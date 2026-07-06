@@ -242,6 +242,59 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 // Formula upgrade
 // ---------------------------------------------------------------------------
 
+/// The installed keg row `upgradeFormula` needs after its DB lookup.
+/// Text columns are owned copies so the lookup statement can be finalized
+/// immediately — see `readOldKeg`.
+const OldKeg = struct {
+    keg_id: i64,
+    version: []const u8,
+    revision: i64,
+    sha256: []const u8,
+    cellar_path: []const u8,
+    tap: []const u8,
+    bin_isolated: bool,
+
+    fn deinit(self: *OldKeg, allocator: std.mem.Allocator) void {
+        allocator.free(self.version);
+        allocator.free(self.sha256);
+        allocator.free(self.cellar_path);
+        allocator.free(self.tap);
+    }
+};
+
+/// Read the installed keg row for `name` into owned storage, finalizing the
+/// statement before returning so no read snapshot outlives the call. Holding
+/// a stepped-open statement pins this connection's WAL read snapshot; the
+/// re-entrant dep install then opens a second connection that advances the
+/// WAL, and the parent's later writes can no longer promote the stale
+/// snapshot to a writer (SQLITE_BUSY). Returns null when no row matches.
+fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !?OldKeg {
+    var stmt = try db.prepare(
+        "SELECT id, version, revision, store_sha256, cellar_path, tap, bin_isolated FROM kegs WHERE name = ?1 LIMIT 1;",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    if (!(try stmt.step())) return null;
+
+    const version = try allocator.dupe(u8, if (stmt.columnText(1)) |v| std.mem.sliceTo(v, 0) else "unknown");
+    errdefer allocator.free(version);
+    const sha256 = try allocator.dupe(u8, if (stmt.columnText(3)) |s| std.mem.sliceTo(s, 0) else "");
+    errdefer allocator.free(sha256);
+    const cellar_path = try allocator.dupe(u8, if (stmt.columnText(4)) |cp| std.mem.sliceTo(cp, 0) else "");
+    errdefer allocator.free(cellar_path);
+    const tap = try allocator.dupe(u8, if (stmt.columnText(5)) |t| std.mem.sliceTo(t, 0) else "");
+
+    return .{
+        .keg_id = stmt.columnInt(0),
+        .version = version,
+        .revision = stmt.columnInt(2),
+        .sha256 = sha256,
+        .cellar_path = cellar_path,
+        .tap = tap,
+        .bin_isolated = stmt.columnInt(6) != 0,
+    };
+}
+
 /// Upgrade a single installed formula with rollback safety.
 ///
 /// Flow:
@@ -279,47 +332,27 @@ fn upgradeFormula(
         return;
     }
 
-    // Step 1: Look up installed version from DB. `bin_isolated` is
-    // read so the upgraded row replays the user's prior isolation
-    // intent without re-passing a flag.
-    var find_stmt = db.prepare(
-        "SELECT id, version, revision, store_sha256, cellar_path, tap, bin_isolated FROM kegs WHERE name = ?1 LIMIT 1;",
-    ) catch return;
-    defer find_stmt.finalize();
-    find_stmt.bindText(1, name) catch return;
-
-    const found = find_stmt.step() catch false;
-    if (!found) {
+    // Read the keg row into owned storage and release its read snapshot
+    // before the dep re-entry (why: see readOldKeg). `bin_isolated` replays
+    // the user's prior isolation intent without re-passing a flag.
+    var old = (readOldKeg(allocator, db, name) catch return error.Aborted) orelse {
         output.err("{s} is not installed as a formula", .{name});
         return error.Aborted;
-    }
-
-    const old_keg_id = find_stmt.columnInt(0);
-    const old_ver_ptr = find_stmt.columnText(1);
-    const old_revision = find_stmt.columnInt(2);
-    const old_sha_ptr = find_stmt.columnText(3);
-    const old_cellar_ptr = find_stmt.columnText(4);
-    const tap_ptr = find_stmt.columnText(5);
-    const replay_bin_isolated = find_stmt.columnInt(6) != 0;
-    const old_version = if (old_ver_ptr) |v| std.mem.sliceTo(v, 0) else "unknown";
-    const old_sha256 = if (old_sha_ptr) |s| std.mem.sliceTo(s, 0) else "";
-    const old_cellar_path = if (old_cellar_ptr) |c| std.mem.sliceTo(c, 0) else "";
-    const tap_label = if (tap_ptr) |t| std.mem.sliceTo(t, 0) else "";
+    };
+    defer old.deinit(allocator);
 
     // Tap-installed formulas come from `<user>/<repo>` repos, not the
     // homebrew/core API. Route them through the tap-aware upgrade path
-    // before touching `formulae.brew.sh`. Dupe the tap label so the
-    // slice survives across statements that reuse the SQLite buffer.
-    if (!install_args_mod.isCoreTap(tap_label)) {
-        const tap_owned = allocator.dupe(u8, tap_label) catch return error.Aborted;
-        defer allocator.free(tap_owned);
-        return upgradeTapFormula(ctx, allocator, name, tap_owned, db, prefix, dry_run, force, audit_mode, tally);
+    // before touching `formulae.brew.sh`. `old.tap` is owned and lives
+    // until this function returns, so it is safe to pass across the call.
+    if (!install_args_mod.isCoreTap(old.tap)) {
+        return upgradeTapFormula(ctx, allocator, name, old.tap, db, prefix, dry_run, force, audit_mode, tally);
     }
 
     // Reconstruct the revision-aware path label for the old keg so
     // cellar_mod.remove / linker calls target the actual on-disk dir.
     var old_pkgver_buf: [128]u8 = undefined;
-    const old_pkg_version = formula_mod.pkgVersion(&old_pkgver_buf, old_version, old_revision) catch old_version;
+    const old_pkg_version = formula_mod.pkgVersion(&old_pkgver_buf, old.version, old.revision) catch old.version;
 
     // Step 2: Fetch latest formula from API
     const formula_json = api.fetchFormula(name) catch {
@@ -345,13 +378,13 @@ fn upgradeFormula(
 
     if (dry_run) {
         if (tally) |t| t.would_upgrade += 1;
-        output.info("Dry run: would upgrade {s} {s} -> {s}", .{ name, old_version, formula.pkg_version });
+        output.info("Dry run: would upgrade {s} {s} -> {s}", .{ name, old.version, formula.pkg_version });
         // Same vocabulary across install/upgrade/migrate — one parser fits all.
         output.emitNdjsonEvent(.would_install, name, null);
         return;
     }
 
-    output.info("Upgrading {s} {s} -> {s}...", .{ name, old_version, formula.pkg_version });
+    output.info("Upgrading {s} {s} -> {s}...", .{ name, old.version, formula.pkg_version });
     output.emitNdjsonEvent(.resolved, name, null);
 
     // Bottles bake LC_LOAD_DYLIB paths against their own dep set, so a
@@ -442,7 +475,7 @@ fn upgradeFormula(
         return error.Aborted;
     };
 
-    const new_keg_id = upgradeDbAtomic(db, &linker, old_keg_id, &formula, fetch.sha256, new_keg.path, replay_bin_isolated) catch |db_err| {
+    const new_keg_id = upgradeDbAtomic(db, &linker, old.keg_id, &formula, fetch.sha256, new_keg.path, old.bin_isolated) catch |db_err| {
         output.err(
             "Failed to record new version of {s} in database: {s} ({s})",
             .{ name, @errorName(db_err), db.errMsg() },
@@ -451,7 +484,7 @@ fn upgradeFormula(
         // FS rollback: the txn restored old keg/links rows; we still
         // need to recreate the old symlinks (FS isn't transactional)
         // and drop the freshly-materialized new cellar dir.
-        restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id, replay_bin_isolated);
+        restoreOldLinks(db, &linker, old.cellar_path, name, old.keg_id, old.bin_isolated);
         cellar_mod.remove(ctx.io, prefix, formula.name, formula.pkg_version) catch {};
         return error.Aborted;
     };
@@ -464,7 +497,7 @@ fn upgradeFormula(
         db.rollback();
         // best-effort FS cleanup before falling back to the old version.
         linker.unlink(new_keg_id) catch {};
-        restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id, replay_bin_isolated);
+        restoreOldLinks(db, &linker, old.cellar_path, name, old.keg_id, old.bin_isolated);
         cellar_mod.remove(ctx.io, prefix, formula.name, formula.pkg_version) catch {};
         return error.Aborted;
     };
@@ -494,9 +527,9 @@ fn upgradeFormula(
         }
     }
 
-    if (old_sha256.len > 0) {
+    if (old.sha256.len > 0) {
         // refcount is advisory; upgrade is already complete on disk.
-        store.decrementRef(old_sha256) catch {};
+        store.decrementRef(old.sha256) catch {};
     }
 
     output.success("{s} upgraded to {s}", .{ name, formula.pkg_version });
@@ -1359,4 +1392,102 @@ test "upgradeDbAtomic re-records dependency edges so cleanup keeps live runtime 
     for (orphans) |o| {
         try std.testing.expect(!std.mem.eql(u8, o, "oniguruma"));
     }
+}
+
+// A stepped-open lookup statement pins connection A's WAL read snapshot.
+// When the re-entrant dep install opens a second connection and advances the
+// WAL, A can no longer promote its stale snapshot to a writer and gets an
+// immediate SQLITE_BUSY (the busy handler is skipped for this self-deadlock)
+// — the failure this bug produced. `readOldKeg` copies the row into owned
+// storage and finalizes the statement first, so the parent stays writable.
+test "readOldKeg releases the WAL read snapshot before a second connection advances the WAL" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bb: [std.fs.max_path_bytes]u8 = undefined;
+    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&pbuf, "{s}/kegs.db", .{base});
+
+    // Connection A stands in for the parent upgrade connection.
+    var a = try sqlite.Database.open(path);
+    defer a.close();
+    try schema.initSchema(&a);
+    try a.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, bin_isolated)
+        \\VALUES ('foo', 'foo', '1.0', 0, 'sha-foo', '/c/foo/1.0', 1);
+    );
+
+    // Control: prove the mechanism. A stepped-open lookup pins A's snapshot;
+    // a second connection committing a write then poisons A's own write.
+    {
+        var pin = try a.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;");
+        defer pin.finalize();
+        try pin.bindText(1, "foo");
+        try std.testing.expect(try pin.step()); // read snapshot now held open
+
+        var b = try sqlite.Database.open(path);
+        defer b.close();
+        try b.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('dep', 'dep', '1', 's', '/c');");
+
+        try std.testing.expectError(sqlite.SqliteError.Busy, a.beginTransaction());
+        a.rollback(); // BEGIN never took hold; keep A clean for the fix path
+    }
+
+    // Fix: readOldKeg copies the row and finalizes before the WAL advances.
+    var old = (try readOldKeg(alloc, &a, "foo")).?;
+    defer old.deinit(alloc);
+    try std.testing.expectEqualStrings("1.0", old.version);
+    try std.testing.expectEqualStrings("sha-foo", old.sha256);
+    try std.testing.expect(old.bin_isolated);
+
+    {
+        var b = try sqlite.Database.open(path);
+        defer b.close();
+        try b.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('dep2', 'dep2', '1', 's2', '/c2');");
+    }
+
+    // The parent's write must still succeed — no stale snapshot to promote.
+    try a.beginTransaction();
+    try a.exec("UPDATE kegs SET pinned = 1 WHERE name = 'foo';");
+    try a.commit();
+}
+
+test "readOldKeg returns null when the formula is not installed" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try std.testing.expect((try readOldKeg(std.testing.allocator, &db, "absent")) == null);
+}
+
+test "readOldKeg surfaces an allocation failure instead of swallowing it" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES ('foo', 'foo', '1.0', 'sha', '/c/foo/1.0');
+    );
+    // A dup that OOMs must propagate (the bulk caller maps it to a counted
+    // failure) — not vanish as a silent success. fail_index 0 also proves the
+    // errdefer chain frees nothing on the first failed dup.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, readOldKeg(failing.allocator(), &db, "foo"));
+}
+
+test "readOldKeg maps a NULL tap column to an owned empty string" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // Core kegs carry a NULL tap; the owned copy must be a real, freeable "".
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap)
+        \\VALUES ('foo', 'foo', '1.0', 'sha', '/c/foo/1.0', NULL);
+    );
+    var old = (try readOldKeg(std.testing.allocator, &db, "foo")).?;
+    defer old.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("", old.tap);
+    try std.testing.expect(install_args_mod.isCoreTap(old.tap));
 }
