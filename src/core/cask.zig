@@ -6,6 +6,7 @@ const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
 const archive_mod = @import("../fs/archive.zig");
+const path_component = @import("../fs/path_component.zig");
 const hash_mod = @import("hash.zig");
 const child_mod = @import("child.zig");
 const cask_font = @import("cask_font.zig");
@@ -65,7 +66,7 @@ pub fn parseCask(allocator: std.mem.Allocator, json_bytes: []const u8) !Cask {
     // cache, and mount paths, so a value that escapes its own path
     // component must be rejected here — the one ingestion choke point —
     // before any sink sees it. A compromised tap is the threat.
-    if (!isPathComponent(token) or !isPathComponent(version)) return CaskError.ParseFailed;
+    if (!path_component.isPathComponent(token) or !path_component.isPathComponent(version)) return CaskError.ParseFailed;
 
     return .{
         .token = token,
@@ -1415,20 +1416,6 @@ pub fn isInstalled(db: *sqlite.Database, token: []const u8) bool {
 }
 
 // --- JSON helpers ---
-
-/// True when `s` is a single, safe path segment. Charset-agnostic on
-/// purpose: real cask versions carry uppercase, commas, and colons that
-/// an allowlist would wrongly reject, so this only bars the shapes that
-/// hop out of a path component — empty, `.`/`..`, an embedded `/` or
-/// `..`, or a NUL the kernel reads as a string terminator.
-fn isPathComponent(s: []const u8) bool {
-    if (s.len == 0) return false;
-    if (std.mem.eql(u8, s, ".") or std.mem.eql(u8, s, "..")) return false;
-    if (std.mem.indexOfScalar(u8, s, '/') != null) return false;
-    if (std.mem.indexOf(u8, s, "..") != null) return false;
-    if (std.mem.indexOfScalar(u8, s, 0) != null) return false;
-    return true;
-}
 
 fn getStr(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const val = obj.get(key) orelse return null;

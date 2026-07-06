@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const atomic = @import("../fs/atomic.zig");
+const path_component = @import("../fs/path_component.zig");
 const client_mod = @import("client.zig");
 const mirror_mod = @import("mirror.zig");
 
@@ -73,7 +74,9 @@ pub fn extractNames(
                 .{ .ignore_unknown_fields = true },
             );
             for (parsed) |e| {
-                if (e.name.len == 0) continue;
+                // Drop tap-controlled names that aren't a clean path component;
+                // the search index feeds path-building sinks downstream.
+                if (!path_component.isPathComponent(e.name)) continue;
                 try out.appendSlice(allocator, e.name);
                 try out.append(allocator, '\n');
             }
@@ -87,7 +90,7 @@ pub fn extractNames(
                 .{ .ignore_unknown_fields = true },
             );
             for (parsed) |e| {
-                if (e.token.len == 0) continue;
+                if (!path_component.isPathComponent(e.token)) continue;
                 try out.appendSlice(allocator, e.token);
                 try out.append(allocator, '\n');
             }
@@ -168,7 +171,10 @@ fn appendVersionLine(
     stable: []const u8,
     revision: i64,
 ) !void {
-    if (name.len == 0 or stable.len == 0) return;
+    if (stable.len == 0) return;
+    // Drop a name/token that isn't a clean path component (rejects empty too);
+    // it keys the outdated map against on-disk kegs.
+    if (!path_component.isPathComponent(name)) return;
     // Untrusted dump fields: a tab or newline would corrupt the line-
     // delimited side-car the consumer splits on, so drop the whole entry
     // rather than emit a record that mis-parses downstream.
@@ -865,6 +871,28 @@ test "extractVersions drops entries whose name or version embeds a delimiter" {
     const out = try extractVersions(testing.allocator, .formula, body);
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("ok\t4.0\t0\n", out);
+}
+
+test "extractVersions drops a name that isn't a clean path component" {
+    // The name keys the outdated map against on-disk kegs; a `/` or `..` from
+    // a hostile tap must never reach that sink.
+    const body =
+        \\[{"name":"../evil","versions":{"stable":"1.0"}},
+        \\ {"name":"a/b","versions":{"stable":"1.0"}},
+        \\ {"name":"ok","versions":{"stable":"2.0"}}]
+    ;
+    const out = try extractVersions(testing.allocator, .formula, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("ok\t2.0\t0\n", out);
+}
+
+test "extractNames drops a name that isn't a clean path component" {
+    const body =
+        \\[{"name":"../evil"},{"name":"redis"}]
+    ;
+    const out = try extractNames(testing.allocator, .formula, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("redis\n", out);
 }
 
 test "extractVersions clamps a negative revision to 0" {
