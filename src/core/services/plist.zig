@@ -133,6 +133,9 @@ pub fn validate(
 
     for (spec.program_args) |a| try checkString(a);
     try checkString(spec.label);
+    // The label becomes a single directory component under var/malt/services,
+    // so a `/` or `..` inside it escapes that subtree once register writes it.
+    if (!isSafeLabelComponent(spec.label)) return ValidationError.PathEscape;
     try checkString(spec.stdout_path);
     try checkString(spec.stderr_path);
     if (spec.working_dir) |wd| try checkString(wd);
@@ -182,6 +185,18 @@ fn calInRange(ci: CalendarInterval) bool {
 fn checkString(s: []const u8) ValidationError!void {
     if (s.len > max_arg_len) return ValidationError.ArgTooLong;
     if (std.mem.indexOfScalar(u8, s, 0) != null) return ValidationError.EmbeddedNul;
+}
+
+/// True when `label` is a single, safe path component. Charset-agnostic: a real
+/// label is `com.malt.<name>` and may carry dots, `-`, `_`, `@`, `+`, so this
+/// bars only the shapes that hop out of a component — empty, `.`/`..`, an
+/// embedded `/`, or an embedded `..`. NUL is already screened by checkString.
+fn isSafeLabelComponent(label: []const u8) bool {
+    if (label.len == 0) return false;
+    if (std.mem.eql(u8, label, ".") or std.mem.eql(u8, label, "..")) return false;
+    if (std.mem.indexOfScalar(u8, label, '/') != null) return false;
+    if (std.mem.indexOf(u8, label, "..") != null) return false;
+    return true;
 }
 
 pub fn render(spec: ServiceSpec, writer: *std.Io.Writer) !void {
@@ -343,4 +358,35 @@ test "expandPrefix matches the whole token, not a sibling Homebrew variable" {
     const out = try expandPrefix(testing.allocator, "$HOMEBREW_CELLAR/redis", "/opt/malt");
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("$HOMEBREW_CELLAR/redis", out);
+}
+
+test "validate rejects path separators in label" {
+    // The label becomes a directory component under var/malt/services; a `/` or
+    // `..` inside it hops the plist write outside that subtree, so the gate
+    // must refuse it before register turns it into a real path.
+    const base = ServiceSpec{
+        .label = "com.malt.redis",
+        .program_args = &.{"/opt/malt/Cellar/foo/1.0/bin/foo"},
+        .stdout_path = "/opt/malt/var/log/foo.out",
+        .stderr_path = "/opt/malt/var/log/foo.err",
+    };
+
+    // Component-hopping shapes: empty, the dot dirs, an embedded `/`, and an
+    // embedded `..` even when the label is not exactly `..` (`a..b`).
+    for ([_][]const u8{ "../../evil", "..", "a/b", ".", "", "a..b", "foo/" }) |bad| {
+        var spec = base;
+        spec.label = bad;
+        try testing.expectError(
+            ValidationError.PathEscape,
+            validate(spec, "/opt/malt/Cellar/foo/1.0", "/opt/malt"),
+        );
+    }
+
+    // Real labels are charset-agnostic single components: single dots, digits,
+    // and `@`/`+` from formula names must all pass.
+    for ([_][]const u8{ "com.malt.redis", "com.malt.openssl@3", "com.malt.gtk+" }) |ok| {
+        var spec = base;
+        spec.label = ok;
+        try validate(spec, "/opt/malt/Cellar/foo/1.0", "/opt/malt");
+    }
 }
