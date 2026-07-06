@@ -54,6 +54,27 @@ pub fn parseArgs(args: []const []const u8) Opts {
     return opts;
 }
 
+/// Emit the manual-recovery hint for a failed self-replace, split out so the
+/// error→message mapping is unit-testable. `RollbackFailed` strands the old
+/// binary at `.old` (loud `mv` recovery); everything else leaves the target
+/// intact (normal install hint). Printing the wrong one misleads the user.
+fn printReplaceFailure(err: swap.SwapError, new_binary: []const u8, self_exe: []const u8) void {
+    switch (err) {
+        error.RollbackFailed => {
+            // Two renames went one-and-a-half: target is gone, .old is still
+            // the previous binary. The next invocation the user makes cannot
+            // find `malt` on PATH, so surface the recovery path loudly.
+            output.err("Update aborted mid-swap; rollback also failed.", .{});
+            output.info("Restore the previous binary with:", .{});
+            output.info("  sudo mv {s}.old {s}", .{ self_exe, self_exe });
+        },
+        else => {
+            output.err("Failed to replace {s}.", .{self_exe});
+            output.info("Manual update: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, self_exe });
+        },
+    }
+}
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     const opts = parseArgs(args);
 
@@ -242,17 +263,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             return error.Aborted;
         },
         error.StagingFailed, error.SwapFailed => {
-            output.err("Failed to replace {s}.", .{self_exe});
-            output.info("Manual update: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, self_exe });
+            printReplaceFailure(error.SwapFailed, new_binary, self_exe);
             return;
         },
         error.RollbackFailed => {
-            // Two renames went one-and-a-half: target is gone, .old is still
-            // the previous binary. The next invocation the user makes
-            // cannot find `malt` on PATH, so surface the recovery path loudly.
-            output.err("Update aborted mid-swap; rollback also failed.", .{});
-            output.info("Restore the previous binary with:", .{});
-            output.info("  sudo mv {s}.old {s}", .{ self_exe, self_exe });
+            printReplaceFailure(error.RollbackFailed, new_binary, self_exe);
             return error.Aborted;
         },
         else => return e,
@@ -546,4 +561,28 @@ fn detectOrigin(io: std.Io) origin.Origin {
 fn unverifiedAllowed(environ: std.process.Environ) bool {
     const v = std.process.Environ.getPosix(environ, "MALT_ALLOW_UNVERIFIED") orelse return false;
     return std.mem.eql(u8, v, "1");
+}
+
+test "printReplaceFailure emits the loud mv-recovery only for RollbackFailed" {
+    const testing = std.testing;
+    const self_exe = "/opt/malt/bin/malt";
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+
+    // SwapFailed: target untouched, so the normal install hint — and NOT the
+    // `mv .old` line, which would fail because a successful swap never left a
+    // stranded `.old`.
+    output.beginStderrCapture(testing.allocator, &buf);
+    printReplaceFailure(error.SwapFailed, "/tmp/malt.new", self_exe);
+    output.endStderrCapture();
+    try testing.expect(std.mem.indexOf(u8, buf.items, "sudo install -m 0755 -b -B .old") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "sudo mv") == null);
+
+    // RollbackFailed: previous binary stranded at `.old`, so the loud recovery
+    // hint must name the exact `mv` that puts it back.
+    buf.clearRetainingCapacity();
+    output.beginStderrCapture(testing.allocator, &buf);
+    printReplaceFailure(error.RollbackFailed, "/tmp/malt.new", self_exe);
+    output.endStderrCapture();
+    try testing.expect(std.mem.indexOf(u8, buf.items, "sudo mv /opt/malt/bin/malt.old /opt/malt/bin/malt") != null);
 }
