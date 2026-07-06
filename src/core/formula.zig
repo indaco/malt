@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 
 const service_types = @import("services/types.zig");
 const cron = @import("services/cron.zig");
+const path_component = @import("../fs/path_component.zig");
 pub const Schedule = service_types.Schedule;
 
 pub const FormulaError = error{
@@ -18,6 +19,9 @@ pub const FormulaError = error{
     /// `run_type :interval` with a missing, non-numeric, or out-of-range
     /// `interval`. Never falls back to `.immediate`.
     InvalidInterval,
+    /// The embedded `name` or `version` carries a path separator or `..`,
+    /// so it would hop out of its on-disk directory component.
+    UnsafePathComponent,
 };
 
 /// Bottle descriptor for one platform. All three strings live in the
@@ -205,6 +209,9 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
 
     // Required string fields
     const name = getString(root, "name") orelse return FormulaError.MissingField;
+    // The embedded name never re-passes the requested-name screen yet becomes
+    // every keg/cellar/receipt path; full_name is tap-qualified (`/`), so skip.
+    if (!path_component.isPathComponent(name)) return FormulaError.UnsafePathComponent;
     const full_name = getString(root, "full_name") orelse name;
     const tap = getString(root, "tap") orelse "";
     const desc = getString(root, "desc") orelse "";
@@ -223,6 +230,10 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         };
         break :blk getString(versions_obj, "stable") orelse "";
     };
+    // version feeds pkg_version → the revision-tagged cellar/keg dir; an empty
+    // version is legitimate, but a present one must stay a single component.
+    if (version_str.len != 0 and !path_component.isPathComponent(version_str))
+        return FormulaError.UnsafePathComponent;
 
     // dependencies
     const dependencies = try getStringArray(arena, root, "dependencies");
@@ -453,6 +464,49 @@ test "parsePkgVersion round-trips with pkgVersion" {
     const r = parsePkgVersion(formatted);
     try testing.expectEqualStrings("3.14.4", r.version);
     try testing.expectEqual(@as(i64, 1), r.revision);
+}
+
+test "parseFormula rejects path separators in embedded name or version" {
+    // `name` and `version` become on-disk directory components (keg, cellar,
+    // receipt, service label); the JSON's own fields never re-pass the
+    // fetch-time name screen, so parse must reject a component-hopping value.
+    const bad = [_][]const u8{
+        \\{"name":"../evil","versions":{"stable":"1.0"}}
+        ,
+        \\{"name":"a/b","versions":{"stable":"1.0"}}
+        ,
+        \\{"name":".","versions":{"stable":"1.0"}}
+        ,
+        \\{"name":"..","versions":{"stable":"1.0"}}
+        ,
+        \\{"name":"foo/","versions":{"stable":"1.0"}}
+        ,
+        \\{"name":"a\u0000b","versions":{"stable":"1.0"}}
+        ,
+        \\{"name":"ok","versions":{"stable":"../1.0"}}
+        ,
+        \\{"name":"ok","versions":{"stable":"1..0"}}
+        ,
+    };
+    for (bad) |json| {
+        try testing.expectError(FormulaError.UnsafePathComponent, parseFormula(testing.allocator, json));
+    }
+
+    // Real names/versions carry `@`, `+`, dots — charset-agnostic, must pass.
+    const ok =
+        \\{"name":"openssl@3","versions":{"stable":"3.2.1+dfsg"}}
+    ;
+    var formula = try parseFormula(testing.allocator, ok);
+    defer formula.deinit();
+    try testing.expectEqualStrings("openssl@3", formula.name);
+
+    // A formula with no stable version parses to an empty version, unchanged.
+    const nover =
+        \\{"name":"nostable","versions":{}}
+    ;
+    var f2 = try parseFormula(testing.allocator, nover);
+    defer f2.deinit();
+    try testing.expectEqualStrings("", f2.version);
 }
 
 test "parseFormula releases every auxiliary allocation through deinit" {
