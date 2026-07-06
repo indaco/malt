@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 
 const service_types = @import("services/types.zig");
 const cron = @import("services/cron.zig");
+const path_component = @import("../fs/path_component.zig");
 pub const Schedule = service_types.Schedule;
 
 pub const FormulaError = error{
@@ -187,19 +188,6 @@ fn getStringArray(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []
 // Parsing
 // ---------------------------------------------------------------------------
 
-/// True when `s` is a single, safe path component. Charset-agnostic: formula
-/// names and versions carry `@`, `+`, and dots that an allowlist would wrongly
-/// reject, so this bars only the shapes that hop out of a component — `.`/`..`,
-/// an embedded `/` or `..`, or a NUL. Empty is left to the caller (a missing
-/// version is legitimate; a missing name is caught as MissingField).
-fn isSafePathComponent(s: []const u8) bool {
-    if (std.mem.eql(u8, s, ".") or std.mem.eql(u8, s, "..")) return false;
-    if (std.mem.indexOfScalar(u8, s, '/') != null) return false;
-    if (std.mem.indexOf(u8, s, "..") != null) return false;
-    if (std.mem.indexOfScalar(u8, s, 0) != null) return false;
-    return true;
-}
-
 /// Parse a Homebrew formula JSON blob into a `Formula`.
 /// The returned value borrows from the parsed JSON; call `deinit()` when done.
 pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formula {
@@ -223,7 +211,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
     const name = getString(root, "name") orelse return FormulaError.MissingField;
     // The embedded name never re-passes the requested-name screen yet becomes
     // every keg/cellar/receipt path; full_name is tap-qualified (`/`), so skip.
-    if (!isSafePathComponent(name)) return FormulaError.UnsafePathComponent;
+    if (!path_component.isPathComponent(name)) return FormulaError.UnsafePathComponent;
     const full_name = getString(root, "full_name") orelse name;
     const tap = getString(root, "tap") orelse "";
     const desc = getString(root, "desc") orelse "";
@@ -244,7 +232,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
     };
     // version feeds pkg_version → the revision-tagged cellar/keg dir; an empty
     // version is legitimate, but a present one must stay a single component.
-    if (version_str.len != 0 and !isSafePathComponent(version_str))
+    if (version_str.len != 0 and !path_component.isPathComponent(version_str))
         return FormulaError.UnsafePathComponent;
 
     // dependencies

@@ -38,7 +38,7 @@ if ! grep -Fqs -- "$TEST_NAME" "$SRC"; then
   echo "FAIL: the embedded name/version guard test is missing from $SRC" >&2
   exit 1
 fi
-if ! grep -Fqs -- "isSafePathComponent" "$SRC"; then
+if ! grep -Fqs -- "isPathComponent" "$SRC"; then
   echo "FAIL: the parseFormula path-component guard is missing from $SRC" >&2
   exit 1
 fi

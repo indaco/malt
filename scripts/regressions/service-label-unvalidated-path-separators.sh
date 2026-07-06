@@ -37,7 +37,7 @@ if ! grep -Fqs -- "$TEST_NAME" "$SRC"; then
   echo "FAIL: the label-rejection guard test is missing from $SRC" >&2
   exit 1
 fi
-if ! grep -Fqs -- "isSafeLabelComponent" "$SRC"; then
+if ! grep -Fqs -- "isPathComponent" "$SRC"; then
   echo "FAIL: the validate label path-component guard is missing from $SRC" >&2
   exit 1
 fi
