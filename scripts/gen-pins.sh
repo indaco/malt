@@ -168,7 +168,20 @@ for name in "${FORMULAS_ARR[@]}"; do
   # API's HEAD snapshot that were renamed/moved before the pinned commit)
   # produce one clean warning per entry instead of a raw "curl: (56)"
   # dump in CI logs.
-  http_code=$(curl -sSL --max-time 15 -o "$RB_TMP" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
+  #
+  # raw.githubusercontent rate-limits by IP: a 429 (or transient 5xx / a
+  # transport error surfaced as 000) must be retried with backoff, or a busy
+  # run silently drops the entry and fabricates a false manifest drift. Only
+  # 200 and 404 are terminal; a 404 is deterministic at a pinned commit.
+  http_code=""
+  for attempt in 1 2 3 4 5; do
+    http_code=$(curl -sSL --max-time 15 -o "$RB_TMP" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
+    case "$http_code" in
+    200 | 404) break ;;
+    esac
+    [ "$attempt" -eq 5 ] && break
+    sleep "$((attempt * 3))" # 3s, 6s, 9s, 12s backoff
+  done
   case "$http_code" in
   200) ;;
   404)
@@ -176,8 +189,10 @@ for name in "${FORMULAS_ARR[@]}"; do
     continue
     ;;
   *)
-    printf '  ⚠ %-24s HTTP %s (skipping)\n' "$name" "$http_code" >&2
-    continue
+    # Fail loud: never emit a silently-incomplete manifest that would read
+    # as a drift downstream.
+    printf '  ✗ %-24s HTTP %s after retries\n' "$name" "$http_code" >&2
+    exit 1
     ;;
   esac
   sha=$(sha256_stdin <"$RB_TMP")
