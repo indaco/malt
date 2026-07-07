@@ -203,3 +203,24 @@ test "help command routes its argument to the per-command topic" {
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
     try testing.expect(std.mem.indexOf(u8, result.stdout, "Usage: malt install") != null);
 }
+
+// Integration: an unknown help topic degrades to the stock fallback and
+// still exits 0 — help must never fail. Skipped if the binary is absent.
+test "help command falls back gracefully for unknown topics" {
+    const io = std.Options.debug_io;
+    const bin_path = "zig-out/bin/malt";
+    test_io.cwd().access(io, bin_path, .{}) catch return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(testing.allocator, threaded.io(), .{
+        .argv = &[_][]const u8{ bin_path, "help", "not-a-real-command" },
+        .stdout_limit = .limited(1 << 16),
+        .stderr_limit = .limited(1 << 16),
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try testing.expect(std.mem.indexOf(u8, result.stdout, "No help available.") != null);
+}

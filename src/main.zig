@@ -282,6 +282,14 @@ test "dispatch accepts AppCtx and routes help without panic" {
     try dispatch(std.testing.allocator, &ctx, .help, &.{});
 }
 
+test "dispatch routes a help topic argument without panic" {
+    // Both the known-topic and unknown-topic branches must stay total —
+    // an unknown topic falls back to helpFor's stock message, not an error.
+    const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
+    try dispatch(std.testing.allocator, &ctx, .help, &.{"install"});
+    try dispatch(std.testing.allocator, &ctx, .help, &.{"not-a-real-command"});
+}
+
 test "passthroughStart finds the first -- after the command token" {
     const argv = &[_][]const u8{ "run", "jq", "--", "--json" };
     try std.testing.expectEqual(@as(?usize, 2), passthroughStart(argv));
