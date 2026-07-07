@@ -170,17 +170,18 @@ fn pickReplacement(path: []const u8, replacements: []const Replacement) ?Replace
 
 const CstringPatchCounts = struct { patched: u32, skipped: u32 };
 
-/// Rewrite NUL-terminated strings inside one `__cstring` region whose
-/// content begins with any configured old prefix. In-place only — the
-/// section's file offset cannot grow without rewriting every fixup in
-/// the binary, which `install_name_tool` does not do for cstring data.
+/// Rewrite NUL-terminated strings inside one `__cstring` region that
+/// contain any configured old prefix — anywhere in the string, not just
+/// at its head. In-place only — the section's file offset cannot grow
+/// without rewriting every fixup in the binary, which
+/// `install_name_tool` does not do for cstring data.
 ///
 /// Each slot's original length (from its NUL terminator) becomes the
-/// hard budget. When the replacement fits, the slot is overwritten and
-/// the tail up to the original NUL is zero-padded so no fragment of the
-/// old path remains. When it doesn't fit, the string is left intact and
-/// counted as skipped — fundamental constraint, not a recoverable
-/// error.
+/// hard budget. When every occurrence shrinks or keeps its length, the
+/// slot is rewritten and the freed tail zero-padded so no fragment of
+/// the old path remains. A growing replacement can't fit and leaves the
+/// slot byte-identical, counted as skipped — fundamental constraint,
+/// not a recoverable error.
 ///
 /// Pointer safety: clang+ld64 with the default `-fmerge-constants`
 /// behaviour deduplicate identical strings but do not tail-merge
@@ -201,40 +202,74 @@ fn patchCstringRegion(
     var i: usize = 0;
     while (i < blob.len) {
         const nul = std.mem.indexOfScalarPos(u8, blob, i, 0) orelse break;
-        const old_len = nul - i;
-        if (old_len == 0) {
-            i = nul + 1;
-            continue;
-        }
-
-        const current = blob[i..nul];
-        if (pickReplacement(current, replacements)) |r| {
-            const new_len = r.new.len + (old_len - r.old.len);
-            if (new_len <= old_len) {
-                // Stage in a stack buffer because the suffix aliases bytes
-                // we are about to overwrite.
-                var staging: [1024]u8 = undefined;
-                if (new_len <= staging.len) {
-                    @memcpy(staging[0..r.new.len], r.new);
-                    @memcpy(
-                        staging[r.new.len..new_len],
-                        current[r.old.len..],
-                    );
-                    @memcpy(blob[i..][0..new_len], staging[0..new_len]);
-                    @memset(blob[i + new_len .. nul], 0);
-                    counts.patched += 1;
-                } else {
-                    counts.skipped += 1;
-                }
-            } else {
-                counts.skipped += 1;
+        if (nul != i) {
+            switch (rewriteCstringSlot(blob[i..nul], replacements)) {
+                .patched => counts.patched += 1,
+                .skipped => counts.skipped += 1,
+                .untouched => {},
             }
         }
-
         i = nul + 1;
     }
 
     return counts;
+}
+
+const SlotOutcome = enum { patched, skipped, untouched };
+
+/// Rewrite every occurrence of any configured old prefix inside one
+/// NUL-terminated slot, in place. Compiled-in fallback configs
+/// (fontconfig's XML blob) embed the prefix mid-string, so matching is
+/// per-occurrence, not head-anchored. Shrink-or-equal replacements let
+/// the tail shift left (write index never passes read index); a growing
+/// pair can't fit the fixed slot, so the pre-scan bails before any byte
+/// is written — a slot is rewritten whole or left byte-identical.
+fn rewriteCstringSlot(slot: []u8, replacements: []const Replacement) SlotOutcome {
+    var scan: usize = 0;
+    var found = false;
+    while (scan < slot.len) {
+        if (matchReplacementAt(slot, scan, replacements)) |r| {
+            if (r.new.len > r.old.len) return .skipped;
+            found = true;
+            scan += r.old.len;
+        } else {
+            scan += 1;
+        }
+    }
+    if (!found) return .untouched;
+
+    var read: usize = 0;
+    var write: usize = 0;
+    while (read < slot.len) {
+        if (matchReplacementAt(slot, read, replacements)) |r| {
+            @memcpy(slot[write..][0..r.new.len], r.new);
+            write += r.new.len;
+            read += r.old.len;
+        } else {
+            slot[write] = slot[read];
+            write += 1;
+            read += 1;
+        }
+    }
+    // Zero the freed tail up to the original NUL so no fragment of the
+    // old path remains.
+    @memset(slot[write..], 0);
+    return .patched;
+}
+
+/// First configured replacement whose old prefix matches at `pos` —
+/// same first-match-wins order as `pickReplacement`.
+fn matchReplacementAt(
+    slot: []const u8,
+    pos: usize,
+    replacements: []const Replacement,
+) ?Replacement {
+    for (replacements) |r| {
+        if (r.old.len == 0) continue;
+        if (pos + r.old.len <= slot.len and
+            std.mem.eql(u8, slot[pos..][0..r.old.len], r.old)) return r;
+    }
+    return null;
 }
 
 /// Dupe both old/new strings into the caller's allocator and append.
