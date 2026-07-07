@@ -101,6 +101,10 @@ pub fn materializeWithCellar(
             break :cache_hit;
         };
         writeInstallReceipt(io, cellar_path, name, version, store_sha256);
+        // Homebrew re-pours etc/var on every install; the cached keg
+        // carries `.bottle`, so a wiped or drifted live config is
+        // restored even when relocation is skipped.
+        installBottleEtcVar(io, allocator, cellar_path, prefix);
         const owned = allocator.dupe(u8, cellar_path) catch return CellarError.OutOfMemory;
         return .{ .name = name, .version = version, .path = owned };
     }
@@ -378,6 +382,102 @@ fn relocateKegTree(
             else => std.log.warn("codesigning failed for {s}: {s}", .{ cellar_path, @errorName(e) }),
         };
     }
+
+    // After text patching, so the poured configs already carry the malt
+    // prefix instead of the bottled `/opt/homebrew` paths.
+    installBottleEtcVar(io, allocator, cellar_path, new_prefix);
+}
+
+/// Pour the bottle's `.bottle/etc` and `.bottle/var` overlay into the
+/// live prefix, mirroring Homebrew's pour: a missing file is installed,
+/// an identical one skipped, and a user-modified config receives the
+/// new bottled default beside it as `<name>.default` instead of a
+/// clobber. Best-effort like the text pass — a per-file failure is
+/// warned about, never fatal to the install.
+/// Pub so the cellar tests can drive it against a scratch prefix.
+pub fn installBottleEtcVar(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    cellar_path: []const u8,
+    prefix: []const u8,
+) void {
+    for ([_][]const u8{ "etc", "var" }) |sub| {
+        const src_root = std.fs.path.join(allocator, &.{ cellar_path, ".bottle", sub }) catch continue;
+        defer allocator.free(src_root);
+
+        // Most bottles ship no overlay — a missing dir is the normal case.
+        var dir = std.Io.Dir.openDirAbsolute(io, src_root, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+
+        var walker = dir.walk(allocator) catch continue;
+        defer walker.deinit();
+
+        while (walker.next(io) catch null) |entry| {
+            if (entry.kind == .directory) {
+                // Bottles ship empty overlay dirs (dbus's `var/lib/dbus`)
+                // that hooks rely on; pour the tree shape, not just files.
+                const dst = std.fs.path.join(allocator, &.{ prefix, sub, entry.path }) catch continue;
+                defer allocator.free(dst);
+                std.Io.Dir.cwd().createDirPath(io, dst) catch |e| {
+                    std.log.warn("bottle overlay {s}/{s} dir not created: {s}", .{ sub, entry.path, @errorName(e) });
+                };
+                continue;
+            }
+            if (entry.kind != .file) {
+                std.log.warn("bottle overlay {s}/{s} skipped (unsupported kind)", .{ sub, entry.path });
+                continue;
+            }
+            pourOverlayFile(io, allocator, src_root, entry.path, prefix, sub) catch |e| {
+                std.log.warn("bottle overlay {s}/{s} not poured: {s}", .{ sub, entry.path, @errorName(e) });
+            };
+        }
+    }
+}
+
+/// One overlay file: install-if-missing, skip-if-identical, else write
+/// the bottled content as `<dst>.default` so user edits survive.
+fn pourOverlayFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    src_root: []const u8,
+    rel: []const u8,
+    prefix: []const u8,
+    sub: []const u8,
+) !void {
+    const src_path = try std.fs.path.join(allocator, &.{ src_root, rel });
+    defer allocator.free(src_path);
+    const dst_path = try std.fs.path.join(allocator, &.{ prefix, sub, rel });
+    defer allocator.free(dst_path);
+
+    const content = try readOverlayFile(io, allocator, src_path);
+    defer allocator.free(content);
+
+    if (readOverlayFile(io, allocator, dst_path)) |existing| {
+        defer allocator.free(existing);
+        if (std.mem.eql(u8, existing, content)) return;
+        const default_path = try std.mem.concat(allocator, u8, &.{ dst_path, ".default" });
+        defer allocator.free(default_path);
+        try atomic.atomicReplaceFile(io, default_path, content);
+    } else |_| {
+        if (std.fs.path.dirname(dst_path)) |parent| {
+            try std.Io.Dir.cwd().createDirPath(io, parent);
+        }
+        try atomic.atomicReplaceFile(io, dst_path, content);
+    }
+}
+
+fn readOverlayFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    // Overlays are config seeds; anything bigger is not a config we
+    // should buffer or silently clobber.
+    if (stat.size > 10 * 1024 * 1024) return error.FileTooBig;
+    const buf = try allocator.alloc(u8, stat.size);
+    errdefer allocator.free(buf);
+    const n = try file.readPositionalAll(io, buf, 0);
+    if (n < buf.len) return error.EndOfStream;
+    return buf;
 }
 
 /// Copy a keg tree from a sibling Homebrew install at `src_keg_path`

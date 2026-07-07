@@ -673,6 +673,91 @@ test "patchPathsCollecting leaves __cstring strings whose replacement does not f
     );
 }
 
+test "patchPathsCollecting relocates prefixes embedded mid-string in a cstring slot" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // Compiled-in fallback configs (fontconfig's XML blob) carry the brew
+    // prefix mid-string, twice in one literal. Both occurrences must be
+    // rewritten, the tail left-shifted, and the freed bytes NUL-padded so
+    // the following slot stays intact.
+    const a = "<cachedir>/opt/homebrew/var/cache</cachedir><include>/opt/homebrew/etc/fonts</include>\x00";
+    const b = "neighbour\x00";
+    const blob = a ++ b;
+
+    const fix = try buildCstringFixture(testing.allocator, blob);
+    defer testing.allocator.free(fix.bytes);
+
+    const dir = try tmpSubdir(io, "cstr_midstring");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", fix.bytes);
+    defer testing.allocator.free(path);
+
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "/opt/homebrew", .new = "/opt/malt" },
+    };
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
+    defer outcome.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 1), outcome.patched_count);
+
+    const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    const got = try testing.allocator.alloc(u8, fix.bytes.len);
+    defer testing.allocator.free(got);
+    _ = try file.readPositionalAll(io, got, 0);
+    const region = got[fix.cstring_offset..][0..blob.len];
+
+    const want = "<cachedir>/opt/malt/var/cache</cachedir><include>/opt/malt/etc/fonts</include>";
+    try testing.expectEqualStrings(want, std.mem.sliceTo(region[0..a.len], 0));
+    // Freed tail bytes up to the original NUL must be zeroed.
+    for (region[want.len..a.len]) |byte| try testing.expectEqual(@as(u8, 0), byte);
+    // The neighbouring slot is untouched.
+    try testing.expectEqualStrings("neighbour", std.mem.sliceTo(region[a.len..][0..b.len], 0));
+}
+
+test "patchPathsCollecting leaves a slot byte-identical when a mid-string replacement would grow it" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // A growing pair can't fit the fixed slot; the slot must stay
+    // byte-identical — never half-rewritten by a bail mid-scan.
+    const blob = "<dir>/x/fonts</dir><dir>/x/extra</dir>\x00";
+    const fix = try buildCstringFixture(testing.allocator, blob);
+    defer testing.allocator.free(fix.bytes);
+
+    const dir = try tmpSubdir(io, "cstr_midgrow");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", fix.bytes);
+    defer testing.allocator.free(path);
+
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "/x", .new = "/much-longer-prefix" },
+    };
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
+    defer outcome.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 0), outcome.patched_count);
+
+    const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    const got = try testing.allocator.alloc(u8, fix.bytes.len);
+    defer testing.allocator.free(got);
+    _ = try file.readPositionalAll(io, got, 0);
+    try testing.expectEqualStrings(
+        "<dir>/x/fonts</dir><dir>/x/extra</dir>",
+        std.mem.sliceTo(got[fix.cstring_offset..][0..blob.len], 0),
+    );
+}
+
 test "patchPathsCollecting picks the first matching prefix for cstrings" {
     var threaded: std.Io.Threaded = undefined;
     const io = testIo(&threaded);
@@ -708,6 +793,46 @@ test "patchPathsCollecting picks the first matching prefix for cstrings" {
     _ = try file.readPositionalAll(io, got, 0);
     try testing.expectEqualStrings(
         "/A/lib/x",
+        std.mem.sliceTo(got[fix.cstring_offset..][0..blob.len], 0),
+    );
+}
+
+test "patchPathsCollecting skips a whole slot when one replacement shrinks and another grows" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // A slot is rewritten whole or left byte-identical: with one shrinking
+    // and one growing pair matching the same slot, the pre-scan must bail
+    // before any byte is written.
+    const blob = "@@HOMEBREW_PREFIX@@/etc:/x/share\x00";
+    const fix = try buildCstringFixture(testing.allocator, blob);
+    defer testing.allocator.free(fix.bytes);
+
+    const dir = try tmpSubdir(io, "cstr_mixedfit");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", fix.bytes);
+    defer testing.allocator.free(path);
+
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" },
+        .{ .old = "/x", .new = "/much-longer-prefix" },
+    };
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
+    defer outcome.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 0), outcome.patched_count);
+
+    const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    const got = try testing.allocator.alloc(u8, fix.bytes.len);
+    defer testing.allocator.free(got);
+    _ = try file.readPositionalAll(io, got, 0);
+    try testing.expectEqualStrings(
+        "@@HOMEBREW_PREFIX@@/etc:/x/share",
         std.mem.sliceTo(got[fix.cstring_offset..][0..blob.len], 0),
     );
 }
