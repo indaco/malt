@@ -121,6 +121,12 @@ pub const bash_script =
     \\                return 0
     \\            fi
     \\            ;;
+    \\        help)
+    \\            if [[ "$cur" != -* ]]; then
+    \\                COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+    \\                return 0
+    \\            fi
+    \\            ;;
     \\        services)
     \\            if [[ "$cur" != -* ]]; then
     \\                COMPREPLY=( $(compgen -W "list start stop restart status logs" -- "$cur") )
@@ -383,6 +389,9 @@ pub const zsh_script =
     \\                    ;;
     \\                completions|shellenv)
     \\                    _values 'shell' bash zsh fish
+    \\                    ;;
+    \\                help)
+    \\                    _describe -t commands 'malt command' commands
     \\                    ;;
     \\                backup)
     \\                    _arguments \
@@ -740,6 +749,9 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command services' -l tail   -d 'Number of trailing log lines'
     \\    complete -c $__malt_bin -n '__malt_using_command services' -l stderr -d 'Read stderr instead of stdout'
     \\    complete -c $__malt_bin -n '__malt_using_command services' -l follow -s f -d 'Tail appended bytes until SIGINT'
+    \\
+    \\    # help — command topic
+    \\    complete -c $__malt_bin -n '__malt_using_command help' -f -a 'install reinstall uninstall remove upgrade update outdated list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services tui bundle' -d 'Help topic'
     \\
     \\    # bundle — sub-subcommands
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'install' -d 'Install Brewfile/Maltfile.json members'
