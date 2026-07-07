@@ -92,17 +92,53 @@ pub fn renderRubyProfile(
     buf.appendSlice(allocator, header) catch return SandboxError.ProfileBuildFailed;
 
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    aw.writer.print(
-        \\(allow file-write*
-        \\  (subpath "{s}")
-        \\  (subpath "{s}/etc")
-        \\  (subpath "{s}/var")
-        \\  (subpath "{s}/share")
-        \\  (subpath "{s}/opt"))
-        \\
-    , .{ cellar_path, malt_prefix, malt_prefix, malt_prefix, malt_prefix }) catch
-        return SandboxError.ProfileBuildFailed;
+    const w = &aw.writer;
+    w.writeAll("(allow file-write*") catch return SandboxError.ProfileBuildFailed;
+
+    // The kernel matches subpath filters against resolved vnode paths;
+    // a symlinked root (macOS /tmp → /private/tmp) needs its resolved
+    // form granted too or writes under it are silently denied.
+    var cellar_real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var prefix_real_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    writeCellarRule(w, cellar_path) catch return SandboxError.ProfileBuildFailed;
+    if (resolvedForProfile(cellar_path, &cellar_real_buf)) |real|
+        writeCellarRule(w, real) catch return SandboxError.ProfileBuildFailed;
+    writePrefixRules(w, malt_prefix) catch return SandboxError.ProfileBuildFailed;
+    if (resolvedForProfile(malt_prefix, &prefix_real_buf)) |real|
+        writePrefixRules(w, real) catch return SandboxError.ProfileBuildFailed;
+    w.writeAll(")\n") catch return SandboxError.ProfileBuildFailed;
+
     return aw.toOwnedSlice() catch SandboxError.ProfileBuildFailed;
+}
+
+fn writeCellarRule(w: *std.Io.Writer, root: []const u8) !void {
+    try w.print("\n  (subpath \"{s}\")", .{root});
+}
+
+fn writePrefixRules(w: *std.Io.Writer, prefix: []const u8) !void {
+    for ([_][]const u8{ "etc", "var", "share", "opt" }) |sub|
+        try w.print("\n  (subpath \"{s}/{s}\")", .{ prefix, sub });
+}
+
+// Zig 0.16 ships no io-free realpath wrapper and this module is
+// deliberately posix-level (fork/exec, no std.Io) — bind libc directly.
+extern "c" fn realpath(noalias file_name: [*:0]const u8, noalias resolved_name: [*:0]u8) ?[*:0]u8;
+
+/// Resolved form of `p` for the kernel's vnode-path matching, or null
+/// when it resolves to itself, is not on disk yet, or the resolved form
+/// fails profile validation — the caller keeps the literal rule either
+/// way, so a failed resolve degrades to today's behaviour.
+fn resolvedForProfile(p: []const u8, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
+    var z: [std.fs.max_path_bytes]u8 = undefined;
+    if (p.len >= z.len) return null;
+    @memcpy(z[0..p.len], p);
+    z[p.len] = 0;
+    const res = realpath(z[0..p.len :0].ptr, @ptrCast(buf)) orelse return null;
+    const resolved = std.mem.sliceTo(res, 0);
+    if (std.mem.eql(u8, resolved, p)) return null;
+    validatePathForProfile(resolved) catch return null;
+    return resolved;
 }
 
 /// Clamp a setrlimit request to the kernel's current hard cap so a
@@ -458,6 +494,42 @@ test "renderRubyProfile emits deny-default + cellar + prefix subpaths" {
     try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/etc\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/var\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/opt\")") != null);
+}
+
+// The kernel matches subpath filters against resolved vnode paths, so a
+// symlinked root (macOS /tmp → /private/tmp) must also grant its
+// resolved form or every write under it is silently denied.
+test "renderRubyProfile also grants writes under the resolved roots for symlinked paths" {
+    _ = std.c.mkdir("/tmp/malt_sbx_profile_test", 0o755); // EEXIST is fine
+    defer _ = std.c.rmdir("/tmp/malt_sbx_profile_test");
+
+    const profile = try renderRubyProfile(
+        std.testing.allocator,
+        // Does not exist on disk — must fall back to the literal alone.
+        "/tmp/malt_sbx_profile_test/Cellar/foo/1.0",
+        "/tmp/malt_sbx_profile_test",
+    );
+    defer std.testing.allocator.free(profile);
+
+    // Literal rules stay (fail-open to today's behaviour)...
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/tmp/malt_sbx_profile_test/etc\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/tmp/malt_sbx_profile_test/Cellar/foo/1.0\")") != null);
+    // ...and the resolved prefix is granted too.
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/private/tmp/malt_sbx_profile_test/etc\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/private/tmp/malt_sbx_profile_test/var\")") != null);
+}
+
+test "renderRubyProfile does not duplicate rules for already-resolved roots" {
+    const profile = try renderRubyProfile(
+        std.testing.allocator,
+        "/opt/malt/Cellar/foo/1.0",
+        "/opt/malt",
+    );
+    defer std.testing.allocator.free(profile);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, profile, "(subpath \"/opt/malt/etc\")"),
+    );
 }
 
 test "renderRubyProfile rejects unsafe cellar path" {
