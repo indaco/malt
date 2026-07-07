@@ -387,6 +387,73 @@ test "formatSlugHint for 3-segment slug names install without <formula> placehol
     try std.testing.expect(std.mem.indexOf(u8, hint, "is not a malt command") != null);
 }
 
+test "formatSlugHint truncates an overlong 2-segment slug instead of overflowing" {
+    var slug_buf: [400]u8 = undefined;
+    @memset(&slug_buf, 'a');
+    slug_buf[200] = '/';
+    var buf: [1024]u8 = undefined;
+    const hint = try formatSlugHint(&buf, .tap_slug_2, &slug_buf);
+    try std.testing.expect(std.mem.indexOf(u8, hint, "is not a malt command") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hint, "…") != null);
+}
+
+test "formatSlugHint truncates an overlong 3-segment slug instead of overflowing" {
+    var slug_buf: [600]u8 = undefined;
+    @memset(&slug_buf, 'a');
+    slug_buf[200] = '/';
+    slug_buf[400] = '/';
+    var buf: [1024]u8 = undefined;
+    const hint = try formatSlugHint(&buf, .tap_slug_3, &slug_buf);
+    try std.testing.expect(std.mem.indexOf(u8, hint, "is not a malt command") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hint, "…") != null);
+}
+
+test "formatBrewFallbackNotice truncates an overlong command instead of overflowing" {
+    var cmd_buf: [2000]u8 = undefined;
+    @memset(&cmd_buf, 'x');
+    var buf: [1024]u8 = undefined;
+    const notice = try formatBrewFallbackNotice(&buf, &cmd_buf);
+    try std.testing.expect(std.mem.indexOf(u8, notice, "is not a malt command") != null);
+    try std.testing.expect(std.mem.indexOf(u8, notice, "…") != null);
+}
+
+test "truncateForHint leaves input at the cap untouched and cuts one byte past it" {
+    var display_buf: [hint_display_cap + 3]u8 = undefined;
+
+    var at_cap: [hint_display_cap]u8 = undefined;
+    @memset(&at_cap, 'a');
+    try std.testing.expectEqualStrings(&at_cap, truncateForHint(&display_buf, &at_cap));
+
+    var over: [hint_display_cap + 1]u8 = undefined;
+    @memset(&over, 'a');
+    const cut = truncateForHint(&display_buf, &over);
+    try std.testing.expectEqual(@as(usize, hint_display_cap + 3), cut.len);
+    try std.testing.expect(std.mem.endsWith(u8, cut, "…"));
+}
+
+test "truncateForHint stays bounded on invalid UTF-8 made of continuation bytes" {
+    // Argv is not guaranteed to be UTF-8; a run of bare continuation bytes
+    // walks the boundary back to zero and must yield just the ellipsis.
+    var display_buf: [hint_display_cap + 3]u8 = undefined;
+    var junk: [hint_display_cap + 40]u8 = undefined;
+    @memset(&junk, 0x80);
+    try std.testing.expectEqualStrings("…", truncateForHint(&display_buf, &junk));
+}
+
+test "formatSlugHint truncation never splits a multibyte codepoint" {
+    // 86 x U+20AC (3 bytes each) plus "/x" = 260 bytes; the display cap
+    // lands mid-sequence, so the cut must back up to a codepoint boundary.
+    var slug_buf: [260]u8 = undefined;
+    var i: usize = 0;
+    while (i < 258) : (i += 3) @memcpy(slug_buf[i..][0..3], "€");
+    slug_buf[258] = '/';
+    slug_buf[259] = 'x';
+    var buf: [1024]u8 = undefined;
+    const hint = try formatSlugHint(&buf, .tap_slug_2, &slug_buf);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(hint));
+    try std.testing.expect(std.mem.indexOf(u8, hint, "…") != null);
+}
+
 test "classifyFirstPositional routes slug-shaped, path, and verb-shaped inputs" {
     try std.testing.expectEqual(FirstPositional.tap_slug_2, classifyFirstPositional("aeroxy/ast-outline"));
     try std.testing.expectEqual(FirstPositional.tap_slug_3, classifyFirstPositional("aeroxy/ast-outline/ast-outline"));
@@ -602,8 +669,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         switch (kind) {
             .tap_slug_2, .tap_slug_3 => {
                 var buf: [1024]u8 = undefined;
-                // 1024 covers any realistic slug; bufPrint can only fail
-                // on overflow, and the slug came from argv.
+                // The helper caps the slug for display, so even the
+                // triple-interpolation template stays under 1024 bytes.
                 const hint = formatSlugHint(&buf, kind, cmd_str) catch unreachable;
                 output_mod.err("{s}", .{hint});
                 std.process.exit(1);
@@ -806,25 +873,46 @@ fn classifyFirstPositional(arg: []const u8) FirstPositional {
     };
 }
 
+// Display cap for argv-derived strings in hint templates. argv can be huge
+// (ARG_MAX ~1 MiB), so cap it before formatting: the worst template
+// interpolates it three times, and 3 x (256 + 3) + fixed text stays well
+// under the 1024-byte buffers at the call sites.
+const hint_display_cap = 256;
+
+/// Cap `s` for display, backing up to a UTF-8 sequence boundary so no
+/// codepoint is split, and appending `…` when anything was cut.
+fn truncateForHint(buf: *[hint_display_cap + 3]u8, s: []const u8) []const u8 {
+    if (s.len <= hint_display_cap) return s;
+    var end: usize = hint_display_cap;
+    while (end > 0 and (s[end] & 0xC0) == 0x80) end -= 1;
+    @memcpy(buf[0..end], s[0..end]);
+    @memcpy(buf[end..][0..3], "…");
+    return buf[0 .. end + 3];
+}
+
 fn formatBrewFallbackNotice(buf: []u8, cmd: []const u8) ![]const u8 {
+    var display_buf: [hint_display_cap + 3]u8 = undefined;
+    const display = truncateForHint(&display_buf, cmd);
     return std.fmt.bufPrint(
         buf,
         "'{s}' is not a malt command — malt forwards unknown commands to brew. Output below is brew's.",
-        .{cmd},
+        .{display},
     );
 }
 
 fn formatSlugHint(buf: []u8, kind: FirstPositional, slug: []const u8) ![]const u8 {
+    var display_buf: [hint_display_cap + 3]u8 = undefined;
+    const display = truncateForHint(&display_buf, slug);
     return switch (kind) {
         .tap_slug_2 => std.fmt.bufPrint(
             buf,
             "'{s}' is not a malt command. Did you mean `mt install {s}/<formula>` or `mt tap {s}`?",
-            .{ slug, slug, slug },
+            .{ display, display, display },
         ),
         .tap_slug_3 => std.fmt.bufPrint(
             buf,
             "'{s}' is not a malt command. Did you mean `mt install {s}`?",
-            .{ slug, slug },
+            .{ display, display },
         ),
         .brew_fallback => error.NotASlugTypo,
     };
@@ -860,7 +948,8 @@ fn brewFallback(ctx: *const AppCtx, cmd: []const u8, args: []const []const u8) !
         // Announce the handoff before spawning so the malt-native context line
         // precedes brew's own output. Passive notice — brew owns reporting.
         var notice_buf: [1024]u8 = undefined;
-        // Cmd came from argv; 1024 is generous, so bufPrint cannot overflow.
+        // The helper caps the cmd for display, so the fixed template plus
+        // the capped cmd stays under 1024 bytes.
         const notice = formatBrewFallbackNotice(&notice_buf, cmd) catch unreachable;
         output_mod.notice("{s}", .{notice});
         // Visual gap so brew's output reads as a distinct block.
