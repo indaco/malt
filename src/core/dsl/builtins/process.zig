@@ -5,6 +5,7 @@ const std = @import("std");
 const values = @import("../values.zig");
 const pathname = @import("pathname.zig");
 const sandbox = @import("../sandbox.zig");
+const fallback_log = @import("../fallback_log.zig");
 
 const Value = values.Value;
 const BuiltinError = pathname.BuiltinError;
@@ -52,17 +53,39 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     }) catch return BuiltinError.SystemCommandFailed;
     const term = child.wait(ctx.io) catch return BuiltinError.SystemCommandFailed;
 
-    return switch (term) {
-        .exited => |code| if (code == 0) Value{ .bool = true } else Value{ .bool = false },
-        else => Value{ .bool = false },
-    };
+    switch (term) {
+        .exited => |code| if (code == 0) return Value{ .bool = true } else recordFailure(ctx, argv_slice[0], code),
+        else => recordFailure(ctx, argv_slice[0], null),
+    }
+    return Value{ .bool = false };
+}
+
+/// Homebrew's formula-context `system` raises on failure, so a child that
+/// runs and exits non-zero is a fatal failure — record it or the router
+/// reports the hook as completed over a failed post_install.
+fn recordFailure(ctx: ExecCtx, argv0: []const u8, exit_code: ?u32) void {
+    const flog = ctx.fallback_log orelse return;
+    const detail = if (exit_code) |code|
+        std.fmt.allocPrint(ctx.allocator, "{s} exited with code {d}", .{ argv0, code }) catch argv0
+    else
+        std.fmt.allocPrint(ctx.allocator, "{s} terminated abnormally", .{argv0}) catch argv0;
+    flog.log(.{
+        .formula = ctx.formula_name,
+        .reason = .system_command_failed,
+        .detail = detail,
+        .loc = null,
+    });
 }
 
 /// quiet_system — execute a command, suppress output
 pub fn quietSystem(ctx: ExecCtx, recv: ?Value, args: []const Value) BuiltinError!Value {
-    // Ruby's `quiet_system` returns true/false and never raises; we drop the
-    // bool too because the DSL sites that use it ignore the result.
-    _ = system(ctx, recv, args) catch {};
+    // Ruby's `quiet_system` returns true/false and never raises — formulas
+    // use it for may-fail probes, so strip the failure entry `system`
+    // would record. We drop the bool too because the DSL sites that use
+    // it ignore the result.
+    var quiet_ctx = ctx;
+    quiet_ctx.fallback_log = null;
+    _ = system(quiet_ctx, recv, args) catch {};
     return Value{ .nil = {} };
 }
 
@@ -249,6 +272,136 @@ test "childStdoutMode ignores subprocess stdout only when suppression is request
     // can't corrupt the document; otherwise it inherits malt's fd.
     try std.testing.expect(std.meta.activeTag(childStdoutMode(true)) == .ignore);
     try std.testing.expect(std.meta.activeTag(childStdoutMode(false)) == .inherit);
+}
+
+// Homebrew's formula-context `system` raises on failure, so a child
+// that runs and exits non-zero must surface as a recorded failure —
+// otherwise the router reports a failed hook as completed.
+test "system records a fatal flog entry when the child exits non-zero" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lio: std.Io.Threaded = .init(arena.allocator(), .{});
+    defer lio.deinit();
+    var flog = fallback_log.FallbackLog.init(arena.allocator());
+    defer flog.deinit();
+    const ctx = ExecCtx{
+        .allocator = arena.allocator(),
+        .io = lio.io(),
+        .environ = .empty,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+        .fallback_log = &flog,
+        .formula_name = "foo",
+    };
+
+    const result = try system(ctx, null, &.{.{ .string = "/usr/bin/false" }});
+
+    try std.testing.expect(result == .bool and !result.bool);
+    try std.testing.expect(flog.hasFatal());
+    const entry = flog.entries()[0];
+    try std.testing.expectEqualStrings("foo", entry.formula);
+    try std.testing.expect(std.mem.indexOf(u8, entry.detail, "/usr/bin/false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, entry.detail, "1") != null);
+}
+
+// The failure entry must be failure-only: a clean exit that logged
+// anything would route every successful hook as fatal.
+test "system records nothing when the child exits zero" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lio: std.Io.Threaded = .init(arena.allocator(), .{});
+    defer lio.deinit();
+    var flog = fallback_log.FallbackLog.init(arena.allocator());
+    defer flog.deinit();
+    const ctx = ExecCtx{
+        .allocator = arena.allocator(),
+        .io = lio.io(),
+        .environ = .empty,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+        .fallback_log = &flog,
+        .formula_name = "foo",
+    };
+
+    const result = try system(ctx, null, &.{.{ .string = "/usr/bin/true" }});
+
+    try std.testing.expect(result == .bool and result.bool);
+    try std.testing.expect(!flog.hasErrors());
+}
+
+// Test contexts omit the log (it is optional on ExecCtx); a failing
+// child must still degrade to `false` instead of dereferencing null.
+test "system tolerates a missing fallback log on failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lio: std.Io.Threaded = .init(arena.allocator(), .{});
+    defer lio.deinit();
+    const ctx = ExecCtx{
+        .allocator = arena.allocator(),
+        .io = lio.io(),
+        .environ = .empty,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+    };
+
+    const result = try system(ctx, null, &.{.{ .string = "/usr/bin/false" }});
+
+    try std.testing.expect(result == .bool and !result.bool);
+}
+
+// A child that dies to a signal never reaches an exit code; that is
+// still a failed hook and must surface as a recorded fatal failure.
+test "system records an abnormal termination when the child dies to a signal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lio: std.Io.Threaded = .init(arena.allocator(), .{});
+    defer lio.deinit();
+    var flog = fallback_log.FallbackLog.init(arena.allocator());
+    defer flog.deinit();
+    const ctx = ExecCtx{
+        .allocator = arena.allocator(),
+        .io = lio.io(),
+        .environ = .empty,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+        .fallback_log = &flog,
+        .formula_name = "foo",
+    };
+
+    const result = try system(ctx, null, &.{
+        .{ .string = "/usr/bin/perl" },
+        .{ .string = "-e" },
+        .{ .string = "kill 'KILL', $$" },
+    });
+
+    try std.testing.expect(result == .bool and !result.bool);
+    try std.testing.expect(flog.hasFatal());
+    const entry = flog.entries()[0];
+    try std.testing.expect(std.mem.indexOf(u8, entry.detail, "terminated abnormally") != null);
+}
+
+// Ruby's `quiet_system` never raises — formulas use it for may-fail
+// probes, so the failure entry `system` records must not leak through.
+test "quiet_system suppresses the failure entry for may-fail probes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lio: std.Io.Threaded = .init(arena.allocator(), .{});
+    defer lio.deinit();
+    var flog = fallback_log.FallbackLog.init(arena.allocator());
+    defer flog.deinit();
+    const ctx = ExecCtx{
+        .allocator = arena.allocator(),
+        .io = lio.io(),
+        .environ = .empty,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+        .fallback_log = &flog,
+        .formula_name = "foo",
+    };
+
+    _ = try quietSystem(ctx, null, &.{.{ .string = "/usr/bin/false" }});
+
+    try std.testing.expect(!flog.hasErrors());
 }
 
 test "system rejects an argv0 outside the sandbox roots before spawning" {

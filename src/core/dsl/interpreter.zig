@@ -279,6 +279,7 @@ pub const Interpreter = struct {
             .malt_prefix = self.ctx.malt_prefix,
             .suppress_child_stdout = self.ctx.suppress_child_stdout,
             .fallback_log = self.ctx.fallback_log_writer,
+            .formula_name = self.ctx.formula_name,
         };
 
         if (mc.receiver) |receiver_node| {
@@ -771,6 +772,7 @@ pub const Interpreter = struct {
             .malt_prefix = self.ctx.malt_prefix,
             .suppress_child_stdout = self.ctx.suppress_child_stdout,
             .fallback_log = self.ctx.fallback_log_writer,
+            .formula_name = self.ctx.formula_name,
         };
         if (builtins_root.receiver_builtins.get(sym)) |func| {
             return func(builtin_ctx, item, &.{}) catch |e| mapBuiltinError(e);
