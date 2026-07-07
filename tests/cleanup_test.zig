@@ -45,6 +45,72 @@ test "cleanUpdateArtefacts removes the .old sibling" {
     try testing.expect(exists(target)); // live binary must survive
 }
 
+test "cleanUpdateArtefacts removes the twin's .old alongside the target's" {
+    const dir = try resetScratch(testing.allocator, "twin_both");
+    defer testing.allocator.free(dir);
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+
+    const target = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    defer testing.allocator.free(target);
+    const old = try std.fmt.allocPrint(testing.allocator, "{s}/malt.old", .{dir});
+    defer testing.allocator.free(old);
+    const twin_old = try std.fmt.allocPrint(testing.allocator, "{s}/mt.old", .{dir});
+    defer testing.allocator.free(twin_old);
+
+    try writeFile(target, "live");
+    try writeFile(old, "previous");
+    try writeFile(twin_old, "previous twin");
+
+    const cleaned = try cleanup.cleanUpdateArtefacts(std.Options.debug_io, target);
+    try testing.expectEqual(@as(u32, 2), cleaned.old);
+    try testing.expect(!exists(old));
+    try testing.expect(!exists(twin_old));
+    try testing.expect(exists(target));
+}
+
+test "cleanUpdateArtefacts targeting mt removes malt.old via the twin branch" {
+    const dir = try resetScratch(testing.allocator, "twin_only");
+    defer testing.allocator.free(dir);
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+
+    const target = try std.fmt.allocPrint(testing.allocator, "{s}/mt", .{dir});
+    defer testing.allocator.free(target);
+    const twin_old = try std.fmt.allocPrint(testing.allocator, "{s}/malt.old", .{dir});
+    defer testing.allocator.free(twin_old);
+
+    try writeFile(target, "live");
+    try writeFile(twin_old, "previous twin");
+
+    const cleaned = try cleanup.cleanUpdateArtefacts(std.Options.debug_io, target);
+    try testing.expectEqual(@as(u32, 1), cleaned.old);
+    try testing.expect(!exists(twin_old));
+    try testing.expect(exists(target));
+}
+
+test "cleanUpdateArtefacts skips the twin sweep for generic target names" {
+    // Only the malt/mt pair gets twin treatment - a generic name must
+    // not trigger deletion of unrelated malt.old/mt.old bystanders.
+    const dir = try resetScratch(testing.allocator, "generic_name");
+    defer testing.allocator.free(dir);
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+
+    const target = try std.fmt.allocPrint(testing.allocator, "{s}/tool", .{dir});
+    defer testing.allocator.free(target);
+    const own_old = try std.fmt.allocPrint(testing.allocator, "{s}/tool.old", .{dir});
+    defer testing.allocator.free(own_old);
+    const bystander = try std.fmt.allocPrint(testing.allocator, "{s}/mt.old", .{dir});
+    defer testing.allocator.free(bystander);
+
+    try writeFile(target, "live");
+    try writeFile(own_old, "previous");
+    try writeFile(bystander, "unrelated");
+
+    const cleaned = try cleanup.cleanUpdateArtefacts(std.Options.debug_io, target);
+    try testing.expectEqual(@as(u32, 1), cleaned.old);
+    try testing.expect(!exists(own_old));
+    try testing.expect(exists(bystander));
+}
+
 test "cleanUpdateArtefacts removes all .malt-update-* staging files" {
     const dir = try resetScratch(testing.allocator, "staging_only");
     defer testing.allocator.free(dir);
