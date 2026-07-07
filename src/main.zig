@@ -740,7 +740,15 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
                 printVersion(ctx);
             }
         },
-        .help => printUsage(ctx),
+        .help => {
+            // `malt help <cmd>` routes to that command's topic; bare
+            // `malt help` keeps the general usage.
+            if (cmd_args.len > 0) {
+                ctx.stdout.writeStreamingAll(ctx.io, cli_help.helpFor(cmd_args[0])) catch {};
+            } else {
+                printUsage(ctx);
+            }
+        },
         .version_flag => printVersion(ctx),
     }
 }
