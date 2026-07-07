@@ -233,3 +233,11 @@ test "backup completions expose --services across every shell" {
     try expectContains(completions.zsh_script, "'--services[");
     try expectContains(completions.fish_script, "-l services");
 }
+
+test "help completions offer command topics across every shell" {
+    // `mt help <cmd>` takes a command topic; each shell must suggest the
+    // command names after `help` so topics are discoverable.
+    try expectContains(completions.bash_script, "help)");
+    try expectContains(completions.zsh_script, "help)");
+    try expectContains(completions.fish_script, "__malt_using_command help");
+}
