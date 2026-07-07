@@ -1059,3 +1059,221 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
     }
     try testing.expect(found);
 }
+
+// ---------------------------------------------------------------------------
+// Bottle etc/var overlay pour
+// ---------------------------------------------------------------------------
+
+fn writeAbs(path: []const u8, content: []const u8) !void {
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{});
+    try f.writeStreamingAll(std.Options.debug_io, content);
+    f.close(std.Options.debug_io);
+}
+
+fn overlayFixture(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
+    const keg = try std.fmt.allocPrint(allocator, "{s}/Cellar/fc/1.0", .{prefix});
+    errdefer allocator.free(keg);
+    const etc_dir = try std.fmt.allocPrint(allocator, "{s}/.bottle/etc/fonts", .{keg});
+    defer allocator.free(etc_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, etc_dir);
+    const conf = try std.fmt.allocPrint(allocator, "{s}/fonts.conf", .{etc_dir});
+    defer allocator.free(conf);
+    try writeAbs(conf, "<fontconfig>poured</fontconfig>\n");
+    return keg;
+}
+
+test "installBottleEtcVar pours a missing overlay file into the prefix" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    const keg = try overlayFixture(testing.allocator, prefix);
+    defer testing.allocator.free(keg);
+    // A var payload rides the same overlay mechanism as etc.
+    const var_dir = try std.fmt.allocPrint(testing.allocator, "{s}/.bottle/var/db", .{keg});
+    defer testing.allocator.free(var_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, var_dir);
+    const seed = try std.fmt.allocPrint(testing.allocator, "{s}/seed", .{var_dir});
+    defer testing.allocator.free(seed);
+    try writeAbs(seed, "seed\n");
+
+    cellar_mod.installBottleEtcVar(std.Options.debug_io, testing.allocator, keg, prefix);
+
+    const conf_path = try std.fmt.allocPrint(testing.allocator, "{s}/etc/fonts/fonts.conf", .{prefix});
+    defer testing.allocator.free(conf_path);
+    const poured = try readFile(testing.allocator, conf_path);
+    defer testing.allocator.free(poured);
+    try testing.expectEqualStrings("<fontconfig>poured</fontconfig>\n", poured);
+
+    const seed_path = try std.fmt.allocPrint(testing.allocator, "{s}/var/db/seed", .{prefix});
+    defer testing.allocator.free(seed_path);
+    const seeded = try readFile(testing.allocator, seed_path);
+    defer testing.allocator.free(seeded);
+    try testing.expectEqualStrings("seed\n", seeded);
+}
+
+test "installBottleEtcVar keeps a user-modified config and writes the new default beside it" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    const keg = try overlayFixture(testing.allocator, prefix);
+    defer testing.allocator.free(keg);
+
+    const live_dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc/fonts", .{prefix});
+    defer testing.allocator.free(live_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, live_dir);
+    const live = try std.fmt.allocPrint(testing.allocator, "{s}/fonts.conf", .{live_dir});
+    defer testing.allocator.free(live);
+    try writeAbs(live, "<fontconfig>user-edited</fontconfig>\n");
+
+    cellar_mod.installBottleEtcVar(std.Options.debug_io, testing.allocator, keg, prefix);
+
+    const kept = try readFile(testing.allocator, live);
+    defer testing.allocator.free(kept);
+    try testing.expectEqualStrings("<fontconfig>user-edited</fontconfig>\n", kept);
+
+    const default_path = try std.fmt.allocPrint(testing.allocator, "{s}.default", .{live});
+    defer testing.allocator.free(default_path);
+    const dflt = try readFile(testing.allocator, default_path);
+    defer testing.allocator.free(dflt);
+    try testing.expectEqualStrings("<fontconfig>poured</fontconfig>\n", dflt);
+}
+
+test "installBottleEtcVar leaves an identical config alone" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    const keg = try overlayFixture(testing.allocator, prefix);
+    defer testing.allocator.free(keg);
+
+    const live_dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc/fonts", .{prefix});
+    defer testing.allocator.free(live_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, live_dir);
+    const live = try std.fmt.allocPrint(testing.allocator, "{s}/fonts.conf", .{live_dir});
+    defer testing.allocator.free(live);
+    try writeAbs(live, "<fontconfig>poured</fontconfig>\n");
+
+    cellar_mod.installBottleEtcVar(std.Options.debug_io, testing.allocator, keg, prefix);
+
+    const default_path = try std.fmt.allocPrint(testing.allocator, "{s}.default", .{live});
+    defer testing.allocator.free(default_path);
+    try testing.expectError(
+        error.FileNotFound,
+        test_io.openFileAbsolute(std.Options.debug_io, default_path, .{}),
+    );
+}
+
+test "installBottleEtcVar no-ops for kegs without a bottle overlay" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/plain/1.0", .{prefix});
+    defer testing.allocator.free(keg);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg);
+
+    cellar_mod.installBottleEtcVar(std.Options.debug_io, testing.allocator, keg, prefix);
+
+    const etc_path = try std.fmt.allocPrint(testing.allocator, "{s}/etc", .{prefix});
+    defer testing.allocator.free(etc_path);
+    try testing.expectError(
+        error.FileNotFound,
+        test_io.openFileAbsolute(std.Options.debug_io, etc_path, .{}),
+    );
+}
+
+test "warm cache-hit reinstall re-pours a wiped overlay config" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    // Cold install: bottle fixture carrying an etc overlay populates the
+    // relocated cache and pours the config.
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "fc", "1.0");
+    const overlay_dir = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/store/{s}/fc/1.0/.bottle/etc/fonts",
+        .{ prefix, valid_test_sha },
+    );
+    defer testing.allocator.free(overlay_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, overlay_dir);
+    const overlay_conf = try std.fmt.allocPrint(testing.allocator, "{s}/fonts.conf", .{overlay_dir});
+    defer testing.allocator.free(overlay_conf);
+    try writeAbs(overlay_conf, "<fontconfig>poured</fontconfig>\n");
+
+    const keg_cold = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "fc",
+        "1.0",
+        ":any",
+    );
+    testing.allocator.free(keg_cold.path);
+    try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+
+    // Wipe the poured config and the Cellar entry; the reinstall must take
+    // the cache short-circuit AND restore the config.
+    const live_conf = try std.fmt.allocPrint(testing.allocator, "{s}/etc/fonts/fonts.conf", .{prefix});
+    defer testing.allocator.free(live_conf);
+    const poured_cold = try readFile(testing.allocator, live_conf);
+    defer testing.allocator.free(poured_cold);
+    try testing.expectEqualStrings("<fontconfig>poured</fontconfig>\n", poured_cold);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, live_conf);
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/fc/1.0", .{prefix});
+    defer testing.allocator.free(keg_dir);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, keg_dir);
+    const store_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, valid_test_sha });
+    defer testing.allocator.free(store_dir);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, store_dir);
+
+    const keg_warm = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "fc",
+        "1.0",
+        ":any",
+    );
+    testing.allocator.free(keg_warm.path);
+
+    const poured_warm = try readFile(testing.allocator, live_conf);
+    defer testing.allocator.free(poured_warm);
+    try testing.expectEqualStrings("<fontconfig>poured</fontconfig>\n", poured_warm);
+}
+
+test "installBottleEtcVar creates empty overlay directories hooks rely on" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    // dbus ships `.bottle/var/lib/dbus/` with no files; post_install's
+    // dbus-uuidgen expects the directory to exist.
+    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/dbus/1.0", .{prefix});
+    defer testing.allocator.free(keg);
+    const empty_dir = try std.fmt.allocPrint(testing.allocator, "{s}/.bottle/var/lib/dbus", .{keg});
+    defer testing.allocator.free(empty_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, empty_dir);
+
+    cellar_mod.installBottleEtcVar(std.Options.debug_io, testing.allocator, keg, prefix);
+
+    const poured_dir = try std.fmt.allocPrint(testing.allocator, "{s}/var/lib/dbus", .{prefix});
+    defer testing.allocator.free(poured_dir);
+    var dir = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, poured_dir, .{});
+    dir.close(std.Options.debug_io);
+}
