@@ -105,12 +105,14 @@ jobs:
           shellcheck scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh scripts/release/*.sh
           shfmt -i 2 -d scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh scripts/release/*.sh
 
-  # Drift guard: re-run gen-pins.sh against the committed pin on every PR
-  # and fail on any diff. Catches "bumped pins.zig, forgot to regenerate
-  # the manifest" (or vice-versa) before the binary embeds a stale
-  # allowlist. Kept unconditional because the check is ~12 curl requests
-  # to raw.githubusercontent.com — cheaper than the subtle false-pass a
-  # path-filtered version produced under shallow checkouts.
+  # Drift guard: verify every committed manifest entry's hash against the
+  # committed pin on every PR. Catches "bumped pins.zig, forgot to
+  # regenerate the manifest" (or vice-versa) and hand-edited entries —
+  # fully reproducible because blobs and 404s are deterministic at a
+  # pinned commit. Deliberately does NOT re-enumerate the live formula
+  # list: that tracks homebrew-core HEAD and failed unrelated PRs whenever
+  # upstream added or removed a post_install formula. Freshness is owned
+  # by the scheduled pins-bump auto-PR, which runs the full regeneration.
   pins-drift:
     name: Pins drift
     runs-on: macos-14
@@ -118,18 +120,5 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Regenerate against committed pin
-        run: |
-          PINNED=$(grep -E 'homebrew_core_commit_sha.*=.*"' src/core/pins.zig \
-            | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-          echo "committed pin: $PINNED"
-          ./scripts/gen-pins.sh "$PINNED"
-
-      - name: Fail on drift
-        run: |
-          if ! git diff --quiet -- src/core/pins.zig src/core/pins_manifest.txt; then
-            echo "::error::pins manifest is out of sync with the committed pin."
-            echo "Run scripts/gen-pins.sh \$PINNED_COMMIT and commit the diff."
-            git --no-pager diff -- src/core/pins.zig src/core/pins_manifest.txt
-            exit 1
-          fi
+      - name: Verify manifest against committed pin
+        run: ./scripts/gen-pins.sh --check
