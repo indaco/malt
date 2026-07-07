@@ -282,6 +282,14 @@ test "dispatch accepts AppCtx and routes help without panic" {
     try dispatch(std.testing.allocator, &ctx, .help, &.{});
 }
 
+test "dispatch routes a help topic argument without panic" {
+    // Both the known-topic and unknown-topic branches must stay total —
+    // an unknown topic falls back to helpFor's stock message, not an error.
+    const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
+    try dispatch(std.testing.allocator, &ctx, .help, &.{"install"});
+    try dispatch(std.testing.allocator, &ctx, .help, &.{"not-a-real-command"});
+}
+
 test "passthroughStart finds the first -- after the command token" {
     const argv = &[_][]const u8{ "run", "jq", "--", "--json" };
     try std.testing.expectEqual(@as(?usize, 2), passthroughStart(argv));
@@ -740,7 +748,15 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
                 printVersion(ctx);
             }
         },
-        .help => printUsage(ctx),
+        .help => {
+            // `malt help <cmd>` routes to that command's topic; bare
+            // `malt help` keeps the general usage.
+            if (cmd_args.len > 0) {
+                ctx.stdout.writeStreamingAll(ctx.io, cli_help.helpFor(cmd_args[0])) catch {};
+            } else {
+                printUsage(ctx);
+            }
+        },
         .version_flag => printVersion(ctx),
     }
 }
