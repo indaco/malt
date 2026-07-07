@@ -211,6 +211,19 @@ test "runOrFailInherit returns SpawnFailed when program does not exist" {
     try std.testing.expectError(ChildError.SpawnFailed, runOrFailInherit(threaded.io(), &argv));
 }
 
+test "termToCode forwards the real exit code and sentinels abnormal terminations" {
+    // The forwarded code is what `mt run`/brew-fallback surface to the shell.
+    try std.testing.expectEqual(@as(u8, 0), termToCode(.{ .exited = 0 }));
+    try std.testing.expectEqual(@as(u8, 1), termToCode(.{ .exited = 1 }));
+    try std.testing.expectEqual(@as(u8, 42), termToCode(.{ .exited = 42 }));
+    // A real exit code of 255 is forwarded verbatim — indistinguishable from
+    // the abnormal-termination sentinel below, an inherent shell ambiguity.
+    try std.testing.expectEqual(@as(u8, 255), termToCode(.{ .exited = 255 }));
+    try std.testing.expectEqual(@as(u8, 255), termToCode(.{ .signal = .KILL }));
+    try std.testing.expectEqual(@as(u8, 255), termToCode(.{ .stopped = .STOP }));
+    try std.testing.expectEqual(@as(u8, 255), termToCode(.{ .unknown = 0 }));
+}
+
 // Capture-content tests (dual-stream, non-zero exit) live in
 // `tests/child_test.zig`. They need a shell to drive stdout+stderr in
 // one command, which the argv-only spawn invariant forbids under

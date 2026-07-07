@@ -33,6 +33,7 @@ const uses = @import("cli/uses.zig");
 const version_update = @import("cli/version_update.zig");
 const which_cmd = @import("cli/which.zig");
 const signals = @import("core/signals.zig");
+const child_mod = @import("core/child.zig");
 const mirror_mod = @import("net/mirror.zig");
 const offline_mod = @import("net/offline.zig");
 const color_mod = @import("ui/color.zig");
@@ -848,13 +849,10 @@ fn brewFallback(ctx: *const AppCtx, cmd: []const u8, args: []const []const u8) !
         const argv = argv_buf[0 .. argc + 1];
         var spawned = std.process.spawn(ctx.io, .{ .argv = argv }) catch continue;
         const term = spawned.wait(ctx.io) catch continue;
-        switch (term) {
-            .exited => |code| {
-                if (code != 0) return error.BrewFailed;
-            },
-            else => return error.BrewFailed,
-        }
-        return;
+        // Forward brew's real exit status; brew owns its own success/failure
+        // reporting, so raising a typed error here only clobbers the code and
+        // prints a spurious root-handler line. Mirrors the `mt run` wrapper.
+        std.process.exit(child_mod.termToCode(term));
     }
 
     // brew not found
