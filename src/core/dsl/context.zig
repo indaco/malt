@@ -139,8 +139,10 @@ pub const ExecContext = struct {
         malt_prefix: []const u8,
         flog: *FallbackLog,
     ) DslError!ExecContext {
+        // pkg_version, not version: the keg dir carries the `_<revision>`
+        // suffix, so raw-version bindings point beside the real keg.
         const cellar_path = std.fmt.allocPrint(arena, "{s}/Cellar/{s}/{s}", .{
-            malt_prefix, ref.name, ref.version,
+            malt_prefix, ref.name, ref.pkg_version,
         }) catch malt_prefix;
 
         var paths = std.EnumArray(PathBinding, []const u8).initUndefined();
@@ -235,4 +237,30 @@ pub const ExecContext = struct {
 
 pub fn joinPath(allocator: std.mem.Allocator, base: []const u8, sub: []const u8) []const u8 {
     return std.fs.path.join(allocator, &.{ base, sub }) catch base;
+}
+
+// The on-disk keg dir is named by pkg_version (`<version>_<revision>`
+// when revision > 0), so every keg-anchored binding must use it — a
+// raw-version path points one directory sideways from the real keg.
+test "ExecContext binds keg paths from the revision-qualified pkg_version" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var flog = FallbackLog.init(alloc);
+    defer flog.deinit();
+
+    var ctx = try ExecContext.init(alloc, std.Options.debug_io, .empty, .{
+        .name = "dbus",
+        .version = "1.16.2",
+        .pkg_version = "1.16.2_1",
+    }, "/opt/malt", &flog);
+    defer ctx.deinit();
+
+    try std.testing.expectEqualStrings("/opt/malt/Cellar/dbus/1.16.2_1", ctx.paths.get(.prefix));
+    try std.testing.expectEqualStrings("/opt/malt/Cellar/dbus/1.16.2_1/bin", ctx.paths.get(.bin));
+    try std.testing.expectEqualStrings("/opt/malt/Cellar/dbus/1.16.2_1/share/dbus", ctx.paths.get(.pkgshare));
+    // Version-agnostic bindings must stay revision-free by design.
+    try std.testing.expectEqualStrings("/opt/malt/opt/dbus", ctx.paths.get(.opt_prefix));
+    try std.testing.expectEqualStrings("/opt/malt/etc/dbus", ctx.paths.get(.pkgetc));
 }
