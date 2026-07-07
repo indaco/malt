@@ -730,6 +730,9 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         .deps => try deps_cmd.execute(ctx, allocator, cmd_args),
         .which => try which_cmd.execute(ctx, allocator, cmd_args),
         .version => {
+            // Intercept -h/--help here: the updater must never start a
+            // release lookup just because help was requested.
+            if (cli_help.showIfRequested(ctx, cmd_args, "version")) return;
             // "mt version" — check for "mt version update" subcommand
             if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
                 try version_update.execute(ctx, allocator, cmd_args[1..]);

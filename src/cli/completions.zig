@@ -153,6 +153,7 @@ pub const bash_script =
     \\        upgrade)          cmd_flags="--all --cask --formula --dry-run --pinned --force -f --isolate-deps --isolate-dependencies" ;;
     \\        outdated)         cmd_flags="--json --formula --cask --pinned-only --tap --refresh --quiet -q" ;;
     \\        update)           cmd_flags="--check --quiet -q" ;;
+    \\        version)          cmd_flags="--check --yes -y --no-verify --cleanup" ;;
     \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --tap --json --size --linked --quiet -q" ;;
     \\        info)             cmd_flags="--formula --cask --json" ;;
     \\        search)           cmd_flags="--formula --cask --json --installed --api --all --offline" ;;
@@ -418,7 +419,12 @@ pub const zsh_script =
     \\                        '--output-format=ndjson[Stream one event per scope start/complete + purge_complete]'
     \\                    ;;
     \\                version)
-    \\                    _values 'subcommand' 'update[Self-update the binary]'
+    \\                    _arguments \
+    \\                        '--check[Only report whether a newer release exists]' \
+    \\                        '(--yes -y)'{--yes,-y}'[Skip the confirmation prompt]' \
+    \\                        '--no-verify[Skip signature/checksum verification]' \
+    \\                        '--cleanup[Remove .old backups and staging files]' \
+    \\                        '1:subcommand:(update)'
     \\                    ;;
     \\                services)
     \\                    _values 'subcommand' \
@@ -717,8 +723,12 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command purge' -s y -l yes             -d 'Skip every typed confirmation'
     \\    complete -c $__malt_bin -n '__malt_using_command purge' -s n -l dry-run          -d 'Preview without removing'
     \\
-    \\    # version — sub-subcommand
+    \\    # version — sub-subcommand + update flags
     \\    complete -c $__malt_bin -n '__malt_using_command version' -f -a 'update' -d 'Self-update'
+    \\    complete -c $__malt_bin -n '__malt_using_command version' -l check     -d 'Only report whether a newer release exists'
+    \\    complete -c $__malt_bin -n '__malt_using_command version' -l yes -s y  -d 'Skip the confirmation prompt'
+    \\    complete -c $__malt_bin -n '__malt_using_command version' -l no-verify -d 'Skip signature/checksum verification'
+    \\    complete -c $__malt_bin -n '__malt_using_command version' -l cleanup   -d 'Remove .old backups and staging files'
     \\
     \\    # services — sub-subcommands
     \\    complete -c $__malt_bin -n '__malt_using_command services' -f -a 'list'    -d 'Show registered services'
