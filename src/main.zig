@@ -33,6 +33,7 @@ const uses = @import("cli/uses.zig");
 const version_update = @import("cli/version_update.zig");
 const which_cmd = @import("cli/which.zig");
 const signals = @import("core/signals.zig");
+const child_mod = @import("core/child.zig");
 const mirror_mod = @import("net/mirror.zig");
 const offline_mod = @import("net/offline.zig");
 const color_mod = @import("ui/color.zig");
@@ -399,6 +400,17 @@ test "classifyFirstPositional routes slug-shaped, path, and verb-shaped inputs" 
     try std.testing.expectEqual(FirstPositional.brew_fallback, classifyFirstPositional("a/b/c/d"));
 }
 
+test "resolveBrewPathOverride reads MALT_BREW_PATH and treats unset/empty as none" {
+    try std.testing.expectEqual(@as(?[]const u8, null), resolveBrewPathOverride(.empty));
+
+    const set = [_:null]?[*:0]const u8{"MALT_BREW_PATH=/opt/custom/bin/brew".ptr};
+    const got = resolveBrewPathOverride(.{ .block = .{ .slice = set[0..1 :null] } });
+    try std.testing.expectEqualStrings("/opt/custom/bin/brew", got.?);
+
+    const empty = [_:null]?[*:0]const u8{"MALT_BREW_PATH=".ptr};
+    try std.testing.expectEqual(@as(?[]const u8, null), resolveBrewPathOverride(.{ .block = .{ .slice = empty[0..1 :null] } }));
+}
+
 test "applyGlobalFlag --output-format=ndjson does not flip --quiet" {
     // Compose with --quiet explicitly when needed; the streams are
     // already split (ndjson on stdout, human on stderr), so users
@@ -725,6 +737,8 @@ fn printUsage(ctx: *const AppCtx) void {
         \\Environment:
         \\  MALT_PREFIX       Override install prefix (default: /opt/malt)
         \\  MALT_CACHE        Override cache directory (default: {prefix}/cache)
+        \\  MALT_BREW_PATH    Override the real brew binary unknown commands fall
+        \\                    back to (default: probes standard install paths)
         \\  NO_COLOR          Disable colored output
         \\  MALT_NO_EMOJI     Disable emoji in output
         \\  MALT_NO_VERSION_NOTIFIER=1
@@ -816,20 +830,35 @@ fn formatSlugHint(buf: []u8, kind: FirstPositional, slug: []const u8) ![]const u
     };
 }
 
+/// Resolve a `MALT_BREW_PATH` override for the brew binary the fallback probes.
+/// Lets a custom install prefix work and lets tests point the fallback at a
+/// stub. Null when unset or empty, so the caller keeps the default locations.
+fn resolveBrewPathOverride(environ: std.process.Environ) ?[]const u8 {
+    const raw_z = std.process.Environ.getPosix(environ, "MALT_BREW_PATH") orelse return null;
+    const val = std.mem.sliceTo(raw_z, 0);
+    return if (val.len == 0) null else val;
+}
+
 fn brewFallback(ctx: *const AppCtx, cmd: []const u8, args: []const []const u8) !void {
-    // Try to find and exec the real brew binary
-    const brew_paths = [_][]const u8{
+    // Real brew install locations, or a single MALT_BREW_PATH override.
+    const default_paths = [_][]const u8{
         "/opt/homebrew/bin/brew",
         "/usr/local/bin/brew",
         "/home/linuxbrew/.linuxbrew/bin/brew",
     };
+    var override_buf: [1][]const u8 = undefined;
+    const candidates: []const []const u8 = if (resolveBrewPathOverride(ctx.environ)) |p| blk: {
+        override_buf[0] = p;
+        break :blk override_buf[0..1];
+    } else &default_paths;
 
-    for (brew_paths) |brew_path| {
+    for (candidates) |brew_path| {
+        // access is F_OK (existence only), so a present-but-unrunnable brew
+        // passes here and fails at spawn below — handled distinctly.
         std.Io.Dir.accessAbsolute(ctx.io, brew_path, .{}) catch continue;
 
-        // Announce the handoff once we know brew is reachable so the
-        // user sees a malt-native context line before brew's own
-        // output. Passive notice — brew owns success/failure reporting.
+        // Announce the handoff before spawning so the malt-native context line
+        // precedes brew's own output. Passive notice — brew owns reporting.
         var notice_buf: [1024]u8 = undefined;
         // Cmd came from argv; 1024 is generous, so bufPrint cannot overflow.
         const notice = formatBrewFallbackNotice(&notice_buf, cmd) catch unreachable;
@@ -844,24 +873,31 @@ fn brewFallback(ctx: *const AppCtx, cmd: []const u8, args: []const []const u8) !
         for (args[0..argc], 1..) |arg, i| {
             argv_buf[i] = arg;
         }
-
         const argv = argv_buf[0 .. argc + 1];
-        var spawned = std.process.spawn(ctx.io, .{ .argv = argv }) catch continue;
-        const term = spawned.wait(ctx.io) catch continue;
-        switch (term) {
-            .exited => |code| {
-                if (code != 0) return error.BrewFailed;
-            },
-            else => return error.BrewFailed,
-        }
-        return;
+
+        // brew is on disk. A spawn failure means it exists but can't be exec'd
+        // (permissions, ENOEXEC) — a broken install, not a missing one. Report
+        // that and exit 126; we've committed to this path, so don't re-probe.
+        var spawned = std.process.spawn(ctx.io, .{ .argv = argv }) catch {
+            output_mod.err("found brew at '{s}' but could not execute it — check its permissions", .{brew_path});
+            std.process.exit(126);
+        };
+        // brew has started and may already have mutated state; forward its real
+        // status and never retry another path on a wait failure.
+        const term = spawned.wait(ctx.io) catch {
+            output_mod.err("brew at '{s}' did not report a status", .{brew_path});
+            std.process.exit(255);
+        };
+        std.process.exit(child_mod.termToCode(term));
     }
 
-    // brew not found
+    // No brew on disk — exit 127, as a shell does for an unknown command.
     if (args.len > 0) {
         var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "malt: '{s}' is not a malt command and brew was not found.\n", .{args[0]}) catch return;
-        ctx.stderr.writeStreamingAll(ctx.io, msg) catch {};
+        if (std.fmt.bufPrint(&buf, "malt: '{s}' is not a malt command and brew was not found.\n", .{args[0]})) |msg| {
+            ctx.stderr.writeStreamingAll(ctx.io, msg) catch {};
+        } else |_| {}
     }
     ctx.stderr.writeStreamingAll(ctx.io, "Install Homebrew: https://brew.sh\n") catch {};
+    std.process.exit(127);
 }
