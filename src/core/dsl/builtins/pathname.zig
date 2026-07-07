@@ -35,6 +35,8 @@ pub const ExecCtx = struct {
     /// Record-only diagnostics sink for builtins (e.g. inreplace's
     /// atomic-write fallback). Optional so test contexts can omit it.
     fallback_log: ?*fallback_log.FallbackLog = null,
+    /// Formula name stamped on fallback-log entries a builtin records.
+    formula_name: []const u8 = "",
 };
 
 /// mkpath — recursive directory creation
