@@ -39,12 +39,12 @@ test "showIfRequested returns true for long --help" {
 test "showIfRequested covers every documented command (exercises every branch of the static map)" {
     const ctx = quietCtx();
     const commands = [_][]const u8{
-        "install",  "uninstall",   "upgrade",            "update",
-        "outdated", "list",        "info",               "search",
-        "doctor",   "tap",         "migrate",            "rollback",
-        "run",      "link",        "unlink",             "pin",
-        "unpin",    "completions", "backup",             "restore",
-        "purge",    "tui",         "not-a-real-command",
+        "install",  "uninstall",   "upgrade", "update",
+        "outdated", "list",        "info",    "search",
+        "doctor",   "tap",         "migrate", "rollback",
+        "run",      "link",        "unlink",  "pin",
+        "unpin",    "completions", "backup",  "restore",
+        "purge",    "tui",         "version", "not-a-real-command",
     };
     const args = [_][]const u8{"--help"};
     for (commands) |cmd| {
@@ -150,6 +150,14 @@ test "showIfRequested honours --help for cleanup" {
     const ctx = quietCtx();
     const args = [_][]const u8{"--help"};
     try testing.expect(help.showIfRequested(&ctx, &args, "cleanup"));
+}
+
+test "version help documents the update subcommand and its flags" {
+    const text = help.helpFor("version");
+    try testing.expect(std.mem.indexOf(u8, text, "malt version") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "update") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--check") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--cleanup") != null);
 }
 
 // Integration: verify that `malt <cmd> --help` writes to stdout (not stderr).

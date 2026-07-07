@@ -49,6 +49,7 @@ pub fn helpFor(command: []const u8) []const u8 {
         .{ "pin", pin_help },
         .{ "unpin", unpin_help },
         .{ "tui", tui_help },
+        .{ "version", version_help },
     });
     return map.get(command) orelse "No help available.\n";
 }
@@ -699,5 +700,25 @@ const which_help =
     \\  malt which jq
     \\  malt which /opt/malt/bin/jq
     \\  malt --json which jq
+    \\
+;
+
+const version_help =
+    \\Usage: malt version [update] [flags]
+    \\
+    \\Show the installed malt version. `malt version update` downloads
+    \\and installs the latest malt release (cosign + SHA256 verified).
+    \\
+    \\Update flags:
+    \\  --check      Only report whether a newer release exists
+    \\  --yes, -y    Skip the confirmation prompt
+    \\  --no-verify  Skip signature/checksum verification (also needs
+    \\               MALT_ALLOW_UNVERIFIED=1; not recommended)
+    \\  --cleanup    Remove .old backups and staging files, then exit
+    \\
+    \\Examples:
+    \\  malt version
+    \\  malt version update --check
+    \\  malt version update --cleanup
     \\
 ;

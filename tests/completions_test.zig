@@ -216,6 +216,15 @@ test "all bundle completions expose the cleanup subcommand and its flags" {
     try expectContains(completions.fish_script, "-l yes");
 }
 
+test "version completions expose the update flags across every shell" {
+    // `mt version update` has a documented flag set; the completions
+    // must surface it so the self-updater is discoverable without --help.
+    try expectContains(completions.bash_script, "--no-verify");
+    try expectContains(completions.zsh_script, "--no-verify[");
+    try expectContains(completions.fish_script, "-l no-verify");
+    try expectContains(completions.fish_script, "-l cleanup");
+}
+
 test "backup completions expose --services across every shell" {
     // `mt backup --services` is the user-visible verb that closes the
     // launchd-bootstrap round-trip; the completions must surface it so

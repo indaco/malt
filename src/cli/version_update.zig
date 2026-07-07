@@ -544,7 +544,7 @@ fn runCleanup(ctx: *const AppCtx) !void {
     if (cleaned.total() == 0) {
         output.info("Nothing to clean up.", .{});
     } else {
-        output.info("Removed {d} .old binary, {d} staging file(s).", .{ cleaned.old, cleaned.staging });
+        output.info("Removed {d} .old file(s), {d} staging file(s).", .{ cleaned.old, cleaned.staging });
     }
 }
 
