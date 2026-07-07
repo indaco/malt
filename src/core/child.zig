@@ -24,7 +24,8 @@ const max_capture_bytes: usize = 256 * 1024;
 /// Captured outcome of a child process. `stdout` / `stderr` are owned
 /// by the caller via `deinit`.
 pub const RunReport = struct {
-    /// Exit code on `.exited`; `255` sentinel for signal/stopped/unknown.
+    /// Exit code on `.exited`; `128+signum` for signal/stopped, `255` sentinel
+    /// for unknown terminations.
     code: u8,
     stdout: []u8,
     stderr: []u8,
@@ -35,12 +36,15 @@ pub const RunReport = struct {
     }
 };
 
-/// Collapse a wait `Term` to an exit code: the real code on a clean exit, a
-/// `255` sentinel for signal/stopped/unknown terminations.
+/// Collapse a wait `Term` to an exit code: the real code on a clean exit, the
+/// shell's `128+signum` convention on signal/stopped (so callers see which
+/// signal killed the child), and a `255` sentinel for unknown terminations.
 pub fn termToCode(term: std.process.Child.Term) u8 {
     return switch (term) {
         .exited => |c| c,
-        .signal, .stopped, .unknown => 255,
+        // WTERMSIG masks the signum to 7 bits, so 128+signum always fits u8.
+        .signal, .stopped => |s| 128 +| @as(u8, @intCast(@intFromEnum(s))),
+        .unknown => 255,
     };
 }
 
@@ -211,16 +215,18 @@ test "runOrFailInherit returns SpawnFailed when program does not exist" {
     try std.testing.expectError(ChildError.SpawnFailed, runOrFailInherit(threaded.io(), &argv));
 }
 
-test "termToCode forwards the real exit code and sentinels abnormal terminations" {
+test "termToCode forwards the real exit code and maps signals to 128+signum" {
     // The forwarded code is what `mt run`/brew-fallback surface to the shell.
     try std.testing.expectEqual(@as(u8, 0), termToCode(.{ .exited = 0 }));
     try std.testing.expectEqual(@as(u8, 1), termToCode(.{ .exited = 1 }));
     try std.testing.expectEqual(@as(u8, 42), termToCode(.{ .exited = 42 }));
-    // A real exit code of 255 is forwarded verbatim — indistinguishable from
-    // the abnormal-termination sentinel below, an inherent shell ambiguity.
     try std.testing.expectEqual(@as(u8, 255), termToCode(.{ .exited = 255 }));
-    try std.testing.expectEqual(@as(u8, 255), termToCode(.{ .signal = .KILL }));
-    try std.testing.expectEqual(@as(u8, 255), termToCode(.{ .stopped = .STOP }));
+    // SIGINT=2, SIGKILL=9 are POSIX-stable across macOS/Linux → 130, 137.
+    try std.testing.expectEqual(@as(u8, 130), termToCode(.{ .signal = .INT }));
+    try std.testing.expectEqual(@as(u8, 137), termToCode(.{ .signal = .KILL }));
+    // stopped follows the same formula; SIGSTOP differs by platform, so derive.
+    try std.testing.expectEqual(@as(u8, 128 + @intFromEnum(std.posix.SIG.STOP)), termToCode(.{ .stopped = .STOP }));
+    // unknown has no signum — keeps the opaque sentinel.
     try std.testing.expectEqual(@as(u8, 255), termToCode(.{ .unknown = 0 }));
 }
 
