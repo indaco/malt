@@ -9,7 +9,14 @@
 # Usage:
 #   scripts/gen-pins.sh                        # auto-pin to current HEAD
 #   scripts/gen-pins.sh <commit-sha>           # pin to specific commit
+#   scripts/gen-pins.sh --check               # verify committed manifest
 #   FORMULAS="fontconfig openssl@3" scripts/gen-pins.sh
+#
+# --check re-verifies every committed manifest entry's hash against the
+# committed pin and writes nothing. It deliberately skips the live-API
+# enumeration: the formula list tracks homebrew-core HEAD and moves under
+# a frozen pin, so a full regen is not reproducible on CI. Freshness is
+# owned by the scheduled pins-bump auto-PR, which runs the full regen.
 #
 # Env:
 #   FORMULAS  — space-separated list of formulas to seed. Defaults to a
@@ -38,6 +45,95 @@ elif command -v openssl >/dev/null 2>&1; then
 else
   echo "error: no working sha256 hasher (need sha256sum, shasum, or openssl)" >&2
   exit 1
+fi
+
+# PINS_MANIFEST is an override seam for tests; production always uses the
+# committed manifest.
+MANIFEST="${PINS_MANIFEST:-src/core/pins_manifest.txt}"
+
+# Download Formula/<x>/<name>.rb at <commit> into $RB_TMP and echo the
+# terminal HTTP code. Downloads to a file — command substitution strips
+# trailing newlines, which makes the computed SHA256 disagree with the
+# runtime fetch (the runtime hashes the raw bytes, newline included).
+# raw.githubusercontent rate-limits by IP: 429 / transient 5xx / transport
+# errors (000) are retried with backoff. Only 200 and 404 are terminal —
+# both are deterministic at a pinned commit; the caller decides what a
+# 404 means for its mode.
+fetch_rb() {
+  name="$1"
+  commit="$2"
+  first=${name:0:1}
+  url="https://raw.githubusercontent.com/Homebrew/homebrew-core/${commit}/Formula/${first}/${name}.rb"
+  http_code=""
+  for attempt in 1 2 3 4 5; do
+    http_code=$(curl -sSL --max-time 15 -o "$RB_TMP" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
+    case "$http_code" in
+    200 | 404) break ;;
+    esac
+    [ "$attempt" -eq 5 ] && break
+    sleep "$((attempt * 3))" # 3s, 6s, 9s, 12s backoff
+  done
+  printf '%s' "$http_code"
+}
+
+read_committed_pin() {
+  grep -E 'homebrew_core_commit_sha.*=.*"' src/core/pins.zig |
+    head -1 | sed -E 's/.*"([^"]+)".*/\1/'
+}
+
+# ── --check: verify the committed manifest against the committed pin ──
+# Read-only integrity gate for CI: every entry's blob must exist at the
+# pin and hash to the committed value. Catches "bumped pins.zig, forgot
+# to regenerate" (all hashes mismatch), hand-edited entries, and names
+# absent at the pin — without depending on the moving live formula list.
+if [ "${1:-}" = "--check" ]; then
+  PIN=$(read_committed_pin)
+  if [ ${#PIN} -ne 40 ]; then
+    echo "error: no committed pin found in src/core/pins.zig" >&2
+    exit 1
+  fi
+  printf '▸ verifying %s against pin %s\n' "$MANIFEST" "$PIN" >&2
+
+  RB_TMP=$(mktemp)
+  trap 'rm -f "$RB_TMP"' EXIT
+
+  checked=0
+  bad=0
+  while IFS=' ' read -r name sha _; do
+    case "$name" in '' | '#'*) continue ;; esac
+    code=$(fetch_rb "$name" "$PIN")
+    case "$code" in
+    200) ;;
+    404)
+      printf '  ✗ %-24s not at pinned commit\n' "$name" >&2
+      bad=$((bad + 1))
+      continue
+      ;;
+    *)
+      printf '  ✗ %-24s HTTP %s after retries\n' "$name" "$code" >&2
+      exit 1
+      ;;
+    esac
+    got=$(sha256_stdin <"$RB_TMP")
+    if [ "$got" != "$sha" ]; then
+      printf '  ✗ %-24s hash mismatch (manifest %s, pinned %s)\n' "$name" "$sha" "$got" >&2
+      bad=$((bad + 1))
+      continue
+    fi
+    checked=$((checked + 1))
+  done <"$MANIFEST"
+
+  if [ "$checked" -eq 0 ]; then
+    echo "error: no entries verified — empty or unreadable manifest" >&2
+    exit 1
+  fi
+  if [ "$bad" -ne 0 ]; then
+    printf 'error: %d manifest entr(y/ies) do not match the pinned commit\n' "$bad" >&2
+    printf 'Run scripts/gen-pins.sh <pinned-commit> and commit the diff.\n' >&2
+    exit 1
+  fi
+  printf '▸ %d entries verified against the pinned commit\n' "$checked" >&2
+  exit 0
 fi
 
 # Fallback seed — TLS + popular language toolchains. Only used when the
@@ -133,7 +229,6 @@ fi
   src/core/pins.zig
 
 # Regenerate the manifest.
-MANIFEST=src/core/pins_manifest.txt
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 
@@ -158,40 +253,19 @@ trap 'rm -f "$TMP" "$RB_TMP"' EXIT
 
 for name in "${FORMULAS_ARR[@]}"; do
   [ -n "$name" ] || continue
-  first=${name:0:1}
-  url="https://raw.githubusercontent.com/Homebrew/homebrew-core/${COMMIT}/Formula/${first}/${name}.rb"
-  # Download to a file — command substitution strips trailing newlines,
-  # which makes the computed SHA256 disagree with the runtime fetch (the
-  # runtime hashes the raw bytes, trailing newline included).
-  #
-  # Drop -f and inspect %{http_code} ourselves so 404s (formulas in the
-  # API's HEAD snapshot that were renamed/moved before the pinned commit)
-  # produce one clean warning per entry instead of a raw "curl: (56)"
-  # dump in CI logs.
-  #
-  # raw.githubusercontent rate-limits by IP: a 429 (or transient 5xx / a
-  # transport error surfaced as 000) must be retried with backoff, or a busy
-  # run silently drops the entry and fabricates a false manifest drift. Only
-  # 200 and 404 are terminal; a 404 is deterministic at a pinned commit.
-  http_code=""
-  for attempt in 1 2 3 4 5; do
-    http_code=$(curl -sSL --max-time 15 -o "$RB_TMP" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
-    case "$http_code" in
-    200 | 404) break ;;
-    esac
-    [ "$attempt" -eq 5 ] && break
-    sleep "$((attempt * 3))" # 3s, 6s, 9s, 12s backoff
-  done
-  case "$http_code" in
+  # 404s here are formulas in the API's HEAD snapshot that were renamed or
+  # moved before the pinned commit — skip with a warning. Anything else is
+  # fail-loud: never emit a silently-incomplete manifest that would read
+  # as a drift downstream.
+  code=$(fetch_rb "$name" "$COMMIT")
+  case "$code" in
   200) ;;
   404)
     printf '  ⚠ %-24s not at pinned commit (skipping)\n' "$name" >&2
     continue
     ;;
   *)
-    # Fail loud: never emit a silently-incomplete manifest that would read
-    # as a drift downstream.
-    printf '  ✗ %-24s HTTP %s after retries\n' "$name" "$http_code" >&2
+    printf '  ✗ %-24s HTTP %s after retries\n' "$name" "$code" >&2
     exit 1
     ;;
   esac
