@@ -385,7 +385,7 @@ fn runTapPostInstallIfDefined(
     defer allocator.free(rb_path);
     const body = post_install_mod.extractRbPostInstallBody(ctx.io, allocator, rb_path) orelse {
         if (post_install_mod.rbHasPostInstallSteps(ctx.io, allocator, rb_path))
-            output.warn("    {s}: post_install skipped (declarative post_install_steps not supported yet; run brew postinstall {s})", .{ name, name });
+            output.warn("    {s}: post_install skipped (declarative steps need formula JSON, unavailable for tap kegs; run brew postinstall {s})", .{ name, name });
         return;
     };
     defer allocator.free(body);

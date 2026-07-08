@@ -117,7 +117,9 @@ fn writeCellarRule(w: *std.Io.Writer, root: []const u8) !void {
 }
 
 fn writePrefixRules(w: *std.Io.Writer, prefix: []const u8) !void {
-    for ([_][]const u8{ "etc", "var", "share", "opt" }) |sub|
+    // lib carries prefix-level caches the declarative install steps
+    // regenerate (gdk-pixbuf loaders.cache, gio module cache).
+    for ([_][]const u8{ "etc", "var", "share", "opt", "lib" }) |sub|
         try w.print("\n  (subpath \"{s}/{s}\")", .{ prefix, sub });
 }
 
@@ -494,6 +496,10 @@ test "renderRubyProfile emits deny-default + cellar + prefix subpaths" {
     try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/etc\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/var\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/opt\")") != null);
+    // Declarative install steps write prefix-level caches under lib/
+    // (gdk-pixbuf loaders.cache, gio module cache) — same trust level as
+    // the other prefix subtrees.
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib\")") != null);
 }
 
 // The kernel matches subpath filters against resolved vnode paths, so a

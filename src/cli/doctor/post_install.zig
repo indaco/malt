@@ -11,6 +11,7 @@ const output = @import("../../ui/output.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
 const dsl = @import("../../core/dsl/root.zig");
 const formula_mod = @import("../../core/formula.zig");
+const steps_mod = @import("../../core/post_install_steps.zig");
 const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
 
@@ -63,6 +64,19 @@ pub fn checkPostInstallStatus(ctx: *const AppCtx, allocator: std.mem.Allocator, 
 
         if (!formula.hasPostInstallHook()) {
             no_pi_count += 1;
+            continue;
+        }
+
+        // Steps-migrated formulas have no Ruby body; classify them by the
+        // native executor's step-type coverage instead.
+        if (formula.has_post_install_steps) {
+            if (steps_mod.allStepsSupported(allocator, formula_json)) {
+                native_count += 1;
+                output.success("  {s}: declarative steps (native)", .{name});
+            } else {
+                partial_count += 1;
+                output.warn("  {s}: declarative steps (some types unsupported)", .{name});
+            }
             continue;
         }
 
