@@ -98,6 +98,7 @@ fn importAllowed(importer_dir: []const u8, path: []const u8) bool {
     return std.mem.eql(u8, resolved, "src/ui/color.zig") or
         std.mem.eql(u8, resolved, "src/ui/term_sanitize.zig") or
         std.mem.eql(u8, resolved, "src/ui/termsize.zig") or
+        std.mem.eql(u8, resolved, "src/ui/term_restore.zig") or
         std.mem.eql(u8, resolved, "src/ui/spinner_frames.zig");
 }
 
@@ -147,6 +148,11 @@ test "importAllowed permits a subdirectory sibling and the ui helpers from a sub
 test "importAllowed permits the shared termsize leaf" {
     try testing.expect(importAllowed("src/tui", "../ui/termsize.zig"));
     try testing.expect(importAllowed("src/tui/json", "../../ui/termsize.zig"));
+}
+
+test "importAllowed permits the shared term_restore leaf" {
+    try testing.expect(importAllowed("src/tui", "../ui/term_restore.zig"));
+    try testing.expect(importAllowed("src/tui/json", "../../ui/term_restore.zig"));
 }
 
 test "importAllowed permits the shared spinner_frames leaf" {

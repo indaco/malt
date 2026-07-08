@@ -1,15 +1,18 @@
 //! malt — terminal control primitives for `mt tui`.
 //!
-//! Leaf module: imports only `std` and the shared `ui/termsize` leaf (the
-//! `mt tui` dashboard pressure-tests the `--json` contract instead of reaching
-//! into `cli/*`/`core/*`). Provides raw-mode, alternate-screen, and cursor
-//! machinery; window-size + `SIGWINCH` tracking lives in `ui/termsize` and is
-//! re-exported here. A single idempotent `restore()` undoes everything entered
-//! and is wired through `errdefer` downstream so a crash can never wedge the
-//! terminal.
+//! Leaf module: imports only `std` and the shared `ui/termsize` +
+//! `ui/term_restore` leaves (the `mt tui` dashboard pressure-tests the
+//! `--json` contract instead of reaching into `cli/*`/`core/*`). Provides
+//! raw-mode, alternate-screen, and cursor machinery; window-size + `SIGWINCH`
+//! tracking lives in `ui/termsize` and is re-exported here. A single
+//! idempotent `restore()` undoes everything entered and is wired through
+//! `errdefer` downstream; `enterRaw` also mirrors the saved termios into the
+//! `ui/term_restore` registry so the panic hook and termination-signal
+//! handlers can restore even when defers never run.
 
 const std = @import("std");
 const termsize = @import("../ui/termsize.zig");
+const term_restore = @import("../ui/term_restore.zig");
 
 /// Window-size + `SIGWINCH` tracking lives in the shared `ui/termsize` leaf so
 /// the CLI side can reuse it without reaching into the TUI. Re-exported here so
@@ -22,6 +25,10 @@ pub const takeResized = termsize.takeResized;
 pub const currentSize = termsize.currentSize;
 pub const setWinchInstalledForTest = termsize.setWinchInstalledForTest;
 pub const setResizedForTest = termsize.setResizedForTest;
+
+/// Crash-only escape hatch, re-exported from `ui/term_restore` so the TUI
+/// run loop wires termination signals next to `installWinch`.
+pub const installCrashSignals = term_restore.installCrashSignals;
 
 /// Escape sequences whose effect is idempotent at the terminal level, so the
 /// state guards below only exist to avoid redundant writes, not to stay correct.
@@ -123,10 +130,15 @@ pub const Term = struct {
         raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
         std.posix.tcsetattr(self.fd, .FLUSH, raw) catch return TermError.TermiosFailed;
         self.saved = saved;
+        // Mirror into the crash registry: defers never run on panic or a
+        // termination signal, and this stack-local `saved` is unreachable
+        // from those process-global paths.
+        term_restore.register(self.fd, saved);
     }
 
     pub fn exitRaw(self: *Term) void {
         const saved = self.saved orelse return;
+        term_restore.clear();
         // Best-effort: a gone tty cannot be put back, and there is no sane
         // recovery from inside restore/errdefer.
         std.posix.tcsetattr(self.fd, .FLUSH, saved) catch {};
