@@ -31,28 +31,49 @@ pub const StepsCtx = struct {
     keg_path: []const u8,
     flog: *FallbackLog,
     suppress_child_stdout: bool = false,
+    /// Only consulted for the data-dir initialisers (`--user=$USER`).
+    environ: std.process.Environ = .empty,
 };
 
 /// Step types this executor runs natively. Everything else routes to the
 /// partial-skip envelope; doctor reads this to classify migrated formulas.
 pub fn supportedStepType(step_type: []const u8) bool {
-    const native = [_][]const u8{
-        "mkdir_p",
-        "touch",
-        "write",
-        "symlink",
-        "link_dir",
-        "link_children",
-        "compile_gsettings_schemas",
-        "gio_querymodules",
-        "gdk_pixbuf_query_loaders",
-        "gtk_update_icon_cache",
-        "update_mime_database",
-        "update_desktop_database",
-    };
-    for (native) |t| if (std.mem.eql(u8, t, step_type)) return true;
-    return false;
+    return step_map.get(step_type) != null;
 }
+
+const StepTag = enum {
+    mkdir_p,
+    touch,
+    write,
+    symlink,
+    link_dir,
+    link_children,
+    compile_gsettings_schemas,
+    gio_querymodules,
+    gdk_pixbuf_query_loaders,
+    gtk_update_icon_cache,
+    update_mime_database,
+    update_desktop_database,
+    init_data_dir,
+};
+
+/// Single source of truth for the native step set: `runStep` dispatch and
+/// the doctor-facing `supportedStepType` classifier both read it.
+const step_map = std.StaticStringMap(StepTag).initComptime(.{
+    .{ "mkdir_p", .mkdir_p },
+    .{ "touch", .touch },
+    .{ "write", .write },
+    .{ "symlink", .symlink },
+    .{ "link_dir", .link_dir },
+    .{ "link_children", .link_children },
+    .{ "compile_gsettings_schemas", .compile_gsettings_schemas },
+    .{ "gio_querymodules", .gio_querymodules },
+    .{ "gdk_pixbuf_query_loaders", .gdk_pixbuf_query_loaders },
+    .{ "gtk_update_icon_cache", .gtk_update_icon_cache },
+    .{ "update_mime_database", .update_mime_database },
+    .{ "update_desktop_database", .update_desktop_database },
+    .{ "init_data_dir", .init_data_dir },
+});
 
 /// True when the formula JSON carries a non-empty steps array whose every
 /// step type runs natively. Read-side classifier for the doctor probe —
@@ -119,34 +140,27 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         return false;
     };
 
-    if (std.mem.eql(u8, step_type, "mkdir_p")) return stepMkdirP(ctx, obj);
-    if (std.mem.eql(u8, step_type, "touch")) return stepTouch(ctx, obj);
-    if (std.mem.eql(u8, step_type, "write")) return stepWrite(ctx, obj);
-    if (std.mem.eql(u8, step_type, "symlink")) return stepSymlink(ctx, obj);
-    if (std.mem.eql(u8, step_type, "link_dir")) return stepLinkDir(ctx, obj);
-    if (std.mem.eql(u8, step_type, "link_children")) return stepLinkChildren(ctx, obj);
-    if (std.mem.eql(u8, step_type, "compile_gsettings_schemas"))
-        return runPathTool(ctx, obj, "glib", "glib-compile-schemas", &.{});
-    if (std.mem.eql(u8, step_type, "gio_querymodules"))
-        return runPathTool(ctx, obj, "glib", "gio-querymodules", &.{});
-    if (std.mem.eql(u8, step_type, "update_mime_database"))
-        return runPathTool(ctx, obj, "shared-mime-info", "update-mime-database", &.{});
-    if (std.mem.eql(u8, step_type, "update_desktop_database"))
-        return runPathTool(ctx, obj, "desktop-file-utils", "update-desktop-database", &.{});
-    if (std.mem.eql(u8, step_type, "gdk_pixbuf_query_loaders"))
-        return stepGdkPixbufQueryLoaders(ctx);
-    if (std.mem.eql(u8, step_type, "gtk_update_icon_cache")) return stepGtkUpdateIconCache(ctx, obj);
-
-    // init_data_dir spawns database initialisers (initdb/mysqld) with
-    // formula-specific env contracts — routed loudly until they earn a
-    // native runner. mkdir/move/move_children are defined upstream but
-    // unused in homebrew-core today.
-    const detail = if (getString(obj, "using")) |using|
-        std.fmt.allocPrint(ctx.allocator, "{s} ({s})", .{ step_type, using }) catch step_type
-    else
-        step_type;
-    logUnsupported(ctx, detail);
-    return false;
+    // mkdir/move/move_children are defined upstream but unused in
+    // homebrew-core today — routed loudly until a formula ships one.
+    const tag = step_map.get(step_type) orelse {
+        logUnsupported(ctx, step_type);
+        return false;
+    };
+    return switch (tag) {
+        .mkdir_p => stepMkdirP(ctx, obj),
+        .touch => stepTouch(ctx, obj),
+        .write => stepWrite(ctx, obj),
+        .symlink => stepSymlink(ctx, obj),
+        .link_dir => stepLinkDir(ctx, obj),
+        .link_children => stepLinkChildren(ctx, obj),
+        .compile_gsettings_schemas => runPathTool(ctx, obj, "glib", "glib-compile-schemas", &.{}),
+        .gio_querymodules => runPathTool(ctx, obj, "glib", "gio-querymodules", &.{}),
+        .update_mime_database => runPathTool(ctx, obj, "shared-mime-info", "update-mime-database", &.{}),
+        .update_desktop_database => runPathTool(ctx, obj, "desktop-file-utils", "update-desktop-database", &.{}),
+        .gdk_pixbuf_query_loaders => stepGdkPixbufQueryLoaders(ctx),
+        .gtk_update_icon_cache => stepGtkUpdateIconCache(ctx, obj),
+        .init_data_dir => stepInitDataDir(ctx, obj),
+    };
 }
 
 // --- path resolution -------------------------------------------------------
@@ -172,13 +186,22 @@ pub fn expandTemplates(ctx: StepsCtx, s: []const u8) ![]const u8 {
     return out.toOwnedSlice(ctx.allocator);
 }
 
+const template_map = std.StaticStringMap(enum { name, version, version_major, version_major_minor, homebrew_prefix }).initComptime(.{
+    .{ "name", .name },
+    .{ "version", .version },
+    .{ "version.major", .version_major },
+    .{ "version.major_minor", .version_major_minor },
+    .{ "HOMEBREW_PREFIX", .homebrew_prefix },
+});
+
 fn templateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, token, "name")) return ctx.name;
-    if (std.mem.eql(u8, token, "version")) return ctx.version;
-    if (std.mem.eql(u8, token, "version.major")) return versionComponents(ctx.version, 1);
-    if (std.mem.eql(u8, token, "version.major_minor")) return versionComponents(ctx.version, 2);
-    if (std.mem.eql(u8, token, "HOMEBREW_PREFIX")) return ctx.prefix;
-    return null;
+    return switch (template_map.get(token) orelse return null) {
+        .name => ctx.name,
+        .version => ctx.version,
+        .version_major => versionComponents(ctx.version, 1),
+        .version_major_minor => versionComponents(ctx.version, 2),
+        .homebrew_prefix => ctx.prefix,
+    };
 }
 
 /// First `n` dot-separated components of a version string.
@@ -194,39 +217,62 @@ fn versionComponents(version: []const u8, n: usize) []const u8 {
     return version;
 }
 
+const BaseTag = enum {
+    homebrew_prefix,
+    prefix,
+    opt_prefix,
+    var_dir,
+    etc,
+    lib,
+    bin,
+    pkgetc,
+    pkgshare,
+    opt_pkgshare,
+    formula_pkgetc,
+    formula_opt_prefix,
+};
+
+const base_map = std.StaticStringMap(BaseTag).initComptime(.{
+    .{ "homebrew_prefix", .homebrew_prefix },
+    .{ "prefix", .prefix },
+    .{ "opt_prefix", .opt_prefix },
+    .{ "var", .var_dir },
+    .{ "etc", .etc },
+    .{ "lib", .lib },
+    .{ "bin", .bin },
+    .{ "pkgetc", .pkgetc },
+    .{ "pkgshare", .pkgshare },
+    .{ "opt_pkgshare", .opt_pkgshare },
+    .{ "formula_pkgetc", .formula_pkgetc },
+    .{ "formula_opt_prefix", .formula_opt_prefix },
+});
+
 /// Map an upstream base token onto the malt prefix. Null means "no safe
 /// mapping" — `home` deliberately so (it escapes the prefix and would fail
 /// confinement anyway), formula-scoped bases without a formula, and any
 /// token this executor does not know.
 pub fn resolveBase(ctx: StepsCtx, base: []const u8, formula_ref: ?[]const u8) ?[]const u8 {
     const a = ctx.allocator;
-    if (std.mem.eql(u8, base, "homebrew_prefix")) return ctx.prefix;
-    if (std.mem.eql(u8, base, "prefix")) return ctx.keg_path;
-    if (std.mem.eql(u8, base, "opt_prefix"))
-        return std.fmt.allocPrint(a, "{s}/opt/{s}", .{ ctx.prefix, ctx.name }) catch null;
-    if (std.mem.eql(u8, base, "var"))
-        return std.fmt.allocPrint(a, "{s}/var", .{ctx.prefix}) catch null;
-    if (std.mem.eql(u8, base, "etc"))
-        return std.fmt.allocPrint(a, "{s}/etc", .{ctx.prefix}) catch null;
-    if (std.mem.eql(u8, base, "lib"))
-        return std.fmt.allocPrint(a, "{s}/lib", .{ctx.prefix}) catch null;
-    if (std.mem.eql(u8, base, "bin"))
-        return std.fmt.allocPrint(a, "{s}/bin", .{ctx.prefix}) catch null;
-    if (std.mem.eql(u8, base, "pkgetc"))
-        return std.fmt.allocPrint(a, "{s}/etc/{s}", .{ ctx.prefix, ctx.name }) catch null;
-    if (std.mem.eql(u8, base, "pkgshare"))
-        return std.fmt.allocPrint(a, "{s}/share/{s}", .{ ctx.prefix, ctx.name }) catch null;
-    if (std.mem.eql(u8, base, "opt_pkgshare"))
-        return std.fmt.allocPrint(a, "{s}/opt/{s}/share/{s}", .{ ctx.prefix, ctx.name, ctx.name }) catch null;
-    if (std.mem.eql(u8, base, "formula_pkgetc")) {
-        const f = formula_ref orelse return null;
-        return std.fmt.allocPrint(a, "{s}/etc/{s}", .{ ctx.prefix, f }) catch null;
-    }
-    if (std.mem.eql(u8, base, "formula_opt_prefix")) {
-        const f = formula_ref orelse return null;
-        return std.fmt.allocPrint(a, "{s}/opt/{s}", .{ ctx.prefix, f }) catch null;
-    }
-    return null;
+    return switch (base_map.get(base) orelse return null) {
+        .homebrew_prefix => ctx.prefix,
+        .prefix => ctx.keg_path,
+        .opt_prefix => std.fmt.allocPrint(a, "{s}/opt/{s}", .{ ctx.prefix, ctx.name }) catch null,
+        .var_dir => std.fmt.allocPrint(a, "{s}/var", .{ctx.prefix}) catch null,
+        .etc => std.fmt.allocPrint(a, "{s}/etc", .{ctx.prefix}) catch null,
+        .lib => std.fmt.allocPrint(a, "{s}/lib", .{ctx.prefix}) catch null,
+        .bin => std.fmt.allocPrint(a, "{s}/bin", .{ctx.prefix}) catch null,
+        .pkgetc => std.fmt.allocPrint(a, "{s}/etc/{s}", .{ ctx.prefix, ctx.name }) catch null,
+        .pkgshare => std.fmt.allocPrint(a, "{s}/share/{s}", .{ ctx.prefix, ctx.name }) catch null,
+        .opt_pkgshare => std.fmt.allocPrint(a, "{s}/opt/{s}/share/{s}", .{ ctx.prefix, ctx.name, ctx.name }) catch null,
+        .formula_pkgetc => {
+            const f = formula_ref orelse return null;
+            return std.fmt.allocPrint(a, "{s}/etc/{s}", .{ ctx.prefix, f }) catch null;
+        },
+        .formula_opt_prefix => {
+            const f = formula_ref orelse return null;
+            return std.fmt.allocPrint(a, "{s}/opt/{s}", .{ ctx.prefix, f }) catch null;
+        },
+    };
 }
 
 /// Resolve a `{base, path, formula}` spec into an absolute path, or null
@@ -417,6 +463,86 @@ fn stepGtkUpdateIconCache(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     return runPathTool(ctx, obj, "gtk+3", "gtk3-update-icon-cache", &.{ "-q", "-t", "-f" });
 }
 
+// --- data-dir initialisers ---------------------------------------------------
+
+const InitDataDirPlan = struct {
+    /// Marker file (inside the data dir) whose presence means "already
+    /// initialised — this is user data, never re-run".
+    marker: []const u8,
+    argv: []const []const u8,
+};
+
+/// Pure argv/marker construction for the three upstream initialisers.
+/// Null for an unknown `using` — no safe way to guess a database init.
+/// Binaries come from the formula's own keg; `--tmpdir` points inside the
+/// prefix because the sandbox fence has no /tmp grant (brew uses /tmp).
+const initialiser_map = std.StaticStringMap(enum { postgresql_initdb, mysql_initialize, mariadb_install_db }).initComptime(.{
+    .{ "postgresql_initdb", .postgresql_initdb },
+    .{ "mysql_initialize", .mysql_initialize },
+    .{ "mariadb_install_db", .mariadb_install_db },
+});
+
+fn initDataDirPlan(ctx: StepsCtx, using: []const u8, datadir: []const u8, locale: ?[]const u8) ?InitDataDirPlan {
+    const a = ctx.allocator;
+    const tmpdir = std.fmt.allocPrint(a, "{s}/var/tmp", .{ctx.prefix}) catch return null;
+
+    const mysql_like: struct { exe: []const u8, first: []const u8, marker_rel: []const u8 } =
+        switch (initialiser_map.get(using) orelse return null) {
+            .postgresql_initdb => {
+                var argv = std.ArrayList([]const u8).empty;
+                argv.append(a, std.fmt.allocPrint(a, "{s}/bin/initdb", .{ctx.keg_path}) catch return null) catch return null;
+                argv.append(a, std.fmt.allocPrint(a, "--locale={s}", .{locale orelse "en_US.UTF-8"}) catch return null) catch return null;
+                argv.appendSlice(a, &.{ "-E", "UTF-8", datadir }) catch return null;
+                return .{
+                    .marker = std.fmt.allocPrint(a, "{s}/PG_VERSION", .{datadir}) catch return null,
+                    .argv = argv.items,
+                };
+            },
+            .mysql_initialize => .{ .exe = "mysqld", .first = "--initialize-insecure", .marker_rel = "mysql/general_log.CSM" },
+            .mariadb_install_db => .{ .exe = "mysql_install_db", .first = "--verbose", .marker_rel = "mysql/user.frm" },
+        };
+
+    var argv = std.ArrayList([]const u8).empty;
+    argv.append(a, std.fmt.allocPrint(a, "{s}/bin/{s}", .{ ctx.keg_path, mysql_like.exe }) catch return null) catch return null;
+    argv.append(a, mysql_like.first) catch return null;
+    // `--user` only matters when running as root (mysqld setuids then);
+    // malt installs as the invoking user, so a missing USER is benign.
+    if (std.process.Environ.getPosix(ctx.environ, "USER")) |user|
+        argv.append(a, std.fmt.allocPrint(a, "--user={s}", .{user}) catch return null) catch return null;
+    argv.append(a, std.fmt.allocPrint(a, "--basedir={s}", .{ctx.keg_path}) catch return null) catch return null;
+    argv.append(a, std.fmt.allocPrint(a, "--datadir={s}", .{datadir}) catch return null) catch return null;
+    argv.append(a, std.fmt.allocPrint(a, "--tmpdir={s}", .{tmpdir}) catch return null) catch return null;
+    return .{
+        .marker = std.fmt.allocPrint(a, "{s}/{s}", .{ datadir, mysql_like.marker_rel }) catch return null,
+        .argv = argv.items,
+    };
+}
+
+fn stepInitDataDir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const using = getString(obj, "using") orelse {
+        logUnsupported(ctx, "init_data_dir without an initialiser");
+        return false;
+    };
+    const datadir = resolvePathSpec(ctx, obj, "path") orelse return false;
+    if (!confined(ctx, datadir)) return false;
+    const plan = initDataDirPlan(ctx, using, datadir, getString(obj, "locale")) orelse {
+        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "init_data_dir ({s})", .{using}) catch using);
+        return false;
+    };
+    std.Io.Dir.cwd().createDirPath(ctx.io, datadir) catch {};
+    // An initialised data dir is user data — mirror brew's marker guard.
+    if (fileExists(ctx.io, plan.marker)) return true;
+    if (!fileExists(ctx.io, plan.argv[0])) {
+        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} initialiser not found in the keg", .{using}) catch using);
+        return false;
+    }
+    // Never pre-create the marker's parent: the initialisers refuse a
+    // non-empty data dir, and they create their own subtrees.
+    const tmpdir = std.fmt.allocPrint(ctx.allocator, "{s}/var/tmp", .{ctx.prefix}) catch return false;
+    std.Io.Dir.cwd().createDirPath(ctx.io, tmpdir) catch {};
+    return spawnFenced(ctx, plan.argv, null, using);
+}
+
 const GdkPixbufEnv = struct {
     moduledir: []const u8,
     module_file: []const u8,
@@ -476,12 +602,18 @@ fn runFormulaToolEnv(ctx: StepsCtx, tool_formula: []const u8, exe: []const u8, a
     argv.append(ctx.allocator, tool) catch return false;
     argv.appendSlice(ctx.allocator, args) catch return false;
 
-    sandbox.validateArgv(argv.items, ctx.keg_path, ctx.prefix) catch {
-        logViolation(ctx, tool);
+    return spawnFenced(ctx, argv.items, env_map, exe);
+}
+
+/// Argv lint + sandbox fence + spawn + wait — the one exec chokepoint for
+/// every tool and initialiser step. `label` names the child in the log.
+fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, env_map: ?*const std.process.Environ.Map, label: []const u8) bool {
+    sandbox.validateArgv(argv, ctx.keg_path, ctx.prefix) catch {
+        logViolation(ctx, argv[0]);
         return false;
     };
-    const fenced = sandbox.fenceArgv(ctx.allocator, argv.items, ctx.keg_path, ctx.prefix) catch {
-        logViolation(ctx, tool);
+    const fenced = sandbox.fenceArgv(ctx.allocator, argv, ctx.keg_path, ctx.prefix) catch {
+        logViolation(ctx, argv[0]);
         return false;
     };
 
@@ -490,19 +622,19 @@ fn runFormulaToolEnv(ctx: StepsCtx, tool_formula: []const u8, exe: []const u8, a
         .stdout = if (ctx.suppress_child_stdout) .ignore else .inherit,
         .environ_map = env_map,
     }) catch {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} failed to spawn", .{exe}) catch exe);
+        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} failed to spawn", .{label}) catch label);
         return false;
     };
     const term = child.wait(ctx.io) catch {
-        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} did not terminate cleanly", .{exe}) catch exe);
+        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} did not terminate cleanly", .{label}) catch label);
         return false;
     };
     switch (term) {
         .exited => |code| {
             if (code == 0) return true;
-            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} exited with code {d}", .{ exe, code }) catch exe);
+            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} exited with code {d}", .{ label, code }) catch label);
         },
-        else => logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} terminated abnormally", .{exe}) catch exe),
+        else => logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} terminated abnormally", .{label}) catch label),
     }
     return false;
 }
@@ -633,6 +765,24 @@ test "expandTemplates substitutes known tokens and leaves unknown verbatim" {
     const hp = try expandTemplates(c, "{{HOMEBREW_PREFIX}}/share");
     try testing.expect(std.mem.startsWith(u8, hp, h.prefix));
     try testing.expectEqualStrings("{{mystery}}", try expandTemplates(c, "{{mystery}}"));
+    // Malformed input stays verbatim rather than corrupting the path.
+    try testing.expectEqualStrings("a{{name", try expandTemplates(c, "a{{name"));
+}
+
+test "versionComponents degrades gracefully on dotless and short versions" {
+    try testing.expectEqualStrings("9", versionComponents("9", 1));
+    try testing.expectEqualStrings("9", versionComponents("9", 2));
+    try testing.expectEqualStrings("2026-07-01", versionComponents("2026-07-01", 1));
+}
+
+test "initDataDirPlan omits --user when USER is absent from the environ" {
+    // The harness environ is empty; --user only matters under root, so a
+    // missing USER must degrade to omission, not a broken argv.
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    const my = initDataDirPlan(h.ctx(), "mysql_initialize", "/p/var/mysql", null) orelse return error.TestUnexpectedResult;
+    for (my.argv) |a| try testing.expect(!std.mem.startsWith(u8, a, "--user="));
 }
 
 test "resolveBase maps every observed upstream token into the malt prefix" {
@@ -779,22 +929,104 @@ test "a step resolving outside the prefix is refused and logged as a sandbox vio
     try testing.expect(!escaped);
 }
 
-test "init_data_dir and unknown step types downgrade to the loud partial skip" {
+test "unknown step types downgrade to the loud partial skip" {
     var h = try TestHarness.init();
     defer h.deinit();
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
         \\[{"type":"mkdir_p","path":{"base":"var","path":"glow"}},
-        \\ {"type":"init_data_dir","path":{"base":"var","path":"glow"},"using":"postgresql_initdb"},
         \\ {"type":"frobnicate"}]
     )));
     try testing.expect(h.flog.hasErrors());
     try testing.expect(!h.flog.hasFatal());
-    try testing.expectEqual(@as(usize, 2), h.flog.entries().len);
+    try testing.expectEqual(@as(usize, 1), h.flog.entries().len);
     try testing.expectEqual(fallback_log.FallbackReason.unknown_method, h.flog.entries()[0].reason);
     // The supported step still ran and counted as handled.
-    try testing.expectEqual(@as(usize, 3), h.flog.total_top_level);
+    try testing.expectEqual(@as(usize, 2), h.flog.total_top_level);
     try testing.expectEqual(@as(usize, 1), h.flog.handled_top_level);
+}
+
+test "initDataDirPlan builds each initialiser's argv and marker" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const c = h.ctx();
+
+    const pg = initDataDirPlan(c, "postgresql_initdb", "/p/var/postgresql", null) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("/p/var/postgresql/PG_VERSION", pg.marker);
+    try testing.expect(std.mem.endsWith(u8, pg.argv[0], "/bin/initdb"));
+    try testing.expect(std.mem.startsWith(u8, pg.argv[0], h.keg));
+    try testing.expectEqualStrings("--locale=en_US.UTF-8", pg.argv[1]);
+    try testing.expectEqualStrings("/p/var/postgresql", pg.argv[pg.argv.len - 1]);
+
+    // A step-supplied locale overrides the default.
+    const pg_it = initDataDirPlan(c, "postgresql_initdb", "/p/var/postgresql", "it_IT.UTF-8") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("--locale=it_IT.UTF-8", pg_it.argv[1]);
+
+    const my = initDataDirPlan(c, "mysql_initialize", "/p/var/mysql", null) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("/p/var/mysql/mysql/general_log.CSM", my.marker);
+    try testing.expect(std.mem.endsWith(u8, my.argv[0], "/bin/mysqld"));
+    try testing.expectEqualStrings("--initialize-insecure", my.argv[1]);
+
+    const maria = initDataDirPlan(c, "mariadb_install_db", "/p/var/mysql", null) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("/p/var/mysql/mysql/user.frm", maria.marker);
+    try testing.expect(std.mem.endsWith(u8, maria.argv[0], "/bin/mysql_install_db"));
+
+    // The confined tmpdir replaces brew's /tmp — the fence has no /tmp grant.
+    var found_tmpdir = false;
+    for (my.argv) |a| {
+        if (std.mem.startsWith(u8, a, "--tmpdir=")) {
+            try testing.expect(std.mem.indexOf(u8, a, h.prefix) != null);
+            found_tmpdir = true;
+        }
+    }
+    try testing.expect(found_tmpdir);
+
+    // Unknown initialisers have no safe plan.
+    try testing.expect(initDataDirPlan(c, "sqlite_seed", "/p/var/x", null) == null);
+}
+
+test "init_data_dir skips initialisation when the marker file exists" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    // Marker present → already initialised; the step must count as handled
+    // without spawning anything (no initdb exists in this fixture keg).
+    const datadir = try std.fmt.allocPrint(a, "{s}/var/postgresql", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, datadir);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/PG_VERSION", .{datadir}), .{});
+        f.close(h.io);
+    }
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"init_data_dir","path":{"base":"var","path":"postgresql"},"using":"postgresql_initdb"}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 1), h.flog.handled_top_level);
+}
+
+test "init_data_dir with a missing initialiser binary fails loudly" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"init_data_dir","path":{"base":"var","path":"postgresql"},"using":"postgresql_initdb"}]
+    )));
+    try testing.expect(h.flog.hasErrors());
+    try testing.expectEqual(fallback_log.FallbackReason.system_command_failed, h.flog.entries()[0].reason);
+}
+
+test "init_data_dir with an unknown initialiser downgrades to the partial skip" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"init_data_dir","path":{"base":"var","path":"x"},"using":"sqlite_seed"}]
+    )));
+    try testing.expect(h.flog.hasErrors());
+    try testing.expect(!h.flog.hasFatal());
+    try testing.expectEqual(fallback_log.FallbackReason.unknown_method, h.flog.entries()[0].reason);
 }
 
 test "a missing helper tool is a loud command failure, not a silent skip" {
@@ -818,9 +1050,13 @@ test "allStepsSupported classifies migrated formulas for the doctor probe" {
         \\[{"type":"mkdir_p","path":{"base":"var","path":"glow"}},
         \\ {"type":"gtk_update_icon_cache","path":{"base":"homebrew_prefix","path":"share/icons"}}]
     )));
-    try testing.expect(!allStepsSupported(a, try testFormulaJson(&h,
+    try testing.expect(allStepsSupported(a, try testFormulaJson(&h,
         \\[{"type":"mkdir_p","path":{"base":"var","path":"glow"}},
         \\ {"type":"init_data_dir","path":{"base":"var","path":"glow"},"using":"postgresql_initdb"}]
+    )));
+    try testing.expect(!allStepsSupported(a, try testFormulaJson(&h,
+        \\[{"type":"mkdir_p","path":{"base":"var","path":"glow"}},
+        \\ {"type":"move","source":{"base":"var","path":"a"},"target":{"base":"var","path":"b"}}]
     )));
     // No steps at all → nothing to support.
     try testing.expect(!allStepsSupported(a, try testFormulaJson(&h, "[]")));
@@ -849,8 +1085,9 @@ test "supportedStepType matches the executable tier and rejects the rest" {
         "mkdir_p",                  "touch",                 "write",                     "symlink",
         "link_dir",                 "link_children",         "compile_gsettings_schemas", "gio_querymodules",
         "gdk_pixbuf_query_loaders", "gtk_update_icon_cache", "update_mime_database",      "update_desktop_database",
+        "init_data_dir",
     };
     for (native) |t| try testing.expect(supportedStepType(t));
-    const routed = [_][]const u8{ "init_data_dir", "mkdir", "move", "move_children", "frobnicate" };
+    const routed = [_][]const u8{ "mkdir", "move", "move_children", "frobnicate" };
     for (routed) |t| try testing.expect(!supportedStepType(t));
 }

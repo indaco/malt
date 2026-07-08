@@ -1875,9 +1875,11 @@ test "driveSteps routes unsupported step types to the loud partial skip" {
     try std.Io.Dir.cwd().createDirPath(io, prefix);
     defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
 
+    // `move` is defined upstream but has no native runner yet — the
+    // canonical "known-shape, unsupported" case.
     const json =
         \\{"name":"glow","versions":{"stable":"1.2.3"},"post_install_defined":false,
-        \\ "post_install_steps":[{"type":"init_data_dir","path":{"base":"var","path":"glow"},"using":"postgresql_initdb"}]}
+        \\ "post_install_steps":[{"type":"move","source":{"base":"var","path":"a"},"target":{"base":"var","path":"b"}}]}
     ;
     const r = try runDriveSteps(json, prefix);
     defer testing.allocator.free(r.out);

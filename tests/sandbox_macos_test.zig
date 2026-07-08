@@ -48,6 +48,9 @@ test "renderRubyProfile deny-by-default, network denied, cellar + prefix subpath
     try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/share\")") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/opt\")") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib\")") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-shm)") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-posix-shm)") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-sem)") != null);
 }
 
 test "renderRubyProfile refuses unsafe cellar path" {

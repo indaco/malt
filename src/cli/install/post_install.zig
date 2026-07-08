@@ -515,6 +515,7 @@ pub fn driveSteps(
         .keg_path = keg_path,
         .flog = &flog,
         .suppress_child_stdout = output.isJson() or output.isNdjson(),
+        .environ = ctx.environ,
     }, formula_json);
 
     routePostInstallOutcome(ctx, allocator, name, version_str, prefix, &flog, use_system_ruby_list, sink);

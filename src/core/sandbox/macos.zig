@@ -80,6 +80,12 @@ pub fn renderRubyProfile(
         \\(allow sysctl-read)
         \\(allow mach-lookup)
         \\(allow iokit-open)
+        // Database initialisers (postgres bootstrap) allocate SysV/POSIX
+        // shared memory and SysV semaphores; without these grants initdb
+        // dies in shmget/semctl.
+        \\(allow ipc-sysv-shm)
+        \\(allow ipc-sysv-sem)
+        \\(allow ipc-posix-shm)
         \\(allow file-read*)
         \\(deny network*)
         \\(allow file-write-data
@@ -500,6 +506,11 @@ test "renderRubyProfile emits deny-default + cellar + prefix subpaths" {
     // (gdk-pixbuf loaders.cache, gio module cache) — same trust level as
     // the other prefix subtrees.
     try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib\")") != null);
+    // Database initialisers (postgres bootstrap) allocate SysV/POSIX
+    // shared memory; without the grant initdb dies in shmget.
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-shm)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-posix-shm)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-sem)") != null);
 }
 
 // The kernel matches subpath filters against resolved vnode paths, so a
