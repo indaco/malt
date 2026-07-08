@@ -157,6 +157,12 @@ FALLBACK_FORMULAS=(
 # post_install_defined flag is true from formulae.brew.sh — an exhaustive
 # allowlist is what the fail-closed gate actually needs. Fall back to the
 # static seed only when the API is unreachable.
+#
+# Formulas migrated to the declarative `post_install_steps` array report
+# post_install_defined=false and are handled natively from the formula
+# JSON — they need no pinned .rb source, so the manifest legitimately
+# shrinks as upstream migrates. Their count is reported below so a
+# shrinking diff is explainable at a glance.
 if [ -n "${FORMULAS:-}" ]; then
   # shellcheck disable=SC2206
   read -r -a FORMULAS_ARR <<<"$FORMULAS"
@@ -181,6 +187,12 @@ for f in data:
 ' | LC_ALL=C sort -u
     )
     printf '▸ %d formulas have post_install_defined\n' "${#FORMULAS_ARR[@]}" >&2
+    STEPS_COUNT=$(printf '%s' "$api_json" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+print(sum(1 for f in data if f.get("post_install_steps")))
+')
+    printf '▸ %s formulas carry declarative post_install_steps (handled natively; not pinned)\n' "$STEPS_COUNT" >&2
   else
     printf '  ⚠ API fetch failed — falling back to static seed\n' >&2
     FORMULAS_ARR=("${FALLBACK_FORMULAS[@]}")
