@@ -83,6 +83,8 @@ pub fn step(s: *State, key: tab.Key) void {
     switch (key) {
         .enter => s.detail = selectedService(s),
         .esc => s.detail = null,
+        // Only the tab knows its filtered row count, so the shell defers End here.
+        .end => s.chrome.view.selected = filteredCount(s.items, s.chrome.filter.slice()) -| 1,
         .char => |c| if (c.len == 1) switch (c.bytes[0]) {
             's' => s.request = .start,
             'x', 'X' => s.request = .stop,
@@ -245,6 +247,12 @@ test "footerHint advertises the details affordance alongside the lifecycle keys"
     const h = footerHint();
     try testing.expect(std.mem.indexOf(u8, h, "enter: details") != null);
     try testing.expect(std.mem.indexOf(u8, h, "s: start") != null);
+}
+
+test "End jumps to the last filtered row" {
+    var s: State = .{ .items = &sample };
+    step(&s, .end);
+    try testing.expectEqual(@as(usize, 3), s.chrome.view.selected);
 }
 
 test "matches is a case-insensitive substring; empty filter matches all" {

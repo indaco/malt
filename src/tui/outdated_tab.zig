@@ -104,6 +104,8 @@ pub fn step(s: *State, key: tab.Key) void {
     switch (key) {
         .space => toggleSelected(s),
         .enter => requestUpgrade(s),
+        // Only the tab knows its filtered row count, so the shell defers End here.
+        .end => s.chrome.view.selected = filteredCount(s.items, s.chrome.filter.slice()) -| 1,
         .char => |c| if (c.len == 1) switch (c.bytes[0]) {
             'u' => requestUpgrade(s),
             'a' => setAll(s, true),
@@ -234,6 +236,16 @@ const sample = [_]Row{
     .{ .name = "firefox", .installed = "120.0", .latest = "121.0", .kind = .cask, .pinned = false, .tap = "user/repo" },
     .{ .name = "ffmpeg", .installed = "8.0", .latest = "8.1", .kind = .formula, .pinned = false, .tap = "" },
 };
+
+test "End jumps to the last filtered row" {
+    var s: State = .{ .items = &sample };
+    step(&s, .end);
+    try testing.expectEqual(@as(usize, 3), s.chrome.view.selected);
+
+    s.chrome.filter.push("f"); // firefox, ffmpeg
+    step(&s, .end);
+    try testing.expectEqual(@as(usize, 1), s.chrome.view.selected);
+}
 
 test "matches is a case-insensitive substring; empty filter matches all" {
     try testing.expect(matches("firefox", ""));
