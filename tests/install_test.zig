@@ -119,7 +119,7 @@ test "collectFormulaJobs queues a formula with a post_install hook" {
     // post_install after materialisation, so the guard no longer rejects.
     try testing.expectEqual(@as(usize, 1), jobs.items.len);
     try testing.expectEqualStrings("needs-ruby", jobs.items[0].name);
-    try testing.expect(jobs.items[0].post_install_defined);
+    try testing.expect(jobs.items[0].wants_post_install);
 }
 
 // --- Pure helper tests (no DB / network) ---
@@ -864,7 +864,7 @@ fn appendOwnedJob(
         .bottle_url = try alloc.dupe(u8, "https://x"),
         .is_dep = is_dep,
         .keg_only = false,
-        .post_install_defined = false,
+        .wants_post_install = false,
         .formula_json = formula_json,
         .cellar_type = try alloc.dupe(u8, ":any"),
         .label_width = 0,

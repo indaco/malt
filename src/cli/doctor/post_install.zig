@@ -61,7 +61,7 @@ pub fn checkPostInstallStatus(ctx: *const AppCtx, allocator: std.mem.Allocator, 
         };
         defer formula.deinit();
 
-        if (!formula.post_install_defined) {
+        if (!formula.hasPostInstallHook()) {
             no_pi_count += 1;
             continue;
         }

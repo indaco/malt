@@ -21,6 +21,7 @@ pub const findHomebrewCoreTap = detect.findHomebrewCoreTap;
 pub const resolveFormulaRbPath = detect.resolveFormulaRbPath;
 pub const extractPostInstallBody = source.extractPostInstallBody;
 pub const extractPostInstallFromSource = source.extractPostInstallFromSource;
+pub const rbHasPostInstallSteps = source.rbHasPostInstallSteps;
 pub const fetchPostInstallFromGitHub = source.fetchPostInstallFromGitHub;
 
 pub const RubyError = error{

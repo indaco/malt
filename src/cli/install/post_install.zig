@@ -29,6 +29,13 @@ pub fn extractRbPostInstallBody(io: std.Io, allocator: std.mem.Allocator, rb_pat
     return ruby_sub.extractPostInstallBody(io, allocator, rb_path);
 }
 
+/// Steps-migrated tap formulas carry a declarative `post_install_steps`
+/// block instead of `def post_install`; detect it so migrate can warn
+/// instead of silently dropping the hook.
+pub fn rbHasPostInstallSteps(io: std.Io, allocator: std.mem.Allocator, rb_path: []const u8) bool {
+    return ruby_sub.rbHasPostInstallSteps(io, allocator, rb_path);
+}
+
 /// Whether --use-system-ruby opts the named formula into the Ruby
 /// post_install path. Caller carries the parsed scope from the flag.
 pub fn useSystemRubyForFormula(scope: []const []const u8, formula_name: []const u8) bool {

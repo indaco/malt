@@ -1141,7 +1141,7 @@ fn executeWithOpts(
             pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, job.name, job.version_str);
         }
 
-        if (job.post_install_defined) {
+        if (job.wants_post_install) {
             drive(ctx, allocator, job.name, job.version_str, job.formula_json, prefix, use_system_ruby_list, &formula_cache, sink);
         }
 
