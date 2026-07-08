@@ -1105,10 +1105,14 @@ fn closeDevnullCtx(fd: std.c.fd_t) void {
 /// Capture stderr output from a single router call and return the raw
 /// bytes. Caller owns the buffer. Deterministic state (no color / no
 /// emoji / not quiet) so the assertions pin plain ASCII prefixes.
-fn runRoute(
+/// `body` pre-resolves the post_install source so the Ruby-fallback
+/// path stays hermetic — resolving it live reads the machine's
+/// homebrew-core tap, whose contents drift under `brew update`.
+fn runRouteWithBody(
     flog: *const dsl.FallbackLog,
     name: []const u8,
     scope: []const []const u8,
+    body: ?[]const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(testing.allocator);
@@ -1125,9 +1129,17 @@ fn runRoute(
     const dn = try devnullCtx();
     defer closeDevnullCtx(dn.fd);
 
-    install_post_install.routePostInstallOutcome(&dn.ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope, install_sink.terminal);
+    install_post_install.routePostInstallOutcomeWithBody(&dn.ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope, body, install_sink.terminal);
 
     return buf.toOwnedSlice(testing.allocator);
+}
+
+fn runRoute(
+    flog: *const dsl.FallbackLog,
+    name: []const u8,
+    scope: []const []const u8,
+) ![]u8 {
+    return runRouteWithBody(flog, name, scope, null);
 }
 
 test "routePostInstallOutcome: clean flog prints a 'completed' info line" {
@@ -1174,7 +1186,11 @@ test "routePostInstallOutcome: --use-system-ruby=NAME in scope triggers the Ruby
     });
 
     const scope = [_][]const u8{"openssl@3"};
-    const out = try runRoute(&flog, "openssl@3", scope[0..]);
+    // A synthetic body with an undefined helper: the wrapper's soft-fail
+    // rescue must catch it and exit 0. Pre-resolved so the test never
+    // reads the live tap (whose openssl@3 drifts under `brew update`).
+    const body = "undefined_stub_helper \"cert.pem\"\n";
+    const out = try runRouteWithBody(&flog, "openssl@3", scope[0..], body);
     defer testing.allocator.free(out);
 
     // The fallback banner leads the warning so users know the Ruby
