@@ -273,6 +273,17 @@ fn stepFilter(a: *App, key: Key) void {
 }
 
 fn stepNormal(a: *App, key: Key) void {
+    // The Installed uninstall guard is modal: while it is up, route every key
+    // to the tab so its one-key resolve sees keys this switch would otherwise
+    // consume — navigation, tab switches, digits, and `/` then cancel the
+    // guard instead of bypassing it.
+    if (a.active == .installed and a.states.installed.confirm_uninstall != null) {
+        switch (key) {
+            .ctrl_c => a.quit = true,
+            else => routeToTab(a, key),
+        }
+        return;
+    }
     switch (key) {
         .ctrl_c => a.quit = true,
         .tab, .right => a.active = tab_bar.next(a.active),
@@ -972,12 +983,11 @@ fn openDetail(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store
     app.states.installed.detail = .{ .pkg = sel, .info = parsed.info };
 }
 
-/// Delegate uninstall to the real `mt` inline, then refresh the list. `sel.name`
-/// is copied into the argv before the spawn; the post-spawn reload frees the
-/// storage it borrowed from, so it is not read afterwards.
-fn doUninstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
-    const sel = installed.selectedPkg(&app.states.installed) orelse return;
-    const argv = try spawn.inlineArgv(allocator, app.mt_path, &.{ "uninstall", sel.name });
+/// Delegate uninstall to the real `mt` inline, then refresh the list. The
+/// target is the guard's latched copy — it neither borrows the list storage the
+/// post-spawn reload frees nor tracks a selection that moved after arming.
+fn doUninstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store, target: installed.ConfirmTarget) RunError!void {
+    const argv = try spawn.inlineArgv(allocator, app.mt_path, &.{ "uninstall", target.name() });
     defer allocator.free(argv);
     {
         // A non-zero `mt uninstall` re-enters the dashboard (the user still has
@@ -999,7 +1009,7 @@ fn serviceInstalled(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app
     switch (req) {
         .none => {},
         .open_detail => try openDetail(io, allocator, app, store),
-        .uninstall => try doUninstall(io, allocator, t, app, store),
+        .uninstall => |target| try doUninstall(io, allocator, t, app, store, target),
     }
     // Lazy per-tab refresh: a tab marked dirty by a mutation refetches on entry.
     if (app.active == .installed and takeDirty(app, .installed)) {
@@ -1870,9 +1880,53 @@ test "a committed filter survives a tab round-trip" {
 
 test "esc in normal mode routes to the active tab so it can cancel its guard" {
     var a: App = .{ .active = .installed };
-    a.states.installed.confirm_uninstall = true;
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl");
     a = step(a, .esc); // not editing → must reach the tab, which lowers the guard
-    try std.testing.expect(!a.states.installed.confirm_uninstall);
+    try std.testing.expect(a.states.installed.confirm_uninstall == null);
+}
+
+const guard_pkgs = [_]installed.Pkg{
+    .{ .name = "pkga", .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null },
+    .{ .name = "pkgb", .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null },
+};
+
+test "navigation while the uninstall guard is up cancels it instead of retargeting" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &guard_pkgs;
+    a = step(a, ch('x')); // arm on pkga (row 0)
+    try std.testing.expect(a.states.installed.confirm_uninstall != null);
+    a = step(a, .down); // modal: the key resolves the guard (cancel), not the list
+    try std.testing.expect(a.states.installed.confirm_uninstall == null);
+    a = step(a, ch('y')); // no longer a confirmation — must not request an uninstall
+    try std.testing.expect(a.states.installed.request == .none);
+    try std.testing.expectEqual(@as(usize, 0), a.states.installed.chrome.view.selected);
+}
+
+test "q while the uninstall guard is up cancels it instead of quitting" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &guard_pkgs;
+    a = step(a, ch('x'));
+    a = step(a, ch('q'));
+    try std.testing.expect(!a.quit); // the guard consumed the key
+    try std.testing.expect(a.states.installed.confirm_uninstall == null);
+}
+
+test "slash while the uninstall guard is up cancels it instead of opening the filter" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &guard_pkgs;
+    a = step(a, ch('x'));
+    a = step(a, ch('/'));
+    try std.testing.expect(!a.editing);
+    try std.testing.expect(a.states.installed.confirm_uninstall == null);
+}
+
+test "tab switch while the uninstall guard is up resolves the guard, not the tab bar" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &guard_pkgs;
+    a = step(a, ch('x'));
+    a = step(a, .tab);
+    try std.testing.expect(a.states.installed.confirm_uninstall == null); // never left armed
+    try std.testing.expectEqual(Tab.installed, a.active); // the key was consumed by the guard
 }
 
 test "esc clears the filter and leaves edit mode" {
@@ -1961,7 +2015,7 @@ test "Enter on a data tab still routes as that tab's domain key, not a focus" {
     var a: App = .{ .active = .installed };
     a = step(a, .enter);
     try std.testing.expect(!a.editing);
-    try std.testing.expectEqual(installed.Request.open_detail, a.states.installed.request);
+    try std.testing.expect(a.states.installed.request == .open_detail);
 }
 
 test "renderFrame shows the committed filter and the editing footer" {
@@ -2291,7 +2345,7 @@ test "mutationPending gates only on requests that spawn a DB-mutating child" {
 
     // Each mutating request, in isolation, gates the drain.
     app = .{};
-    app.states.installed.request = .uninstall;
+    app.states.installed.request = .{ .uninstall = installed.ConfirmTarget.init("wget") };
     try std.testing.expect(mutationPending(&app));
     app = .{};
     app.states.outdated.request = .upgrade;
