@@ -1765,28 +1765,61 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
         if (rc == 0) break; // EOF
         const bytes = rbuf[0..@intCast(rc)];
         var consumed: usize = 0;
+        var partial = false;
         while (consumed < bytes.len) {
             switch (decoder.decode(bytes[consumed..])) {
-                .incomplete => break,
+                .incomplete => {
+                    partial = true;
+                    break;
+                },
                 .key => |k| {
                     consumed += k.consumed;
-                    app = step(app, k.key); // also clears any prior banner
+                    try serviceKey(io, allocator, &t, painter, &fetches, &app, &store, k.key);
                     if (app.quit) break;
-                    paintSearching(fd, &frame, allocator, &app); // status before the blocking search
-                    paintLoading(fd, &frame, allocator, &app); // "Loading…" before a blocking lazy refetch
-                    // A recoverable backend fault becomes the banner the failing
-                    // op already set and the loop continues; only a fatal fault
-                    // (terminal/OOM) propagates to the errdefer restore + exit.
-                    service(io, allocator, &t, painter, &fetches, &app, &store) catch |err| switch (classify(err)) {
-                        .recoverable => {},
-                        .fatal => return err,
-                    };
                 },
             }
+        }
+        // A buffered tail can be a lone Esc, which the blocking read would sit
+        // on until the next keypress. Give the rest of a genuine sequence one
+        // short window to arrive; silence resolves the tail through flush().
+        if (partial and !app.quit and !ttyReadable(fd, esc_resolve_ms)) {
+            if (decoder.flush()) |k| try serviceKey(io, allocator, &t, painter, &fetches, &app, &store, k);
         }
         try repaint(fd, &frame, allocator, &app);
     }
     t.restore();
+}
+
+/// How long a buffered partial escape sequence may wait for its next byte
+/// before the tail resolves as a lone Esc. A genuine CSI arrives in one
+/// write, so this much tty silence means no more bytes are coming.
+const esc_resolve_ms: i32 = 40;
+
+/// True when `fd` has readable bytes within `timeout_ms`. `std.posix.poll`
+/// retries EINTR internally, so a SIGWINCH mid-wait reads as a timeout — the
+/// flush is safe and the resize is consumed on the next loop turn.
+fn ttyReadable(fd: std.posix.fd_t, timeout_ms: i32) bool {
+    var pfd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+    const n = std.posix.poll(&pfd, timeout_ms) catch return false;
+    return n > 0;
+}
+
+/// One decoded key's full turn: pure step, the pre-spawn status paints, then
+/// the requested effects with the recoverable/fatal split. Shared by the
+/// streaming decode path and the timeout-flushed lone Esc so both behave
+/// identically.
+fn serviceKey(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Store, key: Key) RunError!void {
+    app.* = step(app.*, key); // also clears any prior banner
+    if (app.quit) return;
+    paintSearching(painter.fd, painter.frame, allocator, app); // status before the blocking search
+    paintLoading(painter.fd, painter.frame, allocator, app); // "Loading…" before a blocking lazy refetch
+    // A recoverable backend fault becomes the banner the failing op already
+    // set and the loop continues; only a fatal fault (terminal/OOM)
+    // propagates to the errdefer restore + exit.
+    service(io, allocator, t, painter, fetches, app, store) catch |err| switch (classify(err)) {
+        .recoverable => {},
+        .fatal => return err,
+    };
 }
 
 /// Search is the dashboard's first remote read: when the user commits a query,
@@ -1883,6 +1916,16 @@ test "esc in normal mode routes to the active tab so it can cancel its guard" {
     a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl");
     a = step(a, .esc); // not editing → must reach the tab, which lowers the guard
     try std.testing.expect(a.states.installed.confirm_uninstall == null);
+}
+
+test "ttyReadable sees a buffered byte and times out on silence" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    try std.testing.expect(!ttyReadable(fds[0], 1)); // silent pipe: the window elapses
+    try std.testing.expectEqual(@as(isize, 1), std.c.write(fds[1], "x", 1));
+    try std.testing.expect(ttyReadable(fds[0], 1)); // a byte is waiting: ready
 }
 
 const guard_pkgs = [_]installed.Pkg{
