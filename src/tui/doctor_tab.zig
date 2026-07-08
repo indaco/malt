@@ -100,6 +100,8 @@ pub fn step(s: *State, key: tab.Key) void {
             const sel = selectedFinding(s) orelse return;
             if (sel.fixable) s.request = .fix;
         },
+        // Only the tab knows its filtered row count, so the shell defers End here.
+        .end => s.chrome.view.selected = filteredCount(s.items, s.chrome.filter.slice()) -| 1,
         else => {},
     }
 }
@@ -724,6 +726,12 @@ test "matches is a case-insensitive substring; empty filter matches all" {
     try testing.expect(matches("SQLite integrity", ""));
     try testing.expect(matches("SQLite integrity", "sqlite"));
     try testing.expect(!matches("Stale lock", "zzz"));
+}
+
+test "End jumps to the last filtered row" {
+    var s: State = .{ .items = &sample };
+    step(&s, .end);
+    try testing.expectEqual(@as(usize, 3), s.chrome.view.selected);
 }
 
 test "selectedFinding orders by severity (err, then warn, then ok) and clamps" {

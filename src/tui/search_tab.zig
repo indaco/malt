@@ -177,6 +177,11 @@ pub fn step(s: *State, key: tab.Key) void {
             else => {},
         },
         .esc => s.detail = null, // close the info pane
+        // No narrowing filter here; the cursor indexes the active view's list.
+        .end => s.chrome.view.selected = (switch (s.view) {
+            .results => s.items.len,
+            .basket => s.basket.len,
+        }) -| 1,
         else => {},
     }
 }
@@ -590,6 +595,20 @@ const basket_sample = [_]SelEntry{
     .{ .name = "bat", .kind = .formula },
     .{ .name = "firefox", .kind = .cask },
 };
+
+test "End jumps to the last row of the active view: results or basket" {
+    var s: State = .{ .items = &sample, .phase = .loaded, .basket = &basket_sample };
+    step(&s, .end);
+    try testing.expectEqual(@as(usize, 2), s.chrome.view.selected); // 3 hits
+
+    s.view = .basket;
+    step(&s, .end);
+    try testing.expectEqual(@as(usize, 1), s.chrome.view.selected); // 2 picks
+
+    var e: State = .{ .phase = .loaded }; // empty results: no underflow
+    step(&e, .end);
+    try testing.expectEqual(@as(usize, 0), e.chrome.view.selected);
+}
 
 test "the basket view lists every pick, including ones off the current results" {
     var buf: [4096]u8 = undefined;
