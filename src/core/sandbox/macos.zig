@@ -58,12 +58,19 @@ pub fn validatePathForProfile(p: []const u8) SandboxError!void {
     };
 }
 
+/// Per-spawn profile knobs. `allow_ipc` is opt-in for the database
+/// initialisers only — every other fenced child stays IPC-free.
+pub const ProfileOpts = struct {
+    allow_ipc: bool = false,
+};
+
 /// Render the deny-by-default SCL profile; writes limited to `cellar_path`
-/// and four subtrees of `malt_prefix`. Caller owns the slice.
+/// and a fixed set of `malt_prefix` subtrees. Caller owns the slice.
 pub fn renderRubyProfile(
     allocator: std.mem.Allocator,
     cellar_path: []const u8,
     malt_prefix: []const u8,
+    opts: ProfileOpts,
 ) SandboxError![]const u8 {
     try validatePathForProfile(cellar_path);
     try validatePathForProfile(malt_prefix);
@@ -80,12 +87,6 @@ pub fn renderRubyProfile(
         \\(allow sysctl-read)
         \\(allow mach-lookup)
         \\(allow iokit-open)
-        // Database initialisers (postgres bootstrap) allocate SysV/POSIX
-        // shared memory and SysV semaphores; without these grants initdb
-        // dies in shmget/semctl.
-        \\(allow ipc-sysv-shm)
-        \\(allow ipc-sysv-sem)
-        \\(allow ipc-posix-shm)
         \\(allow file-read*)
         \\(deny network*)
         \\(allow file-write-data
@@ -96,6 +97,19 @@ pub fn renderRubyProfile(
         \\
     ;
     buf.appendSlice(allocator, header) catch return SandboxError.ProfileBuildFailed;
+
+    // Database initialisers (postgres bootstrap) allocate SysV/POSIX shared
+    // memory + SysV semaphores; without these grants initdb dies in
+    // shmget/semctl. Scoped to `init_data_dir` so no other fenced child
+    // (DSL system, cache-regen tools, Ruby fallback) gets IPC access.
+    if (opts.allow_ipc) {
+        buf.appendSlice(allocator,
+            \\(allow ipc-sysv-shm)
+            \\(allow ipc-sysv-sem)
+            \\(allow ipc-posix-shm)
+            \\
+        ) catch return SandboxError.ProfileBuildFailed;
+    }
 
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     const w = &aw.writer;
@@ -123,9 +137,10 @@ fn writeCellarRule(w: *std.Io.Writer, root: []const u8) !void {
 }
 
 fn writePrefixRules(w: *std.Io.Writer, prefix: []const u8) !void {
-    // lib carries prefix-level caches the declarative install steps
-    // regenerate (gdk-pixbuf loaders.cache, gio module cache).
-    for ([_][]const u8{ "etc", "var", "share", "opt", "lib" }) |sub|
+    // `<prefix>/lib` is the cross-formula symlink farm — granting all of it
+    // would let one formula's post-install overwrite another's dylib. The
+    // cache-regen steps only touch two subtrees, so grant just those.
+    for ([_][]const u8{ "etc", "var", "share", "opt", "lib/gdk-pixbuf-2.0", "lib/gio" }) |sub|
         try w.print("\n  (subpath \"{s}/{s}\")", .{ prefix, sub });
 }
 
@@ -249,7 +264,7 @@ pub fn runRubySandboxed(
 ) SandboxError!u8 {
     if (builtin.os.tag != .macos) return SandboxError.SandboxUnsupported;
 
-    const profile = try renderRubyProfile(allocator, cellar_path, malt_prefix);
+    const profile = try renderRubyProfile(allocator, cellar_path, malt_prefix, .{});
     defer allocator.free(profile);
 
     const argv = [_][]const u8{
@@ -494,6 +509,7 @@ test "renderRubyProfile emits deny-default + cellar + prefix subpaths" {
         std.testing.allocator,
         "/opt/malt/Cellar/foo/1.0",
         "/opt/malt",
+        .{},
     );
     defer std.testing.allocator.free(profile);
     try std.testing.expect(std.mem.indexOf(u8, profile, "(deny default)") != null);
@@ -502,12 +518,24 @@ test "renderRubyProfile emits deny-default + cellar + prefix subpaths" {
     try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/etc\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/var\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/opt\")") != null);
-    // Declarative install steps write prefix-level caches under lib/
-    // (gdk-pixbuf loaders.cache, gio module cache) — same trust level as
-    // the other prefix subtrees.
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib\")") != null);
-    // Database initialisers (postgres bootstrap) allocate SysV/POSIX
-    // shared memory; without the grant initdb dies in shmget.
+    // Cache-regen steps write only two lib subtrees; the whole `lib` farm
+    // must NOT be granted (cross-formula dylib overwrite surface).
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib/gdk-pixbuf-2.0\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib/gio\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib\")\n") == null);
+    // IPC is opt-in: the default profile must NOT grant it.
+    try std.testing.expect(std.mem.indexOf(u8, profile, "ipc-sysv-shm") == null);
+}
+
+test "renderRubyProfile grants IPC only when allow_ipc is set" {
+    const profile = try renderRubyProfile(
+        std.testing.allocator,
+        "/opt/malt/Cellar/foo/1.0",
+        "/opt/malt",
+        .{ .allow_ipc = true },
+    );
+    defer std.testing.allocator.free(profile);
+    // The database initialisers need SysV/POSIX shm + SysV sem.
     try std.testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-shm)") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-posix-shm)") != null);
     try std.testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-sem)") != null);
@@ -525,6 +553,7 @@ test "renderRubyProfile also grants writes under the resolved roots for symlinke
         // Does not exist on disk — must fall back to the literal alone.
         "/tmp/malt_sbx_profile_test/Cellar/foo/1.0",
         "/tmp/malt_sbx_profile_test",
+        .{},
     );
     defer std.testing.allocator.free(profile);
 
@@ -541,6 +570,7 @@ test "renderRubyProfile does not duplicate rules for already-resolved roots" {
         std.testing.allocator,
         "/opt/malt/Cellar/foo/1.0",
         "/opt/malt",
+        .{},
     );
     defer std.testing.allocator.free(profile);
     try std.testing.expectEqual(
@@ -552,6 +582,6 @@ test "renderRubyProfile does not duplicate rules for already-resolved roots" {
 test "renderRubyProfile rejects unsafe cellar path" {
     try std.testing.expectError(
         SandboxError.UnsafePath,
-        renderRubyProfile(std.testing.allocator, "/opt/malt\"/evil", "/opt/malt"),
+        renderRubyProfile(std.testing.allocator, "/opt/malt\"/evil", "/opt/malt", .{}),
     );
 }

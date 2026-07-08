@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const sandbox = @import("dsl/sandbox.zig");
+const sandbox_macos = @import("sandbox/macos.zig");
 const fallback_log = @import("dsl/fallback_log.zig");
 
 pub const FallbackLog = fallback_log.FallbackLog;
@@ -130,6 +131,11 @@ pub fn execute(ctx: StepsCtx, formula_json: []const u8) bool {
             },
         };
         if (runStep(ctx, obj)) ctx.flog.handled_top_level += 1;
+        // A confinement violation or hard command failure aborts the rest,
+        // mirroring the Ruby post_install path (a raised step ends the run)
+        // and the DSL interpreter's stop-on-violation. Unknown/unsupported
+        // steps only warn, so they don't abort.
+        if (ctx.flog.hasFatal()) break;
     }
     return true;
 }
@@ -298,10 +304,13 @@ fn resolvePathSpec(ctx: StepsCtx, obj: std.json.ObjectMap, key: []const u8) ?[]c
 
 // --- filesystem tier -------------------------------------------------------
 
-/// Confinement gate shared by every write path: same predicate the DSL FS
-/// builtins use, same fatal routing on refusal.
+/// Confinement gate shared by every write path. Resolves the parent chain
+/// (not just the literal string) so a symlink planted by an earlier step
+/// can't redirect a `mkdir_p`/`write`/`init_data_dir` outside the prefix —
+/// same resolved-boundary guard the DSL `cp`/`mv` builtins use, applied
+/// before any filesystem mutation.
 fn confined(ctx: StepsCtx, path: []const u8) bool {
-    sandbox.validatePath(path, ctx.keg_path, ctx.prefix) catch {
+    sandbox.validateWriteDir(ctx.io, path, ctx.keg_path, ctx.prefix) catch {
         logViolation(ctx, path);
         return false;
     };
@@ -486,21 +495,26 @@ fn initDataDirPlan(ctx: StepsCtx, using: []const u8, datadir: []const u8, locale
     const a = ctx.allocator;
     const tmpdir = std.fmt.allocPrint(a, "{s}/var/tmp", .{ctx.prefix}) catch return null;
 
-    const mysql_like: struct { exe: []const u8, first: []const u8, marker_rel: []const u8 } =
-        switch (initialiser_map.get(using) orelse return null) {
-            .postgresql_initdb => {
-                var argv = std.ArrayList([]const u8).empty;
-                argv.append(a, std.fmt.allocPrint(a, "{s}/bin/initdb", .{ctx.keg_path}) catch return null) catch return null;
-                argv.append(a, std.fmt.allocPrint(a, "--locale={s}", .{locale orelse "en_US.UTF-8"}) catch return null) catch return null;
-                argv.appendSlice(a, &.{ "-E", "UTF-8", datadir }) catch return null;
-                return .{
-                    .marker = std.fmt.allocPrint(a, "{s}/PG_VERSION", .{datadir}) catch return null,
-                    .argv = argv.items,
-                };
-            },
-            .mysql_initialize => .{ .exe = "mysqld", .first = "--initialize-insecure", .marker_rel = "mysql/general_log.CSM" },
-            .mariadb_install_db => .{ .exe = "mysql_install_db", .first = "--verbose", .marker_rel = "mysql/user.frm" },
+    const tag = initialiser_map.get(using) orelse return null;
+
+    // Postgres diverges (locale/encoding argv, top-level marker); handle it
+    // before the shared mysql/mariadb shape below.
+    if (tag == .postgresql_initdb) {
+        var argv = std.ArrayList([]const u8).empty;
+        argv.append(a, std.fmt.allocPrint(a, "{s}/bin/initdb", .{ctx.keg_path}) catch return null) catch return null;
+        argv.append(a, std.fmt.allocPrint(a, "--locale={s}", .{locale orelse "en_US.UTF-8"}) catch return null) catch return null;
+        argv.appendSlice(a, &.{ "-E", "UTF-8", datadir }) catch return null;
+        return .{
+            .marker = std.fmt.allocPrint(a, "{s}/PG_VERSION", .{datadir}) catch return null,
+            .argv = argv.items,
         };
+    }
+
+    const mysql_like: struct { exe: []const u8, first: []const u8, marker_rel: []const u8 } = switch (tag) {
+        .postgresql_initdb => unreachable, // handled above
+        .mysql_initialize => .{ .exe = "mysqld", .first = "--initialize-insecure", .marker_rel = "mysql/general_log.CSM" },
+        .mariadb_install_db => .{ .exe = "mysql_install_db", .first = "--verbose", .marker_rel = "mysql/user.frm" },
+    };
 
     var argv = std.ArrayList([]const u8).empty;
     argv.append(a, std.fmt.allocPrint(a, "{s}/bin/{s}", .{ ctx.keg_path, mysql_like.exe }) catch return null) catch return null;
@@ -529,18 +543,34 @@ fn stepInitDataDir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "init_data_dir ({s})", .{using}) catch using);
         return false;
     };
-    std.Io.Dir.cwd().createDirPath(ctx.io, datadir) catch {};
-    // An initialised data dir is user data — mirror brew's marker guard.
+    // An initialised (or otherwise pre-populated) data dir is user data —
+    // mirror brew's marker guard. A dir we did not create is never wiped
+    // on failure below, so a partial init from a prior run is preserved
+    // for inspection rather than silently destroyed.
+    const preexisted = fileExists(ctx.io, plan.marker) or dirExists(ctx.io, datadir);
     if (fileExists(ctx.io, plan.marker)) return true;
     if (!fileExists(ctx.io, plan.argv[0])) {
         logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} initialiser not found in the keg", .{using}) catch using);
         return false;
     }
+    std.Io.Dir.cwd().createDirPath(ctx.io, datadir) catch {};
     // Never pre-create the marker's parent: the initialisers refuse a
     // non-empty data dir, and they create their own subtrees.
     const tmpdir = std.fmt.allocPrint(ctx.allocator, "{s}/var/tmp", .{ctx.prefix}) catch return false;
     std.Io.Dir.cwd().createDirPath(ctx.io, tmpdir) catch {};
-    return spawnFenced(ctx, plan.argv, null, using);
+    if (spawnFenced(ctx, plan.argv, null, using, .{ .allow_ipc = true })) return true;
+    // A failed initialiser can leave a partial data dir; mysql/mariadb
+    // then refuse the non-empty dir on every retry. Remove what this run
+    // created so the next install/upgrade starts clean. postgres already
+    // self-cleans, so this is a no-op there.
+    if (!preexisted) std.Io.Dir.cwd().deleteTree(ctx.io, datadir) catch {};
+    return false;
+}
+
+fn dirExists(io: std.Io, path: []const u8) bool {
+    var dir = std.Io.Dir.openDirAbsolute(io, path, .{}) catch return false;
+    dir.close(io);
+    return true;
 }
 
 const GdkPixbufEnv = struct {
@@ -602,17 +632,18 @@ fn runFormulaToolEnv(ctx: StepsCtx, tool_formula: []const u8, exe: []const u8, a
     argv.append(ctx.allocator, tool) catch return false;
     argv.appendSlice(ctx.allocator, args) catch return false;
 
-    return spawnFenced(ctx, argv.items, env_map, exe);
+    return spawnFenced(ctx, argv.items, env_map, exe, .{});
 }
 
 /// Argv lint + sandbox fence + spawn + wait — the one exec chokepoint for
 /// every tool and initialiser step. `label` names the child in the log.
-fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, env_map: ?*const std.process.Environ.Map, label: []const u8) bool {
+/// `opts` carries per-spawn fence knobs (IPC only for the DB initialisers).
+fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, env_map: ?*const std.process.Environ.Map, label: []const u8, opts: sandbox_macos.ProfileOpts) bool {
     sandbox.validateArgv(argv, ctx.keg_path, ctx.prefix) catch {
         logViolation(ctx, argv[0]);
         return false;
     };
-    const fenced = sandbox.fenceArgv(ctx.allocator, argv, ctx.keg_path, ctx.prefix) catch {
+    const fenced = sandbox.fenceArgv(ctx.allocator, argv, ctx.keg_path, ctx.prefix, opts) catch {
         logViolation(ctx, argv[0]);
         return false;
     };
@@ -914,6 +945,39 @@ test "write respects existing files unless overwrite is set" {
     try testing.expect(!h.flog.hasErrors());
 }
 
+test "a planted directory symlink cannot redirect a later step outside the prefix" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const io = h.io;
+
+    // A genuinely-outside writable location: a SIBLING of the prefix, so
+    // the component-boundary prefix check does not treat it as contained.
+    const outside = try std.fmt.allocPrint(a, "{s}-OUTSIDE", .{h.prefix});
+    std.Io.Dir.cwd().deleteTree(io, outside) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, outside);
+    defer std.Io.Dir.cwd().deleteTree(io, outside) catch {};
+
+    // Step 1 plants <prefix>/etc/la -> <outside>; step 2 tries to mkdir_p
+    // and write *through* that symlink. Every mutating step must resolve
+    // the parent chain and refuse, so nothing lands under <outside>.
+    const json = try std.fmt.allocPrint(a,
+        \\{{"name":"glow","versions":{{"stable":"1.2.3"}},"post_install_defined":false,"post_install_steps":[
+        \\ {{"type":"symlink","force":true,"source":{{"base":"absolute","path":"{s}"}},"target":{{"base":"etc","path":"la"}}}},
+        \\ {{"type":"mkdir_p","path":{{"base":"etc","path":"la/sub"}}}},
+        \\ {{"type":"write","path":{{"base":"etc","path":"la/pwned"}},"content":"x"}}]}}
+    , .{outside});
+    try testing.expect(execute(h.ctx(), json));
+
+    // The escape must have left nothing behind outside the prefix.
+    const leaked_dir = try std.fmt.allocPrint(a, "{s}/sub", .{outside});
+    const leaked_file = try std.fmt.allocPrint(a, "{s}/pwned", .{outside});
+    try testing.expect(std.Io.Dir.openDirAbsolute(io, leaked_dir, .{}) == error.FileNotFound);
+    try testing.expect(std.Io.Dir.openFileAbsolute(io, leaked_file, .{}) == error.FileNotFound);
+    // And the redirect steps were refused as violations, not counted handled.
+    try testing.expect(h.flog.hasFatal());
+}
+
 test "a step resolving outside the prefix is refused and logged as a sandbox violation" {
     var h = try TestHarness.init();
     defer h.deinit();
@@ -1006,6 +1070,62 @@ test "init_data_dir skips initialisation when the marker file exists" {
     try testing.expectEqual(@as(usize, 1), h.flog.handled_top_level);
 }
 
+test "a confinement violation aborts the remaining steps like the DSL interpreter" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"mkdir_p","path":{"base":"absolute","path":"/tmp/malt_steps_escape_abort"}},
+        \\ {"type":"mkdir_p","path":{"base":"var","path":"after-violation"}}]
+    )));
+    try testing.expect(h.flog.hasFatal());
+    // The step after the violation must never have run.
+    const after = try std.fmt.allocPrint(a, "{s}/var/after-violation", .{h.prefix});
+    var ran_after = true;
+    _ = std.Io.Dir.openDirAbsolute(h.io, after, .{}) catch {
+        ran_after = false;
+    };
+    try testing.expect(!ran_after);
+    try testing.expectEqual(@as(usize, 1), h.flog.total_top_level);
+}
+
+test "init_data_dir removes a datadir it created when the initialiser fails" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const io = h.io;
+
+    // An initialiser that runs and exits non-zero: symlink to /usr/bin/false.
+    const keg_bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(io, keg_bin);
+    try std.Io.Dir.symLinkAbsolute(io, "/usr/bin/false", try std.fmt.allocPrint(a, "{s}/mysqld", .{keg_bin}), .{});
+
+    const step_json = try testFormulaJson(&h,
+        \\[{"type":"init_data_dir","path":{"base":"var","path":"mysql"},"using":"mysql_initialize"}]
+    );
+    try testing.expect(execute(h.ctx(), step_json));
+    try testing.expect(h.flog.hasErrors());
+    // The datadir this run created must be gone so a retry starts clean —
+    // mysqld refuses a non-empty datadir, so leftovers brick every retry.
+    const datadir = try std.fmt.allocPrint(a, "{s}/var/mysql", .{h.prefix});
+    var still_there = true;
+    _ = std.Io.Dir.openDirAbsolute(io, datadir, .{}) catch {
+        still_there = false;
+    };
+    try testing.expect(!still_there);
+
+    // A pre-existing datadir is user data: a failed re-run must not touch it.
+    try std.Io.Dir.cwd().createDirPath(io, datadir);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, try std.fmt.allocPrint(a, "{s}/precious", .{datadir}), .{});
+        f.close(io);
+    }
+    try testing.expect(execute(h.ctx(), step_json));
+    const f = std.Io.Dir.openFileAbsolute(io, try std.fmt.allocPrint(a, "{s}/precious", .{datadir}), .{}) catch return error.TestUnexpectedResult;
+    f.close(io);
+}
+
 test "init_data_dir with a missing initialiser binary fails loudly" {
     var h = try TestHarness.init();
     defer h.deinit();
@@ -1078,6 +1198,61 @@ test "gdkPixbufEnvPaths derives the malt-prefix module dir and cache file" {
     const want_file = try std.fmt.allocPrint(a, "{s}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache", .{h.prefix});
     try testing.expectEqualStrings(want_dir, env.moduledir);
     try testing.expectEqualStrings(want_file, env.module_file);
+}
+
+test "gtk_update_icon_cache picks the gtk4 tool when present, else falls back to gtk+3" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    // No gtk4 keg → the gtk+3 branch is chosen; the missing-tool failure
+    // names the gtk3 binary, pinning the fallback selection.
+    const step_json = try testFormulaJson(&h,
+        \\[{"type":"gtk_update_icon_cache","path":{"base":"homebrew_prefix","path":"share/icons/hicolor"}}]
+    );
+    try testing.expect(execute(h.ctx(), step_json));
+    try testing.expect(std.mem.indexOf(u8, h.flog.entries()[0].detail, "gtk3-update-icon-cache") != null);
+
+    // A gtk4 probe file flips the selection; the failure now names the
+    // gtk4 binary (present but not executable in this fixture).
+    const gtk4_bin = try std.fmt.allocPrint(a, "{s}/opt/gtk4/bin", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, gtk4_bin);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/gtk4-update-icon-cache", .{gtk4_bin}), .{});
+        f.close(h.io);
+    }
+    try testing.expect(execute(h.ctx(), step_json));
+    const last = h.flog.entries()[h.flog.entries().len - 1];
+    try testing.expect(std.mem.indexOf(u8, last.detail, "gtk4-update-icon-cache") != null);
+}
+
+test "link_children honours the link-name prefix and treats a missing source as a no-op" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const io = h.io;
+
+    const share = try std.fmt.allocPrint(a, "{s}/share/glow", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(io, share);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, try std.fmt.allocPrint(a, "{s}/tool", .{share}), .{});
+        f.close(io);
+    }
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"link_children","source":{"base":"prefix","path":"share/glow"},"target":{"base":"homebrew_prefix","path":"bin"},"prefix":"{{name}}-"}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+    const linked = try std.fmt.allocPrint(a, "{s}/bin/glow-tool", .{h.prefix});
+    const f = std.Io.Dir.openFileAbsolute(io, linked, .{}) catch return error.TestUnexpectedResult;
+    f.close(io);
+
+    // Missing source dir: counted as handled with nothing created — the
+    // upstream runner iterates zero children the same way.
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"link_children","source":{"base":"prefix","path":"share/ghost"},"target":{"base":"homebrew_prefix","path":"bin"}}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
 }
 
 test "supportedStepType matches the executable tier and rejects the rest" {

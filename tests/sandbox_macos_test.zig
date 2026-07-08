@@ -37,6 +37,7 @@ test "renderRubyProfile deny-by-default, network denied, cellar + prefix subpath
         testing.allocator,
         "/opt/malt/Cellar/foo/1.0",
         "/opt/malt",
+        .{},
     );
     defer testing.allocator.free(profile);
     try testing.expect(std.mem.indexOf(u8, profile, "(deny default)") != null);
@@ -47,7 +48,22 @@ test "renderRubyProfile deny-by-default, network denied, cellar + prefix subpath
     try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/var\")") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/share\")") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/opt\")") != null);
-    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib\")") != null);
+    // lib is granted only at the two cache subtrees, never the whole farm.
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib/gdk-pixbuf-2.0\")") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib/gio\")") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib\")\n") == null);
+    // IPC is opt-in; the default profile omits it.
+    try testing.expect(std.mem.indexOf(u8, profile, "ipc-sysv-shm") == null);
+}
+
+test "renderRubyProfile grants IPC only under allow_ipc" {
+    const profile = try sandbox.renderRubyProfile(
+        testing.allocator,
+        "/opt/malt/Cellar/foo/1.0",
+        "/opt/malt",
+        .{ .allow_ipc = true },
+    );
+    defer testing.allocator.free(profile);
     try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-shm)") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-posix-shm)") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-sem)") != null);
@@ -56,14 +72,14 @@ test "renderRubyProfile deny-by-default, network denied, cellar + prefix subpath
 test "renderRubyProfile refuses unsafe cellar path" {
     try testing.expectError(
         error.UnsafePath,
-        sandbox.renderRubyProfile(testing.allocator, "/opt/malt\"/evil", "/opt/malt"),
+        sandbox.renderRubyProfile(testing.allocator, "/opt/malt\"/evil", "/opt/malt", .{}),
     );
 }
 
 test "renderRubyProfile refuses unsafe prefix path" {
     try testing.expectError(
         error.UnsafePath,
-        sandbox.renderRubyProfile(testing.allocator, "/opt/malt/Cellar/foo/1.0", "/opt/m)alt"),
+        sandbox.renderRubyProfile(testing.allocator, "/opt/malt/Cellar/foo/1.0", "/opt/m)alt", .{}),
     );
 }
 
