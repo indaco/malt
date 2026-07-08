@@ -4,41 +4,40 @@
 //! `renderFrame(buf, app, cols, rows) -> bytes` — are The Elm Architecture and
 //! are unit-tested without a PTY. `run` is the only impure part: it owns the
 //! terminal lifecycle (raw mode + alt-screen + hidden cursor, each undone by an
-//! `errdefer` restore), refuses to launch on a non-interactive terminal, and
-//! drives the read→decode→step→repaint loop. A `SIGWINCH` re-renders from cached
+//! `errdefer` restore; panics and termination signals restore through the
+//! `ui/term_restore` crash registry), refuses to launch on a non-interactive
+//! terminal, and drives the read→decode→step→repaint loop. A `SIGWINCH` re-renders from cached
 //! state with no keypress. The TUI module is referenced only from the lazy
 //! `mt tui` dispatch arm, so non-`tui` commands pay no cold-start cost.
 
 const std = @import("std");
+
 const color = @import("../ui/color.zig");
-const term_sanitize = @import("../ui/term_sanitize.zig");
 const spinner_frames = @import("../ui/spinner_frames.zig");
+const term_sanitize = @import("../ui/term_sanitize.zig");
+const doctor = @import("doctor_tab.zig");
+const filter_input = @import("filter_input.zig");
+const header = @import("header.zig");
+const installed = @import("installed_tab.zig");
+const doctor_json = @import("json/doctor.zig");
+const info_json = @import("json/info.zig");
+const list_json = @import("json/list.zig");
+const outdated_json = @import("json/outdated.zig");
+const search_json = @import("json/search.zig");
+const services_json = @import("json/services.zig");
+const keys = @import("keys.zig");
+const Key = keys.Key;
+const layout = @import("layout.zig");
+const outdated = @import("outdated_tab.zig");
+const scroll_list = @import("scroll_list.zig");
+const search = @import("search_tab.zig");
+const services = @import("services_tab.zig");
+const spawn = @import("spawn.zig");
 const tab = @import("tab.zig");
 const tab_bar = @import("tab_bar.zig");
-const header = @import("header.zig");
-const filter_input = @import("filter_input.zig");
-const keys = @import("keys.zig");
-const term = @import("term.zig");
-const layout = @import("layout.zig");
-const scroll_list = @import("scroll_list.zig");
-const text_wrap = @import("text_wrap.zig");
-
-const spawn = @import("spawn.zig");
-const list_json = @import("json/list.zig");
-const info_json = @import("json/info.zig");
-const outdated_json = @import("json/outdated.zig");
-const services_json = @import("json/services.zig");
-const doctor_json = @import("json/doctor.zig");
-const search_json = @import("json/search.zig");
-
-const installed = @import("installed_tab.zig");
-const outdated = @import("outdated_tab.zig");
-const services = @import("services_tab.zig");
-const doctor = @import("doctor_tab.zig");
-const search = @import("search_tab.zig");
-
 const Tab = tab_bar.Tab;
-const Key = keys.Key;
+const term = @import("term.zig");
+const text_wrap = @import("text_wrap.zig");
 
 /// Every tab's state, all present at once so a tab switch preserves each one's
 /// filter / scroll / data. Field names match `Tab` tags for `@field` dispatch.
@@ -505,7 +504,9 @@ pub const RunError = term.TermError || std.mem.Allocator.Error ||
 
 /// How the event loop treats a run-loop error: a `recoverable` backend fault
 /// becomes an inline banner and the session keeps running; a `fatal` fault
-/// restores the terminal and exits (the TUI-012 crash-safety guarantee).
+/// restores the terminal and exits (the crash-safety guarantee for
+/// error returns; panics and termination signals restore via the
+/// `ui/term_restore` crash registry instead).
 pub const ErrorClass = enum { recoverable, fatal };
 
 /// Pure, exhaustive classifier over `RunError`. A child-process or parse fault
@@ -1689,6 +1690,12 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     // The tty is read+write through one fd; the refusal guard proved it is one.
     const fd = in_fd;
     var t = term.Term.init(io, fd);
+    // SIGTERM/SIGHUP/SIGQUIT restore the terminal then re-raise; errdefers
+    // cover error returns but never a signal death. Installed before raw
+    // entry so no signal can land in between — with an empty registry the
+    // handler is a no-op that just dies. SIGINT stays untouched: raw mode
+    // delivers Ctrl-C as a byte that quits cleanly.
+    term.installCrashSignals();
     try t.enterRaw();
     errdefer t.restore();
     try t.enterAltScreen();
@@ -2746,7 +2753,7 @@ test "classify splits recoverable backend faults from fatal terminal/OOM faults"
     try std.testing.expectEqual(ErrorClass.recoverable, classify(error.EmptyOutput));
     try std.testing.expectEqual(ErrorClass.recoverable, classify(error.ReadFailed)); // child pipe
     try std.testing.expectEqual(ErrorClass.recoverable, classify(error.BadJson));
-    // Terminal-integrity + OOM: fatal — restore and exit (the TUI-012 guarantee).
+    // Terminal-integrity + OOM: fatal — restore and exit (the crash-safety guarantee).
     try std.testing.expectEqual(ErrorClass.fatal, classify(error.NotATty));
     try std.testing.expectEqual(ErrorClass.fatal, classify(error.WriteFailed));
     try std.testing.expectEqual(ErrorClass.fatal, classify(error.TermiosFailed));
