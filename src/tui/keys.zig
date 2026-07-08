@@ -199,6 +199,24 @@ test "recognizeEsc waits for the byte after ESC then resolves" {
     try std.testing.expectEqual(@as(usize, 1), recognize("\x1bx").done.len);
 }
 
+test "flush resolves a buffered lone ESC as .esc and empties the decoder" {
+    var d: Decoder = .{};
+    try std.testing.expect(d.decode("\x1b") == .incomplete);
+    try std.testing.expect(d.flush().? == .esc);
+    try std.testing.expect(d.flush() == null); // tail consumed, decoder empty
+}
+
+test "flush surfaces a partial CSI tail as .unknown, never as a key" {
+    var d: Decoder = .{};
+    try std.testing.expect(d.decode("\x1b[") == .incomplete);
+    try std.testing.expect(d.flush().? == .unknown);
+}
+
+test "flush with nothing buffered is null" {
+    var d: Decoder = .{};
+    try std.testing.expect(d.flush() == null);
+}
+
 test "csiKey maps the supported finals and is unknown otherwise" {
     try std.testing.expect(csiKey("A") == .up);
     try std.testing.expect(csiKey("1~") == .home);
