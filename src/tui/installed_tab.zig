@@ -9,7 +9,9 @@
 //! row's detail (deps / tap / size / linked / pinned) renders through the
 //! reusable `detail_pane`. `x` raises a one-key `[y/N]` guard — the app's single
 //! TUI-side confirm, justified only because `mt uninstall` has no prompt of its
-//! own; `y` then delegates to the real `mt uninstall`, unweakened.
+//! own. Arming latches the target's name by copy, so the confirm always acts on
+//! the package the guard was raised over — a moved selection or a reloaded list
+//! cannot retarget it; `y` then delegates to the real `mt uninstall`, unweakened.
 
 const std = @import("std");
 const tab = @import("tab.zig");
@@ -23,7 +25,32 @@ pub const Pkg = list_json.Pkg;
 
 /// An effect the pure `step` defers to the impure shell, which performs it and
 /// resets the field. `step` never does I/O — this is the command channel.
-pub const Request = enum { none, open_detail, uninstall };
+/// `uninstall` carries the guard's latched target so the shell never re-derives
+/// it from a selection that may have moved since the guard was armed.
+pub const Request = union(enum) { none, open_detail, uninstall: ConfirmTarget };
+
+/// Scratch bound shared by a formatted row, the guard banner, and the latched
+/// target name, so none of the three can silently outgrow the others.
+const row_buf_len = 256;
+
+/// The uninstall guard's target, latched at arm time. The name is copied — not
+/// borrowed — because `items` borrows shell-owned parse storage that a reload
+/// can free while the guard is up.
+pub const ConfirmTarget = struct {
+    buf: [row_buf_len]u8 = undefined,
+    len: usize = 0,
+
+    pub fn init(pkg_name: []const u8) ConfirmTarget {
+        var t: ConfirmTarget = .{};
+        t.len = @min(pkg_name.len, t.buf.len);
+        @memcpy(t.buf[0..t.len], pkg_name[0..t.len]);
+        return t;
+    }
+
+    pub fn name(self: *const ConfirmTarget) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
 
 /// The selected row's detail: the `list` row (size/linked/pinned) plus the
 /// `mt info` payload (deps/tap). Both borrow from shell-owned storage.
@@ -38,8 +65,8 @@ pub const State = struct {
     items: []const Pkg = &.{},
     /// The open detail pane, if a row was selected with Enter.
     detail: ?Detail = null,
-    /// The `[y/N]` uninstall guard is up.
-    confirm_uninstall: bool = false,
+    /// The `[y/N]` uninstall guard, latched on the package it was armed over.
+    confirm_uninstall: ?ConfirmTarget = null,
     /// Pending effect for the shell to perform, then clear.
     request: Request = .none,
 };
@@ -86,27 +113,29 @@ pub fn selectedPkg(s: *const State) ?Pkg {
 /// Pure transition: record the user's intent for the shell to act on. While the
 /// guard is up, the next key resolves it.
 pub fn step(s: *State, key: tab.Key) void {
-    if (s.confirm_uninstall) return resolveGuard(s, key);
+    if (s.confirm_uninstall != null) return resolveGuard(s, key);
     switch (key) {
         .enter => s.request = .open_detail,
         .esc => s.detail = null, // close the detail pane
         .char => |c| if (c.len == 1 and c.bytes[0] == 'x') {
-            s.confirm_uninstall = true; // fat-finger guard before delegating uninstall
+            // Fat-finger guard before delegating uninstall. Latch the target at
+            // arm time; an empty or filtered-out list has nothing to guard.
+            if (selectedPkg(s)) |p| s.confirm_uninstall = ConfirmTarget.init(p.name);
         },
         else => {},
     }
 }
 
-/// `y` confirms (request the real `mt uninstall`); every other key — `n`, Esc,
-/// Enter — cancels. The guard is a fat-finger gate, not a typed-confirm.
+/// `y` confirms (request the real `mt uninstall` of the latched target); every
+/// other key — `n`, Esc, Enter — cancels. A fat-finger gate, not a typed-confirm.
 fn resolveGuard(s: *State, key: tab.Key) void {
     switch (key) {
         .char => |c| if (c.len == 1 and (c.bytes[0] == 'y' or c.bytes[0] == 'Y')) {
-            s.request = .uninstall;
+            s.request = .{ .uninstall = s.confirm_uninstall.? };
         },
         else => {},
     }
-    s.confirm_uninstall = false;
+    s.confirm_uninstall = null;
 }
 
 /// Pure render: an optional guard banner on top, an optional detail pane at the
@@ -114,8 +143,8 @@ fn resolveGuard(s: *State, key: tab.Key) void {
 /// `(state, rect)` so a resize is a re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     var content = r;
-    if (s.confirm_uninstall) {
-        renderGuard(s, f, .{ .row = content.row, .col = content.col, .width = content.width, .height = 1 });
+    if (s.confirm_uninstall) |*target| {
+        renderGuard(target.name(), f, .{ .row = content.row, .col = content.col, .width = content.width, .height = 1 });
         content = .{ .row = content.row + 1, .col = content.col, .width = content.width, .height = content.height -| 1 };
     }
     var list_rect = content;
@@ -166,17 +195,18 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
             f.put(color.selectionAccent());
             f.put(color.Style.reverse.code());
         }
-        var rb: [256]u8 = undefined;
+        var rb: [row_buf_len]u8 = undefined;
         f.putContent(scroll_list.truncate(formatRow(&rb, p), list.width));
         if (selected) f.put(color.Style.reset.code());
     }
 }
 
-fn renderGuard(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
+/// The banner names the latched target, never the live selection — what it
+/// shows is exactly what `y` will uninstall.
+fn renderGuard(name: []const u8, f: *tab.Frame, rect: tab.Rect) void {
     f.moveTo(rect.row, rect.col);
     f.put(color.Style.reverse.code());
-    const name = if (selectedPkg(s)) |p| p.name else "?";
-    var b: [256]u8 = undefined;
+    var b: [row_buf_len]u8 = undefined;
     const line = std.fmt.bufPrint(&b, "Uninstall {s}? [y/N]", .{name}) catch "Uninstall? [y/N]";
     f.putContent(scroll_list.truncate(line, rect.width));
     f.put(color.Style.reset.code());
@@ -281,7 +311,7 @@ test "selectedPkg applies the filter and clamps an out-of-range selection" {
 test "Enter requests the detail effect for the shell to perform" {
     var s: State = .{ .items = &sample };
     step(&s, .enter);
-    try testing.expectEqual(Request.open_detail, s.request);
+    try testing.expect(s.request == .open_detail);
 }
 
 test "Esc closes an open detail pane" {
@@ -293,37 +323,96 @@ test "Esc closes an open detail pane" {
 test "x raises the uninstall guard without spawning anything" {
     var s: State = .{ .items = &sample };
     step(&s, ch('x'));
-    try testing.expect(s.confirm_uninstall);
-    try testing.expectEqual(Request.none, s.request); // no spawn yet
+    try testing.expect(s.confirm_uninstall != null);
+    try testing.expectEqualStrings("brotli", s.confirm_uninstall.?.name()); // latched at arm time
+    try testing.expect(s.request == .none); // no spawn yet
 }
 
-test "y confirms the guard: requests uninstall and lowers the guard" {
+test "y confirms the guard: requests uninstall of the latched name and lowers the guard" {
     var s: State = .{ .items = &sample };
     step(&s, ch('x'));
     step(&s, ch('y'));
-    try testing.expectEqual(Request.uninstall, s.request);
-    try testing.expect(!s.confirm_uninstall);
+    try testing.expect(s.request == .uninstall);
+    try testing.expectEqualStrings("brotli", s.request.uninstall.name());
+    try testing.expect(s.confirm_uninstall == null);
 }
 
 test "n and Esc cancel the guard with no request" {
     var s: State = .{ .items = &sample };
     step(&s, ch('x'));
     step(&s, ch('n'));
-    try testing.expect(!s.confirm_uninstall);
-    try testing.expectEqual(Request.none, s.request);
+    try testing.expect(s.confirm_uninstall == null);
+    try testing.expect(s.request == .none);
 
     step(&s, ch('x'));
     step(&s, .esc);
-    try testing.expect(!s.confirm_uninstall);
-    try testing.expectEqual(Request.none, s.request);
+    try testing.expect(s.confirm_uninstall == null);
+    try testing.expect(s.request == .none);
+}
+
+test "arming latches the target: moving the selection cannot retarget the confirm" {
+    var s: State = .{ .items = &sample };
+    step(&s, ch('x')); // arm on brotli (row 0)
+    s.chrome.view.selected = 2; // the shell moved the selection to ffmpeg
+    step(&s, ch('y'));
+    try testing.expect(s.request == .uninstall);
+    try testing.expectEqualStrings("brotli", s.request.uninstall.name());
+}
+
+test "a list reloaded while the guard is up cannot retarget the latched confirm" {
+    var s: State = .{ .items = &sample };
+    step(&s, ch('x')); // arm on brotli (row 0)
+    // A dirty-tab refetch swaps the rows with no keypress; the latch must hold.
+    const reloaded = [_]Pkg{sample[2]}; // ffmpeg is now row 0
+    s.items = &reloaded;
+    step(&s, ch('y'));
+    try testing.expect(s.request == .uninstall);
+    try testing.expectEqualStrings("brotli", s.request.uninstall.name());
+}
+
+test "uppercase Y confirms the guard like y" {
+    var s: State = .{ .items = &sample };
+    step(&s, ch('x'));
+    step(&s, ch('Y'));
+    try testing.expect(s.request == .uninstall);
+    try testing.expect(s.confirm_uninstall == null);
+}
+
+test "the latch truncates an oversized name instead of overflowing" {
+    const long = "n" ** (row_buf_len + 44);
+    const t = ConfirmTarget.init(long);
+    try testing.expectEqual(@as(usize, row_buf_len), t.name().len);
+    try testing.expectEqualStrings(long[0..row_buf_len], t.name());
+}
+
+test "x on an empty or fully filtered-out list does not arm a targetless guard" {
+    var s: State = .{ .items = &.{} };
+    step(&s, ch('x'));
+    try testing.expect(s.confirm_uninstall == null);
+
+    var t: State = .{ .items = &sample };
+    t.chrome.filter.push("zzznomatch");
+    step(&t, ch('x'));
+    try testing.expect(t.confirm_uninstall == null);
+}
+
+test "the guard banner names the latched package even after the selection moved" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.chrome.view.selected = 1; // curl
+    step(&s, ch('x')); // arm on curl
+    s.chrome.view.selected = 2; // selection moved to ffmpeg
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "Uninstall curl? [y/N]") != null);
 }
 
 test "while the guard is up, x's domain keys do not re-arm or leak" {
     var s: State = .{ .items = &sample };
     step(&s, ch('x'));
     step(&s, .enter); // Enter is "default No" — cancels, no detail request
-    try testing.expect(!s.confirm_uninstall);
-    try testing.expectEqual(Request.none, s.request);
+    try testing.expect(s.confirm_uninstall == null);
+    try testing.expect(s.request == .none);
 }
 
 test "render heads the columns in bold, aligned over their values" {
@@ -421,7 +510,7 @@ test "render draws the [y/N] guard banner naming the package when confirming" {
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
     s.chrome.view.selected = 1; // curl
-    s.confirm_uninstall = true;
+    step(&s, ch('x')); // arm through the real transition so the target latches
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "curl") != null);
