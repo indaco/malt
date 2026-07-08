@@ -117,6 +117,8 @@ pub fn step(s: *State, key: tab.Key) void {
     switch (key) {
         .enter => s.request = .open_detail,
         .esc => s.detail = null, // close the detail pane
+        // Only the tab knows its filtered row count, so the shell defers End here.
+        .end => s.chrome.view.selected = filteredCount(s.items, s.chrome.filter.slice()) -| 1,
         .char => |c| if (c.len == 1 and c.bytes[0] == 'x') {
             // Fat-finger guard before delegating uninstall. Latch the target at
             // arm time; an empty or filtered-out list has nothing to guard.
@@ -306,6 +308,20 @@ test "selectedPkg applies the filter and clamps an out-of-range selection" {
     s.chrome.filter.clear();
     s.chrome.filter.push("zzz");
     try testing.expect(selectedPkg(&s) == null);
+}
+
+test "End jumps to the last filtered row; an empty list stays at zero" {
+    var s: State = .{ .items = &sample };
+    step(&s, .end);
+    try testing.expectEqual(@as(usize, 3), s.chrome.view.selected);
+
+    s.chrome.filter.push("f"); // ffmpeg, flux
+    step(&s, .end);
+    try testing.expectEqual(@as(usize, 1), s.chrome.view.selected);
+
+    var e: State = .{ .items = &.{} };
+    step(&e, .end);
+    try testing.expectEqual(@as(usize, 0), e.chrome.view.selected);
 }
 
 test "Enter requests the detail effect for the shell to perform" {
