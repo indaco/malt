@@ -17,6 +17,7 @@ const builtin = @import("builtin");
 const color = @import("color.zig");
 const output = @import("output.zig");
 const termsize = @import("termsize.zig");
+const term_restore = @import("term_restore.zig");
 const spinner_frames = @import("spinner_frames.zig");
 
 var pkg_stderr: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
@@ -156,7 +157,11 @@ fn writePlainLine(label: []const u8, status: []const u8) void {
 /// or `Spinner.start`: re-enable autowrap, show the cursor, return to
 /// column 0. Safe to call from a panic / signal handler — the bytes are
 /// idempotent, and writes silently drop when stderr is unconfigured.
+/// When the TUI registered a raw terminal, its crash restore (alt-screen
+/// leave + `tcsetattr`) runs first, so a panic message lands on a readable
+/// cooked screen instead of trapping inside the alt buffer.
 pub fn restoreTerminal() void {
+    term_restore.crashRestore();
     writeStderrAll("\x1b[?7h\x1b[?25h\r");
 }
 
