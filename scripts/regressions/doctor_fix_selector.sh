@@ -93,7 +93,7 @@ export MALT_PREFIX="$PFX"
 seed_prefix "$PFX"
 
 out=$("$MALT_BIN" doctor --fix stale_lock --dry-run 2>&1 || true)
-printf '%s' "$out" | grep -qi 'would remove stale lock file' ||
+printf '%s' "$out" | grep -qi 'would clear stale lock file' ||
   fail '--fix stale_lock --dry-run did not print the planned action'
 [[ -f "$PFX/db/malt.lock" ]] ||
   fail '--fix stale_lock --dry-run removed the lock (dry-run must mutate nothing)'
