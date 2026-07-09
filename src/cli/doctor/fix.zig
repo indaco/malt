@@ -103,10 +103,27 @@ pub fn fixBrokenSymlinks(io: std.Io, prefix: []const u8) u32 {
     return walkBrokenSymlinks(io, prefix, true);
 }
 
+/// A broken symlink is one whose target genuinely does not exist. Any other
+/// `statFile` failure (AccessDenied, …) means "can't tell" — the link is live,
+/// so it must be left intact. Shared by the fix walk and the doctor check so
+/// the two cannot drift into report-vs-remove disagreement.
+pub fn isDanglingLinkError(err: anyerror) bool {
+    return err == error.FileNotFound;
+}
+
 const link_dirs = [_][]const u8{ "bin", "lib", "include", "share", "sbin" };
 
-fn walkBrokenSymlinks(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
-    var count: u32 = 0;
+/// Visit every *dangling* symlink under the prefix's link dirs: one target is
+/// resolved per entry and only `FileNotFound` counts, so an inaccessible-but-
+/// intact link is skipped. `visit` receives the open dir plus the subdir/name
+/// pair. The single traversal behind both the fix walk and the doctor check, so
+/// the two cannot report different link sets.
+pub fn forEachBrokenSymlink(
+    io: std.Io,
+    prefix: []const u8,
+    context: anytype,
+    comptime visit: fn (@TypeOf(context), dir: std.Io.Dir, subdir: []const u8, name: []const u8) void,
+) void {
     for (link_dirs) |subdir| {
         var dir_buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
@@ -116,17 +133,28 @@ fn walkBrokenSymlinks(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
         var iter = dir.iterate();
         while (iter.next(io) catch null) |entry| {
             if (entry.kind != .sym_link) continue;
-            // statFile resolves the link; failure means the target is missing.
-            _ = dir.statFile(io, entry.name, .{}) catch {
-                if (do_remove) {
-                    dir.deleteFile(io, entry.name) catch continue;
-                }
-                count += 1;
+            _ = dir.statFile(io, entry.name, .{}) catch |err| {
+                if (isDanglingLinkError(err)) visit(context, dir, subdir, entry.name);
                 continue;
             };
         }
     }
-    return count;
+}
+
+fn walkBrokenSymlinks(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
+    const Sweep = struct {
+        io: std.Io,
+        do_remove: bool,
+        count: u32 = 0,
+        fn visit(self: *@This(), dir: std.Io.Dir, _: []const u8, name: []const u8) void {
+            // A link we cannot unlink was not removed — don't count it.
+            if (self.do_remove) dir.deleteFile(self.io, name) catch return;
+            self.count += 1;
+        }
+    };
+    var sweep = Sweep{ .io = io, .do_remove = do_remove };
+    forEachBrokenSymlink(io, prefix, &sweep, Sweep.visit);
+    return sweep.count;
 }
 
 /// Clear the prefix's stale lock in place when its PID is dead — truncate,
@@ -638,4 +666,73 @@ test "isPurgeableOrphan: only a refcount<=0 row is an orphan" {
     try std.testing.expect(!isPurgeableOrphan(true, 1));
     // No ref row: a warm / in-flight commit purge cannot clear — not an orphan.
     try std.testing.expect(!isPurgeableOrphan(false, 0));
+}
+
+test "isDanglingLinkError: only a missing target is dangling" {
+    // The single source of truth for check and fix: FileNotFound → remove,
+    // every other errno → leave intact (can't tell ≠ broken).
+    try std.testing.expect(isDanglingLinkError(error.FileNotFound));
+    try std.testing.expect(!isDanglingLinkError(error.AccessDenied));
+    try std.testing.expect(!isDanglingLinkError(error.SymLinkLoop));
+}
+
+test "walkBrokenSymlinks: a dangling link is detected and removed" {
+    const io = std.Options.debug_io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bb: [std.fs.max_path_bytes]u8 = undefined;
+    const prefix = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+
+    var pb: [std.fs.max_path_bytes]u8 = undefined;
+    const bin = try std.fmt.bufPrint(&pb, "{s}/bin", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    var lb: [std.fs.max_path_bytes]u8 = undefined;
+    const link = try std.fmt.bufPrint(&lb, "{s}/gone", .{bin});
+    try std.Io.Dir.symLinkAbsolute(io, "/no/such/target", link, .{});
+
+    try std.testing.expectEqual(@as(u32, 1), probeBrokenSymlinks(io, prefix));
+    try std.testing.expectEqual(@as(u32, 1), fixBrokenSymlinks(io, prefix));
+    // The dangling link is gone after the walk.
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().deleteFile(io, link));
+}
+
+test "walkBrokenSymlinks: an intact link with an inaccessible target is left alone" {
+    // A link whose target sits behind a permission wall is live and valid;
+    // doctor must not report or remove it. AccessDenied ≠ missing.
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+
+    const io = std.Options.debug_io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bb: [std.fs.max_path_bytes]u8 = undefined;
+    const prefix = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+
+    // A real target under a mode-0 dir: stat traversal fails with EACCES.
+    var wb: [std.fs.max_path_bytes]u8 = undefined;
+    const walled = try std.fmt.bufPrint(&wb, "{s}/walled", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, walled);
+    var tb: [std.fs.max_path_bytes]u8 = undefined;
+    const target = try std.fmt.bufPrint(&tb, "{s}/keg", .{walled});
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, target, .{});
+        f.close(io);
+    }
+    var walled_dir = try std.Io.Dir.openDirAbsolute(io, walled, .{});
+    defer walled_dir.close(io);
+    try walled_dir.setPermissions(io, std.Io.File.Permissions.fromMode(0));
+    // Restore mode so tmp cleanup can recurse into the walled dir.
+    defer walled_dir.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+
+    var pb: [std.fs.max_path_bytes]u8 = undefined;
+    const bin = try std.fmt.bufPrint(&pb, "{s}/bin", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    var lb: [std.fs.max_path_bytes]u8 = undefined;
+    const link = try std.fmt.bufPrint(&lb, "{s}/wall", .{bin});
+    try std.Io.Dir.symLinkAbsolute(io, target, link, .{});
+
+    try std.testing.expectEqual(@as(u32, 0), probeBrokenSymlinks(io, prefix));
+    try std.testing.expectEqual(@as(u32, 0), fixBrokenSymlinks(io, prefix));
+    // The link entry survives the walk (readLink inspects the link, not the target).
+    var rl: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(io, link, &rl);
 }
