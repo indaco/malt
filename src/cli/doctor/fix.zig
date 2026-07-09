@@ -181,10 +181,14 @@ pub fn probeOrphanedStoreCount(io: std.Io, prefix: []const u8) u32 {
 
 /// Outcome of an orphan walk. Probe (`do_remove = false`): `count` is the
 /// number of orphans detected, `blocked` is always 0. Reap (`do_remove =
-/// true`): `count` is the number removed, `blocked` is the number of orphans
-/// that could not be removed (undeletable dir — permissions, a held file, an
-/// immutable flag); `reason` names the blocker so `--fix` can explain a
-/// partial sweep rather than report a silent no-op.
+/// true`): `count` is the number de-referenced (entry renamed out of the store
+/// namespace and its ref row cleared, regardless of whether every byte was then
+/// reclaimed); `blocked` is the number whose *entry dir* could not even be
+/// renamed aside (permissions, an immutable entry dir), leaving it referenced.
+/// A surviving immutable *child* is not blocked — the entry is already
+/// de-referenced, so it counts as removed and the leftover bytes are a reclaim
+/// concern, not store corruption. `reason` names the blocker so `--fix` can
+/// explain a partial sweep rather than report a silent no-op.
 pub const OrphanSweep = struct {
     count: u32 = 0,
     blocked: u32 = 0,
@@ -201,6 +205,11 @@ pub fn fixOrphanedStore(io: std.Io, prefix: []const u8) OrphanSweep {
 
 fn walkOrphans(io: std.Io, prefix: []const u8, do_remove: bool) OrphanSweep {
     var result: OrphanSweep = .{};
+    // Reclaim `.malt-reap-*` leftovers from a prior sweep whose byte reclaim was
+    // blocked, so un-reapable bytes cannot leak across runs. Reap path only — a
+    // read-only probe must never mutate disk.
+    if (do_remove) reapStaleLeftovers(io, prefix);
+
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return result;
     var db = sqlite.Database.open(db_path) catch return result;
@@ -224,13 +233,61 @@ fn walkOrphans(io: std.Io, prefix: []const u8, do_remove: bool) OrphanSweep {
     return result;
 }
 
-/// Remove one orphan's store dir and clear its ref row. Returns false when
-/// the directory could not be removed, so the caller can report it.
+/// Best-effort removal of `.malt-reap-*` staging dirs a previous sweep renamed
+/// aside but could not fully delete (immutable child). Housekeeping, not an
+/// orphan sweep — never counted. In-pass deletion mirrors `forEachBrokenSymlink`.
+fn reapStaleLeftovers(io: std.Io, prefix: []const u8) void {
+    var dir = std.Io.Dir.openDirAbsolute(io, prefix, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, ".malt-reap-")) continue;
+        var path_buf: [768]u8 = undefined;
+        const p = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ prefix, entry.name }) catch continue;
+        std.Io.Dir.cwd().deleteTree(io, p) catch {};
+    }
+}
+
+/// How many staging names to probe before giving up. Only a stranded
+/// `.malt-reap-*` (an immutable child a prior sweep could not reclaim) occupies
+/// a candidate, so one or two suffice in practice; the cap is a safety bound.
+const reap_name_attempts: u8 = 16;
+
+/// Remove one orphan's store dir and clear its ref row. Returns false when the
+/// entry could not be de-referenced (an undeletable *entry dir* — permissions,
+/// immutable flag), so the caller can report it as blocked.
+///
+/// `deleteTree` is non-atomic: a mid-tree failure on an undeletable *child* used
+/// to leave the entry half-emptied while its ref row survived — a corrupt entry
+/// the DB still called valid. Renaming the entry out of the referenced path
+/// first makes the removal atomic from the ref row's view: once renamed, the row
+/// is cleared and any surviving bytes are unreferenced junk, never a corrupt
+/// referenced entry. Reap names are siblings of `store/` (never visited by its
+/// iteration, same filesystem → no CrossDevice) and probed for a free slot so a
+/// prior stranded leftover cannot block an otherwise-deletable entry.
 fn removeEntry(io: std.Io, prefix: []const u8, db: *sqlite.Database, name: []const u8) bool {
     var entry_buf: [768]u8 = undefined;
     const entry_path = std.fmt.bufPrint(&entry_buf, "{s}/store/{s}", .{ prefix, name }) catch return false;
-    std.Io.Dir.cwd().deleteTree(io, entry_path) catch return false;
+
+    var reap_buf: [768]u8 = undefined;
+    var attempt: u8 = 0;
+    const reap_path = while (attempt < reap_name_attempts) : (attempt += 1) {
+        const candidate = (if (attempt == 0)
+            std.fmt.bufPrint(&reap_buf, "{s}/.malt-reap-{s}", .{ prefix, name })
+        else
+            std.fmt.bufPrint(&reap_buf, "{s}/.malt-reap-{s}-{d}", .{ prefix, name, attempt })) catch return false;
+        std.Io.Dir.renameAbsolute(entry_path, candidate, io) catch |e| switch (e) {
+            // A non-empty stranded staging dir holds this name — try the next.
+            error.DirNotEmpty => continue,
+            // Undeletable entry dir (permissions/immutable): genuinely blocked.
+            else => return false,
+        };
+        break candidate;
+    } else return false;
+
     deleteRefRow(db, name);
+    // Best-effort byte reclaim; a surviving immutable child is left unreferenced.
+    std.Io.Dir.cwd().deleteTree(io, reap_path) catch {};
     return true;
 }
 

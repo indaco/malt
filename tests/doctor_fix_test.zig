@@ -410,6 +410,173 @@ test "fixOrphanedStore: a partial sweep removes what it can and reports the rest
     try testing.expect(sweep.reason != null);
 }
 
+test "fixOrphanedStore: an immutable child never leaves a partial entry under a live ref row" {
+    // The corruption case: a deletable orphan dir with one undeletable child.
+    // An in-place tree delete unlinks the siblings, fails on the child, and
+    // keeps the ref row — leaving a half-empty entry the DB still calls valid.
+    // The sweep must de-reference the entry atomically: gone from the store
+    // namespace with its row cleared, the un-reapable bytes left as unreferenced
+    // junk, never a corrupt-but-referenced entry.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "immutable-child");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_dir_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+    var store_dir_buf: [256]u8 = undefined;
+    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
+
+    var db_path_buf: [256]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    var entry_dir_buf: [320]u8 = undefined;
+    const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, entry_dir);
+
+    // Two children so a failure on one leaves the other behind — the partial state.
+    var a_buf: [384]u8 = undefined;
+    try writeFile(try std.fmt.bufPrint(&a_buf, "{s}/a", .{entry_dir}), "x");
+    var b_buf: [384]u8 = undefined;
+    try writeFile(try std.fmt.bufPrint(&b_buf, "{s}/b", .{entry_dir}), "x");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
+    try store.incrementRef(sha);
+    try store.decrementRef(sha);
+
+    // Make one child undeletable; clear the flag wherever it ends up (the sweep
+    // renames the entry aside), or the prefix teardown itself would block.
+    var child_z_buf: [384]u8 = undefined;
+    const child_z = try std.fmt.bufPrintSentinel(&child_z_buf, "{s}/b", .{entry_dir}, 0);
+    try testing.expectEqual(@as(c_int, 0), c.chflags(child_z.ptr, UF_IMMUTABLE));
+    defer _ = c.chflags(child_z.ptr, 0);
+    var reap_child_z_buf: [384]u8 = undefined;
+    const reap_child_z = try std.fmt.bufPrintSentinel(&reap_child_z_buf, "{s}/.malt-reap-{s}/b", .{ prefix, sha }, 0);
+    defer _ = c.chflags(reap_child_z.ptr, 0);
+
+    const sweep = fix.fixOrphanedStore(io, prefix);
+    // De-referenced and gone from the store namespace → credited, not blocked.
+    try testing.expectEqual(@as(u32, 1), sweep.count);
+    try testing.expectEqual(@as(u32, 0), sweep.blocked);
+    // Consistent end-state: entry gone from the referenced path, ref row cleared.
+    try testing.expect(!pathExists(entry_dir));
+    try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(io, prefix));
+    // The un-reapable child survives only as unreferenced junk, not corruption.
+    var reap_dir_buf: [320]u8 = undefined;
+    const reap_child = try std.fmt.bufPrint(&reap_dir_buf, "{s}/.malt-reap-{s}/b", .{ prefix, sha });
+    try testing.expect(pathExists(reap_child));
+}
+
+test "fixOrphanedStore: a stale .malt-reap-* leftover is reclaimed by the reap, not the probe, and never counted" {
+    // A prior sweep can strand a `.malt-reap-*` staging dir (immutable child).
+    // The reap reclaims it as housekeeping — never counted as an orphan — while
+    // the read-only probe must leave disk untouched.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "reap-leftover");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_dir_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+    var store_dir_buf: [256]u8 = undefined;
+    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
+
+    var db_path_buf: [256]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // A leftover staging dir, a sibling of store/ (never a valid orphan sha).
+    var reap_buf: [320]u8 = undefined;
+    const reap_dir = try std.fmt.bufPrint(&reap_buf, "{s}/.malt-reap-deadbeef", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, reap_dir);
+    var leaf_buf: [384]u8 = undefined;
+    try writeFile(try std.fmt.bufPrint(&leaf_buf, "{s}/x", .{reap_dir}), "x");
+
+    // The probe is read-only: leftover untouched, nothing counted.
+    try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(io, prefix));
+    try testing.expect(pathExists(reap_dir));
+
+    // The reap reclaims the leftover without crediting it as a swept orphan.
+    const sweep = fix.fixOrphanedStore(io, prefix);
+    try testing.expectEqual(@as(u32, 0), sweep.count);
+    try testing.expectEqual(@as(u32, 0), sweep.blocked);
+    try testing.expect(!pathExists(reap_dir));
+}
+
+test "fixOrphanedStore: a stranded reap dir does not block reaping a fresh same-sha orphan" {
+    // The corner a fixed staging name would trip: a prior sweep stranded
+    // `.malt-reap-<sha>` (an immutable child housekeeping cannot reclaim), then
+    // the same sha reappears as a fresh, fully-deletable orphan. Renaming onto
+    // the stranded non-empty dir fails with DirNotEmpty; the sweep must probe a
+    // free staging name and still reap the entry, not report it blocked.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "reap-collision");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_dir_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+    var store_dir_buf: [256]u8 = undefined;
+    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
+
+    var db_path_buf: [256]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+    // A stranded, unreclaimable staging dir occupying the primary reap name.
+    var stranded_buf: [320]u8 = undefined;
+    const stranded = try std.fmt.bufPrint(&stranded_buf, "{s}/.malt-reap-{s}", .{ prefix, sha });
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, stranded);
+    var stuck_z_buf: [384]u8 = undefined;
+    const stuck_z = try std.fmt.bufPrintSentinel(&stuck_z_buf, "{s}/stuck", .{stranded}, 0);
+    try writeFile(std.mem.sliceTo(stuck_z, 0), "x");
+    try testing.expectEqual(@as(c_int, 0), c.chflags(stuck_z.ptr, UF_IMMUTABLE));
+    defer _ = c.chflags(stuck_z.ptr, 0);
+
+    // A fresh, fully-deletable orphan under the same sha.
+    var entry_dir_buf: [320]u8 = undefined;
+    const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, entry_dir);
+    var leaf_buf: [384]u8 = undefined;
+    try writeFile(try std.fmt.bufPrint(&leaf_buf, "{s}/a", .{entry_dir}), "x");
+
+    var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
+    try store.incrementRef(sha);
+    try store.decrementRef(sha);
+
+    const sweep = fix.fixOrphanedStore(io, prefix);
+    // Reaped despite the stranded name — probed to a free slot, not blocked.
+    try testing.expectEqual(@as(u32, 1), sweep.count);
+    try testing.expectEqual(@as(u32, 0), sweep.blocked);
+    try testing.expect(!pathExists(entry_dir));
+    try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(io, prefix));
+}
+
 test "orphan parity: a no-row store entry is invisible to both doctor and purge" {
     // A store dir with no `store_refs` row is a warm / in-flight commit
     // (`--download-only`, or an install interrupted before `incrementRef`).
