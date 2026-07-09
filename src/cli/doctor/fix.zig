@@ -129,13 +129,17 @@ fn walkBrokenSymlinks(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
     return count;
 }
 
-/// Best-effort removal of the prefix's lock file when its PID is dead.
-/// Idempotent: a missing or live lock file is a no-op (returns false).
+/// Clear the prefix's stale lock in place when its PID is dead — truncate,
+/// never unlink, mirroring `LockFile.release`. Idempotent: a missing or live
+/// lock file is a no-op (returns false).
 pub fn fixStaleLock(io: std.Io, prefix: []const u8) bool {
     if (probeStaleLockState(io, prefix) != .stale) return false;
     var lock_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return false;
-    std.Io.Dir.deleteFileAbsolute(io, lock_path) catch return false;
+    // Unlinking would break flock exclusion: the inode is the lock identity.
+    const file = std.Io.Dir.openFileAbsolute(io, lock_path, .{ .mode = .write_only }) catch return false;
+    defer file.close(io);
+    lock_mod.LockFile.clearInPlace(io, file) catch return false;
     return true;
 }
 
@@ -273,7 +277,7 @@ pub fn parseFix(args: []const []const u8) FixRequest {
 /// dry-run plan and the post-action confirmation.
 pub fn safeLabel(kind: FixKind) []const u8 {
     return switch (kind) {
-        .stale_lock => "remove stale lock file",
+        .stale_lock => "clear stale lock file",
         .orphaned_store => "sweep orphaned store entries",
         .broken_symlinks => "unlink broken symlinks under prefix",
     };
@@ -502,7 +506,7 @@ test "renderPlan: dry-run uses 'would apply' verb" {
     const plan = planFixes(.{ .stale_lock = true });
     const out = try renderToBuf(plan, true, &buf);
     try std.testing.expectEqualStrings(
-        "  would apply:\n    - remove stale lock file\n",
+        "  would apply:\n    - clear stale lock file\n",
         out,
     );
 }
@@ -523,7 +527,7 @@ test "renderPlan: manual section follows safe section" {
     const out = try renderToBuf(plan, true, &buf);
     try std.testing.expectEqualStrings(
         "  would apply:\n" ++
-            "    - remove stale lock file\n" ++
+            "    - clear stale lock file\n" ++
             "  manual action required:\n" ++
             "  corrupt database — restore from backup or reinstall malt\n",
         out,
