@@ -292,10 +292,13 @@ pub const MultiProgress = struct {
 pub const ProgressBar = struct {
     label: []const u8,
     total: u64,
-    current: u64,
+    /// Atomic: the owning worker stores lock-free on every `update` while a
+    /// sibling holding the group mutex reads it during a resize repaint.
+    current: std.atomic.Value(u64),
     last_render_ns: i128,
     start_time_ms: i64,
-    spinner_frame: u8,
+    /// Atomic for the same reason as `current` — sibling repaints read it.
+    spinner_frame: std.atomic.Value(u8),
     is_tty: bool,
     /// Minimum label column width for alignment across multiple bars.
     label_width: u8,
@@ -314,10 +317,10 @@ pub const ProgressBar = struct {
         return .{
             .label = label,
             .total = total,
-            .current = 0,
+            .current = .init(0),
             .last_render_ns = 0,
             .start_time_ms = nowMs(),
-            .spinner_frame = 0,
+            .spinner_frame = .init(0),
             .is_tty = supportsAnsi(),
             .label_width = 0,
             .line_index = 0,
@@ -328,7 +331,7 @@ pub const ProgressBar = struct {
     }
 
     pub fn update(self: *ProgressBar, current: u64) void {
-        self.current = current;
+        self.current.store(current, .monotonic);
         if (output.isQuiet()) return;
         switch (pkg_mode) {
             .none => return,
@@ -351,7 +354,7 @@ pub const ProgressBar = struct {
             .tty => {
                 if (!self.is_tty) return;
                 if (self.total > 0) {
-                    self.current = self.total;
+                    self.current.store(self.total, .monotonic);
                 }
                 // Every bar belongs to a group that reserves its row up
                 // front (`SingleBar` for the one-bar case), so the final
@@ -377,7 +380,7 @@ pub const ProgressBar = struct {
         // Advance the animation frame on every render tick. Both determinate
         // and indeterminate bars use this to animate the spinner glyph in
         // front of the label.
-        self.spinner_frame +%= 1;
+        _ = self.spinner_frame.fetchAdd(1, .monotonic);
 
         // The group mutex guards every multi-bar draw; hold it across the
         // resize check + draw so a resize repaints the whole group atomically
@@ -392,6 +395,13 @@ pub const ProgressBar = struct {
         }
     }
 
+    /// Monotonic read of the shared byte counter: draws run under the group
+    /// mutex, but the owning worker stores lock-free, so a repaint may see a
+    /// value one tick stale — never a torn one.
+    fn cur(self: *const ProgressBar) u64 {
+        return self.current.load(.monotonic);
+    }
+
     /// Draw this bar's single line in place — no locking, so the group mutex
     /// is held by the caller (`render`) and by `repaintIfResized`. Determinacy
     /// selects the body; both honour the group's cursor-up/down math.
@@ -404,18 +414,18 @@ pub const ProgressBar = struct {
     /// The spinner uses Braille Pattern chars (not emoji); only the done
     /// glyph has an ASCII fallback to match `output.success()` in no-emoji mode.
     fn glyph(self: *const ProgressBar) []const u8 {
-        const done = self.total > 0 and self.current >= self.total;
+        const done = self.total > 0 and self.cur() >= self.total;
         if (done) {
             return if (color.isEmojiEnabled()) "\xe2\x9c\x93" else "*"; // ✓
         }
-        return spinner_frames.frames[self.spinner_frame % spinner_frames.count];
+        return spinner_frames.frames[self.spinner_frame.load(.monotonic) % spinner_frames.count];
     }
 
     fn computeRate(self: *const ProgressBar) f64 {
         const now_ms = nowMs();
         const elapsed_ms = now_ms - self.start_time_ms;
         if (elapsed_ms <= 0) return 0;
-        return @as(f64, @floatFromInt(self.current)) / (@as(f64, @floatFromInt(elapsed_ms)) / 1000.0);
+        return @as(f64, @floatFromInt(self.cur())) / (@as(f64, @floatFromInt(elapsed_ms)) / 1000.0);
     }
 
     pub fn formatRate(buf: []u8, rate: f64) []const u8 {
@@ -447,7 +457,7 @@ pub const ProgressBar = struct {
         pos += 1;
 
         // Glyph: animated spinner while in progress, green ✓ when done.
-        const done = self.total > 0 and self.current >= self.total;
+        const done = self.total > 0 and self.cur() >= self.total;
         const use_color = color.isColorEnabled();
         const g = self.glyph();
 
@@ -504,7 +514,7 @@ pub const ProgressBar = struct {
     /// fallback over a corrupt frame.
     fn writeCounterLine(self: *const ProgressBar, buf: []u8, start_pos: usize, cols: u16, value: []const u8) usize {
         var pos = start_pos;
-        const done = self.total > 0 and self.current >= self.total;
+        const done = self.total > 0 and self.cur() >= self.total;
         const use_color = color.isColorEnabled();
 
         buf[pos] = ' ';
@@ -560,7 +570,7 @@ pub const ProgressBar = struct {
     fn drawDeterminate(self: *const ProgressBar) void {
         const cols = queryCols();
         const layout = barLayout(cols, self.label_width);
-        const pct: u64 = if (self.total > 0) @min((self.current * 100) / self.total, 100) else 0;
+        const pct: u64 = if (self.total > 0) @min((self.cur() * 100) / self.total, 100) else 0;
 
         var buf: [768]u8 = undefined;
         var pos: usize = 0;
@@ -587,7 +597,7 @@ pub const ProgressBar = struct {
                 pos = self.writeLabel(&buf, pos);
 
                 // Bar
-                const filled: u64 = if (self.total > 0) @min((self.current * bw) / self.total, bw) else 0;
+                const filled: u64 = if (self.total > 0) @min((self.cur() * bw) / self.total, bw) else 0;
                 const empty = bw - filled;
                 if (color.isColorEnabled()) {
                     const cyan_code = color.SemanticStyle.info.code();
@@ -668,8 +678,10 @@ pub const ProgressBar = struct {
         const dim_code = if (use_color) color.SemanticStyle.detail.code() else "";
         const reset_code = if (use_color) color.Style.reset.code() else "";
 
+        // One snapshot for the whole detail so size/rate/ETA agree.
+        const current = self.cur();
         var size_buf: [48]u8 = undefined;
-        const size_kb = self.current / 1024;
+        const size_kb = current / 1024;
         const total_kb = self.total / 1024;
         const size_str = if (total_kb > 1024)
             std.fmt.bufPrint(&size_buf, "{d:.1}/{d:.1} MB", .{
@@ -684,12 +696,12 @@ pub const ProgressBar = struct {
         const rate_str = formatRate(&rate_buf, rate);
 
         var eta_buf: [32]u8 = undefined;
-        const eta_str = if (self.total > 0 and self.current < self.total and rate > 0)
-            formatEta(&eta_buf, self.total - self.current, rate)
+        const eta_str = if (self.total > 0 and current < self.total and rate > 0)
+            formatEta(&eta_buf, self.total - current, rate)
         else
             "";
 
-        var show_rate = self.current > 0;
+        var show_rate = current > 0;
         var show_eta = eta_str.len > 0;
         if (cols) |c| {
             const budget: usize = c;
@@ -737,7 +749,7 @@ pub const ProgressBar = struct {
         buf[pos] = '\r';
         pos += 1;
 
-        const size_kb = self.current / 1024;
+        const size_kb = self.cur() / 1024;
         var size_buf: [32]u8 = undefined;
         const size_str = if (size_kb > 1024)
             std.fmt.bufPrint(&size_buf, "{d:.1} MB", .{@as(f64, @floatFromInt(size_kb)) / 1024.0}) catch ""
@@ -1912,4 +1924,57 @@ test "indeterminate render collapses to label + bytes on a very narrow terminal"
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "kafka") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "MB") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "(") == null); // no detail parens
+}
+
+test "update publishes the byte count through the atomic counter" {
+    const prior_mode = mode();
+    setMode(.none); // no rendering — this pins the store, not the draw
+    defer setMode(prior_mode);
+
+    var bar = ProgressBar.init("tree", 1000);
+    bar.update(42);
+    try std.testing.expectEqual(@as(u64, 42), bar.cur());
+}
+
+test "finish clamps the counter to total through the atomic" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    setColsForTest(80);
+    defer setColsForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init("tree", 1000);
+    bar.is_tty = true;
+    bar.update(400);
+    bar.finish();
+
+    try std.testing.expectEqual(@as(u64, 1000), bar.cur());
+}
+
+test "render advances the spinner frame and wraps at u8 overflow" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    setColsForTest(80);
+    defer setColsForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init("tree", 1000);
+    bar.is_tty = true;
+    bar.spinner_frame.store(255, .monotonic);
+    bar.update(1); // first render tick: 255 +% 1 wraps to 0
+    try std.testing.expectEqual(@as(u8, 0), bar.spinner_frame.load(.monotonic));
 }

@@ -15,15 +15,15 @@ const output_mod = @import("malt").output;
 test "init sets correct defaults" {
     const bar = progress_mod.ProgressBar.init("test-label", 1000);
     try testing.expectEqual(@as(u64, 1000), bar.total);
-    try testing.expectEqual(@as(u64, 0), bar.current);
+    try testing.expectEqual(@as(u64, 0), bar.current.load(.monotonic));
     try testing.expectEqualStrings("test-label", bar.label);
-    try testing.expectEqual(@as(u8, 0), bar.spinner_frame);
+    try testing.expectEqual(@as(u8, 0), bar.spinner_frame.load(.monotonic));
 }
 
 test "init with zero total starts in indeterminate mode" {
     const bar = progress_mod.ProgressBar.init("download", 0);
     try testing.expectEqual(@as(u64, 0), bar.total);
-    try testing.expectEqual(@as(u64, 0), bar.current);
+    try testing.expectEqual(@as(u64, 0), bar.current.load(.monotonic));
 }
 
 test "update advances current position" {
@@ -33,10 +33,10 @@ test "update advances current position" {
 
     var bar = progress_mod.ProgressBar.init("test", 1000);
     bar.update(500);
-    try testing.expectEqual(@as(u64, 500), bar.current);
+    try testing.expectEqual(@as(u64, 500), bar.current.load(.monotonic));
 
     bar.update(999);
-    try testing.expectEqual(@as(u64, 999), bar.current);
+    try testing.expectEqual(@as(u64, 999), bar.current.load(.monotonic));
 }
 
 test "finish sets current to total for determinate bar" {
@@ -47,10 +47,10 @@ test "finish sets current to total for determinate bar" {
 
     var bar = progress_mod.ProgressBar.init("test", 2048);
     bar.update(1024);
-    try testing.expectEqual(@as(u64, 1024), bar.current);
+    try testing.expectEqual(@as(u64, 1024), bar.current.load(.monotonic));
     bar.finish();
     // In quiet mode, finish skips rendering — current stays at last update value
-    try testing.expectEqual(@as(u64, 1024), bar.current);
+    try testing.expectEqual(@as(u64, 1024), bar.current.load(.monotonic));
 }
 
 test "finish does not change current for indeterminate bar" {
@@ -62,7 +62,7 @@ test "finish does not change current for indeterminate bar" {
     bar.finish();
     // total remains 0, current stays at 5000
     try testing.expectEqual(@as(u64, 0), bar.total);
-    try testing.expectEqual(@as(u64, 5000), bar.current);
+    try testing.expectEqual(@as(u64, 5000), bar.current.load(.monotonic));
 }
 
 test "update in quiet mode does not crash" {
@@ -76,7 +76,7 @@ test "update in quiet mode does not crash" {
         bar.update(i);
     }
     bar.finish();
-    try testing.expectEqual(@as(u64, 100), bar.current);
+    try testing.expectEqual(@as(u64, 100), bar.current.load(.monotonic));
 }
 
 // --- ProgressCallback tests ---
@@ -136,16 +136,16 @@ test "ProgressCallback bridges to ProgressBar" {
     // First report sets total from Content-Length
     cb.report(1000, 5000);
     try testing.expectEqual(@as(u64, 5000), bar.total);
-    try testing.expectEqual(@as(u64, 1000), bar.current);
+    try testing.expectEqual(@as(u64, 1000), bar.current.load(.monotonic));
 
     // Subsequent reports don't change total
     cb.report(3000, 5000);
     try testing.expectEqual(@as(u64, 5000), bar.total);
-    try testing.expectEqual(@as(u64, 3000), bar.current);
+    try testing.expectEqual(@as(u64, 3000), bar.current.load(.monotonic));
 
     // Clamping: bytes > total gets clamped
     cb.report(6000, 5000);
-    try testing.expectEqual(@as(u64, 5000), bar.current);
+    try testing.expectEqual(@as(u64, 5000), bar.current.load(.monotonic));
 }
 
 test "ProgressCallback with null content_length stays indeterminate" {
@@ -169,11 +169,11 @@ test "ProgressCallback with null content_length stays indeterminate" {
 
     cb.report(1000, null);
     try testing.expectEqual(@as(u64, 0), bar.total); // stays indeterminate
-    try testing.expectEqual(@as(u64, 1000), bar.current);
+    try testing.expectEqual(@as(u64, 1000), bar.current.load(.monotonic));
 
     cb.report(5000, null);
     try testing.expectEqual(@as(u64, 0), bar.total);
-    try testing.expectEqual(@as(u64, 5000), bar.current);
+    try testing.expectEqual(@as(u64, 5000), bar.current.load(.monotonic));
 }
 
 // --- Rate/ETA helper tests ---
@@ -242,7 +242,7 @@ test "ProgressBar render path executes when forced into TTY mode" {
     bar.last_render_ns = 0;
     bar.update(1000);
     bar.finish();
-    try testing.expectEqual(@as(u64, 1000), bar.current);
+    try testing.expectEqual(@as(u64, 1000), bar.current.load(.monotonic));
 }
 
 test "ProgressBar indeterminate render path executes when forced into TTY mode" {
