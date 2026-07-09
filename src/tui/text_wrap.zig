@@ -31,12 +31,23 @@ pub fn iter(s: []const u8, width: usize) Iter {
 
 /// Bytes of `s` for one row of at most `max` columns: break at the last space
 /// that fits, else hard-break at `max` (a single word wider than the row).
-/// Grapheme-naive — one byte ≈ one column.
+/// Grapheme-naive — one byte ≈ one column — but the hard-break is rune-safe:
+/// it never cuts inside a multibyte UTF-8 sequence.
 pub fn wrapTake(s: []const u8, max: usize) usize {
     if (s.len <= max) return s.len;
     var i = max;
     while (i > 0) : (i -= 1) if (s[i - 1] == ' ') return i; // include the break space
-    return max; // no space in the window: hard break
+    // No space in the window: hard break, walked back off any continuation
+    // bytes so the split lands on a rune boundary (a raw cut at `max` would
+    // orphan a lead byte on one row and its continuations on the next).
+    i = max;
+    var steps: usize = 0; // valid UTF-8 has at most 3 continuation bytes
+    while (i > 0 and steps < 3 and (s[i] & 0xC0) == 0x80) : (steps += 1) i -= 1;
+    if ((s[i] & 0xC0) == 0x80) return max; // invalid continuation run: raw cut on garbage
+    if (i > 0) return i;
+    // Window narrower than the leading rune: one over-wide row beats stalling.
+    const rune_len = std.unicode.utf8ByteSequenceLength(s[0]) catch 1;
+    return @min(rune_len, s.len);
 }
 
 fn trimLeading(s: []const u8) []const u8 {
@@ -64,6 +75,26 @@ test "iter yields successive rows and trims the break space" {
     try testing.expectEqualStrings("two ", it.next().?);
     try testing.expectEqualStrings("three", it.next().?);
     try testing.expect(it.next() == null);
+}
+
+test "wrapTake hard-break lands on a rune boundary" {
+    const s = "caféteria"; // 'é' = 0xC3 0xA9 at byte offsets 3..5
+    const take = wrapTake(s, 4);
+    try testing.expectEqual(@as(usize, 3), take); // walked back before the 'é'
+    try testing.expect(std.unicode.utf8ValidateSlice(s[0..take]));
+    try testing.expect(std.unicode.utf8ValidateSlice(s[take..]));
+}
+
+test "wrapTake window narrower than the leading rune yields the whole rune" {
+    try testing.expectEqual(@as(usize, 2), wrapTake("étage", 1)); // one over-wide row beats stalling
+    var it = iter("é", 1);
+    try testing.expectEqualStrings("é", it.next().?);
+    try testing.expect(it.next() == null);
+}
+
+test "wrapTake cuts invalid continuation runs at max" {
+    const s = "\x80\x80\x80\x80\x80\x80"; // no lead byte to walk back to
+    try testing.expectEqual(@as(usize, 5), wrapTake(s, 5));
 }
 
 test "iter on a degenerate zero width still terminates" {
