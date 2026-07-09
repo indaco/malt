@@ -470,6 +470,32 @@ test "parseRubyFormula falls back to global sha256 when section omits it" {
     }
 }
 
+// A top-level arch-segmented formula (on_arm/on_intel with no on_macos
+// wrapper) whose only block targets the other arch must be refused — the
+// arch-blind fallback must not resolve the other arch's self-consistent
+// url+sha256 pair, which would pass the checksum gate on the wrong binary.
+test "parseRubyFormula refuses a top-level arch block for the wrong arch" {
+    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const src = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_intel do
+        \\    url "https://example.com/foo-intel.tar.gz"
+        \\    sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_arm do
+        \\    url "https://example.com/foo-arm.tar.gz"
+        \\    sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        \\  end
+        \\end
+    ;
+    try testing.expect(install_rb_parse.parseRubyFormula(src) == null);
+}
+
 // A cask with the keyword-arg form for the current arch only (the other
 // arch is missing from the keyword args entirely). On the missing arch
 // the parse must return null cleanly — no crash, no partial info, no
