@@ -52,13 +52,21 @@ fn pathExists(path: []const u8) bool {
     return true;
 }
 
+/// Stat an absolute path through a short-lived handle — used to assert the
+/// stale-lock repair keeps the same inode and empties it (R-010).
+fn statAbsolute(io: std.Io, path: []const u8) !std.Io.File.Stat {
+    const f = try fs_compat.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    return f.stat(io);
+}
+
 // Pick a PID that almost certainly does not exist. PIDs above 2^22 are
 // outside the macOS default range so kill(0) returns ESRCH.
 const dead_pid_str = "999999";
 
 // ── stale lock ──────────────────────────────────────────────────────
 
-test "fixStaleLock: dead PID lock file is removed" {
+test "fixStaleLock: dead PID lock is truncated in place, not unlinked" {
     var prefix_buf: [128]u8 = undefined;
     const prefix = try makePrefix(&prefix_buf, "stalelock");
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -75,9 +83,24 @@ test "fixStaleLock: dead PID lock file is removed" {
     defer threaded.deinit();
     const io = threaded.io();
 
+    const before = try statAbsolute(io, lock_path);
+    try testing.expect(before.size > 0);
+
     try testing.expect(fix.probeStaleLock(io, prefix));
     try testing.expect(fix.fixStaleLock(io, prefix));
-    try testing.expect(!pathExists(lock_path));
+
+    // R-010: the inode is the flock identity. Repair mirrors LockFile.release
+    // — truncate to zero and leave the file in place. Unlinking would let a
+    // fresh acquire take a new inode and break exclusion.
+    try testing.expect(pathExists(lock_path));
+    const after = try statAbsolute(io, lock_path);
+    try testing.expectEqual(before.inode, after.inode);
+    try testing.expectEqual(@as(u64, 0), after.size);
+
+    // Truncation must resolve the finding, not just zero bytes: an emptied
+    // lock reads as vacated, so a re-run is a no-op (idempotent).
+    try testing.expect(!fix.probeStaleLock(io, prefix));
+    try testing.expect(!fix.fixStaleLock(io, prefix));
 }
 
 test "fixStaleLock: live PID is left alone" {
@@ -239,7 +262,9 @@ test "executeFix: live run sweeps stale lock + broken symlinks together" {
     try testing.expect(outcome.stale_lock_removed);
     try testing.expectEqual(@as(u32, 1), outcome.broken_symlinks_removed);
     try testing.expectEqual(@as(u32, 2), outcome.fixesApplied());
-    try testing.expect(!pathExists(lock_path));
+    // Stale lock is vacated in place, not unlinked (R-010).
+    try testing.expect(pathExists(lock_path));
+    try testing.expectEqual(@as(u64, 0), (try statAbsolute(io, lock_path)).size);
 
     var ghost_buf: [256]u8 = undefined;
     const ghost = try std.fmt.bufPrint(&ghost_buf, "{s}/bin/ghost", .{prefix});
@@ -506,7 +531,9 @@ test "executeFix: only=stale_lock removes the lock and leaves broken symlinks" {
     try testing.expectEqual(@as(usize, 1), outcome.plan.safe.count());
     try testing.expect(outcome.plan.safe.contains(.stale_lock));
 
-    try testing.expect(!pathExists(lock_path));
+    // Stale lock is vacated in place, not unlinked (R-010).
+    try testing.expect(pathExists(lock_path));
+    try testing.expectEqual(@as(u64, 0), (try statAbsolute(io, lock_path)).size);
     // `access()` follows the link, so a surviving dangling symlink reads
     // as absent — confirm the entry itself is still present by iterating.
     try testing.expect(symlinkEntryExists(io, bin_dir, "dead"));

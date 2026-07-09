@@ -59,13 +59,23 @@ pub const LockFile = struct {
     /// that may already have it open.
     pub fn release(self: *LockFile, io: std.Io) void {
         // Vacate the pid before unlock so a racing reader sees an empty
-        // file, not the just-released holder's pid. The truncate+sync are
-        // best-effort: any failure leaves a stale pid that the next
-        // acquire immediately overwrites.
-        self.file.setLength(io, 0) catch {};
-        self.file.sync(io) catch {};
+        // file, not the just-released holder's pid. Best-effort: any failure
+        // leaves a stale pid that the next acquire immediately overwrites.
+        clearInPlace(io, self.file) catch {};
         self.file.unlock(io);
         self.file.close(io);
+    }
+
+    /// Clear a lock file's contents in place: truncate to 0, then flush.
+    /// Never unlinks — flock is inode-bound, so removing the inode would let
+    /// a live holder keep its lock while a fresh `acquire` takes a new one.
+    /// `release` and doctor's stale-lock repair share this one owner of the
+    /// clear so the lock file's lifecycle has a single authority.
+    pub fn clearInPlace(io: std.Io, file: std.Io.File) std.Io.File.SetLengthError!void {
+        try file.setLength(io, 0);
+        // Durability is best-effort: a lost flush only leaves a stale pid the
+        // next acquire overwrites.
+        file.sync(io) catch {};
     }
 
     /// Read the PID from an existing lock file. Returns null when the file

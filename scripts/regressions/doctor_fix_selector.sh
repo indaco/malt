@@ -4,7 +4,7 @@
 # Pinned behaviour:
 #   1. `--fix <id>` applies only the named class (stale_lock here) and
 #      leaves the other safe-class offenders (a broken symlink) in place.
-#   2. `--fix` with no id stays apply-all: lock + symlink both go.
+#   2. `--fix` with no id stays apply-all: lock cleared, symlink unlinked.
 #   3. An unknown id exits non-zero and mutates nothing.
 #   4. `--fix <id> --dry-run` plans but mutates nothing.
 #
@@ -48,8 +48,10 @@ export MALT_PREFIX="$PFX"
 seed_prefix "$PFX"
 
 "$MALT_BIN" doctor --fix stale_lock >/dev/null 2>&1 || true
-[[ ! -f "$PFX/db/malt.lock" ]] ||
-  fail '--fix stale_lock did not remove the stale lock'
+# Repair truncates the lock in place (mirrors LockFile.release); unlinking
+# the inode would break flock exclusion, so assert present-and-empty.
+[[ -f "$PFX/db/malt.lock" && ! -s "$PFX/db/malt.lock" ]] ||
+  fail '--fix stale_lock did not truncate the stale lock in place'
 [[ -L "$PFX/bin/dead" ]] ||
   fail '--fix stale_lock also removed the broken symlink (should target only stale_lock)'
 rm -rf "$PFX"
@@ -60,8 +62,8 @@ export MALT_PREFIX="$PFX"
 seed_prefix "$PFX"
 
 "$MALT_BIN" doctor --fix >/dev/null 2>&1 || true
-[[ ! -f "$PFX/db/malt.lock" ]] ||
-  fail 'apply-all --fix did not remove the stale lock'
+[[ -f "$PFX/db/malt.lock" && ! -s "$PFX/db/malt.lock" ]] ||
+  fail 'apply-all --fix did not truncate the stale lock in place'
 [[ ! -L "$PFX/bin/dead" ]] ||
   fail 'apply-all --fix did not remove the broken symlink'
 rm -rf "$PFX"
