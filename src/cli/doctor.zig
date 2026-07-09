@@ -28,6 +28,7 @@ pub const FixConditions = fix_mod.Conditions;
 pub const FixPlan = fix_mod.Plan;
 pub const planFixes = fix_mod.planFixes;
 const post_install = @import("doctor/post_install.zig");
+const lock_report = @import("lock_report.zig");
 const render = @import("doctor/render.zig");
 pub const CheckStatus = render.CheckStatus;
 pub const CheckStyle = render.CheckStyle;
@@ -484,6 +485,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                     outcome.orphans_block_reason orelse "unknown reason",
                 });
             }
+            // The acquire is the in-flight gate: a live op or a failed acquire
+            // skips the prefix-mutating sweeps rather than corrupting them.
+            if (outcome.mutations_skipped) |e| switch (e) {
+                error.Timeout => output.info("skipped orphan and symlink sweeps: {s}", .{op_in_flight_note}),
+                error.DirMissing => output.info("skipped orphan and symlink sweeps: no db/ directory — nothing installed to serialize against", .{}),
+                error.AccessDenied, error.OpenFailed, error.WriteFailed => lock_report.reportAcquireFailure(e, prefix),
+            };
         }
 
         var mit = outcome.plan.manual.iterator();
