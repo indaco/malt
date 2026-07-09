@@ -59,6 +59,9 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     var in_correct_section = false;
     var in_macos = false;
     var prev_in_kwarg_sha256 = false;
+    // Formula is arch-segmented — disarms the arch-blind global fallback so it
+    // can't resolve the other arch's self-consistent (checksum-passing) pair.
+    var saw_arch_marker = false;
 
     var line_start: usize = 0;
     for (rb_content, 0..) |ch, idx| {
@@ -89,17 +92,22 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
                 in_correct_section = true;
             }
 
-            // Track CPU section (Formula style: Hardware::CPU, Cask style: on_arm/on_intel)
-            if (in_macos) {
-                if (is_arm and (std.mem.indexOf(u8, line, "Hardware::CPU.arm?") != null or
-                    std.mem.indexOf(u8, line, "on_arm") != null))
-                {
-                    in_correct_section = true;
-                } else if (!is_arm and (std.mem.indexOf(u8, line, "Hardware::CPU.intel?") != null or
-                    std.mem.indexOf(u8, line, "on_intel") != null))
-                {
-                    in_correct_section = true;
-                }
+            // CPU section (Hardware::CPU / on_arm / on_intel). Not gated on
+            // `on_macos`: these markers also appear at top level, and missing
+            // them there is what let a wrong-arch pair reach the fallback.
+            // `on_*` is anchored to the line start (block opener) so the token
+            // in a `desc`/comment string never mis-flags a flat formula.
+            const has_arm = std.mem.startsWith(u8, line, "on_arm") or
+                std.mem.indexOf(u8, line, "Hardware::CPU.arm?") != null;
+            const has_intel = std.mem.startsWith(u8, line, "on_intel") or
+                std.mem.indexOf(u8, line, "Hardware::CPU.intel?") != null;
+            // Each arch marker re-scopes the section to whether the block is
+            // ours. Without `end` tracking the flag is otherwise sticky, so a
+            // non-matching block (or the first block under `on_macos` on the
+            // other arch) would leak its url/sha256 across the boundary.
+            if (has_arm or has_intel) {
+                saw_arch_marker = true;
+                in_correct_section = (is_arm and has_arm) or (!is_arm and has_intel);
             }
 
             // arch directive — only meaningful inside on_macos.
@@ -146,8 +154,10 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
         }
     }
 
-    // Fallback: if no CPU-specific section found, try global url/sha256
-    if (url == null or sha256 == null) {
+    // Global url/sha256 fallback. Skip when an arch-segmented formula yielded
+    // NEITHER field for our arch — else it grabs the whole other-arch pair.
+    // A partial block (our url + a shared global sha256) still completes.
+    if ((url == null or sha256 == null) and !(saw_arch_marker and url == null and sha256 == null)) {
         var ls: usize = 0;
         for (rb_content, 0..) |ch, idx| {
             if (ch == '\n' or idx == rb_content.len - 1) {
@@ -613,6 +623,139 @@ test "tapCaskArtifactKind: tar.gz formula archives stay on the keg path" {
     try std.testing.expect(tapCaskArtifactKind("https://example.com/tool.tar.gz", false) == null);
     try std.testing.expect(tapCaskArtifactKind("https://example.com/tool.tgz", true) == null);
     try std.testing.expect(tapCaskArtifactKind("https://example.com/tool.tar.xz", false) == null);
+}
+
+test "parseRubyFormula: top-level arch-segmented formula with no matching arch is refused" {
+    // Only the arch we are NOT running on is present. The arch-blind fallback
+    // must not resolve the other arch's self-consistent url+sha256 pair.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const wrong = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_intel do
+        \\    url "https://example.com/foo-1.2.3-intel.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_arm do
+        \\    url "https://example.com/foo-1.2.3-arm.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(wrong) == null);
+}
+
+test "parseRubyFormula: top-level arch block for the running arch resolves its own url+sha256" {
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const src =
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_arm do
+        \\    url "https://example.com/foo-1.2.3-arm.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\  on_intel do
+        \\    url "https://example.com/foo-1.2.3-intel.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  end
+        \\end
+    ;
+    const got = parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    if (is_arm) {
+        try std.testing.expectEqualStrings("https://example.com/foo-1.2.3-arm.tar.gz", got.url);
+        try std.testing.expectEqualStrings("aaaaaaaa", got.sha256);
+    } else {
+        try std.testing.expectEqualStrings("https://example.com/foo-1.2.3-intel.tar.gz", got.url);
+        try std.testing.expectEqualStrings("bbbbbbbb", got.sha256);
+    }
+}
+
+test "parseRubyFormula: a flat formula mentioning on_arm in prose still resolves via fallback" {
+    // The `on_*` marker is anchored to the line start, so an `on_arm` token in
+    // a desc string must not disarm the global fallback for a flat formula.
+    const src =
+        \\class Foo < Formula
+        \\  desc "runs great on_arm boards"
+        \\  version "1.2.3"
+        \\  url "https://example.com/foo-1.2.3.tar.gz"
+        \\  sha256 "deadbeef"
+        \\end
+    ;
+    const got = parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("https://example.com/foo-1.2.3.tar.gz", got.url);
+    try std.testing.expectEqualStrings("deadbeef", got.sha256);
+}
+
+test "parseRubyFormula: top-level Hardware::CPU block for the wrong arch is refused" {
+    // Same defect surface as on_arm/on_intel, expressed in the classic
+    // `Hardware::CPU.<arch>?` form with no on_macos wrapper.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const wrong = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.intel?
+        \\    url "https://example.com/foo-1.2.3-intel.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.arm?
+        \\    url "https://example.com/foo-1.2.3-arm.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(wrong) == null);
+}
+
+test "parseRubyFormula: resolves the running arch even when the other arch block is first" {
+    // The section resets at each arch marker. Otherwise `on_macos` leaves it
+    // stuck true and the leading, wrong-arch block wins — a self-consistent
+    // wrong-arch pair that would sail through the checksum gate.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const src = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_macos do
+        \\    on_intel do
+        \\      url "https://example.com/foo-intel.tar.gz"
+        \\      sha256 "bbbbbbbb"
+        \\    end
+        \\    on_arm do
+        \\      url "https://example.com/foo-arm.tar.gz"
+        \\      sha256 "aaaaaaaa"
+        \\    end
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_macos do
+        \\    on_arm do
+        \\      url "https://example.com/foo-arm.tar.gz"
+        \\      sha256 "aaaaaaaa"
+        \\    end
+        \\    on_intel do
+        \\      url "https://example.com/foo-intel.tar.gz"
+        \\      sha256 "bbbbbbbb"
+        \\    end
+        \\  end
+        \\end
+    ;
+    const got = parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    if (is_arm) {
+        try std.testing.expectEqualStrings("https://example.com/foo-arm.tar.gz", got.url);
+        try std.testing.expectEqualStrings("aaaaaaaa", got.sha256);
+    } else {
+        try std.testing.expectEqualStrings("https://example.com/foo-intel.tar.gz", got.url);
+        try std.testing.expectEqualStrings("bbbbbbbb", got.sha256);
+    }
 }
 
 test "parseRubyFormula: a formula carrying a def install block still parses" {
