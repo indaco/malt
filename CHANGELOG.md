@@ -4,6 +4,48 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.20.9 - 2026-07-09
+
+### Highlights
+
+v0.20.9 brings malt in step with Homebrew v6's declarative post-install steps and polishes a batch of rough edges in `mt tui`.
+
+- **Compatible with Homebrew v6 install steps.** Homebrew is migrating formulae from Ruby `post_install` blocks to the declarative `post_install_steps` framework - malt now runs those steps natively across install, upgrade, and migrate, so packages keep setting themselves up correctly as upstream converts.
+- **A steadier TUI.** Wrapped rows no longer split multi-byte characters, `End` jumps to the last row in every tab, a lone `Esc` resolves immediately, uninstall acts on the package you confirmed - not the live selection - and the terminal is restored cleanly on panic or termination.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **ui/progress:** make shared progress counters race-free under concurrent repaints ([1c9e7a62](https://github.com/indaco/malt/commit/1c9e7a62)) ([#638](https://github.com/indaco/malt/pull/638))
+- **tui:** keep wrapped rows on UTF-8 rune boundaries ([9f338aaa](https://github.com/indaco/malt/commit/9f338aaa)) ([#637](https://github.com/indaco/malt/pull/637))
+- **install:** run declarative post-install steps across install, upgrade, and migrate ([675fea29](https://github.com/indaco/malt/commit/675fea29)) ([#636](https://github.com/indaco/malt/pull/636))
+- **tui:** make End jump to the last row in every tab ([4cf0d4f7](https://github.com/indaco/malt/commit/4cf0d4f7)) ([#635](https://github.com/indaco/malt/pull/635))
+- **tui:** resolve a lone Esc immediately instead of on the next keypress ([9cc4d503](https://github.com/indaco/malt/commit/9cc4d503)) ([#634](https://github.com/indaco/malt/pull/634))
+- **tui:** uninstall the package the guard was armed on, not the live selection ([7239deca](https://github.com/indaco/malt/commit/7239deca)) ([#633](https://github.com/indaco/malt/pull/633))
+- **tui:** restore the terminal on panic and termination signals ([2a74397e](https://github.com/indaco/malt/commit/2a74397e)) ([#631](https://github.com/indaco/malt/pull/631))
+
+### ✅ Tests
+
+- **install:** stop the Ruby fallback route test reading the live homebrew-core tap ([98dd9777](https://github.com/indaco/malt/commit/98dd9777)) ([#632](https://github.com/indaco/malt/pull/632))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.20.8 - 2026-07-08
 
 ### 🩹 Fixes
