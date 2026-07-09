@@ -471,7 +471,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 output.dim("would {s}", .{fix_mod.safeLabel(kind)});
             }
         } else {
-            if (outcome.stale_lock_removed) output.success("removed stale lock file", .{});
+            if (outcome.stale_lock_removed) output.success("cleared stale lock file", .{});
             if (outcome.broken_symlinks_removed > 0) {
                 output.success("unlinked {d} broken symlink(s)", .{outcome.broken_symlinks_removed});
             }
