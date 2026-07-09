@@ -1019,31 +1019,24 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
 }
 
 fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
-    const link_dirs = [_][]const u8{ "bin", "lib", "include", "share", "sbin" };
     var offenders: std.ArrayList([]u8) = .empty;
     defer freeOwnedStringList(ctx.allocator, &offenders);
 
-    for (link_dirs) |subdir| {
-        var dir_buf: [512]u8 = undefined;
-        const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ ctx.prefix, subdir }) catch continue;
-        var dir = std.Io.Dir.openDirAbsolute(ctx.io, dir_path, .{ .iterate = true }) catch continue;
-        defer dir.close(ctx.io);
-
-        var dir_iter = dir.iterate();
-        while (dir_iter.next(ctx.io) catch null) |entry| {
-            if (entry.kind == .sym_link) {
-                _ = dir.statFile(ctx.io, entry.name, .{}) catch |err| {
-                    if (!fix_mod.isDanglingLinkError(err)) continue; // inaccessible ≠ missing
-                    const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ subdir, entry.name }) catch continue;
-                    offenders.append(ctx.allocator, path) catch {
-                        ctx.allocator.free(path);
-                        continue;
-                    };
-                    continue;
-                };
-            }
+    // Same walk the fix executor uses, so report and remove never disagree.
+    const Collect = struct {
+        allocator: std.mem.Allocator,
+        offenders: *std.ArrayList([]u8),
+        fn visit(self: @This(), _: std.Io.Dir, subdir: []const u8, entry_name: []const u8) void {
+            const path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ subdir, entry_name }) catch return;
+            self.offenders.append(self.allocator, path) catch self.allocator.free(path);
         }
-    }
+    };
+    fix_mod.forEachBrokenSymlink(
+        ctx.io,
+        ctx.prefix,
+        Collect{ .allocator = ctx.allocator, .offenders = &offenders },
+        Collect.visit,
+    );
 
     if (offenders.items.len == 0) {
         printCheck(name, .ok, null);

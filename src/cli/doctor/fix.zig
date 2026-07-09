@@ -113,8 +113,17 @@ pub fn isDanglingLinkError(err: anyerror) bool {
 
 const link_dirs = [_][]const u8{ "bin", "lib", "include", "share", "sbin" };
 
-fn walkBrokenSymlinks(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
-    var count: u32 = 0;
+/// Visit every *dangling* symlink under the prefix's link dirs: one target is
+/// resolved per entry and only `FileNotFound` counts, so an inaccessible-but-
+/// intact link is skipped. `visit` receives the open dir plus the subdir/name
+/// pair. The single traversal behind both the fix walk and the doctor check, so
+/// the two cannot report different link sets.
+pub fn forEachBrokenSymlink(
+    io: std.Io,
+    prefix: []const u8,
+    context: anytype,
+    comptime visit: fn (@TypeOf(context), dir: std.Io.Dir, subdir: []const u8, name: []const u8) void,
+) void {
     for (link_dirs) |subdir| {
         var dir_buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
@@ -124,18 +133,28 @@ fn walkBrokenSymlinks(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
         var iter = dir.iterate();
         while (iter.next(io) catch null) |entry| {
             if (entry.kind != .sym_link) continue;
-            // Only a genuinely dangling target counts; an inaccessible one is left alone.
             _ = dir.statFile(io, entry.name, .{}) catch |err| {
-                if (!isDanglingLinkError(err)) continue;
-                if (do_remove) {
-                    dir.deleteFile(io, entry.name) catch continue;
-                }
-                count += 1;
+                if (isDanglingLinkError(err)) visit(context, dir, subdir, entry.name);
                 continue;
             };
         }
     }
-    return count;
+}
+
+fn walkBrokenSymlinks(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
+    const Sweep = struct {
+        io: std.Io,
+        do_remove: bool,
+        count: u32 = 0,
+        fn visit(self: *@This(), dir: std.Io.Dir, _: []const u8, name: []const u8) void {
+            // A link we cannot unlink was not removed — don't count it.
+            if (self.do_remove) dir.deleteFile(self.io, name) catch return;
+            self.count += 1;
+        }
+    };
+    var sweep = Sweep{ .io = io, .do_remove = do_remove };
+    forEachBrokenSymlink(io, prefix, &sweep, Sweep.visit);
+    return sweep.count;
 }
 
 /// Clear the prefix's stale lock in place when its PID is dead — truncate,
