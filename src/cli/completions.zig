@@ -150,13 +150,13 @@ pub const bash_script =
     \\
     \\    local cmd_flags=""
     \\    case "$cmd" in
-    \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-deps --only-dependencies --isolate-deps --isolate-dependencies --quiet -q --json" ;;
+    \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-deps --only-dependencies --isolate-deps --isolate-dependencies --use-system-ruby= --quiet -q --json" ;;
     \\        reinstall)        cmd_flags="--cask --dry-run --isolate-deps --isolate-dependencies --quiet -q --json" ;;
     \\        backup)           cmd_flags="--output -o --versions --services --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
     \\        uninstall|remove) cmd_flags="--force --zap --dry-run" ;;
-    \\        upgrade)          cmd_flags="--all --cask --formula --dry-run --pinned --force -f --isolate-deps --isolate-dependencies" ;;
+    \\        upgrade)          cmd_flags="--all --cask --formula --dry-run --pinned --force -f --isolate-deps --isolate-dependencies --use-system-ruby=" ;;
     \\        outdated)         cmd_flags="--json --formula --cask --pinned-only --tap --refresh --quiet -q" ;;
     \\        update)           cmd_flags="--check --quiet -q" ;;
     \\        version)          cmd_flags="--check --yes -y --no-verify --cleanup" ;;
@@ -166,7 +166,7 @@ pub const bash_script =
     \\        uses)             cmd_flags="--recursive -r --json --quiet -q" ;;
     \\        deps)             cmd_flags="--recursive -r --installed --json --quiet -q" ;;
     \\        which)            cmd_flags="--json" ;;
-    \\        migrate)          cmd_flags="--dry-run" ;;
+    \\        migrate)          cmd_flags="--dry-run --use-system-ruby=" ;;
     \\        rollback)         cmd_flags="--dry-run --list --to --json" ;;
     \\        link)             cmd_flags="--overwrite --force -f --isolate --all" ;;
     \\        services)         cmd_flags="--tail --stderr --follow -f --system --json" ;;
@@ -277,6 +277,7 @@ pub const zsh_script =
     \\                        '--only-dependencies[Brew-parity alias of --only-deps]' \
     \\                        '--isolate-deps[Keep transitive deps out of <prefix>/bin and <prefix>/sbin]' \
     \\                        '--isolate-dependencies[Alias of --isolate-deps]' \
+    \\                        '--use-system-ruby=[Run post_install via system Ruby for the named kegs]:names:' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
     \\                        '--json[Output result as JSON]' \
     \\                        '*::package:'
@@ -308,6 +309,7 @@ pub const zsh_script =
     \\                        '(--force -f)'{--force,-f}'[Bypass pin protection]' \
     \\                        '--isolate-deps[Apply isolation to deps newly pulled in by this upgrade]' \
     \\                        '--isolate-dependencies[Alias of --isolate-deps]' \
+    \\                        '--use-system-ruby=[Run post_install via system Ruby for the named kegs]:names:' \
     \\                        '*::package:'
     \\                    ;;
     \\                pin|unpin)
@@ -369,7 +371,9 @@ pub const zsh_script =
     \\                        '*::query:'
     \\                    ;;
     \\                migrate)
-    \\                    _arguments '--dry-run[Preview without executing]'
+    \\                    _arguments \\
+    \\                        '--dry-run[Preview without executing]' \\
+    \\                        '--use-system-ruby=[Run post_install via system Ruby for the named kegs]:names:'
     \\                    ;;
     \\                rollback)
     \\                    _arguments \
@@ -587,6 +591,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l only-dependencies -d 'Brew-parity alias of --only-deps'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l isolate-deps         -d 'Keep transitive deps out of <prefix>/bin and <prefix>/sbin'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l isolate-dependencies -d 'Alias of --isolate-deps'
+    \\    complete -c $__malt_bin -n '__malt_using_command install' -l use-system-ruby -d 'Run post_install via system Ruby for the named kegs'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l json    -d 'JSON output'
     \\
     \\    # reinstall
@@ -613,6 +618,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -s f -l force -d 'Bypass pin protection'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l isolate-deps         -d 'Apply isolation to deps newly pulled in by this upgrade'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l isolate-dependencies -d 'Alias of --isolate-deps'
+    \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l use-system-ruby -d 'Run post_install via system Ruby for the named kegs'
     \\
     \\    # outdated
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l json        -d 'JSON output'
@@ -674,6 +680,7 @@ pub const fish_script =
     \\
     \\    # migrate / rollback
     \\    complete -c $__malt_bin -n '__malt_using_command migrate'    -l dry-run -d 'Preview'
+    \\    complete -c $__malt_bin -n '__malt_using_command migrate'    -l use-system-ruby -d 'Run post_install via system Ruby for the named kegs'
     \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l list    -d 'List every reachable store entry'
     \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l to    -x -d 'Roll back to a specific store entry (pass <version>)'

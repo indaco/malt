@@ -241,3 +241,21 @@ test "help completions offer command topics across every shell" {
     try expectContains(completions.zsh_script, "help)");
     try expectContains(completions.fish_script, "__malt_using_command help");
 }
+
+test "all install, migrate, and upgrade completions expose --use-system-ruby" {
+    // The scoped Ruby fallback exists on all three commands; each shell
+    // must offer it wherever the command accepts it.
+    try expectContains(completions.bash_script, "--use-system-ruby=");
+    try expectContains(completions.zsh_script, "--use-system-ruby=");
+    try expectContains(completions.fish_script, "-l use-system-ruby");
+    inline for (.{ completions.bash_script, completions.zsh_script, completions.fish_script }) |script| {
+        var count: usize = 0;
+        var pos: usize = 0;
+        while (std.mem.indexOfPos(u8, script, pos, "use-system-ruby")) |i| {
+            count += 1;
+            pos = i + 1;
+        }
+        // install + migrate + upgrade, once per command minimum.
+        try std.testing.expect(count >= 3);
+    }
+}

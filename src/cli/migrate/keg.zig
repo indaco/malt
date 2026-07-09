@@ -212,7 +212,7 @@ pub fn migrateKeg(
         recordDeps(deps.db, keg_id, &formula);
     }
 
-    if (formula.post_install_defined) {
+    if (formula.hasPostInstallHook()) {
         if (deps.post_install_queue) |q| {
             // Queue dupes the strings so the worker's per-iteration
             // arena is free to die before drain runs.
@@ -369,8 +369,9 @@ fn migrateFromLocalCellar(
 
 /// Resolve the tap's post_install body and either queue it (so it
 /// runs after every keg's `opt/<name>/` symlink is in place) or drive
-/// it inline on the legacy single-keg path. Silent when no body is
-/// found — the formula simply has no hook.
+/// it inline on the legacy single-keg path. Silent when the formula
+/// has no hook at all; a declarative `post_install_steps` block has no
+/// extractable body, so it warns instead of silently dropping the hook.
 fn runTapPostInstallIfDefined(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -382,7 +383,11 @@ fn runTapPostInstallIfDefined(
 ) void {
     const rb_path = findTapFormulaRb(ctx.io, allocator, deps.homebrew_prefix, tap, name, receipt_source_path) orelse return;
     defer allocator.free(rb_path);
-    const body = post_install_mod.extractRbPostInstallBody(ctx.io, allocator, rb_path) orelse return;
+    const body = post_install_mod.extractRbPostInstallBody(ctx.io, allocator, rb_path) orelse {
+        if (post_install_mod.rbHasPostInstallSteps(ctx.io, allocator, rb_path))
+            output.warn("    {s}: post_install skipped (declarative steps need formula JSON, unavailable for tap kegs; run brew postinstall {s})", .{ name, name });
+        return;
+    };
     defer allocator.free(body);
 
     if (deps.post_install_queue) |q| {

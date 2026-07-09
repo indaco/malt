@@ -64,6 +64,7 @@ pub const linker = @import("core/linker.zig");
 pub const patch = @import("core/patch.zig");
 pub const perms = @import("core/perms.zig");
 pub const pins = @import("core/pins.zig");
+pub const post_install_steps = @import("core/post_install_steps.zig");
 pub const relocated_store = @import("core/relocated_store.zig");
 pub const ruby_subprocess = @import("core/ruby_subprocess.zig");
 pub const sandbox_macos = @import("core/sandbox/macos.zig");

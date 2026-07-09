@@ -77,6 +77,55 @@ fn testArena() std.heap.ArenaAllocator {
     return std.heap.ArenaAllocator.init(testing.allocator);
 }
 
+test "collectFormulaJobs queues a steps-migrated formula despite post_install_defined false" {
+    // The reproduction shape of the silent-skip bug: migrated formulas
+    // report post_install_defined=false and carry the hook only in the
+    // declarative steps array — the gate must still open.
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tdb = try TempDb.init("postinstall_steps_accept");
+    defer tdb.deinit();
+
+    const json = "{\"name\":\"glowsteps\",\"full_name\":\"glowsteps\",\"tap\":\"homebrew/core\"," ++
+        "\"desc\":\"\",\"homepage\":\"\",\"revision\":0,\"keg_only\":false," ++
+        "\"post_install_defined\":false," ++
+        "\"post_install_steps\":[{\"type\":\"mkdir_p\",\"path\":{\"base\":\"var\",\"path\":\"glowsteps\"}}]," ++
+        "\"versions\":{\"stable\":\"1.0\"},\"dependencies\":[],\"oldnames\":[]," ++
+        "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/glowsteps/blobs\"," ++
+        "\"files\":{\"all\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/glowsteps\",\"sha256\":\"deadbeef\"}}}}}";
+
+    const cache_dir = "/tmp/malt_install_test_postinstall_steps_cache";
+    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+
+    var http = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
+    defer http.deinit();
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
+    defer real_http.deinit();
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
+
+    var store_inst: malt.store.Store = undefined;
+
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
+    defer jobs.deinit(alloc);
+
+    var cache = malt.deps.FormulaCache.init(alloc);
+    defer cache.deinit();
+
+    try install_download.collectFormulaJobs(
+        .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst, .cache = &cache, .worker_backing = alloc },
+        "glowsteps",
+        json,
+        false,
+        &jobs,
+    );
+
+    try testing.expectEqual(@as(usize, 1), jobs.items.len);
+    try testing.expect(jobs.items[0].wants_post_install);
+}
+
 test "collectFormulaJobs queues a formula with a post_install hook" {
     var arena = testArena();
     defer arena.deinit();
@@ -119,7 +168,7 @@ test "collectFormulaJobs queues a formula with a post_install hook" {
     // post_install after materialisation, so the guard no longer rejects.
     try testing.expectEqual(@as(usize, 1), jobs.items.len);
     try testing.expectEqualStrings("needs-ruby", jobs.items[0].name);
-    try testing.expect(jobs.items[0].post_install_defined);
+    try testing.expect(jobs.items[0].wants_post_install);
 }
 
 // --- Pure helper tests (no DB / network) ---
@@ -864,7 +913,7 @@ fn appendOwnedJob(
         .bottle_url = try alloc.dupe(u8, "https://x"),
         .is_dep = is_dep,
         .keg_only = false,
-        .post_install_defined = false,
+        .wants_post_install = false,
         .formula_json = formula_json,
         .cellar_type = try alloc.dupe(u8, ":any"),
         .label_width = 0,

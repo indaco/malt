@@ -259,6 +259,38 @@ fn findMatchingEnd(source: []const u8, start: usize, indent: usize) ?struct {
     return null;
 }
 
+/// True when the source declares a declarative `post_install_steps do`
+/// block. Detection only — the steps grammar (keyword args, symbols) is
+/// outside the DSL, so callers surface a loud skip instead of extracting
+/// a body from it.
+pub fn hasPostInstallStepsBlock(source: []const u8) bool {
+    var it = std.mem.splitScalar(u8, source, '\n');
+    while (it.next()) |line| {
+        const t = std.mem.trim(u8, line, " \t\r");
+        const marker = "post_install_steps";
+        if (!std.mem.startsWith(u8, t, marker)) continue;
+        // Word boundary: `post_install_steps` then whitespace (`do` follows).
+        if (t.len > marker.len and (t[marker.len] == ' ' or t[marker.len] == '\t')) return true;
+    }
+    return false;
+}
+
+/// File-IO twin of `hasPostInstallStepsBlock`, mirroring
+/// `extractPostInstallBody`'s read contract. False on any IO failure —
+/// the caller only uses it to decide whether a skip deserves a warning.
+pub fn rbHasPostInstallSteps(io: std.Io, allocator: std.mem.Allocator, rb_path: []const u8) bool {
+    const file = std.Io.Dir.openFileAbsolute(io, rb_path, .{}) catch return false;
+    defer file.close(io);
+
+    const st = file.stat(io) catch return false;
+    const size: usize = @intCast(@min(@as(u64, max_formula_rb_bytes), st.size));
+    const source = allocator.alloc(u8, size) catch return false;
+    defer allocator.free(source);
+    const n = file.readPositionalAll(io, source, 0) catch return false;
+
+    return hasPostInstallStepsBlock(source[0..n]);
+}
+
 /// Extract the post_install method body + sibling helpers from a formula
 /// .rb source file. Thin file-IO wrapper around `extractPostInstallFromSource`
 /// so the parsing contract lives in one place.
@@ -450,6 +482,53 @@ test "extractPostInstallBody captures the body between def post_install and matc
     defer testing.allocator.free(body.?);
     try testing.expect(std.mem.indexOf(u8, body.?, "mkdir_p \"etc/hello\"") != null);
     try testing.expect(std.mem.indexOf(u8, body.?, "touch \"etc/hello/config\"") != null);
+}
+
+test "hasPostInstallStepsBlock detects a declarative steps block" {
+    // Steps-migrated formulas have no `def post_install`; detection is what
+    // lets the tap arm warn instead of silently dropping the hook.
+    try testing.expect(hasPostInstallStepsBlock(
+        \\class Glow < Formula
+        \\  post_install_steps do
+        \\    gdk_pixbuf_query_loaders
+        \\  end
+        \\end
+        \\
+    ));
+    try testing.expect(!hasPostInstallStepsBlock(
+        \\class Old < Formula
+        \\  def post_install
+        \\    ohai "hi"
+        \\  end
+        \\end
+        \\
+    ));
+    // Commented-out blocks and prefix-sharing identifiers must not count.
+    try testing.expect(!hasPostInstallStepsBlock("  # post_install_steps do\n"));
+    try testing.expect(!hasPostInstallStepsBlock("post_install_steps_helper do\n"));
+}
+
+test "rbHasPostInstallSteps reads the block from a formula .rb on disk" {
+    const io = testIo();
+    const tap = try uniqueDir(io, "steps_only");
+    defer testing.allocator.free(tap);
+    defer std.Io.Dir.cwd().deleteTree(io, tap) catch {};
+    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/glow.rb", .{tap});
+    defer testing.allocator.free(rb);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, rb, .{});
+        try f.writeStreamingAll(io,
+            \\class Glow < Formula
+            \\  post_install_steps do
+            \\    gdk_pixbuf_query_loaders
+            \\  end
+            \\end
+            \\
+        );
+        f.close(io);
+    }
+    try testing.expect(rbHasPostInstallSteps(io, testing.allocator, rb));
+    try testing.expect(!rbHasPostInstallSteps(io, testing.allocator, "/tmp/malt_ruby_missing_xyz.rb"));
 }
 
 test "fetchPostInstallFromGitHub returns null for an empty name" {

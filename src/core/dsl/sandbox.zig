@@ -93,10 +93,11 @@ pub fn fenceArgv(
     argv: []const []const u8,
     cellar_path: []const u8,
     malt_prefix: []const u8,
+    opts: macos.ProfileOpts,
 ) FenceError![]const []const u8 {
     if (builtin.os.tag != .macos or argv.len == 0) return argv;
 
-    const profile = macos.renderRubyProfile(allocator, cellar_path, malt_prefix) catch |e| switch (e) {
+    const profile = macos.renderRubyProfile(allocator, cellar_path, malt_prefix, opts) catch |e| switch (e) {
         // The renderer only allocates and validates: an alloc miss is OOM,
         // anything else (unsafe path) means we can't confine — fail closed.
         error.ProfileBuildFailed => return FenceError.OutOfMemory,
@@ -262,7 +263,7 @@ test "fenceArgv wraps argv under sandbox-exec with the keg/prefix profile" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const wrapped = try fenceArgv(arena.allocator(), &.{ "make", "install" }, "/opt/malt/Cellar/foo/1.0", "/opt/malt");
+    const wrapped = try fenceArgv(arena.allocator(), &.{ "make", "install" }, "/opt/malt/Cellar/foo/1.0", "/opt/malt", .{});
     try std.testing.expectEqualStrings("/usr/bin/sandbox-exec", wrapped[0]);
     try std.testing.expectEqualStrings("-p", wrapped[1]);
     try std.testing.expect(std.mem.indexOf(u8, wrapped[2], "(deny default)") != null);
@@ -274,7 +275,7 @@ test "fenceArgv wraps argv under sandbox-exec with the keg/prefix profile" {
 
 test "fenceArgv leaves empty argv untouched" {
     const empty: []const []const u8 = &.{};
-    const out = try fenceArgv(std.testing.allocator, empty, "/opt/malt/Cellar/foo/1.0", "/opt/malt");
+    const out = try fenceArgv(std.testing.allocator, empty, "/opt/malt/Cellar/foo/1.0", "/opt/malt", .{});
     try std.testing.expectEqual(@as(usize, 0), out.len);
 }
 
@@ -286,7 +287,7 @@ test "fenceArgv fails closed when the profile path is unsafe" {
     // spawn rather than running it unconfined.
     try std.testing.expectError(
         FenceError.PathSandboxViolation,
-        fenceArgv(arena.allocator(), &.{"make"}, "/opt/malt\"/evil", "/opt/malt"),
+        fenceArgv(arena.allocator(), &.{"make"}, "/opt/malt\"/evil", "/opt/malt", .{}),
     );
 }
 
@@ -296,7 +297,7 @@ test "fenceArgv maps a profile allocation failure to OutOfMemory" {
     // allocation — it must surface as OutOfMemory, not a sandbox violation.
     try std.testing.expectError(
         FenceError.OutOfMemory,
-        fenceArgv(std.testing.failing_allocator, &.{"make"}, "/opt/malt/Cellar/foo/1.0", "/opt/malt"),
+        fenceArgv(std.testing.failing_allocator, &.{"make"}, "/opt/malt/Cellar/foo/1.0", "/opt/malt", .{}),
     );
 }
 

@@ -85,7 +85,7 @@ fn makeJob(name: []const u8, version: []const u8, sha: []const u8) malt.install_
         .bottle_url = "",
         .is_dep = false,
         .keg_only = false,
-        .post_install_defined = false,
+        .wants_post_install = false,
         .formula_json = "",
         .cellar_type = ":any",
         .label_width = 0,
