@@ -30,10 +30,11 @@ const install_rb_parse_mod = @import("install/rb_parse.zig");
 const install_record_mod = @import("install/record.zig");
 const InstallError = install_record_mod.InstallError;
 const install_sink_mod = @import("install/sink.zig");
+const post_install_mod = @import("install/post_install.zig");
 const install_mod = @import("install.zig");
 const pin_mod = @import("pin.zig");
 
-const UpgradeFlag = enum { quiet, cask, formula, dry_run, force, pinned, isolate_deps };
+const UpgradeFlag = enum { quiet, cask, formula, dry_run, force, pinned, isolate_deps, use_system_ruby };
 
 const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     .{ "-q", .quiet },
@@ -48,6 +49,9 @@ const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     // Long-form alias matching the `--only-dependencies` / `--only-deps`
     // shape so the flag surface stays predictable.
     .{ "--isolate-dependencies", .isolate_deps },
+    // Recognised only to refuse it with a pointed message: a bare flag
+    // would widen the Ruby trust boundary to every outdated keg.
+    .{ "--use-system-ruby", .use_system_ruby },
 });
 
 /// True when this name should be skipped due to a user pin. Pure gate so
@@ -116,10 +120,21 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // `args` (process-lifetime), so no dup is needed.
     var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(allocator);
+    // Scoped opt-in for the post-install Ruby fallback, same contract as
+    // `migrate`: named kegs only, never a blanket flag.
+    var use_system_ruby_bare = false;
+    var use_system_ruby_scope: std.ArrayList([]const u8) = .empty;
+    defer use_system_ruby_scope.deinit(allocator);
 
     // StaticStringMap + exhaustive switch: every flag routes to a handler.
     for (args) |arg| {
-        if (upgrade_flag_map.get(arg)) |flag| switch (flag) {
+        if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
+            const list = arg["--use-system-ruby=".len..];
+            var it = std.mem.splitScalar(u8, list, ',');
+            while (it.next()) |n| {
+                if (n.len > 0) use_system_ruby_scope.append(allocator, n) catch return error.OutOfMemory;
+            }
+        } else if (upgrade_flag_map.get(arg)) |flag| switch (flag) {
             .quiet => output.setQuiet(true),
             .cask => cask_only = true,
             .formula => formula_only = true,
@@ -127,9 +142,15 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             .force => force = true,
             .pinned => pinned_only = true,
             .isolate_deps => isolate_deps = true,
+            .use_system_ruby => use_system_ruby_bare = true,
         } else if (arg.len > 0 and arg[0] != '-') {
             names.append(allocator, arg) catch return error.OutOfMemory;
         }
+    }
+
+    if (use_system_ruby_bare) {
+        output.err("a bare --use-system-ruby would apply to every outdated keg — name them: --use-system-ruby=<name>,...", .{});
+        return error.Aborted;
     }
 
     if (pinned_only) {
@@ -198,7 +219,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // suppressed in favour of one summary footer printed below.
         var tally: Tally = .{};
         if (!cask_only) {
-            upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, &tally) catch {
+            upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, &tally) catch {
                 any_failed = true;
             };
         }
@@ -215,7 +236,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // tally keeps each named package's per-package line and no footer.
         for (names.items) |name| {
             if (!cask_only and isFormulaInstalled(&db, name)) {
-                upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, null) catch {
+                upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, null) catch {
                     any_failed = true;
                     other_failed = true;
                 };
@@ -316,6 +337,7 @@ fn upgradeFormula(
     force: bool,
     audit_mode: bool,
     isolate_deps: bool,
+    use_system_ruby: []const []const u8,
     tally: ?*Tally,
 ) !void {
     // Honor pins before any network or filesystem work — the whole
@@ -531,6 +553,14 @@ fn upgradeFormula(
         // refcount is advisory; upgrade is already complete on disk.
         store.decrementRef(old.sha256) catch {};
     }
+
+    // Same post-install contract as `mt install`: the fresh keg's hook
+    // (declarative steps or Ruby body) runs against the new version, and
+    // the shipped CA bundle is re-linked for kegs that carry one.
+    if (formula.hasPostInstallHook()) {
+        post_install_mod.drive(ctx, allocator, name, formula.pkg_version, formula_json, prefix, use_system_ruby, null, install_sink_mod.terminal);
+    }
+    post_install_mod.provisionShippedCaBundle(ctx.io, prefix, name);
 
     output.success("{s} upgraded to {s}", .{ name, formula.pkg_version });
     if (tally) |t| t.upgraded += 1;
@@ -953,6 +983,7 @@ fn upgradeAllFormulas(
     force: bool,
     pinned_only: bool,
     isolate_deps: bool,
+    use_system_ruby: []const []const u8,
     tally: *Tally,
 ) !void {
     const sql: [:0]const u8 = if (pinned_only)
@@ -992,7 +1023,7 @@ fn upgradeAllFormulas(
     defer failed_names.deinit(allocator);
 
     for (names.items) |name| {
-        upgradeFormula(ctx, allocator, name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps, tally) catch {
+        upgradeFormula(ctx, allocator, name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby, tally) catch {
             failed_count += 1;
             tally.failed += 1;
             // failed_count is the authoritative counter; list is for UX only.

@@ -285,3 +285,29 @@ test "execute --dry-run on a fresh prefix without db dir exits silently" {
 
     try upgrade.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
 }
+
+test "execute refuses a bare --use-system-ruby" {
+    // A bare flag would widen the Ruby trust boundary to every outdated
+    // keg in one shot; upgrade only accepts the scoped form. Scratch
+    // prefix so no real prefix is ever touched, refusal or not.
+    var s = try Scratch.init(testing.allocator, "usr_bare");
+    defer s.deinit(testing.allocator);
+
+    quiet();
+    defer unquiet();
+    try testing.expectError(
+        error.Aborted,
+        upgrade.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--use-system-ruby"}),
+    );
+}
+
+test "execute accepts a scoped --use-system-ruby on an empty prefix" {
+    // Scope parsing must not disturb the empty-DB no-op contract; the
+    // scope only matters once a keg actually routes through post-install.
+    var s = try Scratch.init(testing.allocator, "usr_scope");
+    defer s.deinit(testing.allocator);
+
+    quiet();
+    defer unquiet();
+    try upgrade.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--use-system-ruby=wget,jq"});
+}

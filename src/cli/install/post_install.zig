@@ -11,6 +11,7 @@ const deps_mod = @import("../../core/deps.zig");
 const dsl = @import("../../core/dsl/root.zig");
 const formula_mod = @import("../../core/formula.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
+const steps_mod = @import("../../core/post_install_steps.zig");
 const sandbox = @import("../../core/sandbox/macos.zig");
 const output = @import("../../ui/output.zig");
 const download = @import("download.zig");
@@ -27,6 +28,13 @@ const OutputSink = sink_mod.OutputSink;
 /// non-null."
 pub fn extractRbPostInstallBody(io: std.Io, allocator: std.mem.Allocator, rb_path: []const u8) ?[]const u8 {
     return ruby_sub.extractPostInstallBody(io, allocator, rb_path);
+}
+
+/// Steps-migrated tap formulas carry a declarative `post_install_steps`
+/// block instead of `def post_install`; detect it so migrate can warn
+/// instead of silently dropping the hook.
+pub fn rbHasPostInstallSteps(io: std.Io, allocator: std.mem.Allocator, rb_path: []const u8) bool {
+    return ruby_sub.rbHasPostInstallSteps(io, allocator, rb_path);
 }
 
 /// Whether --use-system-ruby opts the named formula into the Ruby
@@ -424,6 +432,11 @@ pub fn drive(
     cache: ?*deps_mod.FormulaCache,
     sink: OutputSink,
 ) void {
+    // Steps-migrated formulas have no Ruby body to extract — the JSON steps
+    // are authoritative and already in hand, so this path goes first.
+    if (driveSteps(ctx, allocator, name, version_str, formula_json, prefix, use_system_ruby_list, cache, sink))
+        return;
+
     if (locateDslSource(ctx, allocator, name)) |src| {
         defer allocator.free(src);
         switch (executeDslPostInstall(
@@ -454,6 +467,59 @@ pub fn drive(
     } else {
         sink.warn("{s}: post_install skipped (use --use-system-ruby={s} or brew install {s})", .{ name, name, name });
     }
+}
+
+/// Native dispatch for formulas migrated to the declarative
+/// `post_install_steps` array. Returns true when the steps path owned the
+/// formula — executed (or loudly downgraded) and routed through the same
+/// outcome envelope as the DSL path. False means "no steps": the caller's
+/// Ruby-body pipeline still owns the formula.
+pub fn driveSteps(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    version_str: []const u8,
+    formula_json: []const u8,
+    prefix: []const u8,
+    use_system_ruby_list: []const []const u8,
+    cache: ?*deps_mod.FormulaCache,
+    sink: OutputSink,
+) bool {
+    var owned: ?formula_mod.Formula = null;
+    defer if (owned) |*f| f.deinit();
+
+    const has_steps: bool, const dsl_version: []const u8, const pkg_version: []const u8 = blk: {
+        if (cache) |c| {
+            const f = c.getOrParse(name, formula_json) catch return false;
+            break :blk .{ f.has_post_install_steps, f.version, f.pkg_version };
+        }
+        owned = formula_mod.parseFormula(allocator, formula_json) catch return false;
+        break :blk .{ owned.?.has_post_install_steps, owned.?.version, owned.?.pkg_version };
+    };
+    if (!has_steps) return false;
+
+    // Arena owns every resolved path and log detail until routing is done;
+    // the flog itself lives on the caller allocator like the DSL path.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var flog = dsl.FallbackLog.init(allocator);
+    defer flog.deinit();
+
+    const keg_path = std.fmt.allocPrint(arena.allocator(), "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch return false;
+    _ = steps_mod.execute(.{
+        .io = ctx.io,
+        .allocator = arena.allocator(),
+        .name = name,
+        .version = dsl_version,
+        .prefix = prefix,
+        .keg_path = keg_path,
+        .flog = &flog,
+        .suppress_child_stdout = output.isJson() or output.isNdjson(),
+        .environ = ctx.environ,
+    }, formula_json);
+
+    routePostInstallOutcome(ctx, allocator, name, version_str, prefix, &flog, use_system_ruby_list, sink);
+    return true;
 }
 
 /// Tap-fallback analog of `drive`: the post_install body has already

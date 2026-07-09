@@ -90,6 +90,12 @@ pub const Formula = struct {
     dependencies: []const []const u8,
     keg_only: bool,
     post_install_defined: bool,
+    /// True when the formula carries a non-empty declarative
+    /// `post_install_steps` array. Migrated formulas report
+    /// `post_install_defined: false`, so this is what keeps the
+    /// post-install gate open for them. The raw steps stay reachable
+    /// through the formula JSON already threaded to the install path.
+    has_post_install_steps: bool,
     /// Map storage is allocated through `_parsed.arena`; map keys and
     /// `BottleFile` string fields live in `_parsed`.
     bottle_files: ?std.json.ArrayHashMap(BottleFile),
@@ -106,6 +112,12 @@ pub const Formula = struct {
     /// Holds the parsed JSON tree. Must stay alive as long as the Formula
     /// is in use because string fields point into the JSON source buffer.
     _parsed: std.json.Parsed(std.json.Value),
+
+    /// True when installing must run a post-install phase — either the
+    /// imperative `def post_install` or the declarative steps array.
+    pub fn hasPostInstallHook(self: *const Formula) bool {
+        return self.post_install_defined or self.has_post_install_steps;
+    }
 
     pub fn deinit(self: *Formula) void {
         self._parsed.deinit();
@@ -220,6 +232,12 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
     const revision = getInt(root, "revision");
     const keg_only = getBool(root, "keg_only");
     const post_install_defined = getBool(root, "post_install_defined");
+    // The steps key is present (empty) on every formula; only a non-empty
+    // array marks a steps-migrated hook.
+    const has_post_install_steps = blk: {
+        const v = root.get("post_install_steps") orelse break :blk false;
+        break :blk v == .array and v.array.items.len > 0;
+    };
 
     // versions.stable -> version
     const version_str = blk: {
@@ -343,6 +361,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         .dependencies = dependencies,
         .keg_only = keg_only,
         .post_install_defined = post_install_defined,
+        .has_post_install_steps = has_post_install_steps,
         .bottle_files = bottle_files,
         .bottle_root_url = bottle_root_url,
         .oldnames = oldnames,
@@ -507,6 +526,42 @@ test "parseFormula rejects path separators in embedded name or version" {
     var f2 = try parseFormula(testing.allocator, nover);
     defer f2.deinit();
     try testing.expectEqualStrings("", f2.version);
+}
+
+test "parseFormula flags a formula migrated to post_install_steps" {
+    // Migrated formulas report post_install_defined=false and carry the
+    // hook in a declarative steps array; the steps are what must keep the
+    // install gate open, or post-install silently never runs.
+    const json =
+        \\{"name":"gdk-pixbuf","versions":{"stable":"2.44.3"},"post_install_defined":false,"post_install_steps":[{"type":"gdk_pixbuf_query_loaders"}]}
+    ;
+    var formula = try parseFormula(testing.allocator, json);
+    defer formula.deinit();
+    try testing.expect(!formula.post_install_defined);
+    try testing.expect(formula.has_post_install_steps);
+    try testing.expect(formula.hasPostInstallHook());
+}
+
+test "parseFormula ignores an empty post_install_steps array" {
+    // The key is present (empty) on every formula; ca-certificates ships
+    // post_install_defined=true with steps=[] — empty must not count.
+    const json =
+        \\{"name":"ca-certificates","versions":{"stable":"2026-07-01"},"post_install_defined":true,"post_install_steps":[]}
+    ;
+    var formula = try parseFormula(testing.allocator, json);
+    defer formula.deinit();
+    try testing.expect(!formula.has_post_install_steps);
+    try testing.expect(formula.hasPostInstallHook());
+}
+
+test "parseFormula treats an absent post_install_steps key as no hook" {
+    const json =
+        \\{"name":"plain","versions":{"stable":"1.0"},"post_install_defined":false}
+    ;
+    var formula = try parseFormula(testing.allocator, json);
+    defer formula.deinit();
+    try testing.expect(!formula.has_post_install_steps);
+    try testing.expect(!formula.hasPostInstallHook());
 }
 
 test "parseFormula releases every auxiliary allocation through deinit" {

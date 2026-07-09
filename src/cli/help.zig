@@ -160,6 +160,10 @@ const upgrade_help =
     \\                 out of <prefix>/bin and <prefix>/sbin. Existing kegs
     \\                 replay whatever they were already recorded with.
     \\                 `--isolate-dependencies` accepted as an alias.
+    \\  --use-system-ruby=<name>,...  Run post_install via the system Ruby
+    \\                 interpreter (experimental, sandboxed) for the named
+    \\                 kegs only. A bare `--use-system-ruby` is refused —
+    \\                 it would widen the trust boundary to every outdated keg.
     \\
 ;
 

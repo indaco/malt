@@ -56,7 +56,9 @@ pub const DownloadJob = struct {
     bottle_url: []const u8,
     is_dep: bool,
     keg_only: bool,
-    post_install_defined: bool,
+    /// Collapses `post_install_defined` and the declarative steps array:
+    /// either one must open the post-install gate.
+    wants_post_install: bool,
     formula_json: []const u8,
     /// Cellar type from bottle metadata (e.g. ":any", ":any_skip_relocation").
     /// Used to skip Mach-O patching for relocatable bottles.
@@ -390,7 +392,7 @@ pub fn collectFormulaJobs(
             .bottle_url = strs.bottle_url,
             .is_dep = true,
             .keg_only = dep_formula.keg_only,
-            .post_install_defined = dep_formula.post_install_defined,
+            .wants_post_install = dep_formula.hasPostInstallHook(),
             .formula_json = dep_json,
             .cellar_type = strs.cellar_type,
             .label_width = 0,
@@ -424,7 +426,7 @@ pub fn collectFormulaJobs(
         .bottle_url = main_strs.bottle_url,
         .is_dep = false,
         .keg_only = formula.keg_only,
-        .post_install_defined = formula.post_install_defined,
+        .wants_post_install = formula.hasPostInstallHook(),
         .formula_json = formula_json,
         .cellar_type = main_strs.cellar_type,
         .label_width = 0,
@@ -835,7 +837,7 @@ fn testJob(succeeded: bool) DownloadJob {
         .bottle_url = "",
         .is_dep = false,
         .keg_only = false,
-        .post_install_defined = false,
+        .wants_post_install = false,
         .formula_json = "",
         .cellar_type = "",
         .label_width = 0,

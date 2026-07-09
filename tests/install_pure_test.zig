@@ -1786,3 +1786,105 @@ test "invariant: defer fires on labelled break (FallbackLog no-leak)" {
     }
     try testing.expect(!leaked);
 }
+
+// ---------------------------------------------------------------------------
+// driveSteps — the native executor for formulas migrated to the declarative
+// `post_install_steps` array. The wiring contract: a steps formula is fully
+// handled here (executed + routed through the shared envelope), a stepless
+// formula falls through to the Ruby-DSL body path untouched.
+// ---------------------------------------------------------------------------
+
+fn runDriveSteps(
+    formula_json: []const u8,
+    prefix: []const u8,
+) !struct { handled: bool, out: []u8 } {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(testing.allocator);
+
+    color_mod.setForTest(false, false);
+    defer color_mod.setForTest(null, null);
+    const prior_quiet = output_mod.isQuiet();
+    output_mod.setQuiet(false);
+    defer output_mod.setQuiet(prior_quiet);
+
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    const dn = try devnullCtx();
+    defer closeDevnullCtx(dn.fd);
+
+    const handled = install_post_install.driveSteps(
+        &dn.ctx,
+        testing.allocator,
+        "glow",
+        "1.2.3",
+        formula_json,
+        prefix,
+        &.{},
+        null,
+        install_sink.terminal,
+    );
+    return .{ .handled = handled, .out = try buf.toOwnedSlice(testing.allocator) };
+}
+
+test "driveSteps executes a steps-migrated formula and routes 'completed'" {
+    const io = malt.app_ctx.debug_ctx.io;
+    var rand: [8]u8 = undefined;
+    io.random(&rand);
+    const hex = std.fmt.bytesToHex(rand, .lower);
+    const prefix = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_drivesteps_{s}", .{hex[0..]});
+    defer testing.allocator.free(prefix);
+    try std.Io.Dir.cwd().createDirPath(io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+
+    const json =
+        \\{"name":"glow","versions":{"stable":"1.2.3"},"post_install_defined":false,
+        \\ "post_install_steps":[{"type":"mkdir_p","path":{"base":"var","path":"log/glow"}}]}
+    ;
+    const r = try runDriveSteps(json, prefix);
+    defer testing.allocator.free(r.out);
+
+    try testing.expect(r.handled);
+    try testing.expect(std.mem.indexOf(u8, r.out, "post_install completed for glow") != null);
+
+    const made = try std.fmt.allocPrint(testing.allocator, "{s}/var/log/glow", .{prefix});
+    defer testing.allocator.free(made);
+    var dir = std.Io.Dir.openDirAbsolute(io, made, .{}) catch return error.TestUnexpectedResult;
+    dir.close(io);
+}
+
+test "driveSteps ignores formulas without steps so the Ruby body path still owns them" {
+    const json =
+        \\{"name":"glow","versions":{"stable":"1.2.3"},"post_install_defined":true,
+        \\ "post_install_steps":[]}
+    ;
+    const r = try runDriveSteps(json, "/tmp/malt_drivesteps_unused");
+    defer testing.allocator.free(r.out);
+
+    try testing.expect(!r.handled);
+    try testing.expectEqual(@as(usize, 0), r.out.len);
+}
+
+test "driveSteps routes unsupported step types to the loud partial skip" {
+    const io = malt.app_ctx.debug_ctx.io;
+    var rand: [8]u8 = undefined;
+    io.random(&rand);
+    const hex = std.fmt.bytesToHex(rand, .lower);
+    const prefix = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_drivesteps_{s}", .{hex[0..]});
+    defer testing.allocator.free(prefix);
+    try std.Io.Dir.cwd().createDirPath(io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+
+    // `move` is defined upstream but has no native runner yet — the
+    // canonical "known-shape, unsupported" case.
+    const json =
+        \\{"name":"glow","versions":{"stable":"1.2.3"},"post_install_defined":false,
+        \\ "post_install_steps":[{"type":"move","source":{"base":"var","path":"a"},"target":{"base":"var","path":"b"}}]}
+    ;
+    const r = try runDriveSteps(json, prefix);
+    defer testing.allocator.free(r.out);
+
+    try testing.expect(r.handled);
+    try testing.expect(std.mem.indexOf(u8, r.out, "partially skipped") != null);
+    try testing.expect(std.mem.indexOf(u8, r.out, "--use-system-ruby") != null);
+}
