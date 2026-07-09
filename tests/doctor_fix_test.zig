@@ -14,6 +14,7 @@ const fs_compat = test_io;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const store_mod = malt.store;
+const lock_mod = malt.lock;
 
 // macOS user-immutable flag: makes a directory undeletable (rmdir → EPERM)
 // even for root, so a blocked sweep is deterministic across environments.
@@ -610,4 +611,240 @@ test "executeFix: dangerous classes carry into the plan, not the safe set" {
     try testing.expectEqual(@as(usize, 0), outcome.plan.safe.count());
     try testing.expect(outcome.plan.manual.contains(.corrupt_database));
     try testing.expect(outcome.plan.manual.contains(.missing_kegs));
+}
+
+// ── serialization: mutating sweeps run only under malt.lock ──────────
+
+/// Create `<prefix>/db` and `<prefix>/bin`, plant one dangling symlink under
+/// bin, and return the lock path — the shared scaffold for the held-lock
+/// serialization tests. `lock_out` receives the `<prefix>/db/malt.lock` path.
+fn seedLockAndDanglingLink(prefix: []const u8, lock_out: *[256]u8) ![]const u8 {
+    const io = std.Options.debug_io;
+    var db_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(io, db_dir);
+
+    var bin_buf: [256]u8 = undefined;
+    const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
+    try fs_compat.makeDirAbsolute(io, bin_dir);
+    var bin = try fs_compat.openDirAbsolute(io, bin_dir, .{ .iterate = true });
+    defer bin.close(io);
+    try bin.symLink(io, "/tmp/malt-doctor-fix-held-target-dne", "ghost", .{});
+
+    return std.fmt.bufPrint(lock_out, "{s}/db/malt.lock", .{prefix});
+}
+
+test "executeFix: a live-held malt.lock blocks the broken-symlink sweep" {
+    // R-011: the prefix-mutating classes must not run while another process
+    // holds malt.lock — else `--fix` can delete an install's in-flight state.
+    // A live holder makes the sweep a clean skip; the identical call once the
+    // lock frees must remove the link. The acquire is the gate, so the round
+    // trip is the proof.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "held-lock");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var lock_buf: [256]u8 = undefined;
+    const lock_path = try seedLockAndDanglingLink(prefix, &lock_buf);
+
+    var bin_buf: [256]u8 = undefined;
+    const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // A synthetic live holder: our own process takes the lock.
+    var held = try lock_mod.LockFile.acquire(io, lock_path, 1000);
+
+    const skipped = fix.executeFix(
+        .{ .prefix = prefix, .io = io, .conditions = .{ .broken_symlink_count = 1 } },
+        false,
+    );
+    try testing.expectEqual(@as(u32, 0), skipped.broken_symlinks_removed);
+    try testing.expect(symlinkEntryExists(io, bin_dir, "ghost"));
+
+    // Free the lock; the identical call now sweeps the link away.
+    held.release(io);
+    const swept = fix.executeFix(
+        .{ .prefix = prefix, .io = io, .conditions = .{ .broken_symlink_count = 1 } },
+        false,
+    );
+    try testing.expectEqual(@as(u32, 1), swept.broken_symlinks_removed);
+    try testing.expect(!symlinkEntryExists(io, bin_dir, "ghost"));
+}
+
+test "executeFix: the held-lock skip carries a reason, not a silent no-op" {
+    // A live holder must read as "operation in progress", not a clean prefix:
+    // both mutating classes skip and the outcome names Timeout as the cause.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "skip-reason");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var lock_buf: [256]u8 = undefined;
+    const lock_path = try seedLockAndDanglingLink(prefix, &lock_buf);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var held = try lock_mod.LockFile.acquire(io, lock_path, 1000);
+    defer held.release(io);
+
+    const outcome = fix.executeFix(
+        .{ .prefix = prefix, .io = io, .conditions = .{ .orphan_store_count = 1, .broken_symlink_count = 1 } },
+        false,
+    );
+    try testing.expectEqual(@as(u32, 0), outcome.orphans_removed);
+    try testing.expectEqual(@as(u32, 0), outcome.broken_symlinks_removed);
+    try testing.expectEqual(lock_mod.LockError.Timeout, outcome.mutations_skipped.?);
+}
+
+test "acquire(timeout=0) on a held malt.lock times out at once (pins the executor's gate)" {
+    // The executor gates the sweeps with a single non-blocking pass. Pin that
+    // a live holder surfaces as Timeout immediately, so the timeout-0 choice
+    // can't silently regress into a wait.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "timeout0");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+    var lock_buf: [256]u8 = undefined;
+    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var held = try lock_mod.LockFile.acquire(io, lock_path, 1000);
+    defer held.release(io);
+    try testing.expectError(error.Timeout, lock_mod.LockFile.acquire(io, lock_path, 0));
+}
+
+test "executeFix: a prefix with no db/ dir reports the skip (DirMissing), never silently" {
+    // No db/ → nothing to serialize against, so the sweep is declined — but
+    // recorded, not silent, so the caller can say why (like every other
+    // declined mutation in the codebase).
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "no-db-dir");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var bin_buf: [256]u8 = undefined;
+    const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, bin_dir);
+    var bin = try fs_compat.openDirAbsolute(std.Options.debug_io, bin_dir, .{ .iterate = true });
+    defer bin.close(std.Options.debug_io);
+    try bin.symLink(std.Options.debug_io, "/tmp/malt-doctor-fix-nodb-target-dne", "ghost", .{});
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const outcome = fix.executeFix(
+        .{ .prefix = prefix, .io = io, .conditions = .{ .broken_symlink_count = 1 } },
+        false,
+    );
+    try testing.expectEqual(@as(u32, 0), outcome.broken_symlinks_removed);
+    try testing.expectEqual(lock_mod.LockError.DirMissing, outcome.mutations_skipped.?);
+    try testing.expect(symlinkEntryExists(io, bin_dir, "ghost"));
+}
+
+test "executeFix: an unwritable db/ dir surfaces the acquire failure, not a silent skip" {
+    // AccessDenied would read as "clean" if swallowed. It must reach the
+    // outcome so doctor can point the user at the ownership fix.
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "denied");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var lock_buf: [256]u8 = undefined;
+    _ = try seedLockAndDanglingLink(prefix, &lock_buf);
+
+    var db_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // No lock file yet + a mode-0 db/ → the acquire's create hits EACCES.
+    var db_dir_h = try fs_compat.openDirAbsolute(io, db_dir, .{});
+    defer db_dir_h.close(io);
+    try db_dir_h.setPermissions(io, std.Io.File.Permissions.fromMode(0));
+    // Restore so the prefix teardown can recurse in.
+    defer db_dir_h.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+
+    const outcome = fix.executeFix(
+        .{ .prefix = prefix, .io = io, .conditions = .{ .broken_symlink_count = 1 } },
+        false,
+    );
+    try testing.expectEqual(@as(u32, 0), outcome.broken_symlinks_removed);
+    try testing.expectEqual(lock_mod.LockError.AccessDenied, outcome.mutations_skipped.?);
+}
+
+test "executeFix: --dry-run never touches the lock, even while one is held" {
+    // The acquire sits after the dry_run early return, so a plan-only run must
+    // not contend the lock at all — no skip signal despite a live holder.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "dry-held");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var lock_buf: [256]u8 = undefined;
+    const lock_path = try seedLockAndDanglingLink(prefix, &lock_buf);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var held = try lock_mod.LockFile.acquire(io, lock_path, 1000);
+    defer held.release(io);
+
+    const outcome = fix.executeFix(
+        .{ .prefix = prefix, .io = io, .conditions = .{ .broken_symlink_count = 1 } },
+        true,
+    );
+    try testing.expectEqual(@as(u32, 0), outcome.fixesApplied());
+    try testing.expect(outcome.mutations_skipped == null);
+    try testing.expect(outcome.plan.safe.contains(.broken_symlinks));
+}
+
+test "executeFix: the lock policy keys off the class, not the invocation" {
+    // `--fix stale_lock` must not need the lock (repairing the lock can't
+    // require it); `--fix broken_symlinks` must still serialize. Prove both
+    // under one live holder.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "targeted");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var lock_buf: [256]u8 = undefined;
+    const lock_path = try seedLockAndDanglingLink(prefix, &lock_buf);
+
+    var bin_buf: [256]u8 = undefined;
+    const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var held = try lock_mod.LockFile.acquire(io, lock_path, 1000);
+    defer held.release(io);
+
+    // stale_lock target never reaches the acquire.
+    const s = fix.executeFix(
+        .{ .prefix = prefix, .io = io, .only = .stale_lock, .conditions = .{ .stale_lock = true } },
+        false,
+    );
+    try testing.expect(s.mutations_skipped == null);
+
+    // broken_symlinks target contends and skips, leaving the link intact.
+    const b = fix.executeFix(
+        .{ .prefix = prefix, .io = io, .only = .broken_symlinks, .conditions = .{ .broken_symlink_count = 1 } },
+        false,
+    );
+    try testing.expectEqual(lock_mod.LockError.Timeout, b.mutations_skipped.?);
+    try testing.expectEqual(@as(u32, 0), b.broken_symlinks_removed);
+    try testing.expect(symlinkEntryExists(io, bin_dir, "ghost"));
 }
