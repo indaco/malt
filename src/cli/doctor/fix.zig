@@ -372,6 +372,10 @@ pub const FixOutcome = struct {
     orphans_blocked: u32 = 0,
     orphans_block_reason: ?[]const u8 = null,
     broken_symlinks_removed: u32 = 0,
+    /// Why the prefix-mutating sweeps were skipped, when they were: `Timeout` =
+    /// a live op holds the lock; `DirMissing` = no db/ (nothing installed); the
+    /// acquire failures are surfaced by the caller.
+    mutations_skipped: ?lock_mod.LockError = null,
 
     pub fn fixesApplied(self: FixOutcome) u32 {
         var n: u32 = 0;
@@ -382,9 +386,28 @@ pub const FixOutcome = struct {
     }
 };
 
-/// Drive the safe-fix policy end-to-end. Pure of UI: the caller emits
-/// styled lines via the project's output helpers from the returned
-/// outcome. In `dry_run` mode no filesystem mutation happens.
+/// `stale_lock` is repaired without the lock (a dead holder has nothing to
+/// serialize against); the two prefix mutations must run behind `malt.lock`.
+fn requiresPrefixLock(kind: FixKind) bool {
+    return switch (kind) {
+        .stale_lock => false,
+        .orphaned_store, .broken_symlinks => true,
+    };
+}
+
+fn planNeedsPrefixLock(plan: Plan) bool {
+    var it = plan.safe.iterator();
+    while (it.next()) |kind| if (requiresPrefixLock(kind)) return true;
+    return false;
+}
+
+/// Non-blocking single pass: doctor-fix skips fast, never waits behind a
+/// live install (contrast uninstall's multi-second wait).
+const fix_lock_timeout_ms: u32 = 0;
+
+/// Drive the safe-fix policy end-to-end in three ordered steps. Pure of UI:
+/// the caller emits styled lines from the returned outcome. In `dry_run`
+/// mode no filesystem mutation happens.
 pub fn executeFix(ctx: FixCtx, dry_run: bool) FixOutcome {
     const conditions: Conditions = ctx.conditions orelse .{
         .stale_lock = probeStaleLock(ctx.io, ctx.prefix),
@@ -396,11 +419,30 @@ pub fn executeFix(ctx: FixCtx, dry_run: bool) FixOutcome {
     const plan = if (ctx.only) |kind| planFixes(conditions).onlySafe(kind) else planFixes(conditions);
 
     var outcome: FixOutcome = .{ .plan = plan };
+    // Early return keeps the acquire after it: `--fix --dry-run` never
+    // touches the lock.
     if (dry_run) return outcome;
 
+    // Step 1: reconcile the stale lock outside any held region — no acquire.
     if (plan.safe.contains(.stale_lock)) {
         outcome.stale_lock_removed = fixStaleLock(ctx.io, ctx.prefix);
     }
+
+    // Step 2: the prefix-mutating classes run only while `malt.lock` is held.
+    if (!planNeedsPrefixLock(plan)) return outcome;
+
+    var lock_buf: [512]u8 = undefined;
+    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{ctx.prefix}) catch return outcome;
+    // The acquire IS the gate — do NOT re-probe `operationInFlight` first,
+    // which would reopen the TOCTOU this closes.
+    var lock = lock_mod.LockFile.acquire(ctx.io, lock_path, fix_lock_timeout_ms) catch |e| {
+        // Any skip reason — live op, fresh prefix, or a real failure — is
+        // recorded so the caller reports it, never a silent no-op.
+        outcome.mutations_skipped = e;
+        return outcome;
+    };
+    defer lock.release(ctx.io);
+
     if (plan.safe.contains(.orphaned_store)) {
         const sweep = fixOrphanedStore(ctx.io, ctx.prefix);
         outcome.orphans_removed = sweep.count;
