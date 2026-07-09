@@ -1032,7 +1032,8 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
         var dir_iter = dir.iterate();
         while (dir_iter.next(ctx.io) catch null) |entry| {
             if (entry.kind == .sym_link) {
-                _ = dir.statFile(ctx.io, entry.name, .{}) catch {
+                _ = dir.statFile(ctx.io, entry.name, .{}) catch |err| {
+                    if (!fix_mod.isDanglingLinkError(err)) continue; // inaccessible ≠ missing
                     const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ subdir, entry.name }) catch continue;
                     offenders.append(ctx.allocator, path) catch {
                         ctx.allocator.free(path);
@@ -1574,6 +1575,48 @@ test "emitTapCacheReport: human one-liner when cache holds bytes" {
         "  > Tap archive cache: 256.0 B. Run: mt purge --cache\n",
         buf.items,
     );
+}
+
+test "checkBrokenSymlinks: an intact link with an inaccessible target is not reported" {
+    // Read side must agree with the fix walk — a link whose target sits
+    // behind a permission wall is live, so it is not "broken".
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bb: [std.fs.max_path_bytes]u8 = undefined;
+    const prefix = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+
+    var wb: [std.fs.max_path_bytes]u8 = undefined;
+    const walled = try std.fmt.bufPrint(&wb, "{s}/walled", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, walled);
+    var tb: [std.fs.max_path_bytes]u8 = undefined;
+    const target = try std.fmt.bufPrint(&tb, "{s}/keg", .{walled});
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, target, .{});
+        f.close(io);
+    }
+    var walled_dir = try std.Io.Dir.openDirAbsolute(io, walled, .{});
+    defer walled_dir.close(io);
+    try walled_dir.setPermissions(io, std.Io.File.Permissions.fromMode(0));
+    defer walled_dir.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+
+    var pb: [std.fs.max_path_bytes]u8 = undefined;
+    const bin = try std.fmt.bufPrint(&pb, "{s}/bin", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    var lb: [std.fs.max_path_bytes]u8 = undefined;
+    const link = try std.fmt.bufPrint(&lb, "{s}/wall", .{bin});
+    try std.Io.Dir.symLinkAbsolute(io, target, link, .{});
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    output.beginStderrCapture(allocator, &out);
+    defer output.endStderrCapture();
+
+    const ctx: CheckCtx = .{ .allocator = allocator, .prefix = prefix, .io = io, .environ = .empty };
+    try testing.expectEqual(CheckResult.ok, checkBrokenSymlinks(ctx, "Broken symlinks"));
 }
 
 test "checks table includes the mirror-overrides row" {
