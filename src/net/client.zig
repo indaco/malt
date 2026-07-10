@@ -19,6 +19,24 @@ pub const DownloadError = error{
     OfflineRequired,
 };
 
+/// Explicit error set for the streaming GET (`getToWriter`). Net is a leaf
+/// (Rule U1), so it returns a typed set the caller `switch`es on rather than
+/// leaking std.http's inferred errors. Transport-level failures
+/// (connect / TLS / reading the head) collapse to `RequestFailed`; by the time
+/// one escapes, the retry loop has already exhausted its attempts.
+pub const GetError = error{
+    OfflineRequired,
+    RequestFailed,
+    TlsDowngradeRefused,
+    TooManyHttpRedirects,
+    HttpRedirectInvalid,
+    ResponseTooLarge,
+    ReadFailed,
+    WatchdogSpawnFailed,
+    Canceled,
+    OutOfMemory,
+};
+
 pub const DownloadDiagnostic = struct {
     status: ?u16,
     url: []const u8,
@@ -436,6 +454,23 @@ pub const HttpClient = struct {
         return self.doGetWithRetry(url, extra_headers, max_blob_bytes, progress);
     }
 
+    /// Streaming sibling of `getWithHeaders`: drains a 200 body straight into
+    /// `sink` and returns only the status — no full-size body buffer. Non-200
+    /// bodies go to a bounded throwaway so `sink` stays pristine until the
+    /// response is definitively good, and a mid-200-stream failure is returned
+    /// (never retried) so the single-use `sink` is written at most once. Net is
+    /// a leaf, so the error set is explicit (Rule U1).
+    pub fn getToWriter(
+        self: *HttpClient,
+        url: []const u8,
+        extra_headers: []const std.http.Header,
+        sink: *std.Io.Writer,
+        progress: ?ProgressCallback,
+    ) GetError!u16 {
+        if (self.offline) return error.OfflineRequired;
+        return self.doGetToWriterWithRetry(url, extra_headers, sink, progress);
+    }
+
     /// Perform a HEAD request and return only the HTTP status code.
     pub fn head(self: *HttpClient, url: []const u8) !u16 {
         if (self.offline) return error.OfflineRequired;
@@ -644,24 +679,25 @@ pub const HttpClient = struct {
         return self.doGetWithRetry(url, extra_headers, max_metadata_bytes, null);
     }
 
-    /// Read a response body with the same decompress + idle/total
-    /// watchdog + size cap that the legacy `doGetLimited` path uses.
-    /// Both the generic GET and the conditional GET converge here so
-    /// the single transport policy is enforced in one place — only the
-    /// `total_timeout_ns` differs between callers (blob downloads scale
-    /// it from `content_length`; metadata reads pin it to `self.timeout_ns`).
-    fn readResponseBody(
+    /// Stream a response body into a caller-provided `sink` with the same
+    /// decompress + idle/total watchdog + size cap the buffer path uses. The
+    /// watchdog's spawn/join wraps the streaming call so a stalled sink is
+    /// still killed. Both the generic GET and the conditional GET converge here
+    /// so the single transport policy lives in one place — only the
+    /// `total_timeout_ns` differs between callers (blob downloads scale it from
+    /// `content_length`; metadata reads pin it to `self.timeout_ns`). The sink
+    /// is single-use: on error it holds whatever bytes already arrived and net
+    /// never rewinds it.
+    fn streamResponseBody(
         self: *HttpClient,
         req: *std.http.Client.Request,
         response: *std.http.Client.Response,
+        sink: *std.Io.Writer,
         max_bytes: usize,
         progress: ?ProgressCallback,
         total_timeout_ns: u64,
-    ) !([]const u8) {
+    ) !void {
         const content_length: ?u64 = response.head.content_length;
-
-        var body_writer: std.Io.Writer.Allocating = .init(self.allocator);
-        errdefer body_writer.deinit();
 
         const decompress_buffer: []u8 = switch (response.head.content_encoding) {
             .identity => &.{},
@@ -675,7 +711,7 @@ pub const HttpClient = struct {
         var body_reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
 
         var counting = CountingWriter{
-            .inner = &body_writer.writer,
+            .inner = sink,
             .bytes_written = std.atomic.Value(u64).init(0),
             .max_bytes = max_bytes,
             .limit_exceeded = false,
@@ -713,7 +749,22 @@ pub const HttpClient = struct {
         };
 
         if (counting.limit_exceeded) return error.ResponseTooLarge;
+    }
 
+    /// Buffer wrapper over `streamResponseBody`: supplies its own `Allocating`
+    /// writer so every existing metadata/JSON/blob GET keeps returning an owned
+    /// slice, byte-for-byte unchanged by the sink split.
+    fn readResponseBody(
+        self: *HttpClient,
+        req: *std.http.Client.Request,
+        response: *std.http.Client.Response,
+        max_bytes: usize,
+        progress: ?ProgressCallback,
+        total_timeout_ns: u64,
+    ) !([]const u8) {
+        var body_writer: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer body_writer.deinit();
+        try self.streamResponseBody(req, response, &body_writer.writer, max_bytes, progress, total_timeout_ns);
         return try body_writer.toOwnedSlice();
     }
 
@@ -946,6 +997,122 @@ pub const HttpClient = struct {
             .body = out.body,
             .allocator = self.allocator,
         };
+    }
+
+    /// Streaming counterpart of `doGetWithRetry`: threads `sink` through and
+    /// returns status only. The pre-body retry (transient status, transport
+    /// failure) still fires because the sink is untouched until a 200 body
+    /// starts draining — `followGetToWriter` flips `sink_committed` at that
+    /// point, and once it is set a mid-stream failure is surfaced, never
+    /// retried, keeping the sink single-use.
+    fn doGetToWriterWithRetry(
+        self: *HttpClient,
+        url: []const u8,
+        extra_headers: []const std.http.Header,
+        sink: *std.Io.Writer,
+        progress: ?ProgressCallback,
+    ) GetError!u16 {
+        var attempt: usize = 0;
+        while (true) {
+            var sink_committed = false;
+            const result = self.followGetToWriter(url, extra_headers, sink, progress, &sink_committed);
+            if (result) |status| {
+                if (classifyStatus(status)) |dl_err| {
+                    if (isTransientError(dl_err) and attempt < max_retries) {
+                        try self.retrySleep(attempt);
+                        attempt += 1;
+                        continue;
+                    }
+                }
+                return status;
+            } else |err| {
+                // Past the 200 commit the sink holds partial bytes and cannot
+                // be rewound, so the caller owns recovery: surface the error
+                // instead of retrying into a dirty sink.
+                if (sink_committed) return err;
+                if (attempt < max_retries) {
+                    try self.retrySleep(attempt);
+                    attempt += 1;
+                    continue;
+                }
+                return err;
+            }
+        }
+    }
+
+    /// Redirect-following streaming GET (mirrors `followGet`, minus the etag
+    /// capture and the owned-slice return). A 200 body streams into `sink`
+    /// after `sink_committed` is set; any non-200 body drains into a bounded
+    /// discard so status classification and connection reuse behave as on the
+    /// buffer path while `sink` stays pristine.
+    fn followGetToWriter(
+        self: *HttpClient,
+        url: []const u8,
+        creds: []const std.http.Header,
+        sink: *std.Io.Writer,
+        progress: ?ProgressCallback,
+        sink_committed: *bool,
+    ) GetError!u16 {
+        var current: []const u8 = self.allocator.dupe(u8, url) catch return error.OutOfMemory;
+        defer self.allocator.free(current);
+        var live_creds = creds;
+        var hops: usize = 0;
+
+        while (true) : (hops += 1) {
+            const uri = std.Uri.parse(current) catch return error.RequestFailed;
+            const https_origin = schemeIsHttps(uri.scheme);
+
+            var req = self.client.request(.GET, uri, .{
+                .extra_headers = live_creds,
+                .redirect_behavior = .unhandled,
+            }) catch return error.RequestFailed;
+            errdefer req.deinit();
+
+            req.sendBodiless() catch return error.RequestFailed;
+            var redirect_buf: [32 * 1024]u8 = undefined;
+            var response = req.receiveHead(&redirect_buf) catch return error.RequestFailed;
+            const status: u16 = @intFromEnum(response.head.status);
+
+            if (isFollowableRedirect(status)) {
+                const loc = response.head.location orelse return error.HttpRedirectInvalid;
+                if (hops >= max_get_redirects) return error.TooManyHttpRedirects;
+                const next = self.resolveRedirectUrl(uri, loc) catch |e| switch (e) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.HttpRedirectInvalid,
+                };
+                errdefer self.allocator.free(next);
+                const next_uri = std.Uri.parse(next) catch return error.HttpRedirectInvalid;
+                if (https_origin and !schemeIsHttps(next_uri.scheme))
+                    return error.TlsDowngradeRefused;
+                if (!credsSurviveRedirect(current, next)) live_creds = &.{};
+                req.deinit();
+                self.allocator.free(current);
+                current = next;
+                continue;
+            }
+
+            const total_timeout = @max(blob_timeout_ns, scaledTimeoutNs(response.head.content_length));
+
+            if (status == 200) {
+                // Commit point: past here a transport failure must not retry.
+                sink_committed.* = true;
+                try self.streamResponseBody(&req, &response, sink, max_blob_bytes, progress, total_timeout);
+                req.deinit();
+                return status;
+            }
+
+            // Non-200: drain the error body into a bounded discard so status
+            // classification / pre-body retry behave as on the buffer path and
+            // the pooled connection stays reusable — all while `sink` is left
+            // untouched.
+            // Zero-length buffer: `CountingWriter` sits on top and delegates
+            // every write straight to `drain`, so the discard never buffers.
+            var discard_buf: [0]u8 = undefined;
+            var discarding: std.Io.Writer.Discarding = .init(&discard_buf);
+            try self.streamResponseBody(&req, &response, &discarding.writer, max_metadata_bytes, null, self.timeout_ns);
+            req.deinit();
+            return status;
+        }
     }
 
     /// On a fired deadline (or cancellation), shuts down the request's

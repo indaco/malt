@@ -46,15 +46,19 @@ test "AppCtx-built-without-env defaults to online" {
 
 // ── HttpClient composition: every public entrypoint refuses ──────────
 
-test "HttpClient.get / getWithHeaders / head / headResolved all refuse offline" {
+test "HttpClient.get / getWithHeaders / getToWriter / head / headResolved all refuse offline" {
     // One-stop pinning so adding a new gated entrypoint without wiring
     // it lands here as a fresh test red.
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
     http.offline = true;
 
+    var discard_buf: [0]u8 = undefined;
+    var sink: std.Io.Writer.Discarding = .init(&discard_buf);
+
     try testing.expectError(error.OfflineRequired, http.get("https://example.invalid/x"));
     try testing.expectError(error.OfflineRequired, http.getWithHeaders("https://example.invalid/x", &.{}, null));
+    try testing.expectError(error.OfflineRequired, http.getToWriter("https://example.invalid/x", &.{}, &sink.writer, null));
     try testing.expectError(error.OfflineRequired, http.head("https://example.invalid/x"));
     try testing.expectError(error.OfflineRequired, http.headResolved("https://example.invalid/x"));
 }
