@@ -48,8 +48,15 @@ pub const MismatchInfo = struct {
 pub fn checkBottleSha(expected: []const u8, body: []const u8) ?MismatchInfo {
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(body, &hash, .{});
-    const computed_hex = std.fmt.bytesToHex(hash, .lower);
+    return checkStreamedSha(expected, std.fmt.bytesToHex(hash, .lower), body.len);
+}
 
+/// Slice-free twin of `checkBottleSha`: given a pre-computed 64-hex-char
+/// digest (e.g. from the streaming tee, where no `body` slice survives to
+/// re-hash) and the byte count, returns null on match or the same
+/// `MismatchInfo` as the slice path. Owning the compare + diagnostic here
+/// keeps that decision defined once for both the in-RAM and streamed paths.
+pub fn checkStreamedSha(expected: []const u8, computed_hex: [64]u8, body_len: u64) ?MismatchInfo {
     // Constant-time compare — deny a byte-by-byte timing oracle against
     // the expected hash.
     if (hash_mod.constantTimeEql(u8, &computed_hex, expected)) return null;
@@ -57,7 +64,7 @@ pub fn checkBottleSha(expected: []const u8, body: []const u8) ?MismatchInfo {
     var info: MismatchInfo = .{
         .expected = undefined,
         .computed = computed_hex,
-        .body_len = body.len,
+        .body_len = body_len,
     };
     // Real bottle SHAs are exactly 64 hex chars; pad with NULs if the
     // caller handed us a shorter slice so the diagnostic is still safe
@@ -399,4 +406,66 @@ test "checkBottleSha computed hash is always lowercase hex" {
         const ok = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
         try std.testing.expect(ok);
     }
+}
+
+test "checkStreamedSha returns null when computed matches expected" {
+    const expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+    var computed: [64]u8 = undefined;
+    @memcpy(&computed, expected);
+    try std.testing.expect(checkStreamedSha(expected, computed, 11) == null);
+}
+
+test "checkStreamedSha carries computed and a 400MB body_len into MismatchInfo" {
+    const expected = "0000000000000000000000000000000000000000000000000000000000000000";
+    var computed: [64]u8 = undefined;
+    @memcpy(&computed, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+    const big_len: u64 = 400 * 1024 * 1024;
+    const info = checkStreamedSha(expected, computed, big_len) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings(&computed, &info.computed);
+    try std.testing.expectEqual(big_len, info.body_len);
+    try std.testing.expectEqualStrings(expected, info.expected[0..64]);
+}
+
+test "checkStreamedSha agrees with checkBottleSha for the same body (delegation equivalence)" {
+    const body = "hello world";
+    var h: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(body, &h, .{});
+    const computed = std.fmt.bytesToHex(h, .lower);
+
+    const good = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+    try std.testing.expectEqual(
+        checkBottleSha(good, body) == null,
+        checkStreamedSha(good, computed, body.len) == null,
+    );
+
+    const wrong = "0000000000000000000000000000000000000000000000000000000000000000";
+    const a = checkBottleSha(wrong, body) orelse return error.TestUnexpectedNull;
+    const b = checkStreamedSha(wrong, computed, body.len) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings(&a.computed, &b.computed);
+    try std.testing.expectEqualStrings(&a.expected, &b.expected);
+    try std.testing.expectEqual(a.body_len, b.body_len);
+}
+
+test "checkStreamedSha tolerates empty and oversized expected without crashing" {
+    var computed: [64]u8 = undefined;
+    @memset(&computed, 'a');
+
+    const empty_info = checkStreamedSha("", computed, 1) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(u64, 1), empty_info.body_len);
+    for (empty_info.expected) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+
+    const long_info = checkStreamedSha("b" ** 128, computed, 1) orelse return error.TestUnexpectedNull;
+    for (long_info.expected) |byte| try std.testing.expectEqual(@as(u8, 'b'), byte);
+}
+
+test "checkStreamedSha NUL-pads a shorter-than-64 expected in the echo" {
+    // Interior padding: some caller bytes copied, the tail zeroed — the
+    // branch the empty (n=0) and oversized (n=64) cases don't reach.
+    var computed: [64]u8 = undefined;
+    @memset(&computed, 'a');
+    const short = "c" ** 32;
+    const info = checkStreamedSha(short, computed, 7) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(u64, 7), info.body_len);
+    try std.testing.expectEqualStrings(short, info.expected[0..32]);
+    for (info.expected[32..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
