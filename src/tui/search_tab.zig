@@ -76,6 +76,9 @@ pub const State = struct {
     view: View = .results,
 };
 
+/// Search runs synchronously on demand; it never background-fetches.
+pub const fetch_spec: ?tab.FetchSpec = null;
+
 /// One basket row the shell hands the leaf: a borrowed `(name, kind)`. The bytes
 /// are owned (and freed) by the shell-owned set; the leaf renders them (scrubbed)
 /// and reads them to name a removal — never interprets or frees them.

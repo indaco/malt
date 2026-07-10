@@ -71,6 +71,9 @@ pub const State = struct {
     request: Request = .none,
 };
 
+/// Installed reads synchronously from the DB; it never background-fetches.
+pub const fetch_spec: ?tab.FetchSpec = null;
+
 pub fn title() []const u8 {
     return "Installed";
 }

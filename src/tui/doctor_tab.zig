@@ -37,6 +37,9 @@ pub const State = struct {
     request: Request = .none,
 };
 
+/// Doctor audits in the background; it exits by severity, so it tolerates ≤2.
+pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{"doctor"}, .max_ok_exit = 2, .refresh_op = "doctor refresh failed" };
+
 pub fn title() []const u8 {
     return "Doctor";
 }

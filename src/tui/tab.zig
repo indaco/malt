@@ -27,6 +27,17 @@ pub const Chrome = struct {
     view: scroll_list.View = .{},
 };
 
+/// A background tab's `--json` audit descriptor, declared beside the tab instead
+/// of hand-switched in the shell: the `mt` subcommand `verb`, the exit tolerance
+/// (Doctor exits by severity while still emitting findings, so it tolerates ≤2
+/// where the others require a clean 0), and the `refresh_op` banner wording a
+/// failed refresh shows. `null` for a tab that does not background-fetch.
+pub const FetchSpec = struct {
+    verb: []const []const u8,
+    max_ok_exit: u8,
+    refresh_op: []const u8,
+};
+
 /// A bounded frame-byte appender. Writes stop at the buffer end (the frame is
 /// truncated, never overflows) — same discipline as `layout.render`.
 pub const Frame = struct {
@@ -166,12 +177,17 @@ pub fn verify(comptime M: type) void {
     for ([_][]const u8{ "title", "footerHint", "step", "render" }) |decl| {
         if (!@hasDecl(M, decl)) @compileError(@typeName(M) ++ ": tab must expose `pub fn " ++ decl ++ "`");
     }
+    // A tab declares its background-fetch capability as data, read generically by
+    // the shell; `null` for a synchronous tab. Total coverage, no runtime switch.
+    if (!@hasDecl(M, "fetch_spec")) @compileError(@typeName(M) ++ ": tab must expose `pub const fetch_spec: ?FetchSpec`");
+    if (@TypeOf(M.fetch_spec) != ?FetchSpec) @compileError(@typeName(M) ++ ".fetch_spec must be `?FetchSpec`");
 }
 
 // ─── tests ───────────────────────────────────────────────────────────
 
 const GoodTab = struct {
     pub const State = struct { chrome: Chrome = .{} };
+    pub const fetch_spec: ?FetchSpec = null;
     pub fn title() []const u8 {
         return "Good";
     }
