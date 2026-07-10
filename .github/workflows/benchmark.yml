@@ -88,11 +88,13 @@ jobs:
           | zerobrew | ${{ steps.tree.outputs.zb_size }} |
 
           ### Cold Install (median ±σ)
-          | Package | malt | nanobrew | zerobrew | Homebrew |
+          | Package | malt ${{ steps.tree.outputs.mt_ver }} | nanobrew ${{ steps.tree.outputs.nb_ver }} | zerobrew ${{ steps.tree.outputs.zb_ver }} | Homebrew |
           |---------|------|----------|----------|----------|
           | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold_disp }} | ${{ steps.tree.outputs.nb_cold_disp }} | ${{ steps.tree.outputs.zb_cold_disp }} | ${{ steps.tree.outputs.brew_cold_disp }} |
           | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold_disp }} | ${{ steps.wget.outputs.nb_cold_disp }} | ${{ steps.wget.outputs.zb_cold_disp }} | ${{ steps.wget.outputs.brew_cold_disp }} |
           | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold_disp }} | ${{ steps.ffmpeg.outputs.nb_cold_disp }} | ${{ steps.ffmpeg.outputs.zb_cold_disp }} | ${{ steps.ffmpeg.outputs.brew_cold_disp }} |
+
+          **Benchmarked releases:** malt `${{ steps.tree.outputs.mt_ver }}`, nanobrew `${{ steps.tree.outputs.nb_ver }}`, zerobrew `${{ steps.tree.outputs.zb_ver }}` (peer tools pinned to their latest release tag).
 
           ### Warm Install
           | Package | malt | nanobrew | zerobrew |
@@ -128,7 +130,7 @@ jobs:
           <!-- BENCH:COLD:START -->
           ### Cold Install (median ±σ)
 
-          | Package | malt | nanobrew | zerobrew | Homebrew |
+          | Package | malt ${{ steps.tree.outputs.mt_ver }} | nanobrew ${{ steps.tree.outputs.nb_ver }} | zerobrew ${{ steps.tree.outputs.zb_ver }} | Homebrew |
           | ------- | ---- | -------- | -------- | -------- |
           | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold_disp }} | ${{ steps.tree.outputs.nb_cold_disp }} | ${{ steps.tree.outputs.zb_cold_disp }} | ${{ steps.tree.outputs.brew_cold_disp }} |
           | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold_disp }} | ${{ steps.wget.outputs.nb_cold_disp }} | ${{ steps.wget.outputs.zb_cold_disp }} | ${{ steps.wget.outputs.brew_cold_disp }} |

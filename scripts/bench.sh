@@ -110,6 +110,16 @@ BENCH_ROUNDS="${BENCH_ROUNDS:-5}"
 # malt-today against peer-tool-from-weeks-ago. Set to 1 for offline/reproducible
 # runs that must use whatever is already checked out.
 BENCH_SKIP_UPDATE="${BENCH_SKIP_UPDATE:-0}"
+# Cold-median sanity ceiling (seconds). A peer tool's cold install that
+# exceeds this is treated as a regression in *their* tool, not a real
+# comparison number: the offending cell is omitted from the published
+# table (loud ⚠️ marker + a GitHub warning annotation) instead of
+# silently rewriting the README with garbage. The guard deliberately
+# skips malt itself — a genuinely slow malt install must stay visible,
+# not be hidden. Set to 0 to disable. See build_nanobrew/finalize_results.
+# Default 50s: comfortably above the legitimate range (peer colds top out
+# around 8–9s) yet far below the pathological 90–130s regression spikes.
+BENCH_MAX_COLD="${BENCH_MAX_COLD:-50}"
 case "$BENCH_ROUNDS" in
 '' | *[!0-9]*)
   printf '✗ BENCH_ROUNDS must be a positive integer (got: %s)\n' "$BENCH_ROUNDS" >&2
@@ -239,10 +249,49 @@ get_result() {
 
 # --- build steps -------------------------------------------------------------
 
+# pick_latest_tag — read `git ls-remote --tags` lines (or bare tag names) on
+# stdin and print the highest stable vX.Y.Z tag. Strips the `refs/tags/`
+# prefix and the peeled `^{}` suffix, drops pre-release tags (anything with a
+# `-suffix`), and version-sorts so v0.1.201 wins over v0.1.99. Pure/offline —
+# unit-tested via scripts/test/bench_release_resolution_test.sh.
+pick_latest_tag() {
+  sed 's|.*refs/tags/||; s|\^{}$||' |
+    grep -E '^v[0-9]+(\.[0-9]+)*$' |
+    sort -V |
+    tail -1
+}
+
+# latest_release_tag <git-url> — resolve the latest stable release tag of a
+# remote without a GitHub token (git ls-remote, no API rate limit). Highest
+# semver tag is used as the "latest release" proxy: for the peer tools we
+# bench it matches GitHub's marked latest release. Empty on network failure —
+# callers fall back to the checked-out revision.
+latest_release_tag() {
+  git ls-remote --tags "$1" 'v*' 2>/dev/null | pick_latest_tag
+}
+
+# over_threshold <value> <threshold> — true (exit 0) only when value is a
+# finite number strictly greater than threshold. Non-numeric (FAIL/empty) or a
+# zero/empty threshold (guard disabled) is never "over". Float-safe via awk.
+over_threshold() {
+  local val="$1" thr="$2"
+  [ -n "$thr" ] && [ "$thr" != "0" ] || return 1
+  case "$val" in '' | *[!0-9.]*) return 1 ;; esac
+  awk -v v="$val" -v t="$thr" 'BEGIN { exit !(v + 0 > t + 0) }'
+}
+
+# gha_warning <msg> — emit a GitHub Actions warning annotation on stdout so a
+# peer-tool regression is loud in the run UI. No-op outside Actions.
+gha_warning() {
+  [ -n "${GITHUB_OUTPUT:-}" ] || return 0
+  printf '::warning title=Benchmark anomaly::%s\n' "$1"
+}
+
 build_malt() {
   info "prefixes: malt=$MALT_BENCH_PREFIX nb=$NB_BENCH_PREFIX zb=$ZB_BENCH_PREFIX (BENCH_TRUE_COLD=$BENCH_TRUE_COLD)"
   if [ "$SKIP_BUILD" = "1" ] && [ -x "$MALT_BIN" ]; then
     info "skip build malt (SKIP_BUILD=1, binary present)"
+    set_result ver_mt "$(malt_version)"
     return
   fi
   need zig
@@ -255,26 +304,51 @@ build_malt() {
     err "build did not produce $MALT_BIN"
   fi
   "$MALT_BIN" --version >&2
+  set_result ver_mt "$(malt_version)"
+}
+
+# malt_version — semver token from `malt --version` (e.g. "0.9.3"), for the
+# table header. Empty if malt can't report one; the header just omits it.
+malt_version() {
+  "$MALT_BIN" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^ ]*' | head -1
 }
 
 build_nanobrew() {
-  if [ "$SKIP_BUILD" = "1" ] && [ -x "$NB_BIN" ]; then return; fi
+  local url="https://github.com/justrach/nanobrew.git"
+  if [ "$SKIP_BUILD" = "1" ] && [ -x "$NB_BIN" ]; then
+    set_result ver_nb "$(git -C "$NB_DIR" describe --tags --always 2>/dev/null || true)"
+    return
+  fi
   need git
   need zig
   info "build nanobrew (prefix $NB_BENCH_PREFIX)"
+  # Pin to the latest *release* tag rather than HEAD, so a mid-development
+  # commit (or a peer-tool regression that only landed on HEAD) can't
+  # silently rewrite the published table. Resolved tokenlessly via ls-remote.
+  local tag=""
+  [ "$BENCH_SKIP_UPDATE" = "1" ] || tag=$(latest_release_tag "$url")
   if [ ! -d "$NB_DIR/.git" ]; then
-    git clone --depth 1 https://github.com/justrach/nanobrew.git "$NB_DIR"
+    if [ -n "$tag" ]; then
+      git clone --depth 1 --branch "$tag" "$url" "$NB_DIR"
+    else
+      git clone --depth 1 "$url" "$NB_DIR"
+    fi
   elif [ "$BENCH_SKIP_UPDATE" = "1" ]; then
     # Offline mode: discard any prior in-place sed patch so we re-apply
     # for the current NB_BENCH_PREFIX (idempotent across runs even if
     # the value changed), but don't hit the network.
     git -C "$NB_DIR" checkout -- src
-  else
-    info "updating nanobrew source (BENCH_SKIP_UPDATE=1 to skip)"
-    git -C "$NB_DIR" fetch --depth 1 origin HEAD
+  elif [ -n "$tag" ]; then
+    info "pinning nanobrew to latest release $tag (BENCH_SKIP_UPDATE=1 to skip)"
+    git -C "$NB_DIR" fetch --depth 1 origin "$tag"
     # reset --hard also wipes any prior sed patch — no separate checkout needed.
     git -C "$NB_DIR" reset --hard FETCH_HEAD
+  else
+    warn "could not resolve nanobrew latest release tag — falling back to HEAD"
+    git -C "$NB_DIR" fetch --depth 1 origin HEAD
+    git -C "$NB_DIR" reset --hard FETCH_HEAD
   fi
+  set_result ver_nb "${tag:-$(git -C "$NB_DIR" describe --tags --always 2>/dev/null || true)}"
   # nanobrew has no prefix env var — its paths are compile-time constants in
   # src/platform/paths.zig and several call sites. Replace `/opt/nanobrew`
   # everywhere under src/ before building.
@@ -287,17 +361,35 @@ build_nanobrew() {
 }
 
 build_zerobrew() {
-  if [ "$SKIP_BUILD" = "1" ] && [ -x "$ZB_BIN" ]; then return; fi
+  local url="https://github.com/lucasgelfond/zerobrew.git"
+  if [ "$SKIP_BUILD" = "1" ] && [ -x "$ZB_BIN" ]; then
+    set_result ver_zb "$(git -C "$ZB_DIR" describe --tags --always 2>/dev/null || true)"
+    return
+  fi
   need git
   need cargo
   info "build zerobrew (root $ZB_BENCH_PREFIX)"
+  # Pin to the latest release tag, same rationale as build_nanobrew.
+  local tag=""
+  [ "$BENCH_SKIP_UPDATE" = "1" ] || tag=$(latest_release_tag "$url")
   if [ ! -d "$ZB_DIR/.git" ]; then
-    git clone --depth 1 https://github.com/lucasgelfond/zerobrew.git "$ZB_DIR"
-  elif [ "$BENCH_SKIP_UPDATE" != "1" ]; then
-    info "updating zerobrew source (BENCH_SKIP_UPDATE=1 to skip)"
+    if [ -n "$tag" ]; then
+      git clone --depth 1 --branch "$tag" "$url" "$ZB_DIR"
+    else
+      git clone --depth 1 "$url" "$ZB_DIR"
+    fi
+  elif [ "$BENCH_SKIP_UPDATE" = "1" ]; then
+    : # offline: use whatever is checked out
+  elif [ -n "$tag" ]; then
+    info "pinning zerobrew to latest release $tag (BENCH_SKIP_UPDATE=1 to skip)"
+    git -C "$ZB_DIR" fetch --depth 1 origin "$tag"
+    git -C "$ZB_DIR" reset --hard FETCH_HEAD
+  else
+    warn "could not resolve zerobrew latest release tag — falling back to HEAD"
     git -C "$ZB_DIR" fetch --depth 1 origin HEAD
     git -C "$ZB_DIR" reset --hard FETCH_HEAD
   fi
+  set_result ver_zb "${tag:-$(git -C "$ZB_DIR" describe --tags --always 2>/dev/null || true)}"
   (cd "$ZB_DIR" && cargo build --release)
   mkdir -p "$ZB_BENCH_PREFIX"
   "$ZB_BIN" init >/dev/null 2>&1 || true
@@ -681,7 +773,21 @@ finalize_results() {
       emit_output "${tool}_cold_stddev=$(get_result "cold_${tool}_${pkg}_std")s"
       # Pre-formatted "median±stddev s" string for the README workflow —
       # saves the workflow template from concatenating two fields.
-      emit_output "${tool}_cold_disp=$(fmt_disp "$(get_result "cold_${tool}_$pkg")" "$(get_result "cold_${tool}_${pkg}_std")")"
+      local cold_med cold_disp
+      cold_med=$(get_result "cold_${tool}_$pkg")
+      cold_disp=$(fmt_disp "$cold_med" "$(get_result "cold_${tool}_${pkg}_std")")
+      # Anomaly guard: a peer tool's cold install above the sanity ceiling is
+      # a regression in *their* tool, not a comparable number — omit the cell
+      # (loud marker) instead of publishing garbage. malt is exempt so a real
+      # malt slowdown stays visible rather than hidden.
+      if [ "$tool" != "mt" ] && over_threshold "$cold_med" "$BENCH_MAX_COLD"; then
+        local tver
+        tver=$(get_result "ver_$tool")
+        warn "ANOMALY: $tool ${tver:+$tver }cold $pkg = ${cold_med}s > BENCH_MAX_COLD=${BENCH_MAX_COLD}s — omitting cell"
+        gha_warning "$tool ${tver:+($tver) }cold install of $pkg regressed: ${cold_med}s exceeds ${BENCH_MAX_COLD}s ceiling — cell omitted"
+        cold_disp="⚠️ n/a (>${BENCH_MAX_COLD}s)"
+      fi
+      emit_output "${tool}_cold_disp=$cold_disp"
     fi
     # brew has no warm column in the comparison — only cold gets recorded.
     if [ "$tool" != "brew" ]; then
@@ -732,6 +838,14 @@ run_bench_for() {
 
 # --- run ---------------------------------------------------------------------
 
+# Allow sourcing (BENCH_LIB=1) for unit tests without running the bench.
+# `return` succeeds only when sourced; the `exit 0` runs when executed
+# directly — reachable, despite shellcheck's static guess.
+if [ "${BENCH_LIB:-0}" = "1" ]; then
+  # shellcheck disable=SC2317
+  return 0 2>/dev/null || exit 0
+fi
+
 build_malt
 
 # Stress mode short-circuits the rest of the bench: no peer builds, no
@@ -763,6 +877,13 @@ emit_output "nb_size=$(get_result size_nb)"
 emit_output "zb_size=$(get_result size_zb)"
 # brew_size omitted: `which brew` is the shell wrapper, not a meaningful size.
 
+# Benchmarked versions — pinned peer release tags (malt is the local build).
+# Surfaced in the README column headers so a version bump shows up loudly as
+# a diff in the weekly benchmark PR, and a stale comparison can't hide.
+emit_output "mt_ver=$(get_result ver_mt)"
+emit_output "nb_ver=$(get_result ver_nb)"
+emit_output "zb_ver=$(get_result ver_zb)"
+
 for pkg in "${PACKAGES[@]}"; do
   run_bench_for "$pkg"
 done
@@ -786,6 +907,11 @@ printf "  %-10s %s\n" "malt" "$(get_result size_mt)"
 printf "  %-10s %s\n" "nanobrew" "$(get_result size_nb)"
 printf "  %-10s %s\n" "zerobrew" "$(get_result size_zb)"
 # brew omitted: `which brew` is the shell wrapper, not a meaningful size.
+
+printf "\n%sBenchmarked versions%s\n" "$BOLD" "$RESET"
+printf "  %-10s %s\n" "malt" "$(get_result ver_mt)"
+printf "  %-10s %s\n" "nanobrew" "$(get_result ver_nb)"
+printf "  %-10s %s\n" "zerobrew" "$(get_result ver_zb)"
 
 printf "\n%sCold Install%s (median ±σ)\n" "$BOLD" "$RESET"
 printf "  %-14s %-16s %-16s %-16s %-16s\n" Package malt nanobrew zerobrew brew
