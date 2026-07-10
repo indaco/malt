@@ -30,7 +30,7 @@ SRC="src/net/client.zig"
 #    inner writer's drain delegation. If the order flips, the cap goes soft.
 drain_body=$(awk '/fn drain\(w: \*std\.Io\.Writer/,/^        }$/' "$SRC")
 check_line=$(grep -n 'countSplat\|max_bytes' <<<"$drain_body" | head -1 | cut -d: -f1 || true)
-write_line=$(grep -n 'inner.writer.vtable.drain' <<<"$drain_body" | head -1 | cut -d: -f1 || true)
+write_line=$(grep -n 'inner.vtable.drain' <<<"$drain_body" | head -1 | cut -d: -f1 || true)
 if [ -z "$check_line" ] || [ -z "$write_line" ] || [ "$check_line" -gt "$write_line" ]; then
   echo "FAIL: CountingWriter.drain writes before enforcing max_bytes (soft cap)" >&2
   exit 1

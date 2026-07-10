@@ -1,5 +1,5 @@
 //! malt — bottle.zig integration tests
-//! Covers the SHA verification surface (`checkBottleSha` + `MismatchInfo`)
+//! Covers the SHA verification surface (`checkStreamedSha` + `MismatchInfo`)
 //! and the `isDeterministicDownloadError` classifier reachable through the
 //! install facade. The full network-driven `bottle.download` path stays
 //! out of scope — these tests pin the *pure* invariants the worker relies
@@ -11,6 +11,15 @@ const testing = std.testing;
 const malt = @import("malt");
 const bottle = malt.bottle;
 const install_download = malt.install_download;
+
+// Mirrors the production download sequence (hash-while-writing → streamed
+// compare) without a GHCR client, so the worker's diagnostic invariants stay
+// pinned at the body level even though `download` no longer re-hashes a slice.
+fn checkBodySha(expected: []const u8, body: []const u8) ?bottle.MismatchInfo {
+    var h: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(body, &h, .{});
+    return bottle.checkStreamedSha(expected, std.fmt.bytesToHex(h, .lower), body.len);
+}
 
 // ---------------------------------------------------------------------------
 // MismatchInfo shape — pinned so the worker's log format never drifts
@@ -29,11 +38,11 @@ test "MismatchInfo struct shape: 64-byte expected, 64-byte computed, u64 length"
 }
 
 // ---------------------------------------------------------------------------
-// checkBottleSha — happy path against vector hashes from RFC test corpus
+// Body SHA check — happy path against vector hashes from RFC test corpus
 // and Homebrew-style 64-hex bodies.
 // ---------------------------------------------------------------------------
 
-test "checkBottleSha: SHA matches a 64-byte body of mixed bytes" {
+test "body SHA check: SHA matches a 64-byte body of mixed bytes" {
     // SHA256(0x00..0x3F) — deterministic, easily re-derivable.
     const body = [_]u8{
         0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
@@ -44,11 +53,11 @@ test "checkBottleSha: SHA matches a 64-byte body of mixed bytes" {
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(&body, &hash, .{});
     const expected = std.fmt.bytesToHex(hash, .lower);
-    try testing.expect(bottle.checkBottleSha(&expected, &body) == null);
+    try testing.expect(checkBodySha(&expected, &body) == null);
 }
 
-test "checkBottleSha: byte-level fuzz — any single-byte body change invalidates the hash" {
-    // The pure helper is the only thing standing between the install
+test "body SHA check: byte-level fuzz — any single-byte body change invalidates the hash" {
+    // The compare is the only thing standing between the install
     // pipeline and an attacker who can flip a single bottle byte. Walk
     // all 256 trailing-byte variants of an 8-byte body and confirm only
     // the canonical one passes.
@@ -57,13 +66,13 @@ test "checkBottleSha: byte-level fuzz — any single-byte body change invalidate
     body[7] = 0x42;
     std.crypto.hash.sha2.Sha256.hash(&body, &hash, .{});
     const canonical_expected = std.fmt.bytesToHex(hash, .lower);
-    try testing.expect(bottle.checkBottleSha(&canonical_expected, &body) == null);
+    try testing.expect(checkBodySha(&canonical_expected, &body) == null);
 
     var i: u16 = 0;
     while (i < 256) : (i += 1) {
         if (i == 0x42) continue;
         body[7] = @intCast(i);
-        try testing.expect(bottle.checkBottleSha(&canonical_expected, &body) != null);
+        try testing.expect(checkBodySha(&canonical_expected, &body) != null);
     }
 }
 
@@ -81,7 +90,7 @@ test "MismatchInfo.body_len is the actual byte count, not a clamped value" {
     defer alloc.free(big);
     @memset(big, 0xAB);
     const wrong = "0" ** 64;
-    const info = bottle.checkBottleSha(wrong, big) orelse return error.TestUnexpectedNull;
+    const info = checkBodySha(wrong, big) orelse return error.TestUnexpectedNull;
     try testing.expectEqual(@as(u64, big_size), info.body_len);
 }
 
@@ -90,7 +99,7 @@ test "MismatchInfo.expected echoes caller bytes verbatim (no normalisation)" {
     // any normalisation (case fold, trim, etc.) would break the visual
     // diff a user does between the API hash and the log line.
     const expected = "DeAdBeEfDeAdBeEfDeAdBeEfDeAdBeEfDeAdBeEfDeAdBeEfDeAdBeEfDeAdBeEf";
-    const info = bottle.checkBottleSha(expected, "x") orelse return error.TestUnexpectedNull;
+    const info = checkBodySha(expected, "x") orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings(expected, info.expected[0..64]);
 }
 
@@ -101,7 +110,7 @@ test "MismatchInfo.computed is independent from MismatchInfo.expected (no aliasi
     // useless — assert by comparing computed to a known SHA.
     const body = "xyz"; // SHA256 = 3608bca1e44ea6c4d268eb6db02260269892c0b42b86bbf1e77a6fa16c3c9282
     const wrong = "0" ** 64;
-    const info = bottle.checkBottleSha(wrong, body) orelse return error.TestUnexpectedNull;
+    const info = checkBodySha(wrong, body) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings(
         "3608bca1e44ea6c4d268eb6db02260269892c0b42b86bbf1e77a6fa16c3c9282",
         &info.computed,
@@ -144,8 +153,8 @@ test "install_download.isDeterministicDownloadError: transport errors all retry"
 }
 
 // ---------------------------------------------------------------------------
-// Verify (existing surface) — round-trip a body through `checkBottleSha`
-// and `verify` to confirm the on-disk and in-memory paths agree on the
+// Verify (existing surface) — round-trip a body through the streamed SHA
+// check and `verify` to confirm the on-disk and in-memory paths agree on the
 // same SHA contract.
 // ---------------------------------------------------------------------------
 
@@ -186,7 +195,7 @@ test "MismatchInfo formats cleanly through the worker's log template" {
     try testing.expect(line.len < 4096);
 }
 
-test "checkBottleSha and verify agree on the same body's SHA" {
+test "body SHA check and verify agree on the same body's SHA" {
     const test_io = @import("test_io");
     const path = try std.fmt.allocPrint(
         testing.allocator,
@@ -208,11 +217,11 @@ test "checkBottleSha and verify agree on the same body's SHA" {
     const sha_hex = std.fmt.bytesToHex(hash, .lower);
 
     // Both routes agree this body matches its hash.
-    try testing.expect(bottle.checkBottleSha(&sha_hex, body) == null);
+    try testing.expect(checkBodySha(&sha_hex, body) == null);
     try testing.expect(try bottle.verify(std.Options.debug_io, path, &sha_hex));
 
     // And both reject the same wrong hash.
     const wrong = "0" ** 64;
-    try testing.expect(bottle.checkBottleSha(wrong, body) != null);
+    try testing.expect(checkBodySha(wrong, body) != null);
     try testing.expect(!(try bottle.verify(std.Options.debug_io, path, wrong)));
 }

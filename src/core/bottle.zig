@@ -41,21 +41,11 @@ pub const MismatchInfo = struct {
     body_len: u64,
 };
 
-/// Pure SHA verification: returns null when `body`'s SHA256 matches the
-/// 64-hex-char `expected` value, or a populated `MismatchInfo` otherwise.
-/// Split out of `download` so tests can exercise the mismatch surface
-/// without spinning up GHCR / an HTTP client.
-pub fn checkBottleSha(expected: []const u8, body: []const u8) ?MismatchInfo {
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(body, &hash, .{});
-    return checkStreamedSha(expected, std.fmt.bytesToHex(hash, .lower), body.len);
-}
-
-/// Slice-free twin of `checkBottleSha`: given a pre-computed 64-hex-char
-/// digest (e.g. from the streaming tee, where no `body` slice survives to
-/// re-hash) and the byte count, returns null on match or the same
-/// `MismatchInfo` as the slice path. Owning the compare + diagnostic here
-/// keeps that decision defined once for both the in-RAM and streamed paths.
+/// SHA verification for the streaming download: given the digest the tee
+/// computed while writing the bottle to disk (no `body` slice survives to
+/// re-hash) and the byte count, returns null on a match or a populated
+/// `MismatchInfo` otherwise. Split out of `download` so tests can exercise the
+/// mismatch surface without spinning up GHCR / an HTTP client.
 pub fn checkStreamedSha(expected: []const u8, computed_hex: [64]u8, body_len: u64) ?MismatchInfo {
     // Constant-time compare — deny a byte-by-byte timing oracle against
     // the expected hash.
@@ -74,6 +64,59 @@ pub fn checkStreamedSha(expected: []const u8, computed_hex: [64]u8, body_len: u6
     @memcpy(info.expected[0..n], expected[0..n]);
     return info;
 }
+
+/// Streaming sink that tees every drained chunk to a temp file *and* a
+/// `Sha256` hasher in one pass, so the bottle is hashed as it is written to
+/// disk — peak RSS stays bounded by the transfer buffer, never the bottle
+/// size. It sits *below* net's `CountingWriter` (which caps + reports), so
+/// chunks reaching here are already cap-checked and counted. Same
+/// `@fieldParentPtr("writer", …)` vtable shape as that precedent.
+const HashingFileSink = struct {
+    io: std.Io,
+    file: std.Io.File,
+    hasher: std.crypto.hash.sha2.Sha256,
+    len: u64,
+    writer: std.Io.Writer,
+
+    fn init(io: std.Io, file: std.Io.File) HashingFileSink {
+        return .{
+            .io = io,
+            .file = file,
+            .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
+            .len = 0,
+            .writer = .{ .buffer = &.{}, .vtable = &vtable },
+        };
+    }
+
+    const vtable: std.Io.Writer.VTable = .{ .drain = drain };
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        // @alignCast is sound: `w` always points at the `writer` field of a
+        // properly aligned `HashingFileSink` (created by `init`).
+        const self: *HashingFileSink = @alignCast(@fieldParentPtr("writer", w));
+        var written: usize = 0;
+        // All but the last slice are written once; the last is repeated `splat`
+        // times (mirrors std.Io.Writer's drain contract).
+        for (data[0 .. data.len - 1]) |bytes| {
+            try self.feed(bytes);
+            written += bytes.len;
+        }
+        const pattern = data[data.len - 1];
+        var i: usize = 0;
+        while (i < splat) : (i += 1) try self.feed(pattern);
+        written += pattern.len * splat;
+        return written;
+    }
+
+    fn feed(self: *HashingFileSink, bytes: []const u8) std.Io.Writer.Error!void {
+        if (bytes.len == 0) return;
+        // Tee: same bytes to the file and the hasher, so the on-disk archive
+        // and the digest can never diverge.
+        self.file.writeStreamingAll(self.io, bytes) catch return error.WriteFailed;
+        self.hasher.update(bytes);
+        self.len += @intCast(bytes.len);
+    }
+};
 
 /// Download a bottle from GHCR, verify SHA256, and extract to tmp.
 /// Returns the SHA256 and path to extracted contents.
@@ -97,46 +140,49 @@ pub fn download(
     progress: ?client_mod.ProgressCallback,
     mismatch_info: ?*MismatchInfo,
 ) BottleError!BottleResult {
-    // Download blob into memory
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(allocator);
+    _ = allocator; // Signature kept stable for callers; the streaming path is allocation-free.
 
-    ghcr.downloadBlob(allocator, http, repo, digest, &body, progress) catch |e| {
-        return switch (e) {
-            ghcr_mod.GhcrError.DownloadHttpClientError => BottleError.DownloadPermanent,
-            ghcr_mod.GhcrError.DownloadRateLimited => BottleError.DownloadRateLimited,
-            else => BottleError.DownloadFailed,
-        };
-    };
-
-    if (checkBottleSha(expected_sha256, body.items)) |info| {
-        // Clean up dest_dir on mismatch; Sha256Mismatch is the real error.
-        std.Io.Dir.cwd().deleteTree(io, dest_dir) catch {};
-        if (mismatch_info) |out| out.* = info;
-        return BottleError.Sha256Mismatch;
-    }
-
-    // Ensure dest_dir exists
+    // Create dest_dir and the temp file *before* the first byte arrives — the
+    // bottle streams straight to disk while hashing, so there is no in-RAM copy.
     std.Io.Dir.createDirAbsolute(io, dest_dir, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return BottleError.IoError,
     };
 
-    // Write bottle to temp file for extraction
     var tmp_path_buf: [512]u8 = undefined;
     const tmp_path = try buildTmpArchivePath(&tmp_path_buf, dest_dir);
 
-    // `truncate = true` so a leftover tmp from a prior attempt (e.g. a
-    // shared-tmp caller or a future retry that reuses the same path)
-    // can't leak a longer tail into the extract step.
-    const tmp_file = std.Io.Dir.createFileAbsolute(io, tmp_path, .{ .truncate = true }) catch return BottleError.IoError;
-    tmp_file.writeStreamingAll(io, body.items) catch {
-        tmp_file.close(io);
+    // `truncate = true` so a leftover tmp from a prior attempt can't leak a
+    // longer tail into the extract step.
+    const tmp_file = std.Io.Dir.createFileAbsolute(io, tmp_path, .{ .truncate = true }) catch
         return BottleError.IoError;
-    };
-    tmp_file.close(io);
 
-    // Extract
+    // The temp file exists before the SHA is known, so every early return must
+    // remove it. It lives inside dest_dir, so wiping the tree drops both the
+    // partial (or over-cap) archive and the dir — nothing unverified can reach
+    // extract, and the outer install loop retries with a fresh temp dir.
+    errdefer std.Io.Dir.cwd().deleteTree(io, dest_dir) catch {};
+
+    var sink = HashingFileSink.init(io, tmp_file);
+    const dl = ghcr.downloadBlob(http, repo, digest, &sink.writer, progress);
+    tmp_file.close(io); // fd no longer needed; extract reopens by path
+    dl catch |e| return switch (e) {
+        ghcr_mod.GhcrError.DownloadHttpClientError => BottleError.DownloadPermanent,
+        ghcr_mod.GhcrError.DownloadRateLimited => BottleError.DownloadRateLimited,
+        else => BottleError.DownloadFailed,
+    };
+
+    var raw: [32]u8 = undefined;
+    sink.hasher.final(&raw);
+    const computed_hex = std.fmt.bytesToHex(raw, .lower);
+
+    if (checkStreamedSha(expected_sha256, computed_hex, sink.len)) |info| {
+        // errdefer wipes the temp + dest_dir; an unverified bottle never extracts.
+        if (mismatch_info) |out| out.* = info;
+        return BottleError.Sha256Mismatch;
+    }
+
+    // Verified: extract the stored archive, then drop the temp file.
     archive.extractTarGz(io, tmp_path, dest_dir) catch return BottleError.ExtractionFailed;
 
     // Remove the temp archive file; a leftover tmp is harmless, overwritten on retry.
@@ -288,125 +334,10 @@ test "buildTmpArchivePath joins a normal dest_dir with the archive name" {
 }
 
 // ---------------------------------------------------------------------------
-// checkBottleSha — pure SHA verification helper extracted from `download`.
-// Covers the happy path, the diagnostic path, and pathological inputs. The
-// allocator-free contract is what makes `download` testable end-to-end
-// without spinning up a fake GHCR.
+// checkStreamedSha — the compare + diagnostic construction the streaming
+// download drives after the tee finalizes its digest. Covers the match path,
+// the diagnostic payload, and pathological `expected` inputs.
 // ---------------------------------------------------------------------------
-
-test "checkBottleSha returns null for matching SHA" {
-    const body = "hello world";
-    // SHA256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
-    const expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-    try std.testing.expect(checkBottleSha(expected, body) == null);
-}
-
-test "checkBottleSha returns null for matching SHA on empty body" {
-    // SHA256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-    const expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    try std.testing.expect(checkBottleSha(expected, "") == null);
-}
-
-test "checkBottleSha returns MismatchInfo with body length when SHA differs" {
-    const body = "hello world";
-    const wrong = "0000000000000000000000000000000000000000000000000000000000000000";
-    const info = checkBottleSha(wrong, body) orelse return error.TestUnexpectedNull;
-    try std.testing.expectEqual(@as(u64, body.len), info.body_len);
-    // computed must be the actual SHA of "hello world", lower-hex.
-    try std.testing.expectEqualStrings(
-        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
-        &info.computed,
-    );
-    // expected must echo the caller's input verbatim in the first 64 bytes.
-    try std.testing.expectEqualStrings(wrong, info.expected[0..64]);
-}
-
-test "checkBottleSha mismatch on a single byte difference (constant-time-equivalent)" {
-    // Flip the last hex char of the correct SHA — must still reject.
-    const body = "hello world";
-    const off_by_one = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcdea";
-    try std.testing.expect(checkBottleSha(off_by_one, body) != null);
-}
-
-test "checkBottleSha mismatch on first-byte difference" {
-    const body = "hello world";
-    const off = "094d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-    try std.testing.expect(checkBottleSha(off, body) != null);
-}
-
-test "checkBottleSha records body length on a large payload" {
-    // Use a one-MiB body; verify body_len matches even when the buffer
-    // is larger than typical formula JSON. SHA value isn't asserted here —
-    // the property is "len carried through" — which is the diagnostic
-    // signal the worker logs.
-    const alloc = std.testing.allocator;
-    const big = try alloc.alloc(u8, 1024 * 1024);
-    defer alloc.free(big);
-    @memset(big, 'x');
-    const wrong = "0000000000000000000000000000000000000000000000000000000000000000";
-    const info = checkBottleSha(wrong, big) orelse return error.TestUnexpectedNull;
-    try std.testing.expectEqual(@as(u64, 1024 * 1024), info.body_len);
-}
-
-test "checkBottleSha tolerates an empty expected slice without crashing" {
-    // Hostile input: an empty expected hash should never match a real SHA.
-    // The constant-time compare returns false on length mismatch (it's
-    // strict on length), so we get a populated MismatchInfo back.
-    const info = checkBottleSha("", "x") orelse return error.TestUnexpectedNull;
-    try std.testing.expectEqual(@as(u64, 1), info.body_len);
-    // expected buffer is zero-filled (no caller bytes to copy).
-    for (info.expected) |b| try std.testing.expectEqual(@as(u8, 0), b);
-}
-
-test "checkBottleSha tolerates an oversized expected (longer than 64)" {
-    // Pathological: the hex pads beyond 64 chars. Helper truncates to 64
-    // for the captured echo (no overflow, no crash), but the comparator
-    // sees the full slice — so the result is still "mismatch".
-    const long_expected = "a" ** 128;
-    const info = checkBottleSha(long_expected, "y") orelse return error.TestUnexpectedNull;
-    try std.testing.expectEqual(@as(u64, 1), info.body_len);
-    // First 64 bytes of expected captured.
-    for (info.expected) |b| try std.testing.expectEqual(@as(u8, 'a'), b);
-}
-
-test "checkBottleSha mismatch when body contains the expected hex literally" {
-    // A body whose bytes happen to spell the expected SHA hex must NOT
-    // accidentally match — the hash of the bytes is what counts, not
-    // the bytes themselves.
-    const expected = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-    try std.testing.expect(checkBottleSha(expected, expected) != null);
-}
-
-test "checkBottleSha is symmetric on body equality (idempotent over identical bytes)" {
-    // Same body twice → same SHA → same null/non-null verdict.
-    const a = checkBottleSha(
-        "0000000000000000000000000000000000000000000000000000000000000000",
-        "abc",
-    );
-    const b = checkBottleSha(
-        "0000000000000000000000000000000000000000000000000000000000000000",
-        "abc",
-    );
-    try std.testing.expectEqual(a == null, b == null);
-    if (a) |ai| if (b) |bi| {
-        try std.testing.expectEqualStrings(&ai.computed, &bi.computed);
-        try std.testing.expectEqual(ai.body_len, bi.body_len);
-    };
-}
-
-test "checkBottleSha computed hash is always lowercase hex" {
-    // The diagnostic format compares directly against the caller-supplied
-    // `expected` (lowercase by Homebrew API convention). A stray uppercase
-    // character would silently mismatch even a correct hash.
-    const info = checkBottleSha(
-        "0000000000000000000000000000000000000000000000000000000000000000",
-        "any-payload",
-    ) orelse return error.TestUnexpectedNull;
-    for (info.computed) |c| {
-        const ok = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
-        try std.testing.expect(ok);
-    }
-}
 
 test "checkStreamedSha returns null when computed matches expected" {
     const expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
@@ -426,24 +357,23 @@ test "checkStreamedSha carries computed and a 400MB body_len into MismatchInfo" 
     try std.testing.expectEqualStrings(expected, info.expected[0..64]);
 }
 
-test "checkStreamedSha agrees with checkBottleSha for the same body (delegation equivalence)" {
+test "checkStreamedSha over a freshly hashed body matches the good SHA and rejects a wrong one" {
+    // Mirrors the production sequence (hash-while-writing → compare) on a real
+    // body: the correct digest passes, a wrong `expected` yields a diagnostic
+    // carrying the true computed digest, the echoed expected, and the length.
     const body = "hello world";
     var h: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(body, &h, .{});
     const computed = std.fmt.bytesToHex(h, .lower);
 
     const good = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-    try std.testing.expectEqual(
-        checkBottleSha(good, body) == null,
-        checkStreamedSha(good, computed, body.len) == null,
-    );
+    try std.testing.expect(checkStreamedSha(good, computed, body.len) == null);
 
     const wrong = "0000000000000000000000000000000000000000000000000000000000000000";
-    const a = checkBottleSha(wrong, body) orelse return error.TestUnexpectedNull;
-    const b = checkStreamedSha(wrong, computed, body.len) orelse return error.TestUnexpectedNull;
-    try std.testing.expectEqualStrings(&a.computed, &b.computed);
-    try std.testing.expectEqualStrings(&a.expected, &b.expected);
-    try std.testing.expectEqual(a.body_len, b.body_len);
+    const info = checkStreamedSha(wrong, computed, body.len) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings(&computed, &info.computed);
+    try std.testing.expectEqualStrings(wrong, info.expected[0..64]);
+    try std.testing.expectEqual(@as(u64, body.len), info.body_len);
 }
 
 test "checkStreamedSha tolerates empty and oversized expected without crashing" {
@@ -456,6 +386,84 @@ test "checkStreamedSha tolerates empty and oversized expected without crashing" 
 
     const long_info = checkStreamedSha("b" ** 128, computed, 1) orelse return error.TestUnexpectedNull;
     for (long_info.expected) |byte| try std.testing.expectEqual(@as(u8, 'b'), byte);
+}
+
+// ---------------------------------------------------------------------------
+// HashingFileSink — the tee that folds the SHA into the write stream. Feeding
+// it a chunked byte sequence (a multi-slice drain and a splat) must leave the
+// temp file byte-equal to the input, produce a digest identical to a one-shot
+// hash of the same bytes, and count every byte in `len`.
+// ---------------------------------------------------------------------------
+
+test "HashingFileSink tees each chunk to the file and the hasher" {
+    const io = std.Options.debug_io;
+    const base = "/tmp/malt_hashing_file_sink";
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const path = base ++ "/bottle.tar.gz";
+    const file = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
+
+    var sink = HashingFileSink.init(io, file);
+    const w = &sink.writer;
+
+    // Multiple drain calls — a single slice, a two-slice call, and a splat —
+    // mirror how streamRemaining fans decompressed chunks into the sink.
+    try std.testing.expectEqual(@as(usize, 9), try w.vtable.drain(w, &.{"chunk-one"}, 1));
+    try std.testing.expectEqual(@as(usize, 4), try w.vtable.drain(w, &.{ "AB", "CD" }, 1));
+    try std.testing.expectEqual(@as(usize, 6), try w.vtable.drain(w, &.{"xy"}, 3));
+    file.close(io);
+
+    const input = "chunk-one" ++ "AB" ++ "CD" ++ "xyxyxy";
+
+    // Finalized digest equals a one-shot hash of the exact streamed bytes.
+    var raw: [32]u8 = undefined;
+    sink.hasher.final(&raw);
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(input, &expected, .{});
+    try std.testing.expectEqualSlices(u8, &expected, &raw);
+
+    // File on disk holds exactly the concatenated stream (re-hash it).
+    const expected_hex = std.fmt.bytesToHex(expected, .lower);
+    try std.testing.expect(try verify(io, path, &expected_hex));
+
+    // `len` counts every teed byte.
+    try std.testing.expectEqual(@as(u64, input.len), sink.len);
+}
+
+test "HashingFileSink drain tolerates empty chunks and a zero splat" {
+    // Boundary cases of the drain contract: an empty slice contributes
+    // nothing, and a zero splat writes the pattern zero times. Both must leave
+    // the file, digest, and len consistent with the bytes actually written.
+    const io = std.Options.debug_io;
+    const base = "/tmp/malt_hashing_file_sink_edge";
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const path = base ++ "/bottle.tar.gz";
+    const file = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
+
+    var sink = HashingFileSink.init(io, file);
+    const w = &sink.writer;
+
+    // Empty leading slice is skipped; the pattern is written once.
+    try std.testing.expectEqual(@as(usize, 3), try w.vtable.drain(w, &.{ "", "abc" }, 1));
+    // Zero splat writes nothing and reports zero bytes consumed.
+    try std.testing.expectEqual(@as(usize, 0), try w.vtable.drain(w, &.{"tail"}, 0));
+    file.close(io);
+
+    const input = "abc";
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(input, &expected, .{});
+    var raw: [32]u8 = undefined;
+    sink.hasher.final(&raw);
+    try std.testing.expectEqualSlices(u8, &expected, &raw);
+
+    const expected_hex = std.fmt.bytesToHex(expected, .lower);
+    try std.testing.expect(try verify(io, path, &expected_hex));
+    try std.testing.expectEqual(@as(u64, input.len), sink.len);
 }
 
 test "checkStreamedSha NUL-pads a shorter-than-64 expected in the echo" {

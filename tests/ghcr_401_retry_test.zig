@@ -100,10 +100,10 @@ test "downloadBlob invalidates the cached token and retries once on a 401" {
     defer g.deinit();
     g.base_url = base;
 
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(std.testing.allocator);
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
 
-    const result = g.downloadBlob(std.testing.allocator, &http, "homebrew/core/tree", "sha256:abc", &body, null);
+    const result = g.downloadBlob(&http, "homebrew/core/tree", "sha256:abc", &sink.writer, null);
 
     // Close the client so the server's keep-alive loop ends, then join
     // before reading server-side counters to avoid a data race.
@@ -111,7 +111,7 @@ test "downloadBlob invalidates the cached token and retries once on a 401" {
     server_thread.join();
 
     try result;
-    try std.testing.expectEqualStrings(blob_body, body.items);
+    try std.testing.expectEqualStrings(blob_body, sink.writer.buffered());
     // Two token fetches: the initial one plus the post-invalidation refresh.
     try std.testing.expectEqual(@as(usize, 2), stub.token_count);
     try std.testing.expectEqual(@as(usize, 2), stub.blob_count);
@@ -142,10 +142,10 @@ test "downloadBlob returns Unauthorized after a second 401 (retry bounded to onc
     defer g.deinit();
     g.base_url = base;
 
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(std.testing.allocator);
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
 
-    const result = g.downloadBlob(std.testing.allocator, &http, "homebrew/core/tree", "sha256:abc", &body, null);
+    const result = g.downloadBlob(&http, "homebrew/core/tree", "sha256:abc", &sink.writer, null);
 
     http.deinit();
     server_thread.join();
@@ -182,10 +182,10 @@ test "downloadBlob does not refresh the token on a non-401 error" {
     defer g.deinit();
     g.base_url = base;
 
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(std.testing.allocator);
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
 
-    const result = g.downloadBlob(std.testing.allocator, &http, "homebrew/core/tree", "sha256:abc", &body, null);
+    const result = g.downloadBlob(&http, "homebrew/core/tree", "sha256:abc", &sink.writer, null);
 
     http.deinit();
     server_thread.join();
@@ -218,13 +218,12 @@ const ProgressRec = struct {
     }
 };
 
-test "downloadBlob progress fires across the failed and retried attempts" {
-    // Characterizes an accepted quirk: the 401 error body streams through the
-    // progress callback, then the real blob streams a second, independent
-    // sequence (bytes reset to 0, content-length differs). A consumer that
-    // assumes monotonic bytes sees a reset — cosmetic on this rare recovery
-    // path, pinned here so a future change can't turn the reset into silent
-    // double-counting.
+test "downloadBlob progress reports only the streamed blob, not the discarded 401 body" {
+    // The streaming path drains every non-200 body (including the 401 we
+    // re-auth on) into net's throwaway with no progress callback, so the
+    // caller's progress only ever sees the definitive 200 blob. No reset, no
+    // double-count across the failed + retried attempts — the old buffered
+    // path's double-fire quirk is gone.
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -247,21 +246,22 @@ test "downloadBlob progress fires across the failed and retried attempts" {
     defer g.deinit();
     g.base_url = base;
 
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(std.testing.allocator);
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
 
     var rec = ProgressRec{};
     const progress = client.ProgressCallback{ .context = &rec, .func = ProgressRec.record };
-    const result = g.downloadBlob(std.testing.allocator, &http, "homebrew/core/tree", "sha256:abc", &body, progress);
+    const result = g.downloadBlob(&http, "homebrew/core/tree", "sha256:abc", &sink.writer, progress);
 
     http.deinit();
     server_thread.join();
 
     try result;
-    try std.testing.expectEqualStrings(blob_body, body.items);
-    // Two distinct content-lengths => progress fired for two different
-    // responses (the 401 body then the blob): the double-fire.
-    try std.testing.expect(rec.len_count >= 2);
+    try std.testing.expectEqualStrings(blob_body, sink.writer.buffered());
+    // Exactly one content-length was reported: only the 200 blob streamed
+    // through progress; the discarded 401 body never did.
+    try std.testing.expectEqual(@as(usize, 1), rec.len_count);
+    try std.testing.expect(rec.calls >= 1);
     // The final report reflects the real blob, not the discarded error body.
     try std.testing.expectEqual(@as(u64, blob_body.len), rec.last_bytes);
 }
@@ -327,12 +327,12 @@ fn serveConc(cs: *ConcStub) void {
 const WorkerCtx = struct {
     g: *ghcr.GhcrClient,
     http: *client.HttpClient,
-    body: std.ArrayList(u8) = .empty,
+    sink: std.Io.Writer.Allocating,
     ok: bool = false,
 };
 
 fn concWorker(ctx: *WorkerCtx) void {
-    ctx.g.downloadBlob(std.testing.allocator, ctx.http, "homebrew/core/tree", "sha256:abc", &ctx.body, null) catch return;
+    ctx.g.downloadBlob(ctx.http, "homebrew/core/tree", "sha256:abc", &ctx.sink.writer, null) catch return;
     ctx.ok = true;
 }
 
@@ -366,10 +366,10 @@ test "concurrent downloadBlob workers recover from 401 without cache corruption"
     defer g.deinit();
     g.base_url = base;
 
-    var w1 = WorkerCtx{ .g = &g, .http = &http1 };
-    var w2 = WorkerCtx{ .g = &g, .http = &http2 };
-    defer w1.body.deinit(std.testing.allocator);
-    defer w2.body.deinit(std.testing.allocator);
+    var w1 = WorkerCtx{ .g = &g, .http = &http1, .sink = .init(std.testing.allocator) };
+    var w2 = WorkerCtx{ .g = &g, .http = &http2, .sink = .init(std.testing.allocator) };
+    defer w1.sink.deinit();
+    defer w2.sink.deinit();
 
     const t1 = try std.Thread.spawn(.{}, concWorker, .{&w1});
     const t2 = try std.Thread.spawn(.{}, concWorker, .{&w2});
@@ -383,8 +383,8 @@ test "concurrent downloadBlob workers recover from 401 without cache corruption"
 
     try std.testing.expect(w1.ok);
     try std.testing.expect(w2.ok);
-    try std.testing.expectEqualStrings(blob_body, w1.body.items);
-    try std.testing.expectEqualStrings(blob_body, w2.body.items);
+    try std.testing.expectEqualStrings(blob_body, w1.sink.writer.buffered());
+    try std.testing.expectEqualStrings(blob_body, w2.sink.writer.buffered());
     // Each worker fetched, hit 401, invalidated, re-fetched: at least the two
     // initial fetches happened (the exact total races by design).
     try std.testing.expect(cs.token_count.load(.monotonic) >= 2);
