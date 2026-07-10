@@ -104,6 +104,7 @@ pub const term_sanitize = @import("ui/term_sanitize.zig");
 pub const theme_registry = @import("ui/theme_registry.zig");
 pub const themes = @import("ui/themes.zig");
 pub const tui_app = @import("tui/app.zig");
+pub const tui_ctx = @import("tui/ctx.zig");
 pub const tui_detail_pane = @import("tui/detail_pane.zig");
 pub const tui_filter_input = @import("tui/filter_input.zig");
 pub const tui_header = @import("tui/header.zig");

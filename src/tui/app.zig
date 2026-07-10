@@ -14,7 +14,7 @@ const std = @import("std");
 
 const color = @import("../ui/color.zig");
 const spinner_frames = @import("../ui/spinner_frames.zig");
-const term_sanitize = @import("../ui/term_sanitize.zig");
+const ctx = @import("ctx.zig");
 const doctor = @import("doctor_tab.zig");
 const filter_input = @import("filter_input.zig");
 const header = @import("header.zig");
@@ -38,6 +38,13 @@ const tab_bar = @import("tab_bar.zig");
 const Tab = tab_bar.Tab;
 const term = @import("term.zig");
 const text_wrap = @import("text_wrap.zig");
+
+// Shared read-model + effect-port handles now live in the `ctx.zig` sink leaf;
+// the hub references them downward instead of owning their definitions.
+const Banner = ctx.Banner;
+const Painter = ctx.Painter;
+const TabFetch = ctx.TabFetch;
+const Fetches = ctx.Fetches;
 
 /// Every tab's state, all present at once so a tab switch preserves each one's
 /// filter / scroll / data. Field names match `Tab` tags for `@field` dispatch.
@@ -71,58 +78,6 @@ comptime {
 /// `step`, so a fixed page is the data-agnostic approximation; the render's
 /// `scroll_list.clamp` still bounds it to the real list.
 const page_step = 10;
-
-/// Cap on the recoverable-error banner. An op label + an error name fit well
-/// inside this; the cap keeps the buffer fixed so the banner never allocates.
-pub const banner_max = 160;
-
-/// A transient banner for a recoverable backend failure, shown in the footer.
-/// Fixed buffer, no allocation, like the filter. Set when a delegated op fails
-/// recoverably, cleared on the next keypress (`step`). The message is run
-/// through `term_sanitize` at set-time because the op label may carry a
-/// child-derived package name — the leaf's untrusted-input rule.
-pub const Banner = struct {
-    buf: [banner_max]u8 = undefined,
-    len: usize = 0,
-
-    pub fn slice(self: *const Banner) []const u8 {
-        return self.buf[0..self.len];
-    }
-
-    pub fn isSet(self: *const Banner) bool {
-        return self.len != 0;
-    }
-
-    pub fn clear(self: *Banner) void {
-        self.len = 0;
-    }
-
-    /// Format "<op>: <reason>" into the fixed buffer, run through `term_sanitize`
-    /// so a child-derived package name in `op` cannot inject escape sequences.
-    /// Truncated at the cap; the footer render also strips line-breakers the
-    /// sanitizer lets through (`putContent`).
-    pub fn set(self: *Banner, op: []const u8, reason: []const u8) void {
-        self.len = 0;
-        var san = term_sanitize.Sanitizer.init();
-        const sink: term_sanitize.Sink = .{ .ctx = self, .write_fn = appendSink };
-        // The buffered sink never fails — it truncates at the cap — so the
-        // sanitizer's propagated error cannot occur here; ignore it deliberately.
-        san.feed(op, sink) catch {};
-        san.feed(": ", sink) catch {};
-        san.feed(reason, sink) catch {};
-        san.flush(sink) catch {};
-    }
-
-    /// `term_sanitize.Sink` callback: append clean bytes, bounded by the cap.
-    /// `@ptrCast` is the sink's `*anyopaque` → `*Banner` round-trip; the ctx was
-    /// set from a `*Banner` just above, so the cast is sound.
-    fn appendSink(ctx: *anyopaque, bytes: []const u8) term_sanitize.SinkError!void {
-        const self: *Banner = @ptrCast(@alignCast(ctx));
-        const n = @min(bytes.len, self.buf.len - self.len);
-        @memcpy(self.buf[self.len..][0..n], bytes[0..n]);
-        self.len += n;
-    }
-};
 
 pub const App = struct {
     active: Tab = .search,
@@ -544,14 +499,6 @@ pub fn classify(err: RunError) ErrorClass {
     };
 }
 
-/// Mid-load repaint handle for the polled lazy reads: the controlling-tty fd and
-/// the (resizable) frame buffer, threaded from `run` to wherever a lazy `loadX`
-/// runs so its spinner can repaint without `spawn.zig` knowing about rendering.
-const Painter = struct {
-    fd: std.posix.fd_t,
-    frame: *[]u8,
-};
-
 /// The `tick` callback `spawn.readJsonPolled` invokes on every poll timeout while
 /// a lazy tab is loading: advance the spinner one frame and repaint. Closes over
 /// the paint handle + `App`, so the animation lives here, not in the generic
@@ -782,22 +729,6 @@ pub fn pollMux(tty_fd: std.posix.fd_t, fetch_fds: []const std.posix.fd_t, timeou
     for (0..fetch_fds.len) |i| if (pfds[1 + i].revents != 0) return .{ .fetch = i };
     return .timeout; // defensive: poll reported ready but nothing matched
 }
-
-/// One in-flight background tab fetch: a non-blocking `mt <verb> --json` child
-/// whose stdout the loop drains. `tab` routes the drained bytes to the owning
-/// store; `max_ok_exit` tolerates Doctor's severity exits (≤2) where the others
-/// require a clean 0.
-const TabFetch = struct {
-    tab: Tab,
-    child: std.process.Child,
-    fd: std.posix.fd_t, // the child's stdout, polled alongside the tty
-    buf: std.ArrayList(u8) = .empty,
-    max_ok_exit: u8,
-};
-
-/// At most one in-flight fetch per tab. Installed (a cheap DB read) and Search
-/// (synchronous by design) never background-fetch, so their slots stay null.
-const Fetches = std.EnumArray(Tab, ?TabFetch);
 
 /// The tab's background-fetch descriptor, read from its module — runtime `t`
 /// bridged to the comptime `moduleFor` dispatch the render path already uses.
@@ -2787,34 +2718,6 @@ test "every data tab is dirty at launch so none blocks the first paint" {
     try std.testing.expect(a.dirty.contains(.services));
     try std.testing.expect(a.dirty.contains(.doctor));
     try std.testing.expect(!a.dirty.contains(.search)); // active tab renders without data
-}
-
-test "banner formats op + reason and reports set/clear" {
-    var b: Banner = .{};
-    try std.testing.expect(!b.isSet());
-    b.set("info for jq failed", "BadJson");
-    try std.testing.expect(b.isSet());
-    try std.testing.expectEqualStrings("info for jq failed: BadJson", b.slice());
-    b.clear();
-    try std.testing.expect(!b.isSet());
-    try std.testing.expectEqualStrings("", b.slice());
-}
-
-test "banner sanitizes a child-derived op so a package name cannot inject escapes" {
-    var b: Banner = .{};
-    // A hostile tap could name a package with an OSC title-set; it must be dropped.
-    b.set("info for \x1b]0;pwn\x07evil failed", "BadJson");
-    try std.testing.expect(std.mem.indexOfScalar(u8, b.slice(), 0x1b) == null); // no stray ESC
-    try std.testing.expect(std.mem.indexOf(u8, b.slice(), "evil failed: BadJson") != null);
-}
-
-test "banner truncates an over-cap op to the fixed buffer without overflow" {
-    var b: Banner = .{};
-    var huge: [banner_max * 2]u8 = undefined;
-    @memset(&huge, 'x');
-    b.set(&huge, "BadJson");
-    try std.testing.expect(b.isSet());
-    try std.testing.expect(b.slice().len <= banner_max); // bounded, no overrun
 }
 
 test "a newline in a child-derived op cannot inject an extra footer frame line" {
