@@ -569,7 +569,7 @@ pub const HttpClient = struct {
     /// `bytes_written` is atomic so the idle watchdog (a separate thread)
     /// can sample it on each tick without a lock.
     const CountingWriter = struct {
-        inner: *std.Io.Writer.Allocating,
+        inner: *std.Io.Writer,
         bytes_written: std.atomic.Value(u64),
         max_bytes: u64,
         limit_exceeded: bool,
@@ -591,14 +591,14 @@ pub const HttpClient = struct {
 
         fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
             const self: *CountingWriter = @fieldParentPtr("writer", w);
-            // Refuse the over-cap chunk before the inner Allocating writer grows
-            // to hold it. `drain` is the sole in-band writer, so a monotonic load suffices.
+            // Refuse the over-cap chunk before the inner sink grows to hold it.
+            // `drain` is the sole in-band writer, so a monotonic load suffices.
             const incoming = std.Io.Writer.countSplat(data, splat);
             if (self.bytes_written.load(.monotonic) + incoming > self.max_bytes) {
                 self.limit_exceeded = true;
                 return error.WriteFailed;
             }
-            const n = self.inner.writer.vtable.drain(&self.inner.writer, data, splat) catch
+            const n = self.inner.vtable.drain(self.inner, data, splat) catch
                 return error.WriteFailed;
             const total = self.bytes_written.fetchAdd(n, .release) + n;
             self.report(total);
@@ -614,7 +614,7 @@ pub const HttpClient = struct {
             }
             // Clamp the source so a file cannot overshoot the cap either.
             const clamped = std.Io.Limit.min(limit, .limited64(self.max_bytes - current));
-            const n = self.inner.writer.vtable.sendFile(&self.inner.writer, file_reader, clamped) catch |e| return e;
+            const n = self.inner.vtable.sendFile(self.inner, file_reader, clamped) catch |e| return e;
             const total = self.bytes_written.fetchAdd(n, .release) + n;
             self.report(total);
             // Backstop: the clamp bounds the write, but keep the post-check.
@@ -627,12 +627,12 @@ pub const HttpClient = struct {
 
         fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
             const self: *CountingWriter = @fieldParentPtr("writer", w);
-            return self.inner.writer.vtable.flush(&self.inner.writer);
+            return self.inner.vtable.flush(self.inner);
         }
 
         fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
             const self: *CountingWriter = @fieldParentPtr("writer", w);
-            return self.inner.writer.vtable.rebase(&self.inner.writer, preserve, capacity);
+            return self.inner.vtable.rebase(self.inner, preserve, capacity);
         }
     };
 
@@ -675,7 +675,7 @@ pub const HttpClient = struct {
         var body_reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
 
         var counting = CountingWriter{
-            .inner = &body_writer,
+            .inner = &body_writer.writer,
             .bytes_written = std.atomic.Value(u64).init(0),
             .max_bytes = max_bytes,
             .limit_exceeded = false,
@@ -1509,7 +1509,7 @@ test "CountingWriter.drain: refuses the over-cap chunk before allocating it" {
     var inner: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer inner.deinit();
     var cw = HttpClient.CountingWriter{
-        .inner = &inner,
+        .inner = &inner.writer,
         .bytes_written = std.atomic.Value(u64).init(0),
         .max_bytes = 10,
         .limit_exceeded = false,
@@ -1530,7 +1530,7 @@ test "CountingWriter.drain: accepts a chunk landing exactly on max_bytes" {
     var inner: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer inner.deinit();
     var cw = HttpClient.CountingWriter{
-        .inner = &inner,
+        .inner = &inner.writer,
         .bytes_written = std.atomic.Value(u64).init(0),
         .max_bytes = 10,
         .limit_exceeded = false,
@@ -1549,7 +1549,7 @@ test "CountingWriter.drain: over-cap detected via splat count, not just data len
     var inner: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer inner.deinit();
     var cw = HttpClient.CountingWriter{
-        .inner = &inner,
+        .inner = &inner.writer,
         .bytes_written = std.atomic.Value(u64).init(0),
         .max_bytes = 4,
         .limit_exceeded = false,
@@ -1589,7 +1589,7 @@ test "CountingWriter.sendFile: clamps the source so a file cannot overshoot the 
     var inner: std.Io.Writer.Allocating = .init(alloc);
     defer inner.deinit();
     var cw = HttpClient.CountingWriter{
-        .inner = &inner,
+        .inner = &inner.writer,
         .bytes_written = std.atomic.Value(u64).init(0),
         .max_bytes = 10,
         .limit_exceeded = false,
