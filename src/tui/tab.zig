@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const color = @import("../ui/color.zig");
+const ctx = @import("ctx.zig");
 const scroll_list = @import("scroll_list.zig");
 const layout = @import("layout.zig");
 const filter_input = @import("filter_input.zig");
@@ -181,12 +182,46 @@ pub fn verify(comptime M: type) void {
     // the shell; `null` for a synchronous tab. Total coverage, no runtime switch.
     if (!@hasDecl(M, "fetch_spec")) @compileError(@typeName(M) ++ ": tab must expose `pub const fetch_spec: ?FetchSpec`");
     if (@TypeOf(M.fetch_spec) != ?FetchSpec) @compileError(@typeName(M) ++ ".fetch_spec must be `?FetchSpec`");
+
+    // Optional typed capability decls — a tab migrates its impure surface
+    // incrementally, so these are type-checked *iff* declared, never required
+    // present here (the shell falls back to the legacy dispatch for a tab still
+    // missing `service`). A declared-but-mistyped capability is a build error, so
+    // the uniform effect shape is pinned at comptime the moment a tab conforms.
+    if (@hasDecl(M, "mutates") and @TypeOf(M.mutates) != fn (*const M.State) bool)
+        @compileError(@typeName(M) ++ ".mutates must be `fn (*const State) bool`");
+    if (@hasDecl(M, "service")) verifyService(M);
+}
+
+/// Pin a declared `service` to the uniform `fn (*State, *Storage, *ctx.Ctx) !void`
+/// shape. The error set is inferred per tab, so the parameters — not the whole fn
+/// type — are the contract; the return set is validated where the shell `try`s it.
+fn verifyService(comptime M: type) void {
+    // `service` owns the tab's parse storage, so a conforming tab must expose one —
+    // reported here, not as a raw "no member" when the params are checked below.
+    if (!@hasDecl(M, "Storage")) @compileError(@typeName(M) ++ ": a tab exposing `service` must also expose `pub const Storage`");
+    const fn_info = switch (@typeInfo(@TypeOf(M.service))) {
+        .@"fn" => |f| f,
+        else => @compileError(@typeName(M) ++ ".service must be a function"),
+    };
+    const want = [_]type{ *M.State, *M.Storage, *ctx.Ctx };
+    const shape = @typeName(M) ++ ".service must be `fn (*State, *Storage, *ctx.Ctx) !void`";
+    if (fn_info.params.len != want.len) @compileError(shape);
+    inline for (fn_info.params, want) |got, w| {
+        if (got.type != w) @compileError(shape);
+    }
 }
 
 // ─── tests ───────────────────────────────────────────────────────────
 
 const GoodTab = struct {
     pub const State = struct { chrome: Chrome = .{} };
+    pub const Storage = struct {
+        pub fn deinit(self: *Storage, allocator: std.mem.Allocator) void {
+            _ = self;
+            _ = allocator;
+        }
+    };
     pub const fetch_spec: ?FetchSpec = null;
     pub fn title() []const u8 {
         return "Good";
@@ -203,9 +238,21 @@ const GoodTab = struct {
         _ = f;
         _ = r;
     }
+    pub fn mutates(s: *const State) bool {
+        _ = s;
+        return false;
+    }
+    pub fn service(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
+        _ = s;
+        _ = storage;
+        _ = c;
+    }
 };
 
-test "verify accepts a conforming tab module" {
+test "verify accepts a conforming tab module, including a well-typed service + mutates" {
+    // The optional effect capabilities are type-checked here: had `service`'s
+    // params or `mutates`'s signature drifted from the contract, this would not
+    // compile — the comptime guard the migrated tabs rely on.
     comptime verify(GoodTab);
 }
 

@@ -14,11 +14,13 @@ const std = @import("std");
 const testing = std.testing;
 
 const color = @import("../ui/color.zig");
+const ctx = @import("ctx.zig");
 const doctor_json = @import("json/doctor.zig");
 pub const Row = doctor_json.Finding;
 const Severity = doctor_json.Severity;
 const detail_pane = @import("detail_pane.zig");
 const scroll_list = @import("scroll_list.zig");
+const spawn = @import("spawn.zig");
 const tab = @import("tab.zig");
 
 /// A fix effect the pure `step` defers to the impure shell, which performs it and
@@ -51,6 +53,13 @@ pub const Storage = struct {
 
 /// Doctor audits in the background; it exits by severity, so it tolerates ≤2.
 pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{"doctor"}, .max_ok_exit = 2, .refresh_op = "doctor refresh failed" };
+
+/// Whether the pending request will spawn a DB-mutating child (`mt doctor --fix`).
+/// The shell folds this over every tab before opening the DB so a live background
+/// audit is drained first — the WAL single-writer invariant.
+pub fn mutates(s: *const State) bool {
+    return s.request == .fix;
+}
 
 pub fn title() []const u8 {
     return "Doctor";
@@ -119,6 +128,102 @@ pub fn step(s: *State, key: tab.Key) void {
         .end => s.chrome.view.selected = filteredCount(s.items, s.chrome.filter.slice()) -| 1,
         else => {},
     }
+}
+
+// ─── impure zone ───────────────────────────────────────────────────────
+// The effect half of the tab, reunited beside its pure producer (`step` sets the
+// `request`; the code below drains it). Everything here takes its I/O ports
+// explicitly through the shared `ctx.Ctx` — never a global — so the pure/impure
+// line is the function signature: a decl that touches `io`/`allocator` lives here.
+
+/// The effect chain's error set, composed from the source sets so it tracks them
+/// automatically. It is a subset of the shell's `RunError`, which is the exhaustive
+/// boundary that classifies each fault recoverable-vs-fatal; naming it here keeps
+/// the public `service` explicit without hand-listing errors.
+pub const Error = std.mem.Allocator.Error || spawn.ReadError || spawn.InlineError || doctor_json.Error;
+
+/// Perform any fix effect the pure `step` requested, then clear it — the consumer
+/// half of the `request` seam. The shell dispatches this only for the active tab;
+/// the lazy (re)load on entry / after staleness stays loop machinery, so this owns
+/// only the tab's own effect.
+pub fn service(s: *State, storage: *Storage, c: *ctx.Ctx) Error!void {
+    const req = s.request;
+    s.request = .none;
+    switch (req) {
+        .none => {},
+        .fix => try doDoctorFix(s, storage, c),
+    }
+}
+
+/// Delegate the selected finding's fix to the real `mt` inline, then refresh.
+fn doDoctorFix(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
+    const argv = (try doctorFixArgv(c.allocator, c.mt_path, s)) orelse return; // nothing fixable selected
+    defer c.allocator.free(argv);
+    {
+        // `mt doctor --fix` exits by severity (1 warn / 2 err), not pass/fail — a
+        // clean sweep of a warning-class finding still exits 1 — so tolerate exits
+        // up to 2 (symmetric with the read). A real fault (exit > 2, signal) still
+        // surfaces as a banner; a severity exit re-enters cleanly and falls through
+        // to the refresh. Scoped so the refresh reports under its own op, not the fix.
+        errdefer |err| c.shared.banner.set("doctor fix failed", @errorName(err));
+        try spawn.runInlineReenterTolerant(c.term, argv, 2);
+    }
+    try loadDoctor(s, storage, c); // exit can't say what remains — the refresh is the truth
+    c.shared.markStaleAfter(.doctor); // this tab is fresh; the others may now be stale
+}
+
+/// Build `mt doctor --fix <class>` for the selected finding. Pure over the tab
+/// state: null when nothing is selected or the finding is not fixable (the no-op),
+/// else an owned argv. The token is the finding's `fix_class` — the only thing
+/// `mt doctor --fix` resolves — not its descriptive `id`. Caller frees the slice.
+fn doctorFixArgv(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State) std.mem.Allocator.Error!?[]const []const u8 {
+    const fnd = selectedFinding(s) orelse return null; // empty list: no-op
+    if (!fnd.fixable) return null; // a non-fixable finding has no fix target
+    return try spawn.inlineArgv(allocator, mt_path, &.{ "doctor", "--fix", doctor_json.fixClassTag(fnd.fix_class) });
+}
+
+/// (Re)read `mt doctor --json` and repoint the tab's findings at the fresh parse.
+/// The polled read animates the shell's spinner through `c.painter` while it
+/// blocks; the storage is swapped only after a clean parse, so a failure keeps the
+/// last-good findings and their selection behind a banner.
+fn loadDoctor(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
+    errdefer |err| c.shared.banner.set("doctor refresh failed", @errorName(err));
+    const argv = try spawn.jsonArgv(c.allocator, c.mt_path, &.{"doctor"});
+    defer c.allocator.free(argv);
+    // Keep `loading` set across the poll so each tick paints the spinner, cleared
+    // once the result (or the empty/banner state) replaces it.
+    c.loading.* = true;
+    defer c.loading.* = false;
+    // `mt doctor` exits non-zero by severity (1 warn / 2 err) while still emitting
+    // findings — exactly when the tab is most useful — so tolerate exits up to 2.
+    const bytes = try spawn.readJsonPolled(c.io, c.allocator, argv, 2, c.painter);
+    defer if (bytes) |b| c.allocator.free(b);
+    try applyDoctorBytes(c.allocator, s, storage, bytes);
+}
+
+/// Repoint the Doctor tab at a drained `--json` payload. `null` (a fresh prefix)
+/// clears to no findings; a parsed document swaps in the rows + reclaimable stats.
+/// Shared by the synchronous reload and the background fetch; the storage is
+/// swapped only after a clean parse, so a failure keeps the last-good findings.
+/// Public because the shell's fetch drain routes a background payload through it.
+pub fn applyDoctorBytes(allocator: std.mem.Allocator, st: *State, storage: *Storage, bytes: ?[]const u8) doctor_json.Error!void {
+    const payload = bytes orelse {
+        if (storage.doctor) |old| old.deinit();
+        storage.doctor = null;
+        st.items = &.{};
+        return;
+    };
+    const parsed = try doctor_json.parse(allocator, payload);
+    applyDoctorParse(st, storage, parsed);
+}
+
+/// Repoint the tab at a fresh parse, freeing the previous one. Split from the
+/// spawn so the findings + reclaimable stats wiring is testable without a child.
+fn applyDoctorParse(st: *State, storage: *Storage, parsed: doctor_json.Parsed) void {
+    if (storage.doctor) |old| old.deinit();
+    storage.doctor = parsed;
+    st.items = parsed.items;
+    st.stats = parsed.stats;
 }
 
 /// Local severity → glyph mapping, replicated from the CLI doctor renderer (the
@@ -1445,6 +1550,142 @@ test "the reclaimable section renders on a narrow pane without wrapping into the
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") != null); // header survives the cut
     try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // the list stays the floor
+}
+
+test "mutates is true only for a pending fix — the request that takes the WAL writer" {
+    var s: State = .{};
+    try testing.expect(!mutates(&s)); // .none never gates the pre-mutation drain
+    s.request = .fix;
+    try testing.expect(mutates(&s)); // a fix spawns `mt doctor --fix`, a DB writer
+}
+
+test "applyDoctorBytes repoints the tab at parsed findings + reclaimable stats; null clears" {
+    const allocator = testing.allocator;
+    var st: State = .{};
+    var storage: Storage = .{};
+    defer storage.deinit(allocator);
+    const bytes =
+        \\{"checks":[{"id":"a","severity":"warn","title":"A","fixable":true,"fix_class":"stale_lock"}],
+        \\"cask_history":{"retained_versions":3,"bytes":4096},"tap_cache":{"bytes":512}}
+    ;
+    try applyDoctorBytes(allocator, &st, &storage, bytes);
+    try testing.expectEqual(@as(usize, 1), st.items.len);
+    // The reclaimable figures ride through to the tab so the band can show them.
+    try testing.expectEqual(@as(u64, 4096), st.stats.cask_bytes);
+    try testing.expectEqual(@as(u64, 512), st.stats.tap_cache_bytes);
+    try testing.expectEqual(@as(usize, 3), st.stats.retained_versions);
+
+    // A null payload (a fresh prefix's empty audit) clears the tab to no findings.
+    try applyDoctorBytes(allocator, &st, &storage, null);
+    try testing.expectEqual(@as(usize, 0), st.items.len);
+}
+
+// Backing storage for a `ctx.Ctx` in an effect test: dummy term/fetches/shared,
+// a no-op painter (fd = -1; the test children finish before the first poll tick,
+// so it is never touched), and the synchronous-load flag.
+const TestEnv = struct {
+    term_h: ctx.Term,
+    fetches: ctx.Fetches = ctx.Fetches.initFill(null),
+    shared: ctx.SharedModel = .{},
+    frame: []u8 = &.{},
+    loading: bool = false,
+};
+
+fn mkCtx(io: std.Io, e: *TestEnv, mt_path: []const u8) ctx.Ctx {
+    return .{
+        .io = io,
+        .allocator = testing.allocator,
+        .term = &e.term_h,
+        .painter = .{ .fd = -1, .frame = &e.frame },
+        .fetches = &e.fetches,
+        .shared = &e.shared,
+        .mt_path = mt_path,
+        .loading = &e.loading,
+    };
+}
+
+test "doctorFixArgv builds `mt doctor --fix <class>` from the finding's fix_class, not its id" {
+    const items = [_]Row{
+        .{ .id = "sqlite_integrity", .severity = .err, .title = "SQLite integrity", .fixable = false, .fix_class = .none },
+        .{ .id = "orphaned_store_entries", .severity = .warn, .title = "Orphaned store entries", .fixable = true, .fix_class = .orphaned_store },
+    };
+    var st: State = .{ .items = &items };
+    st.chrome.view.selected = 1; // the fixable finding (display order: err then warn)
+    const argv = (try doctorFixArgv(testing.allocator, "/opt/homebrew/bin/mt", &st)).?;
+    defer testing.allocator.free(argv);
+    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqualStrings("/opt/homebrew/bin/mt", argv[0]);
+    try testing.expectEqualStrings("doctor", argv[1]);
+    try testing.expectEqualStrings("--fix", argv[2]);
+    try testing.expectEqualStrings("orphaned_store", argv[3]); // the class, not "orphaned_store_entries"
+}
+
+test "doctorFixArgv returns null for a non-fixable selection so f is a no-op" {
+    const items = [_]Row{
+        .{ .id = "sqlite_integrity", .severity = .err, .title = "SQLite integrity", .fixable = false, .fix_class = .none },
+    };
+    const st: State = .{ .items = &items };
+    try testing.expect((try doctorFixArgv(testing.allocator, "/bin/mt", &st)) == null);
+}
+
+test "doctorFixArgv returns null on an empty list" {
+    const st: State = .{ .items = &.{} };
+    try testing.expect((try doctorFixArgv(testing.allocator, "/bin/mt", &st)) == null);
+}
+
+test "loadDoctor treats an exit-0 empty response (fresh prefix) as an empty tab" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{};
+    var c = mkCtx(thr.io(), &env, "/usr/bin/true");
+    try loadDoctor(&st, &storage, &c);
+    try testing.expectEqual(@as(usize, 0), st.items.len);
+    try testing.expect(!env.shared.banner.isSet());
+}
+
+test "a failed doctor refresh names the op in the banner and keeps the last-good findings" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{};
+    var c = mkCtx(thr.io(), &env, "/bin/echo"); // echo emits non-JSON → parse fails
+    try testing.expectError(error.BadJson, loadDoctor(&st, &storage, &c));
+    try testing.expectEqualStrings("doctor refresh failed: BadJson", env.shared.banner.slice());
+    try testing.expectEqual(@as(usize, 0), st.items.len); // last-good kept
+}
+
+test "service on a .none request is a clean no-op — no spawn, no banner" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{}; // .none: the pure `step` set nothing to perform
+    var c = mkCtx(thr.io(), &env, "/bin/false"); // would fail if it ever spawned
+    try service(&st, &storage, &c);
+    try testing.expectEqual(Request.none, st.request);
+    try testing.expect(!env.shared.banner.isSet());
+}
+
+test "service drains a fix request; a fix with nothing fixable never spawns" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    // An empty list means `doctorFixArgv` resolves to null: the request drains but
+    // no `mt doctor --fix` child runs, so `/bin/false` is never reached.
+    var st: State = .{ .request = .fix };
+    var c = mkCtx(thr.io(), &env, "/bin/false");
+    try service(&st, &storage, &c);
+    try testing.expectEqual(Request.none, st.request); // the producer/consumer seam drained it
+    try testing.expect(!env.shared.banner.isSet()); // never spawned → no failure banner
+    try testing.expectEqual(@as(usize, 0), st.items.len);
 }
 
 test "conforms to the tab contract" {

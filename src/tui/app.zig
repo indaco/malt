@@ -117,15 +117,11 @@ pub const App = struct {
     prefix: []const u8 = "",
 };
 
-/// After a delegated mutation the active tab was just re-read inline, so it is
-/// fresh; the others may now be stale. Mark them dirty — a dirty tab refetches
-/// only when entered (`takeDirty`), so the cost is paid lazily, on view. Takes the
-/// shared read-model by pointer, not the whole `App`: the cross-tab staleness
-/// channel is scalar-mediated, so this writer structurally cannot touch a tab's
-/// private `Storage`.
+/// The legacy free-function spelling for the hub's not-yet-migrated cross-tab
+/// writers; delegates to `SharedModel.markStaleAfter`, which the migrated tabs
+/// call on the shared model directly. Removed when the last writer moves.
 pub fn markStaleAfterMutation(shared: *SharedModel, active: Tab) void {
-    shared.dirty = std.EnumSet(Tab).initFull();
-    shared.dirty.remove(active);
+    shared.markStaleAfter(active);
 }
 
 /// Mark every data tab dirty at launch so each loads lazily on first entry.
@@ -518,6 +514,27 @@ const LoadTicker = struct {
     }
 };
 
+/// Binds the whole-dashboard repaint for a migrated tab's synchronous polled load
+/// (the Doctor reload after a fix). Type-erased into `Painter.on_tick` so the tab
+/// animates its spinner without importing the hub — only the hub can render every
+/// tab. Mirrors `LoadTicker.tick`, which the not-yet-migrated tabs still use directly.
+const TickBind = struct {
+    allocator: std.mem.Allocator,
+    app: *App,
+    fd: std.posix.fd_t,
+    frame: *[]u8,
+    fn call(p: *anyopaque) void {
+        // `p` was set from a `*TickBind` (`&tick_bind` in `run`), so the round-trip is sound.
+        const b: *TickBind = @ptrCast(@alignCast(p));
+        b.app.spinner_frame +%= 1;
+        // A resize during the load reflows here (repaint reads currentSize); consume
+        // the flag so the loop's own resize check doesn't redundantly repaint.
+        _ = term.takeResized();
+        // Best-effort, like paintLoading: a dropped animation frame is cosmetic.
+        repaint(b.fd, b.frame, b.allocator, b.app) catch {};
+    }
+};
+
 /// The Search tab's cross-query selection ("basket") now lives beside its tab —
 /// it is search-private storage. Aliased here so the shell's search helpers still
 /// name it without the definition radiating from the hub.
@@ -729,7 +746,7 @@ fn applyTabBytes(allocator: std.mem.Allocator, app: *App, store: *Storages, t: T
     switch (t) {
         .outdated => try applyOutdatedBytes(allocator, app, store, bytes),
         .services => try applyServicesBytes(allocator, app, store, bytes),
-        .doctor => try applyDoctorBytes(allocator, app, store, bytes),
+        .doctor => try doctor.applyDoctorBytes(allocator, &app.states.doctor, &store.doctor, bytes),
         else => {},
     }
 }
@@ -1164,99 +1181,6 @@ fn serviceServices(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, pain
     }
 }
 
-/// (Re)read `mt doctor --json` and repoint the Doctor tab's findings at the fresh
-/// parse, freeing the previous one.
-fn loadDoctor(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, store: *Storages) RunError!void {
-    // Annotate any failure as a recoverable banner; the loop boundary decides
-    // recoverable vs fatal. The store is swapped only after a clean parse, so a
-    // failure keeps the last-good findings and their selection.
-    errdefer |err| app.shared.banner.set("doctor refresh failed", @errorName(err));
-    const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{"doctor"});
-    defer allocator.free(argv);
-    // Animate the spinner across the poll: `loading` stays set so each tick
-    // paints it, cleared once the result (or the empty/banner state) replaces it.
-    app.loading = true;
-    defer app.loading = false;
-    const ticker = LoadTicker{ .p = painter, .allocator = allocator, .app = app };
-    // `mt doctor` exits non-zero by severity (1 warn / 2 err) while still emitting
-    // its findings JSON — exactly when the tab is most useful — so the doctor read
-    // tolerates exits up to 2 (`max_ok_exit`) where the generic read rejects them.
-    const bytes = try spawn.readJsonPolled(io, allocator, argv, 2, ticker);
-    defer if (bytes) |b| allocator.free(b);
-    try applyDoctorBytes(allocator, app, store, bytes);
-}
-
-/// Repoint the Doctor tab at a drained `--json` payload. `null` (a fresh prefix)
-/// clears to no findings; a parsed document swaps in the rows + reclaimable stats.
-/// Shared by the synchronous reload and the background fetch; the store is swapped
-/// only after a clean parse, so a failure keeps the last-good findings.
-fn applyDoctorBytes(allocator: std.mem.Allocator, app: *App, store: *Storages, bytes: ?[]const u8) RunError!void {
-    const payload = bytes orelse {
-        if (store.doctor.doctor) |old| old.deinit();
-        store.doctor.doctor = null;
-        app.states.doctor.items = &.{};
-        return;
-    };
-    const parsed = try doctor_json.parse(allocator, payload);
-    applyDoctorParse(app, store, parsed);
-}
-
-/// Repoint the Doctor tab at a fresh parse, freeing the previous one. Split from
-/// the spawn so the findings + reclaimable stats wiring is testable without a
-/// child process.
-fn applyDoctorParse(app: *App, store: *Storages, parsed: doctor_json.Parsed) void {
-    if (store.doctor.doctor) |old| old.deinit();
-    store.doctor.doctor = parsed;
-    app.states.doctor.items = parsed.items;
-    app.states.doctor.stats = parsed.stats;
-}
-
-/// Build `mt doctor --fix <class>` for the selected finding. Pure over the tab
-/// state: null when nothing is selected or the finding is not fixable (the
-/// no-op), else an owned argv. The token is the finding's `fix_class` — the only
-/// thing `mt doctor --fix` resolves — not its descriptive `id`. Caller frees the
-/// returned slice (not its elements).
-fn doctorFixArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const doctor.State) std.mem.Allocator.Error!?[]const []const u8 {
-    const fnd = doctor.selectedFinding(st) orelse return null; // empty list: no-op
-    if (!fnd.fixable) return null; // a non-fixable finding has no fix target
-    return try spawn.inlineArgv(allocator, mt_path, &.{ "doctor", "--fix", doctor_json.fixClassTag(fnd.fix_class) });
-}
-
-/// Delegate the selected finding's fix to the real `mt` inline, then refresh.
-fn doDoctorFix(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Storages) RunError!void {
-    const argv = (try doctorFixArgv(allocator, app.mt_path, &app.states.doctor)) orelse return; // nothing fixable selected
-    defer allocator.free(argv);
-    {
-        // `mt doctor --fix` exits by severity (1 warn / 2 err), not pass/fail —
-        // a clean sweep of a warning-class finding still exits 1 — so tolerate
-        // exits up to 2 (symmetric with the doctor read's `max_ok_exit`). A real
-        // fault (exit > 2, signal, terminal fault) still surfaces as a banner;
-        // a severity exit re-enters cleanly and falls through to the refresh.
-        // Scoped so the refresh below reports under its own op, not the fix.
-        errdefer |err| app.shared.banner.set("doctor fix failed", @errorName(err));
-        try spawn.runInlineReenterTolerant(t, argv, 2);
-    }
-    try loadDoctor(io, allocator, painter, app, store); // exit can't say what remains — the refresh is the truth
-    markStaleAfterMutation(&app.shared, app.active);
-}
-
-/// Perform any fix effect the pure `step` requested on the Doctor tab, then clear
-/// it, and lazily (re)load on first entry or after a mutation marked it dirty.
-fn serviceDoctor(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
-    const req = app.states.doctor.request;
-    app.states.doctor.request = .none;
-    switch (req) {
-        .none => {},
-        .fix => try doDoctorFix(io, allocator, t, painter, app, store),
-    }
-    // Lazy per-tab load: first activation and post-mutation staleness both arrive
-    // as the dirty flag (set at init and by `markStaleAfterMutation`).
-    // Background, non-blocking — see `serviceOutdated`.
-    if (app.active == .doctor and takeDirty(app, .doctor)) {
-        startTabFetch(io, allocator, fetches, app, .doctor);
-    }
-}
-
 /// Build `mt search <query> --json` for the committed query. Pure over the tab
 /// state: null when the query is empty (the no-op — the view shows guidance, no
 /// spawn), else an owned argv whose `query` element borrows the filter buffer.
@@ -1457,7 +1381,7 @@ fn mutationPending(app: *const App) bool {
     return app.states.installed.request == .uninstall or
         app.states.outdated.request == .upgrade or
         app.states.services.request != .none or
-        app.states.doctor.request == .fix or
+        doctor.mutates(&app.states.doctor) or // the migrated tab declares this as a capability
         app.states.search.request == .install;
 }
 
@@ -1495,17 +1419,59 @@ fn drainActiveFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter
 
 /// Drain the active tab's pending effects after a keypress. Each tab's service is
 /// a no-op unless that tab is active and has a request or is due a lazy refresh,
-/// so calling each one each loop is cheap and keeps the dispatch flat.
+/// so visiting each one each loop is cheap and keeps the dispatch flat.
 fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
     // Sole-orchestrator invariant: quiesce any in-flight audit before an inline
     // mutator opens the DB, else the two opens race the single WAL writer and the
     // mutation fails with `Busy`. Read-only turns never drain — navigation stays live.
     if (anyFetchActive(fetches) and mutationPending(app)) drainActiveFetches(io, allocator, painter, fetches, app, store);
-    try serviceInstalled(io, allocator, t, app, store);
-    try serviceOutdated(io, allocator, t, fetches, app, store);
-    try serviceServices(io, allocator, t, painter, fetches, app, store);
-    try serviceDoctor(io, allocator, t, painter, fetches, app, store);
-    try serviceSearch(io, allocator, t, app, store);
+    inline for (@typeInfo(Tab).@"enum".fields) |fld| {
+        try serviceTab(@field(Tab, fld.name), io, allocator, t, painter, fetches, app, store);
+    }
+}
+
+/// Route one tab's post-keypress effects. A migrated tab (one exposing the
+/// contract's `service`) runs through the same comptime `moduleFor` switch the
+/// render path uses; the not-yet-migrated tabs fall back to their legacy
+/// `serviceX` until they move too. Temporary scaffolding — the `@hasDecl` fork and
+/// the legacy arm disappear once every tab conforms.
+fn serviceTab(comptime tag: Tab, io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
+    const M = moduleFor(tag);
+    if (comptime @hasDecl(M, "service")) {
+        // A request or lazy load only ever concerns the active tab (only its `step`
+        // runs), so a conforming tab's `service` runs only when active — the same
+        // scope its legacy `serviceX` guarded internally.
+        if (app.active != tag) return;
+        var c: ctx.Ctx = .{
+            .io = io,
+            .allocator = allocator,
+            .term = t,
+            .painter = painter,
+            .fetches = fetches,
+            .shared = &app.shared,
+            .mt_path = app.mt_path,
+            .loading = &app.loading,
+        };
+        try M.service(&@field(app.states, @tagName(tag)), &@field(app.storages, @tagName(tag)), &c);
+        // The lazy background (re)load stays loop machinery: kick the tab's audit on
+        // first entry / after a mutation marked it dirty. A tab without a fetch spec
+        // is skipped (its lazy-load, if any, is its own concern).
+        if (M.fetch_spec != null and takeDirty(app, tag)) startTabFetch(io, allocator, fetches, app, tag);
+    } else {
+        try legacyService(tag, io, allocator, t, painter, fetches, app, store);
+    }
+}
+
+/// The pre-contract dispatch for a tab whose effect group still lives in the hub.
+/// Removed once the last tab exposes `service`.
+fn legacyService(comptime tag: Tab, io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
+    switch (tag) {
+        .installed => try serviceInstalled(io, allocator, t, app, store),
+        .outdated => try serviceOutdated(io, allocator, t, fetches, app, store),
+        .services => try serviceServices(io, allocator, t, painter, fetches, app, store),
+        .search => try serviceSearch(io, allocator, t, app, store),
+        .doctor => comptime unreachable, // doctor is conforming — handled above
+    }
 }
 
 fn isTty(io: std.Io, fd: std.posix.fd_t) bool {
@@ -1573,8 +1539,10 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     defer app.storages.deinit(allocator); // app owns the per-tab parse storage
     var frame = try allocator.alloc(u8, frameCap(term.currentSize()));
     defer allocator.free(frame);
-    // The paint handle the polled lazy reads tick against to animate the spinner.
-    const painter: Painter = .{ .fd = fd, .frame = &frame };
+    // The paint handle the polled lazy reads tick against to animate the spinner. A
+    // migrated tab repaints through `on_tick` (only the hub can render every tab).
+    var tick_bind: TickBind = .{ .allocator = allocator, .app = &app, .fd = fd, .frame = &frame };
+    const painter: Painter = .{ .fd = fd, .frame = &frame, .on_tick = .{ .ctx = &tick_bind, .call = TickBind.call } };
 
     // Paint the data-free chrome first so the alt-screen never flashes blank,
     // then prime the cheap installed count (a single-digit-ms SQLite read) and
@@ -2822,35 +2790,6 @@ test "loadServices treats an exit-0 empty response (fresh prefix) as an empty ta
     try std.testing.expect(!app.shared.banner.isSet());
 }
 
-test "loadDoctor treats an exit-0 empty response (fresh prefix) as an empty tab" {
-    var t = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer t.deinit();
-    var app: App = .{ .mt_path = "/usr/bin/true" };
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    var frame: []u8 = &.{};
-    try loadDoctor(t.io(), std.testing.allocator, testPainter(&frame), &app, &store);
-    try std.testing.expectEqual(@as(usize, 0), app.states.doctor.items.len);
-    try std.testing.expect(!app.shared.banner.isSet());
-}
-
-test "applyDoctorParse points the Doctor tab at the parsed findings and reclaimable stats" {
-    var app: App = .{};
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    const bytes =
-        \\{"checks":[{"id":"a","severity":"warn","title":"A","fixable":true,"fix_class":"stale_lock"}],
-        \\"cask_history":{"retained_versions":3,"bytes":4096},"tap_cache":{"bytes":512}}
-    ;
-    const parsed = try doctor_json.parse(std.testing.allocator, bytes);
-    applyDoctorParse(&app, &store, parsed);
-    try std.testing.expectEqual(@as(usize, 1), app.states.doctor.items.len);
-    // The reclaimable figures ride through to the tab so the band can show them.
-    try std.testing.expectEqual(@as(u64, 4096), app.states.doctor.stats.cask_bytes);
-    try std.testing.expectEqual(@as(u64, 512), app.states.doctor.stats.tap_cache_bytes);
-    try std.testing.expectEqual(@as(usize, 3), app.states.doctor.stats.retained_versions);
-}
-
 test "a failed info read names the package in the banner and leaves the pane closed" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
@@ -2964,47 +2903,6 @@ test "a failed services refresh names the op in the banner and keeps the last-go
     try std.testing.expectError(error.BadJson, loadServices(t.io(), std.testing.allocator, testPainter(&frame), &app, &store));
     try std.testing.expectEqualStrings("services refresh failed: BadJson", app.shared.banner.slice());
     try std.testing.expectEqual(@as(usize, 0), app.states.services.items.len); // last-good kept
-}
-
-test "doctorFixArgv builds `mt doctor --fix <class>` from the finding's fix_class, not its id" {
-    const items = [_]doctor.Row{
-        .{ .id = "sqlite_integrity", .severity = .err, .title = "SQLite integrity", .fixable = false, .fix_class = .none },
-        .{ .id = "orphaned_store_entries", .severity = .warn, .title = "Orphaned store entries", .fixable = true, .fix_class = .orphaned_store },
-    };
-    var st: doctor.State = .{ .items = &items };
-    st.chrome.view.selected = 1; // the fixable finding (display order: err then warn)
-    const argv = (try doctorFixArgv(std.testing.allocator, "/opt/homebrew/bin/mt", &st)).?;
-    defer std.testing.allocator.free(argv);
-    try std.testing.expectEqual(@as(usize, 4), argv.len);
-    try std.testing.expectEqualStrings("/opt/homebrew/bin/mt", argv[0]);
-    try std.testing.expectEqualStrings("doctor", argv[1]);
-    try std.testing.expectEqualStrings("--fix", argv[2]);
-    try std.testing.expectEqualStrings("orphaned_store", argv[3]); // the class, not "orphaned_store_entries"
-}
-
-test "doctorFixArgv returns null for a non-fixable selection so f is a no-op" {
-    const items = [_]doctor.Row{
-        .{ .id = "sqlite_integrity", .severity = .err, .title = "SQLite integrity", .fixable = false, .fix_class = .none },
-    };
-    const st: doctor.State = .{ .items = &items };
-    try std.testing.expect((try doctorFixArgv(std.testing.allocator, "/bin/mt", &st)) == null);
-}
-
-test "doctorFixArgv returns null on an empty list" {
-    const st: doctor.State = .{ .items = &.{} };
-    try std.testing.expect((try doctorFixArgv(std.testing.allocator, "/bin/mt", &st)) == null);
-}
-
-test "a failed doctor refresh names the op in the banner and keeps the last-good findings" {
-    var t = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer t.deinit();
-    var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    var frame: []u8 = &.{};
-    try std.testing.expectError(error.BadJson, loadDoctor(t.io(), std.testing.allocator, testPainter(&frame), &app, &store));
-    try std.testing.expectEqualStrings("doctor refresh failed: BadJson", app.shared.banner.slice());
-    try std.testing.expectEqual(@as(usize, 0), app.states.doctor.items.len); // last-good kept
 }
 
 test "searchArgv builds `mt search <query> --json` for the committed query" {

@@ -73,6 +73,24 @@ pub const Banner = struct {
 pub const Painter = struct {
     fd: std.posix.fd_t,
     frame: *[]u8,
+    /// Hub-supplied whole-dashboard repaint, type-erased: only the hub can render
+    /// every tab, so it injects the closure here. A tab's synchronous polled load
+    /// ticks it to animate its spinner without importing the hub. Defaults to a
+    /// no-op so a Painter built for a test that never reaches a poll timeout — or
+    /// the background-fetch path, which repaints through the loop — needs no closure.
+    on_tick: Tick = .{},
+
+    pub const Tick = struct {
+        ctx: *anyopaque = undefined,
+        call: *const fn (*anyopaque) void = noop,
+        fn noop(_: *anyopaque) void {}
+    };
+
+    /// Duck-typed for `spawn.readJsonPolled`: fire the injected repaint each poll
+    /// tick. The `noop` default ignores the `undefined` ctx, so a bare Painter is safe.
+    pub fn tick(self: Painter) void {
+        self.on_tick.call(self.on_tick.ctx);
+    }
 };
 
 /// One in-flight background tab fetch: a non-blocking `mt <verb> --json` child
@@ -100,6 +118,16 @@ pub const SharedModel = struct {
     outdated_count: ?usize = null,
     dirty: std.EnumSet(Tab) = .initEmpty(),
     banner: Banner = .{},
+
+    /// After a delegated mutation the active tab was just re-read inline, so it is
+    /// fresh; every other tab may now be stale. A dirty tab refetches only when
+    /// entered, so the cost is paid lazily on view. Scalar-mediated: a mutating
+    /// tab's effect calls this on the shared model, never touching another tab's
+    /// storage — the cross-tab staleness channel that keeps tabs decoupled.
+    pub fn markStaleAfter(self: *SharedModel, active: Tab) void {
+        self.dirty = std.EnumSet(Tab).initFull();
+        self.dirty.remove(active);
+    }
 };
 
 /// The effect ports bundle, passed by pointer to whatever performs an effect.
@@ -112,6 +140,12 @@ pub const Ctx = struct {
     painter: Painter,
     fetches: *Fetches,
     shared: *SharedModel,
+    /// Resolved self-exe path so an effect re-execs *this* `mt` (not whatever PATH
+    /// resolves) for its delegated reads and mutations.
+    mt_path: []const u8,
+    /// The footer "Loading…" flag a tab raises around a synchronous polled load and
+    /// clears after, held by pointer because the hub's renderer reads it.
+    loading: *bool,
 };
 
 test "SharedModel defaults and mutation mirror the old inline App fields" {
@@ -164,6 +198,16 @@ test "banner truncates an over-cap op to the fixed buffer without overflow" {
     try std.testing.expect(b.slice().len <= banner_max); // bounded, no overrun
 }
 
+test "markStaleAfter dirties every tab except the just-refreshed active one" {
+    var m: SharedModel = .{};
+    m.markStaleAfter(.doctor);
+    try std.testing.expect(!m.dirty.contains(.doctor)); // fresh: it was re-read inline
+    try std.testing.expect(m.dirty.contains(.installed));
+    try std.testing.expect(m.dirty.contains(.outdated));
+    try std.testing.expect(m.dirty.contains(.services));
+    try std.testing.expect(m.dirty.contains(.search));
+}
+
 test "Ctx bundles the effect ports and points at the shared read-model" {
     try std.testing.expect(@hasField(Ctx, "io"));
     try std.testing.expect(@hasField(Ctx, "allocator"));
@@ -173,4 +217,7 @@ test "Ctx bundles the effect ports and points at the shared read-model" {
     try std.testing.expectEqual(Painter, @FieldType(Ctx, "painter"));
     try std.testing.expectEqual(*Fetches, @FieldType(Ctx, "fetches"));
     try std.testing.expectEqual(*SharedModel, @FieldType(Ctx, "shared"));
+    // The effect also needs the re-exec target and the synchronous-load flag.
+    try std.testing.expectEqual([]const u8, @FieldType(Ctx, "mt_path"));
+    try std.testing.expectEqual(*bool, @FieldType(Ctx, "loading"));
 }
