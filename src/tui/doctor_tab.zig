@@ -37,6 +37,18 @@ pub const State = struct {
     request: Request = .none,
 };
 
+/// Tab-private parse storage: the `doctor` findings the tab borrows. Owned beside
+/// the tab so the parse arena's lifetime lives here, not in a central store.
+/// `deinit` frees it.
+pub const Storage = struct {
+    doctor: ?doctor_json.Parsed = null,
+
+    pub fn deinit(self: *Storage, allocator: std.mem.Allocator) void {
+        _ = allocator; // the parse arena is self-freeing
+        if (self.doctor) |p| p.deinit();
+    }
+};
+
 /// Doctor audits in the background; it exits by severity, so it tolerates ≤2.
 pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{"doctor"}, .max_ok_exit = 2, .refresh_op = "doctor refresh failed" };
 
@@ -1437,4 +1449,12 @@ test "the reclaimable section renders on a narrow pane without wrapping into the
 
 test "conforms to the tab contract" {
     comptime tab.verify(@This());
+}
+
+test "Storage.deinit frees the parsed findings" {
+    const allocator = std.testing.allocator;
+    var storage: Storage = .{};
+    storage.doctor = try doctor_json.parse(allocator, "{\"schema_version\":1,\"checks\":[]}");
+    // A no-op deinit leaks the parse arena; `testing.allocator` trips at scope end.
+    storage.deinit(allocator);
 }

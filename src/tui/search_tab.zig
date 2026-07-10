@@ -84,6 +84,77 @@ pub const fetch_spec: ?tab.FetchSpec = null;
 /// and reads them to name a removal — never interprets or frees them.
 pub const SelEntry = struct { name: []const u8, kind: Kind };
 
+/// The cross-query selection ("basket"): the packages checked across one or more
+/// queries, keyed by `(name, kind)` and owning its name bytes so a pick outlives
+/// the per-query parse it was checked in. The pure leaf never sees it — only the
+/// projected `checked` slice and the borrowed `entries`.
+pub const Selection = struct {
+    entries: std.ArrayList(SelEntry) = .empty,
+
+    pub fn indexOf(self: *const Selection, name: []const u8, kind: Kind) ?usize {
+        for (self.entries.items, 0..) |e, i| {
+            if (e.kind == kind and std.mem.eql(u8, e.name, name)) return i;
+        }
+        return null;
+    }
+
+    pub fn contains(self: *const Selection, name: []const u8, kind: Kind) bool {
+        return self.indexOf(name, kind) != null;
+    }
+
+    /// Add the pick if absent, remove it if present — the `space` toggle. Owns a
+    /// copy of `name`, so the entry survives the parse storage `name` borrows.
+    pub fn toggle(self: *Selection, allocator: std.mem.Allocator, name: []const u8, kind: Kind) !void {
+        if (self.indexOf(name, kind)) |i| {
+            allocator.free(self.entries.items[i].name);
+            _ = self.entries.swapRemove(i); // order is irrelevant for a set
+            return;
+        }
+        const owned = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned);
+        try self.entries.append(allocator, .{ .name = owned, .kind = kind });
+    }
+
+    /// Drop the pick if present, freeing its bytes — the basket-view `d`/`space`.
+    /// Absent is a no-op, so a stale removal can never trap.
+    pub fn remove(self: *Selection, allocator: std.mem.Allocator, name: []const u8, kind: Kind) void {
+        if (self.indexOf(name, kind)) |i| {
+            allocator.free(self.entries.items[i].name);
+            _ = self.entries.swapRemove(i); // order is irrelevant for a set
+        }
+    }
+
+    /// Empty the basket, freeing every pick's bytes — the `n` escape hatch. Keeps
+    /// the backing capacity for reuse; `deinit` releases that at teardown.
+    pub fn clear(self: *Selection, allocator: std.mem.Allocator) void {
+        for (self.entries.items) |e| allocator.free(e.name);
+        self.entries.clearRetainingCapacity();
+    }
+
+    pub fn deinit(self: *Selection, allocator: std.mem.Allocator) void {
+        for (self.entries.items) |e| allocator.free(e.name);
+        self.entries.deinit(allocator);
+    }
+};
+
+/// Tab-private parse storage: the query results the tab borrows, the parallel
+/// checkbox buffer, the cross-query basket, and the open info pane's parse. Owned
+/// beside the tab so each lifetime lives here, not in a central store. `deinit`
+/// frees every owned buffer.
+pub const Storage = struct {
+    search: ?search_json.Parsed = null,
+    checked: []bool = &.{},
+    selected: Selection = .{},
+    detail: ?info_json.Parsed = null,
+
+    pub fn deinit(self: *Storage, allocator: std.mem.Allocator) void {
+        if (self.search) |p| p.deinit();
+        if (self.checked.len != 0) allocator.free(self.checked);
+        self.selected.deinit(allocator);
+        if (self.detail) |p| p.deinit();
+    }
+};
+
 pub fn title() []const u8 {
     return "Search";
 }
@@ -772,4 +843,16 @@ test "render on a zero-height rect is a clean no-op" {
 
 test "conforms to the tab contract" {
     comptime tab.verify(@This());
+}
+
+test "Storage.deinit frees the results, checkbox buffer, basket, and detail parse" {
+    const allocator = std.testing.allocator;
+    var storage: Storage = .{};
+    storage.search = try search_json.parse(allocator, "{\"schema_version\":1,\"query\":\"zzz\",\"results\":[]}");
+    storage.checked = try allocator.alloc(bool, 0);
+    try storage.selected.toggle(allocator, "wget", .formula); // one owned basket name
+    storage.detail = try info_json.parse(allocator, "{\"name\":\"a\",\"dependencies\":[]}");
+    // A no-op deinit leaks the parses, the buffer, and the basket's owned bytes;
+    // `testing.allocator` trips at scope end, pinning that deinit frees them all.
+    storage.deinit(allocator);
 }

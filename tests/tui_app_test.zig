@@ -70,13 +70,13 @@ test "classify keeps backend faults recoverable and terminal/OOM faults fatal" {
 
 test "a recoverable banner is painted in the footer and a keypress dismisses it" {
     var a: app.App = .{};
-    a.banner.set("info for jq failed", "BadJson");
+    a.shared.banner.set("info for jq failed", "BadJson");
     var buf: [8192]u8 = undefined;
     const shown = app.renderFrame(&buf, &a, 80, 24);
     try testing.expect(std.mem.indexOf(u8, shown, "info for jq failed: BadJson") != null);
 
     a = app.step(a, .down); // any key clears the transient banner
-    try testing.expect(!a.banner.isSet());
+    try testing.expect(!a.shared.banner.isSet());
     const cleared = app.renderFrame(&buf, &a, 80, 24);
     try testing.expect(std.mem.indexOf(u8, cleared, "info for jq failed") == null);
     try testing.expect(std.mem.indexOf(u8, cleared, "quit") != null); // help line is back
@@ -99,8 +99,8 @@ test "header counts are an em-dash before their stores load, the numbers after" 
     try testing.expect(std.mem.indexOf(u8, empty, "\xe2\x80\x94 kegs") != null); // em-dash
     try testing.expect(std.mem.indexOf(u8, empty, "\xe2\x80\x94 outdated") != null);
 
-    a.installed_count = 192;
-    a.outdated_count = 17;
+    a.shared.installed_count = 192;
+    a.shared.outdated_count = 17;
     const loaded = app.renderFrame(&buf, &a, 120, 24);
     try testing.expect(std.mem.indexOf(u8, loaded, "192 kegs") != null);
     try testing.expect(std.mem.indexOf(u8, loaded, "17 outdated") != null);

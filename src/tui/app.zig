@@ -41,10 +41,10 @@ const text_wrap = @import("text_wrap.zig");
 
 // Shared read-model + effect-port handles now live in the `ctx.zig` sink leaf;
 // the hub references them downward instead of owning their definitions.
-const Banner = ctx.Banner;
 const Painter = ctx.Painter;
 const TabFetch = ctx.TabFetch;
 const Fetches = ctx.Fetches;
+const SharedModel = ctx.SharedModel;
 
 /// Every tab's state, all present at once so a tab switch preserves each one's
 /// filter / scroll / data. Field names match `Tab` tags for `@field` dispatch.
@@ -84,18 +84,18 @@ pub const App = struct {
     editing: bool = false,
     quit: bool = false,
     states: TabStates = .{},
-    /// Tabs whose data may be stale after a delegated mutation. Lazy per-tab: a
-    /// dirty tab refetches its `--json` only when entered (README open question
-    /// #4), so an unrelated mutation never pays for a tab the user isn't viewing.
-    dirty: std.EnumSet(Tab) = .initEmpty(),
+    /// Per-tab parse storage, one `Storage` per tab, owned here. Each tab's rows
+    /// borrow from its own slot; the arena lifetimes live with the tab, not a
+    /// central store.
+    storages: Storages = .{},
+    /// The genuinely shared read-model: header counts, the cross-tab `dirty` set,
+    /// and the recoverable-failure banner. Passed by pointer to the cross-tab
+    /// writers so they touch only these scalars, never another tab's `Storage`.
+    shared: SharedModel = .{},
     /// Resolved self-exe path injected by the `main.zig` bridge so the data and
     /// action tabs re-exec *this* `mt` (not whatever PATH resolves) for reads
     /// and mutations.
     mt_path: []const u8 = "",
-    /// A transient banner for the last recoverable backend failure. Shown in the
-    /// footer, dismissed on the next keypress (`step`); a successful action just
-    /// leaves it cleared.
-    banner: Banner = .{},
     /// Set while a lazy tab refetches so the footer shows the loading status.
     /// The polled read keeps it set across its poll loop and clears it after, so
     /// the spinner animates while the child runs and the result replaces it.
@@ -112,38 +112,37 @@ pub const App = struct {
     /// re-renders the same frame. Wraps freely (`+%=`); only its modulus matters.
     spinner_frame: u8 = 0,
     /// Header inputs. `version` (comptime) and `prefix` (env-resolved) are set
-    /// once in `run`; the counts mirror the loaded stores and stay null until
-    /// each store loads, so the header shows a placeholder rather than a wrong
-    /// number.
+    /// once in `run`.
     version: []const u8 = "",
     prefix: []const u8 = "",
-    installed_count: ?usize = null,
-    outdated_count: ?usize = null,
 };
 
 /// After a delegated mutation the active tab was just re-read inline, so it is
 /// fresh; the others may now be stale. Mark them dirty — a dirty tab refetches
-/// only when entered (`takeDirty`), so the cost is paid lazily, on view.
-pub fn markStaleAfterMutation(a: *App) void {
-    a.dirty = std.EnumSet(Tab).initFull();
-    a.dirty.remove(a.active);
+/// only when entered (`takeDirty`), so the cost is paid lazily, on view. Takes the
+/// shared read-model by pointer, not the whole `App`: the cross-tab staleness
+/// channel is scalar-mediated, so this writer structurally cannot touch a tab's
+/// private `Storage`.
+pub fn markStaleAfterMutation(shared: *SharedModel, active: Tab) void {
+    shared.dirty = std.EnumSet(Tab).initFull();
+    shared.dirty.remove(active);
 }
 
 /// Mark every data tab dirty at launch so each loads lazily on first entry.
 /// Search is the active tab and renders without data, so launch never blocks on
 /// a child read — the load cost is paid on view, behind `paintLoading`.
 fn initLaunchDirty(a: *App) void {
-    a.dirty.insert(.installed);
-    a.dirty.insert(.outdated);
-    a.dirty.insert(.services);
-    a.dirty.insert(.doctor);
+    a.shared.dirty.insert(.installed);
+    a.shared.dirty.insert(.outdated);
+    a.shared.dirty.insert(.services);
+    a.shared.dirty.insert(.doctor);
 }
 
 /// Consume `t`'s dirty flag: true exactly once after it was marked, so the
 /// caller refetches its `--json` at most once per staleness.
 pub fn takeDirty(a: *App, t: Tab) bool {
-    if (!a.dirty.contains(t)) return false;
-    a.dirty.remove(t);
+    if (!a.shared.dirty.contains(t)) return false;
+    a.shared.dirty.remove(t);
     return true;
 }
 
@@ -201,7 +200,7 @@ fn tabTitles() [tab_bar.count][]const u8 {
 /// keys the shell does not own fall through to the active tab.
 pub fn step(app: App, key: Key) App {
     var a = app;
-    a.banner.clear(); // a keypress dismisses the prior transient error banner
+    a.shared.banner.clear(); // a keypress dismisses the prior transient error banner
     if (a.editing) stepFilter(&a, key) else stepNormal(&a, key);
     return a;
 }
@@ -296,8 +295,8 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
             f.put(header.render(&hdb, .{
                 .version = app.version,
                 .prefix = app.prefix,
-                .kegs = app.installed_count,
-                .outdated = app.outdated_count,
+                .kegs = app.shared.installed_count,
+                .outdated = app.shared.outdated_count,
                 // While the outdated audit runs in the background, paint the
                 // current spinner frame on the outdated slot. Same glyph source as
                 // `loadingLine`, so the working-indicators can never drift;
@@ -341,11 +340,11 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
             if (app.loading or app.tab_loading.contains(app.active)) {
                 var lb: [64]u8 = undefined;
                 renderFooterText(&f, loadingLine(&lb, app), color.roleCode(.accent), r.footer.row + 1, text_rows, cols);
-            } else if (app.banner.isSet()) {
+            } else if (app.shared.banner.isSet()) {
                 // Undimmed + yellow so a recoverable failure reads as a warning, not
                 // chrome; the wrap paints through `putContent`, which drops the
                 // line-breakers the sanitizer let through.
-                renderFooterText(&f, app.banner.slice(), color.roleCode(.warning), r.footer.row + 1, text_rows, cols);
+                renderFooterText(&f, app.shared.banner.slice(), color.roleCode(.warning), r.footer.row + 1, text_rows, cols);
             } else {
                 var hb: [256]u8 = undefined;
                 renderFooterText(&f, footerLine(&hb, app), color.roleCode(.muted), r.footer.row + 1, text_rows, cols);
@@ -519,61 +518,10 @@ const LoadTicker = struct {
     }
 };
 
-/// The Search tab's cross-query selection ("basket"): the packages checked
-/// across one or more queries, keyed by `(name, kind)` and owning its name bytes
-/// so a pick outlives the per-query parse it was checked in. Shell-owned; the
-/// pure leaf never sees it — only the projected `checked` slice.
-const SearchSelection = struct {
-    // The leaf's borrowed-row type, so the basket view reads `entries.items`
-    // directly with no copy. The shell still owns and frees each `name`.
-    const Entry = search.SelEntry;
-    entries: std.ArrayList(Entry) = .empty,
-
-    fn indexOf(self: *const SearchSelection, name: []const u8, kind: search_json.Kind) ?usize {
-        for (self.entries.items, 0..) |e, i| {
-            if (e.kind == kind and std.mem.eql(u8, e.name, name)) return i;
-        }
-        return null;
-    }
-
-    fn contains(self: *const SearchSelection, name: []const u8, kind: search_json.Kind) bool {
-        return self.indexOf(name, kind) != null;
-    }
-
-    /// Add the pick if absent, remove it if present — the `space` toggle. Owns a
-    /// copy of `name`, so the entry survives the parse storage `name` borrows.
-    fn toggle(self: *SearchSelection, allocator: std.mem.Allocator, name: []const u8, kind: search_json.Kind) !void {
-        if (self.indexOf(name, kind)) |i| {
-            allocator.free(self.entries.items[i].name);
-            _ = self.entries.swapRemove(i); // order is irrelevant for a set
-            return;
-        }
-        const owned = try allocator.dupe(u8, name);
-        errdefer allocator.free(owned);
-        try self.entries.append(allocator, .{ .name = owned, .kind = kind });
-    }
-
-    /// Drop the pick if present, freeing its bytes — the basket-view `d`/`space`.
-    /// Absent is a no-op, so a stale removal can never trap.
-    fn remove(self: *SearchSelection, allocator: std.mem.Allocator, name: []const u8, kind: search_json.Kind) void {
-        if (self.indexOf(name, kind)) |i| {
-            allocator.free(self.entries.items[i].name);
-            _ = self.entries.swapRemove(i); // order is irrelevant for a set
-        }
-    }
-
-    /// Empty the basket, freeing every pick's bytes — the `n` escape hatch. Keeps
-    /// the backing capacity for reuse; `deinit` releases that at teardown.
-    fn clear(self: *SearchSelection, allocator: std.mem.Allocator) void {
-        for (self.entries.items) |e| allocator.free(e.name);
-        self.entries.clearRetainingCapacity();
-    }
-
-    fn deinit(self: *SearchSelection, allocator: std.mem.Allocator) void {
-        for (self.entries.items) |e| allocator.free(e.name);
-        self.entries.deinit(allocator);
-    }
-};
+/// The Search tab's cross-query selection ("basket") now lives beside its tab —
+/// it is search-private storage. Aliased here so the shell's search helpers still
+/// name it without the definition radiating from the hub.
+const SearchSelection = search.Selection;
 
 /// Project the persistent selection onto a result list: a row is checked iff it
 /// is selected and not already installed. A pure function of `(items, selection)`
@@ -584,9 +532,9 @@ fn projectChecked(items: []const search_json.Match, checked: []bool, sel: *const
 
 /// Fill the Search tab's shell-owned `checked` slice from the selection. No-op
 /// before a query has loaded.
-fn projectSearchChecked(store: *Store) void {
-    const items = if (store.search) |p| p.items else return;
-    projectChecked(items, store.search_checked, &store.search_selected);
+fn projectSearchChecked(store: *Storages) void {
+    const items = if (store.search.search) |p| p.items else return;
+    projectChecked(items, store.search.checked, &store.search.selected);
 }
 
 /// Mirror the shell-owned basket onto the leaf: the count (so the core can gate
@@ -594,76 +542,58 @@ fn projectSearchChecked(store: *Store) void {
 /// renders. The leaf holds no allocator and never owns the picks — it borrows this
 /// slice, which the shell refreshes here after every basket mutation (an append
 /// can move the backing buffer, so a stale slice would dangle).
-fn syncSearchSelectedCount(app: *App, store: *const Store) void {
-    app.states.search.selected_count = store.search_selected.entries.items.len;
-    app.states.search.basket = store.search_selected.entries.items;
+fn syncSearchSelectedCount(app: *App, store: *const Storages) void {
+    app.states.search.selected_count = store.search.selected.entries.items.len;
+    app.states.search.basket = store.search.selected.entries.items;
 }
 
-/// Owns the JSON parse results the tabs borrow from. Reads re-exec `mt … --json`
-/// and reparse into here; the tab `State` slices point at this storage and the
-/// pure `step`/`render` never free it. One per running dashboard.
-const Store = struct {
-    installed: ?list_json.Parsed = null,
-    detail: ?info_json.Parsed = null,
-    outdated: ?outdated_json.Parsed = null,
-    /// The Outdated tab's checkbox state, parallel to `outdated.?.items`. Owned
-    /// here, resized to the row count on each (re)load, borrowed by the tab.
-    outdated_checked: []bool = &.{},
-    services: ?services_json.Parsed = null,
-    doctor: ?doctor_json.Parsed = null,
-    search: ?search_json.Parsed = null,
-    /// The Search tab's checkbox state, parallel to `search.?.items`. Owned here,
-    /// resized to the result count on each query, borrowed by the tab. Now a
-    /// projection of `search_selected`, not per-query state.
-    search_checked: []bool = &.{},
-    /// The Search tab's cross-query selection ("basket"), owned here; outlives
-    /// every per-query parse. See `SearchSelection`.
-    search_selected: SearchSelection = .{},
-    /// Backing storage for the Search tab's open `mt info` pane (its own slot so
-    /// it never clobbers the Installed tab's detail parse).
-    search_detail: ?info_json.Parsed = null,
+/// Bundles the per-tab parse storage, one `Storage` per tab. Each tab defines and
+/// owns its own `Storage` (parse arenas + checkbox/basket buffers) beside its pure
+/// core; the hub only aggregates them here so `run` can hold and free the set. The
+/// old central `Store` is gone — no field here reaches across tabs.
+const Storages = struct {
+    installed: installed.Storage = .{},
+    outdated: outdated.Storage = .{},
+    services: services.Storage = .{},
+    doctor: doctor.Storage = .{},
+    search: search.Storage = .{},
 
-    fn deinit(self: *Store, allocator: std.mem.Allocator) void {
-        if (self.installed) |p| p.deinit();
-        if (self.detail) |p| p.deinit();
-        if (self.outdated) |p| p.deinit();
-        if (self.outdated_checked.len != 0) allocator.free(self.outdated_checked);
-        if (self.services) |p| p.deinit();
-        if (self.doctor) |p| p.deinit();
-        if (self.search) |p| p.deinit();
-        if (self.search_checked.len != 0) allocator.free(self.search_checked);
-        self.search_selected.deinit(allocator);
-        if (self.search_detail) |p| p.deinit();
+    fn deinit(self: *Storages, allocator: std.mem.Allocator) void {
+        self.installed.deinit(allocator);
+        self.outdated.deinit(allocator);
+        self.services.deinit(allocator);
+        self.doctor.deinit(allocator);
+        self.search.deinit(allocator);
     }
 };
 
 /// (Re)read `mt list --json --size --linked` and repoint the Installed tab's
 /// rows at the fresh parse, freeing the previous one. The `--size`/`--linked`
 /// keg-dir walk is paid only here — on the Installed tab, lazily.
-fn loadInstalled(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+fn loadInstalled(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Storages) RunError!void {
     // Annotate any failure as a recoverable banner; the loop boundary decides
     // whether to keep looping (recoverable) or restore + exit (fatal). The store
     // is only swapped after a clean parse, so a failure keeps the last-good rows.
-    errdefer |err| app.banner.set("list refresh failed", @errorName(err));
+    errdefer |err| app.shared.banner.set("list refresh failed", @errorName(err));
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "list", "--size", "--linked" });
     defer allocator.free(argv);
     const bytes = (try spawn.readJsonAllowEmpty(io, allocator, argv)) orelse {
         // Fresh prefix: an empty Cellar, not a failure. Clear the rows.
-        if (store.installed) |old| old.deinit();
-        store.installed = null;
+        if (store.installed.installed) |old| old.deinit();
+        store.installed.installed = null;
         app.states.installed.items = &.{};
         app.states.installed.detail = null;
-        app.installed_count = 0; // empty Cellar is a known zero, not "unknown"
+        app.shared.installed_count = 0; // empty Cellar is a known zero, not "unknown"
         return;
     };
     defer allocator.free(bytes);
 
     const parsed = try list_json.parse(allocator, bytes);
-    if (store.installed) |old| old.deinit();
-    store.installed = parsed;
+    if (store.installed.installed) |old| old.deinit();
+    store.installed.installed = parsed;
     app.states.installed.items = parsed.items;
     app.states.installed.detail = null; // a refreshed list invalidates the old detail
-    app.installed_count = parsed.items.len;
+    app.shared.installed_count = parsed.items.len;
 }
 
 /// Argv for the cheap keg-count read: `mt list --json` with **no**
@@ -678,19 +608,21 @@ fn installedCountArgv(allocator: std.mem.Allocator, mt_path: []const u8) std.mem
 /// full `--size --linked` Installed payload still loads lazily on tab entry; this
 /// keeps `<n> kegs` live at launch and after a cross-tab install. A second writer
 /// of `installed_count` beside `loadInstalled` — both compute `items.len`, so
-/// they cannot diverge.
-fn refreshInstalledCount(io: std.Io, allocator: std.mem.Allocator, app: *App) RunError!void {
-    errdefer |err| app.banner.set("keg count refresh failed", @errorName(err));
-    const argv = try installedCountArgv(allocator, app.mt_path);
+/// they cannot diverge. Takes the shared read-model by pointer, not the whole
+/// `App`: like `markStaleAfterMutation` it is a cross-tab writer, so it reaches
+/// only these shared scalars and structurally cannot touch a tab's `Storage`.
+fn refreshInstalledCount(io: std.Io, allocator: std.mem.Allocator, mt_path: []const u8, shared: *SharedModel) RunError!void {
+    errdefer |err| shared.banner.set("keg count refresh failed", @errorName(err));
+    const argv = try installedCountArgv(allocator, mt_path);
     defer allocator.free(argv);
     const bytes = (try spawn.readJsonAllowEmpty(io, allocator, argv)) orelse {
-        app.installed_count = 0; // empty Cellar is a known zero, not "unknown"
+        shared.installed_count = 0; // empty Cellar is a known zero, not "unknown"
         return;
     };
     defer allocator.free(bytes);
     const parsed = try list_json.parse(allocator, bytes);
     defer parsed.deinit(); // count only — the lazy full load owns the rows
-    app.installed_count = parsed.items.len;
+    shared.installed_count = parsed.items.len;
 }
 
 // ── Background tab fetches ─────────────────────────────────────────────────
@@ -793,7 +725,7 @@ const FetchOutcome = union(enum) { bytes: []const u8, empty, failed: anyerror };
 
 /// Route a drained payload to the owning tab's store. Pure dispatch over `tab`;
 /// the per-tab `applyXBytes` own the empty-vs-document split and the swap.
-fn applyTabBytes(allocator: std.mem.Allocator, app: *App, store: *Store, t: Tab, bytes: ?[]const u8) RunError!void {
+fn applyTabBytes(allocator: std.mem.Allocator, app: *App, store: *Storages, t: Tab, bytes: ?[]const u8) RunError!void {
     switch (t) {
         .outdated => try applyOutdatedBytes(allocator, app, store, bytes),
         .services => try applyServicesBytes(allocator, app, store, bytes),
@@ -807,14 +739,14 @@ fn applyTabBytes(allocator: std.mem.Allocator, app: *App, store: *Store, t: Tab,
 /// freed (the parse copies them); a parse/apply failure surfaces the same
 /// recoverable banner the synchronous reload uses and keeps the last-good data —
 /// never fatal, the loop keeps running.
-fn finishTabFetch(allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Store, t: Tab, outcome: FetchOutcome) void {
+fn finishTabFetch(allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, t: Tab, outcome: FetchOutcome) void {
     // Only reached for a tab with an active fetch, so the spec is present; the
     // fallback matches the old switch's default for a would-be non-fetch tab.
     const refresh_op = if (fetchSpec(t)) |s| s.refresh_op else "refresh failed";
     switch (outcome) {
-        .failed => |err| app.banner.set(refresh_op, @errorName(err)),
-        .empty => applyTabBytes(allocator, app, store, t, null) catch |e| app.banner.set(refresh_op, @errorName(e)),
-        .bytes => |b| applyTabBytes(allocator, app, store, t, b) catch |e| app.banner.set(refresh_op, @errorName(e)),
+        .failed => |err| app.shared.banner.set(refresh_op, @errorName(err)),
+        .empty => applyTabBytes(allocator, app, store, t, null) catch |e| app.shared.banner.set(refresh_op, @errorName(e)),
+        .bytes => |b| applyTabBytes(allocator, app, store, t, b) catch |e| app.shared.banner.set(refresh_op, @errorName(e)),
     }
     if (fetches.getPtr(t).*) |*f| f.buf.deinit(allocator);
     fetches.set(t, null);
@@ -827,7 +759,7 @@ fn finishTabFetch(allocator: std.mem.Allocator, painter: Painter, fetches: *Fetc
 /// `.failed` — never parsed); on a read fault or overflow, kill the still-running
 /// child first, then finish `.failed`. Bounded like the blocking drain; the
 /// child is always reaped before the result lands so none leaks.
-fn drainTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Store, t: Tab) void {
+fn drainTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, t: Tab) void {
     const f = &fetches.getPtr(t).*.?;
     var chunk: [4096]u8 = undefined;
     const n = std.posix.read(f.fd, &chunk) catch return failLiveTabFetch(io, allocator, painter, fetches, app, store, t);
@@ -848,7 +780,7 @@ fn drainTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fet
 /// Abandon a fetch whose child is still running (read fault, overflow, OOM):
 /// kill+reap it, then finish `.failed`. The best-effort refresh contract —
 /// last-good data behind the recoverable banner, never a TUI teardown.
-fn failLiveTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Store, t: Tab) void {
+fn failLiveTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, t: Tab) void {
     killAndReap(io, &fetches.getPtr(t).*.?);
     finishTabFetch(allocator, painter, fetches, app, store, t, .{ .failed = error.ReadFailed });
 }
@@ -857,7 +789,7 @@ fn failLiveTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, 
 /// active fetch's stdout. On a timeout, advance + repaint the spinner(s) (and
 /// absorb a resize) so the indicators animate; on a fetch ready, drain it;
 /// return true only when the tty has input the caller must read this turn.
-fn serviceFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Store) error{ReadFailed}!bool {
+fn serviceFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) error{ReadFailed}!bool {
     var fds: [tab_bar.count]std.posix.fd_t = undefined;
     var tabs: [tab_bar.count]Tab = undefined;
     var n: usize = 0;
@@ -883,14 +815,14 @@ fn serviceFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fe
 }
 
 /// Read `mt info <pkg> --json` for the selected row into the detail pane.
-fn openDetail(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+fn openDetail(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Storages) RunError!void {
     const sel = installed.selectedPkg(&app.states.installed) orelse return; // nothing selected
     // Name the package in a recoverable banner on any failure; the detail field
     // is only set after a clean parse, so a failure leaves the pane closed.
     errdefer |err| {
         var sb: [96]u8 = undefined;
         const op = std.fmt.bufPrint(&sb, "info for {s} failed", .{sel.name}) catch "info read failed";
-        app.banner.set(op, @errorName(err));
+        app.shared.banner.set(op, @errorName(err));
     }
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "info", sel.name });
     defer allocator.free(argv);
@@ -898,15 +830,15 @@ fn openDetail(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store
     defer allocator.free(bytes);
 
     const parsed = try info_json.parse(allocator, bytes);
-    if (store.detail) |old| old.deinit();
-    store.detail = parsed;
+    if (store.installed.detail) |old| old.deinit();
+    store.installed.detail = parsed;
     app.states.installed.detail = .{ .pkg = sel, .info = parsed.info };
 }
 
 /// Delegate uninstall to the real `mt` inline, then refresh the list. The
 /// target is the guard's latched copy — it neither borrows the list storage the
 /// post-spawn reload frees nor tracks a selection that moved after arming.
-fn doUninstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store, target: installed.ConfirmTarget) RunError!void {
+fn doUninstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Storages, target: installed.ConfirmTarget) RunError!void {
     const argv = try spawn.inlineArgv(allocator, app.mt_path, &.{ "uninstall", target.name() });
     defer allocator.free(argv);
     {
@@ -914,16 +846,16 @@ fn doUninstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *Ap
         // malt's real output in their scrollback) and surfaces the failure as a
         // recoverable banner — only a terminal fault is fatal. Scoped so the
         // post-mutation refresh below reports under its own op, not "uninstall".
-        errdefer |err| app.banner.set("uninstall failed", @errorName(err));
+        errdefer |err| app.shared.banner.set("uninstall failed", @errorName(err));
         try spawn.runInlineReenter(t, argv);
     }
     try loadInstalled(io, allocator, app, store); // the keg is gone — refetch
-    markStaleAfterMutation(app); // the other tabs may now be stale too
+    markStaleAfterMutation(&app.shared, app.active); // the other tabs may now be stale too
 }
 
 /// Perform any effect the pure `step` requested on the Installed tab, then clear
 /// it. The only tab with effects today; reads/spawns live here, never in `step`.
-fn serviceInstalled(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+fn serviceInstalled(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Storages) RunError!void {
     const req = app.states.installed.request;
     app.states.installed.request = .none;
     switch (req) {
@@ -943,15 +875,15 @@ fn serviceInstalled(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app
 /// the synchronous reload and the background launch fetch, so both land the same
 /// state. The store is swapped only after a clean parse — a failure keeps the
 /// last-good rows for the caller's banner to explain.
-fn applyOutdatedBytes(allocator: std.mem.Allocator, app: *App, store: *Store, bytes: ?[]const u8) RunError!void {
+fn applyOutdatedBytes(allocator: std.mem.Allocator, app: *App, store: *Storages, bytes: ?[]const u8) RunError!void {
     const payload = bytes orelse {
-        if (store.outdated) |old| old.deinit();
-        if (store.outdated_checked.len != 0) allocator.free(store.outdated_checked);
-        store.outdated = null;
-        store.outdated_checked = &.{};
+        if (store.outdated.outdated) |old| old.deinit();
+        if (store.outdated.checked.len != 0) allocator.free(store.outdated.checked);
+        store.outdated.outdated = null;
+        store.outdated.checked = &.{};
         app.states.outdated.items = &.{};
         app.states.outdated.checked = &.{};
-        app.outdated_count = 0; // nothing outdated is a known zero, not "unknown"
+        app.shared.outdated_count = 0; // nothing outdated is a known zero, not "unknown"
         return;
     };
     const parsed = try outdated_json.parse(allocator, payload);
@@ -961,13 +893,13 @@ fn applyOutdatedBytes(allocator: std.mem.Allocator, app: *App, store: *Store, by
     const checked = try allocator.alloc(bool, parsed.items.len);
     @memset(checked, false);
 
-    if (store.outdated) |old| old.deinit();
-    if (store.outdated_checked.len != 0) allocator.free(store.outdated_checked);
-    store.outdated = parsed;
-    store.outdated_checked = checked;
+    if (store.outdated.outdated) |old| old.deinit();
+    if (store.outdated.checked.len != 0) allocator.free(store.outdated.checked);
+    store.outdated.outdated = parsed;
+    store.outdated.checked = checked;
     app.states.outdated.items = parsed.items;
     app.states.outdated.checked = checked;
-    app.outdated_count = parsed.items.len;
+    app.shared.outdated_count = parsed.items.len;
 }
 
 /// Collect the checked, non-pinned rows into `out` as `(name, kind)` refs,
@@ -1033,7 +965,7 @@ fn upgradeFailDetail(buf: []u8, code: u8, refs: []const UpgradedRef) []const u8 
 /// user checked is the row upgraded — `mt upgrade <name>` is formula-first, so a
 /// checked cask would otherwise upgrade a same-named formula. Names borrow the
 /// parse arena, which `dropUpgradedRows` keeps alive across both passes.
-fn doUpgrade(allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+fn doUpgrade(allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Storages) RunError!void {
     const st = &app.states.outdated;
     const count = outdated.selectedCount(st);
     if (count == 0) return; // empty selection: no-op
@@ -1060,13 +992,13 @@ fn doUpgrade(allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Sto
                 dropped_any = true;
             } else {
                 var dbuf: [96]u8 = undefined;
-                app.banner.set("upgrade failed", upgradeFailDetail(&dbuf, code, pass.refs));
+                app.shared.banner.set("upgrade failed", upgradeFailDetail(&dbuf, code, pass.refs));
             }
         } else |err| {
-            app.banner.set("upgrade failed", @errorName(err));
+            app.shared.banner.set("upgrade failed", @errorName(err));
         }
     }
-    if (dropped_any) markStaleAfterMutation(app); // Installed sizes/versions changed too
+    if (dropped_any) markStaleAfterMutation(&app.shared, app.active); // Installed sizes/versions changed too
 }
 
 /// One upgraded row, identified by `(name, kind)` so a formula and a cask that
@@ -1092,13 +1024,13 @@ fn rowUpgraded(upgraded: []const UpgradedRef, row: outdated_json.OutdatedRow) bo
 fn dropUpgradedRows(
     allocator: std.mem.Allocator,
     app: *App,
-    store: *Store,
+    store: *Storages,
     upgraded: []const UpgradedRef,
 ) std.mem.Allocator.Error!void {
-    if (store.outdated == null) return; // nothing loaded → nothing to drop
-    const parsed = &store.outdated.?;
+    if (store.outdated.outdated == null) return; // nothing loaded → nothing to drop
+    const parsed = &store.outdated.outdated.?;
     const old_items = parsed.items;
-    const old_checked = store.outdated_checked;
+    const old_checked = store.outdated.checked;
 
     var keep: usize = 0;
     for (old_items) |row| {
@@ -1123,15 +1055,15 @@ fn dropUpgradedRows(
 
     if (old_checked.len != 0) allocator.free(old_checked);
     parsed.items = new_items;
-    store.outdated_checked = new_checked;
+    store.outdated.checked = new_checked;
     app.states.outdated.items = new_items;
     app.states.outdated.checked = new_checked;
-    app.outdated_count = new_items.len;
+    app.shared.outdated_count = new_items.len;
 }
 
 /// Perform any effect the pure `step` requested on the Outdated tab, then clear
 /// it, and lazily (re)load on first entry or after a mutation marked it dirty.
-fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, fetches: *Fetches, app: *App, store: *Store) RunError!void {
+fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
     const req = app.states.outdated.request;
     app.states.outdated.request = .none;
     switch (req) {
@@ -1149,11 +1081,11 @@ fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, fetc
 
 /// (Re)read `mt services list --json` and repoint the Services tab's rows at the
 /// fresh parse, freeing the previous one.
-fn loadServices(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, store: *Store) RunError!void {
+fn loadServices(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, store: *Storages) RunError!void {
     // Annotate any failure as a recoverable banner; the loop boundary decides
     // recoverable vs fatal. The store is swapped only after a clean parse, so a
     // failure keeps the last-good rows and their selection.
-    errdefer |err| app.banner.set("services refresh failed", @errorName(err));
+    errdefer |err| app.shared.banner.set("services refresh failed", @errorName(err));
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "services", "list" });
     defer allocator.free(argv);
     // Animate the spinner across the poll: `loading` stays set so each tick
@@ -1170,17 +1102,17 @@ fn loadServices(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app:
 /// clears to an empty list; a parsed document swaps in the rows. Shared by the
 /// synchronous reload and the background fetch; the store is swapped only after a
 /// clean parse, so a failure keeps the last-good rows.
-fn applyServicesBytes(allocator: std.mem.Allocator, app: *App, store: *Store, bytes: ?[]const u8) RunError!void {
+fn applyServicesBytes(allocator: std.mem.Allocator, app: *App, store: *Storages, bytes: ?[]const u8) RunError!void {
     const payload = bytes orelse {
-        if (store.services) |old| old.deinit();
-        store.services = null;
+        if (store.services.services) |old| old.deinit();
+        store.services.services = null;
         app.states.services.items = &.{};
         app.states.services.detail = null; // the old detail borrowed the freed rows
         return;
     };
     const parsed = try services_json.parse(allocator, payload);
-    if (store.services) |old| old.deinit();
-    store.services = parsed;
+    if (store.services.services) |old| old.deinit();
+    store.services.services = parsed;
     app.states.services.items = parsed.items;
     app.states.services.detail = null; // a refreshed list invalidates the old detail
 }
@@ -1197,7 +1129,7 @@ fn serviceActionArgv(allocator: std.mem.Allocator, mt_path: []const u8, action: 
 /// Delegate a service lifecycle action to the real `mt` inline, then refresh. The
 /// argv's `name` borrows from the current parse storage; the post-spawn reload
 /// frees that storage, so the name is not read afterwards.
-fn doServiceAction(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store, action: []const u8) RunError!void {
+fn doServiceAction(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Storages, action: []const u8) RunError!void {
     const argv = (try serviceActionArgv(allocator, app.mt_path, action, &app.states.services)) orelse return; // nothing selected
     defer allocator.free(argv);
     {
@@ -1205,17 +1137,17 @@ fn doServiceAction(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, pain
         // keeps malt's real output in their scrollback) and surfaces as a
         // recoverable banner; only a terminal fault is fatal. Scoped so the
         // refresh below reports under its own op, not the action.
-        errdefer |err| app.banner.set("service action failed", @errorName(err));
+        errdefer |err| app.shared.banner.set("service action failed", @errorName(err));
         try spawn.runInlineReenter(t, argv);
     }
     try loadServices(io, allocator, painter, app, store); // the state changed — refetch
-    markStaleAfterMutation(app);
+    markStaleAfterMutation(&app.shared, app.active);
 }
 
 /// Perform any lifecycle effect the pure `step` requested on the Services tab,
 /// then clear it, and lazily (re)load on first entry or after a mutation marked
 /// it dirty.
-fn serviceServices(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Store) RunError!void {
+fn serviceServices(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
     const req = app.states.services.request;
     app.states.services.request = .none;
     switch (req) {
@@ -1234,11 +1166,11 @@ fn serviceServices(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, pain
 
 /// (Re)read `mt doctor --json` and repoint the Doctor tab's findings at the fresh
 /// parse, freeing the previous one.
-fn loadDoctor(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, store: *Store) RunError!void {
+fn loadDoctor(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, store: *Storages) RunError!void {
     // Annotate any failure as a recoverable banner; the loop boundary decides
     // recoverable vs fatal. The store is swapped only after a clean parse, so a
     // failure keeps the last-good findings and their selection.
-    errdefer |err| app.banner.set("doctor refresh failed", @errorName(err));
+    errdefer |err| app.shared.banner.set("doctor refresh failed", @errorName(err));
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{"doctor"});
     defer allocator.free(argv);
     // Animate the spinner across the poll: `loading` stays set so each tick
@@ -1258,10 +1190,10 @@ fn loadDoctor(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *
 /// clears to no findings; a parsed document swaps in the rows + reclaimable stats.
 /// Shared by the synchronous reload and the background fetch; the store is swapped
 /// only after a clean parse, so a failure keeps the last-good findings.
-fn applyDoctorBytes(allocator: std.mem.Allocator, app: *App, store: *Store, bytes: ?[]const u8) RunError!void {
+fn applyDoctorBytes(allocator: std.mem.Allocator, app: *App, store: *Storages, bytes: ?[]const u8) RunError!void {
     const payload = bytes orelse {
-        if (store.doctor) |old| old.deinit();
-        store.doctor = null;
+        if (store.doctor.doctor) |old| old.deinit();
+        store.doctor.doctor = null;
         app.states.doctor.items = &.{};
         return;
     };
@@ -1272,9 +1204,9 @@ fn applyDoctorBytes(allocator: std.mem.Allocator, app: *App, store: *Store, byte
 /// Repoint the Doctor tab at a fresh parse, freeing the previous one. Split from
 /// the spawn so the findings + reclaimable stats wiring is testable without a
 /// child process.
-fn applyDoctorParse(app: *App, store: *Store, parsed: doctor_json.Parsed) void {
-    if (store.doctor) |old| old.deinit();
-    store.doctor = parsed;
+fn applyDoctorParse(app: *App, store: *Storages, parsed: doctor_json.Parsed) void {
+    if (store.doctor.doctor) |old| old.deinit();
+    store.doctor.doctor = parsed;
     app.states.doctor.items = parsed.items;
     app.states.doctor.stats = parsed.stats;
 }
@@ -1291,7 +1223,7 @@ fn doctorFixArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const d
 }
 
 /// Delegate the selected finding's fix to the real `mt` inline, then refresh.
-fn doDoctorFix(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store) RunError!void {
+fn doDoctorFix(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Storages) RunError!void {
     const argv = (try doctorFixArgv(allocator, app.mt_path, &app.states.doctor)) orelse return; // nothing fixable selected
     defer allocator.free(argv);
     {
@@ -1301,16 +1233,16 @@ fn doDoctorFix(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter:
         // fault (exit > 2, signal, terminal fault) still surfaces as a banner;
         // a severity exit re-enters cleanly and falls through to the refresh.
         // Scoped so the refresh below reports under its own op, not the fix.
-        errdefer |err| app.banner.set("doctor fix failed", @errorName(err));
+        errdefer |err| app.shared.banner.set("doctor fix failed", @errorName(err));
         try spawn.runInlineReenterTolerant(t, argv, 2);
     }
     try loadDoctor(io, allocator, painter, app, store); // exit can't say what remains — the refresh is the truth
-    markStaleAfterMutation(app);
+    markStaleAfterMutation(&app.shared, app.active);
 }
 
 /// Perform any fix effect the pure `step` requested on the Doctor tab, then clear
 /// it, and lazily (re)load on first entry or after a mutation marked it dirty.
-fn serviceDoctor(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Store) RunError!void {
+fn serviceDoctor(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
     const req = app.states.doctor.request;
     app.states.doctor.request = .none;
     switch (req) {
@@ -1339,7 +1271,7 @@ fn searchArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const sear
 /// tab's results at the fresh parse. Search is a remote read, so it goes through
 /// `readJson` like the other reads (no alt-screen drop). The store is swapped
 /// only after a clean parse, so a failure keeps the last-good results.
-fn loadSearch(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+fn loadSearch(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Storages) RunError!void {
     const argv = (try searchArgv(allocator, app.mt_path, &app.states.search)) orelse return; // empty query: no-op
     defer allocator.free(argv);
     // Annotate any failure as a recoverable banner; the loop boundary decides
@@ -1347,8 +1279,8 @@ fn loadSearch(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store
     // (set by the pre-spawn paint): fall back to the last-good results, or
     // guidance if none were ever loaded — never a stuck spinner behind the banner.
     errdefer |err| {
-        app.banner.set("search failed", @errorName(err));
-        app.states.search.phase = if (store.search != null) .loaded else .idle;
+        app.shared.banner.set("search failed", @errorName(err));
+        app.states.search.phase = if (store.search.search != null) .loaded else .idle;
     }
     const bytes = try spawn.readJson(io, allocator, argv);
     defer allocator.free(bytes);
@@ -1359,10 +1291,10 @@ fn loadSearch(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store
     // pick survives a re-query and re-checks its row when the package returns.
     const checked = try allocator.alloc(bool, parsed.items.len);
 
-    if (store.search) |old| old.deinit();
-    if (store.search_checked.len != 0) allocator.free(store.search_checked);
-    store.search = parsed;
-    store.search_checked = checked;
+    if (store.search.search) |old| old.deinit();
+    if (store.search.checked.len != 0) allocator.free(store.search.checked);
+    store.search.search = parsed;
+    store.search.checked = checked;
     projectSearchChecked(store);
     app.states.search.items = parsed.items;
     app.states.search.checked = checked;
@@ -1372,9 +1304,9 @@ fn loadSearch(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store
     // unrelated row, and any open info pane is for a hit that may be gone.
     app.states.search.chrome.view = .{};
     app.states.search.detail = null;
-    if (store.search_detail) |old| {
+    if (store.search.detail) |old| {
         old.deinit();
-        store.search_detail = null;
+        store.search.detail = null;
     }
 }
 
@@ -1421,10 +1353,10 @@ fn kindFlag(k: search_json.Kind) []const u8 {
 /// basket, so clear it and re-project the now-empty checked slice; a failed
 /// install retains the basket for retry. Pure over the store — the seam the
 /// install path's clear-on-success / retain-on-failure policy is tested through.
-fn applyInstallOutcome(store: *Store, allocator: std.mem.Allocator, ok: bool) void {
+fn applyInstallOutcome(store: *Storages, allocator: std.mem.Allocator, ok: bool) void {
     if (!ok) return; // retain for retry
-    store.search_selected.deinit(allocator);
-    store.search_selected = .{};
+    store.search.selected.deinit(allocator);
+    store.search.selected = .{};
     projectSearchChecked(store);
 }
 
@@ -1432,15 +1364,15 @@ fn applyInstallOutcome(store: *Store, allocator: std.mem.Allocator, ok: bool) vo
 /// so installed markers flip. The argv's names are owned by the basket (the
 /// active-row fallback name borrows the live parse, read before the re-search
 /// frees it). A clean install clears the basket; a failed one keeps it.
-fn doInstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
-    const argv = (try installArgv(allocator, app.mt_path, &store.search_selected, &app.states.search)) orelse return; // nothing installable selected
+fn doInstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Storages) RunError!void {
+    const argv = (try installArgv(allocator, app.mt_path, &store.search.selected, &app.states.search)) orelse return; // nothing installable selected
     defer allocator.free(argv);
     // A non-zero `mt install` re-enters the dashboard (the user keeps malt's real
     // output, including any prompt, in their scrollback) and surfaces as a
     // recoverable banner; only a terminal fault is fatal — the loop boundary
     // decides which on the re-raised error. The basket is retained either way.
     spawn.runInlineReenter(t, argv) catch |err| {
-        app.banner.set("install failed", @errorName(err));
+        app.shared.banner.set("install failed", @errorName(err));
         applyInstallOutcome(store, allocator, false); // retain for retry
         return err;
     };
@@ -1449,11 +1381,11 @@ fn doInstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App,
     // Re-run the same query so the freshly installed hit's marker flips — the
     // backend's install-aware `installed` flag does the rest (no `mt list` call).
     try loadSearch(io, allocator, app, store);
-    markStaleAfterMutation(app); // Installed/Outdated/Services may have changed too
+    markStaleAfterMutation(&app.shared, app.active); // Installed/Outdated/Services may have changed too
     // The keg set grew but we are on Search, so the lazy Installed reload won't
     // run until that tab is entered — refresh just the count now (cheaply) so the
     // header is live immediately, not stale until Installed is opened.
-    try refreshInstalledCount(io, allocator, app);
+    try refreshInstalledCount(io, allocator, app.mt_path, &app.shared);
 }
 
 /// Perform any effect the pure `step` requested on the Search tab, then clear it.
@@ -1461,7 +1393,7 @@ fn doInstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App,
 /// (idle until the user commits a query), and a remote read on every tab-entry
 /// after an unrelated mutation would be a surprising freeze, so a dirty flag set
 /// by `markStaleAfterMutation` is deliberately never consumed here.
-fn serviceSearch(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+fn serviceSearch(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Storages) RunError!void {
     const req = app.states.search.request;
     app.states.search.request = .none;
     switch (req) {
@@ -1474,7 +1406,7 @@ fn serviceSearch(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *
         // refused installed rows, so the match here is always selectable.
         .toggle => {
             const m = search.selectedMatch(&app.states.search) orelse return;
-            try store.search_selected.toggle(allocator, m.name, m.kind);
+            try store.search.selected.toggle(allocator, m.name, m.kind);
             projectSearchChecked(store);
             syncSearchSelectedCount(app, store);
         },
@@ -1482,13 +1414,13 @@ fn serviceSearch(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *
         // then re-project so any on-screen row for it clears its checkmark.
         .remove => {
             const e = search.selectedBasketEntry(&app.states.search) orelse return;
-            store.search_selected.remove(allocator, e.name, e.kind);
+            store.search.selected.remove(allocator, e.name, e.kind);
             projectSearchChecked(store);
             syncSearchSelectedCount(app, store);
         },
         // Empty the whole basket; the projection then clears every on-screen check.
         .clear => {
-            store.search_selected.clear(allocator);
+            store.search.selected.clear(allocator);
             projectSearchChecked(store);
             syncSearchSelectedCount(app, store);
         },
@@ -1499,12 +1431,12 @@ fn serviceSearch(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *
 /// uninstalled packages alike, so a search result can be inspected before any
 /// install. A read (no alt-screen drop); failure names the package in a banner
 /// and leaves the pane closed.
-fn openSearchInfo(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+fn openSearchInfo(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Storages) RunError!void {
     const m = search.selectedMatch(&app.states.search) orelse return; // empty list: no-op
     errdefer |err| {
         var sb: [96]u8 = undefined;
         const op = std.fmt.bufPrint(&sb, "info for {s} failed", .{m.name}) catch "info read failed";
-        app.banner.set(op, @errorName(err));
+        app.shared.banner.set(op, @errorName(err));
     }
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "info", m.name });
     defer allocator.free(argv);
@@ -1512,8 +1444,8 @@ fn openSearchInfo(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *S
     defer allocator.free(bytes);
 
     const parsed = try info_json.parse(allocator, bytes);
-    if (store.search_detail) |old| old.deinit();
-    store.search_detail = parsed;
+    if (store.search.detail) |old| old.deinit();
+    store.search.detail = parsed;
     app.states.search.detail = parsed.info;
 }
 
@@ -1537,7 +1469,7 @@ fn mutationPending(app: *const App) bool {
 /// cannot starve the drain into a spin; the spinner still ticks so a cold-cache
 /// audit reads as progress, not a freeze. Best-effort like the teardown reap:
 /// a poll fault reaps the lot rather than leaving a child to outlive the mutation.
-fn drainActiveFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Store) void {
+fn drainActiveFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) void {
     while (anyFetchActive(fetches)) {
         var fds: [tab_bar.count]std.posix.fd_t = undefined;
         var tabs: [tab_bar.count]Tab = undefined;
@@ -1564,7 +1496,7 @@ fn drainActiveFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter
 /// Drain the active tab's pending effects after a keypress. Each tab's service is
 /// a no-op unless that tab is active and has a request or is due a lazy refresh,
 /// so calling each one each loop is cheap and keeps the dispatch flat.
-fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Store) RunError!void {
+fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
     // Sole-orchestrator invariant: quiesce any in-flight audit before an inline
     // mutator opens the DB, else the two opens race the single WAL writer and the
     // mutation fails with `Busy`. Read-only turns never drain — navigation stays live.
@@ -1638,8 +1570,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     const prefix = std.process.Environ.getPosix(environ, "MALT_PREFIX") orelse "/opt/malt";
     var app: App = .{ .mt_path = mt_path, .version = version, .prefix = prefix }; // re-exec this mt for delegated mutations
     initLaunchDirty(&app); // every data tab loads lazily on first entry
-    var store: Store = .{};
-    defer store.deinit(allocator);
+    defer app.storages.deinit(allocator); // app owns the per-tab parse storage
     var frame = try allocator.alloc(u8, frameCap(term.currentSize()));
     defer allocator.free(frame);
     // The paint handle the polled lazy reads tick against to animate the spinner.
@@ -1653,8 +1584,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     // freeze). Best-effort: a failed installed count leaves an em-dash, never
     // blocks the dashboard from opening.
     try repaint(fd, &frame, allocator, &app);
-    refreshInstalledCount(io, allocator, &app) catch {};
-    app.banner.clear(); // a failed startup installed count is an em-dash, not a nag
+    refreshInstalledCount(io, allocator, app.mt_path, &app.shared) catch {};
+    app.shared.banner.clear(); // a failed startup installed count is an em-dash, not a nag
 
     // Per-tab background fetches: the slow tabs' `--json` audits run as children
     // the loop drains, so navigation is never trapped behind one. Reaped at
@@ -1676,7 +1607,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
         // a keypress is serviced live; a ready tty falls through to the read below
         // (now non-blocking), else the turn was a spinner tick or a drain — loop.
         // With no fetch in flight this is the original lone blocking read.
-        if (anyFetchActive(&fetches) and !try serviceFetches(io, allocator, painter, &fetches, &app, &store)) continue;
+        if (anyFetchActive(&fetches) and !try serviceFetches(io, allocator, painter, &fetches, &app, &app.storages)) continue;
         const rc = std.c.read(fd, &rbuf, rbuf.len);
         if (rc < 0) {
             if (std.posix.errno(rc) == .INTR) continue; // SIGWINCH woke the read; loop re-checks resize
@@ -1694,7 +1625,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
                 },
                 .key => |k| {
                     consumed += k.consumed;
-                    try serviceKey(io, allocator, &t, painter, &fetches, &app, &store, k.key);
+                    try serviceKey(io, allocator, &t, painter, &fetches, &app, &app.storages, k.key);
                     if (app.quit) break;
                 },
             }
@@ -1703,7 +1634,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
         // on until the next keypress. Give the rest of a genuine sequence one
         // short window to arrive; silence resolves the tail through flush().
         if (partial and !app.quit and !ttyReadable(fd, esc_resolve_ms)) {
-            if (decoder.flush()) |k| try serviceKey(io, allocator, &t, painter, &fetches, &app, &store, k);
+            if (decoder.flush()) |k| try serviceKey(io, allocator, &t, painter, &fetches, &app, &app.storages, k);
         }
         try repaint(fd, &frame, allocator, &app);
     }
@@ -1728,7 +1659,7 @@ fn ttyReadable(fd: std.posix.fd_t, timeout_ms: i32) bool {
 /// the requested effects with the recoverable/fatal split. Shared by the
 /// streaming decode path and the timeout-flushed lone Esc so both behave
 /// identically.
-fn serviceKey(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Store, key: Key) RunError!void {
+fn serviceKey(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, key: Key) RunError!void {
     app.* = step(app.*, key); // also clears any prior banner
     if (app.quit) return;
     paintSearching(painter.fd, painter.frame, allocator, app); // status before the blocking search
@@ -1759,7 +1690,7 @@ fn paintSearching(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator
 /// intentional, not a frozen or — before stderr was suppressed — garbled frame.
 /// Best-effort, like `paintSearching`; the read's own repaint draws the result.
 fn paintLoading(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) void {
-    if (!app.dirty.contains(app.active)) return; // nothing will refetch this turn
+    if (!app.shared.dirty.contains(app.active)) return; // nothing will refetch this turn
     app.loading = true;
     repaint(fd, frame, allocator, app) catch {};
     app.loading = false;
@@ -1786,7 +1717,7 @@ fn testPainter(frame: *[]u8) Painter {
 }
 
 test "a data-free App renders the full chrome so the skeleton paint is real" {
-    var app: App = .{}; // active .search, empty Store, no counts loaded
+    var app: App = .{}; // active .search, empty storage, no counts loaded
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &app, 80, 24);
     for ([_][]const u8{ "Search", "Installed", "Outdated", "Services", "Doctor" }) |title|
@@ -2048,10 +1979,10 @@ test "the footer carries the active tab's keys next to the global keys" {
 test "the Search footer folds in the basket count so i's batch is never a surprise" {
     const alloc = std.testing.allocator;
     var a: App = .{ .active = .search };
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(alloc);
-    try store.search_selected.toggle(alloc, "bat", .formula);
-    try store.search_selected.toggle(alloc, "redis", .formula);
+    try store.search.selected.toggle(alloc, "bat", .formula);
+    try store.search.selected.toggle(alloc, "redis", .formula);
     syncSearchSelectedCount(&a, &store); // the shell mirrors the basket onto the leaf
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 120, 24);
@@ -2139,7 +2070,7 @@ test "the loading glyph is deterministic per (state, cols, rows)" {
 test "the header paints a spinner on the outdated slot while the background audit runs" {
     // `tab_loading` is distinct from the footer `loading`: the header shows the
     // audit is computing, not frozen, while the input loop stays live.
-    var a: App = .{ .active = .search, .spinner_frame = 0, .installed_count = 7 };
+    var a: App = .{ .active = .search, .spinner_frame = 0, .shared = .{ .installed_count = 7 } };
     a.tab_loading.insert(.outdated);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 100, 24);
@@ -2236,7 +2167,7 @@ test "pollMux times out when nothing is ready, so the spinner can tick" {
 // Drive a started fetch to completion with no tty (fd −1 is ignored by `poll`),
 // so the lifecycle — drain → reap → apply → repaint — runs against a real child
 // exactly as the loop drives it, minus the keypress side.
-fn driveFetchToEnd(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store, fetches: *Fetches, t: Tab) !void {
+fn driveFetchToEnd(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Storages, fetches: *Fetches, t: Tab) !void {
     var frame: []u8 = try allocator.alloc(u8, 256);
     defer allocator.free(frame);
     const painter = testPainter(&frame); // repaint writes to fd −1 (a no-op); the buffer may grow
@@ -2247,16 +2178,16 @@ test "startTabFetch kicks off the outdated audit, flags loading, and lands a kno
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/usr/bin/true" }; // exit 0, no output == fresh prefix
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
     startTabFetch(t.io(), std.testing.allocator, &fetches, &app, .outdated);
     try std.testing.expect(fetches.getPtr(.outdated).* != null);
     try std.testing.expect(app.tab_loading.contains(.outdated)); // header spins from the first frame
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
-    try std.testing.expectEqual(@as(?usize, 0), app.outdated_count); // empty payload is a known zero
+    try std.testing.expectEqual(@as(?usize, 0), app.shared.outdated_count); // empty payload is a known zero
     try std.testing.expect(!app.tab_loading.contains(.outdated)); // cleared when the fetch lands
-    try std.testing.expect(!app.banner.isSet());
+    try std.testing.expect(!app.shared.banner.isSet());
 }
 
 test "startTabFetch is a quiet no-op on a spawn fault, never flagging loading" {
@@ -2267,15 +2198,15 @@ test "startTabFetch is a quiet no-op on a spawn fault, never flagging loading" {
     startTabFetch(t.io(), std.testing.allocator, &fetches, &app, .outdated);
     try std.testing.expect(fetches.getPtr(.outdated).* == null); // nothing to drive
     try std.testing.expect(!app.tab_loading.contains(.outdated)); // a failed kickoff stays unflagged
-    try std.testing.expect(app.outdated_count == null);
-    try std.testing.expect(!app.banner.isSet()); // launch-time, no nag
+    try std.testing.expect(app.shared.outdated_count == null);
+    try std.testing.expect(!app.shared.banner.isSet()); // launch-time, no nag
 }
 
 test "startTabFetch skips a tab whose audit is already in flight" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/usr/bin/true" };
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
     startTabFetch(t.io(), std.testing.allocator, &fetches, &app, .outdated);
@@ -2295,12 +2226,12 @@ test "a background outdated fetch parses a real child's document into the tab" {
     });
     var app: App = .{};
     app.tab_loading.insert(.outdated);
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
     fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
-    try std.testing.expectEqual(@as(?usize, 1), app.outdated_count); // header count
+    try std.testing.expectEqual(@as(?usize, 1), app.shared.outdated_count); // header count
     try std.testing.expectEqual(@as(usize, 1), app.states.outdated.items.len); // the tab body, too
     try std.testing.expect(!app.tab_loading.contains(.outdated));
 }
@@ -2311,13 +2242,13 @@ test "a malformed payload banners and keeps the outdated count unknown, never ze
     const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/echo", "garbage" }, .stdout = .pipe, .stderr = .ignore });
     var app: App = .{};
     app.tab_loading.insert(.outdated);
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
     fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
-    try std.testing.expect(app.outdated_count == null); // unknown (`—`), not 0
-    try std.testing.expectEqualStrings("outdated refresh failed: BadJson", app.banner.slice());
+    try std.testing.expect(app.shared.outdated_count == null); // unknown (`—`), not 0
+    try std.testing.expectEqualStrings("outdated refresh failed: BadJson", app.shared.banner.slice());
 }
 
 test "mutationPending gates only on requests that spawn a DB-mutating child" {
@@ -2357,7 +2288,7 @@ test "drainActiveFetches reaps every in-flight audit and lands its payload" {
     });
     var app: App = .{};
     app.tab_loading.insert(.outdated);
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
     fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
@@ -2367,7 +2298,7 @@ test "drainActiveFetches reaps every in-flight audit and lands its payload" {
     drainActiveFetches(t.io(), std.testing.allocator, testPainter(&frame), &fetches, &app, &store);
 
     try std.testing.expect(!anyFetchActive(&fetches)); // the audit closed its DB connection
-    try std.testing.expectEqual(@as(?usize, 1), app.outdated_count); // payload still landed
+    try std.testing.expectEqual(@as(?usize, 1), app.shared.outdated_count); // payload still landed
 }
 
 // The sole-orchestrator guard: with an audit in flight, a mutating dispatch must
@@ -2385,7 +2316,7 @@ test "service quiesces an in-flight audit before a mutating dispatch" {
     var app: App = .{};
     app.tab_loading.insert(.outdated);
     app.states.outdated.request = .upgrade; // a mutating request, but nothing is checked → no spawn
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
     fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
@@ -2396,7 +2327,7 @@ test "service quiesces an in-flight audit before a mutating dispatch" {
     try service(t.io(), std.testing.allocator, &tm, testPainter(&frame), &fetches, &app, &store);
 
     try std.testing.expect(!anyFetchActive(&fetches)); // drained before the dispatch
-    try std.testing.expect(!app.banner.isSet()); // a clean drain, no upgrade failure
+    try std.testing.expect(!app.shared.banner.isSet()); // a clean drain, no upgrade failure
 }
 
 test "service leaves an in-flight audit running when no mutation is pending" {
@@ -2407,7 +2338,7 @@ test "service leaves an in-flight audit running when no mutation is pending" {
     const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/sleep", "5" }, .stdout = .pipe, .stderr = .ignore });
     var app: App = .{};
     app.tab_loading.insert(.outdated); // no request set → nothing mutating
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
     fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
@@ -2439,7 +2370,7 @@ test "upgradeFailDetail names the live app on the refusal code, else stays gener
 
 test "dropUpgradedRows removes upgraded rows in place and preserves kept checked state" {
     var app: App = .{};
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     const json =
         \\{"outdated":[
@@ -2450,32 +2381,51 @@ test "dropUpgradedRows removes upgraded rows in place and preserves kept checked
     ;
     try applyOutdatedBytes(std.testing.allocator, &app, &store, json);
     // Check a and c (b is the one being upgraded); the kept rows must stay checked.
-    store.outdated_checked[0] = true;
-    store.outdated_checked[2] = true;
+    store.outdated.checked[0] = true;
+    store.outdated.checked[2] = true;
 
     try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "b", .kind = .formula }});
 
-    try std.testing.expectEqual(@as(usize, 2), store.outdated.?.items.len);
-    try std.testing.expectEqualStrings("a", store.outdated.?.items[0].name);
-    try std.testing.expectEqualStrings("c", store.outdated.?.items[1].name);
-    try std.testing.expectEqual(@as(?usize, 2), app.outdated_count);
+    try std.testing.expectEqual(@as(usize, 2), store.outdated.outdated.?.items.len);
+    try std.testing.expectEqualStrings("a", store.outdated.outdated.?.items[0].name);
+    try std.testing.expectEqualStrings("c", store.outdated.outdated.?.items[1].name);
+    try std.testing.expectEqual(@as(?usize, 2), app.shared.outdated_count);
     try std.testing.expectEqual(@as(usize, 2), app.states.outdated.items.len);
     // a and c stay checked in the rebuilt lockstep buffer.
     try std.testing.expect(app.states.outdated.checked[0]);
     try std.testing.expect(app.states.outdated.checked[1]);
 }
 
+test "a second outdated apply frees the prior parse arena and repoints at the live one" {
+    var app: App = .{};
+    var store: Storages = .{};
+    defer store.deinit(std.testing.allocator);
+    // First parse (two rows). Its arena must be freed when the second lands, or the
+    // test allocator trips — this pins that the arena lifetime moved into the tab's
+    // own Storage, so a re-load frees the prior parse rather than leaking it.
+    try applyOutdatedBytes(std.testing.allocator, &app, &store, "{\"outdated\":[{\"name\":\"a\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false},{\"name\":\"b\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false}]}");
+    store.outdated.checked[0] = true; // a stale selection the swap must not carry forward
+    try std.testing.expectEqual(@as(usize, 2), store.outdated.outdated.?.items.len);
+    // Second parse (one row) swaps in a fresh arena + an all-clear checkbox buffer.
+    try applyOutdatedBytes(std.testing.allocator, &app, &store, "{\"outdated\":[{\"name\":\"z\",\"installed\":\"1\",\"latest\":\"9\",\"type\":\"cask\",\"pinned\":false}]}");
+    // The survivor borrows the live arena: the name resolves and the count follows.
+    try std.testing.expectEqual(@as(usize, 1), store.outdated.outdated.?.items.len);
+    try std.testing.expectEqualStrings("z", store.outdated.outdated.?.items[0].name);
+    try std.testing.expectEqual(@as(?usize, 1), app.shared.outdated_count);
+    try std.testing.expect(!store.outdated.checked[0]); // fresh buffer, all clear
+}
+
 test "dropUpgradedRows on an unloaded store is a no-op" {
     var app: App = .{};
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "anything", .kind = .formula }});
-    try std.testing.expect(store.outdated == null);
+    try std.testing.expect(store.outdated.outdated == null);
 }
 
 test "dropUpgradedRows drops only the upgraded kind when a formula and cask share a name" {
     var app: App = .{};
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     const json =
         \\{"outdated":[
@@ -2486,13 +2436,13 @@ test "dropUpgradedRows drops only the upgraded kind when a formula and cask shar
     try applyOutdatedBytes(std.testing.allocator, &app, &store, json);
     // Only the formula docker was upgraded; the same-named cask must remain.
     try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "docker", .kind = .formula }});
-    try std.testing.expectEqual(@as(usize, 1), store.outdated.?.items.len);
-    try std.testing.expectEqual(outdated_json.Kind.cask, store.outdated.?.items[0].kind);
+    try std.testing.expectEqual(@as(usize, 1), store.outdated.outdated.?.items.len);
+    try std.testing.expectEqual(outdated_json.Kind.cask, store.outdated.outdated.?.items[0].kind);
 }
 
 test "dropUpgradedRows survives two sequential drops (the formula then cask passes)" {
     var app: App = .{};
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     const json =
         \\{"outdated":[
@@ -2505,18 +2455,18 @@ test "dropUpgradedRows survives two sequential drops (the formula then cask pass
     // Formula pass drops wget; the cask ref (still borrowing the live parse
     // arena) must survive the first drop's store mutation and rebuilt buffer.
     try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "wget", .kind = .formula }});
-    try std.testing.expectEqual(@as(usize, 1), store.outdated.?.items.len);
-    try std.testing.expectEqual(outdated_json.Kind.cask, store.outdated.?.items[0].kind);
+    try std.testing.expectEqual(@as(usize, 1), store.outdated.outdated.?.items.len);
+    try std.testing.expectEqual(outdated_json.Kind.cask, store.outdated.outdated.?.items[0].kind);
 
     // Cask pass drops firefox → empty, no leak / use-after-free.
     try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "firefox", .kind = .cask }});
-    try std.testing.expectEqual(@as(usize, 0), store.outdated.?.items.len);
-    try std.testing.expectEqual(@as(?usize, 0), app.outdated_count);
+    try std.testing.expectEqual(@as(usize, 0), store.outdated.outdated.?.items.len);
+    try std.testing.expectEqual(@as(?usize, 0), app.shared.outdated_count);
 }
 
 test "dropUpgradedRows keeps every row when no upgraded ref matches" {
     var app: App = .{};
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     const json =
         \\{"outdated":[
@@ -2526,12 +2476,12 @@ test "dropUpgradedRows keeps every row when no upgraded ref matches" {
     ;
     try applyOutdatedBytes(std.testing.allocator, &app, &store, json);
     try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "z", .kind = .formula }});
-    try std.testing.expectEqual(@as(usize, 2), store.outdated.?.items.len);
+    try std.testing.expectEqual(@as(usize, 2), store.outdated.outdated.?.items.len);
 }
 
 test "dropUpgradedRows clears the list when every row was upgraded" {
     var app: App = .{};
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     const json =
         \\{"outdated":[
@@ -2541,23 +2491,23 @@ test "dropUpgradedRows clears the list when every row was upgraded" {
     ;
     try applyOutdatedBytes(std.testing.allocator, &app, &store, json);
     try dropUpgradedRows(std.testing.allocator, &app, &store, &.{ .{ .name = "a", .kind = .formula }, .{ .name = "b", .kind = .formula } });
-    try std.testing.expectEqual(@as(usize, 0), store.outdated.?.items.len);
-    try std.testing.expectEqual(@as(?usize, 0), app.outdated_count);
+    try std.testing.expectEqual(@as(usize, 0), store.outdated.outdated.?.items.len);
+    try std.testing.expectEqual(@as(?usize, 0), app.shared.outdated_count);
 }
 
 test "a non-zero child exit fails the fetch without parsing a half-written doc" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     const child = try std.process.spawn(t.io(), .{ .argv = &.{"/usr/bin/false"}, .stdout = .pipe, .stderr = .ignore });
-    var app: App = .{ .outdated_count = 5 }; // a prior good count
+    var app: App = .{ .shared = .{ .outdated_count = 5 } }; // a prior good count
     app.tab_loading.insert(.outdated);
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
     fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
-    try std.testing.expectEqual(@as(?usize, 5), app.outdated_count); // a bad exit keeps the last-good, never 0
-    try std.testing.expect(app.banner.isSet());
+    try std.testing.expectEqual(@as(?usize, 5), app.shared.outdated_count); // a bad exit keeps the last-good, never 0
+    try std.testing.expect(app.shared.banner.isSet());
 }
 
 test "the doctor fetch tolerates a severity exit (≤2) as success" {
@@ -2570,12 +2520,12 @@ test "the doctor fetch tolerates a severity exit (≤2) as success" {
     const child = try std.process.spawn(t.io(), .{ .argv = &.{"/usr/bin/false"}, .stdout = .pipe, .stderr = .ignore });
     var app: App = .{};
     app.tab_loading.insert(.doctor);
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
     fetches.set(.doctor, .{ .tab = .doctor, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 2 });
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .doctor);
-    try std.testing.expect(!app.banner.isSet()); // exit 1 ≤ 2 is OK for doctor
+    try std.testing.expect(!app.shared.banner.isSet()); // exit 1 ≤ 2 is OK for doctor
     try std.testing.expect(!app.tab_loading.contains(.doctor));
 }
 
@@ -2599,12 +2549,12 @@ test "a background fetch accumulates a payload spanning multiple reads" {
     const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/echo", doc.items }, .stdout = .pipe, .stderr = .ignore });
     var app: App = .{};
     app.tab_loading.insert(.outdated);
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
     fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
-    try std.testing.expectEqual(@as(?usize, rows), app.outdated_count); // every row across every chunk
+    try std.testing.expectEqual(@as(?usize, rows), app.shared.outdated_count); // every row across every chunk
 }
 
 test "an overflowing fetch kills the live child and fails to last-good" {
@@ -2614,15 +2564,15 @@ test "an overflowing fetch kills the live child and fails to last-good" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     const child = try std.process.spawn(t.io(), .{ .argv = &.{"/usr/bin/yes"}, .stdout = .pipe, .stderr = .ignore });
-    var app: App = .{ .outdated_count = 5 }; // a prior good count
+    var app: App = .{ .shared = .{ .outdated_count = 5 } }; // a prior good count
     app.tab_loading.insert(.outdated);
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
     fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
-    try std.testing.expectEqual(@as(?usize, 5), app.outdated_count); // last-good kept, not a partial
-    try std.testing.expect(app.banner.isSet());
+    try std.testing.expectEqual(@as(?usize, 5), app.shared.outdated_count); // last-good kept, not a partial
+    try std.testing.expect(app.shared.banner.isSet());
     try std.testing.expect(!app.tab_loading.contains(.outdated));
 }
 
@@ -2647,7 +2597,7 @@ test "renderFrame uses cursor positioning and never emits a raw newline" {
 
 test "a recoverable banner renders in the footer in place of the help line" {
     var a: App = .{};
-    a.banner.set("info for jq failed", "BadJson");
+    a.shared.banner.set("info for jq failed", "BadJson");
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
     try std.testing.expect(std.mem.indexOf(u8, out, "info for jq failed: BadJson") != null);
@@ -2657,7 +2607,7 @@ test "a recoverable banner renders in the footer in place of the help line" {
 
 test "a banner truncates width-aware to the terminal columns" {
     var a: App = .{};
-    a.banner.set("info for some-very-long-package-name failed", "ChildFailed");
+    a.shared.banner.set("info for some-very-long-package-name failed", "ChildFailed");
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 24, 24); // narrow terminal
     // The full message cannot have been painted verbatim into 24 columns.
@@ -2666,10 +2616,10 @@ test "a banner truncates width-aware to the terminal columns" {
 
 test "any keypress clears a transient banner" {
     var a: App = .{};
-    a.banner.set("uninstall failed", "ChildFailed");
-    try std.testing.expect(a.banner.isSet());
+    a.shared.banner.set("uninstall failed", "ChildFailed");
+    try std.testing.expect(a.shared.banner.isSet());
     a = step(a, .down); // a navigation key dismisses the stale banner
-    try std.testing.expect(!a.banner.isSet());
+    try std.testing.expect(!a.shared.banner.isSet());
 }
 
 test "renderFrame falls back cleanly on a too-small terminal" {
@@ -2690,16 +2640,36 @@ test "renderFrame reflows on resize from the same state" {
 
 test "a delegated mutation marks every other tab dirty and keeps the active tab fresh" {
     var a: App = .{ .active = .outdated };
-    markStaleAfterMutation(&a);
-    try std.testing.expect(!a.dirty.contains(.outdated)); // refreshed inline, still fresh
-    try std.testing.expect(a.dirty.contains(.installed));
-    try std.testing.expect(a.dirty.contains(.services));
-    try std.testing.expect(a.dirty.contains(.doctor));
+    markStaleAfterMutation(&a.shared, a.active);
+    try std.testing.expect(!a.shared.dirty.contains(.outdated)); // refreshed inline, still fresh
+    try std.testing.expect(a.shared.dirty.contains(.installed));
+    try std.testing.expect(a.shared.dirty.contains(.services));
+    try std.testing.expect(a.shared.dirty.contains(.doctor));
+}
+
+test "markStaleAfterMutation is scalar-mediated: only the shared model, only dirty" {
+    // The cross-tab staleness channel takes the shared read-model by pointer, not
+    // an `App` — so it structurally cannot reach a tab's private `Storage`. Prove
+    // it runs against a standalone `SharedModel` and touches nothing but `dirty`.
+    var shared: SharedModel = .{ .installed_count = 3, .outdated_count = 1 };
+    shared.banner.set("prior op", "PriorReason");
+    markStaleAfterMutation(&shared, .services);
+    // Every tab but the (freshly re-read) active one is now dirty.
+    try std.testing.expect(!shared.dirty.contains(.services));
+    try std.testing.expect(shared.dirty.contains(.installed));
+    try std.testing.expect(shared.dirty.contains(.outdated));
+    try std.testing.expect(shared.dirty.contains(.doctor));
+    try std.testing.expect(shared.dirty.contains(.search));
+    // The other shared scalars are left exactly as they were — no bleed into the
+    // counts or the banner, so the writer touches only the staleness set.
+    try std.testing.expectEqual(@as(?usize, 3), shared.installed_count);
+    try std.testing.expectEqual(@as(?usize, 1), shared.outdated_count);
+    try std.testing.expectEqualStrings("prior op: PriorReason", shared.banner.slice());
 }
 
 test "entering a dirty tab consumes the flag so its refetch runs at most once" {
     var a: App = .{ .active = .installed };
-    markStaleAfterMutation(&a);
+    markStaleAfterMutation(&a.shared, a.active);
     try std.testing.expect(takeDirty(&a, .doctor)); // first entry → refetch
     try std.testing.expect(!takeDirty(&a, .doctor)); // now fresh → no refetch
 }
@@ -2713,18 +2683,18 @@ test "every data tab is dirty at launch so none blocks the first paint" {
     var a: App = .{}; // opens on Search
     initLaunchDirty(&a);
     // Installed joins the other three: no eager load, so launch never blocks input.
-    try std.testing.expect(a.dirty.contains(.installed));
-    try std.testing.expect(a.dirty.contains(.outdated));
-    try std.testing.expect(a.dirty.contains(.services));
-    try std.testing.expect(a.dirty.contains(.doctor));
-    try std.testing.expect(!a.dirty.contains(.search)); // active tab renders without data
+    try std.testing.expect(a.shared.dirty.contains(.installed));
+    try std.testing.expect(a.shared.dirty.contains(.outdated));
+    try std.testing.expect(a.shared.dirty.contains(.services));
+    try std.testing.expect(a.shared.dirty.contains(.doctor));
+    try std.testing.expect(!a.shared.dirty.contains(.search)); // active tab renders without data
 }
 
 test "a newline in a child-derived op cannot inject an extra footer frame line" {
     // term_sanitize lets \n through; the footer paints via putContent, which drops
     // it, so a package name with an embedded newline can't split the frame.
     var a: App = .{};
-    a.banner.set("info for ev\nil failed", "BadJson");
+    a.shared.banner.set("info for ev\nil failed", "BadJson");
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
     try std.testing.expect(std.mem.indexOfScalar(u8, out, '\n') == null);
@@ -2776,10 +2746,10 @@ test "a failed list refresh names the op in the banner and keeps the last-good r
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     try std.testing.expectError(error.BadJson, loadInstalled(t.io(), std.testing.allocator, &app, &store));
-    try std.testing.expectEqualStrings("list refresh failed: BadJson", app.banner.slice());
+    try std.testing.expectEqualStrings("list refresh failed: BadJson", app.shared.banner.slice());
     try std.testing.expectEqual(@as(usize, 0), app.states.installed.items.len); // last-good kept
 }
 
@@ -2791,11 +2761,11 @@ test "loadInstalled treats an exit-0 empty response (fresh prefix) as an empty t
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/usr/bin/true" };
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     try loadInstalled(t.io(), std.testing.allocator, &app, &store);
     try std.testing.expectEqual(@as(usize, 0), app.states.installed.items.len);
-    try std.testing.expect(!app.banner.isSet());
+    try std.testing.expect(!app.shared.banner.isSet());
 }
 
 test "the keg-count read stays cheap — list --json, no --size/--linked walk" {
@@ -2814,9 +2784,9 @@ test "refreshInstalledCount populates the keg count on a fresh prefix (0, not un
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/usr/bin/true" }; // exit 0, no output = empty Cellar
-    try refreshInstalledCount(t.io(), std.testing.allocator, &app);
-    try std.testing.expectEqual(@as(?usize, 0), app.installed_count); // populated, never null
-    try std.testing.expect(!app.banner.isSet());
+    try refreshInstalledCount(t.io(), std.testing.allocator, app.mt_path, &app.shared);
+    try std.testing.expectEqual(@as(?usize, 0), app.shared.installed_count); // populated, never null
+    try std.testing.expect(!app.shared.banner.isSet());
 }
 
 test "the post-install count refresh overwrites a stale count without entering Installed" {
@@ -2824,49 +2794,49 @@ test "the post-install count refresh overwrites a stale count without entering I
     defer t.deinit();
     // The cross-tab-install gap: a count from before the mutation, with Installed
     // marked dirty (its full --size --linked payload reloads only on entry).
-    var app: App = .{ .mt_path = "/usr/bin/true", .active = .search, .installed_count = 6 };
-    app.dirty.insert(.installed);
-    try refreshInstalledCount(t.io(), std.testing.allocator, &app);
-    try std.testing.expectEqual(@as(?usize, 0), app.installed_count); // live again, not the stale 6
-    try std.testing.expect(app.dirty.contains(.installed)); // full payload still loads lazily on entry
+    var app: App = .{ .mt_path = "/usr/bin/true", .active = .search, .shared = .{ .installed_count = 6 } };
+    app.shared.dirty.insert(.installed);
+    try refreshInstalledCount(t.io(), std.testing.allocator, app.mt_path, &app.shared);
+    try std.testing.expectEqual(@as(?usize, 0), app.shared.installed_count); // live again, not the stale 6
+    try std.testing.expect(app.shared.dirty.contains(.installed)); // full payload still loads lazily on entry
 }
 
 test "a broken keg-count read banners and leaves the prior count untouched" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
-    var app: App = .{ .mt_path = "/bin/echo", .installed_count = 6 }; // echo emits non-JSON → parse fails
-    try std.testing.expectError(error.BadJson, refreshInstalledCount(t.io(), std.testing.allocator, &app));
-    try std.testing.expectEqualStrings("keg count refresh failed: BadJson", app.banner.slice());
-    try std.testing.expectEqual(@as(?usize, 6), app.installed_count); // a failed read keeps the last-good count
+    var app: App = .{ .mt_path = "/bin/echo", .shared = .{ .installed_count = 6 } }; // echo emits non-JSON → parse fails
+    try std.testing.expectError(error.BadJson, refreshInstalledCount(t.io(), std.testing.allocator, app.mt_path, &app.shared));
+    try std.testing.expectEqualStrings("keg count refresh failed: BadJson", app.shared.banner.slice());
+    try std.testing.expectEqual(@as(?usize, 6), app.shared.installed_count); // a failed read keeps the last-good count
 }
 
 test "loadServices treats an exit-0 empty response (fresh prefix) as an empty tab" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/usr/bin/true" };
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var frame: []u8 = &.{};
     try loadServices(t.io(), std.testing.allocator, testPainter(&frame), &app, &store);
     try std.testing.expectEqual(@as(usize, 0), app.states.services.items.len);
-    try std.testing.expect(!app.banner.isSet());
+    try std.testing.expect(!app.shared.banner.isSet());
 }
 
 test "loadDoctor treats an exit-0 empty response (fresh prefix) as an empty tab" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/usr/bin/true" };
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var frame: []u8 = &.{};
     try loadDoctor(t.io(), std.testing.allocator, testPainter(&frame), &app, &store);
     try std.testing.expectEqual(@as(usize, 0), app.states.doctor.items.len);
-    try std.testing.expect(!app.banner.isSet());
+    try std.testing.expect(!app.shared.banner.isSet());
 }
 
 test "applyDoctorParse points the Doctor tab at the parsed findings and reclaimable stats" {
     var app: App = .{};
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     const bytes =
         \\{"checks":[{"id":"a","severity":"warn","title":"A","fixable":true,"fix_class":"stale_lock"}],
@@ -2887,10 +2857,10 @@ test "a failed info read names the package in the banner and leaves the pane clo
     var app: App = .{ .mt_path = "/bin/echo" };
     const items = [_]list_json.Pkg{.{ .name = "jq", .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null }};
     app.states.installed.items = &items;
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     try std.testing.expectError(error.BadJson, openDetail(t.io(), std.testing.allocator, &app, &store));
-    try std.testing.expectEqualStrings("info for jq failed: BadJson", app.banner.slice());
+    try std.testing.expectEqualStrings("info for jq failed: BadJson", app.shared.banner.slice());
     try std.testing.expect(app.states.installed.detail == null); // the pane never opened
 }
 
@@ -2988,11 +2958,11 @@ test "a failed services refresh names the op in the banner and keeps the last-go
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var frame: []u8 = &.{};
     try std.testing.expectError(error.BadJson, loadServices(t.io(), std.testing.allocator, testPainter(&frame), &app, &store));
-    try std.testing.expectEqualStrings("services refresh failed: BadJson", app.banner.slice());
+    try std.testing.expectEqualStrings("services refresh failed: BadJson", app.shared.banner.slice());
     try std.testing.expectEqual(@as(usize, 0), app.states.services.items.len); // last-good kept
 }
 
@@ -3029,11 +2999,11 @@ test "a failed doctor refresh names the op in the banner and keeps the last-good
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var frame: []u8 = &.{};
     try std.testing.expectError(error.BadJson, loadDoctor(t.io(), std.testing.allocator, testPainter(&frame), &app, &store));
-    try std.testing.expectEqualStrings("doctor refresh failed: BadJson", app.banner.slice());
+    try std.testing.expectEqualStrings("doctor refresh failed: BadJson", app.shared.banner.slice());
     try std.testing.expectEqual(@as(usize, 0), app.states.doctor.items.len); // last-good kept
 }
 
@@ -3249,27 +3219,27 @@ test "search selection clear empties the basket and frees every pick" {
 
 test "removing a basket pick re-projects its on-screen row to unchecked" {
     const alloc = std.testing.allocator;
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(alloc);
-    store.search = try search_json.parse(alloc,
+    store.search.search = try search_json.parse(alloc,
         \\{"results":[{"name":"bat","type":"formula","installed":false}]}
     );
-    store.search_checked = try alloc.alloc(bool, 1);
-    @memset(store.search_checked, false);
-    try store.search_selected.toggle(alloc, "bat", .formula);
+    store.search.checked = try alloc.alloc(bool, 1);
+    @memset(store.search.checked, false);
+    try store.search.selected.toggle(alloc, "bat", .formula);
     projectSearchChecked(&store);
-    try std.testing.expect(store.search_checked[0]); // checked before the remove
-    store.search_selected.remove(alloc, "bat", .formula);
+    try std.testing.expect(store.search.checked[0]); // checked before the remove
+    store.search.selected.remove(alloc, "bat", .formula);
     projectSearchChecked(&store);
-    try std.testing.expect(!store.search_checked[0]); // the row reflects the removal
+    try std.testing.expect(!store.search.checked[0]); // the row reflects the removal
 }
 
 test "the shell mirrors the basket entries onto the leaf for the basket view" {
     const alloc = std.testing.allocator;
     var a: App = .{ .active = .search };
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(alloc);
-    try store.search_selected.toggle(alloc, "bat", .formula);
+    try store.search.selected.toggle(alloc, "bat", .formula);
     syncSearchSelectedCount(&a, &store);
     try std.testing.expectEqual(@as(usize, 1), a.states.search.basket.len);
     try std.testing.expectEqualStrings("bat", a.states.search.basket[0].name);
@@ -3350,49 +3320,49 @@ test "a Search selection survives a re-query" {
 
 test "projectSearchChecked fills the store checked slice from the selection" {
     const alloc = std.testing.allocator;
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(alloc);
-    store.search = try search_json.parse(alloc,
+    store.search.search = try search_json.parse(alloc,
         \\{"results":[{"name":"wget","type":"formula","installed":false},{"name":"firefox","type":"cask","installed":true}]}
     );
-    store.search_checked = try alloc.alloc(bool, 2);
-    @memset(store.search_checked, false);
-    try store.search_selected.toggle(alloc, "wget", .formula);
+    store.search.checked = try alloc.alloc(bool, 2);
+    @memset(store.search.checked, false);
+    try store.search.selected.toggle(alloc, "wget", .formula);
     projectSearchChecked(&store);
-    try std.testing.expect(store.search_checked[0]); // selected, installable
-    try std.testing.expect(!store.search_checked[1]); // installed → never checked
+    try std.testing.expect(store.search.checked[0]); // selected, installable
+    try std.testing.expect(!store.search.checked[1]); // installed → never checked
 }
 
 test "a clean install (exit 0) clears the basket and re-projects the checked slice" {
     const alloc = std.testing.allocator;
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(alloc);
-    store.search = try search_json.parse(alloc,
+    store.search.search = try search_json.parse(alloc,
         \\{"results":[{"name":"bat","type":"formula","installed":false}]}
     );
-    store.search_checked = try alloc.alloc(bool, 1);
-    @memset(store.search_checked, false);
-    try store.search_selected.toggle(alloc, "bat", .formula);
-    try store.search_selected.toggle(alloc, "redis", .formula); // an off-list pick too
+    store.search.checked = try alloc.alloc(bool, 1);
+    @memset(store.search.checked, false);
+    try store.search.selected.toggle(alloc, "bat", .formula);
+    try store.search.selected.toggle(alloc, "redis", .formula); // an off-list pick too
     projectSearchChecked(&store);
-    try std.testing.expect(store.search_checked[0]); // bat checked before the install
+    try std.testing.expect(store.search.checked[0]); // bat checked before the install
 
     applyInstallOutcome(&store, alloc, true);
-    try std.testing.expectEqual(@as(usize, 0), store.search_selected.entries.items.len); // basket emptied
-    try std.testing.expect(!store.search_checked[0]); // re-projected against the now-empty basket
+    try std.testing.expectEqual(@as(usize, 0), store.search.selected.entries.items.len); // basket emptied
+    try std.testing.expect(!store.search.checked[0]); // re-projected against the now-empty basket
 }
 
 test "a failed install (non-zero exit) retains the whole basket for retry" {
     const alloc = std.testing.allocator;
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(alloc);
-    try store.search_selected.toggle(alloc, "bat", .formula);
-    try store.search_selected.toggle(alloc, "redis", .formula);
+    try store.search.selected.toggle(alloc, "bat", .formula);
+    try store.search.selected.toggle(alloc, "redis", .formula);
 
     applyInstallOutcome(&store, alloc, false);
-    try std.testing.expectEqual(@as(usize, 2), store.search_selected.entries.items.len); // untouched
-    try std.testing.expect(store.search_selected.contains("bat", .formula));
-    try std.testing.expect(store.search_selected.contains("redis", .formula));
+    try std.testing.expectEqual(@as(usize, 2), store.search.selected.entries.items.len); // untouched
+    try std.testing.expect(store.search.selected.contains("bat", .formula));
+    try std.testing.expect(store.search.selected.contains("redis", .formula));
 }
 
 test "a failed search names the op in the banner and leaves no stuck searching phase" {
@@ -3401,10 +3371,10 @@ test "a failed search names the op in the banner and leaves no stuck searching p
     var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
     app.states.search.chrome.filter.push("fire");
     app.states.search.phase = .searching; // as the pre-spawn paint left it
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     try std.testing.expectError(error.BadJson, loadSearch(t.io(), std.testing.allocator, &app, &store));
-    try std.testing.expectEqualStrings("search failed: BadJson", app.banner.slice());
+    try std.testing.expectEqualStrings("search failed: BadJson", app.shared.banner.slice());
     // No prior results → guidance, not a spinner frozen behind the banner.
     try std.testing.expectEqual(search.Phase.idle, app.states.search.phase);
     try std.testing.expectEqual(@as(usize, 0), app.states.search.items.len);
@@ -3414,19 +3384,19 @@ test "a failed search keeps the last-good results and selection, falling back to
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/bin/echo" }; // non-JSON → BadJson on the new query
-    var store: Store = .{};
+    var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     // Prime a prior successful search: store + tab borrow these results.
-    store.search = try search_json.parse(std.testing.allocator,
+    store.search.search = try search_json.parse(std.testing.allocator,
         \\{"results":[{"name":"jq","type":"formula","installed":true},{"name":"yq","type":"formula","installed":false}]}
     );
-    app.states.search.items = store.search.?.items;
+    app.states.search.items = store.search.search.?.items;
     app.states.search.chrome.filter.push("q");
     app.states.search.chrome.view.selected = 1; // cursor on yq
     app.states.search.phase = .searching; // as the pre-spawn paint left it
 
     try std.testing.expectError(error.BadJson, loadSearch(t.io(), std.testing.allocator, &app, &store));
-    try std.testing.expectEqualStrings("search failed: BadJson", app.banner.slice());
+    try std.testing.expectEqualStrings("search failed: BadJson", app.shared.banner.slice());
     // Prior results exist → fall back to the list, not guidance; and the store is
     // swapped only after a clean parse, so the rows and the cursor both survive.
     try std.testing.expectEqual(search.Phase.loaded, app.states.search.phase);

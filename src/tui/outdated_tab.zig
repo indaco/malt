@@ -34,6 +34,20 @@ pub const State = struct {
     request: Request = .none,
 };
 
+/// Tab-private parse storage: the Outdated audit's parsed rows plus the parallel
+/// checkbox buffer the tab borrows. Owned beside the tab so the parse arena's
+/// lifetime lives here, not in a central store. `deinit` frees both.
+pub const Storage = struct {
+    outdated: ?outdated_json.Parsed = null,
+    /// Per-row checkbox buffer, sized to the row count on each (re)load.
+    checked: []bool = &.{},
+
+    pub fn deinit(self: *Storage, allocator: std.mem.Allocator) void {
+        if (self.outdated) |p| p.deinit();
+        if (self.checked.len != 0) allocator.free(self.checked);
+    }
+};
+
 /// Outdated audits in the background; a non-clean exit means a failed refresh.
 pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{"outdated"}, .max_ok_exit = 0, .refresh_op = "outdated refresh failed" };
 
@@ -440,4 +454,14 @@ test "the cores tolerate a checked slice shorter than items without trapping" {
 
 test "conforms to the tab contract" {
     comptime tab.verify(@This());
+}
+
+test "Storage.deinit frees the parsed rows and the checkbox buffer" {
+    const allocator = std.testing.allocator;
+    var storage: Storage = .{};
+    storage.outdated = try outdated_json.parse(allocator, "{\"outdated\":[{\"name\":\"wget\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false}]}");
+    storage.checked = try allocator.alloc(bool, storage.outdated.?.items.len);
+    // A no-op deinit leaks both the parse arena and the buffer; `testing.allocator`
+    // trips at scope end, pinning that deinit frees every owned resource.
+    storage.deinit(allocator);
 }

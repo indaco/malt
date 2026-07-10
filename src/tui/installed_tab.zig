@@ -71,6 +71,20 @@ pub const State = struct {
     request: Request = .none,
 };
 
+/// Tab-private parse storage: the `list` rows the tab borrows and the open detail
+/// pane's `info` parse. Owned beside the tab so each arena's lifetime lives here,
+/// not in a central store. `deinit` frees both.
+pub const Storage = struct {
+    installed: ?list_json.Parsed = null,
+    detail: ?info_json.Parsed = null,
+
+    pub fn deinit(self: *Storage, allocator: std.mem.Allocator) void {
+        _ = allocator; // both fields own self-freeing parse arenas
+        if (self.installed) |p| p.deinit();
+        if (self.detail) |p| p.deinit();
+    }
+};
+
 /// Installed reads synchronously from the DB; it never background-fetches.
 pub const fetch_spec: ?tab.FetchSpec = null;
 
@@ -566,4 +580,14 @@ test "a filter that excludes every row shows the no-matches placeholder" {
 
 test "conforms to the tab contract" {
     comptime tab.verify(@This());
+}
+
+test "Storage.deinit frees the installed and detail parses" {
+    const allocator = std.testing.allocator;
+    var storage: Storage = .{};
+    storage.installed = try list_json.parse(allocator, "{\"installed\":[]}");
+    storage.detail = try info_json.parse(allocator, "{\"name\":\"a\",\"dependencies\":[]}");
+    // A no-op deinit leaks both parse arenas; `testing.allocator` trips at scope
+    // end, pinning that deinit frees every owned resource.
+    storage.deinit(allocator);
 }

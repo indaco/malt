@@ -35,6 +35,18 @@ pub const State = struct {
     detail: ?Row = null,
 };
 
+/// Tab-private parse storage: the `services list` rows the tab borrows. Owned
+/// beside the tab so the parse arena's lifetime lives here, not in a central
+/// store. `deinit` frees it.
+pub const Storage = struct {
+    services: ?services_json.Parsed = null,
+
+    pub fn deinit(self: *Storage, allocator: std.mem.Allocator) void {
+        _ = allocator; // the parse arena is self-freeing
+        if (self.services) |p| p.deinit();
+    }
+};
+
 /// Services audits in the background; a non-clean exit means a failed refresh.
 pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{ "services", "list" }, .max_ok_exit = 0, .refresh_op = "services refresh failed" };
 
@@ -484,4 +496,12 @@ test "render clamps to a height of one without crashing" {
 
 test "conforms to the tab contract" {
     comptime tab.verify(@This());
+}
+
+test "Storage.deinit frees the parsed service rows" {
+    const allocator = std.testing.allocator;
+    var storage: Storage = .{};
+    storage.services = try services_json.parse(allocator, "{\"schema_version\":1,\"services\":[]}");
+    // A no-op deinit leaks the parse arena; `testing.allocator` trips at scope end.
+    storage.deinit(allocator);
 }
