@@ -233,11 +233,10 @@ pub const GhcrClient = struct {
     /// cache inside this struct remains mutex-protected.
     pub fn downloadBlob(
         self: *GhcrClient,
-        allocator: std.mem.Allocator,
         http: *client_mod.HttpClient,
         repo: []const u8,
         digest: []const u8,
-        body_out: *std.ArrayList(u8),
+        sink: *std.Io.Writer,
         progress: ?client_mod.ProgressCallback,
     ) GhcrError!void {
         var url_buf: [512]u8 = undefined;
@@ -265,21 +264,35 @@ pub const GhcrClient = struct {
                 .{ .name = "Authorization", .value = auth_value },
             };
 
-            var resp = http.getWithHeaders(url, &headers, progress) catch
-                return GhcrError.DownloadFailed;
-            defer resp.deinit();
+            // Streams a definitive 200 body straight into `sink`; non-200
+            // bodies (incl. the 401 we re-auth on) go to net's throwaway, so
+            // the sink stays pristine until the retry loop settles on a 200.
+            const status = http.getToWriter(url, &headers, sink, progress) catch |e| switch (e) {
+                error.OutOfMemory => return GhcrError.OutOfMemory,
+                // Every transport-level failure collapses to a retryable
+                // DownloadFailed, exactly as the buffered path did — the outer
+                // install loop recreates the temp dir and re-streams.
+                error.OfflineRequired,
+                error.RequestFailed,
+                error.TlsDowngradeRefused,
+                error.TooManyHttpRedirects,
+                error.HttpRedirectInvalid,
+                error.ResponseTooLarge,
+                error.ReadFailed,
+                error.WatchdogSpawnFailed,
+                error.Canceled,
+                => return GhcrError.DownloadFailed,
+            };
 
-            if (resp.status == 401) {
+            if (status == 401) {
                 if (retried) return GhcrError.Unauthorized;
                 retried = true;
                 self.invalidateToken();
                 continue;
             }
-            if (resp.status != 200) {
-                return classifyGhcrStatus(resp.status);
+            if (status != 200) {
+                return classifyGhcrStatus(status);
             }
-
-            body_out.appendSlice(allocator, resp.body) catch return GhcrError.OutOfMemory;
             return;
         }
     }
