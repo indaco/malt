@@ -275,6 +275,11 @@ pub const HttpClient = struct {
     /// plane fails fast instead of waiting for connect timeouts.
     offline: bool = false,
 
+    /// Upper bound on a streamed blob body before the cap trips
+    /// `error.ResponseTooLarge`. Defaults to the production bound; tests lower
+    /// it to exercise the cap without a multi-GiB fixture.
+    blob_cap: usize = max_blob_bytes,
+
     /// Reused across requests; each HttpClient is borrowed single-threaded
     /// from a pool, so no concurrent access.
     zstd_window: ?[]u8 = null,
@@ -1096,7 +1101,7 @@ pub const HttpClient = struct {
             if (status == 200) {
                 // Commit point: past here a transport failure must not retry.
                 sink_committed.* = true;
-                try self.streamResponseBody(&req, &response, sink, max_blob_bytes, progress, total_timeout);
+                try self.streamResponseBody(&req, &response, sink, self.blob_cap, progress, total_timeout);
                 req.deinit();
                 return status;
             }

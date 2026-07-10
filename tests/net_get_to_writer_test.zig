@@ -336,3 +336,39 @@ test "getToWriter follows a redirect and streams only the final 200 body into th
     try std.testing.expectEqualStrings(body_200, sink.writer.buffered());
     try std.testing.expectEqual(@as(usize, 2), stub.get_count);
 }
+
+test "getToWriter trips ResponseTooLarge when the 200 body exceeds the blob cap" {
+    // The cap normally guards a multi-GiB body; lower it below the fixture so a
+    // normal 200 overshoots it. The cap fires past the 200 commit, so it is
+    // surfaced (never retried), and the over-cap chunk is refused before the
+    // sink can grow past the bound.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const port = listener.socket.address.getPort();
+
+    var stub = Stub{ .io = io, .listener = &listener, .mode = .ok };
+    const server_thread = try std.Thread.spawn(.{}, serve, .{&stub});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.blob_cap = 8; // below body_200.len
+
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+
+    const status = http.getToWriter(url, &.{}, &sink.writer, null);
+
+    http.deinit();
+    server_thread.join();
+
+    try std.testing.expectError(error.ResponseTooLarge, status);
+    try std.testing.expect(sink.writer.buffered().len <= 8);
+}
