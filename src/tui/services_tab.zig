@@ -35,6 +35,9 @@ pub const State = struct {
     detail: ?Row = null,
 };
 
+/// Services audits in the background; a non-clean exit means a failed refresh.
+pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{ "services", "list" }, .max_ok_exit = 0, .refresh_op = "services refresh failed" };
+
 pub fn title() []const u8 {
     return "Services";
 }

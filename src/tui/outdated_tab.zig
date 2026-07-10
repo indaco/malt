@@ -34,6 +34,9 @@ pub const State = struct {
     request: Request = .none,
 };
 
+/// Outdated audits in the background; a non-clean exit means a failed refresh.
+pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{"outdated"}, .max_ok_exit = 0, .refresh_op = "outdated refresh failed" };
+
 pub fn title() []const u8 {
     return "Outdated";
 }

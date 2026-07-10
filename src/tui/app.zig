@@ -799,26 +799,12 @@ const TabFetch = struct {
 /// (synchronous by design) never background-fetch, so their slots stay null.
 const Fetches = std.EnumArray(Tab, ?TabFetch);
 
-/// The `mt` subcommand + exit tolerance for a slow tab's `--json` audit, or null
-/// for a tab that does not background-fetch. Doctor exits by severity while still
-/// emitting findings, so it tolerates ≤2 where the others require 0.
-fn fetchSpec(t: Tab) ?struct { verb: []const []const u8, max_ok_exit: u8 } {
+/// The tab's background-fetch descriptor, read from its module — runtime `t`
+/// bridged to the comptime `moduleFor` dispatch the render path already uses.
+/// Null for a tab that does not background-fetch (installed, search).
+fn fetchSpec(t: Tab) ?tab.FetchSpec {
     return switch (t) {
-        .outdated => .{ .verb = &.{"outdated"}, .max_ok_exit = 0 },
-        .services => .{ .verb = &.{ "services", "list" }, .max_ok_exit = 0 },
-        .doctor => .{ .verb = &.{"doctor"}, .max_ok_exit = 2 },
-        else => null,
-    };
-}
-
-/// The banner op for a tab's failed background refresh — the same wording the
-/// synchronous reload uses, so a failure reads the same either way.
-fn tabRefreshOp(t: Tab) []const u8 {
-    return switch (t) {
-        .outdated => "outdated refresh failed",
-        .services => "services refresh failed",
-        .doctor => "doctor refresh failed",
-        else => "refresh failed",
+        inline else => |ct| moduleFor(ct).fetch_spec,
     };
 }
 
@@ -891,10 +877,13 @@ fn applyTabBytes(allocator: std.mem.Allocator, app: *App, store: *Store, t: Tab,
 /// recoverable banner the synchronous reload uses and keeps the last-good data —
 /// never fatal, the loop keeps running.
 fn finishTabFetch(allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Store, t: Tab, outcome: FetchOutcome) void {
+    // Only reached for a tab with an active fetch, so the spec is present; the
+    // fallback matches the old switch's default for a would-be non-fetch tab.
+    const refresh_op = if (fetchSpec(t)) |s| s.refresh_op else "refresh failed";
     switch (outcome) {
-        .failed => |err| app.banner.set(tabRefreshOp(t), @errorName(err)),
-        .empty => applyTabBytes(allocator, app, store, t, null) catch |e| app.banner.set(tabRefreshOp(t), @errorName(e)),
-        .bytes => |b| applyTabBytes(allocator, app, store, t, b) catch |e| app.banner.set(tabRefreshOp(t), @errorName(e)),
+        .failed => |err| app.banner.set(refresh_op, @errorName(err)),
+        .empty => applyTabBytes(allocator, app, store, t, null) catch |e| app.banner.set(refresh_op, @errorName(e)),
+        .bytes => |b| applyTabBytes(allocator, app, store, t, b) catch |e| app.banner.set(refresh_op, @errorName(e)),
     }
     if (fetches.getPtr(t).*) |*f| f.buf.deinit(allocator);
     fetches.set(t, null);
@@ -1926,6 +1915,29 @@ test "ttyReadable sees a buffered byte and times out on silence" {
     try std.testing.expect(!ttyReadable(fds[0], 1)); // silent pipe: the window elapses
     try std.testing.expectEqual(@as(isize, 1), std.c.write(fds[1], "x", 1));
     try std.testing.expect(ttyReadable(fds[0], 1)); // a byte is waiting: ready
+}
+
+test "fetch_spec declares each tab's background audit, byte-identical to the old switches" {
+    // Read generically through the same `moduleFor` dispatch the render path uses.
+    const outdated_spec = fetchSpec(.outdated).?;
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{"outdated"}), outdated_spec.verb);
+    try std.testing.expectEqual(@as(u8, 0), outdated_spec.max_ok_exit);
+    try std.testing.expectEqualStrings("outdated refresh failed", outdated_spec.refresh_op);
+
+    const services_spec = fetchSpec(.services).?;
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{ "services", "list" }), services_spec.verb);
+    try std.testing.expectEqual(@as(u8, 0), services_spec.max_ok_exit);
+    try std.testing.expectEqualStrings("services refresh failed", services_spec.refresh_op);
+
+    // Doctor tolerates its severity exit (≤2) where the others require a clean 0.
+    const doctor_spec = fetchSpec(.doctor).?;
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{"doctor"}), doctor_spec.verb);
+    try std.testing.expectEqual(@as(u8, 2), doctor_spec.max_ok_exit);
+    try std.testing.expectEqualStrings("doctor refresh failed", doctor_spec.refresh_op);
+
+    // Synchronous tabs never background-fetch.
+    try std.testing.expectEqual(@as(?tab.FetchSpec, null), fetchSpec(.installed));
+    try std.testing.expectEqual(@as(?tab.FetchSpec, null), fetchSpec(.search));
 }
 
 const guard_pkgs = [_]installed.Pkg{
