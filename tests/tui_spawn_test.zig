@@ -82,7 +82,7 @@ test "runChildTolerant treats a signalled child as ChildFailed regardless of the
 
 test "the refresh hook refetches the active tab and marks the rest dirty on view" {
     var a: app.App = .{ .active = .services };
-    app.markStaleAfterMutation(&a.shared, a.active);
+    a.shared.markStaleAfter(a.active);
     // The tab the user just acted on is refreshed inline, so it stays fresh.
     try testing.expect(!app.takeDirty(&a, .services));
     // Every other tab refetches once when entered, then is fresh again.

@@ -128,6 +128,16 @@ pub const SharedModel = struct {
         self.dirty = std.EnumSet(Tab).initFull();
         self.dirty.remove(active);
     }
+
+    /// Consume `t`'s dirty flag: true exactly once after it was marked, so a caller
+    /// refetches its `--json` at most once per staleness. A synchronous tab reads
+    /// it on entry (inside its own `service`); the loop reads it for the background
+    /// tabs before kicking their audit.
+    pub fn takeDirty(self: *SharedModel, t: Tab) bool {
+        if (!self.dirty.contains(t)) return false;
+        self.dirty.remove(t);
+        return true;
+    }
 };
 
 /// The effect ports bundle, passed by pointer to whatever performs an effect.
@@ -146,6 +156,25 @@ pub const Ctx = struct {
     /// The footer "Loading…" flag a tab raises around a synchronous polled load and
     /// clears after, held by pointer because the hub's renderer reads it.
     loading: *bool,
+    /// Hub-injected header keg-count refresh, type-erased like `Painter.on_tick`.
+    /// Only the hub owns the shared count read (it stays app/header-side), so a tab
+    /// that grows the keg set — search's install — fires it through this port to
+    /// keep `<n> kegs` live immediately, without importing the hub. No-op default
+    /// so a Ctx built for a test that never installs needs no binding.
+    refresh_installed_count: CountRefresh = .{},
+
+    pub const CountRefresh = struct {
+        ctx: *anyopaque = undefined,
+        call: *const fn (*anyopaque) void = noop,
+        fn noop(_: *anyopaque) void {}
+    };
+
+    /// Fire the hub-injected header count refresh. A failed read banners inside the
+    /// hub's closure and is dropped there — a stale count is cosmetic and the
+    /// caller's mutation already succeeded — so this returns void.
+    pub fn refreshInstalledCount(self: *const Ctx) void {
+        self.refresh_installed_count.call(self.refresh_installed_count.ctx);
+    }
 };
 
 test "SharedModel defaults and mutation mirror the old inline App fields" {
@@ -198,6 +227,15 @@ test "banner truncates an over-cap op to the fixed buffer without overflow" {
     try std.testing.expect(b.slice().len <= banner_max); // bounded, no overrun
 }
 
+test "takeDirty consumes a tab's flag exactly once" {
+    var m: SharedModel = .{};
+    try std.testing.expect(!m.takeDirty(.installed)); // never marked → nothing to consume
+    m.dirty.insert(.installed);
+    try std.testing.expect(m.takeDirty(.installed)); // marked → true, and cleared
+    try std.testing.expect(!m.takeDirty(.installed)); // already consumed → false
+    try std.testing.expect(!m.dirty.contains(.installed));
+}
+
 test "markStaleAfter dirties every tab except the just-refreshed active one" {
     var m: SharedModel = .{};
     m.markStaleAfter(.doctor);
@@ -220,4 +258,11 @@ test "Ctx bundles the effect ports and points at the shared read-model" {
     // The effect also needs the re-exec target and the synchronous-load flag.
     try std.testing.expectEqual([]const u8, @FieldType(Ctx, "mt_path"));
     try std.testing.expectEqual(*bool, @FieldType(Ctx, "loading"));
+}
+
+test "an unbound count-refresh port is a safe no-op" {
+    // The default port ignores its `undefined` ctx, so a Ctx built without a binding
+    // (every effect test that never installs) can fire it harmlessly.
+    var port: Ctx.CountRefresh = .{};
+    port.call(port.ctx); // must not dereference the undefined ctx
 }

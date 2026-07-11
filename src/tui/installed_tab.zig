@@ -15,6 +15,8 @@
 
 const std = @import("std");
 const tab = @import("tab.zig");
+const ctx = @import("ctx.zig");
+const spawn = @import("spawn.zig");
 const detail_pane = @import("detail_pane.zig");
 const scroll_list = @import("scroll_list.zig");
 const list_json = @import("json/list.zig");
@@ -87,6 +89,14 @@ pub const Storage = struct {
 
 /// Installed reads synchronously from the DB; it never background-fetches.
 pub const fetch_spec: ?tab.FetchSpec = null;
+
+/// Whether the pending request will spawn a DB-mutating child (`mt uninstall`).
+/// The shell folds this over every tab before opening the DB so a live background
+/// audit is drained first — the WAL single-writer invariant. Read-only requests
+/// (detail) never take the writer.
+pub fn mutates(s: *const State) bool {
+    return s.request == .uninstall;
+}
 
 pub fn title() []const u8 {
     return "Installed";
@@ -287,6 +297,110 @@ fn appendPad(buf: []u8, len: *usize, s: []const u8, width: usize) void {
 }
 
 // ─── tests ───────────────────────────────────────────────────────────
+
+// ── Impure zone ────────────────────────────────────────────────────────────
+// The effects the pure `step` requested. Each takes its I/O ports explicitly
+// through the shared `ctx.Ctx` — never a global — so the pure/impure line lands
+// at the signature: these functions carry `io`/`allocator`, the pure ones above
+// do not.
+
+/// The effect chain's error set, composed from the source sets so it tracks them
+/// automatically. A subset of the shell's `RunError`, which classifies each fault
+/// recoverable-vs-fatal; naming it here keeps the public `service` explicit.
+pub const Error = std.mem.Allocator.Error || spawn.ReadError || spawn.InlineError || list_json.Error || info_json.Error;
+
+/// Cheap keg count from `mt list --json` bytes (no `--size --linked` walk). Header
+/// infrastructure: parses to a temporary and returns only the count, touching no
+/// `Storage` — the shared `installed_count` writer (app/header-side) sources its
+/// number here so the hub need not import the list parser.
+pub fn countFromJson(allocator: std.mem.Allocator, bytes: []const u8) list_json.Error!usize {
+    const parsed = try list_json.parse(allocator, bytes);
+    defer parsed.deinit();
+    return parsed.items.len;
+}
+
+/// (Re)read `mt list --json --size --linked` and repoint the tab's rows at the
+/// fresh parse, freeing the previous one. The `--size`/`--linked` keg-dir walk is
+/// paid only here — on the Installed tab, lazily. The storage is swapped only after
+/// a clean parse, so a failure keeps the last-good rows.
+fn loadInstalled(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
+    errdefer |err| c.shared.banner.set("list refresh failed", @errorName(err));
+    const argv = try spawn.jsonArgv(c.allocator, c.mt_path, &.{ "list", "--size", "--linked" });
+    defer c.allocator.free(argv);
+    const bytes = (try spawn.readJsonAllowEmpty(c.io, c.allocator, argv)) orelse {
+        // Fresh prefix: an empty Cellar, not a failure. Clear the rows.
+        if (storage.installed) |old| old.deinit();
+        storage.installed = null;
+        s.items = &.{};
+        s.detail = null;
+        c.shared.installed_count = 0; // empty Cellar is a known zero, not "unknown"
+        return;
+    };
+    defer c.allocator.free(bytes);
+
+    const parsed = try list_json.parse(c.allocator, bytes);
+    if (storage.installed) |old| old.deinit();
+    storage.installed = parsed;
+    s.items = parsed.items;
+    s.detail = null; // a refreshed list invalidates the old detail
+    c.shared.installed_count = parsed.items.len;
+}
+
+/// Read `mt info <pkg> --json` for the selected row into the detail pane. A read
+/// (no alt-screen drop); the detail is set only after a clean parse, so a failure
+/// names the package in a banner and leaves the pane closed.
+fn openDetail(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
+    const sel = selectedPkg(s) orelse return; // nothing selected
+    errdefer |err| {
+        var sb: [96]u8 = undefined;
+        const op = std.fmt.bufPrint(&sb, "info for {s} failed", .{sel.name}) catch "info read failed";
+        c.shared.banner.set(op, @errorName(err));
+    }
+    const argv = try spawn.jsonArgv(c.allocator, c.mt_path, &.{ "info", sel.name });
+    defer c.allocator.free(argv);
+    const bytes = try spawn.readJson(c.io, c.allocator, argv);
+    defer c.allocator.free(bytes);
+
+    const parsed = try info_json.parse(c.allocator, bytes);
+    if (storage.detail) |old| old.deinit();
+    storage.detail = parsed;
+    s.detail = .{ .pkg = sel, .info = parsed.info };
+}
+
+/// Delegate uninstall to the real `mt` inline, then refresh the list. The target
+/// is the guard's latched copy — it neither borrows the list storage the post-spawn
+/// reload frees nor tracks a selection that moved after arming.
+fn doUninstall(s: *State, storage: *Storage, c: *ctx.Ctx, target: ConfirmTarget) !void {
+    const argv = try spawn.inlineArgv(c.allocator, c.mt_path, &.{ "uninstall", target.name() });
+    defer c.allocator.free(argv);
+    {
+        // A non-zero `mt uninstall` re-enters the dashboard (the user still has
+        // malt's real output in their scrollback) and surfaces the failure as a
+        // recoverable banner — only a terminal fault is fatal. Scoped so the
+        // post-mutation refresh below reports under its own op, not "uninstall".
+        errdefer |err| c.shared.banner.set("uninstall failed", @errorName(err));
+        try spawn.runInlineReenter(c.term, argv);
+    }
+    try loadInstalled(s, storage, c); // the keg is gone — refetch
+    c.shared.markStaleAfter(.installed); // the other tabs may now be stale too
+}
+
+/// Perform any effect the pure `step` requested, then clear it — the consumer half
+/// of the `request` seam. The shell dispatches this only for the active tab, so the
+/// lazy dirty-reload runs when Installed is entered after a cross-tab mutation.
+pub fn service(s: *State, storage: *Storage, c: *ctx.Ctx) Error!void {
+    const req = s.request;
+    s.request = .none;
+    switch (req) {
+        .none => {},
+        .open_detail => try openDetail(s, storage, c),
+        .uninstall => |target| try doUninstall(s, storage, c, target),
+    }
+    // Lazy per-tab refresh: a mutation elsewhere marked this tab dirty; reload on
+    // entry. Only the active tab's `service` runs, so the old `app.active` guard is
+    // now structural.
+    if (c.shared.takeDirty(.installed)) try loadInstalled(s, storage, c);
+}
 
 const testing = std.testing;
 
@@ -590,4 +704,113 @@ test "Storage.deinit frees the installed and detail parses" {
     // A no-op deinit leaks both parse arenas; `testing.allocator` trips at scope
     // end, pinning that deinit frees every owned resource.
     storage.deinit(allocator);
+}
+
+test "mutates gates only on the uninstall request" {
+    var s: State = .{};
+    try testing.expect(!mutates(&s)); // .none never takes the WAL writer
+    s.request = .open_detail;
+    try testing.expect(!mutates(&s)); // a read-only detail request does not gate
+    s.request = .{ .uninstall = ConfirmTarget.init("wget") };
+    try testing.expect(mutates(&s)); // the one DB-mutating request
+}
+
+test "countFromJson returns the row count without retaining the parse" {
+    const allocator = std.testing.allocator;
+    // A leaked parse arena would trip `testing.allocator` at scope end, so this
+    // also pins that the count read frees its temporary.
+    const n = try countFromJson(allocator,
+        \\{"installed":[{"name":"jq","version":"1","type":"formula","pinned":false},{"name":"wget","version":"2","type":"formula","pinned":false}]}
+    );
+    try testing.expectEqual(@as(usize, 2), n);
+}
+
+test "countFromJson reports zero for an empty Cellar" {
+    // The edge the header renders as `0 kegs`, distinct from an unknown count.
+    const n = try countFromJson(std.testing.allocator, "{\"installed\":[]}");
+    try testing.expectEqual(@as(usize, 0), n);
+}
+
+// Backing storage for a `ctx.Ctx` in an effect test: dummy term/fetches/shared, a
+// no-op painter (fd = -1; the synchronous reads never reach a poll tick), and the
+// loading flag.
+const TestEnv = struct {
+    term_h: ctx.Term,
+    fetches: ctx.Fetches = ctx.Fetches.initFill(null),
+    shared: ctx.SharedModel = .{},
+    frame: []u8 = &.{},
+    loading: bool = false,
+};
+
+fn mkCtx(io: std.Io, e: *TestEnv, mt_path: []const u8) ctx.Ctx {
+    return .{
+        .io = io,
+        .allocator = testing.allocator,
+        .term = &e.term_h,
+        .painter = .{ .fd = -1, .frame = &e.frame },
+        .fetches = &e.fetches,
+        .shared = &e.shared,
+        .mt_path = mt_path,
+        .loading = &e.loading,
+    };
+}
+
+test "service on the synchronous read path never starts a background fetch" {
+    // Installed reads the DB inline; it declares no fetch spec, so no branch of its
+    // service may spawn a background audit — the loop multiplexes only the slow tabs.
+    try testing.expect(fetch_spec == null);
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{}; // .none: the pure `step` set nothing to perform
+    var c = mkCtx(thr.io(), &env, "/bin/false"); // would fail if it ever spawned
+    try service(&st, &storage, &c);
+    for (&env.fetches.values) |v| try testing.expect(v == null); // nothing backgrounded
+    try testing.expect(!env.shared.banner.isSet());
+}
+
+test "a failed list refresh names the op in the banner and keeps the last-good rows" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{};
+    var c = mkCtx(thr.io(), &env, "/bin/echo"); // echo emits non-JSON → parse fails
+    try testing.expectError(error.BadJson, loadInstalled(&st, &storage, &c));
+    try testing.expectEqualStrings("list refresh failed: BadJson", env.shared.banner.slice());
+    try testing.expectEqual(@as(usize, 0), st.items.len); // last-good kept
+}
+
+// A fresh prefix (no db yet) makes every `mt … --json` read exit 0 with no output.
+// That is an empty Cellar, not a failure — the tab must show an empty list, never
+// crash on `EmptyOutput`. `/usr/bin/true` reproduces it exactly: exit 0, zero bytes.
+test "loadInstalled treats an exit-0 empty response (fresh prefix) as an empty tab" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{};
+    var c = mkCtx(thr.io(), &env, "/usr/bin/true");
+    try loadInstalled(&st, &storage, &c);
+    try testing.expectEqual(@as(usize, 0), st.items.len);
+    try testing.expect(!env.shared.banner.isSet());
+    try testing.expectEqual(@as(?usize, 0), env.shared.installed_count);
+}
+
+test "a failed info read names the package in the banner and leaves the pane closed" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    const items = [_]Pkg{.{ .name = "jq", .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null }};
+    var st: State = .{ .items = &items };
+    var c = mkCtx(thr.io(), &env, "/bin/echo");
+    try testing.expectError(error.BadJson, openDetail(&st, &storage, &c));
+    try testing.expectEqualStrings("info for jq failed: BadJson", env.shared.banner.slice());
+    try testing.expect(st.detail == null); // the pane never opened
 }
