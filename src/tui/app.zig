@@ -494,30 +494,10 @@ pub fn classify(err: RunError) ErrorClass {
     };
 }
 
-/// The `tick` callback `spawn.readJsonPolled` invokes on every poll timeout while
-/// a lazy tab is loading: advance the spinner one frame and repaint. Closes over
-/// the paint handle + `App`, so the animation lives here, not in the generic
-/// leaf `spawn.zig`.
-const LoadTicker = struct {
-    p: Painter,
-    allocator: std.mem.Allocator,
-    app: *App,
-    pub fn tick(self: LoadTicker) void {
-        self.app.spinner_frame +%= 1;
-        // A resize during the load is absorbed here: repaint reads currentSize so
-        // it reflows; consume the flag so the loop's own resize check doesn't
-        // redundantly repaint the same frame once the read returns.
-        _ = term.takeResized();
-        // Best-effort, like paintLoading/paintSearching: a dropped animation frame
-        // is cosmetic, and a genuine OOM resurfaces on the next real allocation.
-        repaint(self.p.fd, self.p.frame, self.allocator, self.app) catch {};
-    }
-};
-
 /// Binds the whole-dashboard repaint for a migrated tab's synchronous polled load
-/// (the Doctor reload after a fix). Type-erased into `Painter.on_tick` so the tab
-/// animates its spinner without importing the hub — only the hub can render every
-/// tab. Mirrors `LoadTicker.tick`, which the not-yet-migrated tabs still use directly.
+/// (the Doctor reload after a fix, and the Services reload after a lifecycle
+/// action). Type-erased into `Painter.on_tick` so the tab animates its spinner
+/// without importing the hub — only the hub can render every tab.
 const TickBind = struct {
     allocator: std.mem.Allocator,
     app: *App,
@@ -744,8 +724,8 @@ const FetchOutcome = union(enum) { bytes: []const u8, empty, failed: anyerror };
 /// the per-tab `applyXBytes` own the empty-vs-document split and the swap.
 fn applyTabBytes(allocator: std.mem.Allocator, app: *App, store: *Storages, t: Tab, bytes: ?[]const u8) RunError!void {
     switch (t) {
-        .outdated => try applyOutdatedBytes(allocator, app, store, bytes),
-        .services => try applyServicesBytes(allocator, app, store, bytes),
+        .outdated => try outdated.applyOutdatedBytes(allocator, &app.states.outdated, &store.outdated, &app.shared, bytes),
+        .services => try services.applyServicesBytes(allocator, &app.states.services, &store.services, bytes),
         .doctor => try doctor.applyDoctorBytes(allocator, &app.states.doctor, &store.doctor, bytes),
         else => {},
     }
@@ -883,301 +863,6 @@ fn serviceInstalled(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app
     // Lazy per-tab refresh: a tab marked dirty by a mutation refetches on entry.
     if (app.active == .installed and takeDirty(app, .installed)) {
         try loadInstalled(io, allocator, app, store);
-    }
-}
-
-/// Repoint the Outdated tab and the header count at a drained `--json` payload.
-/// `null` (a fresh prefix's exit-0 no-output) clears to a known-zero tab; a parsed
-/// document swaps in the rows and a fresh, all-clear checkbox buffer. Shared by
-/// the synchronous reload and the background launch fetch, so both land the same
-/// state. The store is swapped only after a clean parse — a failure keeps the
-/// last-good rows for the caller's banner to explain.
-fn applyOutdatedBytes(allocator: std.mem.Allocator, app: *App, store: *Storages, bytes: ?[]const u8) RunError!void {
-    const payload = bytes orelse {
-        if (store.outdated.outdated) |old| old.deinit();
-        if (store.outdated.checked.len != 0) allocator.free(store.outdated.checked);
-        store.outdated.outdated = null;
-        store.outdated.checked = &.{};
-        app.states.outdated.items = &.{};
-        app.states.outdated.checked = &.{};
-        app.shared.outdated_count = 0; // nothing outdated is a known zero, not "unknown"
-        return;
-    };
-    const parsed = try outdated_json.parse(allocator, payload);
-    errdefer parsed.deinit();
-    // A fresh checkbox buffer, all clear: an upgrade removes the upgraded rows, so
-    // carrying the old selection forward would point at the wrong packages.
-    const checked = try allocator.alloc(bool, parsed.items.len);
-    @memset(checked, false);
-
-    if (store.outdated.outdated) |old| old.deinit();
-    if (store.outdated.checked.len != 0) allocator.free(store.outdated.checked);
-    store.outdated.outdated = parsed;
-    store.outdated.checked = checked;
-    app.states.outdated.items = parsed.items;
-    app.states.outdated.checked = checked;
-    app.shared.outdated_count = parsed.items.len;
-}
-
-/// Collect the checked, non-pinned rows into `out` as `(name, kind)` refs,
-/// formula rows first then cask rows; returns the formula count (the split
-/// index). `out` must be sized to `selectedCount`. Partitioning by kind lets
-/// `doUpgrade` issue one `--formula` pass and one `--cask` pass.
-fn collectUpgraded(st: *const outdated.State, out: []UpgradedRef) usize {
-    // The two item-order passes below cover exactly `{formula, cask}`; a new
-    // Kind variant would leave its rows uncollected. Lock it at compile time.
-    comptime std.debug.assert(@typeInfo(outdated_json.Kind).@"enum".fields.len == 2);
-    var n: usize = 0;
-    var split: usize = 0;
-    // Two item-order passes so each kind's names stay in display order and the
-    // formula refs land in `out[0..split]`, casks in `out[split..]`.
-    for ([_]outdated_json.Kind{ .formula, .cask }) |kind| {
-        for (st.items, 0..) |row, i| {
-            // Same rule as `selectedNames`: checked, non-pinned, this kind.
-            if (i < st.checked.len and st.checked[i] and !row.pinned and row.kind == kind and n < out.len) {
-                out[n] = .{ .name = row.name, .kind = row.kind };
-                n += 1;
-            }
-        }
-        if (kind == .formula) split = n;
-    }
-    return split;
-}
-
-/// Build `[mt, upgrade, <flag>, names...]` for a single-kind ref slice, or null
-/// when the slice is empty. `flag` is `--formula` / `--cask` so the kind the
-/// user picked is the kind upgraded (`mt upgrade <name>` is formula-first).
-fn kindUpgradeArgv(
-    allocator: std.mem.Allocator,
-    mt_path: []const u8,
-    refs: []const UpgradedRef,
-    flag: []const u8,
-) std.mem.Allocator.Error!?[]const []const u8 {
-    if (refs.len == 0) return null;
-    const rest = try allocator.alloc([]const u8, 2 + refs.len);
-    defer allocator.free(rest);
-    rest[0] = "upgrade";
-    rest[1] = flag;
-    for (refs, rest[2..]) |r, *slot| slot.* = r.name;
-    return try spawn.inlineArgv(allocator, mt_path, rest);
-}
-
-/// The exit code `mt upgrade` returns when it refused a cask because the app is
-/// still running. Mirrors `main.zig`'s `AppRunning` exit mapping — the mt→TUI
-/// process contract, like the doctor severity cap the inline runner already knows.
-const cask_app_running_exit: u8 = 3;
-
-/// Footer detail for a failed cask upgrade pass: on the app-running refusal name
-/// the live app (or "a selected app" when the pass carried several) so the footer
-/// says *why*, not an opaque "ChildFailed". `buf` backs the single-cask name;
-/// `Banner.set` copies the result, so a stack buffer is enough.
-fn upgradeFailDetail(buf: []u8, code: u8, refs: []const UpgradedRef) []const u8 {
-    if (code != cask_app_running_exit) return "ChildFailed";
-    if (refs.len == 1) return std.fmt.bufPrint(buf, "{s} is running", .{refs[0].name}) catch "an app is running";
-    return "a selected app is running";
-}
-
-/// Delegate the checked upgrades to the real `mt` inline, then drop the upgraded
-/// rows in place. Runs one pass per kind (`--formula`, `--cask`) so the row the
-/// user checked is the row upgraded — `mt upgrade <name>` is formula-first, so a
-/// checked cask would otherwise upgrade a same-named formula. Names borrow the
-/// parse arena, which `dropUpgradedRows` keeps alive across both passes.
-fn doUpgrade(allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Storages) RunError!void {
-    const st = &app.states.outdated;
-    const count = outdated.selectedCount(st);
-    if (count == 0) return; // empty selection: no-op
-    // Snapshot the selection (formula refs first, then cask) before any upgrade
-    // or drop — the drop rebuilds the checkbox buffer, erasing the selection.
-    const upgraded = try allocator.alloc(UpgradedRef, count);
-    defer allocator.free(upgraded);
-    const split = collectUpgraded(st, upgraded);
-
-    const passes = [_]struct { refs: []const UpgradedRef, flag: []const u8 }{
-        .{ .refs = upgraded[0..split], .flag = "--formula" },
-        .{ .refs = upgraded[split..], .flag = "--cask" },
-    };
-    // Passes run independently: a failed formula pass still lets the cask pass
-    // proceed, and only a succeeded pass's rows are dropped. A non-zero `mt
-    // upgrade` re-enters the dashboard and surfaces as a recoverable banner.
-    var dropped_any = false;
-    for (passes) |pass| {
-        const argv = (try kindUpgradeArgv(allocator, app.mt_path, pass.refs, pass.flag)) orelse continue;
-        defer allocator.free(argv);
-        if (spawn.runInlineReenterStatus(t, argv)) |code| {
-            if (code == 0) {
-                try dropUpgradedRows(allocator, app, store, pass.refs);
-                dropped_any = true;
-            } else {
-                var dbuf: [96]u8 = undefined;
-                app.shared.banner.set("upgrade failed", upgradeFailDetail(&dbuf, code, pass.refs));
-            }
-        } else |err| {
-            app.shared.banner.set("upgrade failed", @errorName(err));
-        }
-    }
-    if (dropped_any) markStaleAfterMutation(&app.shared, app.active); // Installed sizes/versions changed too
-}
-
-/// One upgraded row, identified by `(name, kind)` so a formula and a cask that
-/// share a name (e.g. `docker`) are never confused for one another.
-const UpgradedRef = struct { name: []const u8, kind: outdated_json.Kind };
-
-/// True when `row` is one of the upgraded rows (linear scan — a batch is small).
-/// Matches on `(name, kind)`: `mt upgrade <name>` resolves formula-first, so a
-/// same-named cask is left outdated and must not be dropped with the formula.
-fn rowUpgraded(upgraded: []const UpgradedRef, row: outdated_json.OutdatedRow) bool {
-    for (upgraded) |u| {
-        if (u.kind == row.kind and std.mem.eql(u8, u.name, row.name)) return true;
-    }
-    return false;
-}
-
-/// Drop the just-upgraded rows from the Outdated tab in place: the post-upgrade
-/// outdated set is the pre-upgrade set minus the upgraded tokens, so a second
-/// `mt outdated` walk is unnecessary. The parsed storage is kept alive (rows
-/// borrow its arena) and `items` is re-pointed at the survivors within that
-/// arena; only the checkbox buffer is reallocated, preserving each kept row's
-/// checked state so a partial-selection upgrade survives.
-fn dropUpgradedRows(
-    allocator: std.mem.Allocator,
-    app: *App,
-    store: *Storages,
-    upgraded: []const UpgradedRef,
-) std.mem.Allocator.Error!void {
-    if (store.outdated.outdated == null) return; // nothing loaded → nothing to drop
-    const parsed = &store.outdated.outdated.?;
-    const old_items = parsed.items;
-    const old_checked = store.outdated.checked;
-
-    var keep: usize = 0;
-    for (old_items) |row| {
-        if (!rowUpgraded(upgraded, row)) keep += 1;
-    }
-
-    // Survivors live in the parse arena alongside the strings they borrow, so
-    // they free together on the next full reload. The checkbox buffer is shell-
-    // owned, so it is reallocated and the old one freed.
-    const arena = parsed.doc.arena.allocator();
-    const new_items = try arena.alloc(outdated_json.OutdatedRow, keep);
-    const new_checked = try allocator.alloc(bool, keep);
-    errdefer allocator.free(new_checked);
-
-    var j: usize = 0;
-    for (old_items, 0..) |row, i| {
-        if (rowUpgraded(upgraded, row)) continue;
-        new_items[j] = row;
-        new_checked[j] = i < old_checked.len and old_checked[i];
-        j += 1;
-    }
-
-    if (old_checked.len != 0) allocator.free(old_checked);
-    parsed.items = new_items;
-    store.outdated.checked = new_checked;
-    app.states.outdated.items = new_items;
-    app.states.outdated.checked = new_checked;
-    app.shared.outdated_count = new_items.len;
-}
-
-/// Perform any effect the pure `step` requested on the Outdated tab, then clear
-/// it, and lazily (re)load on first entry or after a mutation marked it dirty.
-fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
-    const req = app.states.outdated.request;
-    app.states.outdated.request = .none;
-    switch (req) {
-        .none => {},
-        .upgrade => try doUpgrade(allocator, t, app, store),
-    }
-    // Lazy per-tab load: first activation and post-mutation staleness both arrive
-    // as the dirty flag (set at init and by `markStaleAfterMutation`).
-    // Background, non-blocking: spawn the audit and let the loop drain it so the
-    // input stays live — a cold-cache outdated audit never traps the tab.
-    if (app.active == .outdated and takeDirty(app, .outdated)) {
-        startTabFetch(io, allocator, fetches, app, .outdated);
-    }
-}
-
-/// (Re)read `mt services list --json` and repoint the Services tab's rows at the
-/// fresh parse, freeing the previous one.
-fn loadServices(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, store: *Storages) RunError!void {
-    // Annotate any failure as a recoverable banner; the loop boundary decides
-    // recoverable vs fatal. The store is swapped only after a clean parse, so a
-    // failure keeps the last-good rows and their selection.
-    errdefer |err| app.shared.banner.set("services refresh failed", @errorName(err));
-    const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "services", "list" });
-    defer allocator.free(argv);
-    // Animate the spinner across the poll: `loading` stays set so each tick
-    // paints it, cleared once the result (or the empty/banner state) replaces it.
-    app.loading = true;
-    defer app.loading = false;
-    const ticker = LoadTicker{ .p = painter, .allocator = allocator, .app = app };
-    const bytes = try spawn.readJsonPolled(io, allocator, argv, 0, ticker);
-    defer if (bytes) |b| allocator.free(b);
-    try applyServicesBytes(allocator, app, store, bytes);
-}
-
-/// Repoint the Services tab at a drained `--json` payload. `null` (a fresh prefix)
-/// clears to an empty list; a parsed document swaps in the rows. Shared by the
-/// synchronous reload and the background fetch; the store is swapped only after a
-/// clean parse, so a failure keeps the last-good rows.
-fn applyServicesBytes(allocator: std.mem.Allocator, app: *App, store: *Storages, bytes: ?[]const u8) RunError!void {
-    const payload = bytes orelse {
-        if (store.services.services) |old| old.deinit();
-        store.services.services = null;
-        app.states.services.items = &.{};
-        app.states.services.detail = null; // the old detail borrowed the freed rows
-        return;
-    };
-    const parsed = try services_json.parse(allocator, payload);
-    if (store.services.services) |old| old.deinit();
-    store.services.services = parsed;
-    app.states.services.items = parsed.items;
-    app.states.services.detail = null; // a refreshed list invalidates the old detail
-}
-
-/// Build `mt services <action> <name>` for the selected service. Pure over the
-/// tab state: null when nothing is selected (the no-op), else an owned argv whose
-/// `name` element borrows from the parse storage. Caller frees the returned slice
-/// (not its elements).
-fn serviceActionArgv(allocator: std.mem.Allocator, mt_path: []const u8, action: []const u8, st: *const services.State) std.mem.Allocator.Error!?[]const []const u8 {
-    const svc = services.selectedService(st) orelse return null; // empty list: no-op
-    return try spawn.inlineArgv(allocator, mt_path, &.{ "services", action, svc.name });
-}
-
-/// Delegate a service lifecycle action to the real `mt` inline, then refresh. The
-/// argv's `name` borrows from the current parse storage; the post-spawn reload
-/// frees that storage, so the name is not read afterwards.
-fn doServiceAction(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Storages, action: []const u8) RunError!void {
-    const argv = (try serviceActionArgv(allocator, app.mt_path, action, &app.states.services)) orelse return; // nothing selected
-    defer allocator.free(argv);
-    {
-        // A non-zero `mt services <action>` re-enters the dashboard (the user
-        // keeps malt's real output in their scrollback) and surfaces as a
-        // recoverable banner; only a terminal fault is fatal. Scoped so the
-        // refresh below reports under its own op, not the action.
-        errdefer |err| app.shared.banner.set("service action failed", @errorName(err));
-        try spawn.runInlineReenter(t, argv);
-    }
-    try loadServices(io, allocator, painter, app, store); // the state changed — refetch
-    markStaleAfterMutation(&app.shared, app.active);
-}
-
-/// Perform any lifecycle effect the pure `step` requested on the Services tab,
-/// then clear it, and lazily (re)load on first entry or after a mutation marked
-/// it dirty.
-fn serviceServices(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
-    const req = app.states.services.request;
-    app.states.services.request = .none;
-    switch (req) {
-        .none => {},
-        .start => try doServiceAction(io, allocator, t, painter, app, store, "start"),
-        .stop => try doServiceAction(io, allocator, t, painter, app, store, "stop"),
-        .restart => try doServiceAction(io, allocator, t, painter, app, store, "restart"),
-    }
-    // Lazy per-tab load: first activation and post-mutation staleness both arrive
-    // as the dirty flag (set at init and by `markStaleAfterMutation`).
-    // Background, non-blocking — see `serviceOutdated`.
-    if (app.active == .services and takeDirty(app, .services)) {
-        startTabFetch(io, allocator, fetches, app, .services);
     }
 }
 
@@ -1379,9 +1064,9 @@ fn openSearchInfo(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *S
 /// they do not gate the pre-mutation drain.
 fn mutationPending(app: *const App) bool {
     return app.states.installed.request == .uninstall or
-        app.states.outdated.request == .upgrade or
-        app.states.services.request != .none or
-        doctor.mutates(&app.states.doctor) or // the migrated tab declares this as a capability
+        outdated.mutates(&app.states.outdated) or // migrated tabs declare this as a capability
+        services.mutates(&app.states.services) or
+        doctor.mutates(&app.states.doctor) or
         app.states.search.request == .install;
 }
 
@@ -1458,19 +1143,19 @@ fn serviceTab(comptime tag: Tab, io: std.Io, allocator: std.mem.Allocator, t: *t
         // is skipped (its lazy-load, if any, is its own concern).
         if (M.fetch_spec != null and takeDirty(app, tag)) startTabFetch(io, allocator, fetches, app, tag);
     } else {
-        try legacyService(tag, io, allocator, t, painter, fetches, app, store);
+        try legacyService(tag, io, allocator, t, app, store);
     }
 }
 
 /// The pre-contract dispatch for a tab whose effect group still lives in the hub.
+/// Only Installed and Search remain here; the three background-fetch tabs
+/// (doctor, outdated, services) are conforming and route through `moduleFor`.
 /// Removed once the last tab exposes `service`.
-fn legacyService(comptime tag: Tab, io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
+fn legacyService(comptime tag: Tab, io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Storages) RunError!void {
     switch (tag) {
         .installed => try serviceInstalled(io, allocator, t, app, store),
-        .outdated => try serviceOutdated(io, allocator, t, fetches, app, store),
-        .services => try serviceServices(io, allocator, t, painter, fetches, app, store),
         .search => try serviceSearch(io, allocator, t, app, store),
-        .doctor => comptime unreachable, // doctor is conforming — handled above
+        .outdated, .services, .doctor => comptime unreachable, // conforming — handled above
     }
 }
 
@@ -2320,149 +2005,6 @@ test "service leaves an in-flight audit running when no mutation is pending" {
     reapAllFetches(t.io(), std.testing.allocator, &fetches); // tidy the still-running child
 }
 
-test "upgradeFailDetail names the live app on the refusal code, else stays generic" {
-    var buf: [96]u8 = undefined;
-    const one = [_]UpgradedRef{.{ .name = "flux-markdown", .kind = .cask }};
-    const many = [_]UpgradedRef{ .{ .name = "a", .kind = .cask }, .{ .name = "b", .kind = .cask } };
-
-    // The refusal code names the one cask, or stays generic for a batch.
-    try std.testing.expectEqualStrings("flux-markdown is running", upgradeFailDetail(&buf, cask_app_running_exit, &one));
-    try std.testing.expectEqualStrings("a selected app is running", upgradeFailDetail(&buf, cask_app_running_exit, &many));
-    // Any other non-zero exit is the generic child failure, unnamed.
-    try std.testing.expectEqualStrings("ChildFailed", upgradeFailDetail(&buf, 1, &one));
-
-    // Edge: a name longer than the buffer falls back rather than truncating mid-name.
-    var tiny: [4]u8 = undefined;
-    try std.testing.expectEqualStrings("an app is running", upgradeFailDetail(&tiny, cask_app_running_exit, &one));
-}
-
-test "dropUpgradedRows removes upgraded rows in place and preserves kept checked state" {
-    var app: App = .{};
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    const json =
-        \\{"outdated":[
-        \\{"name":"a","installed":"1","latest":"2","type":"formula","pinned":false},
-        \\{"name":"b","installed":"1","latest":"2","type":"formula","pinned":false},
-        \\{"name":"c","installed":"1","latest":"2","type":"formula","pinned":false}
-        \\]}
-    ;
-    try applyOutdatedBytes(std.testing.allocator, &app, &store, json);
-    // Check a and c (b is the one being upgraded); the kept rows must stay checked.
-    store.outdated.checked[0] = true;
-    store.outdated.checked[2] = true;
-
-    try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "b", .kind = .formula }});
-
-    try std.testing.expectEqual(@as(usize, 2), store.outdated.outdated.?.items.len);
-    try std.testing.expectEqualStrings("a", store.outdated.outdated.?.items[0].name);
-    try std.testing.expectEqualStrings("c", store.outdated.outdated.?.items[1].name);
-    try std.testing.expectEqual(@as(?usize, 2), app.shared.outdated_count);
-    try std.testing.expectEqual(@as(usize, 2), app.states.outdated.items.len);
-    // a and c stay checked in the rebuilt lockstep buffer.
-    try std.testing.expect(app.states.outdated.checked[0]);
-    try std.testing.expect(app.states.outdated.checked[1]);
-}
-
-test "a second outdated apply frees the prior parse arena and repoints at the live one" {
-    var app: App = .{};
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    // First parse (two rows). Its arena must be freed when the second lands, or the
-    // test allocator trips — this pins that the arena lifetime moved into the tab's
-    // own Storage, so a re-load frees the prior parse rather than leaking it.
-    try applyOutdatedBytes(std.testing.allocator, &app, &store, "{\"outdated\":[{\"name\":\"a\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false},{\"name\":\"b\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false}]}");
-    store.outdated.checked[0] = true; // a stale selection the swap must not carry forward
-    try std.testing.expectEqual(@as(usize, 2), store.outdated.outdated.?.items.len);
-    // Second parse (one row) swaps in a fresh arena + an all-clear checkbox buffer.
-    try applyOutdatedBytes(std.testing.allocator, &app, &store, "{\"outdated\":[{\"name\":\"z\",\"installed\":\"1\",\"latest\":\"9\",\"type\":\"cask\",\"pinned\":false}]}");
-    // The survivor borrows the live arena: the name resolves and the count follows.
-    try std.testing.expectEqual(@as(usize, 1), store.outdated.outdated.?.items.len);
-    try std.testing.expectEqualStrings("z", store.outdated.outdated.?.items[0].name);
-    try std.testing.expectEqual(@as(?usize, 1), app.shared.outdated_count);
-    try std.testing.expect(!store.outdated.checked[0]); // fresh buffer, all clear
-}
-
-test "dropUpgradedRows on an unloaded store is a no-op" {
-    var app: App = .{};
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "anything", .kind = .formula }});
-    try std.testing.expect(store.outdated.outdated == null);
-}
-
-test "dropUpgradedRows drops only the upgraded kind when a formula and cask share a name" {
-    var app: App = .{};
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    const json =
-        \\{"outdated":[
-        \\{"name":"docker","installed":"1","latest":"2","type":"formula","pinned":false},
-        \\{"name":"docker","installed":"1","latest":"2","type":"cask","pinned":false}
-        \\]}
-    ;
-    try applyOutdatedBytes(std.testing.allocator, &app, &store, json);
-    // Only the formula docker was upgraded; the same-named cask must remain.
-    try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "docker", .kind = .formula }});
-    try std.testing.expectEqual(@as(usize, 1), store.outdated.outdated.?.items.len);
-    try std.testing.expectEqual(outdated_json.Kind.cask, store.outdated.outdated.?.items[0].kind);
-}
-
-test "dropUpgradedRows survives two sequential drops (the formula then cask passes)" {
-    var app: App = .{};
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    const json =
-        \\{"outdated":[
-        \\{"name":"wget","installed":"1","latest":"2","type":"formula","pinned":false},
-        \\{"name":"firefox","installed":"1","latest":"2","type":"cask","pinned":false}
-        \\]}
-    ;
-    try applyOutdatedBytes(std.testing.allocator, &app, &store, json);
-
-    // Formula pass drops wget; the cask ref (still borrowing the live parse
-    // arena) must survive the first drop's store mutation and rebuilt buffer.
-    try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "wget", .kind = .formula }});
-    try std.testing.expectEqual(@as(usize, 1), store.outdated.outdated.?.items.len);
-    try std.testing.expectEqual(outdated_json.Kind.cask, store.outdated.outdated.?.items[0].kind);
-
-    // Cask pass drops firefox → empty, no leak / use-after-free.
-    try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "firefox", .kind = .cask }});
-    try std.testing.expectEqual(@as(usize, 0), store.outdated.outdated.?.items.len);
-    try std.testing.expectEqual(@as(?usize, 0), app.shared.outdated_count);
-}
-
-test "dropUpgradedRows keeps every row when no upgraded ref matches" {
-    var app: App = .{};
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    const json =
-        \\{"outdated":[
-        \\{"name":"a","installed":"1","latest":"2","type":"formula","pinned":false},
-        \\{"name":"b","installed":"1","latest":"2","type":"formula","pinned":false}
-        \\]}
-    ;
-    try applyOutdatedBytes(std.testing.allocator, &app, &store, json);
-    try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "z", .kind = .formula }});
-    try std.testing.expectEqual(@as(usize, 2), store.outdated.outdated.?.items.len);
-}
-
-test "dropUpgradedRows clears the list when every row was upgraded" {
-    var app: App = .{};
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    const json =
-        \\{"outdated":[
-        \\{"name":"a","installed":"1","latest":"2","type":"formula","pinned":false},
-        \\{"name":"b","installed":"1","latest":"2","type":"formula","pinned":false}
-        \\]}
-    ;
-    try applyOutdatedBytes(std.testing.allocator, &app, &store, json);
-    try dropUpgradedRows(std.testing.allocator, &app, &store, &.{ .{ .name = "a", .kind = .formula }, .{ .name = "b", .kind = .formula } });
-    try std.testing.expectEqual(@as(usize, 0), store.outdated.outdated.?.items.len);
-    try std.testing.expectEqual(@as(?usize, 0), app.shared.outdated_count);
-}
-
 test "a non-zero child exit fails the fetch without parsing a half-written doc" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
@@ -2778,18 +2320,6 @@ test "a broken keg-count read banners and leaves the prior count untouched" {
     try std.testing.expectEqual(@as(?usize, 6), app.shared.installed_count); // a failed read keeps the last-good count
 }
 
-test "loadServices treats an exit-0 empty response (fresh prefix) as an empty tab" {
-    var t = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer t.deinit();
-    var app: App = .{ .mt_path = "/usr/bin/true" };
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    var frame: []u8 = &.{};
-    try loadServices(t.io(), std.testing.allocator, testPainter(&frame), &app, &store);
-    try std.testing.expectEqual(@as(usize, 0), app.states.services.items.len);
-    try std.testing.expect(!app.shared.banner.isSet());
-}
-
 test "a failed info read names the package in the banner and leaves the pane closed" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
@@ -2801,108 +2331,6 @@ test "a failed info read names the package in the banner and leaves the pane clo
     try std.testing.expectError(error.BadJson, openDetail(t.io(), std.testing.allocator, &app, &store));
     try std.testing.expectEqualStrings("info for jq failed: BadJson", app.shared.banner.slice());
     try std.testing.expect(app.states.installed.detail == null); // the pane never opened
-}
-
-test "collectUpgraded partitions checked rows formula-first, then cask, excluding pinned" {
-    const items = [_]outdated.Row{
-        .{ .name = "firefox", .installed = "1", .latest = "2", .kind = .cask, .pinned = false, .tap = "" },
-        .{ .name = "wget", .installed = "1", .latest = "2", .kind = .formula, .pinned = false, .tap = "" },
-        .{ .name = "held", .installed = "1", .latest = "2", .kind = .formula, .pinned = true, .tap = "" },
-    };
-    var checked = [_]bool{ true, true, true }; // held is pinned → excluded
-    var st: outdated.State = .{ .items = &items, .checked = &checked };
-    var buf: [3]UpgradedRef = undefined;
-    const split = collectUpgraded(&st, buf[0..outdated.selectedCount(&st)]);
-    try std.testing.expectEqual(@as(usize, 1), split); // one formula, before the cask
-    try std.testing.expectEqualStrings("wget", buf[0].name);
-    try std.testing.expectEqual(outdated_json.Kind.formula, buf[0].kind);
-    try std.testing.expectEqualStrings("firefox", buf[1].name);
-    try std.testing.expectEqual(outdated_json.Kind.cask, buf[1].kind);
-}
-
-test "kindUpgradeArgv builds `mt upgrade <flag> <names>`, null for no refs" {
-    const refs = [_]UpgradedRef{ .{ .name = "firefox", .kind = .cask }, .{ .name = "vlc", .kind = .cask } };
-    const maybe = try kindUpgradeArgv(std.testing.allocator, "/bin/mt", &refs, "--cask");
-    try std.testing.expect(maybe != null);
-    const argv = maybe.?;
-    defer std.testing.allocator.free(argv);
-    try std.testing.expectEqual(@as(usize, 5), argv.len);
-    try std.testing.expectEqualStrings("upgrade", argv[1]);
-    try std.testing.expectEqualStrings("--cask", argv[2]);
-    try std.testing.expectEqualStrings("firefox", argv[3]);
-    try std.testing.expectEqualStrings("vlc", argv[4]);
-    try std.testing.expect((try kindUpgradeArgv(std.testing.allocator, "/bin/mt", &.{}, "--cask")) == null);
-}
-
-test "a mixed selection yields a --formula pass and a --cask pass" {
-    const items = [_]outdated.Row{
-        .{ .name = "wget", .installed = "1", .latest = "2", .kind = .formula, .pinned = false, .tap = "" },
-        .{ .name = "firefox", .installed = "1", .latest = "2", .kind = .cask, .pinned = false, .tap = "" },
-    };
-    var checked = [_]bool{ true, true };
-    var st: outdated.State = .{ .items = &items, .checked = &checked };
-    var buf: [2]UpgradedRef = undefined;
-    const split = collectUpgraded(&st, buf[0..outdated.selectedCount(&st)]);
-
-    const f = (try kindUpgradeArgv(std.testing.allocator, "/bin/mt", buf[0..split], "--formula")).?;
-    defer std.testing.allocator.free(f);
-    try std.testing.expectEqualStrings("--formula", f[2]);
-    try std.testing.expectEqualStrings("wget", f[3]);
-
-    const c = (try kindUpgradeArgv(std.testing.allocator, "/bin/mt", buf[split..], "--cask")).?;
-    defer std.testing.allocator.free(c);
-    try std.testing.expectEqualStrings("--cask", c[2]);
-    try std.testing.expectEqualStrings("firefox", c[3]);
-}
-
-test "a cask-only selection runs no formula pass and upgrades the cask" {
-    const items = [_]outdated.Row{
-        .{ .name = "wget", .installed = "1", .latest = "2", .kind = .formula, .pinned = false, .tap = "" },
-        .{ .name = "firefox", .installed = "1", .latest = "2", .kind = .cask, .pinned = false, .tap = "" },
-    };
-    var checked = [_]bool{ false, true }; // only the cask is checked
-    var st: outdated.State = .{ .items = &items, .checked = &checked };
-    var buf: [1]UpgradedRef = undefined;
-    const split = collectUpgraded(&st, buf[0..outdated.selectedCount(&st)]);
-    try std.testing.expectEqual(@as(usize, 0), split); // no formula rows
-    try std.testing.expect((try kindUpgradeArgv(std.testing.allocator, "/bin/mt", buf[0..split], "--formula")) == null);
-    const c = (try kindUpgradeArgv(std.testing.allocator, "/bin/mt", buf[split..], "--cask")).?;
-    defer std.testing.allocator.free(c);
-    try std.testing.expectEqualStrings("--cask", c[2]);
-    try std.testing.expectEqualStrings("firefox", c[3]);
-}
-
-test "serviceActionArgv builds `mt services <action> <name>` for the selected service" {
-    const items = [_]services.Row{
-        .{ .name = "redis", .state = "running", .auto_start = true, .keg_name = "redis" },
-        .{ .name = "postgresql", .state = "stopped", .auto_start = false, .keg_name = "postgresql@16" },
-    };
-    var st: services.State = .{ .items = &items };
-    st.chrome.view.selected = 1; // postgresql
-    const argv = (try serviceActionArgv(std.testing.allocator, "/opt/homebrew/bin/mt", "restart", &st)).?;
-    defer std.testing.allocator.free(argv);
-    try std.testing.expectEqual(@as(usize, 4), argv.len);
-    try std.testing.expectEqualStrings("/opt/homebrew/bin/mt", argv[0]);
-    try std.testing.expectEqualStrings("services", argv[1]);
-    try std.testing.expectEqualStrings("restart", argv[2]);
-    try std.testing.expectEqualStrings("postgresql", argv[3]); // the selected row's name
-}
-
-test "serviceActionArgv returns null when nothing is selected so the action is a no-op" {
-    const st: services.State = .{ .items = &.{} };
-    try std.testing.expect((try serviceActionArgv(std.testing.allocator, "/bin/mt", "start", &st)) == null);
-}
-
-test "a failed services refresh names the op in the banner and keeps the last-good rows" {
-    var t = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer t.deinit();
-    var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    var frame: []u8 = &.{};
-    try std.testing.expectError(error.BadJson, loadServices(t.io(), std.testing.allocator, testPainter(&frame), &app, &store));
-    try std.testing.expectEqualStrings("services refresh failed: BadJson", app.shared.banner.slice());
-    try std.testing.expectEqual(@as(usize, 0), app.states.services.items.len); // last-good kept
 }
 
 test "searchArgv builds `mt search <query> --json` for the committed query" {
