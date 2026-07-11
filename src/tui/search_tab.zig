@@ -22,6 +22,8 @@ const std = @import("std");
 const testing = std.testing;
 
 const color = @import("../ui/color.zig");
+const ctx = @import("ctx.zig");
+const spawn = @import("spawn.zig");
 const detail_pane = @import("detail_pane.zig");
 const info_json = @import("json/info.zig");
 const search_json = @import("json/search.zig");
@@ -78,6 +80,14 @@ pub const State = struct {
 
 /// Search runs synchronously on demand; it never background-fetches.
 pub const fetch_spec: ?tab.FetchSpec = null;
+
+/// Whether the pending request will spawn a DB-mutating child (`mt install`). The
+/// shell folds this over every tab before opening the DB so a live background audit
+/// is drained first — the WAL single-writer invariant. The read-only requests
+/// (search/info) and the pure basket ops (toggle/remove/clear) never gate.
+pub fn mutates(s: *const State) bool {
+    return s.request == .install;
+}
 
 /// One basket row the shell hands the leaf: a borrowed `(name, kind)`. The bytes
 /// are owned (and freed) by the shell-owned set; the leaf renders them (scrubbed)
@@ -445,6 +455,231 @@ fn appendPad(buf: []u8, len: *usize, s: []const u8, width: usize) void {
     append(buf, len, s);
     var i = s.len;
     while (i < width) : (i += 1) append(buf, len, " ");
+}
+
+// ── Impure zone ────────────────────────────────────────────────────────────
+// The effects the pure `step` requested. Each carries its I/O ports explicitly
+// through the shared `ctx.Ctx` — never a global — so the pure/impure line lands at
+// the signature: these take `io`/`allocator`, the pure functions above do not.
+
+/// The effect chain's error set, composed from the source sets so it tracks them
+/// automatically. A subset of the shell's `RunError`, which classifies each fault
+/// recoverable-vs-fatal; naming it here keeps the public `service` explicit.
+pub const Error = std.mem.Allocator.Error || spawn.ReadError || spawn.InlineError || search_json.Error || info_json.Error;
+
+/// Build `mt search <query> --json` for the committed query. Pure over the tab
+/// state: null when the query is empty (the no-op — the view shows guidance, no
+/// spawn), else an owned argv whose `query` element borrows the filter buffer.
+/// Caller frees the returned slice (not its elements).
+fn searchArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const State) std.mem.Allocator.Error!?[]const []const u8 {
+    const query = st.chrome.filter.slice();
+    if (query.len == 0) return null; // empty query: no remote read
+    return try spawn.jsonArgv(allocator, mt_path, &.{ "search", query });
+}
+
+/// Project the persistent selection onto a result list: a row is checked iff it is
+/// selected and not already installed. A pure function of `(items, selection)` so it
+/// runs identically after a query parse and after a toggle.
+fn projectChecked(items: []const Match, checked: []bool, sel: *const Selection) void {
+    for (items, checked) |m, *c| c.* = !m.installed and sel.contains(m.name, m.kind);
+}
+
+/// Fill the tab-owned `checked` slice from the selection. No-op before a query has
+/// loaded.
+fn projectSearchChecked(storage: *Storage) void {
+    const items = if (storage.search) |p| p.items else return;
+    projectChecked(items, storage.checked, &storage.selected);
+}
+
+/// Mirror the tab-owned basket onto the leaf state: the count (so the core can gate
+/// `i` and the footer can size `N selected`) and the entries slice the basket view
+/// renders. The pure core holds no allocator and never owns the picks — it borrows
+/// this slice, refreshed after every basket mutation (an append can move the backing
+/// buffer, so a stale slice would dangle).
+pub fn syncSelected(s: *State, storage: *const Storage) void {
+    s.selected_count = storage.selected.entries.items.len;
+    s.basket = storage.selected.entries.items;
+}
+
+/// Run the committed query's `mt search --json`, parse, and repoint the results at
+/// the fresh parse. Search is a remote read, so it goes through `readJson` like the
+/// other reads (no alt-screen drop). The storage is swapped only after a clean parse,
+/// so a failure keeps the last-good results.
+fn loadSearch(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
+    const argv = (try searchArgv(c.allocator, c.mt_path, s)) orelse return; // empty query: no-op
+    defer c.allocator.free(argv);
+    // Annotate any failure as a recoverable banner; the loop boundary decides
+    // recoverable vs fatal. A failed read must also leave the "searching…" phase
+    // (set by the pre-spawn paint): fall back to the last-good results, or guidance
+    // if none were ever loaded — never a stuck spinner behind the banner.
+    errdefer |err| {
+        c.shared.banner.set("search failed", @errorName(err));
+        s.phase = if (storage.search != null) .loaded else .idle;
+    }
+    const bytes = try spawn.readJson(c.io, c.allocator, argv);
+    defer c.allocator.free(bytes);
+
+    const parsed = try search_json.parse(c.allocator, bytes);
+    errdefer parsed.deinit();
+    // `checked` is a projection of the persistent basket, not per-query state: a pick
+    // survives a re-query and re-checks its row when the package returns.
+    const checked = try c.allocator.alloc(bool, parsed.items.len);
+
+    if (storage.search) |old| old.deinit();
+    if (storage.checked.len != 0) c.allocator.free(storage.checked);
+    storage.search = parsed;
+    storage.checked = checked;
+    projectSearchChecked(storage);
+    s.items = parsed.items;
+    s.checked = checked;
+    syncSelected(s, storage); // off-list picks count too, so refresh from the basket
+    s.phase = .loaded;
+    // A fresh query is a new result set, so an old cursor would point at an unrelated
+    // row, and any open info pane is for a hit that may be gone.
+    s.chrome.view = .{};
+    s.detail = null;
+    if (storage.detail) |old| {
+        old.deinit();
+        storage.detail = null;
+    }
+}
+
+/// Build the `mt install …` argv from the cross-query basket. The whole basket
+/// installs, so an off-screen pick installs too. Empty basket ⇒ fall back to the
+/// active row (the no-selection case); null when that row is absent or already
+/// installed (the no-op). A single target keeps the explicit `--formula`/`--cask`
+/// flag, because a name can exist as both and bare `mt install <name>` silently picks
+/// the formula; a multi install passes bare names and lets `mt` detect each one's
+/// kind. Basket names are owned, so the argv outlives the parse it was checked in (the
+/// active-row fallback name borrows the live parse, read before any re-search frees
+/// it). Caller frees the returned slice, not its elements.
+fn installArgv(allocator: std.mem.Allocator, mt_path: []const u8, sel: *const Selection, st: *const State) std.mem.Allocator.Error!?[]const []const u8 {
+    const entries = sel.entries.items;
+    if (entries.len == 0) {
+        // Empty basket: the active row, if it is installable.
+        const i = selectedIndex(st) orelse return null;
+        const m = st.items[i];
+        if (m.installed) return null;
+        return try spawn.inlineArgv(allocator, mt_path, &.{ "install", kindFlag(m.kind), m.name });
+    }
+    if (entries.len == 1) {
+        const e = entries[0];
+        return try spawn.inlineArgv(allocator, mt_path, &.{ "install", kindFlag(e.kind), e.name });
+    }
+    const argv = try allocator.alloc([]const u8, 2 + entries.len);
+    argv[0] = mt_path;
+    argv[1] = "install";
+    for (entries, 0..) |e, k| argv[2 + k] = e.name;
+    return argv;
+}
+
+/// The single-target disambiguation flag for a kind. A closed switch: a new kind is
+/// a compile error, never a silent default.
+fn kindFlag(k: Kind) []const u8 {
+    return switch (k) {
+        .formula => "--formula",
+        .cask => "--cask",
+    };
+}
+
+/// Post-install basket lifecycle: a clean install (exit 0) consumed the whole basket,
+/// so clear it and re-project the now-empty checked slice; a failed install retains
+/// the basket for retry. Pure over the storage — the seam the install path's
+/// clear-on-success / retain-on-failure policy is tested through.
+fn applyInstallOutcome(storage: *Storage, allocator: std.mem.Allocator, ok: bool) void {
+    if (!ok) return; // retain for retry
+    storage.selected.deinit(allocator);
+    storage.selected = .{};
+    projectSearchChecked(storage);
+}
+
+/// Delegate the basket's install to the real `mt` inline, then re-run the query so
+/// installed markers flip. The argv's names are owned by the basket (the active-row
+/// fallback name borrows the live parse, read before the re-search frees it). A clean
+/// install clears the basket; a failed one keeps it.
+fn doInstall(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
+    const argv = (try installArgv(c.allocator, c.mt_path, &storage.selected, s)) orelse return; // nothing installable selected
+    defer c.allocator.free(argv);
+    // A non-zero `mt install` re-enters the dashboard (the user keeps malt's real
+    // output, including any prompt, in their scrollback) and surfaces as a recoverable
+    // banner; only a terminal fault is fatal — the loop boundary decides which on the
+    // re-raised error. The basket is retained either way.
+    spawn.runInlineReenter(c.term, argv) catch |err| {
+        c.shared.banner.set("install failed", @errorName(err));
+        applyInstallOutcome(storage, c.allocator, false); // retain for retry
+        return err;
+    };
+    applyInstallOutcome(storage, c.allocator, true); // a clean install consumed the basket
+    syncSelected(s, storage); // basket now empty → leaf gate + footer reflect it
+    // Re-run the same query so the freshly installed hit's marker flips — the
+    // backend's install-aware `installed` flag does the rest (no `mt list` call).
+    try loadSearch(s, storage, c);
+    c.shared.markStaleAfter(.search); // Installed/Outdated/Services may have changed too
+    // The keg set grew but we are on Search, so the lazy Installed reload won't run
+    // until that tab is entered — refresh just the count now (cheaply, through the
+    // hub-owned port) so the header is live immediately, not stale until Installed.
+    c.refreshInstalledCount();
+}
+
+/// Open the `mt info` pane for the active hit. `mt info` resolves installed and
+/// uninstalled packages alike, so a search result can be inspected before any
+/// install. A read (no alt-screen drop); failure names the package in a banner and
+/// leaves the pane closed.
+fn openSearchInfo(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
+    const m = selectedMatch(s) orelse return; // empty list: no-op
+    errdefer |err| {
+        var sb: [96]u8 = undefined;
+        const op = std.fmt.bufPrint(&sb, "info for {s} failed", .{m.name}) catch "info read failed";
+        c.shared.banner.set(op, @errorName(err));
+    }
+    const argv = try spawn.jsonArgv(c.allocator, c.mt_path, &.{ "info", m.name });
+    defer c.allocator.free(argv);
+    const bytes = try spawn.readJson(c.io, c.allocator, argv);
+    defer c.allocator.free(bytes);
+
+    const parsed = try info_json.parse(c.allocator, bytes);
+    if (storage.detail) |old| old.deinit();
+    storage.detail = parsed;
+    s.detail = parsed.info;
+}
+
+/// Perform any effect the pure `step` requested, then clear it — the consumer half of
+/// the `request` seam. Unlike the other tabs there is no lazy dirty-load: Search is
+/// idle until the user commits a query, and a remote read on every tab-entry after an
+/// unrelated mutation would be a surprising freeze, so the dirty flag `markStaleAfter`
+/// may set for Search is deliberately never consumed on entry.
+pub fn service(s: *State, storage: *Storage, c: *ctx.Ctx) Error!void {
+    const req = s.request;
+    s.request = .none;
+    switch (req) {
+        .none => {},
+        .search => try loadSearch(s, storage, c),
+        .install => try doInstall(s, storage, c),
+        .info => try openSearchInfo(s, storage, c),
+        // Add/remove the active hit in the persistent basket, then re-project the
+        // `checked` slice so the row reflects it immediately. The leaf already refused
+        // installed rows, so the match here is always selectable.
+        .toggle => {
+            const m = selectedMatch(s) orelse return;
+            try storage.selected.toggle(c.allocator, m.name, m.kind);
+            projectSearchChecked(storage);
+            syncSelected(s, storage);
+        },
+        // Drop the highlighted basket pick (read its name/kind before freeing it),
+        // then re-project so any on-screen row for it clears its checkmark.
+        .remove => {
+            const e = selectedBasketEntry(s) orelse return;
+            storage.selected.remove(c.allocator, e.name, e.kind);
+            projectSearchChecked(storage);
+            syncSelected(s, storage);
+        },
+        // Empty the whole basket; the projection then clears every on-screen check.
+        .clear => {
+            storage.selected.clear(c.allocator);
+            projectSearchChecked(storage);
+            syncSelected(s, storage);
+        },
+    }
 }
 
 // ─── tests ───────────────────────────────────────────────────────────
@@ -855,4 +1090,491 @@ test "Storage.deinit frees the results, checkbox buffer, basket, and detail pars
     // A no-op deinit leaks the parses, the buffer, and the basket's owned bytes;
     // `testing.allocator` trips at scope end, pinning that deinit frees them all.
     storage.deinit(allocator);
+}
+
+// ── Effect tests ─────────────────────────────────────────────────────────
+
+test "mutates gates only on the install request" {
+    var s: State = .{};
+    try testing.expect(!mutates(&s)); // .none never takes the WAL writer
+    s.request = .info;
+    try testing.expect(!mutates(&s)); // a read-only info request does not gate
+    s.request = .toggle;
+    try testing.expect(!mutates(&s)); // a pure basket op does not gate
+    s.request = .install;
+    try testing.expect(mutates(&s)); // the one DB-mutating request
+}
+
+// Backing storage for a `ctx.Ctx` in an effect test: dummy term/fetches/shared, a
+// no-op painter (fd = -1; these reads never reach a poll tick), and the loading flag.
+const TestEnv = struct {
+    term_h: ctx.Term,
+    fetches: ctx.Fetches = ctx.Fetches.initFill(null),
+    shared: ctx.SharedModel = .{},
+    frame: []u8 = &.{},
+    loading: bool = false,
+};
+
+fn mkCtx(io: std.Io, e: *TestEnv, mt_path: []const u8) ctx.Ctx {
+    return .{
+        .io = io,
+        .allocator = testing.allocator,
+        .term = &e.term_h,
+        .painter = .{ .fd = -1, .frame = &e.frame },
+        .fetches = &e.fetches,
+        .shared = &e.shared,
+        .mt_path = mt_path,
+        .loading = &e.loading,
+    };
+}
+
+test "service on the synchronous read path never starts a background fetch" {
+    // Search reads remotely but synchronously; it declares no fetch spec, so no
+    // branch of its service may spawn a background audit.
+    try testing.expect(fetch_spec == null);
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{}; // .none
+    var c = mkCtx(thr.io(), &env, "/bin/false"); // would fail if it ever spawned
+    try service(&st, &storage, &c);
+    for (&env.fetches.values) |v| try testing.expect(v == null);
+    try testing.expect(!env.shared.banner.isSet());
+}
+
+test "service consumes a toggle request into the basket and mirrors it onto the leaf" {
+    const alloc = testing.allocator;
+    var thr = std.Io.Threaded.init(alloc, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(alloc);
+    // A loaded result the cursor points at; a basket op is pure — no spawn.
+    storage.search = try search_json.parse(alloc,
+        \\{"results":[{"name":"bat","type":"formula","installed":false}]}
+    );
+    storage.checked = try alloc.alloc(bool, 1);
+    @memset(storage.checked, false);
+    var st: State = .{ .items = storage.search.?.items, .request = .toggle };
+    var c = mkCtx(thr.io(), &env, "/bin/false"); // would fail if the pure op ever spawned
+    try service(&st, &storage, &c);
+    try testing.expectEqual(Request.none, st.request); // consumed
+    try testing.expect(storage.selected.contains("bat", .formula)); // added to the basket
+    try testing.expectEqual(@as(usize, 1), st.selected_count); // mirrored onto the leaf
+    try testing.expect(storage.checked[0]); // and re-projected onto the on-screen row
+    try testing.expect(!env.shared.banner.isSet());
+}
+
+test "entering the tab does not trigger a remote read even when marked dirty" {
+    // Search diverges from the other tabs: no lazy dirty-load on entry. A mutation
+    // elsewhere marks it dirty, but entering must stay idle — a surprise remote read
+    // on a tab switch would freeze the frame. `/bin/false` would fail if ever spawned.
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    env.shared.dirty.insert(.search);
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{}; // .none request, idle phase
+    st.chrome.filter.push("firefox"); // a committed query exists, yet entry must not read it
+    var c = mkCtx(thr.io(), &env, "/bin/false");
+    try service(&st, &storage, &c);
+    try testing.expectEqual(Phase.idle, st.phase); // never searched on entry
+    try testing.expectEqual(@as(usize, 0), st.items.len);
+    try testing.expect(!env.shared.banner.isSet());
+    try testing.expect(env.shared.dirty.contains(.search)); // flag left unconsumed
+}
+
+test "searchArgv builds `mt search <query> --json` for the committed query" {
+    var st: State = .{};
+    st.chrome.filter.push("fire");
+    const argv = (try searchArgv(testing.allocator, "/opt/homebrew/bin/mt", &st)).?;
+    defer testing.allocator.free(argv);
+    try testing.expectEqual(@as(usize, 4), argv.len); // mt, search, query, --json
+    try testing.expectEqualStrings("/opt/homebrew/bin/mt", argv[0]);
+    try testing.expectEqualStrings("search", argv[1]);
+    try testing.expectEqualStrings("fire", argv[2]);
+    try testing.expectEqualStrings("--json", argv[3]);
+}
+
+test "searchArgv returns null for an empty query so no remote read fires" {
+    const st: State = .{};
+    try testing.expect((try searchArgv(testing.allocator, "/bin/mt", &st)) == null);
+}
+
+test "installArgv installs the whole basket as bare names for a batch" {
+    const alloc = testing.allocator;
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "bat", .formula);
+    try sel.toggle(alloc, "redis", .formula);
+    const st: State = .{ .items = &.{} }; // basket-driven: no rows on screen
+    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    defer alloc.free(argv);
+    // mt, install, bat, redis — a batch passes bare names (no global kind flag).
+    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqualStrings("install", argv[1]);
+    try testing.expectEqualStrings("bat", argv[2]);
+    try testing.expectEqualStrings("redis", argv[3]);
+}
+
+test "installArgv keeps the entry's kind flag for a single-entry basket" {
+    const alloc = testing.allocator;
+    // The motivating collision: one name, two kinds. The basket entry's stored kind
+    // picks the flag, so a single install can't silently default to the formula when
+    // the user chose the cask — the reason the explicit flag exists.
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "docker", .cask);
+    const st: State = .{ .items = &.{} };
+    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    defer alloc.free(argv);
+    try testing.expectEqual(@as(usize, 4), argv.len); // mt, install, --cask, name
+    try testing.expectEqualStrings("--cask", argv[2]);
+    try testing.expectEqualStrings("docker", argv[3]);
+}
+
+test "installArgv keeps a basket pick whose on-screen row reads installed (no per-package prune)" {
+    const alloc = testing.allocator;
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "git", .formula);
+    // The same name is on screen and already installed, but the basket still installs
+    // it: the post-install re-search only refreshes the current query, so an off-list
+    // pick's `installed` flag can't be trusted — `mt install` is idempotent instead.
+    // The basket path never consults the on-screen rows.
+    const items = [_]Match{.{ .name = "git", .kind = .formula, .installed = true }};
+    const st: State = .{ .items = &items };
+    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    defer alloc.free(argv);
+    try testing.expectEqual(@as(usize, 4), argv.len); // single-entry basket → flag form
+    try testing.expectEqualStrings("--formula", argv[2]); // and the formula flag, not just --cask
+    try testing.expectEqualStrings("git", argv[3]);
+}
+
+test "installArgv over an empty basket falls back to the active row, keeping its kind flag" {
+    const alloc = testing.allocator;
+    const items = [_]Match{
+        .{ .name = "firefox", .kind = .cask, .installed = false },
+        .{ .name = "wget", .kind = .formula, .installed = false },
+    };
+    var sel: Selection = .{}; // empty: never allocates, no free needed
+    var st: State = .{ .items = &items };
+    st.chrome.view.selected = 0; // firefox (cask)
+    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    defer alloc.free(argv);
+    try testing.expectEqual(@as(usize, 4), argv.len); // single → mt, install, --cask, name
+    try testing.expectEqualStrings("--cask", argv[2]);
+    try testing.expectEqualStrings("firefox", argv[3]);
+}
+
+test "installArgv is null with an empty basket and no installable active row" {
+    const alloc = testing.allocator;
+    var sel: Selection = .{};
+    const on_system = [_]Match{.{ .name = "jq", .kind = .formula, .installed = true }};
+    const st_installed: State = .{ .items = &on_system };
+    try testing.expect((try installArgv(alloc, "/bin/mt", &sel, &st_installed)) == null); // active row already installed
+    const empty: State = .{ .items = &.{} };
+    try testing.expect((try installArgv(alloc, "/bin/mt", &sel, &empty)) == null); // nothing on screen, empty basket
+}
+
+test "a basket filled across two separate queries installs every pick in one argv" {
+    const alloc = testing.allocator;
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+
+    // Query A returns bat; the user checks it, then the query is re-run and A's parse
+    // is freed — the pick must survive into the next query.
+    {
+        var a = try search_json.parse(alloc,
+            \\{"results":[{"name":"bat","type":"formula","installed":false}]}
+        );
+        try sel.toggle(alloc, a.items[0].name, a.items[0].kind);
+        a.deinit();
+    }
+    // Query B returns redis; the user checks it too. bat is now off-list.
+    {
+        var b = try search_json.parse(alloc,
+            \\{"results":[{"name":"redis","type":"formula","installed":false}]}
+        );
+        try sel.toggle(alloc, b.items[0].name, b.items[0].kind);
+        b.deinit();
+    }
+
+    // One `i` installs both, in a single argv, no matter which results are on screen —
+    // the owned basket spans the two queries.
+    const st: State = .{ .items = &.{} };
+    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    defer alloc.free(argv);
+    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqualStrings("install", argv[1]);
+    try testing.expectEqualStrings("bat", argv[2]);
+    try testing.expectEqualStrings("redis", argv[3]);
+}
+
+test "installArgv reads names from the owned basket, not the freed parse it was checked in" {
+    const alloc = testing.allocator;
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    // Check two hits out of a live parse, then free that parse — the basket owns its
+    // name bytes, so the argv below must not read the released storage.
+    {
+        var parsed = try search_json.parse(alloc,
+            \\{"results":[{"name":"bat","type":"formula","installed":false},{"name":"redis","type":"formula","installed":false}]}
+        );
+        try sel.toggle(alloc, parsed.items[0].name, parsed.items[0].kind);
+        try sel.toggle(alloc, parsed.items[1].name, parsed.items[1].kind);
+        parsed.deinit(); // the parse the names were borrowed from is gone
+    }
+    const st: State = .{ .items = &.{} };
+    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    defer alloc.free(argv);
+    try testing.expectEqualStrings("bat", argv[2]); // owned bytes, not a dangling borrow
+    try testing.expectEqualStrings("redis", argv[3]);
+}
+
+test "selection toggles (name, kind) membership and owns its bytes" {
+    const alloc = testing.allocator;
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    try testing.expect(!sel.contains("bat", .formula));
+    try sel.toggle(alloc, "bat", .formula);
+    try testing.expect(sel.contains("bat", .formula));
+    try testing.expect(!sel.contains("bat", .cask)); // kind distinguishes the pick
+    try sel.toggle(alloc, "bat", .formula); // a second toggle deselects
+    try testing.expect(!sel.contains("bat", .formula));
+}
+
+test "selection removes the right entry among several (swapRemove)" {
+    const alloc = testing.allocator;
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "a", .formula);
+    try sel.toggle(alloc, "b", .formula);
+    try sel.toggle(alloc, "c", .cask);
+    try sel.toggle(alloc, "b", .formula); // remove the middle pick
+    try testing.expect(sel.contains("a", .formula));
+    try testing.expect(!sel.contains("b", .formula));
+    try testing.expect(sel.contains("c", .cask));
+    try testing.expectEqual(@as(usize, 2), sel.entries.items.len);
+}
+
+test "re-adding a removed pick yields a single entry, not a duplicate" {
+    const alloc = testing.allocator;
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "bat", .formula); // add
+    try sel.toggle(alloc, "bat", .formula); // remove
+    try sel.toggle(alloc, "bat", .formula); // add again
+    try testing.expect(sel.contains("bat", .formula));
+    try testing.expectEqual(@as(usize, 1), sel.entries.items.len);
+}
+
+test "selection remove deletes exactly the named pick and frees it" {
+    const alloc = testing.allocator; // a missed free shows up as a leak here
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "bat", .formula);
+    try sel.toggle(alloc, "redis", .formula);
+    sel.remove(alloc, "bat", .formula);
+    try testing.expect(!sel.contains("bat", .formula));
+    try testing.expect(sel.contains("redis", .formula)); // the other pick is untouched
+    try testing.expectEqual(@as(usize, 1), sel.entries.items.len);
+    sel.remove(alloc, "ghost", .cask); // an absent pick is a harmless no-op
+    try testing.expectEqual(@as(usize, 1), sel.entries.items.len);
+}
+
+test "selection clear empties the basket and frees every pick" {
+    const alloc = testing.allocator; // a missed free shows up as a leak here
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "bat", .formula);
+    try sel.toggle(alloc, "redis", .cask);
+    sel.clear(alloc);
+    try testing.expectEqual(@as(usize, 0), sel.entries.items.len);
+    try testing.expect(!sel.contains("bat", .formula));
+}
+
+test "removing a basket pick re-projects its on-screen row to unchecked" {
+    const alloc = testing.allocator;
+    var storage: Storage = .{};
+    defer storage.deinit(alloc);
+    storage.search = try search_json.parse(alloc,
+        \\{"results":[{"name":"bat","type":"formula","installed":false}]}
+    );
+    storage.checked = try alloc.alloc(bool, 1);
+    @memset(storage.checked, false);
+    try storage.selected.toggle(alloc, "bat", .formula);
+    projectSearchChecked(&storage);
+    try testing.expect(storage.checked[0]); // checked before the remove
+    storage.selected.remove(alloc, "bat", .formula);
+    projectSearchChecked(&storage);
+    try testing.expect(!storage.checked[0]); // the row reflects the removal
+}
+
+test "syncSelected mirrors the basket entries onto the leaf for the basket view" {
+    const alloc = testing.allocator;
+    var s: State = .{};
+    var storage: Storage = .{};
+    defer storage.deinit(alloc);
+    try storage.selected.toggle(alloc, "bat", .formula);
+    syncSelected(&s, &storage);
+    try testing.expectEqual(@as(usize, 1), s.basket.len);
+    try testing.expectEqualStrings("bat", s.basket[0].name);
+}
+
+test "removing a pick then installing builds an argv without the removed name" {
+    const alloc = testing.allocator;
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    // Two picks gathered across queries (the cross-query basket); the user opens the
+    // basket view, removes bat, then installs — only redis reaches the argv.
+    try sel.toggle(alloc, "bat", .formula);
+    try sel.toggle(alloc, "redis", .formula);
+    sel.remove(alloc, "bat", .formula);
+    const st: State = .{ .items = &.{} };
+    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    defer alloc.free(argv);
+    try testing.expectEqual(@as(usize, 4), argv.len); // single → mt, install, --formula, name
+    try testing.expectEqualStrings("redis", argv[3]);
+    try testing.expect(std.mem.indexOf(u8, argv[3], "bat") == null);
+}
+
+test "projectChecked leaves every row unchecked for an empty selection" {
+    const items = [_]Match{
+        .{ .name = "wget", .kind = .formula, .installed = false },
+        .{ .name = "ripgrep", .kind = .formula, .installed = false },
+    };
+    var sel: Selection = .{}; // never touched: no allocation, no free needed
+    var checked = [_]bool{ true, true }; // pre-dirtied to prove the projection clears
+    projectChecked(&items, &checked, &sel);
+    try testing.expect(!checked[0]);
+    try testing.expect(!checked[1]);
+}
+
+test "projectChecked checks selected, not-installed rows only" {
+    const items = [_]Match{
+        .{ .name = "wget", .kind = .formula, .installed = false },
+        .{ .name = "firefox", .kind = .cask, .installed = true },
+        .{ .name = "ripgrep", .kind = .formula, .installed = false },
+    };
+    const alloc = testing.allocator;
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "wget", .formula);
+    try sel.toggle(alloc, "firefox", .cask); // selected but already installed
+    var checked = [_]bool{ false, false, false };
+    projectChecked(&items, &checked, &sel);
+    try testing.expect(checked[0]); // selected + installable
+    try testing.expect(!checked[1]); // installed → never checked
+    try testing.expect(!checked[2]); // not selected
+}
+
+test "a selection survives a re-query" {
+    const alloc = testing.allocator;
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "wget", .formula); // checked under query A
+
+    const b = [_]Match{.{ .name = "redis", .kind = .formula, .installed = false }};
+    var cb = [_]bool{false};
+    projectChecked(&b, &cb, &sel); // query B: wget is absent
+    try testing.expect(!cb[0]);
+
+    const a = [_]Match{.{ .name = "wget", .kind = .formula, .installed = false }};
+    var ca = [_]bool{false};
+    projectChecked(&a, &ca, &sel); // query A again: wget returns
+    try testing.expect(ca[0]); // re-checked from the still-present selection
+}
+
+test "projectSearchChecked fills the storage checked slice from the selection" {
+    const alloc = testing.allocator;
+    var storage: Storage = .{};
+    defer storage.deinit(alloc);
+    storage.search = try search_json.parse(alloc,
+        \\{"results":[{"name":"wget","type":"formula","installed":false},{"name":"firefox","type":"cask","installed":true}]}
+    );
+    storage.checked = try alloc.alloc(bool, 2);
+    @memset(storage.checked, false);
+    try storage.selected.toggle(alloc, "wget", .formula);
+    projectSearchChecked(&storage);
+    try testing.expect(storage.checked[0]); // selected, installable
+    try testing.expect(!storage.checked[1]); // installed → never checked
+}
+
+test "a clean install (exit 0) clears the basket and re-projects the checked slice" {
+    const alloc = testing.allocator;
+    var storage: Storage = .{};
+    defer storage.deinit(alloc);
+    storage.search = try search_json.parse(alloc,
+        \\{"results":[{"name":"bat","type":"formula","installed":false}]}
+    );
+    storage.checked = try alloc.alloc(bool, 1);
+    @memset(storage.checked, false);
+    try storage.selected.toggle(alloc, "bat", .formula);
+    try storage.selected.toggle(alloc, "redis", .formula); // an off-list pick too
+    projectSearchChecked(&storage);
+    try testing.expect(storage.checked[0]); // bat checked before the install
+
+    applyInstallOutcome(&storage, alloc, true);
+    try testing.expectEqual(@as(usize, 0), storage.selected.entries.items.len); // basket emptied
+    try testing.expect(!storage.checked[0]); // re-projected against the now-empty basket
+}
+
+test "a failed install (non-zero exit) retains the whole basket for retry" {
+    const alloc = testing.allocator;
+    var storage: Storage = .{};
+    defer storage.deinit(alloc);
+    try storage.selected.toggle(alloc, "bat", .formula);
+    try storage.selected.toggle(alloc, "redis", .formula);
+
+    applyInstallOutcome(&storage, alloc, false);
+    try testing.expectEqual(@as(usize, 2), storage.selected.entries.items.len); // untouched
+    try testing.expect(storage.selected.contains("bat", .formula));
+    try testing.expect(storage.selected.contains("redis", .formula));
+}
+
+test "a failed search names the op in the banner and leaves no stuck searching phase" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{};
+    st.chrome.filter.push("fire");
+    st.phase = .searching; // as the pre-spawn paint left it
+    var c = mkCtx(thr.io(), &env, "/bin/echo"); // echo emits non-JSON → parse fails
+    try testing.expectError(error.BadJson, loadSearch(&st, &storage, &c));
+    try testing.expectEqualStrings("search failed: BadJson", env.shared.banner.slice());
+    // No prior results → guidance, not a spinner frozen behind the banner.
+    try testing.expectEqual(Phase.idle, st.phase);
+    try testing.expectEqual(@as(usize, 0), st.items.len);
+}
+
+test "a failed search keeps the last-good results and selection, falling back to the list" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    // Prime a prior successful search: storage + leaf borrow these results.
+    storage.search = try search_json.parse(testing.allocator,
+        \\{"results":[{"name":"jq","type":"formula","installed":true},{"name":"yq","type":"formula","installed":false}]}
+    );
+    var st: State = .{};
+    st.items = storage.search.?.items;
+    st.chrome.filter.push("q");
+    st.chrome.view.selected = 1; // cursor on yq
+    st.phase = .searching; // as the pre-spawn paint left it
+    var c = mkCtx(thr.io(), &env, "/bin/echo"); // non-JSON → BadJson on the new query
+
+    try testing.expectError(error.BadJson, loadSearch(&st, &storage, &c));
+    try testing.expectEqualStrings("search failed: BadJson", env.shared.banner.slice());
+    // Prior results exist → fall back to the list, not guidance; and the storage is
+    // swapped only after a clean parse, so the rows and the cursor both survive.
+    try testing.expectEqual(Phase.loaded, st.phase);
+    try testing.expectEqual(@as(usize, 2), st.items.len);
+    try testing.expectEqual(@as(usize, 1), st.chrome.view.selected);
 }
