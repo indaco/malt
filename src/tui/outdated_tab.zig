@@ -11,9 +11,11 @@
 //! selection is a no-op surfaced by the action line.
 
 const std = @import("std");
+const ctx = @import("ctx.zig");
 const tab = @import("tab.zig");
 const scroll_list = @import("scroll_list.zig");
 const outdated_json = @import("json/outdated.zig");
+const spawn = @import("spawn.zig");
 const color = @import("../ui/color.zig");
 
 pub const Row = outdated_json.OutdatedRow;
@@ -50,6 +52,13 @@ pub const Storage = struct {
 
 /// Outdated audits in the background; a non-clean exit means a failed refresh.
 pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{"outdated"}, .max_ok_exit = 0, .refresh_op = "outdated refresh failed" };
+
+/// Whether the pending request will spawn a DB-mutating child (`mt upgrade`). The
+/// shell folds this over every tab before opening the DB so a live background
+/// audit is drained first — the WAL single-writer invariant.
+pub fn mutates(s: *const State) bool {
+    return s.request == .upgrade;
+}
 
 pub fn title() []const u8 {
     return "Outdated";
@@ -238,6 +247,222 @@ fn appendPad(buf: []u8, len: *usize, s: []const u8, width: usize) void {
     while (i < width) : (i += 1) append(buf, len, " ");
 }
 
+// ─── impure zone ───────────────────────────────────────────────────────
+// The effect half of the tab, reunited beside its pure producer (`step` records
+// the `upgrade` request; the code below drains it). Every decl here takes its I/O
+// ports explicitly through the shared `ctx.Ctx` — never a global — so the
+// pure/impure line is the function signature.
+
+/// The effect chain's error set, composed from the source sets so it tracks them
+/// automatically. A subset of the shell's `RunError`, which classifies each fault
+/// recoverable-vs-fatal; naming it here keeps the public `service` explicit.
+pub const Error = std.mem.Allocator.Error || spawn.ReadError || spawn.InlineError || outdated_json.Error;
+
+/// Perform any upgrade effect the pure `step` requested, then clear it — the
+/// consumer half of the `request` seam. The shell dispatches this only for the
+/// active tab; the lazy (re)load on entry / after staleness stays loop machinery.
+pub fn service(s: *State, storage: *Storage, c: *ctx.Ctx) Error!void {
+    const req = s.request;
+    s.request = .none;
+    switch (req) {
+        .none => {},
+        .upgrade => try doUpgrade(s, storage, c),
+    }
+}
+
+/// One upgraded row, identified by `(name, kind)` so a formula and a cask that
+/// share a name (e.g. `docker`) are never confused for one another.
+const UpgradedRef = struct { name: []const u8, kind: outdated_json.Kind };
+
+/// Collect the checked, non-pinned rows into `out` as `(name, kind)` refs,
+/// formula rows first then cask rows; returns the formula count (the split
+/// index). `out` must be sized to `selectedCount`. Partitioning by kind lets
+/// `doUpgrade` issue one `--formula` pass and one `--cask` pass.
+fn collectUpgraded(s: *const State, out: []UpgradedRef) usize {
+    // The two item-order passes below cover exactly `{formula, cask}`; a new
+    // Kind variant would leave its rows uncollected. Lock it at compile time.
+    comptime std.debug.assert(@typeInfo(outdated_json.Kind).@"enum".fields.len == 2);
+    var n: usize = 0;
+    var split: usize = 0;
+    // Two item-order passes so each kind's names stay in display order and the
+    // formula refs land in `out[0..split]`, casks in `out[split..]`.
+    for ([_]outdated_json.Kind{ .formula, .cask }) |kind| {
+        for (s.items, 0..) |row, i| {
+            // Same rule as `selectedNames`: checked, non-pinned, this kind.
+            if (i < s.checked.len and s.checked[i] and !row.pinned and row.kind == kind and n < out.len) {
+                out[n] = .{ .name = row.name, .kind = row.kind };
+                n += 1;
+            }
+        }
+        if (kind == .formula) split = n;
+    }
+    return split;
+}
+
+/// Build `[mt, upgrade, <flag>, names...]` for a single-kind ref slice, or null
+/// when the slice is empty. `flag` is `--formula` / `--cask` so the kind the
+/// user picked is the kind upgraded (`mt upgrade <name>` is formula-first).
+fn kindUpgradeArgv(
+    allocator: std.mem.Allocator,
+    mt_path: []const u8,
+    refs: []const UpgradedRef,
+    flag: []const u8,
+) std.mem.Allocator.Error!?[]const []const u8 {
+    if (refs.len == 0) return null;
+    const rest = try allocator.alloc([]const u8, 2 + refs.len);
+    defer allocator.free(rest);
+    rest[0] = "upgrade";
+    rest[1] = flag;
+    for (refs, rest[2..]) |r, *slot| slot.* = r.name;
+    return try spawn.inlineArgv(allocator, mt_path, rest);
+}
+
+/// The exit code `mt upgrade` returns when it refused a cask because the app is
+/// still running. Mirrors `main.zig`'s `AppRunning` exit mapping — the mt→TUI
+/// process contract, like the doctor severity cap the inline runner already knows.
+const cask_app_running_exit: u8 = 3;
+
+/// Footer detail for a failed cask upgrade pass: on the app-running refusal name
+/// the live app (or "a selected app" when the pass carried several) so the footer
+/// says *why*, not an opaque "ChildFailed". `buf` backs the single-cask name;
+/// `Banner.set` copies the result, so a stack buffer is enough.
+fn upgradeFailDetail(buf: []u8, code: u8, refs: []const UpgradedRef) []const u8 {
+    if (code != cask_app_running_exit) return "ChildFailed";
+    if (refs.len == 1) return std.fmt.bufPrint(buf, "{s} is running", .{refs[0].name}) catch "an app is running";
+    return "a selected app is running";
+}
+
+/// Delegate the checked upgrades to the real `mt` inline, then drop the upgraded
+/// rows in place. Runs one pass per kind (`--formula`, `--cask`) so the row the
+/// user checked is the row upgraded — `mt upgrade <name>` is formula-first, so a
+/// checked cask would otherwise upgrade a same-named formula. Names borrow the
+/// parse arena, which `dropUpgradedRows` keeps alive across both passes.
+fn doUpgrade(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
+    const count = selectedCount(s);
+    if (count == 0) return; // empty selection: no-op
+    // Snapshot the selection (formula refs first, then cask) before any upgrade
+    // or drop — the drop rebuilds the checkbox buffer, erasing the selection.
+    const upgraded = try c.allocator.alloc(UpgradedRef, count);
+    defer c.allocator.free(upgraded);
+    const split = collectUpgraded(s, upgraded);
+
+    const passes = [_]struct { refs: []const UpgradedRef, flag: []const u8 }{
+        .{ .refs = upgraded[0..split], .flag = "--formula" },
+        .{ .refs = upgraded[split..], .flag = "--cask" },
+    };
+    // Passes run independently: a failed formula pass still lets the cask pass
+    // proceed, and only a succeeded pass's rows are dropped. A non-zero `mt
+    // upgrade` re-enters the dashboard and surfaces as a recoverable banner.
+    var dropped_any = false;
+    for (passes) |pass| {
+        const argv = (try kindUpgradeArgv(c.allocator, c.mt_path, pass.refs, pass.flag)) orelse continue;
+        defer c.allocator.free(argv);
+        if (spawn.runInlineReenterStatus(c.term, argv)) |code| {
+            if (code == 0) {
+                try dropUpgradedRows(c.allocator, s, storage, c.shared, pass.refs);
+                dropped_any = true;
+            } else {
+                var dbuf: [96]u8 = undefined;
+                c.shared.banner.set("upgrade failed", upgradeFailDetail(&dbuf, code, pass.refs));
+            }
+        } else |err| {
+            c.shared.banner.set("upgrade failed", @errorName(err));
+        }
+    }
+    if (dropped_any) c.shared.markStaleAfter(.outdated); // Installed sizes/versions changed too
+}
+
+/// True when `row` is one of the upgraded rows (linear scan — a batch is small).
+/// Matches on `(name, kind)`: `mt upgrade <name>` resolves formula-first, so a
+/// same-named cask is left outdated and must not be dropped with the formula.
+fn rowUpgraded(upgraded: []const UpgradedRef, row: Row) bool {
+    for (upgraded) |u| {
+        if (u.kind == row.kind and std.mem.eql(u8, u.name, row.name)) return true;
+    }
+    return false;
+}
+
+/// Drop the just-upgraded rows from the Outdated tab in place: the post-upgrade
+/// outdated set is the pre-upgrade set minus the upgraded tokens, so a second
+/// `mt outdated` walk is unnecessary. The parsed storage is kept alive (rows
+/// borrow its arena) and `items` is re-pointed at the survivors within that
+/// arena; only the checkbox buffer is reallocated, preserving each kept row's
+/// checked state so a partial-selection upgrade survives.
+fn dropUpgradedRows(
+    allocator: std.mem.Allocator,
+    st: *State,
+    storage: *Storage,
+    shared: *ctx.SharedModel,
+    upgraded: []const UpgradedRef,
+) std.mem.Allocator.Error!void {
+    if (storage.outdated == null) return; // nothing loaded → nothing to drop
+    const parsed = &storage.outdated.?;
+    const old_items = parsed.items;
+    const old_checked = storage.checked;
+
+    var keep: usize = 0;
+    for (old_items) |row| {
+        if (!rowUpgraded(upgraded, row)) keep += 1;
+    }
+
+    // Survivors live in the parse arena alongside the strings they borrow, so
+    // they free together on the next full reload. The checkbox buffer is shell-
+    // owned, so it is reallocated and the old one freed.
+    const arena = parsed.doc.arena.allocator();
+    const new_items = try arena.alloc(outdated_json.OutdatedRow, keep);
+    const new_checked = try allocator.alloc(bool, keep);
+    errdefer allocator.free(new_checked);
+
+    var j: usize = 0;
+    for (old_items, 0..) |row, i| {
+        if (rowUpgraded(upgraded, row)) continue;
+        new_items[j] = row;
+        new_checked[j] = i < old_checked.len and old_checked[i];
+        j += 1;
+    }
+
+    if (old_checked.len != 0) allocator.free(old_checked);
+    parsed.items = new_items;
+    storage.checked = new_checked;
+    st.items = new_items;
+    st.checked = new_checked;
+    shared.outdated_count = new_items.len;
+}
+
+/// Repoint the Outdated tab and the header count at a drained `--json` payload.
+/// `null` (a fresh prefix's exit-0 no-output) clears to a known-zero tab; a parsed
+/// document swaps in the rows and a fresh, all-clear checkbox buffer. Shared by
+/// the synchronous reload and the background launch fetch, so both land the same
+/// state. The storage is swapped only after a clean parse — a failure keeps the
+/// last-good rows for the caller's banner to explain. Public because the shell's
+/// fetch drain routes a background payload through it.
+pub fn applyOutdatedBytes(allocator: std.mem.Allocator, st: *State, storage: *Storage, shared: *ctx.SharedModel, bytes: ?[]const u8) outdated_json.Error!void {
+    const payload = bytes orelse {
+        if (storage.outdated) |old| old.deinit();
+        if (storage.checked.len != 0) allocator.free(storage.checked);
+        storage.outdated = null;
+        storage.checked = &.{};
+        st.items = &.{};
+        st.checked = &.{};
+        shared.outdated_count = 0; // nothing outdated is a known zero, not "unknown"
+        return;
+    };
+    const parsed = try outdated_json.parse(allocator, payload);
+    errdefer parsed.deinit();
+    // A fresh checkbox buffer, all clear: an upgrade removes the upgraded rows, so
+    // carrying the old selection forward would point at the wrong packages.
+    const checked = try allocator.alloc(bool, parsed.items.len);
+    @memset(checked, false);
+
+    if (storage.outdated) |old| old.deinit();
+    if (storage.checked.len != 0) allocator.free(storage.checked);
+    storage.outdated = parsed;
+    storage.checked = checked;
+    st.items = parsed.items;
+    st.checked = checked;
+    shared.outdated_count = parsed.items.len;
+}
+
 // ─── tests ───────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -320,6 +545,13 @@ test "Enter requests the upgrade like u" {
     var s: State = .{ .items = &sample, .checked = &checked };
     step(&s, .enter);
     try testing.expectEqual(Request.upgrade, s.request);
+}
+
+test "mutates is true only for a pending upgrade — the request that takes the WAL writer" {
+    var s: State = .{};
+    try testing.expect(!mutates(&s)); // .none never gates the pre-mutation drain
+    s.request = .upgrade;
+    try testing.expect(mutates(&s));
 }
 
 test "selectedCount counts checked, non-pinned rows" {
@@ -450,6 +682,279 @@ test "the cores tolerate a checked slice shorter than items without trapping" {
     _ = selectedCount(&s);
     var out: [4][]const u8 = undefined;
     _ = selectedNames(&s, &out);
+}
+
+test "upgradeFailDetail names the live app on the refusal code, else stays generic" {
+    var buf: [96]u8 = undefined;
+    const one = [_]UpgradedRef{.{ .name = "flux-markdown", .kind = .cask }};
+    const many = [_]UpgradedRef{ .{ .name = "a", .kind = .cask }, .{ .name = "b", .kind = .cask } };
+
+    // The refusal code names the one cask, or stays generic for a batch.
+    try testing.expectEqualStrings("flux-markdown is running", upgradeFailDetail(&buf, cask_app_running_exit, &one));
+    try testing.expectEqualStrings("a selected app is running", upgradeFailDetail(&buf, cask_app_running_exit, &many));
+    // Any other non-zero exit is the generic child failure, unnamed.
+    try testing.expectEqualStrings("ChildFailed", upgradeFailDetail(&buf, 1, &one));
+
+    // Edge: a name longer than the buffer falls back rather than truncating mid-name.
+    var tiny: [4]u8 = undefined;
+    try testing.expectEqualStrings("an app is running", upgradeFailDetail(&tiny, cask_app_running_exit, &one));
+}
+
+test "collectUpgraded partitions checked rows formula-first, then cask, excluding pinned" {
+    const items = [_]Row{
+        .{ .name = "firefox", .installed = "1", .latest = "2", .kind = .cask, .pinned = false, .tap = "" },
+        .{ .name = "wget", .installed = "1", .latest = "2", .kind = .formula, .pinned = false, .tap = "" },
+        .{ .name = "held", .installed = "1", .latest = "2", .kind = .formula, .pinned = true, .tap = "" },
+    };
+    var checked = [_]bool{ true, true, true }; // held is pinned → excluded
+    var st: State = .{ .items = &items, .checked = &checked };
+    var buf: [3]UpgradedRef = undefined;
+    const split = collectUpgraded(&st, buf[0..selectedCount(&st)]);
+    try testing.expectEqual(@as(usize, 1), split); // one formula, before the cask
+    try testing.expectEqualStrings("wget", buf[0].name);
+    try testing.expectEqual(outdated_json.Kind.formula, buf[0].kind);
+    try testing.expectEqualStrings("firefox", buf[1].name);
+    try testing.expectEqual(outdated_json.Kind.cask, buf[1].kind);
+}
+
+test "kindUpgradeArgv builds `mt upgrade <flag> <names>`, null for no refs" {
+    const refs = [_]UpgradedRef{ .{ .name = "firefox", .kind = .cask }, .{ .name = "vlc", .kind = .cask } };
+    const maybe = try kindUpgradeArgv(testing.allocator, "/bin/mt", &refs, "--cask");
+    try testing.expect(maybe != null);
+    const argv = maybe.?;
+    defer testing.allocator.free(argv);
+    try testing.expectEqual(@as(usize, 5), argv.len);
+    try testing.expectEqualStrings("upgrade", argv[1]);
+    try testing.expectEqualStrings("--cask", argv[2]);
+    try testing.expectEqualStrings("firefox", argv[3]);
+    try testing.expectEqualStrings("vlc", argv[4]);
+    try testing.expect((try kindUpgradeArgv(testing.allocator, "/bin/mt", &.{}, "--cask")) == null);
+}
+
+test "a mixed selection yields a --formula pass and a --cask pass" {
+    const items = [_]Row{
+        .{ .name = "wget", .installed = "1", .latest = "2", .kind = .formula, .pinned = false, .tap = "" },
+        .{ .name = "firefox", .installed = "1", .latest = "2", .kind = .cask, .pinned = false, .tap = "" },
+    };
+    var checked = [_]bool{ true, true };
+    var st: State = .{ .items = &items, .checked = &checked };
+    var buf: [2]UpgradedRef = undefined;
+    const split = collectUpgraded(&st, buf[0..selectedCount(&st)]);
+
+    const f = (try kindUpgradeArgv(testing.allocator, "/bin/mt", buf[0..split], "--formula")).?;
+    defer testing.allocator.free(f);
+    try testing.expectEqualStrings("--formula", f[2]);
+    try testing.expectEqualStrings("wget", f[3]);
+
+    const c = (try kindUpgradeArgv(testing.allocator, "/bin/mt", buf[split..], "--cask")).?;
+    defer testing.allocator.free(c);
+    try testing.expectEqualStrings("--cask", c[2]);
+    try testing.expectEqualStrings("firefox", c[3]);
+}
+
+test "a cask-only selection runs no formula pass and upgrades the cask" {
+    const items = [_]Row{
+        .{ .name = "wget", .installed = "1", .latest = "2", .kind = .formula, .pinned = false, .tap = "" },
+        .{ .name = "firefox", .installed = "1", .latest = "2", .kind = .cask, .pinned = false, .tap = "" },
+    };
+    var checked = [_]bool{ false, true }; // only the cask is checked
+    var st: State = .{ .items = &items, .checked = &checked };
+    var buf: [1]UpgradedRef = undefined;
+    const split = collectUpgraded(&st, buf[0..selectedCount(&st)]);
+    try testing.expectEqual(@as(usize, 0), split); // no formula rows
+    try testing.expect((try kindUpgradeArgv(testing.allocator, "/bin/mt", buf[0..split], "--formula")) == null);
+    const c = (try kindUpgradeArgv(testing.allocator, "/bin/mt", buf[split..], "--cask")).?;
+    defer testing.allocator.free(c);
+    try testing.expectEqualStrings("--cask", c[2]);
+    try testing.expectEqualStrings("firefox", c[3]);
+}
+
+test "dropUpgradedRows removes upgraded rows in place and preserves kept checked state" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    const json =
+        \\{"outdated":[
+        \\{"name":"a","installed":"1","latest":"2","type":"formula","pinned":false},
+        \\{"name":"b","installed":"1","latest":"2","type":"formula","pinned":false},
+        \\{"name":"c","installed":"1","latest":"2","type":"formula","pinned":false}
+        \\]}
+    ;
+    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, json);
+    // Check a and c (b is the one being upgraded); the kept rows must stay checked.
+    storage.checked[0] = true;
+    storage.checked[2] = true;
+
+    try dropUpgradedRows(testing.allocator, &st, &storage, &shared, &.{.{ .name = "b", .kind = .formula }});
+
+    try testing.expectEqual(@as(usize, 2), storage.outdated.?.items.len);
+    try testing.expectEqualStrings("a", storage.outdated.?.items[0].name);
+    try testing.expectEqualStrings("c", storage.outdated.?.items[1].name);
+    try testing.expectEqual(@as(?usize, 2), shared.outdated_count);
+    try testing.expectEqual(@as(usize, 2), st.items.len);
+    // a and c stay checked in the rebuilt lockstep buffer.
+    try testing.expect(st.checked[0]);
+    try testing.expect(st.checked[1]);
+}
+
+test "applyOutdatedBytes reallocs the checkbox buffer to the new row count" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    // First parse (two rows). Its arena must be freed when the second lands, or the
+    // test allocator trips — this pins that the arena lifetime moved into the tab's
+    // own Storage, so a re-load frees the prior parse rather than leaking it.
+    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, "{\"outdated\":[{\"name\":\"a\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false},{\"name\":\"b\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false}]}");
+    storage.checked[0] = true; // a stale selection the swap must not carry forward
+    try testing.expectEqual(@as(usize, 2), storage.outdated.?.items.len);
+    try testing.expectEqual(@as(usize, 2), storage.checked.len);
+    // Second parse (one row) swaps in a fresh arena + an all-clear checkbox buffer.
+    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, "{\"outdated\":[{\"name\":\"z\",\"installed\":\"1\",\"latest\":\"9\",\"type\":\"cask\",\"pinned\":false}]}");
+    // The survivor borrows the live arena: the name resolves and the count follows.
+    try testing.expectEqual(@as(usize, 1), storage.outdated.?.items.len);
+    try testing.expectEqual(@as(usize, 1), storage.checked.len); // buffer resized to the new row count
+    try testing.expectEqualStrings("z", storage.outdated.?.items[0].name);
+    try testing.expectEqual(@as(?usize, 1), shared.outdated_count);
+    try testing.expect(!storage.checked[0]); // fresh buffer, all clear
+}
+
+test "dropUpgradedRows on an unloaded store is a no-op" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    try dropUpgradedRows(testing.allocator, &st, &storage, &shared, &.{.{ .name = "anything", .kind = .formula }});
+    try testing.expect(storage.outdated == null);
+}
+
+test "dropUpgradedRows drops only the upgraded kind when a formula and cask share a name" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    const json =
+        \\{"outdated":[
+        \\{"name":"docker","installed":"1","latest":"2","type":"formula","pinned":false},
+        \\{"name":"docker","installed":"1","latest":"2","type":"cask","pinned":false}
+        \\]}
+    ;
+    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, json);
+    // Only the formula docker was upgraded; the same-named cask must remain.
+    try dropUpgradedRows(testing.allocator, &st, &storage, &shared, &.{.{ .name = "docker", .kind = .formula }});
+    try testing.expectEqual(@as(usize, 1), storage.outdated.?.items.len);
+    try testing.expectEqual(outdated_json.Kind.cask, storage.outdated.?.items[0].kind);
+}
+
+test "dropUpgradedRows survives two sequential drops (the formula then cask passes)" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    const json =
+        \\{"outdated":[
+        \\{"name":"wget","installed":"1","latest":"2","type":"formula","pinned":false},
+        \\{"name":"firefox","installed":"1","latest":"2","type":"cask","pinned":false}
+        \\]}
+    ;
+    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, json);
+
+    // Formula pass drops wget; the cask ref (still borrowing the live parse
+    // arena) must survive the first drop's store mutation and rebuilt buffer.
+    try dropUpgradedRows(testing.allocator, &st, &storage, &shared, &.{.{ .name = "wget", .kind = .formula }});
+    try testing.expectEqual(@as(usize, 1), storage.outdated.?.items.len);
+    try testing.expectEqual(outdated_json.Kind.cask, storage.outdated.?.items[0].kind);
+
+    // Cask pass drops firefox → empty, no leak / use-after-free.
+    try dropUpgradedRows(testing.allocator, &st, &storage, &shared, &.{.{ .name = "firefox", .kind = .cask }});
+    try testing.expectEqual(@as(usize, 0), storage.outdated.?.items.len);
+    try testing.expectEqual(@as(?usize, 0), shared.outdated_count);
+}
+
+test "dropUpgradedRows keeps every row when no upgraded ref matches" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    const json =
+        \\{"outdated":[
+        \\{"name":"a","installed":"1","latest":"2","type":"formula","pinned":false},
+        \\{"name":"b","installed":"1","latest":"2","type":"formula","pinned":false}
+        \\]}
+    ;
+    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, json);
+    try dropUpgradedRows(testing.allocator, &st, &storage, &shared, &.{.{ .name = "z", .kind = .formula }});
+    try testing.expectEqual(@as(usize, 2), storage.outdated.?.items.len);
+}
+
+test "dropUpgradedRows clears the list when every row was upgraded" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    const json =
+        \\{"outdated":[
+        \\{"name":"a","installed":"1","latest":"2","type":"formula","pinned":false},
+        \\{"name":"b","installed":"1","latest":"2","type":"formula","pinned":false}
+        \\]}
+    ;
+    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, json);
+    try dropUpgradedRows(testing.allocator, &st, &storage, &shared, &.{ .{ .name = "a", .kind = .formula }, .{ .name = "b", .kind = .formula } });
+    try testing.expectEqual(@as(usize, 0), storage.outdated.?.items.len);
+    try testing.expectEqual(@as(?usize, 0), shared.outdated_count);
+}
+
+// Backing storage for a `ctx.Ctx` in an effect test: dummy term/fetches/shared,
+// a no-op painter (fd = -1; the test children never reach a poll tick), and the
+// synchronous-load flag.
+const TestEnv = struct {
+    term_h: ctx.Term,
+    fetches: ctx.Fetches = ctx.Fetches.initFill(null),
+    shared: ctx.SharedModel = .{},
+    frame: []u8 = &.{},
+    loading: bool = false,
+};
+
+fn mkCtx(io: std.Io, e: *TestEnv, mt_path: []const u8) ctx.Ctx {
+    return .{
+        .io = io,
+        .allocator = testing.allocator,
+        .term = &e.term_h,
+        .painter = .{ .fd = -1, .frame = &e.frame },
+        .fetches = &e.fetches,
+        .shared = &e.shared,
+        .mt_path = mt_path,
+        .loading = &e.loading,
+    };
+}
+
+test "service on a .none request is a clean no-op — no spawn, no banner" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{}; // .none: the pure `step` set nothing to perform
+    var c = mkCtx(thr.io(), &env, "/bin/false"); // would fail if it ever spawned
+    try service(&st, &storage, &c);
+    try testing.expectEqual(Request.none, st.request);
+    try testing.expect(!env.shared.banner.isSet());
+}
+
+test "service drains an upgrade request; an empty selection never spawns" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    // An empty selection means `doUpgrade` resolves count == 0: the request drains
+    // but no `mt upgrade` child runs, so `/bin/false` is never reached.
+    var st: State = .{ .request = .upgrade };
+    var c = mkCtx(thr.io(), &env, "/bin/false");
+    try service(&st, &storage, &c);
+    try testing.expectEqual(Request.none, st.request); // the producer/consumer seam drained it
+    try testing.expect(!env.shared.banner.isSet()); // never spawned → no failure banner
 }
 
 test "conforms to the tab contract" {

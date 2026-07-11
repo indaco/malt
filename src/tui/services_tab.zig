@@ -14,10 +14,12 @@ const std = @import("std");
 const testing = std.testing;
 
 const color = @import("../ui/color.zig");
+const ctx = @import("ctx.zig");
 const services_json = @import("json/services.zig");
 pub const Row = services_json.ServiceRow;
 const detail_pane = @import("detail_pane.zig");
 const scroll_list = @import("scroll_list.zig");
+const spawn = @import("spawn.zig");
 const tab = @import("tab.zig");
 
 /// A lifecycle effect the pure `step` defers to the impure shell, which performs
@@ -49,6 +51,13 @@ pub const Storage = struct {
 
 /// Services audits in the background; a non-clean exit means a failed refresh.
 pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{ "services", "list" }, .max_ok_exit = 0, .refresh_op = "services refresh failed" };
+
+/// Whether the pending request will spawn a DB-mutating child. Unlike the other
+/// tabs' single mutating verb, *every* non-`.none` lifecycle action (start / stop
+/// / restart) opens the DB, so the classifier is "any pending request".
+pub fn mutates(s: *const State) bool {
+    return s.request != .none;
+}
 
 pub fn title() []const u8 {
     return "Services";
@@ -245,6 +254,95 @@ fn appendPad(buf: []u8, len: *usize, s: []const u8, width: usize) void {
     while (i < width) : (i += 1) append(buf, len, " ");
 }
 
+// ─── impure zone ───────────────────────────────────────────────────────
+// The effect half of the tab, reunited beside its pure producer (`step` records
+// the lifecycle `request`; the code below drains it). Every decl here takes its
+// I/O ports explicitly through the shared `ctx.Ctx` — never a global — so the
+// pure/impure line is the function signature.
+
+/// The effect chain's error set, composed from the source sets so it tracks them
+/// automatically. A subset of the shell's `RunError`, which classifies each fault
+/// recoverable-vs-fatal; naming it here keeps the public `service` explicit.
+pub const Error = std.mem.Allocator.Error || spawn.ReadError || spawn.InlineError || services_json.Error;
+
+/// Perform any lifecycle effect the pure `step` requested, then clear it — the
+/// consumer half of the `request` seam. The shell dispatches this only for the
+/// active tab; the lazy (re)load on entry / after staleness stays loop machinery.
+pub fn service(s: *State, storage: *Storage, c: *ctx.Ctx) Error!void {
+    const req = s.request;
+    s.request = .none;
+    switch (req) {
+        .none => {},
+        .start => try doServiceAction(s, storage, c, "start"),
+        .stop => try doServiceAction(s, storage, c, "stop"),
+        .restart => try doServiceAction(s, storage, c, "restart"),
+    }
+}
+
+/// Build `mt services <action> <name>` for the selected service. Pure over the
+/// tab state: null when nothing is selected (the no-op), else an owned argv whose
+/// `name` element borrows from the parse storage. Caller frees the returned slice
+/// (not its elements).
+fn serviceActionArgv(allocator: std.mem.Allocator, mt_path: []const u8, action: []const u8, s: *const State) std.mem.Allocator.Error!?[]const []const u8 {
+    const svc = selectedService(s) orelse return null; // empty list: no-op
+    return try spawn.inlineArgv(allocator, mt_path, &.{ "services", action, svc.name });
+}
+
+/// Delegate a service lifecycle action to the real `mt` inline, then refresh. The
+/// argv's `name` borrows from the current parse storage; the post-spawn reload
+/// frees that storage, so the name is not read afterwards.
+fn doServiceAction(s: *State, storage: *Storage, c: *ctx.Ctx, action: []const u8) !void {
+    const argv = (try serviceActionArgv(c.allocator, c.mt_path, action, s)) orelse return; // nothing selected
+    defer c.allocator.free(argv);
+    {
+        // A non-zero `mt services <action>` re-enters the dashboard (the user
+        // keeps malt's real output in their scrollback) and surfaces as a
+        // recoverable banner; only a terminal fault is fatal. Scoped so the
+        // refresh below reports under its own op, not the action.
+        errdefer |err| c.shared.banner.set("service action failed", @errorName(err));
+        try spawn.runInlineReenter(c.term, argv);
+    }
+    try loadServices(s, storage, c); // the state changed — refetch
+    c.shared.markStaleAfter(.services); // this tab is fresh; the others may now be stale
+}
+
+/// (Re)read `mt services list --json` and repoint the Services tab's rows at the
+/// fresh parse, freeing the previous one. The polled read animates the shell's
+/// spinner through `c.painter` while it blocks; the storage is swapped only after
+/// a clean parse, so a failure keeps the last-good rows and their selection.
+fn loadServices(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
+    errdefer |err| c.shared.banner.set("services refresh failed", @errorName(err));
+    const argv = try spawn.jsonArgv(c.allocator, c.mt_path, &.{ "services", "list" });
+    defer c.allocator.free(argv);
+    // Keep `loading` set across the poll so each tick paints the spinner, cleared
+    // once the result (or the empty/banner state) replaces it.
+    c.loading.* = true;
+    defer c.loading.* = false;
+    const bytes = try spawn.readJsonPolled(c.io, c.allocator, argv, 0, c.painter);
+    defer if (bytes) |b| c.allocator.free(b);
+    try applyServicesBytes(c.allocator, s, storage, bytes);
+}
+
+/// Repoint the Services tab at a drained `--json` payload. `null` (a fresh prefix)
+/// clears to an empty list; a parsed document swaps in the rows. Shared by the
+/// synchronous reload and the background fetch; the storage is swapped only after
+/// a clean parse, so a failure keeps the last-good rows. Public because the shell's
+/// fetch drain routes a background payload through it.
+pub fn applyServicesBytes(allocator: std.mem.Allocator, st: *State, storage: *Storage, bytes: ?[]const u8) services_json.Error!void {
+    const payload = bytes orelse {
+        if (storage.services) |old| old.deinit();
+        storage.services = null;
+        st.items = &.{};
+        st.detail = null; // the old detail borrowed the freed rows
+        return;
+    };
+    const parsed = try services_json.parse(allocator, payload);
+    if (storage.services) |old| old.deinit();
+    storage.services = parsed;
+    st.items = parsed.items;
+    st.detail = null; // a refreshed list invalidates the old detail
+}
+
 // ─── tests ───────────────────────────────────────────────────────────
 
 fn ch(c: u8) tab.Key {
@@ -286,6 +384,17 @@ test "s requests start, x and X request stop, r requests restart" {
     try testing.expectEqual(Request.stop, s.request);
     step(&s, ch('r'));
     try testing.expectEqual(Request.restart, s.request);
+}
+
+test "mutates is true for any pending lifecycle action, false only for none" {
+    var s: State = .{};
+    try testing.expect(!mutates(&s)); // .none never gates the pre-mutation drain
+    s.request = .start;
+    try testing.expect(mutates(&s));
+    s.request = .stop;
+    try testing.expect(mutates(&s));
+    s.request = .restart;
+    try testing.expect(mutates(&s));
 }
 
 test "an unrelated key leaves the request alone" {
@@ -492,6 +601,105 @@ test "render clamps to a height of one without crashing" {
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 }); // one list row fits
+}
+
+test "serviceActionArgv builds `mt services <action> <name>` for the selected service" {
+    const items = [_]Row{
+        .{ .name = "redis", .state = "running", .auto_start = true, .keg_name = "redis" },
+        .{ .name = "postgresql", .state = "stopped", .auto_start = false, .keg_name = "postgresql@16" },
+    };
+    var st: State = .{ .items = &items };
+    st.chrome.view.selected = 1; // postgresql
+    const argv = (try serviceActionArgv(testing.allocator, "/opt/homebrew/bin/mt", "restart", &st)).?;
+    defer testing.allocator.free(argv);
+    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqualStrings("/opt/homebrew/bin/mt", argv[0]);
+    try testing.expectEqualStrings("services", argv[1]);
+    try testing.expectEqualStrings("restart", argv[2]);
+    try testing.expectEqualStrings("postgresql", argv[3]); // the selected row's name
+}
+
+test "serviceActionArgv returns null when nothing is selected so the action is a no-op" {
+    const st: State = .{ .items = &.{} };
+    try testing.expect((try serviceActionArgv(testing.allocator, "/bin/mt", "start", &st)) == null);
+}
+
+// Backing storage for a `ctx.Ctx` in an effect test: dummy term/fetches/shared,
+// a no-op painter (fd = -1; the test children finish before the first poll tick,
+// so it is never touched), and the synchronous-load flag.
+const TestEnv = struct {
+    term_h: ctx.Term,
+    fetches: ctx.Fetches = ctx.Fetches.initFill(null),
+    shared: ctx.SharedModel = .{},
+    frame: []u8 = &.{},
+    loading: bool = false,
+};
+
+fn mkCtx(io: std.Io, e: *TestEnv, mt_path: []const u8) ctx.Ctx {
+    return .{
+        .io = io,
+        .allocator = testing.allocator,
+        .term = &e.term_h,
+        .painter = .{ .fd = -1, .frame = &e.frame },
+        .fetches = &e.fetches,
+        .shared = &e.shared,
+        .mt_path = mt_path,
+        .loading = &e.loading,
+    };
+}
+
+test "loadServices treats an exit-0 empty response (fresh prefix) as an empty tab" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{};
+    var c = mkCtx(thr.io(), &env, "/usr/bin/true");
+    try loadServices(&st, &storage, &c);
+    try testing.expectEqual(@as(usize, 0), st.items.len);
+    try testing.expect(!env.shared.banner.isSet());
+}
+
+test "a failed services refresh names the op in the banner and keeps the last-good rows" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{};
+    var c = mkCtx(thr.io(), &env, "/bin/echo"); // echo emits non-JSON → parse fails
+    try testing.expectError(error.BadJson, loadServices(&st, &storage, &c));
+    try testing.expectEqualStrings("services refresh failed: BadJson", env.shared.banner.slice());
+    try testing.expectEqual(@as(usize, 0), st.items.len); // last-good kept
+}
+
+test "service on a .none request is a clean no-op — no spawn, no banner" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var st: State = .{}; // .none: the pure `step` set nothing to perform
+    var c = mkCtx(thr.io(), &env, "/bin/false"); // would fail if it ever spawned
+    try service(&st, &storage, &c);
+    try testing.expectEqual(Request.none, st.request);
+    try testing.expect(!env.shared.banner.isSet());
+}
+
+test "service drains a lifecycle request; an empty list never spawns" {
+    var thr = std.Io.Threaded.init(testing.allocator, .{});
+    defer thr.deinit();
+    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    // An empty list means `serviceActionArgv` resolves to null: the request drains
+    // but no `mt services start` child runs, so `/bin/false` is never reached.
+    var st: State = .{ .request = .start };
+    var c = mkCtx(thr.io(), &env, "/bin/false");
+    try service(&st, &storage, &c);
+    try testing.expectEqual(Request.none, st.request); // the producer/consumer seam drained it
+    try testing.expect(!env.shared.banner.isSet()); // never spawned → no failure banner
 }
 
 test "conforms to the tab contract" {
