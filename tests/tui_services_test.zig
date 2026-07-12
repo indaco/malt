@@ -63,19 +63,22 @@ test "a lifecycle key over the fixture targets the selected service" {
     defer parsed.deinit();
 
     var st: services.State = .{ .items = parsed.items };
+    var storage: services.Storage = .{};
+    defer storage.deinit(testing.allocator);
 
-    // Cursor on dnsmasq (index 2); `r` requests a restart of exactly that row.
+    // Cursor on dnsmasq (index 2); `r` builds a restart mutation over exactly that row.
     st.chrome.view.selected = 2;
-    services.step(&st, .{ .char = .{ .bytes = .{ 'r', 0, 0, 0 }, .len = 1 } });
-    try testing.expectEqual(services.Request.restart, st.request);
-    try testing.expectEqualStrings("dnsmasq", services.selectedService(&st).?.name);
+    const restart = services.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, .{ .char = .{ .bytes = .{ 'r', 0, 0, 0 }, .len = 1 } });
+    defer testing.allocator.free(restart.run_mutation.argv);
+    try testing.expectEqualStrings("restart", restart.run_mutation.argv[2]);
+    try testing.expectEqualStrings("dnsmasq", restart.run_mutation.argv[3]);
 
-    // `s` on postgresql@16 requests a start of that row — the argv `mt services`
-    // would receive is `start postgresql@16`.
+    // `s` on postgresql@16 → `mt services start postgresql@16`.
     st.chrome.view.selected = 1;
-    services.step(&st, .{ .char = .{ .bytes = .{ 's', 0, 0, 0 }, .len = 1 } });
-    try testing.expectEqual(services.Request.start, st.request);
-    try testing.expectEqualStrings("postgresql@16", services.selectedService(&st).?.name);
+    const start = services.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, .{ .char = .{ .bytes = .{ 's', 0, 0, 0 }, .len = 1 } });
+    defer testing.allocator.free(start.run_mutation.argv);
+    try testing.expectEqualStrings("start", start.run_mutation.argv[2]);
+    try testing.expectEqualStrings("postgresql@16", start.run_mutation.argv[3]);
 }
 
 test "a filter narrows the lifecycle target to a matching service" {
@@ -85,9 +88,12 @@ test "a filter narrows the lifecycle target to a matching service" {
     defer parsed.deinit();
 
     var st: services.State = .{ .items = parsed.items };
+    var storage: services.Storage = .{};
+    defer storage.deinit(testing.allocator);
     st.chrome.filter.push("postgres"); // only postgresql@16 matches
     st.chrome.view.selected = 0;
-    services.step(&st, .{ .char = .{ .bytes = .{ 'x', 0, 0, 0 }, .len = 1 } });
-    try testing.expectEqual(services.Request.stop, st.request);
-    try testing.expectEqualStrings("postgresql@16", services.selectedService(&st).?.name);
+    const stop = services.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, .{ .char = .{ .bytes = .{ 'x', 0, 0, 0 }, .len = 1 } });
+    defer testing.allocator.free(stop.run_mutation.argv);
+    try testing.expectEqualStrings("stop", stop.run_mutation.argv[2]);
+    try testing.expectEqualStrings("postgresql@16", stop.run_mutation.argv[3]);
 }

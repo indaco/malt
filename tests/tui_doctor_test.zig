@@ -60,16 +60,20 @@ test "f over the fixture targets the selected fixable finding by its fix_class" 
     defer parsed.deinit();
 
     var st: doctor.State = .{ .items = parsed.items };
+    var storage: doctor.Storage = .{};
+    defer storage.deinit(testing.allocator);
 
     // Display order: sqlite (err), orphaned (warn), stale_lock (warn), malt_prefix (ok).
-    // Cursor on the orphaned finding; `f` requests a fix of exactly that finding.
+    // Cursor on the orphaned finding; `f` builds a fix mutation over exactly that finding.
     st.chrome.view.selected = 1;
     const sel = doctor.selectedFinding(&st).?;
     try testing.expectEqualStrings("orphaned_store_entries", sel.id); // the descriptive id…
     try testing.expectEqualStrings("orphaned_store", doctor_json.fixClassTag(sel.fix_class)); // …vs the --fix token
 
-    doctor.step(&st, .{ .char = .{ .bytes = .{ 'f', 0, 0, 0 }, .len = 1 } });
-    try testing.expectEqual(doctor.Request.fix, st.request);
+    const eff = doctor.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, .{ .char = .{ .bytes = .{ 'f', 0, 0, 0 }, .len = 1 } });
+    defer testing.allocator.free(eff.run_mutation.argv);
+    try testing.expectEqualStrings("--fix", eff.run_mutation.argv[2]);
+    try testing.expectEqualStrings("orphaned_store", eff.run_mutation.argv[3]); // the fix_class token
 }
 
 test "f on a non-fixable finding over the fixture is inert" {
@@ -79,10 +83,11 @@ test "f on a non-fixable finding over the fixture is inert" {
     defer parsed.deinit();
 
     var st: doctor.State = .{ .items = parsed.items };
+    var storage: doctor.Storage = .{};
+    defer storage.deinit(testing.allocator);
     st.chrome.view.selected = 0; // sqlite_integrity — an error, not fixable
     try testing.expectEqual(false, doctor.selectedFinding(&st).?.fixable);
-    doctor.step(&st, .{ .char = .{ .bytes = .{ 'f', 0, 0, 0 }, .len = 1 } });
-    try testing.expectEqual(doctor.Request.none, st.request);
+    try testing.expect(doctor.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, .{ .char = .{ .bytes = .{ 'f', 0, 0, 0 }, .len = 1 } }) == .none);
 }
 
 test "a filter narrows the fix target to a matching finding" {

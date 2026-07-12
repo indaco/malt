@@ -27,7 +27,8 @@ for tab in installed_tab outdated_tab services_tab doctor_tab search_tab; do
 done
 
 # 2. The shell must still defer .end to the tab (the row count lives there).
-rg -q '\.space, \.end, \.esc => routeToTab' src/tui/app.zig ||
+#    Post-reify `routeToTab` returns the tab's `Cmd`, so the arm returns it.
+rg -q '\.space, \.end, \.esc => return routeToTab' src/tui/app.zig ||
   fail "app.zig no longer routes .end to the active tab"
 
 # 3. The last-row unit tests must exist and pass.
