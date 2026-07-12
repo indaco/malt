@@ -177,15 +177,17 @@ test "importAllowed rejects an outward reach from any depth" {
 
 const app_import = "@import(\"app.zig\")";
 
-/// A file bound by the anti-cycle rule: the `ctx.zig` sink and every `*_tab.zig`
-/// must import only downward. `app.zig` itself and the leaves it composes are
-/// exempt — the ban is on the upward edge into the hub, not on the hub.
+/// A file bound by the anti-cycle rule: the `ctx.zig`/`cmd.zig` sinks and every
+/// `*_tab.zig` must import only downward. `app.zig` itself and the leaves it
+/// composes are exempt — the ban is on the upward edge into the hub, not the hub.
 fn antiCycleGuarded(rel_path: []const u8) bool {
     const base = if (std.mem.lastIndexOfScalar(u8, rel_path, '/')) |slash|
         rel_path[slash + 1 ..]
     else
         rel_path;
-    return std.mem.eql(u8, base, "ctx.zig") or std.mem.endsWith(u8, base, "_tab.zig");
+    return std.mem.eql(u8, base, "ctx.zig") or
+        std.mem.eql(u8, base, "cmd.zig") or
+        std.mem.endsWith(u8, base, "_tab.zig");
 }
 
 fn scanAntiCycle(io: std.Io, root: []const u8, failures: *std.ArrayList([]const u8)) !void {
@@ -217,8 +219,10 @@ fn scanAntiCycle(io: std.Io, root: []const u8, failures: *std.ArrayList([]const 
     }
 }
 
-test "antiCycleGuarded covers ctx.zig and every *_tab.zig, not the hub or its leaves" {
+test "antiCycleGuarded covers the ctx/cmd sinks and every *_tab.zig, not the hub or its leaves" {
     try testing.expect(antiCycleGuarded("ctx.zig"));
+    try testing.expect(antiCycleGuarded("cmd.zig"));
+    try testing.expect(antiCycleGuarded("src/tui/cmd.zig"));
     try testing.expect(antiCycleGuarded("src/tui/outdated_tab.zig"));
     try testing.expect(antiCycleGuarded("installed_tab.zig"));
     try testing.expect(!antiCycleGuarded("app.zig"));
@@ -233,7 +237,7 @@ test "the anti-cycle scan detects an upward app.zig import edge" {
     try testing.expect(std.mem.indexOf(u8, clean, app_import) == null);
 }
 
-test "no tab or ctx sink imports app.zig" {
+test "no tab or ctx/cmd sink imports app.zig" {
     const io = std.Options.debug_io;
 
     var failures: std.ArrayList([]const u8) = .empty;
@@ -248,6 +252,49 @@ test "no tab or ctx sink imports app.zig" {
         for (failures.items) |f| std.debug.print("{s}\n", .{f});
         return error.TuiAntiCycleViolated;
     }
+}
+
+// ── cmd sink: imports no tab ─────────────────────────────────────────────────
+// The effect-vocabulary sink `cmd.zig` must name no `*_tab.zig`: a `Cmd`/`Msg`
+// type reaching into a tab would radiate the hub it replaces. The anti-cycle
+// scan above already bans its `app.zig` edge; a tab import is *intra-leaf*, so
+// the whitelist permits it and this dedicated guard is what forbids it.
+
+/// True iff `content` has an `@import("…_tab.zig")`. `tab.zig`/`tab_bar.zig` are
+/// not tabs, so a sink may name them (`cmd.zig` imports `tab_bar` for `MsgTag`).
+fn importsTabModule(content: []const u8) bool {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, content, cursor, import_prefix)) |start| {
+        const path_start = start + import_prefix.len;
+        const end = std.mem.indexOfScalarPos(u8, content, path_start, '"') orelse break;
+        const path = content[path_start..end];
+        cursor = end + 1;
+        if (std.mem.endsWith(u8, path, "_tab.zig")) return true;
+    }
+    return false;
+}
+
+test "importsTabModule flags a tab import but not tab.zig / tab_bar.zig" {
+    try testing.expect(importsTabModule("const x = @import(\"outdated_tab.zig\");"));
+    try testing.expect(importsTabModule("a = @import(\"json/list.zig\"); b = @import(\"search_tab.zig\");"));
+    try testing.expect(!importsTabModule("const b = @import(\"tab_bar.zig\");"));
+    try testing.expect(!importsTabModule("const t = @import(\"tab.zig\");"));
+}
+
+test "the cmd sink imports no *_tab.zig" {
+    const io = std.Options.debug_io;
+
+    var dir = try test_io.cwd().openDir(io, scanned_root, .{});
+    defer dir.close(io);
+
+    const file = try dir.openFile(io, "cmd.zig", .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    const content = try testing.allocator.alloc(u8, @intCast(stat.size));
+    defer testing.allocator.free(content);
+    _ = try file.readPositionalAll(io, content, 0);
+
+    try testing.expect(!importsTabModule(content));
 }
 
 fn writeFixture(io: std.Io, abs_path: []const u8, content: []const u8) !void {
