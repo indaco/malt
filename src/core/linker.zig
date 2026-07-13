@@ -17,10 +17,11 @@ pub const Linker = struct {
     db: *sqlite.Database,
     prefix: []const u8,
 
-    /// Keg subdirectories whose top-level files get symlinked into the
-    /// prefix. `bin`/`sbin` lead so the bin-isolated variant is a tail
-    /// slice (`[2..]`). The install path also reads this to decide whether
-    /// an extracted archive produced anything linkable at all — keep that
+    /// Keg subdirectories whose contents get symlinked into the prefix,
+    /// recursing into nested subdirs (lib/pkgconfig, share/man, …).
+    /// `bin`/`sbin` lead so the bin-isolated variant is a tail slice
+    /// (`[2..]`). The install path also reads this to decide whether an
+    /// extracted archive produced anything linkable at all — keep that
     /// check and `link` reading the same list so they cannot drift.
     pub const linkable_dirs = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc" };
 
@@ -39,11 +40,15 @@ pub const Linker = struct {
         var conflicts: std.ArrayList(Conflict) = .empty;
 
         for (dirs_to_check) |subdir| {
-            var keg_dir_buf: [512]u8 = undefined;
-            const keg_subdir = std.fmt.bufPrint(&keg_dir_buf, "{s}/{s}", .{ keg_path, subdir }) catch continue;
-
-            var dir = std.Io.Dir.openDirAbsolute(self.io, keg_subdir, .{ .iterate = true }) catch continue;
-            defer dir.close(self.io);
+            // Collect nested leaves first (share/man/man1/*, lib/pkgconfig/*),
+            // then probe each — keep this in step with linkSubdir's walk.
+            var leaves: std.ArrayList([]u8) = .empty;
+            defer {
+                for (leaves.items) |p| self.allocator.free(p);
+                leaves.deinit(self.allocator);
+            }
+            self.collectLeafPaths(keg_path, subdir, &leaves);
+            if (leaves.items.len == 0) continue;
 
             var prefix_dir_buf: [512]u8 = undefined;
             const prefix_subdir = std.fmt.bufPrint(&prefix_dir_buf, "{s}/{s}", .{ self.prefix, subdir }) catch continue;
@@ -51,22 +56,20 @@ pub const Linker = struct {
             var prefix_dir = std.Io.Dir.openDirAbsolute(self.io, prefix_subdir, .{}) catch continue;
             defer prefix_dir.close(self.io);
 
-            var iter = dir.iterate();
-            while (iter.next(self.io) catch null) |entry| {
-                if (entry.kind == .directory) continue;
-
+            for (leaves.items) |rel| {
                 // Check if a symlink already exists at the target location.
                 // 1 KiB fits every path malt produces under its prefix — the
                 // previous `max_path_bytes` (~4 KiB) was stack-wasteful when
-                // scanning kegs with many files.
+                // scanning kegs with many files. `rel` is the full nested
+                // path relative to the linkable dir.
                 var link_target_buf: [1024]u8 = undefined;
-                const link_target_len = prefix_dir.readLink(self.io, entry.name, &link_target_buf) catch continue;
+                const link_target_len = prefix_dir.readLink(self.io, rel, &link_target_buf) catch continue;
                 const link_target = link_target_buf[0..link_target_len];
 
                 // If the existing symlink points into a different keg, it's a conflict
                 if (!std.mem.startsWith(u8, link_target, keg_path)) {
                     var link_path_buf: [512]u8 = undefined;
-                    const link_path = std.fmt.bufPrint(&link_path_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, entry.name }) catch continue;
+                    const link_path = std.fmt.bufPrint(&link_path_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, rel }) catch continue;
 
                     // Extract the existing keg path from the symlink target
                     // Targets look like: /opt/malt/Cellar/<name>/<ver>/bin/<file>
@@ -81,6 +84,51 @@ pub const Linker = struct {
         }
 
         return conflicts.toOwnedSlice(self.allocator) catch return &.{};
+    }
+
+    /// Collect the relative paths of every leaf (file or symlink) under
+    /// `keg_path/subdir`, recursing into nested dirs. Read-only BFS: the
+    /// caller mutates the prefix afterward. Shared by `link` and
+    /// `checkConflicts` so both act on the same leaf set and cannot drift.
+    /// Caller owns and frees the returned paths.
+    fn collectLeafPaths(self: *Linker, keg_path: []const u8, subdir: []const u8, out: *std.ArrayList([]u8)) void {
+        var base_buf: [512]u8 = undefined;
+        const base = std.fmt.bufPrint(&base_buf, "{s}/{s}", .{ keg_path, subdir }) catch return;
+
+        // BFS: `pending` holds dir paths relative to `base`; "" is the root.
+        var pending: std.ArrayList([]u8) = .empty;
+        defer {
+            for (pending.items) |p| self.allocator.free(p);
+            pending.deinit(self.allocator);
+        }
+        pending.append(self.allocator, self.allocator.dupe(u8, "") catch return) catch return;
+
+        var i: usize = 0;
+        while (i < pending.items.len) : (i += 1) {
+            const rel = pending.items[i];
+            var lvl_buf: [512]u8 = undefined;
+            const lvl_path = if (rel.len == 0)
+                base
+            else
+                std.fmt.bufPrint(&lvl_buf, "{s}/{s}", .{ base, rel }) catch continue;
+
+            var lvl = std.Io.Dir.openDirAbsolute(self.io, lvl_path, .{ .iterate = true }) catch continue;
+            defer lvl.close(self.io);
+            var it = lvl.iterate();
+            while (it.next(self.io) catch null) |entry| {
+                var child_buf: [512]u8 = undefined;
+                const child = if (rel.len == 0)
+                    std.fmt.bufPrint(&child_buf, "{s}", .{entry.name}) catch continue
+                else
+                    std.fmt.bufPrint(&child_buf, "{s}/{s}", .{ rel, entry.name }) catch continue;
+                const dup = self.allocator.dupe(u8, child) catch continue;
+                if (entry.kind == .directory) {
+                    pending.append(self.allocator, dup) catch self.allocator.free(dup);
+                } else {
+                    out.append(self.allocator, dup) catch self.allocator.free(dup);
+                }
+            }
+        }
     }
 
     /// Extract "Cellar/<name>/<ver>" from a full path like "/opt/malt/Cellar/foo/1.0/bin/foo"
@@ -111,13 +159,23 @@ pub const Linker = struct {
 
     fn linkSubdir(self: *Linker, keg_path: []const u8, subdir: []const u8, name: []const u8, keg_id: i64) !void {
         _ = name;
-        var keg_dir_buf: [512]u8 = undefined;
-        const keg_subdir = std.fmt.bufPrint(&keg_dir_buf, "{s}/{s}", .{ keg_path, subdir }) catch return;
 
-        var dir = std.Io.Dir.openDirAbsolute(self.io, keg_subdir, .{ .iterate = true }) catch return;
-        defer dir.close(self.io);
+        // Mirror the keg's tree as real dirs under the prefix and symlink
+        // each leaf — the same traversal `checkConflicts` uses, so a nested
+        // conflict the pre-check flags is exactly what link would create.
+        // Whole-dir symlinking would break when two kegs share a nested dir
+        // (share/man/man1, lib/pkgconfig, share/locale). Empty keg dirs
+        // yield no leaf, so there is nothing to link.
+        var leaves: std.ArrayList([]u8) = .empty;
+        defer {
+            for (leaves.items) |p| self.allocator.free(p);
+            leaves.deinit(self.allocator);
+        }
+        self.collectLeafPaths(keg_path, subdir, &leaves);
+        if (leaves.items.len == 0) return;
 
-        // Ensure parent dir exists
+        // Ensure the top-level prefix dir exists; nested parents are created
+        // per-leaf below.
         var parent_buf: [512]u8 = undefined;
         const parent = std.fmt.bufPrint(&parent_buf, "{s}/{s}", .{ self.prefix, subdir }) catch return;
         std.Io.Dir.createDirAbsolute(self.io, parent, .default_dir) catch |e| switch (e) {
@@ -128,30 +186,37 @@ pub const Linker = struct {
         var parent_dir = std.Io.Dir.openDirAbsolute(self.io, parent, .{}) catch return;
         defer parent_dir.close(self.io);
 
-        var iter = dir.iterate();
-        while (iter.next(self.io) catch null) |entry| {
-            if (entry.kind == .directory) continue;
+        for (leaves.items) |rel| {
+            // `rel` is relative and may nest (e.g. "pkgconfig/foo.pc").
+            // Create the leaf's prefix-side parent before linking.
+            const rel_parent = std.fs.path.dirname(rel);
+            if (rel_parent) |rp| parent_dir.createDirPath(self.io, rp) catch continue;
 
             var target_buf: [512]u8 = undefined;
-            const target = std.fmt.bufPrint(&target_buf, "{s}/{s}/{s}", .{ keg_path, subdir, entry.name }) catch continue;
+            const target = std.fmt.bufPrint(&target_buf, "{s}/{s}/{s}", .{ keg_path, subdir, rel }) catch continue;
 
             // Atomic symlink: create at a temp name, then rename into place.
             // This avoids a window where the link is absent after deleteFile.
-            var tmp_name_buf: [280]u8 = undefined;
-            const tmp_name = std.fmt.bufPrint(&tmp_name_buf, ".malt_tmp_{s}", .{entry.name}) catch continue;
+            // The temp sits in the leaf's own parent so the rename stays
+            // within one directory.
+            var tmp_name_buf: [512]u8 = undefined;
+            const tmp_name = if (rel_parent) |rp|
+                std.fmt.bufPrint(&tmp_name_buf, "{s}/.malt_tmp_{s}", .{ rp, std.fs.path.basename(rel) }) catch continue
+            else
+                std.fmt.bufPrint(&tmp_name_buf, ".malt_tmp_{s}", .{rel}) catch continue;
             // Stale tmp from a prior aborted link; symLink would otherwise EEXIST.
             parent_dir.deleteFile(self.io, tmp_name) catch {};
             parent_dir.symLink(self.io, target, tmp_name, .{}) catch continue;
-            parent_dir.rename(tmp_name, parent_dir, entry.name, self.io) catch {
+            parent_dir.rename(tmp_name, parent_dir, rel, self.io) catch {
                 // Rename failed — fall back to direct replacement (non-atomic).
                 parent_dir.deleteFile(self.io, tmp_name) catch {};
-                parent_dir.deleteFile(self.io, entry.name) catch {};
-                parent_dir.symLink(self.io, target, entry.name, .{}) catch continue;
+                parent_dir.deleteFile(self.io, rel) catch {};
+                parent_dir.symLink(self.io, target, rel, .{}) catch continue;
             };
 
             // Build the full link path for DB recording
             var link_buf: [512]u8 = undefined;
-            const link_path = std.fmt.bufPrint(&link_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, entry.name }) catch continue;
+            const link_path = std.fmt.bufPrint(&link_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, rel }) catch continue;
 
             // Record in DB
             var stmt = try self.db.prepare(

@@ -91,6 +91,147 @@ test "link creates symlinks for every file in a keg and records them in the DB" 
     try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, link_path, .{}));
 }
 
+fn writeFile(path: []const u8, body: []const u8) !void {
+    if (std.fs.path.dirname(path)) |parent| {
+        try test_io.cwd().createDirPath(std.Options.debug_io, parent);
+    }
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, body);
+}
+
+test "link mirrors nested keg subdirectories and records each nested leaf" {
+    const prefix = try uniquePrefix("link_nested");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/nest/1.0", .{prefix});
+    defer testing.allocator.free(keg);
+
+    // Depth-1 leaf, a nested chain four levels deep, and two sibling subdirs
+    // under one linkable dir (share/locale + share/man) — the sibling case
+    // must not stop after the first leaf.
+    const bin = try std.fmt.allocPrint(testing.allocator, "{s}/bin/tool", .{keg});
+    defer testing.allocator.free(bin);
+    const pc = try std.fmt.allocPrint(testing.allocator, "{s}/lib/pkgconfig/nest.pc", .{keg});
+    defer testing.allocator.free(pc);
+    const mo = try std.fmt.allocPrint(testing.allocator, "{s}/share/locale/en_US/LC_MESSAGES/nest.mo", .{keg});
+    defer testing.allocator.free(mo);
+    const man = try std.fmt.allocPrint(testing.allocator, "{s}/share/man/man1/tool.1", .{keg});
+    defer testing.allocator.free(man);
+    try writeFile(bin, "#!/bin/sh\n");
+    try writeFile(pc, "Name: nest\n");
+    try writeFile(mo, "mo\n");
+    try writeFile(man, ".TH TOOL 1\n");
+
+    // A keg-shipped symlink leaf (Homebrew ships e.g. lib/libfoo.dylib ->
+    // libfoo.1.dylib) must be linked like a file, not descended into. The
+    // link's own target is irrelevant here — the linker links to the keg's
+    // symlink file, never dereferencing it — so any absolute target works.
+    const dylib = try std.fmt.allocPrint(testing.allocator, "{s}/lib/libnest.dylib", .{keg});
+    defer testing.allocator.free(dylib);
+    const dylib_target = try std.fmt.allocPrint(testing.allocator, "{s}/lib/libnest.1.dylib", .{keg});
+    defer testing.allocator.free(dylib_target);
+    try test_io.symLinkAbsolute(std.Options.debug_io, dylib_target, dylib, .{});
+
+    // An empty nested dir must contribute no leaf and no prefix dir.
+    const empty = try std.fmt.allocPrint(testing.allocator, "{s}/share/empty", .{keg});
+    defer testing.allocator.free(empty);
+    try test_io.cwd().createDirPath(std.Options.debug_io, empty);
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // A kegs row so the links FK is satisfied and the rows actually record.
+    var ins = try db.prepare(
+        \\INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path)
+        \\VALUES (1, 'nest', 'nest', '1.0', 'aa', ?1);
+    );
+    try ins.bindText(1, keg);
+    _ = try ins.step();
+    ins.finalize();
+
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try linker.link(keg, "nest", 1, false);
+
+    // Every leaf — nested, sibling, and the keg symlink — must resolve.
+    const leaves = [_][]const u8{
+        "bin/tool",
+        "lib/pkgconfig/nest.pc",
+        "lib/libnest.dylib",
+        "share/locale/en_US/LC_MESSAGES/nest.mo",
+        "share/man/man1/tool.1",
+    };
+    for (leaves) |leaf| {
+        var lp_buf: [512]u8 = undefined;
+        const lp = try std.fmt.bufPrint(&lp_buf, "{s}/{s}", .{ prefix, leaf });
+        var tgt_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const tgt = try test_io.readLinkAbsolute(std.Options.debug_io, lp, &tgt_buf);
+        try testing.expect(std.mem.endsWith(u8, tgt, leaf));
+    }
+
+    // The empty keg dir is skipped: no prefix dir is created for it.
+    var empty_lp_buf: [512]u8 = undefined;
+    const empty_lp = try std.fmt.bufPrint(&empty_lp_buf, "{s}/share/empty", .{prefix});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.openDirAbsolute(std.Options.debug_io, empty_lp, .{}));
+
+    // One links row per leaf, each keyed on its full nested path so unlink
+    // removes it.
+    var count = try db.prepare("SELECT COUNT(*) FROM links WHERE keg_id = 1;");
+    defer count.finalize();
+    _ = try count.step();
+    try testing.expectEqual(@as(i64, leaves.len), count.columnInt(0));
+
+    // unlink clears the nested symlinks too.
+    try linker.unlink(1);
+    var data_lp_buf: [512]u8 = undefined;
+    const data_lp = try std.fmt.bufPrint(&data_lp_buf, "{s}/share/man/man1/tool.1", .{prefix});
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, data_lp, .{}));
+}
+
+test "checkConflicts detects a nested cross-keg collision" {
+    const prefix = try uniquePrefix("link_nested_conflict");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    // Two kegs that both ship the same nested man page.
+    const keg_a = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/alpha/1.0", .{prefix});
+    defer testing.allocator.free(keg_a);
+    const keg_b = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/beta/1.0", .{prefix});
+    defer testing.allocator.free(keg_b);
+    const man_a = try std.fmt.allocPrint(testing.allocator, "{s}/share/man/man1/tool.1", .{keg_a});
+    defer testing.allocator.free(man_a);
+    const man_b = try std.fmt.allocPrint(testing.allocator, "{s}/share/man/man1/tool.1", .{keg_b});
+    defer testing.allocator.free(man_b);
+    try writeFile(man_a, ".TH TOOL 1\n");
+    try writeFile(man_b, ".TH TOOL 1\n");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try linker.link(keg_a, "alpha", 1, false);
+
+    const conflicts = try linker.checkConflicts(keg_b, false);
+    defer {
+        for (conflicts) |c| {
+            testing.allocator.free(c.link_path);
+            testing.allocator.free(c.existing_keg);
+        }
+        testing.allocator.free(conflicts);
+    }
+    var matched = false;
+    for (conflicts) |c| {
+        if (std.mem.endsWith(u8, c.link_path, "/share/man/man1/tool.1")) {
+            matched = true;
+            try testing.expect(std.mem.indexOf(u8, c.existing_keg, "alpha") != null);
+        }
+    }
+    try testing.expect(matched);
+}
+
 test "linkOpt creates opt/{name} -> Cellar/{name}/{version}" {
     const prefix = try uniquePrefix("link_opt");
     defer testing.allocator.free(prefix);
