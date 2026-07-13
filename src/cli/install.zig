@@ -368,12 +368,16 @@ pub fn installAll(
     packages: []const []const u8,
     opts: InstallAllOpts,
 ) !void {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(allocator);
-    if (opts.cask) try argv.append(allocator, "--cask");
-    if (opts.isolate_deps) try argv.append(allocator, "--isolate-deps");
-    for (packages) |p| try argv.append(allocator, p);
-    return executeWithOpts(ctx, allocator, argv.items, .{ .skip_lock = opts.skip_lock, .sink = opts.sink });
+    // Build the typed flags directly — the bundle callers pass validated
+    // package names, so there is nothing to re-scan or refuse in `parse`.
+    return runInstall(ctx, allocator, packages, installFlagsFromOpts(opts), .{ .skip_lock = opts.skip_lock, .sink = opts.sink });
+}
+
+/// Map the non-argv `InstallAllOpts` onto the typed flags the argv path
+/// would have parsed from `--cask` / `--isolate-deps`. Keeps the bundle
+/// entry a struct construction instead of an argv round-trip.
+fn installFlagsFromOpts(opts: InstallAllOpts) args_mod.InstallFlags {
+    return .{ .force_cask = opts.cask, .isolate_deps = opts.isolate_deps };
 }
 
 /// Internal options that don't have an argv form. Kept private so the
@@ -391,6 +395,38 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     return executeWithOpts(ctx, allocator, args, .{});
 }
 
+/// Map a leaf refusal to its verbatim, caller-owned sink line + return code.
+/// The rules live in `install/args.zig`; the words live here (the
+/// `checkPrefixSane` precedent). Shared so the argv path and the struct-first
+/// path emit byte-identical refusals. Always returns an error.
+fn reportInstallRefusal(sink: OutputSink, refusal: args_mod.Refusal) anyerror {
+    switch (refusal.err) {
+        .local_requires_path => sink.err("--local requires a path to a .rb file", .{}),
+        .local_with_cask => sink.err("--local cannot be combined with --cask (a .rb file is never a cask)", .{}),
+        .local_with_formula => sink.err("--local already selects formula mode; drop --formula", .{}),
+        .local_with_system_ruby => sink.err("--local does not run post_install; --use-system-ruby has no effect and is refused", .{}),
+        .download_only_with_only_deps => sink.err("--download-only cannot be combined with --only-deps", .{}),
+        .no_packages => sink.err("No package names specified", .{}),
+        .self_install => sink.err("Refusing to install malt itself ('{s}'). Use 'mt version update' to upgrade.", .{refusal.arg}),
+        .ambiguous_system_ruby_scope => sink.err(
+            "--use-system-ruby needs a scope when multiple packages are installed; use --use-system-ruby={s}[,<name>...]",
+            .{refusal.arg},
+        ),
+    }
+    return switch (refusal.err) {
+        .no_packages => InstallError.NoPackages,
+        .ambiguous_system_ruby_scope => InstallError.AmbiguousSystemRubyScope,
+        // `error.Aborted` per the main.zig contract — avoids a raw stack trace.
+        .local_requires_path,
+        .local_with_cask,
+        .local_with_formula,
+        .local_with_system_ruby,
+        .download_only_with_only_deps,
+        .self_install,
+        => error.Aborted,
+    };
+}
+
 fn executeWithOpts(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -405,48 +441,44 @@ fn executeWithOpts(
     // Parse + validate argv in the leaf: the rules live there, the words
     // stay caller-owned (the `checkPrefixSane` precedent). Each refusal maps
     // to its verbatim sink line + return code below. A scoped arena backs the
-    // parsed package/scope slices so every return path reclaims them even when
-    // the caller's allocator isn't itself an arena.
+    // parsed package/scope slices; it stays alive across `runInstall` and is
+    // reclaimed here even when the caller's allocator isn't itself an arena.
     var parse_arena = std.heap.ArenaAllocator.init(allocator);
     defer parse_arena.deinit();
     const parsed = switch (try args_mod.parse(parse_arena.allocator(), args)) {
         .ok => |p| p,
-        .invalid => |v| {
-            switch (v.err) {
-                .local_requires_path => sink.err("--local requires a path to a .rb file", .{}),
-                .local_with_cask => sink.err("--local cannot be combined with --cask (a .rb file is never a cask)", .{}),
-                .local_with_formula => sink.err("--local already selects formula mode; drop --formula", .{}),
-                .local_with_system_ruby => sink.err("--local does not run post_install; --use-system-ruby has no effect and is refused", .{}),
-                .download_only_with_only_deps => sink.err("--download-only cannot be combined with --only-deps", .{}),
-                .no_packages => sink.err("No package names specified", .{}),
-                .self_install => sink.err("Refusing to install malt itself ('{s}'). Use 'mt version update' to upgrade.", .{v.arg}),
-                .ambiguous_system_ruby_scope => sink.err(
-                    "--use-system-ruby needs a scope when multiple packages are installed; use --use-system-ruby={s}[,<name>...]",
-                    .{v.arg},
-                ),
-            }
-            return switch (v.err) {
-                .no_packages => InstallError.NoPackages,
-                .ambiguous_system_ruby_scope => InstallError.AmbiguousSystemRubyScope,
-                // `error.Aborted` per the main.zig contract — avoids a raw stack trace.
-                .local_requires_path,
-                .local_with_cask,
-                .local_with_formula,
-                .local_with_system_ruby,
-                .download_only_with_only_deps,
-                .self_install,
-                => error.Aborted,
-            };
-        },
+        .invalid => |v| return reportInstallRefusal(sink, v),
     };
 
     // Global side effects the UI-agnostic leaf can't apply: `--quiet` / `--json`
-    // are surfaced by `parse` and applied once here; the global `--dry-run`
-    // (consumed by main.zig) ORs with the parsed flag.
+    // are surfaced by `parse` and applied once here.
     if (parsed.quiet) output.setQuiet(true);
     if (parsed.json) output.setMode(.json);
-    const packages = parsed.packages;
-    var flags = parsed.flags;
+
+    return runInstall(ctx, allocator, parsed.packages, parsed.flags, exec_opts);
+}
+
+/// Struct-first install core shared by the argv path (`executeWithOpts`)
+/// and the bundle path (`installAll`). Both hand it resolved packages +
+/// typed flags; the only remaining orchestrator-owned flag fold is the
+/// global `--dry-run` (consumed by main.zig), OR-ed in here.
+fn runInstall(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    packages: []const []const u8,
+    flags_in: args_mod.InstallFlags,
+    exec_opts: ExecuteOpts,
+) !void {
+    const sink = exec_opts.sink;
+
+    // Install-contract guard shared with the argv path (which ran it inside
+    // `parse`). On the struct-first path it is the only place a self-install
+    // or an empty list is refused, keeping both entry points symmetric.
+    if (args_mod.checkInstallable(packages)) |refusal| return reportInstallRefusal(sink, refusal);
+
+    // Resolve the dual-source dry-run once, for both entry points: the
+    // per-command `--dry-run` flag OR the global `--dry-run` main.zig consumed.
+    var flags = flags_in;
     flags.dry_run = flags.dry_run or output.isDryRun();
 
     // Initialize infrastructure
@@ -1400,6 +1432,28 @@ fn formatMaterializeFailure(buf: []u8, name: []const u8, err: cellar_mod.CellarE
     // Overflow only fires on pathologically long names; fall back to a
     // truncated form rather than swallowing the failure silently.
     return result catch "Failed to materialize <truncated>";
+}
+
+test "installFlagsFromOpts matches what the --cask --isolate-deps argv path parsed" {
+    // Byte-parity oracle for dropping the argv round-trip: the flags built
+    // directly from InstallAllOpts must equal what parse() derived from the
+    // synthesised `--cask --isolate-deps` argv, and set nothing else.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const parsed = switch (try args_mod.parse(arena.allocator(), &.{ "--cask", "--isolate-deps", "wget" })) {
+        .ok => |p| p,
+        .invalid => return error.TestUnexpectedResult,
+    };
+    const direct = installFlagsFromOpts(.{ .cask = true, .isolate_deps = true });
+    try std.testing.expectEqual(parsed.flags.force_cask, direct.force_cask);
+    try std.testing.expectEqual(parsed.flags.isolate_deps, direct.isolate_deps);
+    try std.testing.expectEqual(parsed.flags.force, direct.force);
+    try std.testing.expectEqual(parsed.flags.force_formula, direct.force_formula);
+    try std.testing.expectEqual(parsed.flags.dry_run, direct.dry_run);
+    try std.testing.expectEqual(parsed.flags.local_only, direct.local_only);
+    try std.testing.expectEqual(parsed.flags.only_deps, direct.only_deps);
+    try std.testing.expectEqual(parsed.flags.download_only, direct.download_only);
+    try std.testing.expectEqual(parsed.flags.system_ruby.len, direct.system_ruby.len);
 }
 
 test "promoteIsolatedDepIfAny opt-links the revisioned dir, not the raw version" {
