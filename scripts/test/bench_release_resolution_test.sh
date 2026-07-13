@@ -61,6 +61,22 @@ check "bare tag list" "v0.3.2" "$(printf 'v0.2.1\nv0.3.0\nv0.3.2\nv0.2.9\n' | pi
 check "empty input yields empty" "" "$(printf '' | pick_latest_tag)"
 check "no stable tags yields empty" "" "$(printf 'v1.0.0-rc1\nmain\n' | pick_latest_tag)"
 
+echo "pick_latest_release_branch:"
+# Real ls-remote --heads shape for the release/N.M branch line.
+heads=$(
+  cat <<'EOF'
+1111111111111111111111111111111111111111	refs/heads/main
+2222222222222222222222222222222222222222	refs/heads/release/0.9
+3333333333333333333333333333333333333333	refs/heads/release/0.19
+4444444444444444444444444444444444444444	refs/heads/release/0.20
+5555555555555555555555555555555555555555	refs/heads/feature/release-notes
+EOF
+)
+check "highest minor wins (0.20 > 0.19 > 0.9)" "release/0.20" "$(printf '%s\n' "$heads" | pick_latest_release_branch)"
+check "bare ref list" "release/0.20" "$(printf 'release/0.18\nrelease/0.20\nrelease/0.19\n' | pick_latest_release_branch)"
+check "empty input yields empty" "" "$(printf '' | pick_latest_release_branch)"
+check "non-release refs ignored" "" "$(printf 'main\nfeature/release/0.20\n' | pick_latest_release_branch)"
+
 echo "over_threshold:"
 check_pred "130.802 over 30 trips" 0 over_threshold "130.802" "30"
 check_pred "2.9 under 30 does not trip" 1 over_threshold "2.933" "30"
