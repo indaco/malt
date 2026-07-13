@@ -237,12 +237,30 @@ pub const Parsed = struct {
     json: bool,
 };
 
+/// A tagged refusal. `arg` borrows into the caller's argv/package slice —
+/// the offending package for `self_install`, the first package for
+/// `ambiguous_system_ruby_scope`.
+pub const Refusal = struct { err: ParseError, arg: []const u8 = "" };
+
 pub const ParseResult = union(enum) {
     ok: Parsed,
-    /// `arg` borrows into `args` — the offending package for `self_install`,
-    /// the first package for `ambiguous_system_ruby_scope`.
-    invalid: struct { err: ParseError, arg: []const u8 = "" },
+    invalid: Refusal,
 };
+
+/// The install-contract checks that hold regardless of how the flags were
+/// built: a non-empty package list and no self-install. The argv path runs
+/// them inside `parse`; the struct-first path (`installAll`) runs the same
+/// function in the orchestrator, so both entry points share one guarantee.
+/// Pure and allocation-free — the offending name borrows into `packages`.
+pub fn checkInstallable(packages: []const []const u8) ?Refusal {
+    if (packages.len == 0) return .{ .err = .no_packages };
+    // Refuse self-install in every shape the dispatcher accepts; `mt version
+    // update` is the supported upgrade channel.
+    for (packages) |pkg| {
+        if (isSelfInstall(pkg)) return .{ .err = .self_install, .arg = pkg };
+    }
+    return null;
+}
 
 const InstallFlag = enum {
     cask,
@@ -338,14 +356,8 @@ pub fn parse(arena: std.mem.Allocator, args: []const []const u8) error{OutOfMemo
     if (flags.download_only and flags.only_deps) {
         return .{ .invalid = .{ .err = .download_only_with_only_deps } };
     }
-    if (packages.items.len == 0) {
-        return .{ .invalid = .{ .err = .no_packages } };
-    }
-    // Refuse self-install in every shape the dispatcher accepts; `mt version
-    // update` is the supported upgrade channel.
-    for (packages.items) |pkg| {
-        if (isSelfInstall(pkg)) return .{ .invalid = .{ .err = .self_install, .arg = pkg } };
-    }
+    // Shared install-contract guard; the struct-first path runs the same one.
+    if (checkInstallable(packages.items)) |refusal| return .{ .invalid = refusal };
     // Bare `--use-system-ruby` is only valid for a single formula.
     if (use_system_ruby_bare) {
         if (packages.items.len == 1) {
@@ -563,6 +575,16 @@ test "parse: brew-parity aliases resolve to the same flags as their canonical sp
             try std.testing.expectEqualStrings("wget", p.packages[0]);
         },
     }
+}
+
+test "checkInstallable: empty list and self-install refused, real names pass" {
+    // The shared install-contract guard both the argv path and installAll
+    // funnel through; a bundle member named `malt` is refused symmetrically.
+    try std.testing.expectEqual(ParseError.no_packages, checkInstallable(&.{}).?.err);
+    const refusal = checkInstallable(&.{ "wget", "malt" }).?;
+    try std.testing.expectEqual(ParseError.self_install, refusal.err);
+    try std.testing.expectEqualStrings("malt", refusal.arg);
+    try std.testing.expect(checkInstallable(&.{ "wget", "jq" }) == null);
 }
 
 test "isCoreTap recognises homebrew/core and homebrew/cask" {
