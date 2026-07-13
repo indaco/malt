@@ -18,9 +18,9 @@ grep -Rqs -- "$FILTER" "$ROOT/src/cli/install.zig" ||
 # The real call site must be gated by the predicate, not a bare `if (force)`.
 # The colocated test re-implements the gate, so this grep is what catches a
 # revert of the wiring at the prune site.
-grep -Rqs -- "if (shouldPruneForReinstall(force, download_only))" "$ROOT/src/cli/install.zig" ||
+grep -Rqs -- "if (flags.pruneForReinstall())" "$ROOT/src/cli/install.zig" ||
   {
-    echo "FAIL: --force prune is not gated by shouldPruneForReinstall" >&2
+    echo "FAIL: --force prune is not gated by InstallFlags.pruneForReinstall" >&2
     exit 1
   }
 

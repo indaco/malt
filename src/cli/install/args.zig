@@ -168,6 +168,91 @@ pub fn expandTildePath(ctx: *const AppCtx, buf: []u8, arg: []const u8) ?[]const 
     return std.fmt.bufPrint(buf, "{s}{s}", .{ home, arg[1..] }) catch null;
 }
 
+/// The eleven install modes as one typed value object. Populated from
+/// argv in `cli/install.zig` and threaded through the phase code so read
+/// sites name intent (`flags.fastpathEligible()`) instead of re-deriving
+/// boolean algebra inline. Bare bools carry no allocation; `system_ruby`
+/// borrows the caller's resolved scope slice.
+pub const InstallFlags = struct {
+    force_cask: bool = false,
+    force_formula: bool = false,
+    dry_run: bool = false,
+    force: bool = false,
+    local_only: bool = false,
+    only_deps: bool = false,
+    download_only: bool = false,
+    isolate_deps: bool = false,
+    /// Resolved `--use-system-ruby` scope. Empty means system ruby off.
+    system_ruby: []const []const u8 = &.{},
+
+    // ── Derived predicates: the flag interaction, named ───────────────
+
+    /// Eligible for the idempotent fast path that skips DB/lock/HTTP.
+    /// Only modes that change install semantics veto it; `download_only`,
+    /// `isolate_deps`, and `force_formula` don't reach the fast path gate.
+    pub fn fastpathEligible(self: InstallFlags) bool {
+        return !self.force and !self.force_cask and !self.local_only and
+            !self.dry_run and !self.only_deps;
+    }
+
+    /// Whether the `--force` pre-materialize prune should run.
+    /// `--download-only` stops before materialize, so pruning then would
+    /// delete an installed keg with nothing to repopulate it — download-only
+    /// must never mutate the installed cellar.
+    pub fn pruneForReinstall(self: InstallFlags) bool {
+        return self.force and !self.download_only;
+    }
+
+    /// Whether this keg's bins are isolated out of PATH. Direct kegs (the
+    /// names the user asked for) are never isolated even under
+    /// `--isolate-deps` — the contract isolates transitive deps only.
+    pub fn isolatesDep(self: InstallFlags, is_dep: bool) bool {
+        return self.isolate_deps and is_dep;
+    }
+};
+
+test "InstallFlags.fastpathEligible: clear when no semantic flag is set" {
+    try std.testing.expect((InstallFlags{}).fastpathEligible());
+}
+
+test "InstallFlags.fastpathEligible: force/cask/local/dry_run/only_deps each veto it" {
+    try std.testing.expect(!(InstallFlags{ .force = true }).fastpathEligible());
+    try std.testing.expect(!(InstallFlags{ .force_cask = true }).fastpathEligible());
+    try std.testing.expect(!(InstallFlags{ .local_only = true }).fastpathEligible());
+    try std.testing.expect(!(InstallFlags{ .dry_run = true }).fastpathEligible());
+    try std.testing.expect(!(InstallFlags{ .only_deps = true }).fastpathEligible());
+}
+
+test "InstallFlags.fastpathEligible: download_only/isolate_deps/force_formula do NOT gate it" {
+    // These three are absent from the fast-path conjunction; the test
+    // fails if someone folds one into it and narrows the fast path.
+    try std.testing.expect((InstallFlags{ .download_only = true }).fastpathEligible());
+    try std.testing.expect((InstallFlags{ .isolate_deps = true }).fastpathEligible());
+    try std.testing.expect((InstallFlags{ .force_formula = true }).fastpathEligible());
+}
+
+test "InstallFlags.pruneForReinstall: only a plain --force prunes" {
+    try std.testing.expect((InstallFlags{ .force = true }).pruneForReinstall());
+    try std.testing.expect(!(InstallFlags{}).pruneForReinstall());
+    try std.testing.expect(!(InstallFlags{ .download_only = true }).pruneForReinstall());
+}
+
+test "InstallFlags.pruneForReinstall: download-only vetoes the force prune" {
+    // A --download-only run stops before materialize; pruning then would
+    // delete an installed keg with nothing to repopulate it. The
+    // !download_only guard is the keg-deletion invariant — this test
+    // fails if someone later drops that guard.
+    try std.testing.expect(!(InstallFlags{ .force = true, .download_only = true }).pruneForReinstall());
+}
+
+test "InstallFlags.isolatesDep: gated on isolate_deps AND is_dep" {
+    try std.testing.expect((InstallFlags{ .isolate_deps = true }).isolatesDep(true));
+    // A direct keg is never isolated, even under --isolate-deps.
+    try std.testing.expect(!(InstallFlags{ .isolate_deps = true }).isolatesDep(false));
+    try std.testing.expect(!(InstallFlags{}).isolatesDep(true));
+    try std.testing.expect(!(InstallFlags{}).isolatesDep(false));
+}
+
 test "isCoreTap recognises homebrew/core and homebrew/cask" {
     try std.testing.expect(isCoreTap("homebrew/core"));
     try std.testing.expect(isCoreTap("homebrew/cask"));
