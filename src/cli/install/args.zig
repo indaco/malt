@@ -1,6 +1,7 @@
-//! Pure argv + path helpers used by `cli/install.zig`. Every function
-//! here is allocation-free and filesystem-free so tests can call them
-//! without fixtures.
+//! Pure argv + path helpers used by `cli/install.zig`. The path/predicate
+//! helpers are allocation-free and filesystem-free so tests can call them
+//! without fixtures; `parse` is the one exception — it takes the caller's
+//! arena to build the package list and split the `--use-system-ruby=` scope.
 
 const std = @import("std");
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
@@ -211,6 +212,153 @@ pub const InstallFlags = struct {
     }
 };
 
+/// One variant per argv refusal. Data, not words: the orchestrator maps
+/// each to its user-facing `sink.err` line and return code, so the leaf
+/// stays UI-agnostic (the `checkPrefixSane` precedent).
+pub const ParseError = enum {
+    local_requires_path,
+    local_with_cask,
+    local_with_formula,
+    local_with_system_ruby,
+    download_only_with_only_deps,
+    no_packages,
+    self_install,
+    ambiguous_system_ruby_scope,
+};
+
+/// The validated argv: resolved flags plus the package list. `quiet` /
+/// `json` are surfaced (not applied) because touching `output` would break
+/// the leaf boundary; `dry_run` here reflects only `--dry-run` in `args`,
+/// leaving the global `output.isDryRun()` OR to the caller.
+pub const Parsed = struct {
+    flags: InstallFlags,
+    packages: []const []const u8,
+    quiet: bool,
+    json: bool,
+};
+
+pub const ParseResult = union(enum) {
+    ok: Parsed,
+    /// `arg` borrows into `args` — the offending package for `self_install`,
+    /// the first package for `ambiguous_system_ruby_scope`.
+    invalid: struct { err: ParseError, arg: []const u8 = "" },
+};
+
+const InstallFlag = enum {
+    cask,
+    formula,
+    dry_run,
+    force,
+    local,
+    use_system_ruby,
+    quiet,
+    json,
+    only_deps,
+    download_only,
+    isolate_deps,
+};
+
+const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
+    .{ "--cask", .cask },
+    .{ "--formula", .formula },
+    .{ "--dry-run", .dry_run },
+    .{ "--force", .force },
+    .{ "--local", .local },
+    .{ "--use-system-ruby", .use_system_ruby },
+    .{ "--quiet", .quiet },
+    .{ "-q", .quiet },
+    .{ "--json", .json },
+    .{ "--only-deps", .only_deps },
+    // brew-parity alias — `--only-dependencies` is what `brew install`
+    // accepts, so muscle memory keeps working alongside the canonical
+    // `--only-deps` spelling that mirrors `--isolate-deps`.
+    .{ "--only-dependencies", .only_deps },
+    .{ "--download-only", .download_only },
+    .{ "--isolate-deps", .isolate_deps },
+    // Long-form alias — mirrors the `--only-deps` / `--only-dependencies`
+    // pair so the flag surface stays predictable.
+    .{ "--isolate-dependencies", .isolate_deps },
+});
+
+/// Scan + validate the install argv in one place. Returns validated data or
+/// a tagged refusal — never a message. `arena` builds the package list and
+/// the split `--use-system-ruby=` scope; the caller owns it (the `installAll`
+/// contract already threads a run arena).
+pub fn parse(arena: std.mem.Allocator, args: []const []const u8) error{OutOfMemory}!ParseResult {
+    var packages: std.ArrayList([]const u8) = .empty;
+    var system_ruby: std.ArrayList([]const u8) = .empty;
+    var flags: InstallFlags = .{};
+    var quiet = false;
+    var json = false;
+    // A bare `--use-system-ruby` across multiple formulas would let one DSL
+    // parse failure silently widen Ruby trust; resolved or rejected below.
+    var use_system_ruby_bare = false;
+
+    // StaticStringMap + exhaustive switch: the compiler checks every flag has
+    // a handler, so adding a variant without wiring it fails to build.
+    for (args) |arg| {
+        if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
+            const list = arg["--use-system-ruby=".len..];
+            var it = std.mem.splitScalar(u8, list, ',');
+            while (it.next()) |name| {
+                if (name.len > 0) try system_ruby.append(arena, name);
+            }
+            continue;
+        }
+        if (install_flag_map.get(arg)) |flag| switch (flag) {
+            .cask => flags.force_cask = true,
+            .formula => flags.force_formula = true,
+            .dry_run => flags.dry_run = true,
+            .force => flags.force = true,
+            .local => flags.local_only = true,
+            .use_system_ruby => use_system_ruby_bare = true,
+            .quiet => quiet = true,
+            .json => json = true,
+            .only_deps => flags.only_deps = true,
+            .download_only => flags.download_only = true,
+            .isolate_deps => flags.isolate_deps = true,
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try packages.append(arena, arg);
+        }
+    }
+
+    if (flags.local_only and packages.items.len == 0) {
+        return .{ .invalid = .{ .err = .local_requires_path } };
+    }
+    // Refuse ambiguous argv so `--local` cannot silently drop another mode.
+    if (flags.local_only) {
+        if (flags.force_cask) return .{ .invalid = .{ .err = .local_with_cask } };
+        if (flags.force_formula) return .{ .invalid = .{ .err = .local_with_formula } };
+        if (use_system_ruby_bare or system_ruby.items.len > 0) {
+            return .{ .invalid = .{ .err = .local_with_system_ruby } };
+        }
+    }
+    // --only-deps skips the requested package, --download-only skips
+    // materialise+link entirely; refuse rather than pick a winner.
+    if (flags.download_only and flags.only_deps) {
+        return .{ .invalid = .{ .err = .download_only_with_only_deps } };
+    }
+    if (packages.items.len == 0) {
+        return .{ .invalid = .{ .err = .no_packages } };
+    }
+    // Refuse self-install in every shape the dispatcher accepts; `mt version
+    // update` is the supported upgrade channel.
+    for (packages.items) |pkg| {
+        if (isSelfInstall(pkg)) return .{ .invalid = .{ .err = .self_install, .arg = pkg } };
+    }
+    // Bare `--use-system-ruby` is only valid for a single formula.
+    if (use_system_ruby_bare) {
+        if (packages.items.len == 1) {
+            try system_ruby.append(arena, packages.items[0]);
+        } else {
+            return .{ .invalid = .{ .err = .ambiguous_system_ruby_scope, .arg = packages.items[0] } };
+        }
+    }
+
+    flags.system_ruby = system_ruby.items;
+    return .{ .ok = .{ .flags = flags, .packages = packages.items, .quiet = quiet, .json = json } };
+}
+
 test "InstallFlags.fastpathEligible: clear when no semantic flag is set" {
     try std.testing.expect((InstallFlags{}).fastpathEligible());
 }
@@ -251,6 +399,170 @@ test "InstallFlags.isolatesDep: gated on isolate_deps AND is_dep" {
     try std.testing.expect(!(InstallFlags{ .isolate_deps = true }).isolatesDep(false));
     try std.testing.expect(!(InstallFlags{}).isolatesDep(true));
     try std.testing.expect(!(InstallFlags{}).isolatesDep(false));
+}
+
+fn expectInvalid(res: ParseResult, want: ParseError) !void {
+    switch (res) {
+        .ok => return error.TestUnexpectedResult,
+        .invalid => |v| try std.testing.expectEqual(want, v.err),
+    }
+}
+
+test "parse: a bare package name yields ok with default flags" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = try parse(arena.allocator(), &.{"wget"});
+    switch (res) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| {
+            try std.testing.expectEqual(@as(usize, 1), p.packages.len);
+            try std.testing.expectEqualStrings("wget", p.packages[0]);
+            try std.testing.expectEqual(InstallFlags{}, p.flags);
+        },
+    }
+}
+
+test "parse: --local without a path is refused (a .rb path is required)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectInvalid(try parse(arena.allocator(), &.{"--local"}), .local_requires_path);
+}
+
+test "parse: --local + --cask is refused (a .rb file is never a cask)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectInvalid(try parse(arena.allocator(), &.{ "--local", "--cask", "./x.rb" }), .local_with_cask);
+}
+
+test "parse: --local + --formula is refused (--local already selects formula)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectInvalid(try parse(arena.allocator(), &.{ "--local", "--formula", "./x.rb" }), .local_with_formula);
+}
+
+test "parse: --local + --use-system-ruby is refused (local runs no post_install)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectInvalid(try parse(arena.allocator(), &.{ "--local", "--use-system-ruby", "./x.rb" }), .local_with_system_ruby);
+}
+
+test "parse: --download-only + --only-deps is refused (they pull opposite ways)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectInvalid(try parse(arena.allocator(), &.{ "wget", "--download-only", "--only-deps" }), .download_only_with_only_deps);
+}
+
+test "parse: an empty package list is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectInvalid(try parse(arena.allocator(), &.{"--force"}), .no_packages);
+}
+
+test "parse: self-install is refused and carries the offending arg" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = try parse(arena.allocator(), &.{"malt"});
+    switch (res) {
+        .ok => return error.TestUnexpectedResult,
+        .invalid => |v| {
+            try std.testing.expectEqual(ParseError.self_install, v.err);
+            try std.testing.expectEqualStrings("malt", v.arg);
+        },
+    }
+}
+
+test "parse: bare --use-system-ruby with multiple packages needs a scope" {
+    // A bare flag across many formulas would let one DSL parse failure
+    // silently widen Ruby trust across the rest — refuse and name the
+    // first package so the caller can suggest the scoped form.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = try parse(arena.allocator(), &.{ "--use-system-ruby", "wget", "jq" });
+    switch (res) {
+        .ok => return error.TestUnexpectedResult,
+        .invalid => |v| {
+            try std.testing.expectEqual(ParseError.ambiguous_system_ruby_scope, v.err);
+            try std.testing.expectEqualStrings("wget", v.arg);
+        },
+    }
+}
+
+test "parse: bare --use-system-ruby folds into scope for a single formula" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = try parse(arena.allocator(), &.{ "--use-system-ruby", "wget" });
+    switch (res) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| {
+            try std.testing.expectEqual(@as(usize, 1), p.flags.system_ruby.len);
+            try std.testing.expectEqualStrings("wget", p.flags.system_ruby[0]);
+        },
+    }
+}
+
+test "parse: --use-system-ruby=<scope> splits the comma list into system_ruby" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = try parse(arena.allocator(), &.{ "--use-system-ruby=wget,jq", "wget", "jq" });
+    switch (res) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| {
+            try std.testing.expectEqual(@as(usize, 2), p.flags.system_ruby.len);
+            try std.testing.expectEqualStrings("wget", p.flags.system_ruby[0]);
+            try std.testing.expectEqualStrings("jq", p.flags.system_ruby[1]);
+        },
+    }
+}
+
+test "parse: dry_run reflects only --dry-run, never the global (leaf purity)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const with = try parse(arena.allocator(), &.{ "--dry-run", "wget" });
+    switch (with) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| try std.testing.expect(p.flags.dry_run),
+    }
+    // A bare invocation must leave dry_run false even if the process global
+    // is on — the OR happens in the caller, not the leaf.
+    const without = try parse(arena.allocator(), &.{"wget"});
+    switch (without) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| try std.testing.expect(!p.flags.dry_run),
+    }
+}
+
+test "parse: --quiet / --json are surfaced on the result, not applied" {
+    // The leaf must not call output.setQuiet/setMode; it reports intent and
+    // the orchestrator applies it once, post-parse.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = try parse(arena.allocator(), &.{ "--quiet", "--json", "wget" });
+    switch (res) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| {
+            try std.testing.expect(p.quiet);
+            try std.testing.expect(p.json);
+        },
+    }
+}
+
+test "parse: brew-parity aliases resolve to the same flags as their canonical spelling" {
+    // The relocated flag map must keep the long-form + `-q` aliases. A typo in
+    // the move would silently route `--only-dependencies` into the package list
+    // instead of setting only_deps — this guards the whole moved map.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = try parse(arena.allocator(), &.{ "-q", "--only-dependencies", "--isolate-dependencies", "wget" });
+    switch (res) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| {
+            try std.testing.expect(p.quiet);
+            try std.testing.expect(p.flags.only_deps);
+            try std.testing.expect(p.flags.isolate_deps);
+            try std.testing.expectEqual(@as(usize, 1), p.packages.len);
+            try std.testing.expectEqualStrings("wget", p.packages[0]);
+        },
+    }
 }
 
 test "isCoreTap recognises homebrew/core and homebrew/cask" {
