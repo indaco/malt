@@ -105,6 +105,18 @@ pub fn paintRows(f: *Frame, rows: []const []const u8, view: scroll_list.View, re
         f.moveClear(rect.row + @as(u16, @intCast(i)), rect.col);
         f.putContent(scroll_list.truncate(row, rect.width));
     }
+    blankRemainder(f, rect, @intCast(win.len));
+}
+
+/// Blank every row of `rect` the caller left unpainted — from `painted` rows
+/// down to the bottom edge — each self-erased via `moveClear`. So a region that
+/// shrank between frames covers its whole rectangle and no stale row can survive
+/// once the whole-screen clear is gone. `painted` is `visible`-clamped to the
+/// height, so a full region blanks nothing. Shared: the per-tab list loops call
+/// this after their own paint to close the same variable-height gap.
+pub fn blankRemainder(f: *Frame, rect: Rect, painted: u16) void {
+    var i = painted;
+    while (i < rect.height) : (i += 1) f.moveClear(rect.row + i, rect.col);
 }
 
 /// A multi-select row checkbox: unselected, selected, or blocked (a row that
@@ -413,4 +425,65 @@ test "paintRows positions each row and a row's embedded newline never injects a 
     try std.testing.expect(std.mem.indexOfScalar(u8, f.slice(), '\n') == null);
     try std.testing.expect(std.mem.indexOf(u8, f.slice(), "xy") != null); // the \n was stripped
     try std.testing.expect(std.mem.indexOf(u8, f.slice(), "z") != null);
+}
+
+test "paintRows blanks the whole rectangle so a shrunk list leaves no ghost rows" {
+    var buf: [256]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    // Two rows into a five-tall region: the three rows the list no longer fills
+    // must each be blanked, so nothing survives once the whole-screen clear goes.
+    const rows = [_][]const u8{ "a", "b" };
+    paintRows(&f, &rows, .{}, .{ .row = 1, .col = 1, .width = 20, .height = 5 });
+    const out = f.slice();
+    // Five self-erasing rows total: two painted, three remainder.
+    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, out, "\x1b[K"));
+    // The remainder rows are addressed and erased in place.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[3;1H\x1b[K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[4;1H\x1b[K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[5;1H\x1b[K") != null);
+}
+
+test "paintRows on a full-height list blanks no extra row past the rectangle bottom" {
+    var buf: [256]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    // List exactly fills the region: no remainder, and nothing addresses row 4.
+    const rows = [_][]const u8{ "a", "b", "c" };
+    paintRows(&f, &rows, .{}, .{ .row = 1, .col = 1, .width = 20, .height = 3 });
+    const out = f.slice();
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, out, "\x1b[K"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[4;1H") == null); // no write past the bottom edge
+}
+
+test "paintRows on an empty list blanks every row of the rectangle" {
+    var buf: [256]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    // A filtered list with no matches: nothing painted, so all four rows are blanked.
+    paintRows(&f, &.{}, .{}, .{ .row = 1, .col = 1, .width = 20, .height = 4 });
+    const out = f.slice();
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, out, "\x1b[K"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1;1H\x1b[K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[4;1H\x1b[K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[5;1H") == null); // no write past the bottom edge
+}
+
+test "blankRemainder addresses the unpainted rows relative to the rect origin" {
+    var buf: [128]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    // Region at row 10, col 3, one row painted: only rows 11 and 12 are blanked,
+    // rect-relative — the painted row 10 is left alone and nothing runs past 12.
+    blankRemainder(&f, .{ .row = 10, .col = 3, .width = 20, .height = 3 }, 1);
+    const out = f.slice();
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "\x1b[K"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[11;3H\x1b[K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[12;3H\x1b[K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[10;3H") == null); // caller's painted row untouched
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[13;3H") == null); // nothing past the bottom
+}
+
+test "blankRemainder is a no-op when the caller already filled the rectangle" {
+    var buf: [64]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    // painted >= height: the `i < height` bound yields no rows, so nothing is emitted.
+    blankRemainder(&f, .{ .row = 1, .col = 1, .width = 20, .height = 3 }, 3);
+    try std.testing.expectEqual(@as(usize, 0), f.slice().len);
 }
