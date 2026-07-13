@@ -67,6 +67,17 @@ pub const Frame = struct {
         self.put(term.cursorMove(&tmp, row, col) catch return);
     }
 
+    /// Position the cursor, then erase to end of line — a self-erasing line for
+    /// single-write rows that own their line from `col` rightward. The erase is a
+    /// raw `put` on purpose: `putContent` strips ESC, so a row can never emit its
+    /// own erase. Rows that paint several segments across one line (the header,
+    /// the detail pane's indented continuations) must keep `moveTo` — a mid-row
+    /// erase here would wipe an earlier segment.
+    pub fn moveClear(self: *Frame, row: u16, col: u16) void {
+        self.moveTo(row, col);
+        self.put(term.seq.erase_line);
+    }
+
     /// Paint untrusted row content as inert text: TAB becomes a space and every
     /// C0 control byte — ESC included — plus DEL is dropped, so a child-derived
     /// row can neither re-drive the cursor (ESC/CSI), set the window title (OSC),
@@ -84,13 +95,14 @@ pub const Frame = struct {
 };
 
 /// Paint `rows` into `rect`: clamp the view to the height, take the visible
-/// window, position each row and paint it through `putContent`. The single
+/// window, position-and-erase each row (`moveClear`) then paint it through
+/// `putContent` — so a shorter repaint drops the previous row's tail. The single
 /// place row content reaches the frame — so the control-byte defense lives here once.
 pub fn paintRows(f: *Frame, rows: []const []const u8, view: scroll_list.View, rect: Rect) void {
     const v = scroll_list.clamp(view, rows.len, rect.height);
     const win = scroll_list.visible(rows, v, rect.height);
     for (win, 0..) |row, i| {
-        f.moveTo(rect.row + @as(u16, @intCast(i)), rect.col);
+        f.moveClear(rect.row + @as(u16, @intCast(i)), rect.col);
         f.putContent(scroll_list.truncate(row, rect.width));
     }
 }
@@ -336,6 +348,15 @@ test "Frame.moveTo emits a 1-based CUP sequence" {
     try std.testing.expectEqualStrings("\x1b[3;5H", f.slice());
 }
 
+test "Frame.moveClear positions then erases to end of line" {
+    var buf: [32]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    f.moveClear(3, 5);
+    // CUP followed by a raw erase-to-EOL: the mechanism that lets a shorter
+    // repaint drop the previous row's tail once the whole-screen clear is gone.
+    try std.testing.expectEqualStrings("\x1b[3;5H\x1b[K", f.slice());
+}
+
 test "Frame.putContent strips line breakers and turns tab into a space" {
     var buf: [32]u8 = undefined;
     var f: Frame = .{ .buf = &buf };
@@ -360,6 +381,27 @@ test "putContent strips the control introducers from a hostile row (OSC + BEL + 
     try std.testing.expect(std.mem.indexOfScalar(u8, out, 0x1b) == null); // no ESC → no CSI/OSC executes
     try std.testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null); // BEL dropped
     try std.testing.expect(std.mem.indexOf(u8, out, "x") != null and std.mem.indexOf(u8, out, "y") != null);
+}
+
+test "paintRows self-erases every painted row so a shorter repaint drops no tail" {
+    var buf: [128]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    const rows = [_][]const u8{ "a-long-previous-row", "short" };
+    paintRows(&f, &rows, .{}, .{ .row = 1, .col = 1, .width = 20, .height = 2 });
+    // One erase-to-EOL per positioned row: the byte that clears the stale tail
+    // once the whole-screen clear is gone. (CUP carries no bare `\x1b[K`.)
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, f.slice(), "\x1b[K"));
+}
+
+test "paintRows emits the erase raw yet still scrubs an erase carried in row content" {
+    var buf: [64]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    const rows = [_][]const u8{"\x1b[Kx"}; // a hostile row carrying its own erase
+    paintRows(&f, &rows, .{}, .{ .row = 1, .col = 1, .width = 10, .height = 1 });
+    // Exactly one erase — the structural one from moveClear. The row's own
+    // `\x1b[K` lost its ESC to putContent, so it can never drive a second erase.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, f.slice(), "\x1b[K"));
+    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "[Kx") != null); // inert remnant
 }
 
 test "paintRows positions each row and a row's embedded newline never injects a frame line" {
