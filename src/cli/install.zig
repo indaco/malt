@@ -82,15 +82,6 @@ pub fn pruneCellarForReinstall(ctx: *const AppCtx, prefix: []const u8, name: []c
     std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};
 }
 
-/// Whether the `--force` pre-materialize prune should run. `--download-only`
-/// stops before the materialize phase, so pruning then would deleteTree an
-/// installed keg with nothing to re-populate it — download-only must never
-/// mutate the installed cellar. Mirrors the tap/local path, which already
-/// returns on download-only before its own force prune.
-pub fn shouldPruneForReinstall(force: bool, download_only: bool) bool {
-    return force and !download_only;
-}
-
 /// Unlink the on-disk symlinks AND drop the `links` rows for every
 /// `kegs` row of `name` whose `cellar_path` differs from
 /// `keep_cellar_path` — i.e. the prior install at an other
@@ -565,6 +556,20 @@ fn executeWithOpts(
     }
     const use_system_ruby_list: []const []const u8 = use_system_ruby_scope.items;
 
+    // Snapshot the parsed modes as one typed value object; every read site
+    // below names intent off `flags` instead of threading loose bools.
+    const flags: args_mod.InstallFlags = .{
+        .force_cask = force_cask,
+        .force_formula = force_formula,
+        .dry_run = dry_run,
+        .force = force,
+        .local_only = local_only,
+        .only_deps = only_deps,
+        .download_only = download_only,
+        .isolate_deps = isolate_deps,
+        .system_ruby = use_system_ruby_list,
+    };
+
     // Initialize infrastructure
     const prefix = atomic.maltPrefixOrAbort();
 
@@ -585,8 +590,7 @@ fn executeWithOpts(
     // (--force / --cask / --local / --dry-run / --only-deps) and
     // tap-form / .rb-path args route to the regular flow. All-or-nothing
     // on multi-arg keeps the gate state-free.
-    const fastpath_eligible = !force and !force_cask and !local_only and
-        !dry_run and !only_deps;
+    const fastpath_eligible = flags.fastpathEligible();
     if (fastpath_eligible) fast: {
         for (packages.items) |pkg| {
             if (isTapFormula(pkg) or isLocalFormulaPath(pkg)) break :fast;
@@ -726,8 +730,8 @@ fn executeWithOpts(
 
         // Path wins over tap-form when `.rb` is present — a typo like
         // `user/repo/foo.rb` hits local-file error, not a GitHub 404.
-        if (local_only or isLocalFormulaPath(pkg_name)) {
-            installLocalFormula(ctx, allocator, pkg_name, &db, &linker, prefix, dry_run, force, sink) catch |e| {
+        if (flags.local_only or isLocalFormulaPath(pkg_name)) {
+            installLocalFormula(ctx, allocator, pkg_name, &db, &linker, prefix, flags.dry_run, flags.force, sink) catch |e| {
                 // Skip the generic summary when the inner error line already
                 // told the user what went wrong.
                 if (!localErrorIsAnnounced(e)) {
@@ -740,7 +744,7 @@ fn executeWithOpts(
 
         // Handle tap formulas separately (they don't use GHCR)
         if (isTapFormula(pkg_name)) {
-            installTapFormula(ctx, allocator, pkg_name, &db, &linker, prefix, dry_run, force, download_only, sink) catch |e| {
+            installTapFormula(ctx, allocator, pkg_name, &db, &linker, prefix, flags.dry_run, flags.force, flags.download_only, sink) catch |e| {
                 // A source-build refusal already printed an actionable line
                 // plus the `brew install` hint, so don't bury it under a
                 // generic summary that just repeats the error enum name.
@@ -755,7 +759,7 @@ fn executeWithOpts(
         }
 
         // Try formula
-        if (!force_cask) {
+        if (!flags.force_cask) {
             const formula_json = api.fetchFormula(pkg_name) catch |fetch_err| {
                 // Offline misses route straight to a typed "snapshot
                 // didn't have it" line instead of falling through to a
@@ -765,7 +769,7 @@ fn executeWithOpts(
                     failed_count += 1;
                     continue;
                 }
-                if (force_formula) {
+                if (flags.force_formula) {
                     if (mapApiFetchError(fetch_err) != null) {
                         sink.err("Cannot reach Homebrew API for formula '{s}'", .{pkg_name});
                     } else {
@@ -775,7 +779,7 @@ fn executeWithOpts(
                     continue;
                 }
                 // Try cask
-                installCask(ctx, allocator, pkg_name, &db, &api, dry_run, download_only, sink) catch |e| {
+                installCask(ctx, allocator, pkg_name, &db, &api, flags, sink) catch |e| {
                     if (e == api_mod.ApiError.OfflineRequired) {
                         sink.err("offline mode: '{s}' not cached as formula or cask", .{pkg_name});
                     } else {
@@ -787,7 +791,7 @@ fn executeWithOpts(
             };
 
             // Skip the cask read+parse when no cask is cached — single stat.
-            if (!force_formula and api.cachedExists(pkg_name, .cask)) {
+            if (!flags.force_formula and api.cachedExists(pkg_name, .cask)) {
                 if (api.fetchCask(pkg_name)) |cask_json| {
                     allocator.free(cask_json);
                     sink.info("{s} exists as both a formula and a cask. Installing formula. Use --cask to install the cask instead.", .{pkg_name});
@@ -805,14 +809,14 @@ fn executeWithOpts(
                 .cache = &formula_cache,
                 .worker_backing = std.heap.smp_allocator,
                 .sink = sink,
-            }, pkg_name, formula_json, force, &all_jobs) catch |e| {
+            }, pkg_name, formula_json, flags.force, &all_jobs) catch |e| {
                 sink.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
                 failed_count += 1;
                 continue;
             };
             output.emitNdjsonEvent(.resolved, pkg_name, null);
         } else {
-            installCask(ctx, allocator, pkg_name, &db, &api, dry_run, download_only, sink) catch |e| {
+            installCask(ctx, allocator, pkg_name, &db, &api, flags, sink) catch |e| {
                 sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                 failed_count += 1;
             };
@@ -822,7 +826,7 @@ fn executeWithOpts(
     // top-level skipped; deps still recorded for GC. Surviving jobs keep
     // `is_dep=true`, so `linkAndRecord` writes `install_reason='dependency'`
     // and `mt purge --unused-deps` reclaims them once nothing direct retains them.
-    if (only_deps) dropTopLevelJobs(allocator, &all_jobs);
+    if (flags.only_deps) dropTopLevelJobs(allocator, &all_jobs);
 
     if (all_jobs.items.len == 0) {
         // Resolution-only failures never reach the link loop's trailing
@@ -832,7 +836,7 @@ fn executeWithOpts(
         return;
     }
 
-    if (dry_run) {
+    if (flags.dry_run) {
         sink.info("Dry run: would install {d} package(s):", .{all_jobs.items.len});
         for (all_jobs.items) |job| {
             const tag: []const u8 = if (job.is_dep) " (dependency)" else "";
@@ -880,7 +884,7 @@ fn executeWithOpts(
     // `--download-only`: emit per-job `download_started` from the main
     // thread before the pool spawns so consumers see a deterministic
     // pre-fetch line. Paired with `download_complete` after the join.
-    if (download_only and output.isNdjson()) {
+    if (flags.download_only and output.isNdjson()) {
         for (all_jobs.items) |job| {
             output.emitNdjsonEvent(.download_started, job.name, null);
         }
@@ -892,7 +896,7 @@ fn executeWithOpts(
     // crash leaves the user's prior keg + row intact for the revision-bump
     // case. Pin survives because `recordKeg` inherits via COALESCE-MAX on
     // `pinned` by name.
-    if (shouldPruneForReinstall(force, download_only)) {
+    if (flags.pruneForReinstall()) {
         for (all_jobs.items) |job| {
             pruneCellarForReinstall(ctx, prefix, job.name, job.version_str);
         }
@@ -989,7 +993,7 @@ fn executeWithOpts(
             .cache = &formula_cache,
             .results = mats,
             .worker_backing = std.heap.smp_allocator,
-            .download_only = download_only,
+            .download_only = flags.download_only,
             .sink = sink,
         };
 
@@ -1029,7 +1033,7 @@ fn executeWithOpts(
     // --download-only stops here. Skip the serial link phase and surface
     // each warmed bottle's `<prefix>/store/<sha>` path so a follow-up
     // real install can consume the bytes.
-    if (download_only) {
+    if (flags.download_only) {
         for (all_jobs.items) |job| {
             if (!job.succeeded) {
                 output.emitNdjsonEvent(.download_complete, job.name, "failed");
@@ -1118,12 +1122,12 @@ fn executeWithOpts(
         // `linkAndRecord` below. Rows + dependencies + dirs stay so
         // `recordKeg`'s COALESCE-MAX subquery can still inherit the
         // user pin from the prior row.
-        if (force) {
+        if (flags.force) {
             unlinkSameVersionKegLinks(&linker, &db, job.name, mats[i].kegPath());
             unlinkStaleKegLinks(&db, &linker, job.name, mats[i].kegPath());
         }
 
-        linkAndRecord(ctx.io, allocator, job, mats[i].kegPath(), &db, &linker, prefix, &formula_cache, isolate_deps, sink) catch {
+        linkAndRecord(ctx.io, allocator, job, mats[i].kegPath(), &db, &linker, prefix, &formula_cache, flags, sink) catch {
             // The underlying error was already logged with a tag by
             // linkAndRecord — just record that this job failed so its
             // dependents in the rest of the loop get skipped above.
@@ -1136,13 +1140,13 @@ fn executeWithOpts(
         // new row (and inherited any pin via COALESCE-MAX), it is
         // safe to drop the prior other-version rows + their dirs.
         // Disk safety net catches any cellar dir without a row.
-        if (force) {
+        if (flags.force) {
             dropStaleKegRows(ctx, allocator, &db, job.name, mats[i].kegPath());
             pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, job.name, job.version_str);
         }
 
         if (job.wants_post_install) {
-            drive(ctx, allocator, job.name, job.version_str, job.formula_json, prefix, use_system_ruby_list, &formula_cache, sink);
+            drive(ctx, allocator, job.name, job.version_str, job.formula_json, prefix, flags.system_ruby, &formula_cache, sink);
         }
 
         // ca-certificates' macOS post_install can't run natively, so the
@@ -1164,10 +1168,9 @@ fn executeWithOpts(
 /// Link + record a materialised keg. Must run serially: linker conflict
 /// checks read live symlink state and SQLite is single-writer.
 ///
-/// `isolate_deps` is the per-pass user flag. The keg's `bin_isolated`
-/// is computed as `isolate_deps and job.is_dep` so direct kegs always
-/// land in PATH even when the flag is set — the contract is "isolate
-/// transitive deps, never the named package."
+/// The keg's `bin_isolated` is `flags.isolatesDep(job.is_dep)` so direct
+/// kegs always land in PATH even under `--isolate-deps` — the contract is
+/// "isolate transitive deps, never the named package."
 fn linkAndRecord(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1177,11 +1180,11 @@ fn linkAndRecord(
     linker: *linker_mod.Linker,
     prefix: []const u8,
     cache: *deps_mod.FormulaCache,
-    isolate_deps: bool,
+    flags: args_mod.InstallFlags,
     sink: OutputSink,
 ) !void {
     const reason: []const u8 = if (job.is_dep) "dependency" else "direct";
-    const bin_isolated = isolate_deps and job.is_dep;
+    const bin_isolated = flags.isolatesDep(job.is_dep);
 
     // Cache hit on the warm path; miss only happens for jobs whose JSON
     // never reached collectFormulaJobs (none today).
@@ -1379,7 +1382,7 @@ pub fn confirmPkgSudo(token: []const u8) bool {
     return true;
 }
 
-/// Install a cask (DMG, ZIP, or PKG). When `download_only` is set, the
+/// Install a cask (DMG, ZIP, or PKG). Under `flags.download_only`, the
 /// flow stops after `<prefix>/cache/Cask/<file>` is sha-verified — no
 /// `/Applications` writes, no DB inserts.
 fn installCask(
@@ -1388,8 +1391,7 @@ fn installCask(
     token: []const u8,
     db: *sqlite.Database,
     api: *api_mod.BrewApi,
-    dry_run: bool,
-    download_only: bool,
+    flags: args_mod.InstallFlags,
     sink: OutputSink,
 ) !void {
     const cask_json = api.fetchCask(token) catch |e| {
@@ -1415,7 +1417,7 @@ fn installCask(
     // refresh the cached artefact ahead of an `mt upgrade` even when an
     // older revision is on disk. The real install path keeps the
     // "already installed" short-circuit.
-    if (!download_only and cask_mod.isInstalled(db, cask.token)) {
+    if (!flags.download_only and cask_mod.isInstalled(db, cask.token)) {
         sink.info("{s} is already installed", .{cask.token});
         return;
     }
@@ -1428,7 +1430,7 @@ fn installCask(
         artifact_type = resolveCaskArtifactViaHead(ctx, allocator, cask.url);
     }
 
-    if (dry_run) {
+    if (flags.dry_run) {
         sink.info("Dry run: would install cask {s} {s} ({s})", .{
             cask.token,
             cask.version,
@@ -1448,7 +1450,7 @@ fn installCask(
     // never escalates, so it skips the gate.
     if (artifact_type == .pkg) {
         sink.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
-        if (!download_only and !confirmPkgSudo(cask.token)) return InstallError.CaskNotFound;
+        if (!flags.download_only and !confirmPkgSudo(cask.token)) return InstallError.CaskNotFound;
     }
 
     const prefix = atomic.maltPrefixOrAbort();
@@ -1470,7 +1472,7 @@ fn installCask(
         };
     }
 
-    if (download_only) {
+    if (flags.download_only) {
         output.emitNdjsonEvent(.download_started, cask.token, null);
         const cache_path = installer.downloadOnly(&cask) catch |e| {
             if (sp) |*s| s.bar.finish();
@@ -1638,17 +1640,12 @@ test "kegPresent returns true only when <prefix>/Cellar/<name> exists" {
 // path ran the `--force` prune ahead of its download-only early return,
 // so `mt install --download-only --force <same-version>` deleteTree'd an
 // installed keg and never re-materialized it. The prune is now gated on
-// `shouldPruneForReinstall`, which vetoes the prune under download-only.
-// (The prune loops all jobs, so a multi-dep target would wipe every
-// dependency's cellar; one assertion on the primary keg suffices.)
+// `InstallFlags.pruneForReinstall`, which vetoes the prune under
+// download-only. (The prune loops all jobs, so a multi-dep target would
+// wipe every dependency's cellar; one assertion on the primary keg
+// suffices. The pure decision matrix is unit-tested in install/args.zig.)
 test "install: --download-only suppresses the --force reinstall prune" {
     const testing = std.testing;
-
-    // Pure decision: only a plain `--force` (no download-only) prunes.
-    try testing.expect(shouldPruneForReinstall(true, false));
-    try testing.expect(!shouldPruneForReinstall(true, true));
-    try testing.expect(!shouldPruneForReinstall(false, false));
-    try testing.expect(!shouldPruneForReinstall(false, true));
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1666,11 +1663,13 @@ test "install: --download-only suppresses the --force reinstall prune" {
     try std.Io.Dir.cwd().createDirPath(ctx.io, keg);
 
     // download-only gate is false → prune skipped → keg survives.
-    if (shouldPruneForReinstall(true, true)) pruneCellarForReinstall(&ctx, prefix, "wget", "1.21");
+    if ((args_mod.InstallFlags{ .force = true, .download_only = true }).pruneForReinstall())
+        pruneCellarForReinstall(&ctx, prefix, "wget", "1.21");
     try std.Io.Dir.accessAbsolute(ctx.io, keg, .{});
 
     // plain --force gate is true → prune runs → keg gone.
-    if (shouldPruneForReinstall(true, false)) pruneCellarForReinstall(&ctx, prefix, "wget", "1.21");
+    if ((args_mod.InstallFlags{ .force = true }).pruneForReinstall())
+        pruneCellarForReinstall(&ctx, prefix, "wget", "1.21");
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(ctx.io, keg, .{}));
 }
 
