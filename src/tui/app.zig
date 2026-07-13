@@ -921,6 +921,16 @@ fn testPainter(frame: *[]u8) Painter {
     return .{ .fd = -1, .frame = frame };
 }
 
+/// A heap-owned `argv` of `/bin/echo <doc>`, so a synchronous read yields a fixed
+/// document with no live `mt`. Owned like a real `Cmd`'s argv — the pump frees the
+/// slice; the elements are static, so nothing else is freed.
+fn echoArgv(allocator: std.mem.Allocator, doc: []const u8) std.mem.Allocator.Error![]const []const u8 {
+    const argv = try allocator.alloc([]const u8, 2);
+    argv[0] = "/bin/echo";
+    argv[1] = doc;
+    return argv;
+}
+
 test "a data-free App renders the full chrome so the skeleton paint is real" {
     var app: App = .{}; // active .search, empty storage, no counts loaded
     var buf: [8192]u8 = undefined;
@@ -1461,6 +1471,67 @@ test "the pump enqueues a background read rather than blocking, then folds it vi
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expectEqual(@as(?usize, 0), app.shared.outdated_count); // empty read folds to a known zero
     try std.testing.expect(!app.shared.tab_loading.contains(.outdated));
+}
+
+test "a synchronous foreground read folds through the pump into the tab model in one cycle" {
+    // The pump's contract in isolation: a blocking foreground `read` `Cmd` resolves
+    // within the single `pump` call (perform → `.loaded` → `update`), leaving the tab
+    // at its expected model with nothing deferred — the counterpart of the
+    // background-mode test above, which enqueues and folds later.
+    var thr = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer thr.deinit();
+    var app: App = .{ .active = .search };
+    var store: Storages = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    var frame: []u8 = try std.testing.allocator.alloc(u8, 256);
+    defer std.testing.allocator.free(frame);
+    var tm = term.Term.init(thr.io(), -1); // headless: a foreground read never touches the term
+
+    // Build the real search read (real parser baked in), then repoint its argv at a
+    // fixed document so the blocking capture is deterministic without a live `mt`.
+    app.states.search.chrome.filter.push("wget"); // non-empty query, so searchCmd is a read
+    var c = search.searchCmd(std.testing.allocator, app.mt_path, &app.states.search);
+    try std.testing.expect(c == .read);
+    std.testing.allocator.free(c.read.argv);
+    c.read.argv = try echoArgv(std.testing.allocator, "{\"results\":[{\"name\":\"wget\",\"type\":\"formula\",\"installed\":false}]}");
+
+    try pump(thr.io(), std.testing.allocator, &tm, testPainter(&frame), &fetches, &app, &store, c);
+
+    try std.testing.expectEqual(search.Phase.loaded, app.states.search.phase); // the fold reset it from searching
+    try std.testing.expectEqual(@as(usize, 1), app.states.search.items.len); // the result landed this cycle
+    try std.testing.expect(!anyFetchActive(&fetches)); // synchronous — no background fetch queued
+}
+
+test "the search info fast-path opens the detail pane in one pump cycle, never deferred" {
+    // The press-Enter-opens-a-pane feel: Enter on a loaded hit yields a blocking `mt
+    // info` read that must complete inside the one pump cycle (no async round-trip),
+    // so the pane is open when the cycle returns and no background fetch is registered.
+    var thr = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer thr.deinit();
+    const items = [_]search.Match{.{ .name = "wget", .kind = .formula, .installed = false }};
+    var app: App = .{ .active = .search };
+    app.states.search.items = &items;
+    app.states.search.phase = .loaded;
+    var store: Storages = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    var frame: []u8 = try std.testing.allocator.alloc(u8, 256);
+    defer std.testing.allocator.free(frame);
+    var tm = term.Term.init(thr.io(), -1);
+
+    var c = step(std.testing.allocator, app.mt_path, &app, .enter); // Enter inspects the active hit
+    try std.testing.expect(c == .read);
+    try std.testing.expect(!app.editing);
+    std.testing.allocator.free(c.read.argv);
+    c.read.argv = try echoArgv(std.testing.allocator,
+        \\{"schema_version":1,"name":"wget","type":"formula","installed":false,"version":"1.21","tap":"homebrew/core","dependencies":[],"pinned":false,"installed_at":"","available_rollback_versions":[]}
+    );
+
+    try pump(thr.io(), std.testing.allocator, &tm, testPainter(&frame), &fetches, &app, &store, c);
+
+    try std.testing.expect(app.states.search.detail != null); // the pane opened within the cycle
+    try std.testing.expect(!anyFetchActive(&fetches)); // fast-path is synchronous, not a deferred fetch
 }
 
 test "a background outdated fetch parses a real child's document into the tab" {
