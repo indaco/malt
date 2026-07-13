@@ -232,6 +232,59 @@ test "checkConflicts detects a nested cross-keg collision" {
     try testing.expect(matched);
 }
 
+test "unlink prunes emptied nested dirs but keeps dirs another keg still links" {
+    const prefix = try uniquePrefix("unlink_prune");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    // Two kegs share share/man/man1; each ships its own page there.
+    const keg_a = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/alpha/1.0", .{prefix});
+    defer testing.allocator.free(keg_a);
+    const keg_b = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/beta/1.0", .{prefix});
+    defer testing.allocator.free(keg_b);
+    const man_a = try std.fmt.allocPrint(testing.allocator, "{s}/share/man/man1/a.1", .{keg_a});
+    defer testing.allocator.free(man_a);
+    const man_b = try std.fmt.allocPrint(testing.allocator, "{s}/share/man/man1/b.1", .{keg_b});
+    defer testing.allocator.free(man_b);
+    try writeFile(man_a, ".TH A 1\n");
+    try writeFile(man_b, ".TH B 1\n");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var ins = try db.prepare(
+        \\INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path)
+        \\VALUES (1, 'alpha', 'alpha', '1.0', 'aa', ?1), (2, 'beta', 'beta', '1.0', 'bb', ?2);
+    );
+    try ins.bindText(1, keg_a);
+    try ins.bindText(2, keg_b);
+    _ = try ins.step();
+    ins.finalize();
+
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try linker.link(keg_a, "alpha", 1, false);
+    try linker.link(keg_b, "beta", 2, false);
+
+    // Unlink alpha: its page goes, but beta's b.1 keeps share/man/man1 alive.
+    try linker.unlink(1);
+    var man1_buf: [512]u8 = undefined;
+    const man1 = try std.fmt.bufPrint(&man1_buf, "{s}/share/man/man1", .{prefix});
+    var d = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, man1, .{});
+    d.close(std.Options.debug_io);
+
+    // Unlink beta: now share/man/man1, share/man and share are all empty and
+    // must be pruned — no lingering nested dirs — while the prefix survives.
+    try linker.unlink(2);
+    for ([_][]const u8{ "share/man/man1", "share/man", "share" }) |sub| {
+        var buf: [512]u8 = undefined;
+        const p = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, sub });
+        try testing.expectError(error.FileNotFound, std.Io.Dir.openDirAbsolute(std.Options.debug_io, p, .{}));
+    }
+    var pd = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, prefix, .{});
+    pd.close(std.Options.debug_io);
+}
+
 test "linkOpt creates opt/{name} -> Cellar/{name}/{version}" {
     const prefix = try uniquePrefix("link_opt");
     defer testing.allocator.free(prefix);

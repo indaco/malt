@@ -269,12 +269,27 @@ pub const Linker = struct {
             const path_slice = std.mem.sliceTo(link_path, 0);
             // Symlink may already be gone from the filesystem; DB row is the source of truth we're flushing.
             std.Io.Dir.cwd().deleteFile(self.io, path_slice) catch {};
+            // Prune the nested dirs `link` created (share/man/man1, …) so
+            // they don't linger once emptied.
+            self.pruneEmptyParents(path_slice);
         }
 
         var del_stmt = try self.db.prepare("DELETE FROM links WHERE keg_id = ?1;");
         defer del_stmt.finalize();
         try del_stmt.bindInt(1, keg_id);
         _ = try del_stmt.step();
+    }
+
+    /// Remove now-empty ancestor dirs of `link_path`, climbing until the
+    /// first non-empty dir or the prefix root. `deleteDirAbsolute` only
+    /// succeeds on an empty dir, so a dir another keg still links into
+    /// survives; the prefix itself is never touched.
+    fn pruneEmptyParents(self: *Linker, link_path: []const u8) void {
+        var dir = std.fs.path.dirname(link_path) orelse return;
+        while (dir.len > self.prefix.len and std.mem.startsWith(u8, dir, self.prefix)) {
+            std.Io.Dir.deleteDirAbsolute(self.io, dir) catch return;
+            dir = std.fs.path.dirname(dir) orelse return;
+        }
     }
 };
 
