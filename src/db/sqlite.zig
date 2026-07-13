@@ -28,9 +28,24 @@ fn mapError(rc: c_int, comptime default: SqliteError) SqliteError {
     };
 }
 
-/// Use SQLITE_STATIC (null destructor) for text bindings.
-/// This is safe because all bound text outlives the statement step.
-const SQLITE_STATIC: c.sqlite3_destructor_type = null;
+/// SQLite's transient-destructor sentinel (-1 as a pointer): tells `bind` to
+/// copy the bound bytes now, so the caller's buffer need only stay valid for the
+/// bind call itself — no lifetime obligation past `bindText`.
+const SQLITE_TRANSIENT_BITS: usize = @bitCast(@as(isize, -1));
+
+comptime {
+    // The sentinel must be all-ones for SQLite to recognize it as -1.
+    std.debug.assert(SQLITE_TRANSIENT_BITS == std.math.maxInt(usize));
+}
+
+/// The sentinel isn't pointer-aligned, so Zig can't hold it as a typed
+/// fn-pointer constant; reinterpret the bits at the call. SQLite only compares
+/// this value against -1, never calls through it.
+inline fn sqliteTransient() c.sqlite3_destructor_type {
+    return (extern union { bits: usize, dtor: c.sqlite3_destructor_type }{
+        .bits = SQLITE_TRANSIENT_BITS,
+    }).dtor;
+}
 
 pub const Statement = struct {
     /// Raw sqlite handle; touch only via the methods below.
@@ -56,14 +71,15 @@ pub const Statement = struct {
         if (rc != c.SQLITE_OK) return mapError(rc, SqliteError.StepFailed);
     }
 
-    /// Bind a text value to the 1-indexed parameter at `idx`.
+    /// Bind a text value to the 1-indexed parameter at `idx`. SQLite copies the
+    /// bytes at bind time, so `text` may be freed as soon as this returns.
     pub fn bindText(self: *Statement, idx: u32, text: []const u8) SqliteError!void {
         const rc = c.sqlite3_bind_text(
             self._stmt,
             @intCast(idx),
             @ptrCast(text.ptr),
             @intCast(text.len),
-            SQLITE_STATIC,
+            sqliteTransient(),
         );
         if (rc != c.SQLITE_OK) return mapError(rc, SqliteError.BindFailed);
     }
@@ -219,4 +235,32 @@ test "errMsg surfaces a UNIQUE constraint violation message" {
     try testing.expectError(SqliteError.ConstraintViolation, stmt.step());
     const msg = db.errMsg();
     try testing.expect(std.mem.indexOf(u8, msg, "UNIQUE") != null);
+}
+
+test "bindText copies bound bytes at bind time, so caller may free before step" {
+    var db = try Database.open(":memory:");
+    defer db.close();
+
+    try db.exec("CREATE TABLE t(name TEXT);");
+
+    var stmt = try db.prepare("INSERT INTO t(name) VALUES(?1);");
+    defer stmt.finalize();
+
+    const original = "malt-formula-name";
+    const buf = try testing.allocator.dupe(u8, original);
+    try stmt.bindText(1, buf);
+
+    // Scribble then free the caller's buffer *before* stepping. Under a no-copy
+    // (SQLITE_STATIC) bind this hands SQLite a dangling pointer to 0xAA bytes;
+    // a copy-at-bind (SQLITE_TRANSIENT) already owns the bytes and is immune.
+    @memset(buf, 0xAA);
+    testing.allocator.free(buf);
+
+    try testing.expect(!try stmt.step());
+
+    var read = try db.prepare("SELECT name FROM t;");
+    defer read.finalize();
+    try testing.expect(try read.step());
+    const got = std.mem.sliceTo(read.columnText(0).?, 0);
+    try testing.expectEqualStrings(original, got);
 }
