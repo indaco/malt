@@ -391,21 +391,25 @@ fn renderTooSmall(f: *tab.Frame, cols: u16, rows: u16) void {
 }
 
 /// Paint `text` wrapped across at most `max_rows` rows from `start_row`, styled
-/// with `role`. Each row is positioned by a cursor move (no raw newline) and
-/// painted through `putContent` so a child-derived banner can't inject a frame
-/// line. Rows past the cap are dropped — truncation only as the last resort
-/// below the bound. Shares `text_wrap` with the detail pane, so one wrap rule.
+/// with `role`. Each row is positioned and erased to end-of-line (`moveClear`,
+/// no raw newline) so a shorter hint drops its old tail, then painted through
+/// `putContent` so a child-derived banner can't inject a frame line. Rows past
+/// the cap are dropped — truncation only as the last resort below the bound.
+/// Shares `text_wrap` with the detail pane, so one wrap rule.
 fn renderFooterText(f: *tab.Frame, text: []const u8, role: []const u8, start_row: u16, max_rows: u16, cols: u16) void {
     if (cols == 0 or max_rows == 0) return;
     var it = text_wrap.iter(text, cols);
     var row: u16 = 0;
     while (it.next()) |chunk| : (row += 1) {
         if (row >= max_rows) break;
-        f.moveTo(start_row + row, 1);
+        f.moveClear(start_row + row, 1);
         f.put(role);
         f.putContent(chunk);
         f.put(color.Style.reset.code());
     }
+    // Self-erase the rows a shorter wrap left painted by the last frame, so the
+    // footer covers its full height once the whole-screen clear is gone.
+    tab.blankRemainder(f, .{ .row = start_row, .col = 1, .width = cols, .height = max_rows }, row);
 }
 
 fn loadingLine(buf: []u8, app: *const App) []const u8 {
@@ -1240,6 +1244,32 @@ test "renderFooterText wraps into the row cap and drops any overflow below it" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[6;1H") != null); // first text row
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[7;1H") != null); // second text row
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[8;1H") == null); // capped — no third row
+    // Text already fills both rows, so no remainder blanking is emitted and
+    // nothing self-erases past the second row.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[8;1H\x1b[K") == null);
+}
+
+test "renderFooterText blanks the rows it leaves unpainted up to the cap" {
+    var buf: [512]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    // A one-line footer into a two-row cap: the second row held a line last frame
+    // and must be self-erased, or it ghosts once the whole-screen clear is gone.
+    renderFooterText(&f, "hi", color.roleCode(.muted), 6, 2, 40);
+    const out = f.slice();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[6;1H") != null); // the painted line
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[7;1H\x1b[K") != null); // the unused row, self-erased
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[8;1H") == null); // never past the cap
+}
+
+test "renderFooterText self-erases each painted line so a shorter hint drops its tail" {
+    var buf: [512]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    // A single-row footer whose width shrinks frame-to-frame (e.g. the basket
+    // count clearing) must clear its old tail, not just repaint a prefix — the
+    // painted row owns its line from col 1, so it erases to EOL as it lands.
+    renderFooterText(&f, "hi", color.roleCode(.muted), 6, 1, 40);
+    const out = f.slice();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[6;1H\x1b[K") != null); // painted line self-erased
 }
 
 test "a too-small terminal shows a wrapped, styled notice (width alone trips it)" {
