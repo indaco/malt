@@ -47,7 +47,7 @@ pub const Storage = struct {
 };
 
 /// Services audits in the background; a non-clean exit means a failed refresh.
-pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{ "services", "list" }, .max_ok_exit = 0, .refresh_op = "services refresh failed" };
+pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{ "services", "list" }, .max_ok_exit = 0, .refresh_op = "services refresh failed", .parse = cmd.parserFor(.services, services_json.parse) };
 
 pub fn title() []const u8 {
     return "Services";
@@ -305,22 +305,13 @@ fn swapRows(s: *State, storage: *Storage, parsed: services_json.Parsed) void {
     s.detail = null; // a refreshed list invalidates the old detail
 }
 
-/// Clear to the empty-list state, freeing any held parse. Shared by a null
-/// background payload and a `.cleared` keypress read.
+/// Clear to the empty-list state, freeing any held parse. The `.cleared` fold —
+/// an exit-0 empty read, background or keypress.
 fn clear(s: *State, storage: *Storage) void {
     if (storage.services) |old| old.deinit();
     storage.services = null;
     s.items = &.{};
     s.detail = null; // the old detail borrowed the freed rows
-}
-
-/// Repoint the Services tab at a drained background `--json` payload. `null` (a
-/// fresh prefix) clears to an empty list; a document parses and swaps in. The
-/// shell's fetch drain routes a background payload here; the keypress reload folds
-/// the same swap through `update`.
-pub fn applyServicesBytes(allocator: std.mem.Allocator, st: *State, storage: *Storage, bytes: ?[]const u8) services_json.Error!void {
-    const payload = bytes orelse return clear(st, storage);
-    swapRows(st, storage, try services_json.parse(allocator, payload));
 }
 
 // ─── tests ───────────────────────────────────────────────────────────
@@ -657,11 +648,13 @@ test "update on a cleared read (an exit-0 empty reload) empties the list" {
     try testing.expect(st.detail == null); // the stale detail borrowed the freed rows
 }
 
-test "applyServicesBytes on a null (fresh-prefix) payload clears to an empty list" {
+test "a cleared services read (fresh prefix) drops to an empty list" {
     var st: State = .{ .items = &sample };
     var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
     defer storage.deinit(testing.allocator);
-    try applyServicesBytes(testing.allocator, &st, &storage, null);
+    // An exit-0 empty background/keypress read folds through `update` as `.cleared`.
+    _ = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .cleared);
     try testing.expectEqual(@as(usize, 0), st.items.len);
     try testing.expect(st.detail == null);
 }

@@ -5,6 +5,7 @@
 //! tui leaves — never `app.zig` or any tab.
 
 const std = @import("std");
+const cmd = @import("cmd.zig");
 const term = @import("term.zig");
 const tab_bar = @import("tab_bar.zig");
 const term_sanitize = @import("../ui/term_sanitize.zig");
@@ -79,6 +80,11 @@ pub const Painter = struct {
     /// no-op so a Painter built for a test that never reaches a poll timeout — or
     /// the background-fetch path, which repaints through the loop — needs no closure.
     on_tick: Tick = .{},
+    /// Hub-supplied *plain* whole-dashboard repaint (no spinner advance, no resize
+    /// consume), type-erased like `on_tick`. The pre-read paint before a *blocking*
+    /// read uses this so a blocking read only shows the current frame — it must not
+    /// advance the animation the way an animated `tick` does. No-op default.
+    on_repaint: Tick = .{},
 
     pub const Tick = struct {
         ctx: *anyopaque = undefined,
@@ -91,18 +97,28 @@ pub const Painter = struct {
     pub fn tick(self: Painter) void {
         self.on_tick.call(self.on_tick.ctx);
     }
+
+    /// Plain repaint (no animation advance) for a pre-read paint. Same no-op safety.
+    pub fn repaint(self: Painter) void {
+        self.on_repaint.call(self.on_repaint.ctx);
+    }
 };
 
 /// One in-flight background tab fetch: a non-blocking `mt <verb> --json` child
-/// whose stdout the loop drains. `tab` routes the drained bytes to the owning
-/// store; `max_ok_exit` tolerates Doctor's severity exits (≤2) where the others
-/// require a clean 0.
+/// whose stdout the interpreter drains. `tab` routes the completed `Msg` back to
+/// the owning tab's `update`; `max_ok_exit` tolerates Doctor's severity exits
+/// (≤2) where the others require a clean 0. `parse` is the read `Cmd`'s carried
+/// parser — the drain turns captured bytes into a tagged `Parsed` with it, so the
+/// interpreter needs no per-tab knowledge; `fail_op` is the banner wording a
+/// recoverable drain fault shows.
 pub const TabFetch = struct {
     tab: Tab,
     child: std.process.Child,
     fd: std.posix.fd_t, // the child's stdout, polled alongside the tty
     buf: std.ArrayList(u8) = .empty,
     max_ok_exit: u8,
+    parse: cmd.ParseFn,
+    fail_op: []const u8,
 };
 
 /// At most one in-flight fetch per tab. Installed (a cheap DB read) and Search
@@ -117,6 +133,12 @@ pub const SharedModel = struct {
     installed_count: ?usize = null,
     outdated_count: ?usize = null,
     dirty: std.EnumSet(Tab) = .initEmpty(),
+    /// Tabs whose payload is fetching in the background, so the header/footer show
+    /// a spinner instead of a frozen or done-looking blank. Shared read-model state
+    /// (the renderer reads it) the interpreter owns the lifecycle of: set on a
+    /// background kickoff, cleared when the fetch lands or is quiesced. Mirrors the
+    /// `Fetches` slots exactly — a tab is loading iff its fetch is in flight.
+    tab_loading: std.EnumSet(Tab) = .initEmpty(),
     banner: Banner = .{},
 
     /// After a delegated mutation the active tab was just re-read inline, so it is

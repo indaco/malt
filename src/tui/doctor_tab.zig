@@ -48,7 +48,7 @@ pub const Storage = struct {
 };
 
 /// Doctor audits in the background; it exits by severity, so it tolerates ≤2.
-pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{"doctor"}, .max_ok_exit = 2, .refresh_op = "doctor refresh failed" };
+pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{"doctor"}, .max_ok_exit = 2, .refresh_op = "doctor refresh failed", .parse = cmd.parserFor(.doctor, doctor_json.parse) };
 
 pub fn title() []const u8 {
     return "Doctor";
@@ -174,23 +174,12 @@ pub fn update(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, stor
     }
 }
 
-/// Clear to no findings, freeing any held parse. Shared by a null background
-/// payload and a `.cleared` keypress read.
+/// Clear to no findings, freeing any held parse. The `.cleared` fold — an exit-0
+/// empty audit, background or keypress.
 fn clear(st: *State, storage: *Storage) void {
     if (storage.doctor) |old| old.deinit();
     storage.doctor = null;
     st.items = &.{};
-}
-
-/// Repoint the Doctor tab at a drained `--json` payload. `null` (a fresh prefix)
-/// clears to no findings; a parsed document swaps in the rows + reclaimable stats.
-/// Shared by the synchronous reload and the background fetch; the storage is
-/// swapped only after a clean parse, so a failure keeps the last-good findings.
-/// Public because the shell's fetch drain routes a background payload through it.
-pub fn applyDoctorBytes(allocator: std.mem.Allocator, st: *State, storage: *Storage, bytes: ?[]const u8) doctor_json.Error!void {
-    const payload = bytes orelse return clear(st, storage);
-    const parsed = try doctor_json.parse(allocator, payload);
-    applyDoctorParse(st, storage, parsed);
 }
 
 /// Repoint the tab at a fresh parse, freeing the previous one. Split from the
@@ -1539,24 +1528,26 @@ test "the reclaimable section renders on a narrow pane without wrapping into the
     try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // the list stays the floor
 }
 
-test "applyDoctorBytes repoints the tab at parsed findings + reclaimable stats; null clears" {
+test "a loaded doctor read repoints findings + reclaimable stats; a cleared read empties" {
     const allocator = testing.allocator;
     var st: State = .{};
     var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
     defer storage.deinit(allocator);
     const bytes =
         \\{"checks":[{"id":"a","severity":"warn","title":"A","fixable":true,"fix_class":"stale_lock"}],
         \\"cask_history":{"retained_versions":3,"bytes":4096},"tap_cache":{"bytes":512}}
     ;
-    try applyDoctorBytes(allocator, &st, &storage, bytes);
+    const parsed = try doctor_json.parse(allocator, bytes);
+    _ = update(allocator, "/bin/mt", &st, &storage, &shared, .{ .loaded = .{ .doctor = parsed } });
     try testing.expectEqual(@as(usize, 1), st.items.len);
     // The reclaimable figures ride through to the tab so the band can show them.
     try testing.expectEqual(@as(u64, 4096), st.stats.cask_bytes);
     try testing.expectEqual(@as(u64, 512), st.stats.tap_cache_bytes);
     try testing.expectEqual(@as(usize, 3), st.stats.retained_versions);
 
-    // A null payload (a fresh prefix's empty audit) clears the tab to no findings.
-    try applyDoctorBytes(allocator, &st, &storage, null);
+    // A cleared read (a fresh prefix's empty audit) clears the tab to no findings.
+    _ = update(allocator, "/bin/mt", &st, &storage, &shared, .cleared);
     try testing.expectEqual(@as(usize, 0), st.items.len);
 }
 
