@@ -91,6 +91,18 @@ test "link creates symlinks for every file in a keg and records them in the DB" 
     try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, link_path, .{}));
 }
 
+fn insertKeg(db: *sqlite.Database, id: i64, name: []const u8, cellar_path: []const u8) !void {
+    var s = try db.prepare(
+        \\INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path)
+        \\VALUES (?1, ?2, ?2, '1.0', 'aa', ?3);
+    );
+    defer s.finalize();
+    try s.bindInt(1, id);
+    try s.bindText(2, name);
+    try s.bindText(3, cellar_path);
+    _ = try s.step();
+}
+
 fn writeFile(path: []const u8, body: []const u8) !void {
     if (std.fs.path.dirname(path)) |parent| {
         try test_io.cwd().createDirPath(std.Options.debug_io, parent);
@@ -211,6 +223,7 @@ test "checkConflicts detects a nested cross-keg collision" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
+    try insertKeg(&db, 1, "alpha", keg_a);
     var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
     try linker.link(keg_a, "alpha", 1, false);
 
@@ -420,6 +433,107 @@ test "re-linking a nested keg is idempotent: no error, no duplicate rows" {
     try testing.expect(std.mem.endsWith(u8, tgt, "share/man/man1/tool.1"));
 }
 
+test "link propagates a DB write failure and backs out the orphaned symlink" {
+    // No kegs row -> the links FK insert fails. link() must surface the error
+    // (so install can roll back) and leave no symlink the DB can't track.
+    const prefix = try uniquePrefix("link_db_fail");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/nest/1.0", .{prefix});
+    defer testing.allocator.free(keg);
+    const bin = try std.fmt.allocPrint(testing.allocator, "{s}/bin/tool", .{keg});
+    defer testing.allocator.free(bin);
+    try writeFile(bin, "#!/bin/sh\n");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+
+    // FK violation propagates instead of being swallowed.
+    try testing.expectError(sqlite.SqliteError.ConstraintViolation, linker.link(keg, "nest", 1, false));
+
+    // The symlink created just before the failed insert was backed out.
+    var lp_buf: [512]u8 = undefined;
+    const lp = try std.fmt.bufPrint(&lp_buf, "{s}/bin/tool", .{prefix});
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, lp, .{}));
+}
+
+test "checkConflicts flags a file-vs-directory collision the symlink probe misses" {
+    const prefix = try uniquePrefix("conflict_filedir");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    // alpha ships a FILE at share/data; beta ships share/data/inner (so beta
+    // needs `data` to be a directory). Linking beta would fail — the
+    // pre-check must not report a clean bill of health.
+    const keg_a = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/alpha/1.0", .{prefix});
+    defer testing.allocator.free(keg_a);
+    const keg_b = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/beta/1.0", .{prefix});
+    defer testing.allocator.free(keg_b);
+    const file_a = try std.fmt.allocPrint(testing.allocator, "{s}/share/data", .{keg_a});
+    defer testing.allocator.free(file_a);
+    const file_b = try std.fmt.allocPrint(testing.allocator, "{s}/share/data/inner", .{keg_b});
+    defer testing.allocator.free(file_b);
+    try writeFile(file_a, "payload\n");
+    try writeFile(file_b, "inner\n");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertKeg(&db, 1, "alpha", keg_a);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try linker.link(keg_a, "alpha", 1, false);
+
+    const conflicts = try linker.checkConflicts(keg_b, false);
+    defer {
+        for (conflicts) |c| {
+            testing.allocator.free(c.link_path);
+            testing.allocator.free(c.existing_keg);
+        }
+        testing.allocator.free(conflicts);
+    }
+    var hit = false;
+    for (conflicts) |c| {
+        if (std.mem.endsWith(u8, c.link_path, "/share/data")) hit = true;
+    }
+    try testing.expect(hit);
+}
+
+test "link handles a nested path longer than 512 bytes without dropping it" {
+    // Two ~250-char component dirs push the composed path past the old 512-byte
+    // buffers; the leaf must still be linked (no silent truncation drop).
+    const prefix = try uniquePrefix("link_deep");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    const seg = "d" ** 250;
+    const rel = try std.fmt.allocPrint(testing.allocator, "share/{s}/{s}/leaf.txt", .{ seg, seg });
+    defer testing.allocator.free(rel);
+    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/nest/1.0", .{prefix});
+    defer testing.allocator.free(keg);
+    const leaf = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ keg, rel });
+    defer testing.allocator.free(leaf);
+    try writeFile(leaf, "deep\n");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertKeg(&db, 1, "nest", keg);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try linker.link(keg, "nest", 1, false);
+
+    var lp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const lp = try std.fmt.bufPrint(&lp_buf, "{s}/{s}", .{ prefix, rel });
+    var tgt_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tgt = try test_io.readLinkAbsolute(std.Options.debug_io, lp, &tgt_buf);
+    try testing.expect(std.mem.endsWith(u8, tgt, "leaf.txt"));
+}
+
 test "linkOpt creates opt/{name} -> Cellar/{name}/{version}" {
     const prefix = try uniquePrefix("link_opt");
     defer testing.allocator.free(prefix);
@@ -529,6 +643,7 @@ test "checkConflicts flags a symlink that points into a different keg" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
+    try insertKeg(&db, 1, "alpha", keg_a);
     var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
     try linker.link(keg_a, "alpha", 1, false);
 

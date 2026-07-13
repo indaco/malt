@@ -57,6 +57,26 @@ pub const Linker = struct {
             defer prefix_dir.close(self.io);
 
             for (leaves.items) |rel| {
+                // File-vs-directory clash (ancestor is a non-dir, or the leaf
+                // slot is a dir): invisible to readLink, but linking would
+                // fail — flag it so the pre-check isn't falsely clean.
+                if (self.structuralConflict(prefix_dir, rel)) |clash| {
+                    var lp_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    const link_path = std.fmt.bufPrint(&lp_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, clash }) catch continue;
+                    // Name the owning keg when the clashing node is a keg
+                    // symlink; otherwise report the bare structural clash.
+                    var owner_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    const owner: []const u8 = if (prefix_dir.readLink(self.io, clash, &owner_buf)) |n|
+                        (extractKegFromPath(owner_buf[0..n]) orelse owner_buf[0..n])
+                    else |_|
+                        "existing directory";
+                    conflicts.append(self.allocator, .{
+                        .link_path = self.allocator.dupe(u8, link_path) catch continue,
+                        .existing_keg = self.allocator.dupe(u8, owner) catch continue,
+                    }) catch continue;
+                    continue;
+                }
+
                 // Check if a symlink already exists at the target location.
                 // 1 KiB fits every path malt produces under its prefix — the
                 // previous `max_path_bytes` (~4 KiB) was stack-wasteful when
@@ -68,7 +88,7 @@ pub const Linker = struct {
 
                 // If the existing symlink points into a different keg, it's a conflict
                 if (!std.mem.startsWith(u8, link_target, keg_path)) {
-                    var link_path_buf: [512]u8 = undefined;
+                    var link_path_buf: [std.fs.max_path_bytes]u8 = undefined;
                     const link_path = std.fmt.bufPrint(&link_path_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, rel }) catch continue;
 
                     // Extract the existing keg path from the symlink target
@@ -106,7 +126,10 @@ pub const Linker = struct {
         var i: usize = 0;
         while (i < pending.items.len) : (i += 1) {
             const rel = pending.items[i];
-            var lvl_buf: [512]u8 = undefined;
+            // Path buffers are sized to the OS path max: a leaf read from the
+            // filesystem is a real path (≤ PATH_MAX), so composing it here
+            // never truncates — no real leaf is silently dropped.
+            var lvl_buf: [std.fs.max_path_bytes]u8 = undefined;
             const lvl_path = if (rel.len == 0)
                 base
             else
@@ -116,7 +139,7 @@ pub const Linker = struct {
             defer lvl.close(self.io);
             var it = lvl.iterate();
             while (it.next(self.io) catch null) |entry| {
-                var child_buf: [512]u8 = undefined;
+                var child_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const child = if (rel.len == 0)
                     std.fmt.bufPrint(&child_buf, "{s}", .{entry.name}) catch continue
                 else
@@ -129,6 +152,29 @@ pub const Linker = struct {
                 }
             }
         }
+    }
+
+    /// Detect a file-vs-directory clash the symlink probe can't see: an
+    /// ancestor of `rel` already exists as a non-directory (so `rel`'s nested
+    /// parent can't be created), or `rel` itself is an existing directory (so
+    /// the leaf slot is taken). `prefix_dir` is opened at `<prefix>/<subdir>`.
+    /// Returns the offending prefix-relative component, or null when clear.
+    fn structuralConflict(self: *Linker, prefix_dir: std.Io.Dir, rel: []const u8) ?[]const u8 {
+        var pos: usize = 0;
+        while (pos < rel.len) {
+            const slash = std.mem.indexOfScalarPos(u8, rel, pos, '/');
+            const partial = rel[0 .. slash orelse rel.len]; // cumulative path so far
+            const is_last = slash == null;
+            const st = prefix_dir.statFile(self.io, partial, .{ .follow_symlinks = false }) catch
+                return null; // component absent → nothing below can clash
+            if (is_last) {
+                if (st.kind == .directory) return partial; // leaf slot is a dir
+            } else if (st.kind != .directory) {
+                return partial; // an ancestor is a file/symlink
+            }
+            pos = (slash orelse rel.len) + 1;
+        }
+        return null;
     }
 
     /// Extract "Cellar/<name>/<ver>" from a full path like "/opt/malt/Cellar/foo/1.0/bin/foo"
@@ -153,7 +199,10 @@ pub const Linker = struct {
         const dirs_to_link: []const []const u8 = if (bin_isolated) linkable_dirs[2..] else &linkable_dirs;
 
         for (dirs_to_link) |subdir| {
-            self.linkSubdir(keg_path, subdir, name, keg_id) catch continue;
+            // linkSubdir swallows per-leaf filesystem hiccups but propagates a
+            // DB write failure; surface it so install can roll the keg back
+            // rather than leave it silently half-linked.
+            try self.linkSubdir(keg_path, subdir, name, keg_id);
         }
     }
 
@@ -192,14 +241,16 @@ pub const Linker = struct {
             const rel_parent = std.fs.path.dirname(rel);
             if (rel_parent) |rp| parent_dir.createDirPath(self.io, rp) catch continue;
 
-            var target_buf: [512]u8 = undefined;
+            // Path buffers sized to the OS path max so a real keg leaf never
+            // truncates (see collectLeafPaths).
+            var target_buf: [std.fs.max_path_bytes]u8 = undefined;
             const target = std.fmt.bufPrint(&target_buf, "{s}/{s}/{s}", .{ keg_path, subdir, rel }) catch continue;
 
             // Atomic symlink: create at a temp name, then rename into place.
             // This avoids a window where the link is absent after deleteFile.
             // The temp sits in the leaf's own parent so the rename stays
             // within one directory.
-            var tmp_name_buf: [512]u8 = undefined;
+            var tmp_name_buf: [std.fs.max_path_bytes]u8 = undefined;
             const tmp_name = if (rel_parent) |rp|
                 std.fmt.bufPrint(&tmp_name_buf, "{s}/.malt_tmp_{s}", .{ rp, std.fs.path.basename(rel) }) catch continue
             else
@@ -215,19 +266,29 @@ pub const Linker = struct {
             };
 
             // Build the full link path for DB recording
-            var link_buf: [512]u8 = undefined;
+            var link_buf: [std.fs.max_path_bytes]u8 = undefined;
             const link_path = std.fmt.bufPrint(&link_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, rel }) catch continue;
 
-            // Record in DB
-            var stmt = try self.db.prepare(
-                "INSERT OR REPLACE INTO links (keg_id, link_path, target) VALUES (?1, ?2, ?3);",
-            );
-            defer stmt.finalize();
-            try stmt.bindInt(1, keg_id);
-            try stmt.bindText(2, link_path);
-            try stmt.bindText(3, target);
-            _ = try stmt.step();
+            // Record the link. On DB failure, back out the symlink we just
+            // made — a DB-less symlink is an orphan `unlink` can't find — and
+            // propagate so the caller (install) rolls the keg back instead of
+            // reporting a half-linked keg as success.
+            self.recordLink(keg_id, link_path, target) catch |e| {
+                parent_dir.deleteFile(self.io, rel) catch {};
+                return e;
+            };
         }
+    }
+
+    fn recordLink(self: *Linker, keg_id: i64, link_path: []const u8, target: []const u8) !void {
+        var stmt = try self.db.prepare(
+            "INSERT OR REPLACE INTO links (keg_id, link_path, target) VALUES (?1, ?2, ?3);",
+        );
+        defer stmt.finalize();
+        try stmt.bindInt(1, keg_id);
+        try stmt.bindText(2, link_path);
+        try stmt.bindText(3, target);
+        _ = try stmt.step();
     }
 
     /// Create `opt/{name} -> Cellar/{name}/{version}` symlink.
