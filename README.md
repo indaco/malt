@@ -834,11 +834,16 @@ Install times on macOS 14 (Apple Silicon).
 <!-- BENCH:COLD:START -->
 ### Cold Install (median ±σ)
 
-| Package | malt 0.20.0 | nanobrew v0.1.202 | zerobrew v0.3.2 | Homebrew |
+| Package | malt 0.20.10 | nanobrew v0.1.202 | zerobrew v0.3.2 | Homebrew |
 | ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.375±0.058s | 2.442±0.206s | 0.854±0.136s | 1.738±0.092s |
-| **wget** (6 deps) | 2.195±0.375s | ⚠️ n/a (>50s) | 5.164±1.000s | 1.949±0.152s |
-| **ffmpeg** (11 deps) | 2.919±0.695s | ⚠️ n/a (>50s) | 6.303±1.428s | 4.766±0.378s |
+| **tree** (0 deps) | 0.697±0.068s | 2.849±0.032s | 1.325±0.072s | 2.138±0.119s |
+| **wget** (6 deps) | 2.578±0.999s | ⚠️ n/a (>50s) | 5.499±1.181s | 2.223±0.306s |
+| **ffmpeg** (11 deps) | 4.059±0.597s | ⚠️ n/a (>50s) | 6.700±1.173s | 5.003±1.040s |
+
+> ⚠️ = cell omitted. That tool's cold install exceeded the sanity
+> ceiling (50 s), which reflects a regression in that tool rather than
+> a comparable install time, so the number is withheld instead of
+> published. malt is never omitted — a real malt slowdown stays visible.
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
@@ -846,9 +851,9 @@ Install times on macOS 14 (Apple Silicon).
 
 | Package | malt | nanobrew | zerobrew |
 | ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.011s | 0.014s | 0.223s |
-| **wget** (6 deps) | 0.008s | 0.012s | 0.818s |
-| **ffmpeg** (11 deps) | 0.025s | 0.019s | 2.684s |
+| **tree** (0 deps) | 0.010s | 0.011s | 0.254s |
+| **wget** (6 deps) | 0.010s | 0.015s | 0.715s |
+| **ffmpeg** (11 deps) | 0.032s | 0.020s | 2.161s |
 <!-- BENCH:WARM:END -->
 
 <!-- BENCH:SIZE:START -->
