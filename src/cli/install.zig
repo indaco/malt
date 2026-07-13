@@ -386,42 +386,6 @@ const ExecuteOpts = struct {
     sink: OutputSink = sink_mod.terminal,
 };
 
-const InstallFlag = enum {
-    cask,
-    formula,
-    dry_run,
-    force,
-    local,
-    use_system_ruby,
-    quiet,
-    json,
-    only_deps,
-    download_only,
-    isolate_deps,
-};
-
-const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
-    .{ "--cask", .cask },
-    .{ "--formula", .formula },
-    .{ "--dry-run", .dry_run },
-    .{ "--force", .force },
-    .{ "--local", .local },
-    .{ "--use-system-ruby", .use_system_ruby },
-    .{ "--quiet", .quiet },
-    .{ "-q", .quiet },
-    .{ "--json", .json },
-    .{ "--only-deps", .only_deps },
-    // brew-parity alias — `--only-dependencies` is what `brew install`
-    // accepts, so muscle memory keeps working alongside the canonical
-    // `--only-deps` spelling that mirrors `--isolate-deps`.
-    .{ "--only-dependencies", .only_deps },
-    .{ "--download-only", .download_only },
-    .{ "--isolate-deps", .isolate_deps },
-    // Long-form alias — mirrors the `--only-deps` / `--only-dependencies`
-    // pair so the flag surface stays predictable.
-    .{ "--isolate-dependencies", .isolate_deps },
-});
-
 /// `allocator` must be an arena (see `installAll`).
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     return executeWithOpts(ctx, allocator, args, .{});
@@ -438,137 +402,52 @@ fn executeWithOpts(
     // Single emission seam for this run; default forwards to `ui/output`.
     const sink = exec_opts.sink;
 
-    // Parse flags
-    var packages: std.ArrayList([]const u8) = .empty;
-    defer packages.deinit(allocator);
-    var force_cask = false;
-    var force_formula = false;
-    // Honour the global `--dry-run` flag consumed by main.zig, while still
-    // allowing programmatic callers to pass `--dry-run` directly in `args`.
-    var dry_run = output.isDryRun();
-    var force = false;
-    // Scoped `--use-system-ruby` — a bare flag with multiple formulas would
-    // let a DSL parse failure on one silently widen Ruby trust across the rest.
-    var use_system_ruby_bare = false;
-    var use_system_ruby_scope: std.ArrayList([]const u8) = .empty;
-    defer use_system_ruby_scope.deinit(allocator);
-    // `--local` forces .rb-path interpretation — explicit trust opt-in in
-    // argv instead of shape-based autodetection.
-    var local_only = false;
-    // brew parity: resolve the dep graph, bail before the requested package's
-    // materialise+link. Deps stay marked `dependency` for `mt purge --unused-deps`.
-    var only_deps = false;
-    // Warm the bottle store; skip materialise/link/record. Refcount stays
-    // at 0 so warmed entries are invisible to `purge --store-orphans`
-    // until a follow-up install picks them up.
-    var download_only = false;
-    // Per-pass user intent: every dep keg materialised during this run
-    // gets `bin_isolated=1`. Direct kegs (the names the user asked for)
-    // are unaffected so they still land in PATH.
-    var isolate_deps = false;
-
-    // StaticStringMap + exhaustive switch: the compiler checks every flag
-    // has a handler, so adding a new variant without wiring it fails to build.
-    for (args) |arg| {
-        if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
-            const list = arg["--use-system-ruby=".len..];
-            var it = std.mem.splitScalar(u8, list, ',');
-            while (it.next()) |name| {
-                if (name.len > 0) try use_system_ruby_scope.append(allocator, name);
+    // Parse + validate argv in the leaf: the rules live there, the words
+    // stay caller-owned (the `checkPrefixSane` precedent). Each refusal maps
+    // to its verbatim sink line + return code below. A scoped arena backs the
+    // parsed package/scope slices so every return path reclaims them even when
+    // the caller's allocator isn't itself an arena.
+    var parse_arena = std.heap.ArenaAllocator.init(allocator);
+    defer parse_arena.deinit();
+    const parsed = switch (try args_mod.parse(parse_arena.allocator(), args)) {
+        .ok => |p| p,
+        .invalid => |v| {
+            switch (v.err) {
+                .local_requires_path => sink.err("--local requires a path to a .rb file", .{}),
+                .local_with_cask => sink.err("--local cannot be combined with --cask (a .rb file is never a cask)", .{}),
+                .local_with_formula => sink.err("--local already selects formula mode; drop --formula", .{}),
+                .local_with_system_ruby => sink.err("--local does not run post_install; --use-system-ruby has no effect and is refused", .{}),
+                .download_only_with_only_deps => sink.err("--download-only cannot be combined with --only-deps", .{}),
+                .no_packages => sink.err("No package names specified", .{}),
+                .self_install => sink.err("Refusing to install malt itself ('{s}'). Use 'mt version update' to upgrade.", .{v.arg}),
+                .ambiguous_system_ruby_scope => sink.err(
+                    "--use-system-ruby needs a scope when multiple packages are installed; use --use-system-ruby={s}[,<name>...]",
+                    .{v.arg},
+                ),
             }
-            continue;
-        }
-        if (install_flag_map.get(arg)) |flag| switch (flag) {
-            .cask => force_cask = true,
-            .formula => force_formula = true,
-            .dry_run => dry_run = true,
-            .force => force = true,
-            .local => local_only = true,
-            .use_system_ruby => use_system_ruby_bare = true,
-            .quiet => output.setQuiet(true),
-            .json => output.setMode(.json),
-            .only_deps => only_deps = true,
-            .download_only => download_only = true,
-            .isolate_deps => isolate_deps = true,
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
-            packages.append(allocator, arg) catch return error.OutOfMemory;
-        }
-    }
-
-    if (local_only and packages.items.len == 0) {
-        // `error.Aborted` per the main.zig contract — avoids a raw stack trace.
-        sink.err("--local requires a path to a .rb file", .{});
-        return error.Aborted;
-    }
-
-    // Refuse ambiguous argv so `--local` cannot silently drop another mode.
-    if (local_only) {
-        if (force_cask) {
-            sink.err("--local cannot be combined with --cask (a .rb file is never a cask)", .{});
-            return error.Aborted;
-        }
-        if (force_formula) {
-            sink.err("--local already selects formula mode; drop --formula", .{});
-            return error.Aborted;
-        }
-        if (use_system_ruby_bare or use_system_ruby_scope.items.len > 0) {
-            sink.err("--local does not run post_install; --use-system-ruby has no effect and is refused", .{});
-            return error.Aborted;
-        }
-    }
-
-    // The two flags pull in opposite directions: --only-deps skips the
-    // requested package, --download-only skips materialise+link entirely.
-    // Document the refusal up front rather than silently picking a winner.
-    if (download_only and only_deps) {
-        sink.err("--download-only cannot be combined with --only-deps", .{});
-        return error.Aborted;
-    }
-
-    if (packages.items.len == 0) {
-        sink.err("No package names specified", .{});
-        return InstallError.NoPackages;
-    }
-
-    // Refuse self-install in every shape the dispatcher accepts.
-    // `mt version update` is the supported upgrade channel; letting
-    // install proceed would relink `<prefix>/bin/malt` outside its
-    // rev/origin tracking.
-    for (packages.items) |pkg| {
-        if (isSelfInstall(pkg)) {
-            sink.err("Refusing to install malt itself ('{s}'). Use 'mt version update' to upgrade.", .{pkg});
-            return error.Aborted;
-        }
-    }
-
-    // Bare `--use-system-ruby` only valid for a single formula; otherwise
-    // require an explicit scope.
-    if (use_system_ruby_bare) {
-        if (packages.items.len == 1) {
-            try use_system_ruby_scope.append(allocator, packages.items[0]);
-        } else {
-            sink.err(
-                "--use-system-ruby needs a scope when multiple packages are installed; use --use-system-ruby={s}[,<name>...]",
-                .{packages.items[0]},
-            );
-            return InstallError.AmbiguousSystemRubyScope;
-        }
-    }
-    const use_system_ruby_list: []const []const u8 = use_system_ruby_scope.items;
-
-    // Snapshot the parsed modes as one typed value object; every read site
-    // below names intent off `flags` instead of threading loose bools.
-    const flags: args_mod.InstallFlags = .{
-        .force_cask = force_cask,
-        .force_formula = force_formula,
-        .dry_run = dry_run,
-        .force = force,
-        .local_only = local_only,
-        .only_deps = only_deps,
-        .download_only = download_only,
-        .isolate_deps = isolate_deps,
-        .system_ruby = use_system_ruby_list,
+            return switch (v.err) {
+                .no_packages => InstallError.NoPackages,
+                .ambiguous_system_ruby_scope => InstallError.AmbiguousSystemRubyScope,
+                // `error.Aborted` per the main.zig contract — avoids a raw stack trace.
+                .local_requires_path,
+                .local_with_cask,
+                .local_with_formula,
+                .local_with_system_ruby,
+                .download_only_with_only_deps,
+                .self_install,
+                => error.Aborted,
+            };
+        },
     };
+
+    // Global side effects the UI-agnostic leaf can't apply: `--quiet` / `--json`
+    // are surfaced by `parse` and applied once here; the global `--dry-run`
+    // (consumed by main.zig) ORs with the parsed flag.
+    if (parsed.quiet) output.setQuiet(true);
+    if (parsed.json) output.setMode(.json);
+    const packages = parsed.packages;
+    var flags = parsed.flags;
+    flags.dry_run = flags.dry_run or output.isDryRun();
 
     // Initialize infrastructure
     const prefix = atomic.maltPrefixOrAbort();
@@ -592,7 +471,7 @@ fn executeWithOpts(
     // on multi-arg keeps the gate state-free.
     const fastpath_eligible = flags.fastpathEligible();
     if (fastpath_eligible) fast: {
-        for (packages.items) |pkg| {
+        for (packages) |pkg| {
             if (isTapFormula(pkg) or isLocalFormulaPath(pkg)) break :fast;
             if (!kegPresent(ctx, prefix, pkg)) break :fast;
         }
@@ -601,8 +480,8 @@ fn executeWithOpts(
         // bin/sbin symlinks materialised. That work fails open the DB
         // and the lock, so it lives in the slow path; here we just
         // gate the early return.
-        if (anyNamedNeedsPromotion(ctx, prefix, packages.items)) break :fast;
-        for (packages.items) |pkg| {
+        if (anyNamedNeedsPromotion(ctx, prefix, packages)) break :fast;
+        for (packages) |pkg| {
             sink.info("{s} is already installed", .{pkg});
             // Fast-path skips the protocol; positive signal so consumers
             // can tell idempotent success from "command never ran".
@@ -694,7 +573,7 @@ fn executeWithOpts(
     // Done before resolution so the subsequent flow sees the post-
     // promotion state ("direct + present") and `collectFormulaJobs`
     // correctly short-circuits without re-downloading the keg.
-    for (packages.items) |pkg_name| {
+    for (packages) |pkg_name| {
         if (promoteIsolatedDepIfAny(&db, &linker, pkg_name)) {
             sink.success("{s} promoted to direct: bin/sbin links restored", .{pkg_name});
         }
@@ -718,7 +597,7 @@ fn executeWithOpts(
         return;
     }
 
-    for (packages.items) |pkg_name| {
+    for (packages) |pkg_name| {
         // Check for Ctrl-C between packages during resolution
         if (signals.isInterrupted()) {
             sink.warn("Interrupted during resolution.", .{});
