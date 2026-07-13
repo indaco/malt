@@ -15,6 +15,7 @@ const linker_mod = @import("../../core/linker.zig");
 const cellar_mod = @import("../../core/cellar.zig");
 const formula_mod = @import("../../core/formula.zig");
 const cask_mod = @import("../../core/cask.zig");
+const relocated_store = @import("../../core/relocated_store.zig");
 const util = @import("util.zig");
 const report = @import("report.zig");
 
@@ -238,7 +239,7 @@ fn orphanStillLinked(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Datab
 
 // ── Tier: --cache[=DAYS] (was `cleanup --prune=`) ───────────────────────────
 
-pub fn runCache(ctx: *const AppCtx, cache_dir: []const u8, max_age_days: i64, dry_run: bool) !TierResult {
+pub fn runCache(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8, prefix: []const u8, max_age_days: i64, dry_run: bool) !TierResult {
     var result: TierResult = .{};
 
     var rep = report.Reporter.init("cache", dry_run);
@@ -248,6 +249,22 @@ pub fn runCache(ctx: *const AppCtx, cache_dir: []const u8, max_age_days: i64, dr
         cache_dir,
     });
     pruneCacheRecursive(ctx.io, cache_dir, max_age_days, dry_run, &result, &rep);
+
+    // Relocated kegs left by a past relocation-logic bump are pure cache and
+    // DB-independent, so the cache sweep is their reclaim path. Each version
+    // tree counts as one reclaimed item.
+    const reaped = relocated_store.reapStaleVersions(ctx.io, allocator, prefix, !dry_run);
+    if (reaped.removed > 0) {
+        var lbl: [96]u8 = undefined;
+        const label = std.fmt.bufPrint(&lbl, "store-relocated: {d} stale version {s}", .{
+            reaped.removed,
+            report.pluralize(reaped.removed, "tree", "trees"),
+        }) catch "store-relocated: stale version trees";
+        rep.item(label);
+        result.removed += reaped.removed;
+        result.bytes += reaped.bytes;
+    }
+
     rep.done(result.removed);
     return result;
 }
@@ -907,6 +924,35 @@ test "runStaleCasks self-heals a schema-less db rather than reporting it as a fa
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     try testing.expect(result.error_kind == null);
     try testing.expectEqual(@as(u32, 0), result.removed);
+}
+
+test "runCache reclaims relocated kegs orphaned by a past logic-version bump" {
+    const allocator = testing.allocator;
+
+    const prefix = "/tmp/malt_runCache_reloc_reap";
+    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+
+    const cache_dir = prefix ++ "/cache";
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, cache_dir);
+
+    const sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    // A version segment that is clearly not the current one → stale.
+    const stale_root = prefix ++ "/store-relocated/v999999";
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, stale_root ++ "/" ++ sha);
+    // The live version segment must survive the sweep.
+    const current = try std.fmt.allocPrint(allocator, "{s}/store-relocated/v{d}/{s}", .{
+        prefix, relocated_store.RELOC_LOGIC_VERSION, sha,
+    });
+    defer allocator.free(current);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, current);
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runCache(&ctx, allocator, cache_dir, prefix, 30, false);
+
+    try testing.expectEqual(@as(u32, 1), result.removed);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, stale_root, .{}));
+    try std.Io.Dir.accessAbsolute(fs_test_io, current, .{});
 }
 
 // ── runOldVersions cask history sweep ──────────────────────────────────────

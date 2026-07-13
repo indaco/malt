@@ -198,7 +198,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             r = try switch (k) {
                 .unused_deps => scopes_mod.runUnusedDeps(ctx, allocator, prefix, dry_run),
                 .store_orphans => scopes_mod.runStoreOrphans(ctx, allocator, prefix, dry_run),
-                .cache => scopes_mod.runCache(ctx, cache_dir, opts.cache_days, dry_run),
+                .cache => scopes_mod.runCache(ctx, allocator, cache_dir, prefix, opts.cache_days, dry_run),
                 .downloads => scopes_mod.runDownloads(ctx, cache_dir, dry_run),
                 .stale_casks => scopes_mod.runStaleCasks(ctx, allocator, prefix, dry_run),
                 .old_versions => scopes_mod.runOldVersions(ctx, allocator, prefix, dry_run),

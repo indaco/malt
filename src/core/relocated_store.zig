@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const clonefile = @import("../fs/clonefile.zig");
+const dirsize = @import("../fs/dirsize.zig");
 
 pub const RelocatedStoreError = error{
     InvalidSha256,
@@ -95,7 +96,11 @@ pub fn save(
     // the loser would otherwise fail at `renameAbsolute` below.
     std.Io.Dir.accessAbsolute(io, dst, .{}) catch {
         // Not present yet — proceed with snapshot.
-        return saveFresh(io, allocator, prefix, name, version, dst);
+        try saveFresh(io, allocator, prefix, name, version, dst);
+        // A fresh save under the current version is the natural point to
+        // reclaim kegs orphaned by a past logic-version bump. Best-effort.
+        _ = reapStaleVersions(io, allocator, prefix, true);
+        return;
     };
     return;
 }
@@ -189,6 +194,59 @@ pub fn remove(io: std.Io, prefix: []const u8, sha: []const u8) RelocatedStoreErr
     var buf: [512]u8 = undefined;
     const dir = try cacheDir(&buf, prefix, RELOC_LOGIC_VERSION, sha);
     std.Io.Dir.cwd().deleteTree(io, dir) catch return;
+}
+
+pub const Reaped = struct { removed: u32 = 0, bytes: u64 = 0 };
+
+/// Reclaim relocated kegs left under a superseded logic version: delete every
+/// `store-relocated/v<M>/` tree whose M != `RELOC_LOGIC_VERSION` (with
+/// `do_remove` false, only measure them, for a `purge --dry-run` preview).
+/// Best-effort — unreadable or undeletable entries are skipped so a partial
+/// failure never aborts the caller (an install's opportunistic sweep or
+/// `purge`). Race-safe: same-version peers only ever touch the current
+/// `v<N>/`, so an older version has no live reader to disturb.
+pub fn reapStaleVersions(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, do_remove: bool) Reaped {
+    var root_buf: [512]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, "{s}/store-relocated", .{prefix}) catch return .{};
+    var dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch return .{};
+    defer dir.close(io);
+
+    // Collect stale segment names before deleting — mutating a directory
+    // mid-iteration can invalidate its cursor.
+    var stale: std.ArrayList([]u8) = .empty;
+    defer {
+        for (stale.items) |n| allocator.free(n);
+        stale.deinit(allocator);
+    }
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (entry.kind != .directory) continue;
+        const ver = parseVersionSegment(entry.name) orelse continue;
+        if (ver == RELOC_LOGIC_VERSION) continue;
+        const owned = allocator.dupe(u8, entry.name) catch continue;
+        stale.append(allocator, owned) catch {
+            allocator.free(owned);
+            continue;
+        };
+    }
+
+    var reaped: Reaped = .{};
+    for (stale.items) |name| {
+        var child_buf: [512]u8 = undefined;
+        const child = std.fmt.bufPrint(&child_buf, "{s}/{s}", .{ root, name }) catch continue;
+        const bytes = dirsize.dirSizeBytes(io, child);
+        if (do_remove) std.Io.Dir.cwd().deleteTree(io, child) catch continue;
+        reaped.removed += 1;
+        reaped.bytes +|= bytes;
+    }
+    return reaped;
+}
+
+/// Parse a `v<digits>` cache segment name into its version, else null so
+/// foreign entries at the store root are never touched.
+fn parseVersionSegment(name: []const u8) ?u32 {
+    if (name.len < 2 or name[0] != 'v') return null;
+    return std.fmt.parseInt(u32, name[1..], 10) catch null;
 }
 
 // ---------------------------------------------------------------------------
@@ -515,4 +573,83 @@ test "save is not shadowed by a leftover entry from another version" {
     try buildKegForTests(testing.allocator, prefix, "ns", "1.0");
     try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "ns", "1.0");
     try testing.expect(has(testIo(), prefix, valid_sha_for_tests));
+}
+
+test "reapStaleVersions removes prior-version trees and keeps the current one" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "reap");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    // One current-version entry and two stale ones from past bumps.
+    try buildKegForTests(testing.allocator, prefix, "cur", "1.0");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "cur", "1.0");
+    var b1: [512]u8 = undefined;
+    var b2: [512]u8 = undefined;
+    const old_a = try cacheDir(&b1, prefix, RELOC_LOGIC_VERSION +% 1, valid_sha_for_tests);
+    const old_b = try cacheDir(&b2, prefix, RELOC_LOGIC_VERSION +% 2, valid_sha_for_tests);
+    try std.Io.Dir.cwd().createDirPath(testIo(), old_a);
+    try std.Io.Dir.cwd().createDirPath(testIo(), old_b);
+
+    const reaped = reapStaleVersions(testIo(), testing.allocator, prefix, true);
+    try testing.expectEqual(@as(u32, 2), reaped.removed);
+
+    // Stale gone, current survives.
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), old_a, .{}));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), old_b, .{}));
+    try testing.expect(has(testIo(), prefix, valid_sha_for_tests));
+}
+
+test "reapStaleVersions with do_remove=false measures without deleting" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "reap_dry");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    var buf: [512]u8 = undefined;
+    const old = try cacheDir(&buf, prefix, RELOC_LOGIC_VERSION +% 1, valid_sha_for_tests);
+    try std.Io.Dir.cwd().createDirPath(testIo(), old);
+    // A real file so the byte count is non-zero.
+    try writeFileForTests(testing.allocator, old, "bin/tool", fixture_script);
+
+    const reaped = reapStaleVersions(testIo(), testing.allocator, prefix, false);
+    try testing.expectEqual(@as(u32, 1), reaped.removed);
+    try testing.expect(reaped.bytes > 0);
+    // Dry-run must not delete.
+    try std.Io.Dir.accessAbsolute(testIo(), old, .{});
+}
+
+test "reapStaleVersions ignores foreign entries and a missing store" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "reap_foreign");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    // No store-relocated dir yet → no-op, no error.
+    try testing.expectEqual(@as(u32, 0), reapStaleVersions(testIo(), testing.allocator, prefix, true).removed);
+
+    // A non-`v<digits>` sibling must never be touched.
+    const foreign = try std.fmt.allocPrint(testing.allocator, "{s}/store-relocated/notes", .{prefix});
+    defer testing.allocator.free(foreign);
+    try std.Io.Dir.cwd().createDirPath(testIo(), foreign);
+    try testing.expectEqual(@as(u32, 0), reapStaleVersions(testIo(), testing.allocator, prefix, true).removed);
+    try std.Io.Dir.accessAbsolute(testIo(), foreign, .{});
+}
+
+test "save self-heals a prior-version entry" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "save_selfheal");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    // A stale entry from a past bump is present before the install.
+    var buf: [512]u8 = undefined;
+    const old = try cacheDir(&buf, prefix, RELOC_LOGIC_VERSION +% 1, valid_sha_for_tests);
+    try std.Io.Dir.cwd().createDirPath(testIo(), old);
+
+    // A fresh save under the current version reclaims it opportunistically.
+    try buildKegForTests(testing.allocator, prefix, "heal", "1.0");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "heal", "1.0");
+    try testing.expect(has(testIo(), prefix, valid_sha_for_tests));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), old, .{}));
 }
