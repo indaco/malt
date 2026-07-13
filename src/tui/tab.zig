@@ -38,6 +38,11 @@ pub const FetchSpec = struct {
     verb: []const []const u8,
     max_ok_exit: u8,
     refresh_op: []const u8,
+    /// The tab's own parser, wrapped as a `cmd.ParseFn`. The tab already imports
+    /// its `json/*` module for `render`, so it names it here too — this is how a
+    /// background `read` `Cmd` carries the parser the interpreter calls, keeping the
+    /// interpreter free of any tab/parser import.
+    parse: cmd.ParseFn,
 };
 
 /// A bounded frame-byte appender. Writes stop at the buffer end (the frame is

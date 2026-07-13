@@ -53,7 +53,7 @@ pub const Storage = struct {
 };
 
 /// Outdated audits in the background; a non-clean exit means a failed refresh.
-pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{"outdated"}, .max_ok_exit = 0, .refresh_op = "outdated refresh failed" };
+pub const fetch_spec: ?tab.FetchSpec = .{ .verb = &.{"outdated"}, .max_ok_exit = 0, .refresh_op = "outdated refresh failed", .parse = cmd.parserFor(.outdated, outdated_json.parse) };
 
 pub fn title() []const u8 {
     return "Outdated";
@@ -462,22 +462,8 @@ fn dropUpgradedRows(
     shared.outdated_count = new_items.len;
 }
 
-/// Repoint the Outdated tab and the header count at a drained `--json` payload.
-/// `null` (a fresh prefix's exit-0 no-output) clears to a known-zero tab; a parsed
-/// document swaps in the rows and a fresh, all-clear checkbox buffer. Shared by
-/// the synchronous reload and the background launch fetch, so both land the same
-/// state. The storage is swapped only after a clean parse — a failure keeps the
-/// last-good rows for the caller's banner to explain. Public because the shell's
-/// fetch drain routes a background payload through it.
-pub fn applyOutdatedBytes(allocator: std.mem.Allocator, st: *State, storage: *Storage, shared: *ctx.SharedModel, bytes: ?[]const u8) outdated_json.Error!void {
-    const payload = bytes orelse return clearRows(allocator, st, storage, shared);
-    const parsed = try outdated_json.parse(allocator, payload);
-    errdefer parsed.deinit();
-    try applyOutdatedParse(allocator, st, storage, shared, parsed);
-}
-
 /// Clear to the known-zero state, freeing the parse and the shell-owned checkbox
-/// buffer. Shared by a null background payload and a `.cleared` keypress read.
+/// buffer. The `.cleared` fold — an exit-0 empty read, background or keypress.
 fn clearRows(allocator: std.mem.Allocator, st: *State, storage: *Storage, shared: *ctx.SharedModel) void {
     if (storage.outdated) |old| old.deinit();
     if (storage.checked.len != 0) allocator.free(storage.checked);
@@ -491,10 +477,10 @@ fn clearRows(allocator: std.mem.Allocator, st: *State, storage: *Storage, shared
 /// Repoint the Outdated tab + header count at a fresh parse, allocating a new
 /// all-clear checkbox buffer (shell-owned) and freeing the previous parse/buffer.
 /// An upgrade removes the upgraded rows, so carrying the old selection forward
-/// would point at the wrong packages — the buffer starts clear. Shared by the
-/// background fetch drain (`applyOutdatedBytes`) and the keypress reload (`update`
-/// on `.loaded`). The swap runs only after `checked` is allocated, so a fold OOM
-/// leaves `parsed` for the caller's `errdefer`/banner and never half-applies.
+/// would point at the wrong packages — the buffer starts clear. The `.loaded`
+/// fold, from a background drain or a keypress reload alike. The swap runs only
+/// after `checked` is allocated, so a fold OOM leaves `parsed` for `update` to free
+/// behind the banner and never half-applies.
 fn applyOutdatedParse(allocator: std.mem.Allocator, st: *State, storage: *Storage, shared: *ctx.SharedModel, parsed: outdated_json.Parsed) std.mem.Allocator.Error!void {
     const checked = try allocator.alloc(bool, parsed.items.len);
     @memset(checked, false);
@@ -514,6 +500,14 @@ const testing = std.testing;
 
 fn ch(c: u8) tab.Key {
     return .{ .char = .{ .bytes = .{ c, 0, 0, 0 }, .len = 1 } };
+}
+
+/// Fold a `--json` document into the tab exactly as the interpreter does: parse,
+/// then deliver it as a `.loaded` `Msg` through `update`. The reified stand-in for
+/// the old `applyOutdatedBytes`, so a test can seed rows the way the real drain does.
+fn loadOutdated(st: *State, storage: *Storage, shared: *ctx.SharedModel, json: []const u8) !void {
+    const parsed = try outdated_json.parse(testing.allocator, json);
+    _ = update(testing.allocator, "/bin/mt", st, storage, shared, .{ .loaded = .{ .outdated = parsed } });
 }
 
 /// Drive `step` with a throwaway storage and a fixed mt path. Outdated's `step`
@@ -810,7 +804,7 @@ test "an upgrade runs a --formula pass, then chains a --cask pass, dropping each
         \\{"name":"firefox","installed":"1","latest":"2","type":"cask","pinned":false}
         \\]}
     ;
-    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, json);
+    try loadOutdated(&st, &storage, &shared, json);
     storage.checked[0] = true; // wget (formula)
     storage.checked[1] = true; // firefox (cask)
     st.checked = storage.checked;
@@ -847,7 +841,7 @@ test "a failed formula pass keeps its rows and still chains the cask pass" {
         \\{"name":"firefox","installed":"1","latest":"2","type":"cask","pinned":false}
         \\]}
     ;
-    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, json);
+    try loadOutdated(&st, &storage, &shared, json);
     storage.checked[0] = true;
     storage.checked[1] = true;
     st.checked = storage.checked;
@@ -874,7 +868,7 @@ test "dropUpgradedRows removes upgraded rows in place and preserves kept checked
         \\{"name":"c","installed":"1","latest":"2","type":"formula","pinned":false}
         \\]}
     ;
-    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, json);
+    try loadOutdated(&st, &storage, &shared, json);
     // Check a and c (b is the one being upgraded); the kept rows must stay checked.
     storage.checked[0] = true;
     storage.checked[2] = true;
@@ -891,7 +885,7 @@ test "dropUpgradedRows removes upgraded rows in place and preserves kept checked
     try testing.expect(st.checked[1]);
 }
 
-test "applyOutdatedBytes reallocs the checkbox buffer to the new row count" {
+test "a reloaded outdated read reallocs the checkbox buffer to the new row count" {
     var st: State = .{};
     var storage: Storage = .{};
     var shared: ctx.SharedModel = .{};
@@ -899,12 +893,12 @@ test "applyOutdatedBytes reallocs the checkbox buffer to the new row count" {
     // First parse (two rows). Its arena must be freed when the second lands, or the
     // test allocator trips — this pins that the arena lifetime moved into the tab's
     // own Storage, so a re-load frees the prior parse rather than leaking it.
-    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, "{\"outdated\":[{\"name\":\"a\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false},{\"name\":\"b\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false}]}");
+    try loadOutdated(&st, &storage, &shared, "{\"outdated\":[{\"name\":\"a\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false},{\"name\":\"b\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false}]}");
     storage.checked[0] = true; // a stale selection the swap must not carry forward
     try testing.expectEqual(@as(usize, 2), storage.outdated.?.items.len);
     try testing.expectEqual(@as(usize, 2), storage.checked.len);
     // Second parse (one row) swaps in a fresh arena + an all-clear checkbox buffer.
-    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, "{\"outdated\":[{\"name\":\"z\",\"installed\":\"1\",\"latest\":\"9\",\"type\":\"cask\",\"pinned\":false}]}");
+    try loadOutdated(&st, &storage, &shared, "{\"outdated\":[{\"name\":\"z\",\"installed\":\"1\",\"latest\":\"9\",\"type\":\"cask\",\"pinned\":false}]}");
     // The survivor borrows the live arena: the name resolves and the count follows.
     try testing.expectEqual(@as(usize, 1), storage.outdated.?.items.len);
     try testing.expectEqual(@as(usize, 1), storage.checked.len); // buffer resized to the new row count
@@ -933,7 +927,7 @@ test "dropUpgradedRows drops only the upgraded kind when a formula and cask shar
         \\{"name":"docker","installed":"1","latest":"2","type":"cask","pinned":false}
         \\]}
     ;
-    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, json);
+    try loadOutdated(&st, &storage, &shared, json);
     // Only the formula docker was upgraded; the same-named cask must remain.
     try dropUpgradedRows(testing.allocator, &st, &storage, &shared, &.{.{ .name = "docker", .kind = .formula }});
     try testing.expectEqual(@as(usize, 1), storage.outdated.?.items.len);
@@ -951,7 +945,7 @@ test "dropUpgradedRows survives two sequential drops (the formula then cask pass
         \\{"name":"firefox","installed":"1","latest":"2","type":"cask","pinned":false}
         \\]}
     ;
-    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, json);
+    try loadOutdated(&st, &storage, &shared, json);
 
     // Formula pass drops wget; the cask ref (still borrowing the live parse
     // arena) must survive the first drop's store mutation and rebuilt buffer.
@@ -976,7 +970,7 @@ test "dropUpgradedRows keeps every row when no upgraded ref matches" {
         \\{"name":"b","installed":"1","latest":"2","type":"formula","pinned":false}
         \\]}
     ;
-    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, json);
+    try loadOutdated(&st, &storage, &shared, json);
     try dropUpgradedRows(testing.allocator, &st, &storage, &shared, &.{.{ .name = "z", .kind = .formula }});
     try testing.expectEqual(@as(usize, 2), storage.outdated.?.items.len);
 }
@@ -992,7 +986,7 @@ test "dropUpgradedRows clears the list when every row was upgraded" {
         \\{"name":"b","installed":"1","latest":"2","type":"formula","pinned":false}
         \\]}
     ;
-    try applyOutdatedBytes(testing.allocator, &st, &storage, &shared, json);
+    try loadOutdated(&st, &storage, &shared, json);
     try dropUpgradedRows(testing.allocator, &st, &storage, &shared, &.{ .{ .name = "a", .kind = .formula }, .{ .name = "b", .kind = .formula } });
     try testing.expectEqual(@as(usize, 0), storage.outdated.?.items.len);
     try testing.expectEqual(@as(?usize, 0), shared.outdated_count);

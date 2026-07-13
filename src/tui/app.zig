@@ -27,6 +27,7 @@ const Key = keys.Key;
 const layout = @import("layout.zig");
 const outdated = @import("outdated_tab.zig");
 const scroll_list = @import("scroll_list.zig");
+const interp = @import("perform.zig");
 const search = @import("search_tab.zig");
 const services = @import("services_tab.zig");
 const spawn = @import("spawn.zig");
@@ -42,6 +43,23 @@ const Painter = ctx.Painter;
 const TabFetch = ctx.TabFetch;
 const Fetches = ctx.Fetches;
 const SharedModel = ctx.SharedModel;
+
+// The effect interpreter is its own domain-agnostic leaf (`perform.zig`); the hub
+// names its vocabulary unqualified so the loop and its tests read as before, while
+// the interpreter itself imports no tab and no `json/*`.
+pub const RunError = interp.RunError;
+pub const ErrorClass = interp.ErrorClass;
+pub const classify = interp.classify;
+pub const MuxEvent = interp.MuxEvent;
+pub const pollMux = interp.pollMux;
+const freeCmdArgv = interp.freeCmdArgv;
+const anyFetchActive = interp.anyFetchActive;
+const killAndReap = interp.killAndReap;
+const reapTabFetch = interp.reapTabFetch;
+const reapAllFetches = interp.reapAllFetches;
+const fetch_tick_ms = interp.fetch_tick_ms;
+const max_fetch_bytes = interp.max_fetch_bytes;
+const FetchOutcome = interp.FetchOutcome;
 
 /// Every tab's state, all present at once so a tab switch preserves each one's
 /// filter / scroll / data. Field names match `Tab` tags for `@field` dispatch.
@@ -97,11 +115,6 @@ pub const App = struct {
     /// The polled read keeps it set across its poll loop and clears it after, so
     /// the spinner animates while the child runs and the result replaces it.
     loading: bool = false,
-    /// Tabs whose payload is being fetched in the background, so the input loop
-    /// stays live while a slow audit runs. Drives the working-indicator (spinner)
-    /// on the header `outdated` slot and on the active tab's footer, instead of a
-    /// frozen frame. Distinct from `loading` (a synchronous, blocking refetch).
-    tab_loading: std.EnumSet(Tab) = .initEmpty(),
     /// Spinner animation index, advanced one frame per poll tick while a lazy
     /// read is in flight (mirrors `progress.zig`). Lives on `App` so `renderFrame`
     /// stays a pure function of `(state, cols, rows)`: the glyph is
@@ -292,7 +305,7 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
                 // current spinner frame on the outdated slot. Same glyph source as
                 // `loadingLine`, so the working-indicators can never drift;
                 // deterministic per state.
-                .outdated_spinner = if (app.tab_loading.contains(.outdated))
+                .outdated_spinner = if (app.shared.tab_loading.contains(.outdated))
                     spinner_frames.frames[app.spinner_frame % spinner_frames.count]
                 else
                     null,
@@ -328,7 +341,7 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
             // The active tab's background fetch reads as Loading in the footer too,
             // so a tab the user navigated *into* mid-audit shows it is still
             // computing — not an empty list that looks done.
-            if (app.loading or app.tab_loading.contains(app.active)) {
+            if (app.loading or app.shared.tab_loading.contains(app.active)) {
                 var lb: [64]u8 = undefined;
                 renderFooterText(&f, loadingLine(&lb, app), color.roleCode(.accent), r.footer.row + 1, text_rows, cols);
             } else if (app.shared.banner.isSet()) {
@@ -453,46 +466,6 @@ fn refusalMessage(r: Refusal) []const u8 {
     };
 }
 
-// The terminal/loop/spawn faults the pump and the header count-read can raise.
-// A tab parser's own errors flow back through the interpreter as a `.failed` `Msg`
-// (recoverable, bannered from the `Cmd`'s `fail_op`), never up here — only the
-// count-read's `BadJson` still surfaces directly. `classify` stays exhaustive over
-// these concrete tags.
-pub const RunError = term.TermError || std.mem.Allocator.Error ||
-    spawn.ReadError || spawn.InlineError ||
-    error{ ReadFailed, BadJson };
-
-/// How the event loop treats a run-loop error: a `recoverable` backend fault
-/// becomes an inline banner and the session keeps running; a `fatal` fault
-/// restores the terminal and exits (the crash-safety guarantee for
-/// error returns; panics and termination signals restore via the
-/// `ui/term_restore` crash registry instead).
-pub const ErrorClass = enum { recoverable, fatal };
-
-/// Pure, exhaustive classifier over `RunError`. A child-process or parse fault
-/// is `recoverable` — proportionate to its cause, the dashboard keeps its tab,
-/// selection, and filter. A terminal-integrity or out-of-memory fault is
-/// `fatal`. No `else`, so a newly-added error is a compile error until it is
-/// deliberately classified — the discipline the `Key`/`Tab` enums use. Note:
-/// `ReadFailed` here is the child-pipe drain (recoverable); the controlling-tty
-/// read failure never reaches this — it is a direct fatal return in the loop.
-pub fn classify(err: RunError) ErrorClass {
-    return switch (err) {
-        error.SpawnFailed,
-        error.WaitFailed,
-        error.ChildFailed,
-        error.EmptyOutput,
-        error.ReadFailed,
-        error.BadJson,
-        => .recoverable,
-        error.NotATty,
-        error.WriteFailed,
-        error.TermiosFailed,
-        error.OutOfMemory,
-        => .fatal,
-    };
-}
-
 /// Binds the whole-dashboard repaint for a migrated tab's synchronous polled load
 /// (the Doctor reload after a fix, and the Services reload after a lifecycle
 /// action). Type-erased into `Painter.on_tick` so the tab animates its spinner
@@ -510,6 +483,12 @@ const TickBind = struct {
         // the flag so the loop's own resize check doesn't redundantly repaint.
         _ = term.takeResized();
         // Best-effort, like paintLoading: a dropped animation frame is cosmetic.
+        repaint(b.fd, b.frame, b.allocator, b.app) catch {};
+    }
+    /// Plain repaint, no animation advance — bound to `Painter.on_repaint` for the
+    /// pre-read paint before a blocking read (which shows a single frozen frame).
+    fn callRepaint(p: *anyopaque) void {
+        const b: *TickBind = @ptrCast(@alignCast(p));
         repaint(b.fd, b.frame, b.allocator, b.app) catch {};
     }
 };
@@ -569,36 +548,6 @@ fn refreshInstalledCount(io: std.Io, allocator: std.mem.Allocator, mt_path: []co
 // live and every tab fills in when its own fetch lands — navigation is never
 // trapped behind a cold-cache audit.
 
-/// Poll timeout between spinner ticks while any background fetch runs — short
-/// enough to read as animation, long enough not to busy-spin.
-const fetch_tick_ms: i32 = 80;
-
-/// Cap on a background fetch's captured bytes, sized like the blocking drain's
-/// `--json` shape with headroom.
-const max_fetch_bytes: usize = 4 * 1024 * 1024;
-
-/// Which fd a multiplexed wait found ready. The tty wins over any fetch when
-/// both are ready, so a queued keypress is serviced before a fetch drains —
-/// input is never starved by a chatty audit.
-pub const MuxEvent = union(enum) { tty, fetch: usize, timeout };
-
-/// One multiplexed wait over the controlling tty and every active fetch's
-/// stdout. Bounds the wait at `timeout` ms so a spinner tick / resize reflow
-/// lands even with nothing ready. `std.posix.poll` retries `EINTR` internally,
-/// so a `SIGWINCH` mid-wait surfaces as `.timeout`, never an error. The `.fetch`
-/// index is into `fetch_fds`; the tty is checked first so it wins ties.
-pub fn pollMux(tty_fd: std.posix.fd_t, fetch_fds: []const std.posix.fd_t, timeout: i32) error{ReadFailed}!MuxEvent {
-    var pfds_buf: [1 + tab_bar.count]std.posix.pollfd = undefined;
-    const pfds = pfds_buf[0 .. 1 + fetch_fds.len];
-    pfds[0] = .{ .fd = tty_fd, .events = std.posix.POLL.IN, .revents = 0 };
-    for (fetch_fds, 0..) |fd, i| pfds[1 + i] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
-    const ready = std.posix.poll(pfds, timeout) catch return error.ReadFailed;
-    if (ready == 0) return .timeout;
-    if (pfds[0].revents != 0) return .tty; // input wins; a HUP/ERR on the tty also reads here
-    for (0..fetch_fds.len) |i| if (pfds[1 + i].revents != 0) return .{ .fetch = i };
-    return .timeout; // defensive: poll reported ready but nothing matched
-}
-
 /// The tab's background-fetch descriptor, read from its module — runtime `t`
 /// bridged to the comptime `moduleFor` dispatch the render path already uses.
 /// Null for a tab that does not background-fetch (installed, search).
@@ -608,86 +557,51 @@ fn fetchSpec(t: Tab) ?tab.FetchSpec {
     };
 }
 
-/// True when any fetch is in flight — the loop only multiplexes then; with none
-/// active it falls back to the lone blocking tty read, so an idle dashboard has
-/// zero wakeups.
-fn anyFetchActive(fetches: *const Fetches) bool {
-    for (&fetches.values) |*v| if (v.* != null) return true;
-    return false;
+/// Build the lazy on-entry audit for a background tab as a `read` `Cmd` value the
+/// interpreter enqueues — carrying the tab's own parser (from its `fetch_spec`), so
+/// the drain needs no tab knowledge. `null` for a synchronous tab (no `fetch_spec`)
+/// or if the argv alloc fails (a quiet skip). The argv is heap-owned; the pump frees
+/// it after the enqueue.
+fn backgroundReadCmd(allocator: std.mem.Allocator, mt_path: []const u8, t: Tab) ?cmd.Cmd {
+    const spec = fetchSpec(t) orelse return null;
+    const argv = spawn.jsonArgv(allocator, mt_path, spec.verb) catch return null;
+    return .{ .read = .{ .argv = argv, .max_ok_exit = spec.max_ok_exit, .mode = .background, .parse = spec.parse, .tag = t, .fail_op = spec.refresh_op } };
 }
 
-/// Kick off `t`'s background audit, flag it loading, and store the fetch. A
-/// no-op when the tab has no fetch spec or one is already in flight. A spawn
-/// fault is quiet: the tab stays unflagged so the entry path can retry, never a
-/// nag banner.
-fn startTabFetch(io: std.Io, allocator: std.mem.Allocator, fetches: *Fetches, app: *App, t: Tab) void {
-    if (fetches.getPtr(t).* != null) return; // already auditing this tab
-    const spec = fetchSpec(t) orelse return;
-    const argv = spawn.jsonArgv(allocator, app.mt_path, spec.verb) catch return;
-    defer allocator.free(argv);
-    var child = std.process.spawn(io, .{ .argv = argv, .stdout = .pipe, .stderr = .ignore }) catch return;
-    const out = child.stdout orelse {
-        child.kill(io);
-        _ = child.wait(io) catch {};
-        return;
-    };
-    app.tab_loading.insert(t);
-    fetches.set(t, .{ .tab = t, .child = child, .fd = out.handle, .max_ok_exit = spec.max_ok_exit });
-}
-
-/// Kill the child so it cannot outlive the TUI; `kill` also reaps it (no zombie)
-/// and closes its stdout, so no separate `wait` — a second reap would abort on the
-/// already-cleared pid. The shared child-teardown step; callers own the buffer.
-fn killAndReap(io: std.Io, f: *TabFetch) void {
-    f.child.kill(io);
-}
-
-/// Tear an in-flight fetch down completely: reap the child and free its buffer.
-/// The teardown path when the user quit before the audit finished.
-fn reapTabFetch(io: std.Io, allocator: std.mem.Allocator, f: *TabFetch) void {
-    killAndReap(io, f);
-    f.buf.deinit(allocator);
-}
-
-/// Reap every in-flight fetch at teardown so none outlives the TUI or zombies.
-fn reapAllFetches(io: std.Io, allocator: std.mem.Allocator, fetches: *Fetches) void {
-    var it = fetches.iterator();
-    while (it.next()) |e| if (e.value.*) |*f| reapTabFetch(io, allocator, f);
-}
-
-/// A drained fetch's outcome, kept three-way so a *failed* audit (bad exit, read
-/// fault) stays distinct from a *clean empty* one: empty clears the tab to a
-/// known-zero state, failure keeps the last-good data behind a banner.
-const FetchOutcome = union(enum) { bytes: []const u8, empty, failed: anyerror };
-
-/// Route a drained payload to the owning tab's store. Pure dispatch over `tab`;
-/// the per-tab `applyXBytes` own the empty-vs-document split and the swap.
-fn applyTabBytes(allocator: std.mem.Allocator, app: *App, store: *Storages, t: Tab, bytes: ?[]const u8) RunError!void {
+/// Route a `Msg` to the tab named by `t` — the by-tag counterpart of `updateActive`,
+/// for a background read that lands after the user switched tabs. The result `Cmd`
+/// is freed, not pumped: a `.loaded`/`.cleared`/`.failed` fold returns `.none` (a
+/// background load chains no further effect), so this cannot drop a live effect.
+fn updateTab(allocator: std.mem.Allocator, app: *App, store: *Storages, t: Tab, msg: cmd.Msg) void {
     switch (t) {
-        .outdated => try outdated.applyOutdatedBytes(allocator, &app.states.outdated, &store.outdated, &app.shared, bytes),
-        .services => try services.applyServicesBytes(allocator, &app.states.services, &store.services, bytes),
-        .doctor => try doctor.applyDoctorBytes(allocator, &app.states.doctor, &store.doctor, bytes),
-        else => {},
+        inline else => |ct| freeCmdArgv(allocator, moduleFor(ct).update(allocator, app.mt_path, &@field(app.states, @tagName(ct)), &@field(store, @tagName(ct)), &app.shared, msg)),
     }
 }
 
-/// Land a completed fetch into its tab's store, then drop it and repaint. The
-/// child must already be reaped. The bytes are applied *before* the buffer is
-/// freed (the parse copies them); a parse/apply failure surfaces the same
-/// recoverable banner the synchronous reload uses and keeps the last-good data —
-/// never fatal, the loop keeps running.
-fn finishTabFetch(allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, t: Tab, outcome: FetchOutcome) void {
-    // Only reached for a tab with an active fetch, so the spec is present; the
-    // fallback matches the old switch's default for a would-be non-fetch tab.
-    const refresh_op = if (fetchSpec(t)) |s| s.refresh_op else "refresh failed";
-    switch (outcome) {
-        .failed => |err| app.shared.banner.set(refresh_op, @errorName(err)),
-        .empty => applyTabBytes(allocator, app, store, t, null) catch |e| app.shared.banner.set(refresh_op, @errorName(e)),
-        .bytes => |b| applyTabBytes(allocator, app, store, t, b) catch |e| app.shared.banner.set(refresh_op, @errorName(e)),
-    }
-    if (fetches.getPtr(t).*) |*f| f.buf.deinit(allocator);
+/// Land a completed fetch into its tab, then drop it and repaint. The child must
+/// already be reaped. The captured bytes are turned into a `Msg` by the fetch's
+/// carried parser — the same interpreter path a blocking read takes (`performRead`),
+/// so the drain knows no tab — and folded through the owning tab's `update`. A bad
+/// exit / read fault / recoverable parse error surfaces the recoverable banner from
+/// the fetch's `fail_op` and keeps the last-good data; a clean empty read clears to
+/// known-zero. A parse-time OOM propagates as fatal (the process is out of memory) to
+/// the loop's terminal-restore-and-exit path, exactly as a blocking read's does.
+fn finishTabFetch(allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, t: Tab, outcome: FetchOutcome) RunError!void {
+    const f = &fetches.getPtr(t).*.?;
+    // The interpreter turns the drained outcome into a `Msg` with the fetch's carried
+    // parser (and banners a recoverable fault); the hub routes it to the owning tab's
+    // `update`. On a fatal OOM, clear the fetch first so the terminal-restore teardown
+    // finds no half-live audit, then propagate.
+    const msg = interp.foldOutcome(allocator, &app.shared, f.parse, f.fail_op, outcome) catch |err| {
+        f.buf.deinit(allocator);
+        fetches.set(t, null);
+        app.shared.tab_loading.remove(t);
+        return err;
+    };
+    updateTab(allocator, app, store, t, msg);
+    f.buf.deinit(allocator);
     fetches.set(t, null);
-    app.tab_loading.remove(t);
+    app.shared.tab_loading.remove(t);
     repaint(painter.fd, painter.frame, allocator, app) catch {};
 }
 
@@ -696,7 +610,7 @@ fn finishTabFetch(allocator: std.mem.Allocator, painter: Painter, fetches: *Fetc
 /// `.failed` — never parsed); on a read fault or overflow, kill the still-running
 /// child first, then finish `.failed`. Bounded like the blocking drain; the
 /// child is always reaped before the result lands so none leaks.
-fn drainTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, t: Tab) void {
+fn drainTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, t: Tab) RunError!void {
     const f = &fetches.getPtr(t).*.?;
     var chunk: [4096]u8 = undefined;
     const n = std.posix.read(f.fd, &chunk) catch return failLiveTabFetch(io, allocator, painter, fetches, app, store, t);
@@ -710,23 +624,25 @@ fn drainTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fet
         return finishTabFetch(allocator, painter, fetches, app, store, t, outcome);
     }
     if (f.buf.items.len + n > max_fetch_bytes) return failLiveTabFetch(io, allocator, painter, fetches, app, store, t);
-    // An append OOM is a failed refresh (last-good kept), not a TUI teardown.
+    // An append/overflow is a failed refresh (last-good kept), not a TUI teardown —
+    // the buffer-cap contract; distinct from a parse-time OOM, which `finishTabFetch`
+    // treats as fatal.
     f.buf.appendSlice(allocator, chunk[0..n]) catch return failLiveTabFetch(io, allocator, painter, fetches, app, store, t);
 }
 
-/// Abandon a fetch whose child is still running (read fault, overflow, OOM):
+/// Abandon a fetch whose child is still running (read fault, overflow, append OOM):
 /// kill+reap it, then finish `.failed`. The best-effort refresh contract —
 /// last-good data behind the recoverable banner, never a TUI teardown.
-fn failLiveTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, t: Tab) void {
+fn failLiveTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, t: Tab) RunError!void {
     killAndReap(io, &fetches.getPtr(t).*.?);
-    finishTabFetch(allocator, painter, fetches, app, store, t, .{ .failed = error.ReadFailed });
+    return finishTabFetch(allocator, painter, fetches, app, store, t, .{ .failed = error.ReadFailed });
 }
 
 /// One loop turn while background fetches run: multiplex the tty with every
 /// active fetch's stdout. On a timeout, advance + repaint the spinner(s) (and
 /// absorb a resize) so the indicators animate; on a fetch ready, drain it;
 /// return true only when the tty has input the caller must read this turn.
-fn serviceFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) error{ReadFailed}!bool {
+fn serviceFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!bool {
     var fds: [tab_bar.count]std.posix.fd_t = undefined;
     var tabs: [tab_bar.count]Tab = undefined;
     var n: usize = 0;
@@ -744,51 +660,17 @@ fn serviceFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fe
             return false;
         },
         .fetch => |i| {
-            drainTabFetch(io, allocator, painter, fetches, app, store, tabs[i]);
+            try drainTabFetch(io, allocator, painter, fetches, app, store, tabs[i]);
             return false;
         },
         .tty => return true,
     }
 }
 
-/// Quiesce every in-flight background audit before an inline mutation opens the
-/// DB. The TUI is the sole DB orchestrator: a live `mt … --json` child holds the
-/// WAL writer on each open (`initSchema` writes on connect), so a mutating child
-/// spawned alongside it races the single writer and fails with `Busy`.
-///
-/// Crucially this *kills* each audit without applying its payload, rather than
-/// waiting for it and swapping in the result: the pending mutation's argv borrows
-/// the active tab's parse storage (the checked rows / selected name), which an
-/// apply-swap would free while the argv still points into it. Killing also avoids
-/// blocking the mutation behind a slow cold-cache audit. Each reaped tab is
-/// re-marked dirty so its audit re-runs afterwards; the storage is left intact, so
-/// the mutation acts on exactly the rows the user saw.
-fn quiesceFetches(io: std.Io, allocator: std.mem.Allocator, fetches: *Fetches, app: *App) void {
-    var it = fetches.iterator();
-    while (it.next()) |e| if (e.value.*) |*f| {
-        reapTabFetch(io, allocator, f); // kill + reap (closes the DB connection) + free the buffer
-        e.value.* = null;
-        app.tab_loading.remove(e.key);
-        app.shared.dirty.insert(e.key); // re-audit after the mutation, off the intact storage
-    };
-}
-
-// ── The Cmd/Msg pump (temporary shim over the phase-1 spawn/mux machinery) ──
-// `step` → `Cmd` → `perform` → `Msg` → `update` → `Cmd`, until `Cmd.none`. A later
-// pass generalizes this into one domain-agnostic `perform(cmd)` and folds it into
-// the loop; for now it performs each variant with the existing `spawn` helpers and
-// routes the result to the active tab's `update`.
-
-/// Free a `Cmd`'s heap argv once it is performed — the ownership contract: the tab
-/// (in `step`/`update`) builds the argv, the interpreter frees the slice (never its
-/// elements, which borrow parse storage).
-fn freeCmdArgv(allocator: std.mem.Allocator, c: cmd.Cmd) void {
-    switch (c) {
-        .read => |r| allocator.free(r.argv),
-        .run_mutation => |m| allocator.free(m.argv),
-        .none, .batch => {},
-    }
-}
+// ── The Cmd/Msg pump ────────────────────────────────────────────────────────
+// `step` → `Cmd` → `interp.perform` → `Msg` → `update` → `Cmd`, until `Cmd.none`.
+// The interpreter (`perform.zig`) runs each effect knowing no tab; the hub owns the
+// `moduleFor` routing of the `Msg` back to the active tab and the repaint.
 
 /// Route a `Msg` to the active tab's `update` — the same comptime `moduleFor`
 /// switch the render path uses. The active tab is stable across a synchronous pump
@@ -800,79 +682,6 @@ fn updateActive(allocator: std.mem.Allocator, app: *App, store: *Storages, msg: 
     }
 }
 
-/// Perform one `Cmd`, returning the `Msg` to fold back. A recoverable fault sets the
-/// banner from the `Cmd`'s `fail_op` and returns `.failed`/`.mutated`; only a fatal
-/// (terminal/OOM) fault propagates. `.none`/`.batch` never reach here.
-fn perform(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, c: cmd.Cmd) RunError!cmd.Msg {
-    switch (c) {
-        .none, .batch => unreachable, // the pump never performs these; no tab emits a batch
-        .read => |r| return performRead(io, allocator, painter, app, r),
-        .run_mutation => |m| return performMutation(io, allocator, t, fetches, app, m),
-    }
-}
-
-/// Perform a `read`: paint the pre-read status, capture `mt … --json`, and parse it
-/// with the `Cmd`'s carried parser. An `allow_empty` empty read is `.cleared`; a
-/// recoverable read/parse fault banners and is `.failed`; a fatal fault propagates.
-fn performRead(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, r: cmd.Cmd.Read) RunError!cmd.Msg {
-    // Paint before the blocking freeze so it reads as intentional. Search shows its
-    // own "searching…" via `phase`; the others get the "Loading…" footer.
-    const show_loading = r.tag != .search;
-    if (show_loading) app.loading = true;
-    repaint(painter.fd, painter.frame, allocator, app) catch {};
-    if (show_loading) app.loading = false;
-
-    const bytes: ?[]u8 = readBytes(io, allocator, painter, app, r) catch |err| switch (classify(err)) {
-        .fatal => return err,
-        .recoverable => {
-            app.shared.banner.set(r.fail_op, @errorName(err));
-            return .failed;
-        },
-    };
-    const payload = bytes orelse return .cleared; // an exit-0 empty read
-    defer allocator.free(payload);
-    const parsed = r.parse(allocator, payload) catch |err| {
-        if (err == error.OutOfMemory) return error.OutOfMemory; // fatal
-        app.shared.banner.set(r.fail_op, @errorName(err));
-        return .failed;
-    };
-    return .{ .loaded = parsed };
-}
-
-/// The read-mode dispatch over the phase-1 `spawn` readers. Blocking non-empty is
-/// `readJson`; blocking empty-ok is `readJsonAllowEmpty`; polled is spinner-animated
-/// via the painter. `background` never reaches here — those go through `startTabFetch`.
-fn readBytes(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, r: cmd.Cmd.Read) spawn.ReadError!?[]u8 {
-    return switch (r.mode) {
-        .blocking => if (r.allow_empty) spawn.readJsonAllowEmpty(io, allocator, r.argv) else @as(?[]u8, try spawn.readJson(io, allocator, r.argv)),
-        .polled => blk: {
-            // Keep `loading` set across the poll so each tick paints the spinner.
-            app.loading = true;
-            defer app.loading = false;
-            break :blk try spawn.readJsonPolled(io, allocator, r.argv, r.max_ok_exit, painter);
-        },
-        .background => unreachable,
-    };
-}
-
-/// Perform a `run_mutation`: quiesce background audits (the WAL single-writer
-/// invariant), re-exec `mt` inline, and return the child's exit code as `.mutated`
-/// for the tab's `update` to judge. A spawn/re-enter fault banners and is `.failed`;
-/// a terminal fault propagates.
-fn performMutation(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, fetches: *Fetches, app: *App, m: cmd.Cmd.Mutation) RunError!cmd.Msg {
-    // Sole-orchestrator invariant: a live `mt … --json` child holds the WAL writer,
-    // so a mutating child spawned alongside it races and fails `Busy`. Quiesce first.
-    if (anyFetchActive(fetches)) quiesceFetches(io, allocator, fetches, app);
-    const code = spawn.runInlineReenterStatus(t, m.argv) catch |err| switch (classify(err)) {
-        .fatal => return err,
-        .recoverable => {
-            app.shared.banner.set(m.fail_op, @errorName(err));
-            return .failed;
-        },
-    };
-    return .{ .mutated = code };
-}
-
 /// Drive one `Cmd` chain to completion: perform → fold → repeat until `Cmd.none`.
 /// The interpreter frees each performed argv; a successful Search-tab mutation grows
 /// the keg set while Installed is off-tab, so the header count is refreshed eagerly.
@@ -880,7 +689,15 @@ fn pump(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painte
     var c = initial;
     while (c != .none) {
         const performed = c;
-        const msg = perform(io, allocator, t, painter, fetches, app, performed) catch |err| {
+        // A background read enqueues rather than blocking: the loop drains its child
+        // and folds the result through `update` later. It is always a chain's initial
+        // Cmd (only the lazy on-entry audit builds one), so the chain ends here.
+        if (performed == .read and performed.read.mode == .background) {
+            interp.startBackground(io, fetches, &app.shared, performed.read);
+            freeCmdArgv(allocator, performed);
+            return;
+        }
+        const msg = interp.perform(io, allocator, t, painter, fetches, &app.shared, &app.loading, performed) catch |err| {
             freeCmdArgv(allocator, performed);
             return err;
         };
@@ -893,15 +710,18 @@ fn pump(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painte
 }
 
 /// After the keypress chain, the active tab's lazy on-entry (re)load if it is dirty:
-/// a background-fetch tab kicks its audit (loop machinery); a synchronous tab that
-/// exposes `refreshCmd` (Installed) pumps its read now. Search declares neither, so
-/// entering it never triggers a surprise remote read.
+/// a background-fetch tab enqueues its audit as a background `read` `Cmd`; a
+/// synchronous tab that exposes `refreshCmd` (Installed) pumps its blocking read now.
+/// Both go through the one pump. Search declares neither, so entering it never
+/// triggers a surprise remote read.
 fn onEntryReload(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
     switch (app.active) {
         inline else => |tag| {
             const M = moduleFor(tag);
             if (M.fetch_spec != null) {
-                if (takeDirty(app, tag)) startTabFetch(io, allocator, fetches, app, tag);
+                if (takeDirty(app, tag)) {
+                    if (backgroundReadCmd(allocator, app.mt_path, tag)) |bg| try pump(io, allocator, t, painter, fetches, app, store, bg);
+                }
             } else if (@hasDecl(M, "refreshCmd")) {
                 if (takeDirty(app, tag)) try pump(io, allocator, t, painter, fetches, app, store, M.refreshCmd(allocator, app.mt_path));
             }
@@ -977,7 +797,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     // The paint handle the polled lazy reads tick against to animate the spinner. A
     // migrated tab repaints through `on_tick` (only the hub can render every tab).
     var tick_bind: TickBind = .{ .allocator = allocator, .app = &app, .fd = fd, .frame = &frame };
-    const painter: Painter = .{ .fd = fd, .frame = &frame, .on_tick = .{ .ctx = &tick_bind, .call = TickBind.call } };
+    const painter: Painter = .{ .fd = fd, .frame = &frame, .on_tick = .{ .ctx = &tick_bind, .call = TickBind.call }, .on_repaint = .{ .ctx = &tick_bind, .call = TickBind.callRepaint } };
 
     // Paint the data-free chrome first so the alt-screen never flashes blank,
     // then prime the cheap installed count (a single-digit-ms SQLite read) and
@@ -997,9 +817,10 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     defer reapAllFetches(io, allocator, &fetches);
     // Outdated is fetched at launch so the header count fills in without entering
     // the tab; its dirty flag is consumed once the fetch owns the load, so the
-    // first entry doesn't spawn a duplicate audit.
-    startTabFetch(io, allocator, &fetches, &app, .outdated);
-    if (app.tab_loading.contains(.outdated)) _ = takeDirty(&app, .outdated);
+    // first entry doesn't spawn a duplicate audit. Enqueued through the pump like
+    // any background read — the one interpreter path.
+    if (backgroundReadCmd(allocator, app.mt_path, .outdated)) |bg| try pump(io, allocator, &t, painter, &fetches, &app, &app.storages, bg);
+    if (app.shared.tab_loading.contains(.outdated)) _ = takeDirty(&app, .outdated);
     try repaint(fd, &frame, allocator, &app); // first interactive frame: kegs + the outdated spinner
 
     var decoder: keys.Decoder = .{};
@@ -1463,7 +1284,7 @@ test "the header paints a spinner on the outdated slot while the background audi
     // `tab_loading` is distinct from the footer `loading`: the header shows the
     // audit is computing, not frozen, while the input loop stays live.
     var a: App = .{ .active = .search, .spinner_frame = 0, .shared = .{ .installed_count = 7 } };
-    a.tab_loading.insert(.outdated);
+    a.shared.tab_loading.insert(.outdated);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 100, 24);
     const glyph = spinner_frames.frames[0];
@@ -1475,7 +1296,7 @@ test "a tab entered mid-fetch reads as Loading in the footer, not an empty list"
     // The freeze this whole feature removes: navigating *into* a slow tab while
     // its audit runs must show it is still computing, not a done-looking blank.
     var a: App = .{ .active = .doctor, .spinner_frame = 0 };
-    a.tab_loading.insert(.doctor);
+    a.shared.tab_loading.insert(.doctor);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 100, 24);
     try std.testing.expect(std.mem.indexOf(u8, out, "Loading Doctor") != null);
@@ -1485,7 +1306,7 @@ test "a background fetch on an inactive tab leaves the active footer alone" {
     // Doctor audits in the background while the user sits on a loaded Installed:
     // the footer must show Installed's help, not a spurious Loading.
     var a: App = .{ .active = .installed };
-    a.tab_loading.insert(.doctor);
+    a.shared.tab_loading.insert(.doctor);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 100, 24);
     try std.testing.expect(std.mem.indexOf(u8, out, "Loading") == null);
@@ -1566,46 +1387,80 @@ fn driveFetchToEnd(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *
     while (fetches.getPtr(t).* != null) _ = try serviceFetches(io, allocator, painter, fetches, app, store);
 }
 
-test "startTabFetch kicks off the outdated audit, flags loading, and lands a known zero" {
+/// Build `t`'s background read `Cmd` and enqueue it through the interpreter, then
+/// free the argv — exactly what the pump does in `run`, inlined for a kickoff test.
+fn startBg(io: std.Io, fetches: *Fetches, app: *App, t: Tab) void {
+    const bg = backgroundReadCmd(std.testing.allocator, app.mt_path, t) orelse return;
+    defer freeCmdArgv(std.testing.allocator, bg);
+    interp.startBackground(io, fetches, &app.shared, bg.read);
+}
+
+test "a background read kickoff starts the outdated audit, flags loading, and lands a known zero" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/usr/bin/true" }; // exit 0, no output == fresh prefix
     var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
-    startTabFetch(t.io(), std.testing.allocator, &fetches, &app, .outdated);
+    startBg(t.io(), &fetches, &app, .outdated);
     try std.testing.expect(fetches.getPtr(.outdated).* != null);
-    try std.testing.expect(app.tab_loading.contains(.outdated)); // header spins from the first frame
+    try std.testing.expect(app.shared.tab_loading.contains(.outdated)); // header spins from the first frame
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expectEqual(@as(?usize, 0), app.shared.outdated_count); // empty payload is a known zero
-    try std.testing.expect(!app.tab_loading.contains(.outdated)); // cleared when the fetch lands
+    try std.testing.expect(!app.shared.tab_loading.contains(.outdated)); // cleared when the fetch lands
     try std.testing.expect(!app.shared.banner.isSet());
 }
 
-test "startTabFetch is a quiet no-op on a spawn fault, never flagging loading" {
+test "a background read kickoff is a quiet no-op on a spawn fault, never flagging loading" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/nonexistent/malt_outdated_probe" };
     var fetches: Fetches = .initFill(null);
-    startTabFetch(t.io(), std.testing.allocator, &fetches, &app, .outdated);
+    startBg(t.io(), &fetches, &app, .outdated);
     try std.testing.expect(fetches.getPtr(.outdated).* == null); // nothing to drive
-    try std.testing.expect(!app.tab_loading.contains(.outdated)); // a failed kickoff stays unflagged
+    try std.testing.expect(!app.shared.tab_loading.contains(.outdated)); // a failed kickoff stays unflagged
     try std.testing.expect(app.shared.outdated_count == null);
     try std.testing.expect(!app.shared.banner.isSet()); // launch-time, no nag
 }
 
-test "startTabFetch skips a tab whose audit is already in flight" {
+test "a background read kickoff skips a tab whose audit is already in flight" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/usr/bin/true" };
     var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
-    startTabFetch(t.io(), std.testing.allocator, &fetches, &app, .outdated);
+    startBg(t.io(), &fetches, &app, .outdated);
     const fd_before = fetches.getPtr(.outdated).*.?.fd;
-    startTabFetch(t.io(), std.testing.allocator, &fetches, &app, .outdated); // second call: no-op
+    startBg(t.io(), &fetches, &app, .outdated); // second call: no-op
     try std.testing.expectEqual(fd_before, fetches.getPtr(.outdated).*.?.fd); // same child, not respawned
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
+}
+
+test "the pump enqueues a background read rather than blocking, then folds it via update" {
+    // The interpreter runs a background `read` `Cmd` through the same pump as every
+    // effect: it enqueues (a fetch registered, loop still live) instead of blocking,
+    // and the drained result lands via the owning tab's `update` — AC1's background
+    // mode end-to-end, off a real child, with no tty.
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/usr/bin/true" }; // exit 0, no output == fresh prefix
+    var store: Storages = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    var frame: []u8 = try std.testing.allocator.alloc(u8, 256);
+    defer std.testing.allocator.free(frame);
+    var tm = term.Term.init(t.io(), -1); // headless: a background read never touches the term
+
+    const bg = backgroundReadCmd(std.testing.allocator, app.mt_path, .outdated).?;
+    try pump(t.io(), std.testing.allocator, &tm, testPainter(&frame), &fetches, &app, &store, bg);
+    // Enqueued, not blocked: the fetch is registered and the header spins.
+    try std.testing.expect(fetches.getPtr(.outdated).* != null);
+    try std.testing.expect(app.shared.tab_loading.contains(.outdated));
+
+    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
+    try std.testing.expectEqual(@as(?usize, 0), app.shared.outdated_count); // empty read folds to a known zero
+    try std.testing.expect(!app.shared.tab_loading.contains(.outdated));
 }
 
 test "a background outdated fetch parses a real child's document into the tab" {
@@ -1617,15 +1472,15 @@ test "a background outdated fetch parses a real child's document into the tab" {
         .stderr = .ignore,
     });
     var app: App = .{};
-    app.tab_loading.insert(.outdated);
+    app.shared.tab_loading.insert(.outdated);
     var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
-    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0, .parse = outdated.fetch_spec.?.parse, .fail_op = outdated.fetch_spec.?.refresh_op });
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expectEqual(@as(?usize, 1), app.shared.outdated_count); // header count
     try std.testing.expectEqual(@as(usize, 1), app.states.outdated.items.len); // the tab body, too
-    try std.testing.expect(!app.tab_loading.contains(.outdated));
+    try std.testing.expect(!app.shared.tab_loading.contains(.outdated));
 }
 
 test "a malformed payload banners and keeps the outdated count unknown, never zero" {
@@ -1633,14 +1488,38 @@ test "a malformed payload banners and keeps the outdated count unknown, never ze
     defer t.deinit();
     const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/echo", "garbage" }, .stdout = .pipe, .stderr = .ignore });
     var app: App = .{};
-    app.tab_loading.insert(.outdated);
+    app.shared.tab_loading.insert(.outdated);
     var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
-    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0, .parse = outdated.fetch_spec.?.parse, .fail_op = outdated.fetch_spec.?.refresh_op });
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expect(app.shared.outdated_count == null); // unknown (`—`), not 0
     try std.testing.expectEqualStrings("outdated refresh failed: BadJson", app.shared.banner.slice());
+}
+
+// A parser that OOMs, to drive the fatal background-parse path end to end.
+fn oomParse(_: std.mem.Allocator, _: []const u8) anyerror!cmd.Parsed {
+    return error.OutOfMemory;
+}
+
+test "a background parse OOM is fatal: it propagates and clears the fetch, no banner" {
+    // A background fetch whose parser hits OOM must not be masked as a recoverable
+    // refresh — it propagates to the loop's terminal-restore path (as a blocking read
+    // does), and the fetch is cleared first so teardown finds no half-live audit.
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/echo", "{}" }, .stdout = .pipe, .stderr = .ignore });
+    var app: App = .{};
+    app.shared.tab_loading.insert(.outdated);
+    var store: Storages = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0, .parse = oomParse, .fail_op = "outdated refresh failed" });
+    try std.testing.expectError(error.OutOfMemory, driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated));
+    try std.testing.expect(fetches.getPtr(.outdated).* == null); // slot cleared on the fatal path — teardown won't double-reap
+    try std.testing.expect(!app.shared.tab_loading.contains(.outdated));
+    try std.testing.expect(!app.shared.banner.isSet()); // fatal, not a recoverable "refresh failed"
 }
 
 test "quiesceFetches kills an in-flight audit and re-marks it dirty, leaving storage intact" {
@@ -1650,14 +1529,14 @@ test "quiesceFetches kills an in-flight audit and re-marks it dirty, leaving sto
     // the case where the pending mutation's argv still borrows the live storage.
     const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/sleep", "5" }, .stdout = .pipe, .stderr = .ignore });
     var app: App = .{ .shared = .{ .outdated_count = 7 } }; // a prior good count
-    app.tab_loading.insert(.outdated);
+    app.shared.tab_loading.insert(.outdated);
     var fetches: Fetches = .initFill(null);
-    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0, .parse = outdated.fetch_spec.?.parse, .fail_op = outdated.fetch_spec.?.refresh_op });
 
-    quiesceFetches(t.io(), std.testing.allocator, &fetches, &app);
+    interp.quiesceFetches(t.io(), std.testing.allocator, &fetches, &app.shared);
 
     try std.testing.expect(!anyFetchActive(&fetches)); // the writer is released for the mutation
-    try std.testing.expect(!app.tab_loading.contains(.outdated)); // no longer flagged loading
+    try std.testing.expect(!app.shared.tab_loading.contains(.outdated)); // no longer flagged loading
     try std.testing.expect(app.shared.dirty.contains(.outdated)); // re-audit after the mutation
     // The audit is *not* applied: storage is untouched, so the mutation's argv (which
     // borrows those rows) cannot dangle. A wait-and-apply drain would swap it to 1.
@@ -1672,15 +1551,15 @@ test "service quiesces an in-flight audit before a mutating dispatch" {
     defer t.deinit();
     const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/sleep", "5" }, .stdout = .pipe, .stderr = .ignore });
     var app: App = .{};
-    app.tab_loading.insert(.outdated);
+    app.shared.tab_loading.insert(.outdated);
     var fetches: Fetches = .initFill(null);
-    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0, .parse = outdated.fetch_spec.?.parse, .fail_op = outdated.fetch_spec.?.refresh_op });
     var tm = term.Term.init(t.io(), -1);
 
     // The re-exec re-enter faults on the headless (-1) term, but the quiesce runs
     // *first*; assert the audit was killed regardless of the mutation's outcome.
     const m: cmd.Cmd.Mutation = .{ .argv = &.{"/usr/bin/true"}, .tag = .outdated };
-    _ = performMutation(t.io(), std.testing.allocator, &tm, &fetches, &app, m) catch {};
+    _ = interp.performMutation(t.io(), std.testing.allocator, &tm, &fetches, &app.shared, m) catch {};
 
     try std.testing.expect(!anyFetchActive(&fetches)); // quiesced before the dispatch
 }
@@ -1690,11 +1569,11 @@ test "a non-zero child exit fails the fetch without parsing a half-written doc" 
     defer t.deinit();
     const child = try std.process.spawn(t.io(), .{ .argv = &.{"/usr/bin/false"}, .stdout = .pipe, .stderr = .ignore });
     var app: App = .{ .shared = .{ .outdated_count = 5 } }; // a prior good count
-    app.tab_loading.insert(.outdated);
+    app.shared.tab_loading.insert(.outdated);
     var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
-    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0, .parse = outdated.fetch_spec.?.parse, .fail_op = outdated.fetch_spec.?.refresh_op });
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expectEqual(@as(?usize, 5), app.shared.outdated_count); // a bad exit keeps the last-good, never 0
     try std.testing.expect(app.shared.banner.isSet());
@@ -1709,14 +1588,14 @@ test "the doctor fetch tolerates a severity exit (≤2) as success" {
     defer t.deinit();
     const child = try std.process.spawn(t.io(), .{ .argv = &.{"/usr/bin/false"}, .stdout = .pipe, .stderr = .ignore });
     var app: App = .{};
-    app.tab_loading.insert(.doctor);
+    app.shared.tab_loading.insert(.doctor);
     var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
-    fetches.set(.doctor, .{ .tab = .doctor, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 2 });
+    fetches.set(.doctor, .{ .tab = .doctor, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 2, .parse = doctor.fetch_spec.?.parse, .fail_op = doctor.fetch_spec.?.refresh_op });
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .doctor);
     try std.testing.expect(!app.shared.banner.isSet()); // exit 1 ≤ 2 is OK for doctor
-    try std.testing.expect(!app.tab_loading.contains(.doctor));
+    try std.testing.expect(!app.shared.tab_loading.contains(.doctor));
 }
 
 test "a background fetch accumulates a payload spanning multiple reads" {
@@ -1738,11 +1617,11 @@ test "a background fetch accumulates a payload spanning multiple reads" {
     try std.testing.expect(doc.items.len > 4096); // genuinely spans more than one 4096-byte read
     const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/echo", doc.items }, .stdout = .pipe, .stderr = .ignore });
     var app: App = .{};
-    app.tab_loading.insert(.outdated);
+    app.shared.tab_loading.insert(.outdated);
     var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
-    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0, .parse = outdated.fetch_spec.?.parse, .fail_op = outdated.fetch_spec.?.refresh_op });
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expectEqual(@as(?usize, rows), app.shared.outdated_count); // every row across every chunk
 }
@@ -1755,15 +1634,15 @@ test "an overflowing fetch kills the live child and fails to last-good" {
     defer t.deinit();
     const child = try std.process.spawn(t.io(), .{ .argv = &.{"/usr/bin/yes"}, .stdout = .pipe, .stderr = .ignore });
     var app: App = .{ .shared = .{ .outdated_count = 5 } }; // a prior good count
-    app.tab_loading.insert(.outdated);
+    app.shared.tab_loading.insert(.outdated);
     var store: Storages = .{};
     defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
-    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0, .parse = outdated.fetch_spec.?.parse, .fail_op = outdated.fetch_spec.?.refresh_op });
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expectEqual(@as(?usize, 5), app.shared.outdated_count); // last-good kept, not a partial
     try std.testing.expect(app.shared.banner.isSet());
-    try std.testing.expect(!app.tab_loading.contains(.outdated));
+    try std.testing.expect(!app.shared.tab_loading.contains(.outdated));
 }
 
 test "reapTabFetch tears down a still-running fetch without a hang or leak" {
@@ -1773,7 +1652,7 @@ test "reapTabFetch tears down a still-running fetch without a hang or leak" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/sleep", "30" }, .stdout = .pipe, .stderr = .ignore });
-    var f: TabFetch = .{ .tab = .doctor, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 2 };
+    var f: TabFetch = .{ .tab = .doctor, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 2, .parse = doctor.fetch_spec.?.parse, .fail_op = doctor.fetch_spec.?.refresh_op };
     reapTabFetch(t.io(), std.testing.allocator, &f);
 }
 
@@ -1915,21 +1794,6 @@ test "a dim rule separates the filter from the content; Doctor keeps its own" {
     var d: App = .{ .active = .doctor };
     const dout = renderFrame(&buf, &d, 80, 24);
     try std.testing.expect(!hasSeparatorAtRow(dout, 4));
-}
-
-test "classify splits recoverable backend faults from fatal terminal/OOM faults" {
-    // Child-process + parse faults: survivable — show a banner, keep the session.
-    try std.testing.expectEqual(ErrorClass.recoverable, classify(error.SpawnFailed));
-    try std.testing.expectEqual(ErrorClass.recoverable, classify(error.WaitFailed));
-    try std.testing.expectEqual(ErrorClass.recoverable, classify(error.ChildFailed));
-    try std.testing.expectEqual(ErrorClass.recoverable, classify(error.EmptyOutput));
-    try std.testing.expectEqual(ErrorClass.recoverable, classify(error.ReadFailed)); // child pipe
-    try std.testing.expectEqual(ErrorClass.recoverable, classify(error.BadJson));
-    // Terminal-integrity + OOM: fatal — restore and exit (the crash-safety guarantee).
-    try std.testing.expectEqual(ErrorClass.fatal, classify(error.NotATty));
-    try std.testing.expectEqual(ErrorClass.fatal, classify(error.WriteFailed));
-    try std.testing.expectEqual(ErrorClass.fatal, classify(error.TermiosFailed));
-    try std.testing.expectEqual(ErrorClass.fatal, classify(error.OutOfMemory));
 }
 
 test "the hub imports no json/* parser — the dissolved-hub invariant" {
