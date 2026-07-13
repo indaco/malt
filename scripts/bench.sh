@@ -270,6 +270,26 @@ latest_release_tag() {
   git ls-remote --tags "$1" 'v*' 2>/dev/null | pick_latest_tag
 }
 
+# pick_latest_release_branch — read `git ls-remote --heads` lines (or bare ref
+# names) on stdin and print the highest `release/N.M...` branch name. malt
+# patch-releases from a per-minor branch (release/0.20, release/0.19, …), so
+# the highest one is the current release line. Version-sorts so release/0.20
+# wins over release/0.9. Pure/offline — unit-tested alongside pick_latest_tag.
+pick_latest_release_branch() {
+  sed 's|.*refs/heads/||' |
+    grep -E '^release/[0-9]+(\.[0-9]+)*$' |
+    sort -V |
+    tail -1
+}
+
+# latest_release_branch — highest `release/N.M` branch of this repo's origin,
+# malt's own "latest release" proxy (matching how peer tools resolve their
+# latest release tag). Empty on failure — caller falls back to the working tree.
+latest_release_branch() {
+  git -C "$REPO_ROOT" ls-remote --heads origin 'release/*' 2>/dev/null |
+    pick_latest_release_branch
+}
+
 # over_threshold <value> <threshold> — true (exit 0) only when value is a
 # finite number strictly greater than threshold. Non-numeric (FAIL/empty) or a
 # zero/empty threshold (guard disabled) is never "over". Float-safe via awk.
@@ -295,11 +315,35 @@ build_malt() {
     return
   fi
   need zig
+
+  # Source to build from. Default: the working tree, so a local run benches
+  # your actual change (the `no regression vs baseline` gate). CI sets
+  # BENCH_MALT_RELEASE=1 to bench the shipped release instead — the published
+  # table then compares malt's latest release branch against the peers' latest
+  # release tags (apples to apples). Build from a detached tree extracted with
+  # `git archive` (version comes from the tracked .version file, so no .git is
+  # needed) and fall back to the working tree if no release branch resolves.
+  local src="$REPO_ROOT"
+  if [ "${BENCH_MALT_RELEASE:-0}" = "1" ]; then
+    local branch
+    branch=$(latest_release_branch)
+    if [ -n "$branch" ]; then
+      src="$WORK_DIR/malt-src"
+      info "pinning malt to latest release branch $branch"
+      git -C "$REPO_ROOT" fetch --depth 1 origin "$branch"
+      rm -rf "$src"
+      mkdir -p "$src"
+      git -C "$REPO_ROOT" archive FETCH_HEAD | tar -x -C "$src"
+    else
+      warn "BENCH_MALT_RELEASE=1 but no release/* branch resolved — benching the working tree"
+    fi
+  fi
+
   info "build malt (ReleaseSafe) → $BENCH_BUILD_PREFIX"
   # Wipe the dedicated bench prefix so we never pick up a stale debug binary
   # left behind by `zig build` / `just build` / IDE builds in ./zig-out.
   rm -rf "$BENCH_BUILD_PREFIX"
-  (cd "$REPO_ROOT" && zig build -Doptimize=ReleaseSafe --prefix "$BENCH_BUILD_PREFIX")
+  (cd "$src" && zig build -Doptimize=ReleaseSafe --prefix "$BENCH_BUILD_PREFIX")
   if [ ! -x "$MALT_BIN" ]; then
     err "build did not produce $MALT_BIN"
   fi

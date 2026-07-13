@@ -20,6 +20,10 @@ jobs:
       # silently publish fake timings.
       BENCH_TRUE_COLD: "1"
       BENCH_FAIL_FAST: "1"
+      # Bench malt's shipped release (highest release/N.M branch), not the dev
+      # tree, so the published table compares like-for-like with the peers'
+      # latest release tags. Local runs leave this unset and bench the tree.
+      BENCH_MALT_RELEASE: "1"
     steps:
       - uses: actions/checkout@v7
 
@@ -94,7 +98,7 @@ jobs:
           | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold_disp }} | ${{ steps.wget.outputs.nb_cold_disp }} | ${{ steps.wget.outputs.zb_cold_disp }} | ${{ steps.wget.outputs.brew_cold_disp }} |
           | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold_disp }} | ${{ steps.ffmpeg.outputs.nb_cold_disp }} | ${{ steps.ffmpeg.outputs.zb_cold_disp }} | ${{ steps.ffmpeg.outputs.brew_cold_disp }} |
 
-          **Benchmarked releases:** malt `${{ steps.tree.outputs.mt_ver }}`, nanobrew `${{ steps.tree.outputs.nb_ver }}`, zerobrew `${{ steps.tree.outputs.zb_ver }}` (peer tools pinned to their latest release tag).
+          **Benchmarked releases:** malt `${{ steps.tree.outputs.mt_ver }}`, nanobrew `${{ steps.tree.outputs.nb_ver }}`, zerobrew `${{ steps.tree.outputs.zb_ver }}` (malt pinned to its latest release branch; peer tools to their latest release tag).
 
           ### Warm Install
           | Package | malt | nanobrew | zerobrew |
@@ -135,8 +139,26 @@ jobs:
           | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold_disp }} | ${{ steps.tree.outputs.nb_cold_disp }} | ${{ steps.tree.outputs.zb_cold_disp }} | ${{ steps.tree.outputs.brew_cold_disp }} |
           | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold_disp }} | ${{ steps.wget.outputs.nb_cold_disp }} | ${{ steps.wget.outputs.zb_cold_disp }} | ${{ steps.wget.outputs.brew_cold_disp }} |
           | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold_disp }} | ${{ steps.ffmpeg.outputs.nb_cold_disp }} | ${{ steps.ffmpeg.outputs.zb_cold_disp }} | ${{ steps.ffmpeg.outputs.brew_cold_disp }} |
-          <!-- BENCH:COLD:END -->
           TABLE
+
+          # Explain any ⚠️ cell so a reader isn't left guessing why a number is
+          # missing. The marker is only ever emitted for a peer tool whose cold
+          # median blew past BENCH_MAX_COLD, so the legend is appended only when
+          # such a cell exists — and it lands inside the START/END block, so a
+          # later clean run drops it again.
+          if grep -q '⚠️' /tmp/cold_table.md; then
+            cat >> /tmp/cold_table.md << 'NOTE'
+
+          > ⚠️ = cell omitted. That tool's cold install exceeded the sanity
+          > ceiling (50 s), which reflects a regression in that tool rather than
+          > a comparable install time, so the number is withheld instead of
+          > published. malt is never omitted — a real malt slowdown stays visible.
+          NOTE
+          fi
+
+          cat >> /tmp/cold_table.md << 'END'
+          <!-- BENCH:COLD:END -->
+          END
 
           # Generate warm install table
           cat > /tmp/warm_table.md << TABLE
