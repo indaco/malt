@@ -1,7 +1,8 @@
 //! malt — post-relocation keg cache.
 //!
-//! `<MALT_PREFIX>/store-relocated/<sha256>/` snapshots a fully-relocated
-//! Cellar keg keyed by bottle sha256. On warm reinstalls of a bottle whose
+//! `<MALT_PREFIX>/store-relocated/v<N>/<sha256>/` snapshots a fully-relocated
+//! Cellar keg keyed by (relocation-logic version, bottle sha256). On warm
+//! reinstalls of a bottle whose
 //! content has not changed, the install pipeline can skip
 //! extract → placeholder substitution → install_name_tool → ad-hoc
 //! codesign and clonefile-restore the keg directly. APFS clonefile makes
@@ -22,6 +23,18 @@ pub const RelocatedStoreError = error{
     MaterializeFailed,
 };
 
+/// Relocation-logic version, folded into the cache path as
+/// `store-relocated/v<N>/<sha>`. The cached bytes are the output of
+/// `cellar.relocateKegTree` (placeholder substitution + install_name_tool +
+/// ad-hoc codesign), whose result depends on the relocation *rules*, not just
+/// the bottle sha. Bump this whenever `relocateKegTree` / `patchTextFiles` /
+/// the `@@HOMEBREW_*@@` replacement set / codesign behaviour changes: the bump
+/// turns every prior `v<N-1>/` entry into a cache miss, forcing correct
+/// re-relocation. Prior `v<N-1>/` trees are orphaned on disk — there is no
+/// automatic sweeper for `store-relocated` yet — so a bump trades a one-time
+/// disk cost for correctness; bumps are rare (only on relocation-logic change).
+pub const RELOC_LOGIC_VERSION: u32 = 1;
+
 /// Reject anything that is not exactly 64 lowercase hex characters.
 /// Run this before forming any path so traversal sequences (`..`, `/`) and
 /// case variants never reach the filesystem.
@@ -34,8 +47,8 @@ fn isValidSha256(sha: []const u8) bool {
     return true;
 }
 
-fn cacheDir(buf: []u8, prefix: []const u8, sha: []const u8) RelocatedStoreError![]u8 {
-    return std.fmt.bufPrint(buf, "{s}/store-relocated/{s}", .{ prefix, sha }) catch
+fn cacheDir(buf: []u8, prefix: []const u8, version: u32, sha: []const u8) RelocatedStoreError![]u8 {
+    return std.fmt.bufPrint(buf, "{s}/store-relocated/v{d}/{s}", .{ prefix, version, sha }) catch
         return RelocatedStoreError.PathTooLong;
 }
 
@@ -56,7 +69,7 @@ fn cellarParentDir(buf: []u8, prefix: []const u8, name: []const u8) RelocatedSto
 pub fn has(io: std.Io, prefix: []const u8, sha: []const u8) bool {
     if (!isValidSha256(sha)) return false;
     var buf: [512]u8 = undefined;
-    const dir = cacheDir(&buf, prefix, sha) catch return false;
+    const dir = cacheDir(&buf, prefix, RELOC_LOGIC_VERSION, sha) catch return false;
     std.Io.Dir.accessAbsolute(io, dir, .{}) catch return false;
     return true;
 }
@@ -76,7 +89,7 @@ pub fn save(
     if (!isValidSha256(sha)) return RelocatedStoreError.InvalidSha256;
 
     var dst_buf: [512]u8 = undefined;
-    const dst = try cacheDir(&dst_buf, prefix, sha);
+    const dst = try cacheDir(&dst_buf, prefix, RELOC_LOGIC_VERSION, sha);
 
     // Idempotent: already cached → done. Concurrent installs race here, and
     // the loser would otherwise fail at `renameAbsolute` below.
@@ -103,10 +116,9 @@ fn saveFresh(
     // outside. Surface as `SaveFailed` (debug-logged by the caller).
     std.Io.Dir.accessAbsolute(io, src, .{}) catch return RelocatedStoreError.SaveFailed;
 
-    // Ensure the parent `<prefix>/store-relocated/` directory exists.
-    var parent_buf: [512]u8 = undefined;
-    const parent = std.fmt.bufPrint(&parent_buf, "{s}/store-relocated", .{prefix}) catch
-        return RelocatedStoreError.PathTooLong;
+    // Ensure the versioned parent `<prefix>/store-relocated/v<N>/` exists.
+    // Derive it from `dst` so the version segment stays in one place.
+    const parent = std.fs.path.dirname(dst) orelse return RelocatedStoreError.SaveFailed;
     std.Io.Dir.cwd().createDirPath(io, parent) catch return RelocatedStoreError.SaveFailed;
 
     // Atomic write: clone into a sibling temp dir, then rename into place.
@@ -153,7 +165,7 @@ pub fn materialize(
     if (!isValidSha256(sha)) return RelocatedStoreError.InvalidSha256;
 
     var src_buf: [512]u8 = undefined;
-    const src = try cacheDir(&src_buf, prefix, sha);
+    const src = try cacheDir(&src_buf, prefix, RELOC_LOGIC_VERSION, sha);
     std.Io.Dir.accessAbsolute(io, src, .{}) catch return RelocatedStoreError.MaterializeFailed;
 
     var parent_buf: [512]u8 = undefined;
@@ -175,7 +187,7 @@ pub fn materialize(
 pub fn remove(io: std.Io, prefix: []const u8, sha: []const u8) RelocatedStoreError!void {
     if (!isValidSha256(sha)) return RelocatedStoreError.InvalidSha256;
     var buf: [512]u8 = undefined;
-    const dir = try cacheDir(&buf, prefix, sha);
+    const dir = try cacheDir(&buf, prefix, RELOC_LOGIC_VERSION, sha);
     std.Io.Dir.cwd().deleteTree(io, dir) catch return;
 }
 
@@ -400,23 +412,15 @@ test "saveFresh cleans the tempdir on the race-loss branch" {
 
     // Force the race-loss branch: pre-create dst so saveFresh's second
     // accessAbsolute(dst) succeeds, skipping the rename and falling through.
-    const dst = try std.fmt.allocPrint(
-        testing.allocator,
-        "{s}/store-relocated/{s}",
-        .{ prefix, valid_sha_for_tests },
-    );
-    defer testing.allocator.free(dst);
+    var dst_buf: [512]u8 = undefined;
+    const dst = try cacheDir(&dst_buf, prefix, RELOC_LOGIC_VERSION, valid_sha_for_tests);
     try std.Io.Dir.cwd().createDirPath(testIo(), dst);
 
     try saveFresh(testIo(), testing.allocator, prefix, "rl", "1.0", dst);
 
-    // Race winner kept dst; the loser's tempdir must not survive.
-    const store_root = try std.fmt.allocPrint(
-        testing.allocator,
-        "{s}/store-relocated",
-        .{prefix},
-    );
-    defer testing.allocator.free(store_root);
+    // Race winner kept dst; the loser's tempdir must not survive. The temp is
+    // a sibling of dst, so scan dst's parent (the versioned segment dir).
+    const store_root = std.fs.path.dirname(dst).?;
     var root_dir = try std.Io.Dir.openDirAbsolute(testIo(), store_root, .{ .iterate = true });
     defer root_dir.close(testIo());
     var iter = root_dir.iterate();
@@ -440,4 +444,75 @@ test "remove deletes the cache entry" {
 
     // remove on a missing entry is an idempotent no-op success.
     try remove(testIo(), prefix, valid_sha_for_tests);
+}
+
+// ── Relocation-logic version keying ─────────────────────────────────────────
+
+test "same sha under two logic versions resolves to distinct paths" {
+    var a_buf: [512]u8 = undefined;
+    var b_buf: [512]u8 = undefined;
+    const a = try cacheDir(&a_buf, "/opt/malt", 1, valid_sha_for_tests);
+    const b = try cacheDir(&b_buf, "/opt/malt", 2, valid_sha_for_tests);
+    try testing.expect(!std.mem.eql(u8, a, b));
+    try testing.expect(std.mem.indexOf(u8, a, "/v1/") != null);
+    try testing.expect(std.mem.indexOf(u8, b, "/v2/") != null);
+}
+
+test "save nests the entry under the current version, not the bare sha path" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "versioned_layout");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try buildKegForTests(testing.allocator, prefix, "ver", "1.0");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "ver", "1.0");
+    try testing.expect(has(testIo(), prefix, valid_sha_for_tests));
+
+    // The old unversioned layout (`store-relocated/<sha>`) must not be produced —
+    // a logic change would otherwise serve that stale entry forever.
+    const bare = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/store-relocated/{s}",
+        .{ prefix, valid_sha_for_tests },
+    );
+    defer testing.allocator.free(bare);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), bare, .{}));
+
+    // The entry lives under the current version segment.
+    var ver_buf: [512]u8 = undefined;
+    const versioned = try cacheDir(&ver_buf, prefix, RELOC_LOGIC_VERSION, valid_sha_for_tests);
+    try std.Io.Dir.accessAbsolute(testIo(), versioned, .{});
+}
+
+test "has misses an entry saved under a different logic version" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "version_miss");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    // Seed an entry under a neighbouring logic version (simulating a bump).
+    var buf: [512]u8 = undefined;
+    const other = try cacheDir(&buf, prefix, RELOC_LOGIC_VERSION +% 1, valid_sha_for_tests);
+    try std.Io.Dir.cwd().createDirPath(testIo(), other);
+
+    // `has` probes the current version only, so the neighbour is a miss.
+    try testing.expect(!has(testIo(), prefix, valid_sha_for_tests));
+}
+
+test "save is not shadowed by a leftover entry from another version" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "version_no_shadow");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    // A stale entry from a previous logic version sits on disk.
+    var buf: [512]u8 = undefined;
+    const other = try cacheDir(&buf, prefix, RELOC_LOGIC_VERSION +% 1, valid_sha_for_tests);
+    try std.Io.Dir.cwd().createDirPath(testIo(), other);
+
+    // The current-version save must still run (its idempotency check targets
+    // the current version), so a bump can never be shadowed by the leftover.
+    try buildKegForTests(testing.allocator, prefix, "ns", "1.0");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "ns", "1.0");
+    try testing.expect(has(testIo(), prefix, valid_sha_for_tests));
 }
