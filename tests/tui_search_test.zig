@@ -68,19 +68,21 @@ test "i over the fixture installs the selected not-yet-installed hit and is iner
     defer parsed.deinit();
 
     var st: search.State = .{ .items = parsed.items, .phase = .loaded };
+    var storage: search.Storage = .{};
+    defer storage.deinit(testing.allocator);
 
     // Cursor on firefox (index 0, already installed): `i` is inert.
     st.chrome.view.selected = 0;
-    search.step(&st, ch('i'));
-    try testing.expectEqual(search.Request.none, st.request);
+    try testing.expect(search.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, ch('i')) == .none);
 
-    // Cursor on firefox@developer-edition (index 1, not installed): `i` installs
-    // exactly that hit — the name the `mt install <name>` argv would carry.
+    // Cursor on firefox@developer-edition (index 1, not installed): `i` builds the
+    // install of exactly that hit — the argv `mt install --cask <name>` would carry.
     st.chrome.view.selected = 1;
-    search.step(&st, ch('i'));
-    try testing.expectEqual(search.Request.install, st.request);
-    try testing.expectEqualStrings("firefox@developer-edition", search.selectedMatch(&st).?.name);
-    try testing.expectEqual(search_json.Kind.cask, search.selectedMatch(&st).?.kind);
+    const eff = search.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, ch('i'));
+    defer testing.allocator.free(eff.run_mutation.argv);
+    try testing.expect(eff == .run_mutation);
+    try testing.expectEqualStrings("--cask", eff.run_mutation.argv[2]);
+    try testing.expectEqualStrings("firefox@developer-edition", eff.run_mutation.argv[3]);
 }
 
 test "i fires for a cross-query basket even when the cursor sits on an installed row" {
@@ -89,19 +91,24 @@ test "i fires for a cross-query basket even when the cursor sits on an installed
     var parsed = try search_json.parse(testing.allocator, bytes);
     defer parsed.deinit();
 
-    // The shell mirrors the cross-query basket onto the leaf as `selected_count`
-    // (picks from earlier queries, none on this result set). `i` must install the
-    // basket even with the cursor parked on an already-installed hit.
-    var st: search.State = .{ .items = parsed.items, .phase = .loaded, .selected_count = 2 };
-    st.chrome.view.selected = 0; // firefox (index 0, already installed)
-    search.step(&st, ch('i'));
-    try testing.expectEqual(search.Request.install, st.request);
+    var st: search.State = .{ .items = parsed.items, .phase = .loaded };
+    var storage: search.Storage = .{};
+    defer storage.deinit(testing.allocator);
+
+    // Build a cross-query basket by checking the not-installed hit (index 1).
+    st.chrome.view.selected = 1;
+    _ = search.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, .space);
+    try testing.expectEqual(@as(usize, 1), st.selected_count);
+
+    // Cursor parked on the already-installed firefox (index 0); the basket wins.
+    st.chrome.view.selected = 0;
+    const eff = search.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, ch('i'));
+    defer testing.allocator.free(eff.run_mutation.argv);
+    try testing.expect(eff == .run_mutation);
 
     // Empty basket + the same installed row → nothing to do, so `i` is inert.
-    st.request = .none;
-    st.selected_count = 0;
-    search.step(&st, ch('i'));
-    try testing.expectEqual(search.Request.none, st.request);
+    _ = search.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, ch('n')); // clear the basket
+    try testing.expect(search.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, ch('i')) == .none);
 }
 
 test "the basket view surfaces and removes an off-results pick from a real query" {
@@ -110,28 +117,29 @@ test "the basket view surfaces and removes an off-results pick from a real query
     var parsed = try search_json.parse(testing.allocator, bytes);
     defer parsed.deinit();
 
-    // The cross-query case the basket exists for: `gimp` was checked under an
-    // earlier query and is absent from this result set, while `firejail` is on
-    // screen. The shell hands both to the leaf as the borrowed basket.
-    const basket = [_]search.SelEntry{
-        .{ .name = "gimp", .kind = .cask }, // off the current results
-        .{ .name = "firejail", .kind = .formula }, // also a row in the fixture
-    };
-    var st: search.State = .{ .items = parsed.items, .phase = .loaded, .basket = &basket };
+    var st: search.State = .{ .items = parsed.items, .phase = .loaded };
+    var storage: search.Storage = .{};
+    defer storage.deinit(testing.allocator);
+
+    // The cross-query case the basket exists for: `gimp` was checked under an earlier
+    // query and is absent from this result set, while `firejail` is on screen.
+    try storage.selected.toggle(testing.allocator, "gimp", .cask); // off the current results
+    try storage.selected.toggle(testing.allocator, "firejail", .formula); // also a row in the fixture
+    search.syncSelected(&st, &storage);
 
     // `l` opens the basket; the off-results pick is the highlighted row.
-    search.step(&st, ch('l'));
+    _ = search.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, ch('l'));
     try testing.expectEqual(search.View.basket, st.view);
     st.chrome.view.selected = 0;
     try testing.expectEqualStrings("gimp", search.selectedBasketEntry(&st).?.name);
 
-    // `d` asks the shell to drop exactly that pick — the name the removal carries.
-    search.step(&st, ch('d'));
-    try testing.expectEqual(search.Request.remove, st.request);
-    try testing.expectEqualStrings("gimp", search.selectedBasketEntry(&st).?.name);
+    // `d` drops exactly that pick from the basket.
+    try testing.expect(search.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, ch('d')) == .none);
+    try testing.expect(!storage.selected.contains("gimp", .cask)); // dropped
+    try testing.expect(storage.selected.contains("firejail", .formula)); // the on-screen pick stays
 }
 
-test "Enter over a result requests its info (committing the query is the shell's job)" {
+test "Enter over a result opens its info read (committing the query is the shell's job)" {
     const bytes = try readFixture(testing.allocator, "tui_search.json");
     defer testing.allocator.free(bytes);
     var parsed = try search_json.parse(testing.allocator, bytes);
@@ -140,6 +148,10 @@ test "Enter over a result requests its info (committing the query is the shell's
     // Enter over a loaded result opens `mt info` for it; the query-commit path
     // (filter editing → search) is driven by the app shell, not the tab core.
     var st: search.State = .{ .items = parsed.items, .phase = .loaded };
-    search.step(&st, .enter);
-    try testing.expectEqual(search.Request.info, st.request);
+    var storage: search.Storage = .{};
+    defer storage.deinit(testing.allocator);
+    const eff = search.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, .enter);
+    defer testing.allocator.free(eff.read.argv);
+    try testing.expect(eff == .read);
+    try testing.expectEqualStrings("info", eff.read.argv[1]);
 }

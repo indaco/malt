@@ -1,9 +1,11 @@
 //! malt — Search tab for `mt tui`: find and install new packages.
 //!
-//! Leaf module. Pure cores only: `step(state, key)` records an intent (re-run
-//! the query, or install the selected hit) as a `request` for the impure shell
-//! to delegate; `render(state, frame, rect)` is a pure function of `(state,
-//! rect)` so a resize is a re-render.
+//! Leaf module. Pure cores only: `step` maps a key to a `Cmd` (`i` installs the
+//! selection, Enter reads `mt info`) or performs a pure basket op in place; the
+//! shell commits the filter-as-query via `searchCmd`. `update` folds the pump's
+//! result back (a search parse becomes the results, an install refetches). The tab
+//! names effects as data and never imports the runner. `render(state, frame, rect)`
+//! is a pure function of `(state, rect)` so a resize is a re-render.
 //!
 //! **Divergence from the other tabs.** Everywhere else `chrome.filter` narrows a
 //! static, already-loaded list. Here the filter *doubles as the search box*: the
@@ -22,8 +24,8 @@ const std = @import("std");
 const testing = std.testing;
 
 const color = @import("../ui/color.zig");
+const cmd = @import("cmd.zig");
 const ctx = @import("ctx.zig");
-const spawn = @import("spawn.zig");
 const detail_pane = @import("detail_pane.zig");
 const info_json = @import("json/info.zig");
 const search_json = @import("json/search.zig");
@@ -31,15 +33,6 @@ pub const Match = search_json.Match;
 const Kind = search_json.Kind;
 const scroll_list = @import("scroll_list.zig");
 const tab = @import("tab.zig");
-
-/// An effect the pure `step` defers to the impure shell, which performs it and
-/// resets the field. `step` never does I/O — this is the command channel.
-/// `search` (re)runs the committed query; `install` installs the selection;
-/// `info` opens `mt info` for the active hit (works for uninstalled hits too);
-/// `toggle` adds/removes the active hit in the shell-owned cross-query basket
-/// (selection outlives the per-query result list, so the leaf cannot own it);
-/// `remove` drops the highlighted basket pick; `clear` empties the whole basket.
-pub const Request = enum { none, search, install, info, toggle, remove, clear };
 
 /// The read lifecycle the render reflects. `idle` before any query is committed
 /// (show guidance), `searching` while the blocking remote read runs (the shell
@@ -62,8 +55,6 @@ pub const State = struct {
     /// The open info pane for the active hit, if Enter requested one. Borrows
     /// from shell-owned parse storage; cleared on Esc or a fresh query.
     detail: ?info_json.Info = null,
-    /// Pending effect for the shell to perform, then clear.
-    request: Request = .none,
     /// Where the tab is in the read lifecycle; drives the render's status line.
     phase: Phase = .idle,
     /// Cross-query basket size, mirrored from the shell-owned selection (no
@@ -80,14 +71,6 @@ pub const State = struct {
 
 /// Search runs synchronously on demand; it never background-fetches.
 pub const fetch_spec: ?tab.FetchSpec = null;
-
-/// Whether the pending request will spawn a DB-mutating child (`mt install`). The
-/// shell folds this over every tab before opening the DB so a live background audit
-/// is drained first — the WAL single-writer invariant. The read-only requests
-/// (search/info) and the pure basket ops (toggle/remove/clear) never gate.
-pub fn mutates(s: *const State) bool {
-    return s.request == .install;
-}
 
 /// One basket row the shell hands the leaf: a borrowed `(name, kind)`. The bytes
 /// are owned (and freed) by the shell-owned set; the leaf renders them (scrubbed)
@@ -204,10 +187,14 @@ pub fn selectedIndex(s: *const State) ?usize {
 /// Request a basket toggle for the active row. An already-installed hit is never
 /// selectable, so it is inert. The shell owns the cross-query basket and writes
 /// the projected `checked` slice; the pure leaf only signals intent here.
-fn requestToggle(s: *State) void {
+fn doToggle(allocator: std.mem.Allocator, s: *State, storage: *Storage) void {
     const m = selectedMatch(s) orelse return;
-    if (m.installed) return;
-    s.request = .toggle;
+    if (m.installed) return; // an already-installed hit is never selectable
+    // OOM drops the toggle, not the TUI; the user retries. The basket op is pure
+    // state (no I/O), so it stays out of the effect path.
+    storage.selected.toggle(allocator, m.name, m.kind) catch return;
+    projectSearchChecked(storage);
+    syncSelected(s, storage);
 }
 
 /// The basket pick the cursor points at, clamping the (shell-driven, unbounded)
@@ -218,46 +205,50 @@ pub fn selectedBasketEntry(s: *const State) ?SelEntry {
     return s.basket[@min(s.chrome.view.selected, s.basket.len - 1)];
 }
 
-/// Request dropping the highlighted basket pick; inert on an empty basket.
-fn requestRemove(s: *State) void {
-    if (selectedBasketEntry(s) != null) s.request = .remove;
+/// Drop the highlighted basket pick, then re-project; inert on an empty basket.
+fn doRemove(allocator: std.mem.Allocator, s: *State, storage: *Storage) void {
+    const e = selectedBasketEntry(s) orelse return;
+    storage.selected.remove(allocator, e.name, e.kind);
+    projectSearchChecked(storage);
+    syncSelected(s, storage);
+}
+
+/// Empty the whole basket, then re-project; inert when it is already empty.
+fn doClear(allocator: std.mem.Allocator, s: *State, storage: *Storage) void {
+    if (s.selected_count == 0) return;
+    storage.selected.clear(allocator);
+    projectSearchChecked(storage);
+    syncSelected(s, storage);
 }
 
 /// `space` selects in the results view and removes in the basket view — the one
 /// key, its meaning set by the view.
-fn selectKey(s: *State) void {
+fn selectKey(allocator: std.mem.Allocator, s: *State, storage: *Storage) void {
     switch (s.view) {
-        .results => requestToggle(s),
-        .basket => requestRemove(s),
+        .results => doToggle(allocator, s, storage),
+        .basket => doRemove(allocator, s, storage),
     }
 }
 
-/// Pure transition. Enter (re)runs the committed query — the filter doubles as
-/// the search box, so committing it is the search. `i` installs the selected hit
-/// when it is not already installed; on an installed hit it is inert.
-pub fn step(s: *State, key: tab.Key) void {
+/// Pure transition. `i` returns the install `Cmd`; Enter opens `mt info`; the
+/// basket ops (`space`/`d`/`n`) mutate the shell-owned selection in place (pure
+/// state, `Cmd.none`) — they leave the effect path. Committing the query (Enter's
+/// other meaning) is driven by the shell on filter-commit via `searchCmd`.
+pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storage: *Storage, key: tab.Key) cmd.Cmd {
     switch (key) {
-        // Enter on a result opens `mt info` for it. Committing the query (the
-        // other meaning of Enter) is driven by the shell on filter-commit, not
-        // here, so the two never collide.
-        .enter => if (selectedMatch(s) != null) {
-            s.request = .info;
-        },
+        // Enter on a result opens `mt info` for it. Committing the query is driven
+        // by the shell on filter-commit, so the two never collide.
+        .enter => if (selectedMatch(s) != null) return openSearchInfoCmd(allocator, mt_path, s),
         // `space` selects in the results view and removes in the basket view; `d`
         // is the basket-view remove alias and is inert in the results view.
-        .space => selectKey(s),
+        .space => selectKey(allocator, s, storage),
         .char => |c| if (c.len == 1) switch (c.bytes[0]) {
             // `i` installs the multi-selection (or the active row when nothing is
             // checked); inert when there is nothing installable to do.
-            'i' => if (anyInstallable(s)) {
-                s.request = .install;
-            },
+            'i' => if (anyInstallable(s)) return installCmd(allocator, mt_path, s, storage),
             'l' => s.view = if (s.view == .results) .basket else .results,
-            // `n` clears the whole basket from either view; inert when it is empty.
-            'n' => if (s.selected_count > 0) {
-                s.request = .clear;
-            },
-            'd' => if (s.view == .basket) requestRemove(s),
+            'n' => doClear(allocator, s, storage), // clears the whole basket; inert when empty
+            'd' => if (s.view == .basket) doRemove(allocator, s, storage),
             else => {},
         },
         .esc => s.detail = null, // close the info pane
@@ -268,6 +259,7 @@ pub fn step(s: *State, key: tab.Key) void {
         }) -| 1,
         else => {},
     }
+    return .none;
 }
 
 /// True when `i` would install something: a non-empty basket (which installs as a
@@ -457,24 +449,54 @@ fn appendPad(buf: []u8, len: *usize, s: []const u8, width: usize) void {
     while (i < width) : (i += 1) append(buf, len, " ");
 }
 
-// ── Impure zone ────────────────────────────────────────────────────────────
-// The effects the pure `step` requested. Each carries its I/O ports explicitly
-// through the shared `ctx.Ctx` — never a global — so the pure/impure line lands at
-// the signature: these take `io`/`allocator`, the pure functions above do not.
+// ─── effect producers ───────────────────────────────────────────────────
+// The tab names reads/mutations as `Cmd` values; the pump performs them and folds
+// the result back through `update`. The basket ops are pure state (done in `step`)
+// and never appear here. No I/O and no runner import.
 
-/// The effect chain's error set, composed from the source sets so it tracks them
-/// automatically. A subset of the shell's `RunError`, which classifies each fault
-/// recoverable-vs-fatal; naming it here keeps the public `service` explicit.
-pub const Error = std.mem.Allocator.Error || spawn.ReadError || spawn.InlineError || search_json.Error || info_json.Error;
+/// Banner op strings for a recoverable fault, parity with the pre-reify error names.
+const search_fail_op = "search failed";
+const install_fail_op = "install failed";
+const info_fail_op = "info read failed";
 
-/// Build `mt search <query> --json` for the committed query. Pure over the tab
-/// state: null when the query is empty (the no-op — the view shows guidance, no
-/// spawn), else an owned argv whose `query` element borrows the filter buffer.
-/// Caller frees the returned slice (not its elements).
+/// Build `mt search <query> --json` for the committed query, null when the query is
+/// empty (the no-op — the view shows guidance, no read). The `query` element borrows
+/// the filter buffer; the pump frees the returned slice, not its elements.
 fn searchArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const State) std.mem.Allocator.Error!?[]const []const u8 {
     const query = st.chrome.filter.slice();
     if (query.len == 0) return null; // empty query: no remote read
-    return try spawn.jsonArgv(allocator, mt_path, &.{ "search", query });
+    return try cmd.jsonArgv(allocator, mt_path, &.{ "search", query });
+}
+
+/// The committed query's `mt search --json` read, or `Cmd.none` for an empty query.
+fn searchReadCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State) cmd.Cmd {
+    const argv = (searchArgv(allocator, mt_path, s) catch return .none) orelse return .none;
+    return .{ .read = .{ .argv = argv, .mode = .blocking, .parse = cmd.parserFor(.search, search_json.parse), .tag = .search, .fail_op = search_fail_op } };
+}
+
+/// The shell commits the filter-as-query on Enter and asks for this. Flips `phase`
+/// to `searching` before the blocking read (the shell repaints first); the fold
+/// resets it to `loaded`, and a failed read resets it via `update` on `.failed`.
+pub fn searchCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *State) cmd.Cmd {
+    const c = searchReadCmd(allocator, mt_path, s);
+    if (c == .read) s.phase = .searching;
+    return c;
+}
+
+/// The `mt info <pkg> --json` read for the active hit, or `Cmd.none` when nothing is
+/// selected. `mt info` resolves uninstalled hits too, so a result is inspectable
+/// before any install.
+fn openSearchInfoCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State) cmd.Cmd {
+    const m = selectedMatch(s) orelse return .none; // empty list: no-op
+    const argv = cmd.jsonArgv(allocator, mt_path, &.{ "info", m.name }) catch return .none;
+    return .{ .read = .{ .argv = argv, .mode = .blocking, .parse = cmd.parserFor(.info, info_json.parse), .tag = .search, .fail_op = info_fail_op } };
+}
+
+/// The basket's `mt install …` mutation, or `Cmd.none` when nothing installable is
+/// selected. `update` re-runs the query on success so the installed markers flip.
+fn installCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State, storage: *const Storage) cmd.Cmd {
+    const argv = (installArgv(allocator, mt_path, &storage.selected, s) catch return .none) orelse return .none;
+    return .{ .run_mutation = .{ .argv = argv, .tag = .search, .fail_op = install_fail_op } };
 }
 
 /// Project the persistent selection onto a result list: a row is checked iff it is
@@ -493,40 +515,57 @@ fn projectSearchChecked(storage: *Storage) void {
 
 /// Mirror the tab-owned basket onto the leaf state: the count (so the core can gate
 /// `i` and the footer can size `N selected`) and the entries slice the basket view
-/// renders. The pure core holds no allocator and never owns the picks — it borrows
-/// this slice, refreshed after every basket mutation (an append can move the backing
-/// buffer, so a stale slice would dangle).
+/// renders. The pure core never owns the picks — it borrows this slice, refreshed
+/// after every basket mutation (an append can move the backing buffer).
 pub fn syncSelected(s: *State, storage: *const Storage) void {
     s.selected_count = storage.selected.entries.items.len;
     s.basket = storage.selected.entries.items;
 }
 
-/// Run the committed query's `mt search --json`, parse, and repoint the results at
-/// the fresh parse. Search is a remote read, so it goes through `readJson` like the
-/// other reads (no alt-screen drop). The storage is swapped only after a clean parse,
-/// so a failure keeps the last-good results.
-fn loadSearch(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
-    const argv = (try searchArgv(c.allocator, c.mt_path, s)) orelse return; // empty query: no-op
-    defer c.allocator.free(argv);
-    // Annotate any failure as a recoverable banner; the loop boundary decides
-    // recoverable vs fatal. A failed read must also leave the "searching…" phase
-    // (set by the pre-spawn paint): fall back to the last-good results, or guidance
-    // if none were ever loaded — never a stuck spinner behind the banner.
-    errdefer |err| {
-        c.shared.banner.set("search failed", @errorName(err));
-        s.phase = if (storage.search != null) .loaded else .idle;
+/// Fold a completed effect back into the model. A delivered `search` parse becomes
+/// the ranked results; an `info` parse opens the pane; a finished install refetches;
+/// a `.failed` read leaves the "searching…" phase behind its banner.
+pub fn update(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storage: *Storage, shared: *ctx.SharedModel, msg: cmd.Msg) cmd.Cmd {
+    switch (msg) {
+        .loaded => |parsed| switch (parsed) {
+            .search => |sp| {
+                applySearchParse(allocator, s, storage, sp) catch |err| {
+                    sp.deinit(); // the fold failed to take ownership; free the arena
+                    shared.banner.set(search_fail_op, @errorName(err));
+                    s.phase = if (storage.search != null) .loaded else .idle;
+                };
+                return .none;
+            },
+            .info => |ip| {
+                setInfoDetail(s, storage, ip);
+                return .none;
+            },
+            // Search only issues search/info reads; free any misrouted parse.
+            inline else => |p| {
+                p.deinit();
+                return .none;
+            },
+        },
+        .mutated => |code| return foldInstall(allocator, mt_path, s, storage, shared, code),
+        .cleared => return .none, // search/info reads are never `allow_empty`
+        .failed => {
+            // Leave the "searching…" phase behind the banner (already set): the last
+            // good results, or guidance if none ever loaded — never a stuck spinner.
+            s.phase = if (storage.search != null) .loaded else .idle;
+            return .none;
+        },
     }
-    const bytes = try spawn.readJson(c.io, c.allocator, argv);
-    defer c.allocator.free(bytes);
+}
 
-    const parsed = try search_json.parse(c.allocator, bytes);
-    errdefer parsed.deinit();
+/// Repoint the results at a fresh `search` parse, projecting the persistent basket
+/// onto the new `checked` slice. Swapped only after `checked` is allocated, so a
+/// fold OOM leaves the parse for the caller to free and keeps the last-good results.
+fn applySearchParse(allocator: std.mem.Allocator, s: *State, storage: *Storage, parsed: search_json.Parsed) std.mem.Allocator.Error!void {
     // `checked` is a projection of the persistent basket, not per-query state: a pick
     // survives a re-query and re-checks its row when the package returns.
-    const checked = try c.allocator.alloc(bool, parsed.items.len);
-
+    const checked = try allocator.alloc(bool, parsed.items.len);
     if (storage.search) |old| old.deinit();
-    if (storage.checked.len != 0) c.allocator.free(storage.checked);
+    if (storage.checked.len != 0) allocator.free(storage.checked);
     storage.search = parsed;
     storage.checked = checked;
     projectSearchChecked(storage);
@@ -544,15 +583,35 @@ fn loadSearch(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
     }
 }
 
+/// Open the info pane over the delivered `mt info` parse, freeing the previous one.
+fn setInfoDetail(s: *State, storage: *Storage, parsed: info_json.Parsed) void {
+    if (storage.detail) |old| old.deinit();
+    storage.detail = parsed;
+    s.detail = parsed.info;
+}
+
+/// Fold a finished install: a clean exit consumed the basket (clear it, mark the
+/// siblings stale, re-run the query so markers flip); a non-zero exit retains the
+/// basket behind a recoverable banner.
+fn foldInstall(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storage: *Storage, shared: *ctx.SharedModel, code: u8) cmd.Cmd {
+    const ok = code == 0;
+    applyInstallOutcome(storage, allocator, ok); // clear on success, retain on failure
+    syncSelected(s, storage); // basket may now be empty → leaf gate + footer reflect it
+    if (!ok) {
+        shared.banner.set(install_fail_op, "ChildFailed");
+        return .none;
+    }
+    shared.markStaleAfter(.search); // Installed/Outdated/Services may have changed too
+    return searchReadCmd(allocator, mt_path, s); // re-run the query; markers flip
+}
+
 /// Build the `mt install …` argv from the cross-query basket. The whole basket
 /// installs, so an off-screen pick installs too. Empty basket ⇒ fall back to the
 /// active row (the no-selection case); null when that row is absent or already
 /// installed (the no-op). A single target keeps the explicit `--formula`/`--cask`
 /// flag, because a name can exist as both and bare `mt install <name>` silently picks
 /// the formula; a multi install passes bare names and lets `mt` detect each one's
-/// kind. Basket names are owned, so the argv outlives the parse it was checked in (the
-/// active-row fallback name borrows the live parse, read before any re-search frees
-/// it). Caller frees the returned slice, not its elements.
+/// kind. Basket names are owned, so the argv outlives the parse it was checked in.
 fn installArgv(allocator: std.mem.Allocator, mt_path: []const u8, sel: *const Selection, st: *const State) std.mem.Allocator.Error!?[]const []const u8 {
     const entries = sel.entries.items;
     if (entries.len == 0) {
@@ -560,11 +619,11 @@ fn installArgv(allocator: std.mem.Allocator, mt_path: []const u8, sel: *const Se
         const i = selectedIndex(st) orelse return null;
         const m = st.items[i];
         if (m.installed) return null;
-        return try spawn.inlineArgv(allocator, mt_path, &.{ "install", kindFlag(m.kind), m.name });
+        return try cmd.inlineArgv(allocator, mt_path, &.{ "install", kindFlag(m.kind), m.name });
     }
     if (entries.len == 1) {
         const e = entries[0];
-        return try spawn.inlineArgv(allocator, mt_path, &.{ "install", kindFlag(e.kind), e.name });
+        return try cmd.inlineArgv(allocator, mt_path, &.{ "install", kindFlag(e.kind), e.name });
     }
     const argv = try allocator.alloc([]const u8, 2 + entries.len);
     argv[0] = mt_path;
@@ -593,95 +652,6 @@ fn applyInstallOutcome(storage: *Storage, allocator: std.mem.Allocator, ok: bool
     projectSearchChecked(storage);
 }
 
-/// Delegate the basket's install to the real `mt` inline, then re-run the query so
-/// installed markers flip. The argv's names are owned by the basket (the active-row
-/// fallback name borrows the live parse, read before the re-search frees it). A clean
-/// install clears the basket; a failed one keeps it.
-fn doInstall(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
-    const argv = (try installArgv(c.allocator, c.mt_path, &storage.selected, s)) orelse return; // nothing installable selected
-    defer c.allocator.free(argv);
-    // A non-zero `mt install` re-enters the dashboard (the user keeps malt's real
-    // output, including any prompt, in their scrollback) and surfaces as a recoverable
-    // banner; only a terminal fault is fatal — the loop boundary decides which on the
-    // re-raised error. The basket is retained either way.
-    spawn.runInlineReenter(c.term, argv) catch |err| {
-        c.shared.banner.set("install failed", @errorName(err));
-        applyInstallOutcome(storage, c.allocator, false); // retain for retry
-        return err;
-    };
-    applyInstallOutcome(storage, c.allocator, true); // a clean install consumed the basket
-    syncSelected(s, storage); // basket now empty → leaf gate + footer reflect it
-    // Re-run the same query so the freshly installed hit's marker flips — the
-    // backend's install-aware `installed` flag does the rest (no `mt list` call).
-    try loadSearch(s, storage, c);
-    c.shared.markStaleAfter(.search); // Installed/Outdated/Services may have changed too
-    // The keg set grew but we are on Search, so the lazy Installed reload won't run
-    // until that tab is entered — refresh just the count now (cheaply, through the
-    // hub-owned port) so the header is live immediately, not stale until Installed.
-    c.refreshInstalledCount();
-}
-
-/// Open the `mt info` pane for the active hit. `mt info` resolves installed and
-/// uninstalled packages alike, so a search result can be inspected before any
-/// install. A read (no alt-screen drop); failure names the package in a banner and
-/// leaves the pane closed.
-fn openSearchInfo(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
-    const m = selectedMatch(s) orelse return; // empty list: no-op
-    errdefer |err| {
-        var sb: [96]u8 = undefined;
-        const op = std.fmt.bufPrint(&sb, "info for {s} failed", .{m.name}) catch "info read failed";
-        c.shared.banner.set(op, @errorName(err));
-    }
-    const argv = try spawn.jsonArgv(c.allocator, c.mt_path, &.{ "info", m.name });
-    defer c.allocator.free(argv);
-    const bytes = try spawn.readJson(c.io, c.allocator, argv);
-    defer c.allocator.free(bytes);
-
-    const parsed = try info_json.parse(c.allocator, bytes);
-    if (storage.detail) |old| old.deinit();
-    storage.detail = parsed;
-    s.detail = parsed.info;
-}
-
-/// Perform any effect the pure `step` requested, then clear it — the consumer half of
-/// the `request` seam. Unlike the other tabs there is no lazy dirty-load: Search is
-/// idle until the user commits a query, and a remote read on every tab-entry after an
-/// unrelated mutation would be a surprising freeze, so the dirty flag `markStaleAfter`
-/// may set for Search is deliberately never consumed on entry.
-pub fn service(s: *State, storage: *Storage, c: *ctx.Ctx) Error!void {
-    const req = s.request;
-    s.request = .none;
-    switch (req) {
-        .none => {},
-        .search => try loadSearch(s, storage, c),
-        .install => try doInstall(s, storage, c),
-        .info => try openSearchInfo(s, storage, c),
-        // Add/remove the active hit in the persistent basket, then re-project the
-        // `checked` slice so the row reflects it immediately. The leaf already refused
-        // installed rows, so the match here is always selectable.
-        .toggle => {
-            const m = selectedMatch(s) orelse return;
-            try storage.selected.toggle(c.allocator, m.name, m.kind);
-            projectSearchChecked(storage);
-            syncSelected(s, storage);
-        },
-        // Drop the highlighted basket pick (read its name/kind before freeing it),
-        // then re-project so any on-screen row for it clears its checkmark.
-        .remove => {
-            const e = selectedBasketEntry(s) orelse return;
-            storage.selected.remove(c.allocator, e.name, e.kind);
-            projectSearchChecked(storage);
-            syncSelected(s, storage);
-        },
-        // Empty the whole basket; the projection then clears every on-screen check.
-        .clear => {
-            storage.selected.clear(c.allocator);
-            projectSearchChecked(storage);
-            syncSelected(s, storage);
-        },
-    }
-}
-
 // ─── tests ───────────────────────────────────────────────────────────
 
 fn ch(c: u8) tab.Key {
@@ -693,6 +663,11 @@ const sample = [_]Match{
     .{ .name = "firefox", .kind = .cask, .installed = true },
     .{ .name = "ripgrep", .kind = .formula, .installed = false },
 };
+
+/// Drive `step` with an explicit storage (basket ops mutate it) and a fixed mt path.
+fn stepKey(s: *State, storage: *Storage, key: tab.Key) cmd.Cmd {
+    return step(testing.allocator, "/opt/malt/bin/mt", s, storage, key);
+}
 
 test "selectedMatch clamps the unbounded cursor into the result list" {
     var s: State = .{ .items = &sample, .phase = .loaded };
@@ -707,100 +682,134 @@ test "selectedMatch on an empty list is null (the action becomes a no-op)" {
     try testing.expect(selectedMatch(&s) == null);
 }
 
-test "enter opens info for the active hit" {
+test "enter returns the `mt info` read for the active hit" {
     var s: State = .{ .items = &sample, .phase = .loaded };
-    step(&s, .enter);
-    try testing.expectEqual(Request.info, s.request);
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    const eff = stepKey(&s, &storage, .enter);
+    defer testing.allocator.free(eff.read.argv);
+    try testing.expect(eff == .read);
+    try testing.expectEqual(cmd.MsgTag.search, eff.read.tag);
+    try testing.expectEqualStrings("info", eff.read.argv[1]);
+    try testing.expectEqualStrings("wget", eff.read.argv[2]);
 }
 
 test "enter is inert on an empty result list" {
     var s: State = .{ .items = &.{} };
-    step(&s, .enter);
-    try testing.expectEqual(Request.none, s.request);
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    try testing.expect(stepKey(&s, &storage, .enter) == .none);
 }
 
 test "esc closes the info pane" {
     const info: info_json.Info = .{ .name = "wget", .version = "1", .tap = "", .dependencies = &.{} };
     var s: State = .{ .items = &sample, .detail = info };
-    step(&s, .esc);
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    try testing.expect(stepKey(&s, &storage, .esc) == .none);
     try testing.expect(s.detail == null);
 }
 
-test "i on a not-installed hit requests install; on an installed hit it is inert" {
+test "i on a not-installed active row (empty basket) returns the install mutation" {
     var s: State = .{ .items = &sample, .phase = .loaded };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
     s.chrome.view.selected = 0; // wget, not installed
-    step(&s, ch('i'));
-    try testing.expectEqual(Request.install, s.request);
+    const eff = stepKey(&s, &storage, ch('i'));
+    defer testing.allocator.free(eff.run_mutation.argv);
+    try testing.expect(eff == .run_mutation);
+    try testing.expectEqual(cmd.MsgTag.search, eff.run_mutation.tag);
+    try testing.expectEqualStrings("install", eff.run_mutation.argv[1]);
+    try testing.expectEqualStrings("--formula", eff.run_mutation.argv[2]);
+    try testing.expectEqualStrings("wget", eff.run_mutation.argv[3]);
+}
 
-    s.request = .none;
+test "i on an already-installed active row (empty basket) is inert" {
+    var s: State = .{ .items = &sample, .phase = .loaded };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
     s.chrome.view.selected = 1; // firefox, already installed
-    step(&s, ch('i'));
-    try testing.expectEqual(Request.none, s.request); // inert
+    try testing.expect(stepKey(&s, &storage, ch('i')) == .none);
 }
 
 test "i on an empty list is inert" {
     var s: State = .{ .items = &.{} };
-    step(&s, ch('i'));
-    try testing.expectEqual(Request.none, s.request);
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    try testing.expect(stepKey(&s, &storage, ch('i')) == .none);
 }
 
-test "an unrelated key leaves the request alone" {
+test "an unrelated key is inert" {
     var s: State = .{ .items = &sample };
-    step(&s, ch('z'));
-    try testing.expectEqual(Request.none, s.request);
-    step(&s, .down);
-    try testing.expectEqual(Request.none, s.request);
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    try testing.expect(stepKey(&s, &storage, ch('z')) == .none);
+    try testing.expect(stepKey(&s, &storage, .down) == .none);
 }
 
-test "space requests a basket toggle for the active not-installed row" {
+test "space adds the active not-installed row to the basket in place, no effect" {
     var s: State = .{ .items = &sample, .phase = .loaded };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
     s.chrome.view.selected = 0; // wget, not installed
-    step(&s, .space);
-    try testing.expectEqual(Request.toggle, s.request);
+    try testing.expect(stepKey(&s, &storage, .space) == .none); // pure state, no Cmd
+    try testing.expect(storage.selected.contains("wget", .formula)); // in the basket now
+    try testing.expectEqual(@as(usize, 1), s.selected_count); // mirrored onto the leaf
+
+    // A second space toggles it back out.
+    try testing.expect(stepKey(&s, &storage, .space) == .none);
+    try testing.expect(!storage.selected.contains("wget", .formula));
+    try testing.expectEqual(@as(usize, 0), s.selected_count);
 }
 
 test "space is inert on an already-installed row (never selectable)" {
     var s: State = .{ .items = &sample, .phase = .loaded };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
     s.chrome.view.selected = 1; // firefox, already installed
-    step(&s, .space);
-    try testing.expectEqual(Request.none, s.request);
+    try testing.expect(stepKey(&s, &storage, .space) == .none);
+    try testing.expectEqual(@as(usize, 0), s.selected_count); // nothing added
 }
 
 test "space is inert on an empty result list" {
     var s: State = .{ .items = &.{} };
-    step(&s, .space);
-    try testing.expectEqual(Request.none, s.request);
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    try testing.expect(stepKey(&s, &storage, .space) == .none);
 }
 
 test "i installs the basket even when the active row is already installed" {
-    var s: State = .{ .items = &sample, .selected_count = 1, .phase = .loaded };
-    s.chrome.view.selected = 1; // active = firefox (installed); the basket still wins
-    step(&s, ch('i'));
-    try testing.expectEqual(Request.install, s.request);
-}
-
-test "i installs the basket even when none of its picks are on screen" {
-    // The cross-query case: the basket holds off-list picks, so `i` must fire even
-    // though the current query returned nothing checkable.
-    var s: State = .{ .items = &.{}, .selected_count = 2, .phase = .loaded };
-    step(&s, ch('i'));
-    try testing.expectEqual(Request.install, s.request);
+    var s: State = .{ .items = &sample, .phase = .loaded };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    // Basket holds ripgrep; the active row is the installed firefox — the basket wins.
+    s.chrome.view.selected = 2; // ripgrep, not installed
+    _ = stepKey(&s, &storage, .space); // basket = {ripgrep}
+    s.chrome.view.selected = 1; // active = firefox (installed)
+    const eff = stepKey(&s, &storage, ch('i'));
+    defer testing.allocator.free(eff.run_mutation.argv);
+    try testing.expect(eff == .run_mutation);
+    try testing.expectEqualStrings("ripgrep", eff.run_mutation.argv[3]); // the basket pick
 }
 
 test "i is inert only when the basket is empty and the active row is not installable" {
-    var s: State = .{ .items = &sample, .selected_count = 0, .phase = .loaded };
+    var s: State = .{ .items = &sample, .phase = .loaded };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
     s.chrome.view.selected = 1; // empty basket + active firefox (installed) → nothing to do
-    step(&s, ch('i'));
-    try testing.expectEqual(Request.none, s.request);
+    try testing.expect(stepKey(&s, &storage, ch('i')) == .none);
 }
 
 test "the cores tolerate a checked slice shorter than items without trapping" {
-    // Before the shell sizes `checked` it can be empty; the cores must not index
-    // past it. Toggle is then inert and install falls back to the active row.
+    // Before a search sizes `checked` it is empty; the basket op must not index past
+    // it (projection is a no-op with no results), and install falls back to the row.
     var s: State = .{ .items = &sample, .checked = &.{}, .phase = .loaded };
-    step(&s, .space); // no checked slot for the active row → inert, no trap
-    step(&s, ch('i')); // resolves over the empty set + the active (installable) row
-    try testing.expectEqual(Request.install, s.request);
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    _ = stepKey(&s, &storage, .space); // wget → basket, projection skipped (no results loaded)
+    const eff = stepKey(&s, &storage, ch('i')); // resolves over the basket pick
+    defer testing.allocator.free(eff.run_mutation.argv);
+    try testing.expect(eff == .run_mutation);
 }
 
 test "render draws a multi-select checkbox per result row" {
@@ -893,10 +902,12 @@ test "footerHint exposes the tab's action keys for the shared footer" {
 
 test "l flips the body between the results and basket views" {
     var s: State = .{ .items = &sample, .phase = .loaded };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
     try testing.expectEqual(View.results, s.view); // results by default
-    step(&s, ch('l'));
+    _ = stepKey(&s, &storage, ch('l'));
     try testing.expectEqual(View.basket, s.view);
-    step(&s, ch('l')); // and back
+    _ = stepKey(&s, &storage, ch('l')); // and back
     try testing.expectEqual(View.results, s.view);
 }
 
@@ -907,15 +918,17 @@ const basket_sample = [_]SelEntry{
 
 test "End jumps to the last row of the active view: results or basket" {
     var s: State = .{ .items = &sample, .phase = .loaded, .basket = &basket_sample };
-    step(&s, .end);
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    _ = stepKey(&s, &storage, .end);
     try testing.expectEqual(@as(usize, 2), s.chrome.view.selected); // 3 hits
 
     s.view = .basket;
-    step(&s, .end);
+    _ = stepKey(&s, &storage, .end);
     try testing.expectEqual(@as(usize, 1), s.chrome.view.selected); // 2 picks
 
     var e: State = .{ .phase = .loaded }; // empty results: no underflow
-    step(&e, .end);
+    _ = stepKey(&e, &storage, .end);
     try testing.expectEqual(@as(usize, 0), e.chrome.view.selected);
 }
 
@@ -985,47 +998,65 @@ test "selectedBasketEntry on an empty basket is null" {
     try testing.expect(selectedBasketEntry(&s) == null);
 }
 
-test "space in the basket view requests removing the highlighted pick" {
-    var s: State = .{ .view = .basket, .basket = &basket_sample };
+test "space in the basket view removes the highlighted pick in place" {
+    var s: State = .{ .items = &sample, .phase = .loaded };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
     s.chrome.view.selected = 0;
-    step(&s, .space);
-    try testing.expectEqual(Request.remove, s.request);
+    _ = stepKey(&s, &storage, .space); // wget → basket
+    s.chrome.view.selected = 2;
+    _ = stepKey(&s, &storage, .space); // ripgrep → basket
+    s.view = .basket;
+    s.chrome.view.selected = 0; // highlight the first pick
+    try testing.expect(stepKey(&s, &storage, .space) == .none); // remove, pure state
+    try testing.expect(!storage.selected.contains("wget", .formula)); // removed
+    try testing.expect(storage.selected.contains("ripgrep", .formula)); // kept
 }
 
-test "d in the basket view also requests a remove" {
-    var s: State = .{ .view = .basket, .basket = &basket_sample };
-    s.chrome.view.selected = 1;
-    step(&s, ch('d'));
-    try testing.expectEqual(Request.remove, s.request);
+test "d in the basket view also removes the highlighted pick" {
+    var s: State = .{ .items = &sample, .phase = .loaded };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    s.chrome.view.selected = 0;
+    _ = stepKey(&s, &storage, .space); // wget → basket
+    s.view = .basket;
+    s.chrome.view.selected = 0;
+    try testing.expect(stepKey(&s, &storage, ch('d')) == .none);
+    try testing.expect(!storage.selected.contains("wget", .formula));
 }
 
 test "d in the results view is inert (remove is a basket-only key)" {
     var s: State = .{ .items = &sample, .phase = .loaded, .view = .results };
-    step(&s, ch('d'));
-    try testing.expectEqual(Request.none, s.request);
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    try testing.expect(stepKey(&s, &storage, ch('d')) == .none);
 }
 
 test "space in the basket view is inert when the basket is empty" {
-    var s: State = .{ .view = .basket, .basket = &.{} };
-    step(&s, .space);
-    try testing.expectEqual(Request.none, s.request);
+    var s: State = .{ .view = .basket };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    try testing.expect(stepKey(&s, &storage, .space) == .none);
 }
 
-test "n requests clearing the basket from either view when it holds picks" {
-    var s: State = .{ .items = &sample, .phase = .loaded, .selected_count = 2 };
-    step(&s, ch('n')); // results view
-    try testing.expectEqual(Request.clear, s.request);
-
-    s.request = .none;
-    s.view = .basket;
-    step(&s, ch('n')); // basket view
-    try testing.expectEqual(Request.clear, s.request);
+test "n clears the basket from the results view when it holds picks" {
+    var s: State = .{ .items = &sample, .phase = .loaded };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    s.chrome.view.selected = 0;
+    _ = stepKey(&s, &storage, .space); // wget
+    s.chrome.view.selected = 2;
+    _ = stepKey(&s, &storage, .space); // ripgrep
+    try testing.expectEqual(@as(usize, 2), s.selected_count);
+    try testing.expect(stepKey(&s, &storage, ch('n')) == .none); // clear, pure state
+    try testing.expectEqual(@as(usize, 0), s.selected_count);
 }
 
 test "n on an empty basket is inert" {
-    var s: State = .{ .items = &sample, .phase = .loaded, .selected_count = 0 };
-    step(&s, ch('n'));
-    try testing.expectEqual(Request.none, s.request);
+    var s: State = .{ .items = &sample, .phase = .loaded };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    try testing.expect(stepKey(&s, &storage, ch('n')) == .none);
 }
 
 test "the footer hint reflects the active view" {
@@ -1094,97 +1125,47 @@ test "Storage.deinit frees the results, checkbox buffer, basket, and detail pars
 
 // ── Effect tests ─────────────────────────────────────────────────────────
 
-test "mutates gates only on the install request" {
-    var s: State = .{};
-    try testing.expect(!mutates(&s)); // .none never takes the WAL writer
-    s.request = .info;
-    try testing.expect(!mutates(&s)); // a read-only info request does not gate
-    s.request = .toggle;
-    try testing.expect(!mutates(&s)); // a pure basket op does not gate
-    s.request = .install;
-    try testing.expect(mutates(&s)); // the one DB-mutating request
-}
-
-// Backing storage for a `ctx.Ctx` in an effect test: dummy term/fetches/shared, a
-// no-op painter (fd = -1; these reads never reach a poll tick), and the loading flag.
-const TestEnv = struct {
-    term_h: ctx.Term,
-    fetches: ctx.Fetches = ctx.Fetches.initFill(null),
-    shared: ctx.SharedModel = .{},
-    frame: []u8 = &.{},
-    loading: bool = false,
-};
-
-fn mkCtx(io: std.Io, e: *TestEnv, mt_path: []const u8) ctx.Ctx {
-    return .{
-        .io = io,
-        .allocator = testing.allocator,
-        .term = &e.term_h,
-        .painter = .{ .fd = -1, .frame = &e.frame },
-        .fetches = &e.fetches,
-        .shared = &e.shared,
-        .mt_path = mt_path,
-        .loading = &e.loading,
-    };
-}
-
-test "service on the synchronous read path never starts a background fetch" {
-    // Search reads remotely but synchronously; it declares no fetch spec, so no
-    // branch of its service may spawn a background audit.
+test "Search declares no background fetch and no lazy on-entry reload" {
+    // Search reads remotely but synchronously (no fetch spec), and unlike Installed
+    // it exposes no `refreshCmd`: a remote read on every tab-entry would be a
+    // surprising freeze, so entering never re-queries even when marked dirty.
     try testing.expect(fetch_spec == null);
-    var thr = std.Io.Threaded.init(testing.allocator, .{});
-    defer thr.deinit();
-    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
-    var storage: Storage = .{};
-    defer storage.deinit(testing.allocator);
-    var st: State = .{}; // .none
-    var c = mkCtx(thr.io(), &env, "/bin/false"); // would fail if it ever spawned
-    try service(&st, &storage, &c);
-    for (&env.fetches.values) |v| try testing.expect(v == null);
-    try testing.expect(!env.shared.banner.isSet());
+    try testing.expect(!@hasDecl(@This(), "refreshCmd"));
 }
 
-test "service consumes a toggle request into the basket and mirrors it onto the leaf" {
+test "space projects the basket toggle onto the on-screen checkbox row" {
     const alloc = testing.allocator;
-    var thr = std.Io.Threaded.init(alloc, .{});
-    defer thr.deinit();
-    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
     var storage: Storage = .{};
     defer storage.deinit(alloc);
-    // A loaded result the cursor points at; a basket op is pure — no spawn.
+    // A loaded result the cursor points at; the toggle re-projects `checked`.
     storage.search = try search_json.parse(alloc,
         \\{"results":[{"name":"bat","type":"formula","installed":false}]}
     );
     storage.checked = try alloc.alloc(bool, 1);
     @memset(storage.checked, false);
-    var st: State = .{ .items = storage.search.?.items, .request = .toggle };
-    var c = mkCtx(thr.io(), &env, "/bin/false"); // would fail if the pure op ever spawned
-    try service(&st, &storage, &c);
-    try testing.expectEqual(Request.none, st.request); // consumed
+    var st: State = .{ .items = storage.search.?.items, .checked = storage.checked, .phase = .loaded };
+    try testing.expect(stepKey(&st, &storage, .space) == .none); // pure state, no effect
     try testing.expect(storage.selected.contains("bat", .formula)); // added to the basket
     try testing.expectEqual(@as(usize, 1), st.selected_count); // mirrored onto the leaf
     try testing.expect(storage.checked[0]); // and re-projected onto the on-screen row
-    try testing.expect(!env.shared.banner.isSet());
 }
 
-test "entering the tab does not trigger a remote read even when marked dirty" {
-    // Search diverges from the other tabs: no lazy dirty-load on entry. A mutation
-    // elsewhere marks it dirty, but entering must stay idle — a surprise remote read
-    // on a tab switch would freeze the frame. `/bin/false` would fail if ever spawned.
-    var thr = std.Io.Threaded.init(testing.allocator, .{});
-    defer thr.deinit();
-    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
-    env.shared.dirty.insert(.search);
-    var storage: Storage = .{};
-    defer storage.deinit(testing.allocator);
-    var st: State = .{}; // .none request, idle phase
-    st.chrome.filter.push("firefox"); // a committed query exists, yet entry must not read it
-    var c = mkCtx(thr.io(), &env, "/bin/false");
-    try service(&st, &storage, &c);
-    try testing.expectEqual(Phase.idle, st.phase); // never searched on entry
-    try testing.expectEqual(@as(usize, 0), st.items.len);
-    try testing.expect(!env.shared.banner.isSet());
-    try testing.expect(env.shared.dirty.contains(.search)); // flag left unconsumed
+test "searchCmd flips to the searching phase and carries the query read" {
+    var st: State = .{};
+    st.chrome.filter.push("fire");
+    const eff = searchCmd(testing.allocator, "/opt/homebrew/bin/mt", &st);
+    defer testing.allocator.free(eff.read.argv);
+    try testing.expect(eff == .read);
+    try testing.expectEqual(Phase.searching, st.phase); // flipped before the blocking read
+    try testing.expectEqual(cmd.MsgTag.search, eff.read.tag);
+    try testing.expectEqualStrings("search", eff.read.argv[1]);
+    try testing.expectEqualStrings("fire", eff.read.argv[2]);
+}
+
+test "searchCmd on an empty query is a no-op and leaves the phase alone" {
+    var st: State = .{ .phase = .idle };
+    try testing.expect(searchCmd(testing.allocator, "/bin/mt", &st) == .none);
+    try testing.expectEqual(Phase.idle, st.phase);
 }
 
 test "searchArgv builds `mt search <query> --json` for the committed query" {
@@ -1536,45 +1517,77 @@ test "a failed install (non-zero exit) retains the whole basket for retry" {
     try testing.expect(storage.selected.contains("redis", .formula));
 }
 
-test "a failed search names the op in the banner and leaves no stuck searching phase" {
-    var thr = std.Io.Threaded.init(testing.allocator, .{});
-    defer thr.deinit();
-    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+test "update on a failed search leaves no stuck searching phase (guidance when none loaded)" {
+    var st: State = .{ .phase = .searching }; // as the pre-read paint left it
     var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
     defer storage.deinit(testing.allocator);
-    var st: State = .{};
-    st.chrome.filter.push("fire");
-    st.phase = .searching; // as the pre-spawn paint left it
-    var c = mkCtx(thr.io(), &env, "/bin/echo"); // echo emits non-JSON → parse fails
-    try testing.expectError(error.BadJson, loadSearch(&st, &storage, &c));
-    try testing.expectEqualStrings("search failed: BadJson", env.shared.banner.slice());
-    // No prior results → guidance, not a spinner frozen behind the banner.
+    const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .failed);
+    try testing.expect(next == .none);
+    // No prior results → guidance, not a spinner frozen behind the (pump-set) banner.
     try testing.expectEqual(Phase.idle, st.phase);
-    try testing.expectEqual(@as(usize, 0), st.items.len);
 }
 
-test "a failed search keeps the last-good results and selection, falling back to the list" {
-    var thr = std.Io.Threaded.init(testing.allocator, .{});
-    defer thr.deinit();
-    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+test "update on a failed search falls back to the last-good results, keeping the cursor" {
     var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
     defer storage.deinit(testing.allocator);
     // Prime a prior successful search: storage + leaf borrow these results.
     storage.search = try search_json.parse(testing.allocator,
         \\{"results":[{"name":"jq","type":"formula","installed":true},{"name":"yq","type":"formula","installed":false}]}
     );
-    var st: State = .{};
-    st.items = storage.search.?.items;
-    st.chrome.filter.push("q");
+    var st: State = .{ .items = storage.search.?.items, .phase = .searching };
     st.chrome.view.selected = 1; // cursor on yq
-    st.phase = .searching; // as the pre-spawn paint left it
-    var c = mkCtx(thr.io(), &env, "/bin/echo"); // non-JSON → BadJson on the new query
-
-    try testing.expectError(error.BadJson, loadSearch(&st, &storage, &c));
-    try testing.expectEqualStrings("search failed: BadJson", env.shared.banner.slice());
-    // Prior results exist → fall back to the list, not guidance; and the storage is
-    // swapped only after a clean parse, so the rows and the cursor both survive.
+    const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .failed);
+    try testing.expect(next == .none);
+    // Prior results exist → fall back to the list, not guidance; the rows and cursor survive.
     try testing.expectEqual(Phase.loaded, st.phase);
     try testing.expectEqual(@as(usize, 2), st.items.len);
     try testing.expectEqual(@as(usize, 1), st.chrome.view.selected);
+}
+
+test "update on a loaded search parse swaps in the ranked results and lands loaded" {
+    var st: State = .{ .phase = .searching };
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    try storage.selected.toggle(testing.allocator, "bat", .formula); // a prior pick
+    const parsed = try search_json.parse(testing.allocator,
+        \\{"results":[{"name":"bat","type":"formula","installed":false},{"name":"jq","type":"formula","installed":true}]}
+    );
+    const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .{ .loaded = .{ .search = parsed } });
+    try testing.expect(next == .none);
+    try testing.expectEqual(Phase.loaded, st.phase);
+    try testing.expectEqual(@as(usize, 2), st.items.len);
+    try testing.expect(st.checked[0]); // bat re-checked from the persistent basket
+    try testing.expect(!st.checked[1]); // jq installed → never checked
+}
+
+test "a successful install clears the basket, marks siblings stale, and re-runs the query" {
+    var st: State = .{};
+    st.chrome.filter.push("bat");
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    try storage.selected.toggle(testing.allocator, "bat", .formula);
+    syncSelected(&st, &storage);
+    const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .{ .mutated = 0 });
+    defer testing.allocator.free(next.read.argv);
+    try testing.expect(next == .read); // re-run the query so markers flip
+    try testing.expectEqualStrings("search", next.read.argv[1]);
+    try testing.expectEqual(@as(usize, 0), st.selected_count); // basket consumed
+    try testing.expect(shared.takeDirty(.installed)); // siblings marked stale
+}
+
+test "a failed install retains the basket behind a recoverable banner and does not re-query" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    try storage.selected.toggle(testing.allocator, "bat", .formula);
+    syncSelected(&st, &storage);
+    const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .{ .mutated = 1 });
+    try testing.expect(next == .none); // no re-query on failure
+    try testing.expectEqual(@as(usize, 1), st.selected_count); // basket retained for retry
+    try testing.expect(std.mem.startsWith(u8, shared.banner.slice(), "install failed"));
 }

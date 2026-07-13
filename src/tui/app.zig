@@ -1,8 +1,10 @@
 //! malt — `mt tui` app shell: event loop, tab dispatch, filter, rendering.
 //!
-//! Leaf module. The pure cores — `step(app, key) -> app` and
-//! `renderFrame(buf, app, cols, rows) -> bytes` — are The Elm Architecture and
-//! are unit-tested without a PTY. `run` is the only impure part: it owns the
+//! Leaf module. `step(app, key) -> Cmd` maps a key to the active tab's effect
+//! (pure over `(app, key)`; nav/editing mutate `app` in place) and
+//! `renderFrame(buf, app, cols, rows) -> bytes` paints — The Elm Architecture,
+//! unit-tested without a PTY. The `perform`/`update` pump in `serviceKey` runs the
+//! `Cmd`, folds the `Msg` back, and repaints. `run` is the only impure part: it owns the
 //! terminal lifecycle (raw mode + alt-screen + hidden cursor, each undone by an
 //! `errdefer` restore; panics and termination signals restore through the
 //! `ui/term_restore` crash registry), refuses to launch on a non-interactive
@@ -14,6 +16,7 @@ const std = @import("std");
 
 const color = @import("../ui/color.zig");
 const spinner_frames = @import("../ui/spinner_frames.zig");
+const cmd = @import("cmd.zig");
 const ctx = @import("ctx.zig");
 const doctor = @import("doctor_tab.zig");
 const filter_input = @import("filter_input.zig");
@@ -145,9 +148,11 @@ fn activeFilterLabel(a: *const App) []const u8 {
     return if (a.active == .search) "search: " else "filter: ";
 }
 
-fn routeToTab(a: *App, key: Key) void {
+/// Route a key to the active tab's `step`, returning the `Cmd` it produces. The
+/// tab's pure state changes land in place; the effect (if any) is the return.
+fn routeToTab(allocator: std.mem.Allocator, mt_path: []const u8, a: *App, key: Key) cmd.Cmd {
     switch (a.active) {
-        inline else => |t| moduleFor(t).step(&@field(a.states, @tagName(t)), key),
+        inline else => |t| return moduleFor(t).step(allocator, mt_path, &@field(a.states, @tagName(t)), &@field(a.storages, @tagName(t)), key),
     }
 }
 
@@ -177,26 +182,27 @@ fn tabTitles() [tab_bar.count][]const u8 {
     return t;
 }
 
-/// Pure transition: keys split between filter editing and normal navigation;
-/// keys the shell does not own fall through to the active tab.
-pub fn step(app: App, key: Key) App {
-    var a = app;
-    a.shared.banner.clear(); // a keypress dismisses the prior transient error banner
-    if (a.editing) stepFilter(&a, key) else stepNormal(&a, key);
-    return a;
+/// Transition: keys split between filter editing and normal navigation; keys the
+/// shell does not own fall through to the active tab. Nav/editing mutate `app` in
+/// place; the return is the active tab's effect `Cmd` (`none` for a pure key), which
+/// the `serviceKey` pump performs. Not a value-returning `App -> App` anymore because
+/// a `Cmd` carries a heap argv the pump owns.
+pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, app: *App, key: Key) cmd.Cmd {
+    app.shared.banner.clear(); // a keypress dismisses the prior transient error banner
+    return if (app.editing) stepFilter(allocator, mt_path, app, key) else stepNormal(allocator, mt_path, app, key);
 }
 
-fn stepFilter(a: *App, key: Key) void {
+fn stepFilter(allocator: std.mem.Allocator, mt_path: []const u8, a: *App, key: Key) cmd.Cmd {
     switch (key) {
         .char => |c| activeChrome(a).filter.push(c.slice()),
         .backspace => activeChrome(a).filter.backspace(),
         .enter => { // commit, keep the filter
             a.editing = false;
-            // Search divergence: its filter doubles as the search box, so
-            // committing the query *is* the search. Set the request directly
-            // rather than routing Enter to the tab, whose Enter now means "open
-            // info" — every other tab's filter just narrows a loaded list.
-            if (a.active == .search) a.states.search.request = .search;
+            // Search divergence: its filter doubles as the search box, so committing
+            // the query *is* the search — ask the tab for the query `Cmd` rather than
+            // routing Enter (whose tab meaning is "open info"). Every other tab's
+            // filter just narrows a loaded list, so their commit is a pure no-op.
+            if (a.active == .search) return search.searchCmd(allocator, mt_path, &a.states.search);
         },
         .esc => { // cancel: clear the filter
             activeChrome(a).filter.clear();
@@ -205,19 +211,22 @@ fn stepFilter(a: *App, key: Key) void {
         .ctrl_c => a.quit = true, // always escapes, even mid-edit
         .up, .down, .left, .right, .space, .tab, .page_up, .page_down, .home, .end, .unknown => {},
     }
+    return .none;
 }
 
-fn stepNormal(a: *App, key: Key) void {
+fn stepNormal(allocator: std.mem.Allocator, mt_path: []const u8, a: *App, key: Key) cmd.Cmd {
     // The Installed uninstall guard is modal: while it is up, route every key
     // to the tab so its one-key resolve sees keys this switch would otherwise
     // consume — navigation, tab switches, digits, and `/` then cancel the
     // guard instead of bypassing it.
     if (a.active == .installed and a.states.installed.confirm_uninstall != null) {
         switch (key) {
-            .ctrl_c => a.quit = true,
-            else => routeToTab(a, key),
+            .ctrl_c => {
+                a.quit = true;
+                return .none;
+            },
+            else => return routeToTab(allocator, mt_path, a, key),
         }
-        return;
     }
     switch (key) {
         .ctrl_c => a.quit = true,
@@ -232,19 +241,19 @@ fn stepNormal(a: *App, key: Key) void {
             if (c.len == 1) switch (c.bytes[0]) {
                 'q' => {
                     a.quit = true;
-                    return;
+                    return .none;
                 },
                 '/' => {
                     a.editing = true;
-                    return;
+                    return .none;
                 },
                 '1'...'5' => {
                     if (tab_bar.fromDigit(c.bytes[0])) |t| a.active = t;
-                    return;
+                    return .none;
                 },
                 else => {},
             };
-            routeToTab(a, key); // a domain key (e.g. u/f) belongs to the tab
+            return routeToTab(allocator, mt_path, a, key); // a domain key (e.g. u/f) belongs to the tab
         },
         .enter => {
             // On Search, Enter focuses the query box when there are no results
@@ -252,14 +261,15 @@ fn stepNormal(a: *App, key: Key) void {
             // results are loaded. Every other tab uses Enter as a domain key.
             if (a.active == .search and a.states.search.items.len == 0) {
                 a.editing = true;
-            } else routeToTab(a, key);
+            } else return routeToTab(allocator, mt_path, a, key);
         },
-        .space, .end, .esc => routeToTab(a, key),
+        .space, .end, .esc => return routeToTab(allocator, mt_path, a, key),
         // `end` needs the row count to land on the last row — deferred to the
         // data tab; Esc routes so a tab can close a pane / cancel its guard;
         // `backspace`/`unknown` are inert outside edit mode.
         .backspace, .unknown => {},
     }
+    return .none;
 }
 
 /// Pure render: full-screen clear, then each region painted at its cursor
@@ -443,14 +453,14 @@ fn refusalMessage(r: Refusal) []const u8 {
     };
 }
 
-// Composed from each tab's own effect `Error` set (which already unions the parser
-// errors it can raise) plus the terminal/loop faults — so the hub no longer names
-// any `json/*` parser directly. `classify` below stays exhaustive over the same
-// concrete tags.
+// The terminal/loop/spawn faults the pump and the header count-read can raise.
+// A tab parser's own errors flow back through the interpreter as a `.failed` `Msg`
+// (recoverable, bannered from the `Cmd`'s `fail_op`), never up here — only the
+// count-read's `BadJson` still surfaces directly. `classify` stays exhaustive over
+// these concrete tags.
 pub const RunError = term.TermError || std.mem.Allocator.Error ||
     spawn.ReadError || spawn.InlineError ||
-    installed.Error || outdated.Error || services.Error || doctor.Error || search.Error ||
-    error{ReadFailed};
+    error{ ReadFailed, BadJson };
 
 /// How the event loop treats a run-loop error: a `recoverable` backend fault
 /// becomes an inline banner and the session keeps running; a `fatal` fault
@@ -501,25 +511,6 @@ const TickBind = struct {
         _ = term.takeResized();
         // Best-effort, like paintLoading: a dropped animation frame is cosmetic.
         repaint(b.fd, b.frame, b.allocator, b.app) catch {};
-    }
-};
-
-/// Binds the hub-owned header keg-count refresh into a tab's `ctx.Ctx`. Only the hub
-/// reads the shared count (it stays app/header-side), so it injects the closure here;
-/// a tab that grows the keg set (search's install) fires it through the port without
-/// importing the hub. A failed read banners and is dropped — a stale count is cosmetic
-/// and the mutation already landed.
-const CountRefresh = struct {
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    mt_path: []const u8,
-    shared: *SharedModel,
-    fn call(p: *anyopaque) void {
-        // `p` was set from a `*CountRefresh` in `serviceTab`, so the round-trip is sound.
-        const self: *CountRefresh = @ptrCast(@alignCast(p));
-        // A failed count read already bannered via its errdefer; a stale header count
-        // is cosmetic and the mutation landed, so the error is dropped here.
-        refreshInstalledCount(self.io, self.allocator, self.mt_path, self.shared) catch {};
     }
 };
 
@@ -760,89 +751,162 @@ fn serviceFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fe
     }
 }
 
-/// True when any tab has a pending request that will spawn a DB-mutating inline
-/// child (uninstall, upgrade, service action, doctor --fix, install). A generic fold
-/// over each tab's own `mutates` capability — read-only requests
-/// (detail/info/search/basket toggles) declare `false`, so they do not gate the
-/// pre-mutation drain.
-fn mutationPending(app: *const App) bool {
-    inline for (@typeInfo(Tab).@"enum".fields) |fld| {
-        const tag = @field(Tab, fld.name);
-        if (moduleFor(tag).mutates(&@field(app.states, @tagName(tag)))) return true;
-    }
-    return false;
-}
-
-/// Quiesce every in-flight background audit before an inline mutator opens the
-/// DB. The TUI is the sole DB orchestrator: a live `mt … --json` child still
-/// holds the WAL writer on each open (`initSchema` writes on every connect), so
-/// a mutating child spawned alongside it races the single writer and fails with
-/// `Busy`. Polls only the fetch fds — never the tty — so a queued keystroke
-/// cannot starve the drain into a spin; the spinner still ticks so a cold-cache
-/// audit reads as progress, not a freeze. Best-effort like the teardown reap:
-/// a poll fault reaps the lot rather than leaving a child to outlive the mutation.
-fn drainActiveFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) void {
-    while (anyFetchActive(fetches)) {
-        var fds: [tab_bar.count]std.posix.fd_t = undefined;
-        var tabs: [tab_bar.count]Tab = undefined;
-        var n: usize = 0;
-        var it = fetches.iterator();
-        while (it.next()) |e| if (e.value.*) |*f| {
-            fds[n] = f.fd;
-            tabs[n] = e.key;
-            n += 1;
-        };
-        var pfds_buf: [tab_bar.count]std.posix.pollfd = undefined;
-        const pfds = pfds_buf[0..n];
-        for (fds[0..n], 0..) |fd, i| pfds[i] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
-        const ready = std.posix.poll(pfds, fetch_tick_ms) catch return reapAllFetches(io, allocator, fetches);
-        if (ready == 0) { // tick: animate the spinner so the wait isn't a freeze
-            app.spinner_frame +%= 1;
-            repaint(painter.fd, painter.frame, allocator, app) catch {};
-            continue;
-        }
-        for (0..n) |i| if (pfds[i].revents != 0) drainTabFetch(io, allocator, painter, fetches, app, store, tabs[i]);
-    }
-}
-
-/// Drain the active tab's pending effects after a keypress. Only the active tab's
-/// `step` runs, so only its `service` can have anything to do — dispatched through
-/// the same comptime `moduleFor` switch the render path uses.
-fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
-    // Sole-orchestrator invariant: quiesce any in-flight audit before an inline
-    // mutator opens the DB, else the two opens race the single WAL writer and the
-    // mutation fails with `Busy`. Read-only turns never drain — navigation stays live.
-    if (anyFetchActive(fetches) and mutationPending(app)) drainActiveFetches(io, allocator, painter, fetches, app, store);
-    switch (app.active) {
-        inline else => |tag| try serviceTab(tag, io, allocator, t, painter, fetches, app),
-    }
-}
-
-/// Route the active tab's post-keypress effects through `moduleFor`: build the
-/// effect ports and call the tab's `service`. Every tab conforms, so the dispatch is
-/// uniform — no per-tab fork.
-fn serviceTab(comptime tag: Tab, io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App) RunError!void {
-    const M = moduleFor(tag);
-    // The hub owns the shared keg-count read (it stays app/header-side), so bind it
-    // into the ports here; a tab that grows the keg set fires it without importing
-    // the hub. Stack-lived — the `service` call below is synchronous.
-    var count_bind: CountRefresh = .{ .io = io, .allocator = allocator, .mt_path = app.mt_path, .shared = &app.shared };
-    var c: ctx.Ctx = .{
-        .io = io,
-        .allocator = allocator,
-        .term = t,
-        .painter = painter,
-        .fetches = fetches,
-        .shared = &app.shared,
-        .mt_path = app.mt_path,
-        .loading = &app.loading,
-        .refresh_installed_count = .{ .ctx = &count_bind, .call = CountRefresh.call },
+/// Quiesce every in-flight background audit before an inline mutation opens the
+/// DB. The TUI is the sole DB orchestrator: a live `mt … --json` child holds the
+/// WAL writer on each open (`initSchema` writes on connect), so a mutating child
+/// spawned alongside it races the single writer and fails with `Busy`.
+///
+/// Crucially this *kills* each audit without applying its payload, rather than
+/// waiting for it and swapping in the result: the pending mutation's argv borrows
+/// the active tab's parse storage (the checked rows / selected name), which an
+/// apply-swap would free while the argv still points into it. Killing also avoids
+/// blocking the mutation behind a slow cold-cache audit. Each reaped tab is
+/// re-marked dirty so its audit re-runs afterwards; the storage is left intact, so
+/// the mutation acts on exactly the rows the user saw.
+fn quiesceFetches(io: std.Io, allocator: std.mem.Allocator, fetches: *Fetches, app: *App) void {
+    var it = fetches.iterator();
+    while (it.next()) |e| if (e.value.*) |*f| {
+        reapTabFetch(io, allocator, f); // kill + reap (closes the DB connection) + free the buffer
+        e.value.* = null;
+        app.tab_loading.remove(e.key);
+        app.shared.dirty.insert(e.key); // re-audit after the mutation, off the intact storage
     };
-    try M.service(&@field(app.states, @tagName(tag)), &@field(app.storages, @tagName(tag)), &c);
-    // The lazy background (re)load stays loop machinery: kick the tab's audit on
-    // first entry / after a mutation marked it dirty. A tab without a fetch spec is
-    // skipped (its lazy-load, if any, is its own concern inside `service`).
-    if (M.fetch_spec != null and takeDirty(app, tag)) startTabFetch(io, allocator, fetches, app, tag);
+}
+
+// ── The Cmd/Msg pump (temporary shim over the phase-1 spawn/mux machinery) ──
+// `step` → `Cmd` → `perform` → `Msg` → `update` → `Cmd`, until `Cmd.none`. A later
+// pass generalizes this into one domain-agnostic `perform(cmd)` and folds it into
+// the loop; for now it performs each variant with the existing `spawn` helpers and
+// routes the result to the active tab's `update`.
+
+/// Free a `Cmd`'s heap argv once it is performed — the ownership contract: the tab
+/// (in `step`/`update`) builds the argv, the interpreter frees the slice (never its
+/// elements, which borrow parse storage).
+fn freeCmdArgv(allocator: std.mem.Allocator, c: cmd.Cmd) void {
+    switch (c) {
+        .read => |r| allocator.free(r.argv),
+        .run_mutation => |m| allocator.free(m.argv),
+        .none, .batch => {},
+    }
+}
+
+/// Route a `Msg` to the active tab's `update` — the same comptime `moduleFor`
+/// switch the render path uses. The active tab is stable across a synchronous pump
+/// cycle (no input is read mid-chain), and every pump `Cmd` was produced for it, so
+/// the `Parsed` member always matches the tab.
+fn updateActive(allocator: std.mem.Allocator, app: *App, store: *Storages, msg: cmd.Msg) cmd.Cmd {
+    switch (app.active) {
+        inline else => |t| return moduleFor(t).update(allocator, app.mt_path, &@field(app.states, @tagName(t)), &@field(store, @tagName(t)), &app.shared, msg),
+    }
+}
+
+/// Perform one `Cmd`, returning the `Msg` to fold back. A recoverable fault sets the
+/// banner from the `Cmd`'s `fail_op` and returns `.failed`/`.mutated`; only a fatal
+/// (terminal/OOM) fault propagates. `.none`/`.batch` never reach here.
+fn perform(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, c: cmd.Cmd) RunError!cmd.Msg {
+    switch (c) {
+        .none, .batch => unreachable, // the pump never performs these; no tab emits a batch
+        .read => |r| return performRead(io, allocator, painter, app, r),
+        .run_mutation => |m| return performMutation(io, allocator, t, fetches, app, m),
+    }
+}
+
+/// Perform a `read`: paint the pre-read status, capture `mt … --json`, and parse it
+/// with the `Cmd`'s carried parser. An `allow_empty` empty read is `.cleared`; a
+/// recoverable read/parse fault banners and is `.failed`; a fatal fault propagates.
+fn performRead(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, r: cmd.Cmd.Read) RunError!cmd.Msg {
+    // Paint before the blocking freeze so it reads as intentional. Search shows its
+    // own "searching…" via `phase`; the others get the "Loading…" footer.
+    const show_loading = r.tag != .search;
+    if (show_loading) app.loading = true;
+    repaint(painter.fd, painter.frame, allocator, app) catch {};
+    if (show_loading) app.loading = false;
+
+    const bytes: ?[]u8 = readBytes(io, allocator, painter, app, r) catch |err| switch (classify(err)) {
+        .fatal => return err,
+        .recoverable => {
+            app.shared.banner.set(r.fail_op, @errorName(err));
+            return .failed;
+        },
+    };
+    const payload = bytes orelse return .cleared; // an exit-0 empty read
+    defer allocator.free(payload);
+    const parsed = r.parse(allocator, payload) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory; // fatal
+        app.shared.banner.set(r.fail_op, @errorName(err));
+        return .failed;
+    };
+    return .{ .loaded = parsed };
+}
+
+/// The read-mode dispatch over the phase-1 `spawn` readers. Blocking non-empty is
+/// `readJson`; blocking empty-ok is `readJsonAllowEmpty`; polled is spinner-animated
+/// via the painter. `background` never reaches here — those go through `startTabFetch`.
+fn readBytes(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, r: cmd.Cmd.Read) spawn.ReadError!?[]u8 {
+    return switch (r.mode) {
+        .blocking => if (r.allow_empty) spawn.readJsonAllowEmpty(io, allocator, r.argv) else @as(?[]u8, try spawn.readJson(io, allocator, r.argv)),
+        .polled => blk: {
+            // Keep `loading` set across the poll so each tick paints the spinner.
+            app.loading = true;
+            defer app.loading = false;
+            break :blk try spawn.readJsonPolled(io, allocator, r.argv, r.max_ok_exit, painter);
+        },
+        .background => unreachable,
+    };
+}
+
+/// Perform a `run_mutation`: quiesce background audits (the WAL single-writer
+/// invariant), re-exec `mt` inline, and return the child's exit code as `.mutated`
+/// for the tab's `update` to judge. A spawn/re-enter fault banners and is `.failed`;
+/// a terminal fault propagates.
+fn performMutation(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, fetches: *Fetches, app: *App, m: cmd.Cmd.Mutation) RunError!cmd.Msg {
+    // Sole-orchestrator invariant: a live `mt … --json` child holds the WAL writer,
+    // so a mutating child spawned alongside it races and fails `Busy`. Quiesce first.
+    if (anyFetchActive(fetches)) quiesceFetches(io, allocator, fetches, app);
+    const code = spawn.runInlineReenterStatus(t, m.argv) catch |err| switch (classify(err)) {
+        .fatal => return err,
+        .recoverable => {
+            app.shared.banner.set(m.fail_op, @errorName(err));
+            return .failed;
+        },
+    };
+    return .{ .mutated = code };
+}
+
+/// Drive one `Cmd` chain to completion: perform → fold → repeat until `Cmd.none`.
+/// The interpreter frees each performed argv; a successful Search-tab mutation grows
+/// the keg set while Installed is off-tab, so the header count is refreshed eagerly.
+fn pump(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, initial: cmd.Cmd) RunError!void {
+    var c = initial;
+    while (c != .none) {
+        const performed = c;
+        const msg = perform(io, allocator, t, painter, fetches, app, performed) catch |err| {
+            freeCmdArgv(allocator, performed);
+            return err;
+        };
+        if (performed == .run_mutation and performed.run_mutation.tag == .search)
+            // Installed won't lazy-reload while off-tab, so keep `<n> kegs` live now.
+            refreshInstalledCount(io, allocator, app.mt_path, &app.shared) catch {};
+        freeCmdArgv(allocator, performed);
+        c = updateActive(allocator, app, store, msg);
+    }
+}
+
+/// After the keypress chain, the active tab's lazy on-entry (re)load if it is dirty:
+/// a background-fetch tab kicks its audit (loop machinery); a synchronous tab that
+/// exposes `refreshCmd` (Installed) pumps its read now. Search declares neither, so
+/// entering it never triggers a surprise remote read.
+fn onEntryReload(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages) RunError!void {
+    switch (app.active) {
+        inline else => |tag| {
+            const M = moduleFor(tag);
+            if (M.fetch_spec != null) {
+                if (takeDirty(app, tag)) startTabFetch(io, allocator, fetches, app, tag);
+            } else if (@hasDecl(M, "refreshCmd")) {
+                if (takeDirty(app, tag)) try pump(io, allocator, t, painter, fetches, app, store, M.refreshCmd(allocator, app.mt_path));
+            }
+        },
+    }
 }
 
 fn isTty(io: std.Io, fd: std.posix.fd_t) bool {
@@ -994,45 +1058,20 @@ fn ttyReadable(fd: std.posix.fd_t, timeout_ms: i32) bool {
     return n > 0;
 }
 
-/// One decoded key's full turn: pure step, the pre-spawn status paints, then
-/// the requested effects with the recoverable/fatal split. Shared by the
-/// streaming decode path and the timeout-flushed lone Esc so both behave
-/// identically.
+/// One decoded key's full turn: `step` yields the active tab's `Cmd`, the pump
+/// performs it and folds the `Msg` chain back, then the tab's lazy on-entry reload
+/// runs. Shared by the streaming decode path and the timeout-flushed lone Esc so
+/// both behave identically. A recoverable fault is already a banner (set by the
+/// interpreter from the `Cmd`'s `fail_op`); only a fatal fault propagates to the
+/// errdefer restore + exit.
 fn serviceKey(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, key: Key) RunError!void {
-    app.* = step(app.*, key); // also clears any prior banner
-    if (app.quit) return;
-    paintSearching(painter.fd, painter.frame, allocator, app); // status before the blocking search
-    paintLoading(painter.fd, painter.frame, allocator, app); // "Loading…" before a blocking lazy refetch
-    // A recoverable backend fault becomes the banner the failing op already
-    // set and the loop continues; only a fatal fault (terminal/OOM)
-    // propagates to the errdefer restore + exit.
-    service(io, allocator, t, painter, fetches, app, store) catch |err| switch (classify(err)) {
-        .recoverable => {},
-        .fatal => return err,
-    };
-}
-
-/// Search is the dashboard's first remote read: when the user commits a query,
-/// flip the phase and repaint a "searching…" status *before* the blocking call,
-/// so the synchronous freeze isn't a dead terminal. The only tab-specific paint
-/// in the otherwise tab-agnostic loop, earned by that first-remote-read cost.
-/// Best-effort: a paint failure just means the real read's repaint follows.
-fn paintSearching(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) void {
-    if (app.active != .search or app.states.search.request != .search) return;
-    if (app.states.search.chrome.filter.slice().len == 0) return; // empty query: no spawn
-    app.states.search.phase = .searching;
-    repaint(fd, frame, allocator, app) catch {};
-}
-
-/// Before the active tab runs a blocking lazy refetch (it is dirty and will
-/// refetch on entry), paint a "Loading…" footer so the synchronous read reads as
-/// intentional, not a frozen or — before stderr was suppressed — garbled frame.
-/// Best-effort, like `paintSearching`; the read's own repaint draws the result.
-fn paintLoading(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) void {
-    if (!app.shared.dirty.contains(app.active)) return; // nothing will refetch this turn
-    app.loading = true;
-    repaint(fd, frame, allocator, app) catch {};
-    app.loading = false;
+    const c = step(allocator, app.mt_path, app, key); // mutates nav/editing in place; clears the banner
+    if (app.quit) {
+        freeCmdArgv(allocator, c); // a quit key can still return a stray Cmd (it won't)
+        return;
+    }
+    try pump(io, allocator, t, painter, fetches, app, store, c);
+    try onEntryReload(io, allocator, t, painter, fetches, app, store);
 }
 
 fn repaint(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) std.mem.Allocator.Error!void {
@@ -1046,6 +1085,12 @@ fn repaint(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: 
 
 fn ch(c: u8) Key {
     return .{ .char = .{ .bytes = .{ c, 0, 0, 0 }, .len = 1 } };
+}
+
+/// Drive `step` in place for a nav/editing test and free any effect argv it
+/// produces — these tests assert on the resulting `App` state, not the `Cmd`.
+fn stepA(a: *App, key: Key) void {
+    freeCmdArgv(std.testing.allocator, step(std.testing.allocator, a.mt_path, a, key));
 }
 
 /// A no-op paint handle for unit tests that drive a lazy loader directly: the
@@ -1067,44 +1112,44 @@ test "a data-free App renders the full chrome so the skeleton paint is real" {
 test "tab cycles and 1-5 jump to a tab" {
     var a: App = .{};
     try std.testing.expectEqual(Tab.search, a.active); // the dashboard opens on Search
-    a = step(a, .tab);
+    stepA(&a, .tab);
     try std.testing.expectEqual(Tab.installed, a.active);
-    a = step(a, ch('3'));
+    stepA(&a, ch('3'));
     try std.testing.expectEqual(Tab.outdated, a.active);
-    a = step(a, ch('1'));
+    stepA(&a, ch('1'));
     try std.testing.expectEqual(Tab.search, a.active);
 }
 
 test "left and right arrows switch tabs both directions and wrap" {
     var a: App = .{};
-    a = step(a, .right);
+    stepA(&a, .right);
     try std.testing.expectEqual(Tab.installed, a.active);
-    a = step(a, .left);
+    stepA(&a, .left);
     try std.testing.expectEqual(Tab.search, a.active);
-    a = step(a, .left); // wrap backward to the last tab
+    stepA(&a, .left); // wrap backward to the last tab
     try std.testing.expectEqual(Tab.doctor, a.active);
 }
 
 test "a committed filter survives a tab round-trip" {
     var a: App = .{};
-    a = step(a, ch('/')); // enter filter mode
+    stepA(&a, ch('/')); // enter filter mode
     try std.testing.expect(a.editing);
-    a = step(a, ch('w'));
-    a = step(a, ch('g'));
-    a = step(a, .enter); // commit
+    stepA(&a, ch('w'));
+    stepA(&a, ch('g'));
+    stepA(&a, .enter); // commit
     try std.testing.expect(!a.editing);
-    a = step(a, .tab); // leave the tab
-    a = step(a, .tab);
-    a = step(a, .tab);
-    a = step(a, .tab);
-    a = step(a, .tab); // and come back (five tabs now)
+    stepA(&a, .tab); // leave the tab
+    stepA(&a, .tab);
+    stepA(&a, .tab);
+    stepA(&a, .tab);
+    stepA(&a, .tab); // and come back (five tabs now)
     try std.testing.expectEqualStrings("wg", activeFilterText(&a));
 }
 
 test "esc in normal mode routes to the active tab so it can cancel its guard" {
     var a: App = .{ .active = .installed };
     a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl");
-    a = step(a, .esc); // not editing → must reach the tab, which lowers the guard
+    stepA(&a, .esc); // not editing → must reach the tab, which lowers the guard
     try std.testing.expect(a.states.installed.confirm_uninstall == null);
 }
 
@@ -1149,20 +1194,20 @@ const guard_pkgs = [_]installed.Pkg{
 test "navigation while the uninstall guard is up cancels it instead of retargeting" {
     var a: App = .{ .active = .installed };
     a.states.installed.items = &guard_pkgs;
-    a = step(a, ch('x')); // arm on pkga (row 0)
+    stepA(&a, ch('x')); // arm on pkga (row 0)
     try std.testing.expect(a.states.installed.confirm_uninstall != null);
-    a = step(a, .down); // modal: the key resolves the guard (cancel), not the list
+    stepA(&a, .down); // modal: the key resolves the guard (cancel), not the list
     try std.testing.expect(a.states.installed.confirm_uninstall == null);
-    a = step(a, ch('y')); // no longer a confirmation — must not request an uninstall
-    try std.testing.expect(a.states.installed.request == .none);
+    stepA(&a, ch('y')); // no longer a confirmation — must not spawn an uninstall
+    try std.testing.expect(a.states.installed.pending_uninstall == null);
     try std.testing.expectEqual(@as(usize, 0), a.states.installed.chrome.view.selected);
 }
 
 test "q while the uninstall guard is up cancels it instead of quitting" {
     var a: App = .{ .active = .installed };
     a.states.installed.items = &guard_pkgs;
-    a = step(a, ch('x'));
-    a = step(a, ch('q'));
+    stepA(&a, ch('x'));
+    stepA(&a, ch('q'));
     try std.testing.expect(!a.quit); // the guard consumed the key
     try std.testing.expect(a.states.installed.confirm_uninstall == null);
 }
@@ -1170,8 +1215,8 @@ test "q while the uninstall guard is up cancels it instead of quitting" {
 test "slash while the uninstall guard is up cancels it instead of opening the filter" {
     var a: App = .{ .active = .installed };
     a.states.installed.items = &guard_pkgs;
-    a = step(a, ch('x'));
-    a = step(a, ch('/'));
+    stepA(&a, ch('x'));
+    stepA(&a, ch('/'));
     try std.testing.expect(!a.editing);
     try std.testing.expect(a.states.installed.confirm_uninstall == null);
 }
@@ -1179,82 +1224,86 @@ test "slash while the uninstall guard is up cancels it instead of opening the fi
 test "tab switch while the uninstall guard is up resolves the guard, not the tab bar" {
     var a: App = .{ .active = .installed };
     a.states.installed.items = &guard_pkgs;
-    a = step(a, ch('x'));
-    a = step(a, .tab);
+    stepA(&a, ch('x'));
+    stepA(&a, .tab);
     try std.testing.expect(a.states.installed.confirm_uninstall == null); // never left armed
     try std.testing.expectEqual(Tab.installed, a.active); // the key was consumed by the guard
 }
 
 test "esc clears the filter and leaves edit mode" {
     var a: App = .{};
-    a = step(a, ch('/'));
-    a = step(a, ch('x'));
-    a = step(a, .esc);
+    stepA(&a, ch('/'));
+    stepA(&a, ch('x'));
+    stepA(&a, .esc);
     try std.testing.expect(!a.editing);
     try std.testing.expectEqualStrings("", activeFilterText(&a));
 }
 
 test "backspace edits the active filter while typing" {
     var a: App = .{};
-    a = step(a, ch('/'));
-    a = step(a, ch('a'));
-    a = step(a, ch('b'));
-    a = step(a, .backspace);
+    stepA(&a, ch('/'));
+    stepA(&a, ch('a'));
+    stepA(&a, ch('b'));
+    stepA(&a, .backspace);
     try std.testing.expectEqualStrings("a", activeFilterText(&a));
 }
 
 test "q and ctrl_c request quit" {
-    const a: App = .{};
-    try std.testing.expect(step(a, ch('q')).quit);
-    try std.testing.expect(step(a, .ctrl_c).quit);
+    var a: App = .{};
+    stepA(&a, ch('q'));
+    try std.testing.expect(a.quit);
+    var b: App = .{};
+    stepA(&b, .ctrl_c);
+    try std.testing.expect(b.quit);
 }
 
 test "down increments the selection, up saturates at zero" {
     var a: App = .{};
-    a = step(a, .down);
-    a = step(a, .down);
+    stepA(&a, .down);
+    stepA(&a, .down);
     try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
-    a = step(a, .up);
-    a = step(a, .up);
-    a = step(a, .up);
+    stepA(&a, .up);
+    stepA(&a, .up);
+    stepA(&a, .up);
     try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
 }
 
 test "page keys jump by a page and saturate; home returns to the top" {
     var a: App = .{};
-    a = step(a, .page_down);
+    stepA(&a, .page_down);
     try std.testing.expectEqual(@as(usize, page_step), activeChrome(&a).view.selected);
-    a = step(a, .page_up);
-    a = step(a, .page_up); // already at 0 → saturates, no underflow
+    stepA(&a, .page_up);
+    stepA(&a, .page_up); // already at 0 → saturates, no underflow
     try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
-    a = step(a, .down);
-    a = step(a, .down);
-    a = step(a, .home);
+    stepA(&a, .down);
+    stepA(&a, .down);
+    stepA(&a, .home);
     try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
 }
 
 test "a non-command printable key in normal mode is inert (routed, no state change)" {
-    const a: App = .{};
-    const b = step(a, ch('z')); // not q / 1-4 / /
-    try std.testing.expectEqual(a.active, b.active);
+    var b: App = .{};
+    stepA(&b, ch('z')); // not q / 1-4 / /
+    try std.testing.expectEqual(Tab.search, b.active);
     try std.testing.expect(!b.editing);
     try std.testing.expect(!b.quit);
 }
 
 test "per-tab filters are independent across tabs" {
     var a: App = .{};
-    a = step(a, ch('/'));
-    a = step(a, ch('a')); // installed filter = "a"
-    a = step(a, .enter);
-    a = step(a, .tab); // outdated
+    stepA(&a, ch('/'));
+    stepA(&a, ch('a')); // installed filter = "a"
+    stepA(&a, .enter);
+    stepA(&a, .tab); // outdated
     try std.testing.expectEqualStrings("", activeFilterText(&a)); // its own empty filter
 }
 
 test "Enter on the Search tab focuses the query box rather than firing an empty search" {
     var a: App = .{ .active = .search };
-    a = step(a, .enter);
+    const c = step(std.testing.allocator, a.mt_path, &a, .enter);
+    defer freeCmdArgv(std.testing.allocator, c);
     try std.testing.expect(a.editing); // the query box is now focused for typing
-    try std.testing.expectEqual(search.Request.none, a.states.search.request); // no search fired yet
+    try std.testing.expect(c == .none); // no search fired yet
 }
 
 test "Enter on the Search tab opens info once results are loaded" {
@@ -1262,24 +1311,28 @@ test "Enter on the Search tab opens info once results are loaded" {
     var a: App = .{ .active = .search };
     a.states.search.items = &items;
     a.states.search.phase = .loaded;
-    a = step(a, .enter);
+    const c = step(std.testing.allocator, a.mt_path, &a, .enter);
+    defer freeCmdArgv(std.testing.allocator, c);
     try std.testing.expect(!a.editing); // a row is active, so Enter inspects it, not the box
-    try std.testing.expectEqual(search.Request.info, a.states.search.request);
+    try std.testing.expect(c == .read); // the `mt info` read for the active hit
+    try std.testing.expectEqualStrings("info", c.read.argv[1]);
 }
 
 test "Enter on a data tab still routes as that tab's domain key, not a focus" {
     var a: App = .{ .active = .installed };
-    a = step(a, .enter);
+    a.states.installed.items = &guard_pkgs;
+    const c = step(std.testing.allocator, a.mt_path, &a, .enter);
+    defer freeCmdArgv(std.testing.allocator, c);
     try std.testing.expect(!a.editing);
-    try std.testing.expect(a.states.installed.request == .open_detail);
+    try std.testing.expect(c == .read); // installed Enter opens the `mt info` detail read
 }
 
 test "renderFrame shows the committed filter and the editing footer" {
     var a: App = .{};
-    a = step(a, ch('2')); // Installed tab: its box is a filter over the loaded list
-    a = step(a, ch('/'));
-    a = step(a, ch('j'));
-    a = step(a, ch('q')); // 'q' is a literal char while editing, not quit
+    stepA(&a, ch('2')); // Installed tab: its box is a filter over the loaded list
+    stepA(&a, ch('/'));
+    stepA(&a, ch('j'));
+    stepA(&a, ch('q')); // 'q' is a literal char while editing, not quit
     try std.testing.expect(!a.quit);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
@@ -1289,9 +1342,9 @@ test "renderFrame shows the committed filter and the editing footer" {
 
 test "the Search tab labels its input box as a query, not a filter" {
     var a: App = .{ .active = .search };
-    a = step(a, ch('/'));
-    a = step(a, ch('r'));
-    a = step(a, ch('g'));
+    stepA(&a, ch('/'));
+    stepA(&a, ch('r'));
+    stepA(&a, ch('g'));
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
     try std.testing.expect(std.mem.indexOf(u8, out, "search: rg_") != null);
@@ -1590,105 +1643,46 @@ test "a malformed payload banners and keeps the outdated count unknown, never ze
     try std.testing.expectEqualStrings("outdated refresh failed: BadJson", app.shared.banner.slice());
 }
 
-test "mutationPending gates only on requests that spawn a DB-mutating child" {
-    var app: App = .{};
-    try std.testing.expect(!mutationPending(&app)); // all .none
-
-    // Read-only requests never take the WAL writer, so they must not gate.
-    app.states.installed.request = .open_detail;
-    app.states.search.request = .info;
-    try std.testing.expect(!mutationPending(&app));
-
-    // Each mutating request, in isolation, gates the drain.
-    app = .{};
-    app.states.installed.request = .{ .uninstall = installed.ConfirmTarget.init("wget") };
-    try std.testing.expect(mutationPending(&app));
-    app = .{};
-    app.states.outdated.request = .upgrade;
-    try std.testing.expect(mutationPending(&app));
-    app = .{};
-    app.states.services.request = .restart;
-    try std.testing.expect(mutationPending(&app));
-    app = .{};
-    app.states.doctor.request = .fix;
-    try std.testing.expect(mutationPending(&app));
-    app = .{};
-    app.states.search.request = .install;
-    try std.testing.expect(mutationPending(&app));
-}
-
-test "drainActiveFetches reaps every in-flight audit and lands its payload" {
+test "quiesceFetches kills an in-flight audit and re-marks it dirty, leaving storage intact" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
-    const child = try std.process.spawn(t.io(), .{
-        .argv = &.{ "/bin/echo", "{\"outdated\":[{\"name\":\"wget\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false}]}" },
-        .stdout = .pipe,
-        .stderr = .ignore,
-    });
-    var app: App = .{};
+    // A slow child so the audit is genuinely in flight (never drained) when killed —
+    // the case where the pending mutation's argv still borrows the live storage.
+    const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/sleep", "5" }, .stdout = .pipe, .stderr = .ignore });
+    var app: App = .{ .shared = .{ .outdated_count = 7 } }; // a prior good count
     app.tab_loading.insert(.outdated);
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
     var fetches: Fetches = .initFill(null);
     fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
-    var frame: []u8 = try std.testing.allocator.alloc(u8, 256);
-    defer std.testing.allocator.free(frame);
 
-    drainActiveFetches(t.io(), std.testing.allocator, testPainter(&frame), &fetches, &app, &store);
+    quiesceFetches(t.io(), std.testing.allocator, &fetches, &app);
 
-    try std.testing.expect(!anyFetchActive(&fetches)); // the audit closed its DB connection
-    try std.testing.expectEqual(@as(?usize, 1), app.shared.outdated_count); // payload still landed
+    try std.testing.expect(!anyFetchActive(&fetches)); // the writer is released for the mutation
+    try std.testing.expect(!app.tab_loading.contains(.outdated)); // no longer flagged loading
+    try std.testing.expect(app.shared.dirty.contains(.outdated)); // re-audit after the mutation
+    // The audit is *not* applied: storage is untouched, so the mutation's argv (which
+    // borrows those rows) cannot dangle. A wait-and-apply drain would swap it to 1.
+    try std.testing.expectEqual(@as(?usize, 7), app.shared.outdated_count);
 }
 
-// The sole-orchestrator guard: with an audit in flight, a mutating dispatch must
-// drain it first so the inline child never opens the DB beside a live writer.
-// The mutation no-ops on an empty selection, so no child is spawned — the test
-// asserts only the quiescing, which is the falsifiable invariant.
+// The sole-orchestrator guard is a straight-line call in `performMutation` (quiesce,
+// then re-exec). A read-only turn produces no `run_mutation` `Cmd`, so it never
+// reaches the quiesce; only a mutation does.
 test "service quiesces an in-flight audit before a mutating dispatch" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
-    const child = try std.process.spawn(t.io(), .{
-        .argv = &.{ "/bin/echo", "{\"outdated\":[{\"name\":\"wget\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false}]}" },
-        .stdout = .pipe,
-        .stderr = .ignore,
-    });
-    var app: App = .{};
-    app.tab_loading.insert(.outdated);
-    app.states.outdated.request = .upgrade; // a mutating request, but nothing is checked → no spawn
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
-    var fetches: Fetches = .initFill(null);
-    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
-    var frame: []u8 = try std.testing.allocator.alloc(u8, 256);
-    defer std.testing.allocator.free(frame);
-    var tm = term.Term.init(t.io(), -1);
-
-    try service(t.io(), std.testing.allocator, &tm, testPainter(&frame), &fetches, &app, &store);
-
-    try std.testing.expect(!anyFetchActive(&fetches)); // drained before the dispatch
-    try std.testing.expect(!app.shared.banner.isSet()); // a clean drain, no upgrade failure
-}
-
-test "service leaves an in-flight audit running when no mutation is pending" {
-    var t = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer t.deinit();
-    // `sleep` keeps the fetch genuinely in flight across the call; a read-only
-    // turn must not block on it.
     const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/sleep", "5" }, .stdout = .pipe, .stderr = .ignore });
     var app: App = .{};
-    app.tab_loading.insert(.outdated); // no request set → nothing mutating
-    var store: Storages = .{};
-    defer store.deinit(std.testing.allocator);
+    app.tab_loading.insert(.outdated);
     var fetches: Fetches = .initFill(null);
     fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
-    var frame: []u8 = try std.testing.allocator.alloc(u8, 256);
-    defer std.testing.allocator.free(frame);
     var tm = term.Term.init(t.io(), -1);
 
-    try service(t.io(), std.testing.allocator, &tm, testPainter(&frame), &fetches, &app, &store);
+    // The re-exec re-enter faults on the headless (-1) term, but the quiesce runs
+    // *first*; assert the audit was killed regardless of the mutation's outcome.
+    const m: cmd.Cmd.Mutation = .{ .argv = &.{"/usr/bin/true"}, .tag = .outdated };
+    _ = performMutation(t.io(), std.testing.allocator, &tm, &fetches, &app, m) catch {};
 
-    try std.testing.expect(anyFetchActive(&fetches)); // untouched: navigation never blocks on an audit
-    reapAllFetches(t.io(), std.testing.allocator, &fetches); // tidy the still-running child
+    try std.testing.expect(!anyFetchActive(&fetches)); // quiesced before the dispatch
 }
 
 test "a non-zero child exit fails the fetch without parsing a half-written doc" {
@@ -1814,7 +1808,7 @@ test "any keypress clears a transient banner" {
     var a: App = .{};
     a.shared.banner.set("uninstall failed", "ChildFailed");
     try std.testing.expect(a.shared.banner.isSet());
-    a = step(a, .down); // a navigation key dismisses the stale banner
+    stepA(&a, .down); // a navigation key dismisses the stale banner
     try std.testing.expect(!a.shared.banner.isSet());
 }
 
@@ -2004,30 +1998,34 @@ test "committing the filter fires a search on the Search tab but no domain key e
     // On Search the filter doubles as the search box, so Enter commits *and*
     // requests the read — 'i' typed mid-edit is literal query text, not install.
     var a: App = .{ .active = .search };
-    a = step(a, ch('/'));
-    a = step(a, ch('f'));
-    a = step(a, ch('i'));
-    a = step(a, .enter);
+    stepA(&a, ch('/'));
+    stepA(&a, ch('f'));
+    stepA(&a, ch('i'));
+    const c = step(std.testing.allocator, a.mt_path, &a, .enter); // commit → the search read
+    defer freeCmdArgv(std.testing.allocator, c);
     try std.testing.expect(!a.editing);
-    try std.testing.expectEqual(search.Request.search, a.states.search.request);
+    try std.testing.expect(c == .read); // committing the query *is* the search
+    try std.testing.expectEqualStrings("search", c.read.argv[1]);
+    try std.testing.expectEqual(search.Phase.searching, a.states.search.phase); // flipped for the paint
     try std.testing.expectEqualStrings("fi", activeFilterText(&a));
 
     // The same commit on a non-search tab must not be routed to its domain key
-    // (outdated's Enter would otherwise request an upgrade).
+    // (outdated's Enter would otherwise fire an upgrade); the commit is a pure no-op.
     var b: App = .{ .active = .outdated };
-    b = step(b, ch('/'));
-    b = step(b, ch('x'));
-    b = step(b, .enter);
+    stepA(&b, ch('/'));
+    stepA(&b, ch('x'));
+    const bc = step(std.testing.allocator, b.mt_path, &b, .enter);
+    defer freeCmdArgv(std.testing.allocator, bc);
     try std.testing.expect(!b.editing);
-    try std.testing.expectEqual(outdated.Request.none, b.states.outdated.request);
+    try std.testing.expect(bc == .none); // no effect from committing a filter
 }
 
 test "the 1 key jumps to the Search tab, the 5 key to Doctor" {
     var a: App = .{};
-    a = step(a, .tab); // move off Search first
-    a = step(a, ch('1'));
+    stepA(&a, .tab); // move off Search first
+    stepA(&a, ch('1'));
     try std.testing.expectEqual(Tab.search, a.active);
-    a = step(a, ch('5'));
+    stepA(&a, ch('5'));
     try std.testing.expectEqual(Tab.doctor, a.active);
 }
 

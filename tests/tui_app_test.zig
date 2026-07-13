@@ -19,24 +19,33 @@ fn ch(c: u8) Key {
     return .{ .char = .{ .bytes = .{ c, 0, 0, 0 }, .len = 1 } };
 }
 
+/// Drive `step` in place for a nav/editing test. These keys produce `Cmd.none`
+/// (no heap argv), so the discarded `Cmd` owns nothing to free.
+fn stepA(a: *app.App, key: Key) void {
+    _ = app.step(testing.allocator, a.mt_path, a, key);
+}
+
 test "tab and digit keys switch the active tab" {
     var a: app.App = .{};
-    a = app.step(a, .tab);
+    stepA(&a, .tab);
     try testing.expectEqual(Tab.installed, a.active);
-    a = app.step(a, ch('4'));
+    stepA(&a, ch('4'));
     try testing.expectEqual(Tab.services, a.active);
-    a = app.step(a, ch('1'));
+    stepA(&a, ch('1'));
     try testing.expectEqual(Tab.search, a.active);
 }
 
 test "filter editing toggles edit mode and quit keys set quit" {
     var a: app.App = .{};
-    a = app.step(a, ch('/'));
+    stepA(&a, ch('/'));
     try testing.expect(a.editing);
-    a = app.step(a, .enter);
+    stepA(&a, .enter);
     try testing.expect(!a.editing);
-    try testing.expect(app.step(a, ch('q')).quit);
-    try testing.expect(app.step(a, .ctrl_c).quit);
+    stepA(&a, ch('q'));
+    try testing.expect(a.quit);
+    var b: app.App = .{};
+    stepA(&b, .ctrl_c);
+    try testing.expect(b.quit);
 }
 
 test "renderFrame is a pure function of size — a resize re-renders from cached state" {
@@ -75,7 +84,7 @@ test "a recoverable banner is painted in the footer and a keypress dismisses it"
     const shown = app.renderFrame(&buf, &a, 80, 24);
     try testing.expect(std.mem.indexOf(u8, shown, "info for jq failed: BadJson") != null);
 
-    a = app.step(a, .down); // any key clears the transient banner
+    stepA(&a, .down); // any key clears the transient banner
     try testing.expect(!a.shared.banner.isSet());
     const cleared = app.renderFrame(&buf, &a, 80, 24);
     try testing.expect(std.mem.indexOf(u8, cleared, "info for jq failed") == null);

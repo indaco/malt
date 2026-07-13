@@ -99,6 +99,10 @@ pub const Cmd = union(enum) {
         mode: Mode,
         parse: ParseFn,
         tag: MsgTag,
+        /// Banner op for a recoverable read fault (bad exit, empty, parse error).
+        /// The tab authors it so the interpreter needs no per-tab knowledge; the
+        /// last-good model is kept behind it.
+        fail_op: []const u8 = "refresh failed",
     };
 
     pub const Mutation = struct {
@@ -106,6 +110,9 @@ pub const Cmd = union(enum) {
         /// Highest child exit still a success — e.g. `mt doctor --fix`'s severity.
         max_ok_exit: u8 = 0,
         tag: MsgTag,
+        /// Banner op for a recoverable spawn/re-enter fault (not a non-zero child
+        /// exit, which flows back as `.mutated` for the tab's `update` to judge).
+        fail_op: []const u8 = "action failed",
     };
 };
 
@@ -113,13 +120,66 @@ pub const Cmd = union(enum) {
 pub const Msg = union(enum) {
     /// A read completed: the parsed document, typed by its union member.
     loaded: Parsed,
+    /// An `allow_empty` read returned an exit-0 empty document (a fresh prefix
+    /// with no db): the tab clears to its known-zero state, no parse to fold.
+    cleared,
     /// A mutation completed with this child exit code. 0 is success; a tolerated
     /// non-zero (Doctor's severity, the cask app-running refusal) is the owning
     /// tab's to interpret.
     mutated: u8,
+    /// A read faulted recoverably (bad exit, parse error). The interpreter has
+    /// already set the recoverable banner from the `Cmd`'s `fail_op`; this lets the
+    /// tab undo any pre-effect state it set (e.g. Search leaving `searching`). The
+    /// last-good model is kept; a fatal fault propagates instead of arriving here.
+    failed,
 };
 
+/// Build `[mt_path, tail...]` — a mutation `Cmd`'s argv, letting a tab name a
+/// `mt <sub>` without importing the runner. Strings are borrowed from the caller;
+/// only the returned slice is owned (the interpreter frees it, not its elements).
+pub fn inlineArgv(
+    allocator: Allocator,
+    mt_path: []const u8,
+    tail: []const []const u8,
+) Allocator.Error![]const []const u8 {
+    const argv = try allocator.alloc([]const u8, 1 + tail.len);
+    argv[0] = mt_path;
+    @memcpy(argv[1..], tail);
+    return argv;
+}
+
+/// Build `[mt_path, tail..., "--json"]` — a read `Cmd`'s argv. Same ownership
+/// contract as `inlineArgv`.
+pub fn jsonArgv(
+    allocator: Allocator,
+    mt_path: []const u8,
+    tail: []const []const u8,
+) Allocator.Error![]const []const u8 {
+    const argv = try allocator.alloc([]const u8, 2 + tail.len);
+    argv[0] = mt_path;
+    @memcpy(argv[1 .. 1 + tail.len], tail);
+    argv[argv.len - 1] = "--json";
+    return argv;
+}
+
 // ── tests (written first; the decls above are added to make them pass) ───────
+
+test "inlineArgv prepends the resolved mt path to the subcommand tail" {
+    const argv = try inlineArgv(testing.allocator, "/opt/malt/bin/mt", &.{ "services", "start", "redis" });
+    defer testing.allocator.free(argv);
+    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqualStrings("/opt/malt/bin/mt", argv[0]);
+    try testing.expectEqualStrings("redis", argv[3]);
+}
+
+test "jsonArgv wraps the tail as `mt <tail...> --json`" {
+    const argv = try jsonArgv(testing.allocator, "/bin/mt", &.{ "services", "list" });
+    defer testing.allocator.free(argv);
+    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqualStrings("/bin/mt", argv[0]);
+    try testing.expectEqualStrings("services", argv[1]);
+    try testing.expectEqualStrings("--json", argv[3]);
+}
 
 test "Parsed preserves the active member's tag round-trip" {
     const p = try services_json.parse(testing.allocator, "{\"services\":[]}");
@@ -220,7 +280,7 @@ test "Msg delivers a loaded Parsed and a mutation exit code" {
     const loaded: Msg = .{ .loaded = .{ .services = p } };
     defer switch (loaded) {
         .loaded => |parsed| parsed.deinit(),
-        .mutated => {},
+        .cleared, .mutated, .failed => {},
     };
     try testing.expect(loaded == .loaded);
 

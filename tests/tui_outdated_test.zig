@@ -67,9 +67,11 @@ test "select-all over the fixture upgrades every non-pinned row in order, holdin
     defer testing.allocator.free(checked);
     @memset(checked, false);
     var st: outdated.State = .{ .items = parsed.items, .checked = checked };
+    var storage: outdated.Storage = .{};
+    defer storage.deinit(testing.allocator);
 
     // `a` checks all non-pinned rows; curl (index 1) is pinned and stays clear.
-    outdated.step(&st, .{ .char = .{ .bytes = .{ 'a', 0, 0, 0 }, .len = 1 } });
+    _ = outdated.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, .{ .char = .{ .bytes = .{ 'a', 0, 0, 0 }, .len = 1 } });
     try testing.expect(!checked[1]); // pinned curl
     try testing.expectEqual(@as(usize, 4), outdated.selectedCount(&st)); // 5 rows − 1 pinned
 
@@ -93,12 +95,14 @@ test "toggling individual fixture rows selects exactly those, in item order" {
     defer testing.allocator.free(checked);
     @memset(checked, false);
     var st: outdated.State = .{ .items = parsed.items, .checked = checked };
+    var storage: outdated.Storage = .{};
+    defer storage.deinit(testing.allocator);
 
     // Toggle ffmpeg (index 2) and visual-studio-code (index 4) via the cursor.
     st.chrome.view.selected = 2;
-    outdated.step(&st, .space);
+    _ = outdated.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, .space);
     st.chrome.view.selected = 4;
-    outdated.step(&st, .space);
+    _ = outdated.step(testing.allocator, "/opt/malt/bin/mt", &st, &storage, .space);
 
     var names: [8][]const u8 = undefined;
     const n = outdated.selectedNames(&st, &names);

@@ -1,8 +1,10 @@
 //! malt — Installed tab for `mt tui`: the first data-bearing pane.
 //!
-//! Leaf module. Pure cores only: `step(state, key)` records the user's intent as
-//! a `request` for the impure shell to perform (read `mt info`, re-exec
-//! `mt uninstall`), and `render(state, frame, rect)` is a pure function of
+//! Leaf module. Pure cores only: `step(...)` maps a key to a `Cmd` (Enter reads
+//! `mt info`, a confirmed `x` re-execs `mt uninstall`), and `update` folds the
+//! pump's result back (an info read opens the pane, a list read swaps rows, a
+//! finished uninstall refetches). The tab names effects as data and never imports
+//! the runner. `render(state, frame, rect)` is a pure function of
 //! `(state, rect)` so a resize is a re-render. The shell owns the I/O and the
 //! row data's lifetime; `items` and `detail` borrow from that storage. Rows are
 //! filtered by the shared filter, the selection is highlighted, and a selected
@@ -15,8 +17,8 @@
 
 const std = @import("std");
 const tab = @import("tab.zig");
+const cmd = @import("cmd.zig");
 const ctx = @import("ctx.zig");
-const spawn = @import("spawn.zig");
 const detail_pane = @import("detail_pane.zig");
 const scroll_list = @import("scroll_list.zig");
 const list_json = @import("json/list.zig");
@@ -24,12 +26,6 @@ const info_json = @import("json/info.zig");
 const color = @import("../ui/color.zig");
 
 pub const Pkg = list_json.Pkg;
-
-/// An effect the pure `step` defers to the impure shell, which performs it and
-/// resets the field. `step` never does I/O — this is the command channel.
-/// `uninstall` carries the guard's latched target so the shell never re-derives
-/// it from a selection that may have moved since the guard was armed.
-pub const Request = union(enum) { none, open_detail, uninstall: ConfirmTarget };
 
 /// Scratch bound shared by a formatted row, the guard banner, and the latched
 /// target name, so none of the three can silently outgrow the others.
@@ -69,8 +65,10 @@ pub const State = struct {
     detail: ?Detail = null,
     /// The `[y/N]` uninstall guard, latched on the package it was armed over.
     confirm_uninstall: ?ConfirmTarget = null,
-    /// Pending effect for the shell to perform, then clear.
-    request: Request = .none,
+    /// The target of an uninstall in flight, latched out of the guard so its name
+    /// (borrowed by the `run_mutation` argv) outlives the guard banner clearing and
+    /// the synchronous re-enter. `update` clears it when the mutation lands.
+    pending_uninstall: ?ConfirmTarget = null,
 };
 
 /// Tab-private parse storage: the `list` rows the tab borrows and the open detail
@@ -89,14 +87,6 @@ pub const Storage = struct {
 
 /// Installed reads synchronously from the DB; it never background-fetches.
 pub const fetch_spec: ?tab.FetchSpec = null;
-
-/// Whether the pending request will spawn a DB-mutating child (`mt uninstall`).
-/// The shell folds this over every tab before opening the DB so a live background
-/// audit is drained first — the WAL single-writer invariant. Read-only requests
-/// (detail) never take the writer.
-pub fn mutates(s: *const State) bool {
-    return s.request == .uninstall;
-}
 
 pub fn title() []const u8 {
     return "Installed";
@@ -137,12 +127,14 @@ pub fn selectedPkg(s: *const State) ?Pkg {
     return null; // unreachable: sel < nf
 }
 
-/// Pure transition: record the user's intent for the shell to act on. While the
-/// guard is up, the next key resolves it.
-pub fn step(s: *State, key: tab.Key) void {
-    if (s.confirm_uninstall != null) return resolveGuard(s, key);
+/// Pure transition: map a key to a `Cmd`. Enter reads the selected row's `mt info`
+/// into the detail pane; `x` arms the fat-finger uninstall guard (pure state);
+/// Esc/End are pure. While the guard is up, the next key resolves it.
+pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storage: *Storage, key: tab.Key) cmd.Cmd {
+    _ = storage;
+    if (s.confirm_uninstall != null) return resolveGuard(allocator, mt_path, s, key);
     switch (key) {
-        .enter => s.request = .open_detail,
+        .enter => return openDetailCmd(allocator, mt_path, s),
         .esc => s.detail = null, // close the detail pane
         // Only the tab knows its filtered row count, so the shell defers End here.
         .end => s.chrome.view.selected = filteredCount(s.items, s.chrome.filter.slice()) -| 1,
@@ -153,18 +145,24 @@ pub fn step(s: *State, key: tab.Key) void {
         },
         else => {},
     }
+    return .none;
 }
 
-/// `y` confirms (request the real `mt uninstall` of the latched target); every
-/// other key — `n`, Esc, Enter — cancels. A fat-finger gate, not a typed-confirm.
-fn resolveGuard(s: *State, key: tab.Key) void {
+/// `y` confirms (the real `mt uninstall` of the latched target); every other key —
+/// `n`, Esc, Enter — cancels. A fat-finger gate, not a typed-confirm. The guard is
+/// cleared here regardless of outcome so a failed uninstall never leaves it stuck;
+/// the target moves to `pending_uninstall` so its name outlives the guard for the
+/// argv the mutation borrows.
+fn resolveGuard(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, key: tab.Key) cmd.Cmd {
+    defer s.confirm_uninstall = null;
     switch (key) {
         .char => |c| if (c.len == 1 and (c.bytes[0] == 'y' or c.bytes[0] == 'Y')) {
-            s.request = .{ .uninstall = s.confirm_uninstall.? };
+            s.pending_uninstall = s.confirm_uninstall.?;
+            return uninstallCmd(allocator, mt_path, &s.pending_uninstall.?);
         },
         else => {},
     }
-    s.confirm_uninstall = null;
+    return .none;
 }
 
 /// Pure render: an optional guard banner on top, an optional detail pane at the
@@ -298,16 +296,9 @@ fn appendPad(buf: []u8, len: *usize, s: []const u8, width: usize) void {
 
 // ─── tests ───────────────────────────────────────────────────────────
 
-// ── Impure zone ────────────────────────────────────────────────────────────
-// The effects the pure `step` requested. Each takes its I/O ports explicitly
-// through the shared `ctx.Ctx` — never a global — so the pure/impure line lands
-// at the signature: these functions carry `io`/`allocator`, the pure ones above
-// do not.
-
-/// The effect chain's error set, composed from the source sets so it tracks them
-/// automatically. A subset of the shell's `RunError`, which classifies each fault
-/// recoverable-vs-fatal; naming it here keeps the public `service` explicit.
-pub const Error = std.mem.Allocator.Error || spawn.ReadError || spawn.InlineError || list_json.Error || info_json.Error;
+// ─── effect producers ───────────────────────────────────────────────────
+// The tab names effects as `Cmd` values; the pump performs them and folds the
+// result back through `update`. No I/O and no runner import here.
 
 /// Cheap keg count from `mt list --json` bytes (no `--size --linked` walk). Header
 /// infrastructure: parses to a temporary and returns only the count, touching no
@@ -319,93 +310,110 @@ pub fn countFromJson(allocator: std.mem.Allocator, bytes: []const u8) list_json.
     return parsed.items.len;
 }
 
-/// (Re)read `mt list --json --size --linked` and repoint the tab's rows at the
-/// fresh parse, freeing the previous one. The `--size`/`--linked` keg-dir walk is
-/// paid only here — on the Installed tab, lazily. The storage is swapped only after
-/// a clean parse, so a failure keeps the last-good rows.
-fn loadInstalled(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
-    errdefer |err| c.shared.banner.set("list refresh failed", @errorName(err));
-    const argv = try spawn.jsonArgv(c.allocator, c.mt_path, &.{ "list", "--size", "--linked" });
-    defer c.allocator.free(argv);
-    const bytes = (try spawn.readJsonAllowEmpty(c.io, c.allocator, argv)) orelse {
-        // Fresh prefix: an empty Cellar, not a failure. Clear the rows.
-        if (storage.installed) |old| old.deinit();
-        storage.installed = null;
-        s.items = &.{};
-        s.detail = null;
-        c.shared.installed_count = 0; // empty Cellar is a known zero, not "unknown"
-        return;
-    };
-    defer c.allocator.free(bytes);
-
-    const parsed = try list_json.parse(c.allocator, bytes);
-    if (storage.installed) |old| old.deinit();
-    storage.installed = parsed;
-    s.items = parsed.items;
-    s.detail = null; // a refreshed list invalidates the old detail
-    c.shared.installed_count = parsed.items.len;
+/// Build the `mt info <pkg> --json` read for the selected row (a blocking read, no
+/// alt-screen drop), or `Cmd.none` when nothing is selected. `update` folds the
+/// info into the detail pane.
+fn openDetailCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State) cmd.Cmd {
+    const sel = selectedPkg(s) orelse return .none; // nothing selected
+    const argv = cmd.jsonArgv(allocator, mt_path, &.{ "info", sel.name }) catch return .none;
+    return .{ .read = .{ .argv = argv, .mode = .blocking, .parse = cmd.parserFor(.info, info_json.parse), .tag = .installed, .fail_op = "info read failed" } };
 }
 
-/// Read `mt info <pkg> --json` for the selected row into the detail pane. A read
-/// (no alt-screen drop); the detail is set only after a clean parse, so a failure
-/// names the package in a banner and leaves the pane closed.
-fn openDetail(s: *State, storage: *Storage, c: *ctx.Ctx) !void {
-    const sel = selectedPkg(s) orelse return; // nothing selected
-    errdefer |err| {
-        var sb: [96]u8 = undefined;
-        const op = std.fmt.bufPrint(&sb, "info for {s} failed", .{sel.name}) catch "info read failed";
-        c.shared.banner.set(op, @errorName(err));
-    }
-    const argv = try spawn.jsonArgv(c.allocator, c.mt_path, &.{ "info", sel.name });
-    defer c.allocator.free(argv);
-    const bytes = try spawn.readJson(c.io, c.allocator, argv);
-    defer c.allocator.free(bytes);
+/// Build the `mt uninstall <name>` mutation for the guard's latched target. The
+/// name borrows `pending_uninstall`, which outlives the guard and the re-enter.
+fn uninstallCmd(allocator: std.mem.Allocator, mt_path: []const u8, target: *const ConfirmTarget) cmd.Cmd {
+    const argv = cmd.inlineArgv(allocator, mt_path, &.{ "uninstall", target.name() }) catch return .none;
+    return .{ .run_mutation = .{ .argv = argv, .tag = .installed, .fail_op = "uninstall failed" } };
+}
 
-    const parsed = try info_json.parse(c.allocator, bytes);
+/// The `mt list --json --size --linked` read: the `--size`/`--linked` keg-dir walk
+/// is paid only here, lazily. Blocking, empty-ok (a fresh prefix's empty Cellar).
+fn listReadCmd(allocator: std.mem.Allocator, mt_path: []const u8) cmd.Cmd {
+    const argv = cmd.jsonArgv(allocator, mt_path, &.{ "list", "--size", "--linked" }) catch return .none;
+    return .{ .read = .{ .argv = argv, .allow_empty = true, .mode = .blocking, .parse = cmd.parserFor(.list, list_json.parse), .tag = .installed, .fail_op = "list refresh failed" } };
+}
+
+/// The lazy on-entry reload: Installed has no background fetch, so the pump asks
+/// for this `list` read when the tab is entered dirty (a cross-tab mutation, or
+/// launch). Distinct from the post-uninstall reload `update` returns.
+pub fn refreshCmd(allocator: std.mem.Allocator, mt_path: []const u8) cmd.Cmd {
+    return listReadCmd(allocator, mt_path);
+}
+
+/// Fold a completed effect back into the model. A delivered `info` read opens the
+/// detail pane; a delivered `list` read swaps in the rows; an empty `list` read
+/// clears the Cellar; a finished uninstall (exit 0) refetches the list, else banners.
+pub fn update(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storage: *Storage, shared: *ctx.SharedModel, msg: cmd.Msg) cmd.Cmd {
+    switch (msg) {
+        .loaded => |parsed| {
+            switch (parsed) {
+                .info => |info_p| setDetail(s, storage, info_p),
+                .list => |list_p| swapRows(s, storage, shared, list_p),
+                // Installed only issues info/list reads; free any misrouted parse.
+                inline else => |p| p.deinit(),
+            }
+            return .none;
+        },
+        .failed => return .none, // the pump set the banner; keep the last-good rows
+        .cleared => {
+            clear(s, storage, shared); // an empty `mt list` read: a fresh, empty Cellar
+            return .none;
+        },
+        .mutated => |code| {
+            s.pending_uninstall = null; // the in-flight target is spent
+            if (code != 0) {
+                shared.banner.set("uninstall failed", "ChildFailed");
+                return .none;
+            }
+            shared.markStaleAfter(.installed); // the keg is gone; the siblings may be stale
+            return listReadCmd(allocator, mt_path); // the keg is gone — refetch
+        },
+    }
+}
+
+/// Open the detail pane over the delivered `mt info` parse, freeing the previous.
+/// If the selection vanished between the read and the fold, drop the parse.
+fn setDetail(s: *State, storage: *Storage, parsed: info_json.Parsed) void {
+    const sel = selectedPkg(s) orelse {
+        parsed.deinit();
+        return;
+    };
     if (storage.detail) |old| old.deinit();
     storage.detail = parsed;
     s.detail = .{ .pkg = sel, .info = parsed.info };
 }
 
-/// Delegate uninstall to the real `mt` inline, then refresh the list. The target
-/// is the guard's latched copy — it neither borrows the list storage the post-spawn
-/// reload frees nor tracks a selection that moved after arming.
-fn doUninstall(s: *State, storage: *Storage, c: *ctx.Ctx, target: ConfirmTarget) !void {
-    const argv = try spawn.inlineArgv(c.allocator, c.mt_path, &.{ "uninstall", target.name() });
-    defer c.allocator.free(argv);
-    {
-        // A non-zero `mt uninstall` re-enters the dashboard (the user still has
-        // malt's real output in their scrollback) and surfaces the failure as a
-        // recoverable banner — only a terminal fault is fatal. Scoped so the
-        // post-mutation refresh below reports under its own op, not "uninstall".
-        errdefer |err| c.shared.banner.set("uninstall failed", @errorName(err));
-        try spawn.runInlineReenter(c.term, argv);
-    }
-    try loadInstalled(s, storage, c); // the keg is gone — refetch
-    c.shared.markStaleAfter(.installed); // the other tabs may now be stale too
+/// Repoint the rows at a fresh `list` parse, freeing the previous one. Swapped only
+/// after a clean parse upstream, so a failed refresh keeps the last-good rows.
+fn swapRows(s: *State, storage: *Storage, shared: *ctx.SharedModel, parsed: list_json.Parsed) void {
+    if (storage.installed) |old| old.deinit();
+    storage.installed = parsed;
+    s.items = parsed.items;
+    s.detail = null; // a refreshed list invalidates the old detail
+    shared.installed_count = parsed.items.len;
 }
 
-/// Perform any effect the pure `step` requested, then clear it — the consumer half
-/// of the `request` seam. The shell dispatches this only for the active tab, so the
-/// lazy dirty-reload runs when Installed is entered after a cross-tab mutation.
-pub fn service(s: *State, storage: *Storage, c: *ctx.Ctx) Error!void {
-    const req = s.request;
-    s.request = .none;
-    switch (req) {
-        .none => {},
-        .open_detail => try openDetail(s, storage, c),
-        .uninstall => |target| try doUninstall(s, storage, c, target),
-    }
-    // Lazy per-tab refresh: a mutation elsewhere marked this tab dirty; reload on
-    // entry. Only the active tab's `service` runs, so the old `app.active` guard is
-    // now structural.
-    if (c.shared.takeDirty(.installed)) try loadInstalled(s, storage, c);
+/// Clear to an empty Cellar (a fresh prefix), freeing any held list parse.
+fn clear(s: *State, storage: *Storage, shared: *ctx.SharedModel) void {
+    if (storage.installed) |old| old.deinit();
+    storage.installed = null;
+    s.items = &.{};
+    s.detail = null;
+    shared.installed_count = 0; // empty Cellar is a known zero, not "unknown"
 }
 
 const testing = std.testing;
 
 fn ch(c: u8) tab.Key {
     return .{ .char = .{ .bytes = .{ c, 0, 0, 0 }, .len = 1 } };
+}
+
+/// Drive `step` with a throwaway storage and a fixed mt path. Installed's `step`
+/// ignores storage, so this keeps the pure-behaviour tests readable.
+fn stepKey(s: *State, key: tab.Key) cmd.Cmd {
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    return step(testing.allocator, "/opt/malt/bin/mt", s, &storage, key);
 }
 
 const sample = [_]Pkg{
@@ -443,85 +451,90 @@ test "selectedPkg applies the filter and clamps an out-of-range selection" {
 
 test "End jumps to the last filtered row; an empty list stays at zero" {
     var s: State = .{ .items = &sample };
-    step(&s, .end);
+    _ = stepKey(&s, .end);
     try testing.expectEqual(@as(usize, 3), s.chrome.view.selected);
 
     s.chrome.filter.push("f"); // ffmpeg, flux
-    step(&s, .end);
+    _ = stepKey(&s, .end);
     try testing.expectEqual(@as(usize, 1), s.chrome.view.selected);
 
     var e: State = .{ .items = &.{} };
-    step(&e, .end);
+    _ = stepKey(&e, .end);
     try testing.expectEqual(@as(usize, 0), e.chrome.view.selected);
 }
 
-test "Enter requests the detail effect for the shell to perform" {
+test "Enter returns the `mt info` read for the selected row" {
     var s: State = .{ .items = &sample };
-    step(&s, .enter);
-    try testing.expect(s.request == .open_detail);
+    const eff = stepKey(&s, .enter);
+    defer testing.allocator.free(eff.read.argv);
+    try testing.expect(eff == .read);
+    try testing.expectEqual(cmd.MsgTag.installed, eff.read.tag);
+    try testing.expectEqualStrings("info", eff.read.argv[1]);
+    try testing.expectEqualStrings("brotli", eff.read.argv[2]); // the selected row
 }
 
 test "Esc closes an open detail pane" {
     var s: State = .{ .items = &sample, .detail = .{ .pkg = sample[0], .info = .{} } };
-    step(&s, .esc);
+    try testing.expect(stepKey(&s, .esc) == .none);
     try testing.expect(s.detail == null);
 }
 
-test "x raises the uninstall guard without spawning anything" {
+test "x raises the uninstall guard, producing no effect yet" {
     var s: State = .{ .items = &sample };
-    step(&s, ch('x'));
+    try testing.expect(stepKey(&s, ch('x')) == .none); // no effect yet
     try testing.expect(s.confirm_uninstall != null);
     try testing.expectEqualStrings("brotli", s.confirm_uninstall.?.name()); // latched at arm time
-    try testing.expect(s.request == .none); // no spawn yet
 }
 
-test "y confirms the guard: requests uninstall of the latched name and lowers the guard" {
+test "y confirms the guard: returns the uninstall of the latched name and lowers the guard" {
     var s: State = .{ .items = &sample };
-    step(&s, ch('x'));
-    step(&s, ch('y'));
-    try testing.expect(s.request == .uninstall);
-    try testing.expectEqualStrings("brotli", s.request.uninstall.name());
-    try testing.expect(s.confirm_uninstall == null);
+    _ = stepKey(&s, ch('x'));
+    const eff = stepKey(&s, ch('y'));
+    defer testing.allocator.free(eff.run_mutation.argv);
+    try testing.expect(eff == .run_mutation);
+    try testing.expectEqualStrings("uninstall", eff.run_mutation.argv[1]);
+    try testing.expectEqualStrings("brotli", eff.run_mutation.argv[2]);
+    try testing.expect(s.confirm_uninstall == null); // guard lowered
+    try testing.expectEqualStrings("brotli", s.pending_uninstall.?.name()); // latched for the argv
 }
 
-test "n and Esc cancel the guard with no request" {
+test "n and Esc cancel the guard with no effect" {
     var s: State = .{ .items = &sample };
-    step(&s, ch('x'));
-    step(&s, ch('n'));
+    _ = stepKey(&s, ch('x'));
+    try testing.expect(stepKey(&s, ch('n')) == .none);
     try testing.expect(s.confirm_uninstall == null);
-    try testing.expect(s.request == .none);
 
-    step(&s, ch('x'));
-    step(&s, .esc);
+    _ = stepKey(&s, ch('x'));
+    try testing.expect(stepKey(&s, .esc) == .none);
     try testing.expect(s.confirm_uninstall == null);
-    try testing.expect(s.request == .none);
 }
 
 test "arming latches the target: moving the selection cannot retarget the confirm" {
     var s: State = .{ .items = &sample };
-    step(&s, ch('x')); // arm on brotli (row 0)
+    _ = stepKey(&s, ch('x')); // arm on brotli (row 0)
     s.chrome.view.selected = 2; // the shell moved the selection to ffmpeg
-    step(&s, ch('y'));
-    try testing.expect(s.request == .uninstall);
-    try testing.expectEqualStrings("brotli", s.request.uninstall.name());
+    const eff = stepKey(&s, ch('y'));
+    defer testing.allocator.free(eff.run_mutation.argv);
+    try testing.expectEqualStrings("brotli", eff.run_mutation.argv[2]); // still brotli
 }
 
 test "a list reloaded while the guard is up cannot retarget the latched confirm" {
     var s: State = .{ .items = &sample };
-    step(&s, ch('x')); // arm on brotli (row 0)
+    _ = stepKey(&s, ch('x')); // arm on brotli (row 0)
     // A dirty-tab refetch swaps the rows with no keypress; the latch must hold.
     const reloaded = [_]Pkg{sample[2]}; // ffmpeg is now row 0
     s.items = &reloaded;
-    step(&s, ch('y'));
-    try testing.expect(s.request == .uninstall);
-    try testing.expectEqualStrings("brotli", s.request.uninstall.name());
+    const eff = stepKey(&s, ch('y'));
+    defer testing.allocator.free(eff.run_mutation.argv);
+    try testing.expectEqualStrings("brotli", eff.run_mutation.argv[2]);
 }
 
 test "uppercase Y confirms the guard like y" {
     var s: State = .{ .items = &sample };
-    step(&s, ch('x'));
-    step(&s, ch('Y'));
-    try testing.expect(s.request == .uninstall);
+    _ = stepKey(&s, ch('x'));
+    const eff = stepKey(&s, ch('Y'));
+    defer testing.allocator.free(eff.run_mutation.argv);
+    try testing.expect(eff == .run_mutation);
     try testing.expect(s.confirm_uninstall == null);
 }
 
@@ -534,12 +547,12 @@ test "the latch truncates an oversized name instead of overflowing" {
 
 test "x on an empty or fully filtered-out list does not arm a targetless guard" {
     var s: State = .{ .items = &.{} };
-    step(&s, ch('x'));
+    try testing.expect(stepKey(&s, ch('x')) == .none);
     try testing.expect(s.confirm_uninstall == null);
 
     var t: State = .{ .items = &sample };
     t.chrome.filter.push("zzznomatch");
-    step(&t, ch('x'));
+    try testing.expect(stepKey(&t, ch('x')) == .none);
     try testing.expect(t.confirm_uninstall == null);
 }
 
@@ -548,18 +561,17 @@ test "the guard banner names the latched package even after the selection moved"
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
     s.chrome.view.selected = 1; // curl
-    step(&s, ch('x')); // arm on curl
+    _ = stepKey(&s, ch('x')); // arm on curl
     s.chrome.view.selected = 2; // selection moved to ffmpeg
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
     try testing.expect(std.mem.indexOf(u8, f.slice(), "Uninstall curl? [y/N]") != null);
 }
 
-test "while the guard is up, x's domain keys do not re-arm or leak" {
+test "while the guard is up, Enter cancels it and does not open a detail read" {
     var s: State = .{ .items = &sample };
-    step(&s, ch('x'));
-    step(&s, .enter); // Enter is "default No" — cancels, no detail request
+    _ = stepKey(&s, ch('x'));
+    try testing.expect(stepKey(&s, .enter) == .none); // Enter is "default No" — cancels
     try testing.expect(s.confirm_uninstall == null);
-    try testing.expect(s.request == .none);
 }
 
 test "render heads the columns in bold, aligned over their values" {
@@ -657,7 +669,7 @@ test "render draws the [y/N] guard banner naming the package when confirming" {
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
     s.chrome.view.selected = 1; // curl
-    step(&s, ch('x')); // arm through the real transition so the target latches
+    _ = stepKey(&s, ch('x')); // arm through the real transition so the target latches
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "curl") != null);
@@ -706,15 +718,6 @@ test "Storage.deinit frees the installed and detail parses" {
     storage.deinit(allocator);
 }
 
-test "mutates gates only on the uninstall request" {
-    var s: State = .{};
-    try testing.expect(!mutates(&s)); // .none never takes the WAL writer
-    s.request = .open_detail;
-    try testing.expect(!mutates(&s)); // a read-only detail request does not gate
-    s.request = .{ .uninstall = ConfirmTarget.init("wget") };
-    try testing.expect(mutates(&s)); // the one DB-mutating request
-}
-
 test "countFromJson returns the row count without retaining the parse" {
     const allocator = std.testing.allocator;
     // A leaked parse arena would trip `testing.allocator` at scope end, so this
@@ -731,86 +734,75 @@ test "countFromJson reports zero for an empty Cellar" {
     try testing.expectEqual(@as(usize, 0), n);
 }
 
-// Backing storage for a `ctx.Ctx` in an effect test: dummy term/fetches/shared, a
-// no-op painter (fd = -1; the synchronous reads never reach a poll tick), and the
-// loading flag.
-const TestEnv = struct {
-    term_h: ctx.Term,
-    fetches: ctx.Fetches = ctx.Fetches.initFill(null),
-    shared: ctx.SharedModel = .{},
-    frame: []u8 = &.{},
-    loading: bool = false,
-};
-
-fn mkCtx(io: std.Io, e: *TestEnv, mt_path: []const u8) ctx.Ctx {
-    return .{
-        .io = io,
-        .allocator = testing.allocator,
-        .term = &e.term_h,
-        .painter = .{ .fd = -1, .frame = &e.frame },
-        .fetches = &e.fetches,
-        .shared = &e.shared,
-        .mt_path = mt_path,
-        .loading = &e.loading,
-    };
-}
-
-test "service on the synchronous read path never starts a background fetch" {
-    // Installed reads the DB inline; it declares no fetch spec, so no branch of its
-    // service may spawn a background audit — the loop multiplexes only the slow tabs.
+test "Installed declares no background fetch — its reads are synchronous" {
     try testing.expect(fetch_spec == null);
-    var thr = std.Io.Threaded.init(testing.allocator, .{});
-    defer thr.deinit();
-    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
-    var storage: Storage = .{};
-    defer storage.deinit(testing.allocator);
-    var st: State = .{}; // .none: the pure `step` set nothing to perform
-    var c = mkCtx(thr.io(), &env, "/bin/false"); // would fail if it ever spawned
-    try service(&st, &storage, &c);
-    for (&env.fetches.values) |v| try testing.expect(v == null); // nothing backgrounded
-    try testing.expect(!env.shared.banner.isSet());
 }
 
-test "a failed list refresh names the op in the banner and keeps the last-good rows" {
-    var thr = std.Io.Threaded.init(testing.allocator, .{});
-    defer thr.deinit();
-    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+test "update on a loaded info parse opens the detail pane over the selected row" {
+    var st: State = .{ .items = &sample };
     var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
     defer storage.deinit(testing.allocator);
-    var st: State = .{};
-    var c = mkCtx(thr.io(), &env, "/bin/echo"); // echo emits non-JSON → parse fails
-    try testing.expectError(error.BadJson, loadInstalled(&st, &storage, &c));
-    try testing.expectEqualStrings("list refresh failed: BadJson", env.shared.banner.slice());
-    try testing.expectEqual(@as(usize, 0), st.items.len); // last-good kept
+    const info = try info_json.parse(testing.allocator, "{\"name\":\"brotli\",\"dependencies\":[]}");
+    const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .{ .loaded = .{ .info = info } });
+    try testing.expect(next == .none);
+    try testing.expect(st.detail != null);
 }
 
-// A fresh prefix (no db yet) makes every `mt … --json` read exit 0 with no output.
-// That is an empty Cellar, not a failure — the tab must show an empty list, never
-// crash on `EmptyOutput`. `/usr/bin/true` reproduces it exactly: exit 0, zero bytes.
-test "loadInstalled treats an exit-0 empty response (fresh prefix) as an empty tab" {
-    var thr = std.Io.Threaded.init(testing.allocator, .{});
-    defer thr.deinit();
-    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
-    var storage: Storage = .{};
-    defer storage.deinit(testing.allocator);
+test "update on a loaded list parse swaps rows in and sets the keg count" {
     var st: State = .{};
-    var c = mkCtx(thr.io(), &env, "/usr/bin/true");
-    try loadInstalled(&st, &storage, &c);
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    const list = try list_json.parse(testing.allocator, "{\"installed\":[{\"name\":\"jq\",\"version\":\"1\",\"type\":\"formula\",\"pinned\":false}]}");
+    const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .{ .loaded = .{ .list = list } });
+    try testing.expect(next == .none);
+    try testing.expectEqual(@as(usize, 1), st.items.len);
+    try testing.expectEqual(@as(?usize, 1), shared.installed_count);
+}
+
+test "update on a cleared read empties the Cellar to a known zero" {
+    var st: State = .{ .items = &sample };
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .cleared);
+    try testing.expect(next == .none);
     try testing.expectEqual(@as(usize, 0), st.items.len);
-    try testing.expect(!env.shared.banner.isSet());
-    try testing.expectEqual(@as(?usize, 0), env.shared.installed_count);
+    try testing.expectEqual(@as(?usize, 0), shared.installed_count);
 }
 
-test "a failed info read names the package in the banner and leaves the pane closed" {
-    var thr = std.Io.Threaded.init(testing.allocator, .{});
-    defer thr.deinit();
-    var env: TestEnv = .{ .term_h = ctx.Term.init(thr.io(), -1) };
+test "a successful uninstall clears the pending target, marks siblings stale, refetches" {
+    var st: State = .{ .pending_uninstall = ConfirmTarget.init("brotli") };
     var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
     defer storage.deinit(testing.allocator);
-    const items = [_]Pkg{.{ .name = "jq", .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null }};
-    var st: State = .{ .items = &items };
-    var c = mkCtx(thr.io(), &env, "/bin/echo");
-    try testing.expectError(error.BadJson, openDetail(&st, &storage, &c));
-    try testing.expectEqualStrings("info for jq failed: BadJson", env.shared.banner.slice());
-    try testing.expect(st.detail == null); // the pane never opened
+    const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .{ .mutated = 0 });
+    defer testing.allocator.free(next.read.argv);
+    try testing.expect(next == .read);
+    try testing.expectEqualStrings("list", next.read.argv[1]); // refetch the list
+    try testing.expect(st.pending_uninstall == null);
+    try testing.expect(shared.takeDirty(.outdated)); // siblings marked stale
+}
+
+test "a failed uninstall banners and does not refetch" {
+    var st: State = .{ .pending_uninstall = ConfirmTarget.init("brotli") };
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .{ .mutated = 1 });
+    try testing.expect(next == .none);
+    try testing.expect(st.pending_uninstall == null);
+    try testing.expect(std.mem.startsWith(u8, shared.banner.slice(), "uninstall failed"));
+}
+
+test "refreshCmd is the `mt list --size --linked` read for the lazy on-entry reload" {
+    const eff = refreshCmd(testing.allocator, "/bin/mt");
+    defer testing.allocator.free(eff.read.argv);
+    try testing.expect(eff == .read);
+    try testing.expect(eff.read.allow_empty); // a fresh prefix reads empty
+    try testing.expectEqualStrings("list", eff.read.argv[1]);
+    try testing.expectEqualStrings("--size", eff.read.argv[2]);
+    try testing.expectEqualStrings("--linked", eff.read.argv[3]);
+    try testing.expectEqualStrings("--json", eff.read.argv[4]);
 }
