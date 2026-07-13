@@ -113,7 +113,7 @@ pub fn freeCmdArgv(allocator: std.mem.Allocator, c: cmd.Cmd) void {
     switch (c) {
         .read => |r| allocator.free(r.argv),
         .run_mutation => |m| allocator.free(m.argv),
-        .none, .batch => {},
+        .none => {},
     }
 }
 
@@ -211,11 +211,11 @@ pub fn foldOutcome(allocator: std.mem.Allocator, shared: *SharedModel, parse: cm
 
 /// Perform one synchronous `Cmd`, returning the `Msg` to fold back. A recoverable
 /// fault sets the banner from the `Cmd`'s `fail_op` and returns `.failed`/`.mutated`;
-/// only a fatal (terminal/OOM) fault propagates. `.none`/`.batch` never reach here,
-/// and a background `.read` is enqueued by the pump (`startBackground`) before this.
+/// only a fatal (terminal/OOM) fault propagates. `.none` never reaches here, and a
+/// background `.read` is enqueued by the pump (`startBackground`) before this.
 pub fn perform(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, shared: *SharedModel, loading: *bool, c: cmd.Cmd) RunError!cmd.Msg {
     switch (c) {
-        .none, .batch => unreachable, // the pump never performs these; no tab emits a batch
+        .none => unreachable, // the pump loops while `c != .none`, so it never performs it
         .read => |r| return performRead(io, allocator, painter, shared, loading, r),
         .run_mutation => |m| return performMutation(io, allocator, t, fetches, shared, m),
     }

@@ -81,8 +81,6 @@ pub const Cmd = union(enum) {
     /// A self-classifying inline mutation (`mt …`). The interpreter drains the
     /// background-fetch pool before running it (the single-writer invariant).
     run_mutation: Mutation,
-    /// Independent passes run in order — upgrade's `--formula` then `--cask`.
-    batch: []const Cmd,
 
     /// How the interpreter drives a read: a non-blocking background child the
     /// loop drains, a blocking capture, or a blocking capture that ticks a
@@ -231,7 +229,7 @@ test "every tab parser is assignable through parserFor with no cast" {
     }
 }
 
-test "Cmd covers the read modes and the mutation/batch surface" {
+test "Cmd covers the read modes and the mutation surface" {
     const none: Cmd = .none;
     try testing.expect(none == .none);
 
@@ -264,15 +262,6 @@ test "Cmd covers the read modes and the mutation/batch surface" {
         .tag = .doctor,
     } };
     try testing.expectEqual(@as(u8, 2), fix.run_mutation.max_ok_exit);
-
-    // Upgrade's two-pass batch: one formula pass, one cask pass.
-    const passes = [_]Cmd{
-        .{ .run_mutation = .{ .argv = &.{ "mt", "upgrade", "--formula", "jq" }, .tag = .outdated } },
-        .{ .run_mutation = .{ .argv = &.{ "mt", "upgrade", "--cask", "docker" }, .tag = .outdated } },
-    };
-    const batch: Cmd = .{ .batch = &passes };
-    try testing.expectEqual(@as(usize, 2), batch.batch.len);
-    try testing.expect(batch.batch[0].run_mutation.tag == .outdated);
 }
 
 test "Msg delivers a loaded Parsed and a mutation exit code" {
