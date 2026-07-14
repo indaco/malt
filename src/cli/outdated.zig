@@ -20,6 +20,7 @@ pub const parseWorkersEnv = refresh_mod.parseWorkersEnv;
 pub const outdatedWorkerCount = refresh_mod.outdatedWorkerCount;
 pub const shouldUsePool = refresh_mod.shouldUsePool;
 pub const refreshSnapshot = refresh_mod.refreshSnapshot;
+pub const writeSnapshotEntries = refresh_mod.writeSnapshotEntries;
 pub const collectOutdatedFormulas = refresh_mod.collectOutdatedFormulas;
 pub const collectOutdatedCasks = refresh_mod.collectOutdatedCasks;
 const render_mod = @import("outdated/render.zig");

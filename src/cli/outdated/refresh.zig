@@ -97,6 +97,22 @@ pub fn refreshSnapshot(
         allocator.free(casks);
     }
 
+    try writeSnapshotEntries(ctx, allocator, cache_dir, formulas, casks);
+}
+
+/// Stamp `now` and write the snapshot from entries already in hand — the
+/// single home for the outdated snapshot's timestamp policy and shape.
+/// Callers must pass a *full* keg-set audit (formulas + casks): the write is
+/// unconditional, so a narrowed audit here would persist a partial snapshot
+/// and make the Outdated view silently under-report. `refresh_ok ⇒ full-keg
+/// audit` is the invariant every caller upholds.
+pub fn writeSnapshotEntries(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    cache_dir: []const u8,
+    formulas: []const OutdatedEntry,
+    casks: []const OutdatedEntry,
+) !void {
     try snap_mod.writeSnapshot(ctx.io, allocator, cache_dir, .{
         .generated_at_ms = std.Io.Clock.real.now(ctx.io).toMilliseconds(),
         .formulas = formulas,
@@ -1055,6 +1071,45 @@ test "WorkerCtx: per-row arena accepts testing.allocator backing without leaking
     const a = wctx.arena.allocator();
     _ = try a.dupe(u8, "wget");
     _ = try a.alloc(u8, 1024);
+}
+
+test "writeSnapshotEntries writes a snapshot the reader round-trips field-for-field" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+
+    const formulas = [_]OutdatedEntry{
+        .{ .name = @constCast("wget"), .installed = @constCast("1.21.3"), .latest = @constCast("1.21.4") },
+    };
+    const casks = [_]OutdatedEntry{
+        .{ .name = @constCast("firefox"), .installed = @constCast("120.0"), .latest = @constCast("121.0") },
+    };
+
+    try writeSnapshotEntries(&ctx, std.testing.allocator, cache_dir, &formulas, &casks);
+
+    // A successful read is the version-2 assertion: `parseSnapshot` refuses any
+    // other version, so a non-null result proves the leaf wrote the version-2
+    // shape. The entries must survive the round-trip byte-for-byte, and the
+    // timestamp policy must stamp a real (non-zero) clock reading.
+    const read = snap_mod.readSnapshot(io, std.testing.allocator, cache_dir) orelse
+        return error.SnapshotUnreadable;
+    defer snap_mod.freeSnapshot(std.testing.allocator, read);
+
+    try std.testing.expect(read.generated_at_ms > 0);
+    try std.testing.expectEqual(@as(usize, 1), read.formulas.len);
+    try std.testing.expectEqualStrings("wget", read.formulas[0].name);
+    try std.testing.expectEqualStrings("1.21.3", read.formulas[0].installed);
+    try std.testing.expectEqualStrings("1.21.4", read.formulas[0].latest);
+    try std.testing.expectEqual(@as(usize, 1), read.casks.len);
+    try std.testing.expectEqualStrings("firefox", read.casks[0].name);
+    try std.testing.expectEqualStrings("120.0", read.casks[0].installed);
+    try std.testing.expectEqualStrings("121.0", read.casks[0].latest);
 }
 
 test "outdatedWorkerCount caps at the default for large N" {

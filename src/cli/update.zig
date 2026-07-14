@@ -75,11 +75,7 @@ fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: 
 
     var db = sqlite.Database.open(db_path) catch {
         // Fresh prefix: write an empty snapshot so readers get instant "all clear".
-        try outdated_mod.writeSnapshot(ctx.io, allocator, cache_dir, .{
-            .generated_at_ms = std.Io.Clock.real.now(ctx.io).toMilliseconds(),
-            .formulas = &.{},
-            .casks = &.{},
-        });
+        try outdated_mod.writeSnapshotEntries(ctx, allocator, cache_dir, &.{}, &.{});
         return;
     };
     defer db.close();
