@@ -523,6 +523,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // immediately killing the process. Install commands check the flag at
     // step boundaries and clean up before exiting.
     signals.installHandler();
+    // Seed every HTTP client with the interrupt flag so any command's
+    // in-flight fetch aborts on Ctrl-C instead of blocking to its timeout.
+    @import("net/client.zig").HttpClient.setDefaultCancel(signals.isInterrupted);
 
     var arena = std.heap.ArenaAllocator.init(backing);
     defer arena.deinit();
