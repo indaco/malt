@@ -837,6 +837,14 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     // the tab; its dirty flag is consumed once the fetch owns the load, so the
     // first entry doesn't spawn a duplicate audit. Enqueued through the pump like
     // any background read — the one interpreter path.
+    // Warm-read first: seed the tab from the last snapshot so it opens with data
+    // instead of a spinner; the audit below then refreshes it (pinned/tap fill in).
+    // Cache dir resolved locally (MALT_CACHE, else <prefix>/cache) so the TUI
+    // stays clear of the fs leaf.
+    var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir: ?[]const u8 = std.process.Environ.getPosix(environ, "MALT_CACHE") orelse
+        (std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch null);
+    if (cache_dir) |cd| outdated.warmRead(io, allocator, cd, &app.states.outdated, &app.storages.outdated, &app.shared);
     if (backgroundReadCmd(allocator, app.mt_path, .outdated)) |bg| try pump(io, allocator, &t, painter, &fetches, &app, &app.storages, bg);
     if (app.shared.tab_loading.contains(.outdated)) _ = takeDirty(&app, .outdated);
     try repaint(fd, &frame, allocator, &app); // first interactive frame: kegs + the outdated spinner

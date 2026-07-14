@@ -265,6 +265,7 @@ pub fn build(b: *std.Build) void {
         "tests/tui_search_test.zig",
         "tests/tui_purity_test.zig",
         "tests/tui_selection_theme_test.zig",
+        "tests/tui_outdated_warm_read_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");

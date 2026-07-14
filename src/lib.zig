@@ -115,6 +115,7 @@ pub const tui_json_list = @import("tui/json/list.zig");
 pub const tui_json_outdated = @import("tui/json/outdated.zig");
 pub const tui_json_search = @import("tui/json/search.zig");
 pub const tui_json_services = @import("tui/json/services.zig");
+pub const tui_json_snapshot = @import("tui/json/snapshot.zig");
 pub const tui_keys = @import("tui/keys.zig");
 pub const tui_layout = @import("tui/layout.zig");
 pub const tui_scroll_list = @import("tui/scroll_list.zig");
