@@ -46,7 +46,7 @@ const version_mod = @import("version.zig");
 const version = version_mod.value;
 
 // Wrap the panic path so the cursor + autowrap state owned by
-// MultiProgress / Spinner is restored before abort. Defers don't run
+// MultiProgress is restored before abort. Defers don't run
 // on panic, so this is the only way to leave the terminal usable when
 // install/migrate trips a safety check.
 pub const panic = std.debug.FullPanic(maltPanic);
