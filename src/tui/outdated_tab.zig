@@ -19,6 +19,7 @@ const ctx = @import("ctx.zig");
 const tab = @import("tab.zig");
 const scroll_list = @import("scroll_list.zig");
 const outdated_json = @import("json/outdated.zig");
+const snapshot_json = @import("json/snapshot.zig");
 const color = @import("../ui/color.zig");
 
 pub const Row = outdated_json.OutdatedRow;
@@ -494,7 +495,21 @@ fn applyOutdatedParse(allocator: std.mem.Allocator, st: *State, storage: *Storag
     shared.outdated_count = parsed.items.len;
 }
 
+/// Seed the tab from the on-disk snapshot for an instant warm paint before the
+/// live audit lands, so the dashboard opens with data instead of a spinner (the
+/// audit recomputes a stale snapshot and can stall on the network). Best-effort:
+/// a miss leaves the tab to the audit. Rows come back unpinned/untagged — the
+/// snapshot has neither — and the refresh corrects them; `mt upgrade` enforces
+/// pins itself, so an unpinned provisional row is never upgraded past its pin.
+pub fn warmRead(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, s: *State, storage: *Storage, shared: *ctx.SharedModel) void {
+    const parsed = snapshot_json.read(io, allocator, cache_dir) orelse return;
+    applyOutdatedParse(allocator, s, storage, shared, parsed) catch parsed.deinit();
+}
+
 // ─── tests ───────────────────────────────────────────────────────────
+// warmRead's end-to-end wiring (snapshot file → tab rows) lives in
+// tests/tui_outdated_warm_read_test.zig; the pure snapshot shapes are
+// unit-tested inline in json/snapshot.zig.
 
 const testing = std.testing;
 
