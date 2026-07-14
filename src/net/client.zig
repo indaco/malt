@@ -289,6 +289,20 @@ pub const HttpClient = struct {
     /// Blob downloads (bottles, cask DMGs) get a much longer timeout.
     const blob_timeout_ns: u64 = 600 * std.time.ns_per_s; // 10 minutes
 
+    /// Process-wide cancel predicate seeded into every new client's `cancel`
+    /// field. `main` injects the SIGINT flag once so all HTTP-using commands
+    /// abort an in-flight fetch on Ctrl-C without each site re-wiring it; net/
+    /// stays agnostic to which signal mechanism the caller chose.
+    var default_cancel: ?*const fn () bool = null;
+
+    pub fn setDefaultCancel(f: ?*const fn () bool) void {
+        default_cancel = f;
+    }
+
+    pub fn defaultCancel() ?*const fn () bool {
+        return default_cancel;
+    }
+
     pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator) HttpClient {
         var c: std.http.Client = .{ .allocator = allocator, .io = io };
         return initWith(&c, io, environ, allocator);
@@ -310,6 +324,7 @@ pub const HttpClient = struct {
             .environ = environ,
             .allocator = allocator,
             .client = client.*,
+            .cancel = default_cancel,
         };
     }
 
@@ -1263,6 +1278,29 @@ test "HttpClient.initWith: preserves field defaults" {
     try std.testing.expectEqual(@as(?*const fn () bool, null), http.cancel);
     try std.testing.expectEqual(@as(?[]u8, null), http.zstd_window);
     try std.testing.expectEqual(@as(?[]u8, null), http.flate_window);
+}
+
+test "HttpClient.init: inherits the process-wide default cancel predicate" {
+    const Probe = struct {
+        fn cancel() bool {
+            return true;
+        }
+    };
+    const prior = HttpClient.defaultCancel();
+    defer HttpClient.setDefaultCancel(prior);
+
+    // Once `main` injects a predicate, every client is interruptible without
+    // each call site re-wiring `http.cancel`.
+    HttpClient.setDefaultCancel(&Probe.cancel);
+    var http = HttpClient.init(std.Options.debug_io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    try std.testing.expectEqual(@as(?*const fn () bool, &Probe.cancel), http.cancel);
+
+    // Clearing the default returns clients to non-cancelling.
+    HttpClient.setDefaultCancel(null);
+    var plain = HttpClient.init(std.Options.debug_io, std.process.Environ.empty, std.testing.allocator);
+    defer plain.deinit();
+    try std.testing.expectEqual(@as(?*const fn () bool, null), plain.cancel);
 }
 
 test "HttpClient.init: delegates to initWith without losing defaults" {

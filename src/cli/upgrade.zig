@@ -6,6 +6,7 @@ const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const cask_mod = @import("../core/cask.zig");
 const cellar_mod = @import("../core/cellar.zig");
+const signals = @import("../core/signals.zig");
 const deps_mod = @import("../core/deps.zig");
 const formula_mod = @import("../core/formula.zig");
 const linker_mod = @import("../core/linker.zig");
@@ -1222,6 +1223,9 @@ fn upgradeAllFormulas(
     defer failed_names.deinit(allocator);
 
     for (names.items) |name| {
+        // Stop between packages on Ctrl-C; the in-flight fetch is torn down by
+        // http.cancel, this keeps us from starting the next one.
+        if (signals.isInterrupted()) break;
         upgradeFormula(ctx, allocator, name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby, tally, sink) catch {
             failed_count += 1;
             tally.failed += 1;
@@ -1427,6 +1431,7 @@ fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite
     defer failed_tokens.deinit(allocator);
 
     for (tokens.items) |token| {
+        if (signals.isInterrupted()) break;
         upgradeCask(ctx, allocator, token, db, api, prefix, dry_run, force, pinned_only, tally, sink) catch {
             failed_count += 1;
             tally.failed += 1;
@@ -1756,4 +1761,116 @@ test "readOldKeg maps a NULL tap column to an owned empty string" {
     defer old.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("", old.tap);
     try std.testing.expect(install_args_mod.isCoreTap(old.tap));
+}
+
+test "upgradeAllFormulas stops between packages once interrupted" {
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // Two core kegs so the loop must iterate more than once; NULL tap keeps
+    // them on the offline-failing homebrew/core fetch path.
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap)
+        \\VALUES ('aaa', 'aaa', '1.0', 's1', '/c/aaa/1.0', NULL),
+        \\       ('bbb', 'bbb', '1.0', 's2', '/c/bbb/1.0', NULL);
+    );
+
+    // Offline so each fetch fails instantly from a cache miss — no network.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+    api.offline = true;
+
+    // Fire on the 2nd interrupt poll: iteration 1 processes `aaa`, iteration 2
+    // sees the flag and must break before touching `bbb`.
+    const prior = signals.isInterrupted();
+    defer signals.setInterruptedForTest(prior);
+    signals.setInterruptedForTest(false);
+    signals.armInterruptAfterForTest(2);
+    defer signals.armInterruptAfterForTest(0);
+
+    var tally: Tally = .{};
+    upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, &tally, null) catch {};
+
+    // Only the first keg was attempted; the interrupt stopped the loop.
+    try std.testing.expectEqual(@as(usize, 1), tally.checked());
+}
+
+test "upgradeAllFormulas processes nothing when interrupted before the loop" {
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap)
+        \\VALUES ('aaa', 'aaa', '1.0', 's1', '/c/aaa/1.0', NULL);
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+    api.offline = true;
+
+    const prior = signals.isInterrupted();
+    defer signals.setInterruptedForTest(prior);
+    signals.setInterruptedForTest(true);
+
+    var tally: Tally = .{};
+    upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, &tally, null) catch {};
+
+    try std.testing.expectEqual(@as(usize, 0), tally.checked());
+}
+
+test "upgradeAllCasks stops between casks once interrupted" {
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // Two core casks (NULL tap) so the loop iterates and each falls to the
+    // offline-failing core-API fetch path — no network, no registered taps.
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url) VALUES
+        \\  ('aaa', 'aaa', '1.0', 'https://example/aaa'),
+        \\  ('bbb', 'bbb', '1.0', 'https://example/bbb');
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+    api.offline = true;
+
+    // Fire on the 2nd poll: cask `aaa` is attempted, `bbb` is skipped.
+    const prior = signals.isInterrupted();
+    defer signals.setInterruptedForTest(prior);
+    signals.setInterruptedForTest(false);
+    signals.armInterruptAfterForTest(2);
+    defer signals.armInterruptAfterForTest(0);
+
+    var tally: Tally = .{};
+    upgradeAllCasks(&ctx, alloc, &db, &api, "/opt/malt", true, false, false, &tally, null) catch {};
+
+    try std.testing.expectEqual(@as(usize, 1), tally.checked());
 }
