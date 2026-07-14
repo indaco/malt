@@ -1407,3 +1407,156 @@ pub fn getRawFile(
     }
     return http.get(rb_url);
 }
+
+/// Outcome of probing a tap `.rb` across candidate layouts.
+pub const RawFetch = union(enum) {
+    /// The first layout that answered HTTP 200. Caller owns it and must
+    /// `deinit()` after reading `.body`.
+    found: client_mod.Response,
+    /// No layout answered 200; carries the last layout's status (usually
+    /// 404). A transport failure surfaces as the error union instead, so the
+    /// caller can tell "no such file" from "couldn't reach the forge".
+    not_found: u16,
+};
+
+/// Fetch a tap package's `.rb` by trying each `subtree` layout at `sha` in
+/// order; the first HTTP 200 wins. The "try the next layout" decision keys
+/// only on HTTP status, so the Ruby parse stays in the caller — keeping this
+/// leaf UI-agnostic and shared by both the outdated audit and the upgrade
+/// dry-run (a shared home avoids an `upgrade → outdated` command edge).
+pub fn fetchRawFile(
+    http: *client_mod.HttpClient,
+    environ: std.process.Environ,
+    forge_kind: forge.Forge,
+    raw_base: []const u8,
+    sha: []const u8,
+    name: []const u8,
+    subtrees: []const forge.RawKind,
+) !RawFetch {
+    var last_status: u16 = 0;
+    for (subtrees) |subtree| {
+        var rb_url_buf: [512]u8 = undefined;
+        const rb_url = forge.rawFileUrl(&rb_url_buf, forge_kind, raw_base, sha, subtree, name) catch continue;
+
+        var rb_resp = try getRawFile(http, environ, forge_kind, rb_url);
+        if (rb_resp.status == 200) return .{ .found = rb_resp };
+        last_status = rb_resp.status;
+        rb_resp.deinit();
+    }
+    return .{ .not_found = last_status };
+}
+
+// Serves `status` for the first `misses` requests, then 200 with `body` — so a
+// test can exercise the layout fallback (404 → 404 → 200) or an all-miss run.
+const RawFileTestServer = struct {
+    io: std.Io,
+    listener: *std.Io.net.Server,
+    body: []const u8,
+    miss_status: std.http.Status,
+    misses: usize,
+    seen: std.atomic.Value(usize),
+
+    fn serve(self: *RawFileTestServer) void {
+        while (true) {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            var rbuf: [16 * 1024]u8 = undefined;
+            var wbuf: [16 * 1024]u8 = undefined;
+            var reader = stream.reader(self.io, &rbuf);
+            var writer = stream.writer(self.io, &wbuf);
+            var srv = std.http.Server.init(&reader.interface, &writer.interface);
+            var req = srv.receiveHead() catch return;
+            const n = self.seen.fetchAdd(1, .monotonic);
+            if (n < self.misses) {
+                req.respond("", .{ .status = self.miss_status }) catch return;
+            } else {
+                req.respond(self.body, .{ .status = .ok }) catch return;
+            }
+        }
+    }
+};
+
+test "fetchRawFile returns the first 200 across layouts" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    // First layout (Formula/) 404s; the root layout serves.
+    var srv = RawFileTestServer{ .io = io, .listener = &listener, .body = "ok-body", .miss_status = .not_found, .misses = 1, .seen = std.atomic.Value(usize).init(0) };
+    const thread = try std.Thread.spawn(.{}, RawFileTestServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    var fetch = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root });
+    listener.deinit(io);
+    thread.join();
+
+    switch (fetch) {
+        .found => |*resp| {
+            defer resp.deinit();
+            try std.testing.expectEqualStrings("ok-body", resp.body);
+        },
+        .not_found => return error.TestUnexpectedResult,
+    }
+}
+
+test "fetchRawFile reports not_found when no layout hits" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    // Both layouts 404 (misses exceeds the subtree count).
+    var srv = RawFileTestServer{ .io = io, .listener = &listener, .body = "", .miss_status = .not_found, .misses = 8, .seen = std.atomic.Value(usize).init(0) };
+    const thread = try std.Thread.spawn(.{}, RawFileTestServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const fetch = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root });
+    listener.deinit(io);
+    thread.join();
+
+    try std.testing.expectEqual(@as(u16, 404), fetch.not_found);
+}
+
+test "fetchRawFile surfaces a transport failure as an error, not not_found" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Claim a port, then release it so the connect is refused — a transport
+    // failure must reach the caller as the error union, distinct from a
+    // not_found (which means the forge answered, just not 200).
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    listener.deinit(io);
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    if (fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{.formula})) |_| {
+        return error.TestExpectedTransportError; // a refused connect must not read as not_found
+    } else |_| {}
+}
