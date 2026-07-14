@@ -487,7 +487,7 @@ fn upgradeFormula(
     // before touching `formulae.brew.sh`. `old.tap` is owned and lives
     // until this function returns, so it is safe to pass across the call.
     if (!install_args_mod.isCoreTap(old.tap)) {
-        return upgradeTapFormula(ctx, allocator, name, old.tap, db, prefix, dry_run, force, audit_mode, tally, sink);
+        return upgradeTapFormula(ctx, allocator, name, old.tap, old.version, old.revision, db, prefix, dry_run, force, audit_mode, tally, sink);
     }
 
     // Reconstruct the revision-aware path label for the old keg so
@@ -686,6 +686,57 @@ fn upgradeFormula(
     if (tally) |t| t.upgraded += 1;
 }
 
+/// How a dry-run tap formula feeds the snapshot warm. `taint` degrades the
+/// whole run to a full recompute (never a partial warm); `skip` is a sha-only
+/// move the tap `.rb` proves current; `collect` is a genuine would-upgrade row.
+const TapWarmDecision = enum { collect, skip, taint };
+
+/// null `upstream` (fetch/parse failed) taints rather than skips: without a
+/// version we cannot prove the row current, and skipping it would silently
+/// under-report a genuinely-outdated tap keg — a taint re-audits everything
+/// instead. A match is current (skip); a difference is outdated (collect),
+/// mirroring the audit's `!eql` filter so both agree on tap version-truth.
+fn tapWarmDecision(upstream: ?[]const u8, installed: []const u8) TapWarmDecision {
+    const up = upstream orelse return .taint;
+    return if (std.mem.eql(u8, up, installed)) .skip else .collect;
+}
+
+test "tapWarmDecision: null taints, equal skips, differing collects" {
+    try std.testing.expectEqual(TapWarmDecision.taint, tapWarmDecision(null, "1.2.0"));
+    try std.testing.expectEqual(TapWarmDecision.skip, tapWarmDecision("1.2.0", "1.2.0"));
+    try std.testing.expectEqual(TapWarmDecision.collect, tapWarmDecision("1.3.0", "1.2.0"));
+    // Revision-qualified strings compare byte-for-byte, so a revision-only
+    // bump (`1.2.0` vs `1.2.0_1`) is a collect, not a skip.
+    try std.testing.expectEqual(TapWarmDecision.collect, tapWarmDecision("1.2.0_1", "1.2.0"));
+}
+
+/// Resolve a tap formula's upstream version from its `.rb` at `sha`, for the
+/// dry-run warm. Reuses the shared `tap.fetchRawFile` leaf; the parse is local
+/// (the outdated audit taints differently, so per-caller failure policy stays
+/// here). Null on any fetch/parse failure so the caller degrades to a taint.
+fn tapFormulaUpstreamVersion(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    forge_kind: forge.Forge,
+    raw_base: []const u8,
+    sha: []const u8,
+    name: []const u8,
+) ?[]u8 {
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+    var fetch = tap_mod.fetchRawFile(&http, ctx.environ, forge_kind, raw_base, sha, name, &.{ .formula, .formula_root }) catch return null;
+    switch (fetch) {
+        .not_found => return null,
+        .found => |*resp| {
+            defer resp.deinit();
+            const rb_info = install_rb_parse_mod.parseRubyFormula(resp.body) orelse return null;
+            var ver_buf: [256]u8 = undefined;
+            const qualified = formula_mod.pkgVersion(&ver_buf, rb_info.version, rb_info.revision) catch rb_info.version;
+            return allocator.dupe(u8, qualified) catch null;
+        },
+    }
+}
+
 /// Upgrade a tap-installed formula. The reported `tap_label` is
 /// `<user>/<repo>` (the value `kegs.tap` carries for everything that did
 /// not come from `homebrew/core`). We re-resolve the tap's HEAD commit,
@@ -698,6 +749,8 @@ fn upgradeTapFormula(
     allocator: std.mem.Allocator,
     name: []const u8,
     tap_label: []const u8,
+    installed_version: []const u8,
+    installed_revision: i64,
     db: *sqlite.Database,
     prefix: [:0]const u8,
     dry_run: bool,
@@ -763,10 +816,21 @@ fn upgradeTapFormula(
 
     if (dry_run) {
         if (tally) |t| t.would_upgrade += 1;
-        // Tap formulae decide by commit sha, not version — no snapshot-shaped
-        // `latest` exists here, so taint and skip the warm rather than persist
-        // an under-reporting snapshot.
-        if (sink) |s| s.tainted = true;
+        // The would-upgrade set is sha-driven (so `mt upgrade` still refreshes
+        // on any HEAD move); the snapshot warm must be version-truth to match
+        // `mt outdated`. Resolve the tap `.rb` version so a sha-only move no
+        // longer taints the whole warm — only a real version bump lands a row.
+        if (sink) |s| {
+            var qbuf: [256]u8 = undefined;
+            const installed = formula_mod.pkgVersion(&qbuf, installed_version, installed_revision) catch installed_version;
+            const upstream = tapFormulaUpstreamVersion(ctx, allocator, urls.forge, urls.raw_base, fresh_sha, name);
+            defer if (upstream) |u| allocator.free(u);
+            switch (tapWarmDecision(upstream, installed)) {
+                .taint => s.tainted = true, // fetch/parse failure → full recompute
+                .skip => {}, // sha-only move: legitimately current
+                .collect => s.collectFormula(name, installed_version, installed_revision, upstream.?),
+            }
+        }
         const short_len = @min(@as(usize, 8), fresh_sha.len);
         output.info("Dry run: would refresh tap {s} to {s} for {s}", .{ tap_label, fresh_sha[0..short_len], name });
         output.emitNdjsonEvent(.would_install, name, null);

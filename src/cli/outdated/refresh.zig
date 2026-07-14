@@ -768,10 +768,10 @@ fn tapRawLatestVersion(
     return tapVersionFromSubtrees(alloc, &http, environ, urls.forge, urls.raw_base, fresh_sha, name, subtrees, noun, tap_label);
 }
 
-/// Fetch the `.rb` from each `subtrees` layout in order (first 200 wins) and
-/// parse its `version`, else warn + null. Split out from `tapRawLatestVersion`
-/// so the per-layout fetch loop can be driven by a localhost server in tests,
-/// without the live HEAD resolve.
+/// Fetch the `.rb` via the shared `tap.fetchRawFile` leaf (first 200 wins) and
+/// parse its `version`, else warn + null. The fetch loop lives in `core/tap`
+/// so the upgrade dry-run shares it; the parse + messaging stay here (leaf is
+/// UI-agnostic). Driven by a localhost server in tests via `raw_base`.
 fn tapVersionFromSubtrees(
     alloc: std.mem.Allocator,
     http: *client_mod.HttpClient,
@@ -784,17 +784,19 @@ fn tapVersionFromSubtrees(
     noun: []const u8,
     tap_label: []const u8,
 ) ?[]u8 {
-    var last_status: u16 = 0;
-    for (subtrees) |subtree| {
-        var rb_url_buf: [512]u8 = undefined;
-        const rb_url = forge.rawFileUrl(&rb_url_buf, forge_kind, raw_base, sha, subtree, name) catch continue;
-
-        var rb_resp = tap_mod.getRawFile(http, environ, forge_kind, rb_url) catch {
-            warnTapCaskFetchFailed(tap_label, name, "Network failure while reading the .rb");
+    var fetch = tap_mod.fetchRawFile(http, environ, forge_kind, raw_base, sha, name, subtrees) catch {
+        warnTapCaskFetchFailed(tap_label, name, "Network failure while reading the .rb");
+        return null;
+    };
+    switch (fetch) {
+        .not_found => |status| {
+            var status_buf: [64]u8 = undefined;
+            const reason = std.fmt.bufPrint(&status_buf, "GitHub returned status {d} for the .rb", .{status}) catch "GitHub returned a non-200 status for the .rb";
+            warnTapCaskFetchFailed(tap_label, name, reason);
             return null;
-        };
-        defer rb_resp.deinit();
-        if (rb_resp.status == 200) {
+        },
+        .found => |*rb_resp| {
+            defer rb_resp.deinit();
             const rb_info = install_rb_parse_mod.parseRubyFormula(rb_resp.body) orelse {
                 var dsl_buf: [96]u8 = undefined;
                 const reason = std.fmt.bufPrint(&dsl_buf, "unsupported Ruby DSL shape — use `brew upgrade` for this {s}", .{noun}) catch "unsupported Ruby DSL shape";
@@ -806,15 +808,8 @@ fn tapVersionFromSubtrees(
             var ver_buf: [256]u8 = undefined;
             const qualified = formula_mod.pkgVersion(&ver_buf, rb_info.version, rb_info.revision) catch rb_info.version;
             return alloc.dupe(u8, qualified) catch null;
-        }
-        // Non-200 (likely a 404 for this layout) — try the next subtree.
-        last_status = rb_resp.status;
+        },
     }
-
-    var status_buf: [64]u8 = undefined;
-    const reason = std.fmt.bufPrint(&status_buf, "GitHub returned status {d} for the .rb", .{last_status}) catch "GitHub returned a non-200 status for the .rb";
-    warnTapCaskFetchFailed(tap_label, name, reason);
-    return null;
 }
 
 /// Tap cask: `Casks/<token>.rb` at the tap HEAD.
