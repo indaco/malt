@@ -447,14 +447,9 @@ pub const ProgressBar = struct {
         return std.fmt.bufPrint(buf, "ETA {d}s", .{eta_secs}) catch return "";
     }
 
-    fn writeLabel(self: *const ProgressBar, buf: []u8, start_pos: usize) usize {
-        var pos = start_pos;
-
+    fn writeLabel(self: *const ProgressBar, w: *std.Io.Writer) std.Io.Writer.Error!void {
         // "  " indent to align with output.info() style
-        buf[pos] = ' ';
-        pos += 1;
-        buf[pos] = ' ';
-        pos += 1;
+        try w.writeAll("  ");
 
         // Glyph: animated spinner while in progress, green ✓ when done.
         const done = self.total > 0 and self.cur() >= self.total;
@@ -463,40 +458,21 @@ pub const ProgressBar = struct {
 
         if (use_color) {
             const c = if (done) color.SemanticStyle.success.code() else color.SemanticStyle.info.code();
-            @memcpy(buf[pos .. pos + c.len], c);
-            pos += c.len;
+            try w.writeAll(c);
         }
-        @memcpy(buf[pos .. pos + g.len], g);
-        pos += g.len;
-        if (use_color) {
-            const reset_code = color.Style.reset.code();
-            @memcpy(buf[pos .. pos + reset_code.len], reset_code);
-            pos += reset_code.len;
-        }
-        buf[pos] = ' ';
-        pos += 1;
+        try w.writeAll(g);
+        if (use_color) try w.writeAll(color.Style.reset.code());
+        try w.writeByte(' ');
 
-        // Label — clip to leave headroom for label_width padding, the
-        // trailing space, and the bar/percent/details/erase/cursor that the
-        // caller appends next. Mirrors the Spinner.drawFrame clamp pattern.
-        const tail_reserve: usize = 320;
-        const remaining = if (buf.len > pos + tail_reserve) buf.len - pos - tail_reserve else 0;
-        const label_len = @min(self.label.len, remaining);
-        @memcpy(buf[pos .. pos + label_len], self.label[0..label_len]);
-        pos += label_len;
+        // No clip math: the writer refuses any overflow, and on a real terminal
+        // the caller's `cols` budget clips the visible line long before that.
+        try w.writeAll(self.label);
 
-        if (self.label_width > 0 and label_len < self.label_width) {
-            const desired_pad: usize = self.label_width - label_len;
-            const pad_room: usize = if (buf.len > pos + 1) buf.len - pos - 1 else 0;
-            const pad = @min(desired_pad, pad_room);
-            @memset(buf[pos .. pos + pad], ' ');
-            pos += pad;
+        if (self.label_width > 0 and self.label.len < self.label_width) {
+            try w.splatByteAll(' ', self.label_width - self.label.len);
         }
 
-        buf[pos] = ' ';
-        pos += 1;
-
-        return pos;
+        try w.writeByte(' ');
     }
 
     /// Visible columns `writeLabel` emits: indent (2) + glyph (1) + space (1)
@@ -512,59 +488,58 @@ pub const ProgressBar = struct {
     /// visible line never exceeds `cols`; `value` is the percent (determinate)
     /// or the bytes-so-far (indeterminate). Mirrors the TUI's readable-text
     /// fallback over a corrupt frame.
-    fn writeCounterLine(self: *const ProgressBar, buf: []u8, start_pos: usize, cols: u16, value: []const u8) usize {
-        var pos = start_pos;
+    fn writeCounterLine(self: *const ProgressBar, w: *std.Io.Writer, cols: u16, value: []const u8) std.Io.Writer.Error!void {
         const done = self.total > 0 and self.cur() >= self.total;
         const use_color = color.isColorEnabled();
 
-        buf[pos] = ' ';
-        pos += 1;
-        buf[pos] = ' ';
-        pos += 1;
+        try w.writeAll("  ");
 
         const g = self.glyph();
         if (use_color) {
             const c = if (done) color.SemanticStyle.success.code() else color.SemanticStyle.info.code();
-            @memcpy(buf[pos .. pos + c.len], c);
-            pos += c.len;
+            try w.writeAll(c);
         }
-        @memcpy(buf[pos .. pos + g.len], g);
-        pos += g.len;
-        if (use_color) {
-            const r = color.Style.reset.code();
-            @memcpy(buf[pos .. pos + r.len], r);
-            pos += r.len;
-        }
-        buf[pos] = ' ';
-        pos += 1;
+        try w.writeAll(g);
+        if (use_color) try w.writeAll(color.Style.reset.code());
+        try w.writeByte(' ');
 
         // Columns already spent (indent + glyph + space) plus the space and
         // value still to come; the label takes whatever is left.
         const fixed: usize = 2 + 1 + 1 + 1 + value.len;
         const budget: usize = if (cols > fixed) cols - fixed else 0;
         const label_len = @min(self.label.len, budget);
-        @memcpy(buf[pos .. pos + label_len], self.label[0..label_len]);
-        pos += label_len;
+        try w.writeAll(self.label[0..label_len]);
 
-        buf[pos] = ' ';
-        pos += 1;
-        @memcpy(buf[pos .. pos + value.len], value);
-        pos += value.len;
-        return pos;
+        try w.writeByte(' ');
+        try w.writeAll(value);
     }
 
     /// Write ANSI escape to move cursor up `n` lines.
-    fn writeCursorUp(buf: []u8, pos: usize, n: u16) usize {
-        if (n == 0) return pos;
-        const seq = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{n}) catch return pos;
-        return pos + seq.len;
+    fn writeCursorUp(w: *std.Io.Writer, n: u16) void {
+        if (n == 0) return;
+        w.print("\x1b[{d}A", .{n}) catch {}; // cosmetic move; drop if the frame is full
     }
 
     /// Write ANSI escape to move cursor down `n` lines.
-    fn writeCursorDown(buf: []u8, pos: usize, n: u16) usize {
-        if (n == 0) return pos;
-        const seq = std.fmt.bufPrint(buf[pos..], "\x1b[{d}B", .{n}) catch return pos;
-        return pos + seq.len;
+    fn writeCursorDown(w: *std.Io.Writer, n: u16) void {
+        if (n == 0) return;
+        w.print("\x1b[{d}B", .{n}) catch {}; // cosmetic move; drop if the frame is full
+    }
+
+    /// Trailing `\x1b[K` erase plus the multi-progress cursor restore. The
+    /// erase wipes a previously longer frame and stops the row wrapping (a wrap
+    /// breaks the cursor-up math), so it must land even when the body overflowed
+    /// — force-appended by rewinding `w` just enough to fit.
+    fn writeEraseTail(w: *std.Io.Writer, move_up: u16) void {
+        var tail_buf: [16]u8 = undefined; // erase(3) + cursor-down(≤8) + CR(1)
+        var tw = std.Io.Writer.fixed(&tail_buf);
+        tw.writeAll("\x1b[K") catch {}; // fits by construction
+        writeCursorDown(&tw, move_up);
+        if (move_up > 0) tw.writeByte('\r') catch {}; // fits by construction
+        const tail = tw.buffered();
+
+        if (w.end + tail.len > w.buffer.len) w.end = w.buffer.len - tail.len;
+        w.writeAll(tail) catch {}; // fits after the rewind
     }
 
     fn drawDeterminate(self: *const ProgressBar) void {
@@ -573,107 +548,64 @@ pub const ProgressBar = struct {
         const pct: u64 = if (self.total > 0) @min((self.cur() * 100) / self.total, 100) else 0;
 
         var buf: [768]u8 = undefined;
-        var pos: usize = 0;
+        var w = std.Io.Writer.fixed(&buf);
 
         // For multi-progress: move cursor up to our line
         const move_up: u16 = if (self.multi) |mp| mp.total_lines - self.line_index else 0;
-        pos = writeCursorUp(&buf, pos, move_up);
+        writeCursorUp(&w, move_up);
 
-        // Carriage return
-        buf[pos] = '\r';
-        pos += 1;
+        body: {
+            w.writeByte('\r') catch break :body; // carriage return
 
-        switch (layout) {
-            .counter => {
-                // Too narrow for a bar: drop to "  <glyph> <label> NN%".
-                var pct_buf: [8]u8 = undefined;
-                const pct_str = std.fmt.bufPrint(&pct_buf, "{d}%", .{pct}) catch "%";
-                pos = self.writeCounterLine(&buf, pos, cols.?, pct_str);
-            },
-            .bar => |bw_u16| {
-                const bw: u64 = bw_u16;
+            switch (layout) {
+                .counter => {
+                    // Too narrow for a bar: drop to "  <glyph> <label> NN%".
+                    var pct_buf: [8]u8 = undefined;
+                    const pct_str = std.fmt.bufPrint(&pct_buf, "{d}%", .{pct}) catch "%";
+                    self.writeCounterLine(&w, cols.?, pct_str) catch break :body;
+                },
+                .bar => |bw_u16| {
+                    const bw: u64 = bw_u16;
 
-                // Prefix + aligned label
-                pos = self.writeLabel(&buf, pos);
+                    // Prefix + aligned label
+                    self.writeLabel(&w) catch break :body;
 
-                // Bar
-                const filled: u64 = if (self.total > 0) @min((self.cur() * bw) / self.total, bw) else 0;
-                const empty = bw - filled;
-                if (color.isColorEnabled()) {
-                    const cyan_code = color.SemanticStyle.info.code();
-                    const dim_code = color.SemanticStyle.detail.code();
-                    const reset_code = color.Style.reset.code();
-
-                    @memcpy(buf[pos .. pos + cyan_code.len], cyan_code);
-                    pos += cyan_code.len;
-
-                    var i: u64 = 0;
-                    while (i < filled) : (i += 1) {
-                        const ch = "\xe2\x94\x81"; // ━
-                        @memcpy(buf[pos .. pos + 3], ch);
-                        pos += 3;
+                    // Bar
+                    const filled: u64 = if (self.total > 0) @min((self.cur() * bw) / self.total, bw) else 0;
+                    const empty = bw - filled;
+                    if (color.isColorEnabled()) {
+                        w.writeAll(color.SemanticStyle.info.code()) catch break :body;
+                        var i: u64 = 0;
+                        while (i < filled) : (i += 1) w.writeAll("\xe2\x94\x81") catch break :body; // ━
+                        w.writeAll(color.Style.reset.code()) catch break :body;
+                        w.writeAll(color.SemanticStyle.detail.code()) catch break :body;
+                        i = 0;
+                        while (i < empty) : (i += 1) w.writeAll("\xe2\x94\x80") catch break :body; // ─
+                        w.writeAll(color.Style.reset.code()) catch break :body;
+                    } else {
+                        var i: u64 = 0;
+                        while (i < filled) : (i += 1) w.writeByte('=') catch break :body;
+                        i = 0;
+                        while (i < empty) : (i += 1) w.writeByte(' ') catch break :body;
                     }
 
-                    @memcpy(buf[pos .. pos + reset_code.len], reset_code);
-                    pos += reset_code.len;
+                    // Percentage (outside parens, normal color)
+                    w.print(" {d: >3}%", .{pct}) catch break :body;
 
-                    @memcpy(buf[pos .. pos + dim_code.len], dim_code);
-                    pos += dim_code.len;
-
-                    i = 0;
-                    while (i < empty) : (i += 1) {
-                        const ch = "\xe2\x94\x80"; // ─
-                        @memcpy(buf[pos .. pos + 3], ch);
-                        pos += 3;
-                    }
-
-                    @memcpy(buf[pos .. pos + reset_code.len], reset_code);
-                    pos += reset_code.len;
-                } else {
-                    var i: u64 = 0;
-                    while (i < filled) : (i += 1) {
-                        buf[pos] = '=';
-                        pos += 1;
-                    }
-                    i = 0;
-                    while (i < empty) : (i += 1) {
-                        buf[pos] = ' ';
-                        pos += 1;
-                    }
-                }
-
-                // Percentage (outside parens, normal color)
-                const pct_part = std.fmt.bufPrint(buf[pos..], " {d: >3}%", .{pct}) catch "";
-                pos += pct_part.len;
-
-                pos = self.writeDetail(&buf, pos, cols, bw);
-            },
+                    self.writeDetail(&w, cols, bw) catch break :body;
+                },
+            }
         }
 
-        // Erase from cursor to end of line. This clears any leftover chars
-        // from a previously longer render (e.g. "ETA 10m03s" → "ETA 5s") and,
-        // crucially, keeps the visible row narrow so it doesn't wrap on
-        // standard-width terminals — wrap would break the cursor-up math.
-        const erase = "\x1b[K";
-        @memcpy(buf[pos .. pos + erase.len], erase);
-        pos += erase.len;
-
-        // For multi-progress: move cursor back down and reset to column 0
-        pos = writeCursorDown(&buf, pos, move_up);
-        if (move_up > 0) {
-            buf[pos] = '\r';
-            pos += 1;
-        }
-
-        writeStderrAll(buf[0..pos]);
+        writeEraseTail(&w, move_up);
+        writeStderrAll(w.buffered());
     }
 
     /// Append the dim `(size | rate | ETA)` detail. When `cols` is known, ETA
     /// then rate are dropped (in that order) if the assembled line would
     /// overflow — so the verbose readout gives way before the bar does. `bw` is
     /// the bar width already drawn; the budget is measured against it.
-    fn writeDetail(self: *const ProgressBar, buf: []u8, start_pos: usize, cols: ?u16, bw: u64) usize {
-        var pos = start_pos;
+    fn writeDetail(self: *const ProgressBar, w: *std.Io.Writer, cols: ?u16, bw: u64) std.Io.Writer.Error!void {
         const use_color = color.isColorEnabled();
         const dim_code = if (use_color) color.SemanticStyle.detail.code() else "";
         const reset_code = if (use_color) color.Style.reset.code() else "";
@@ -713,41 +645,23 @@ pub const ProgressBar = struct {
             if (show_eta and (!show_rate or after_rate + 3 + eta_str.len > budget)) show_eta = false;
         }
 
-        @memcpy(buf[pos .. pos + dim_code.len], dim_code);
-        pos += dim_code.len;
-
-        const open = std.fmt.bufPrint(buf[pos..], " (", .{}) catch "";
-        pos += open.len;
-        @memcpy(buf[pos .. pos + size_str.len], size_str);
-        pos += size_str.len;
-
-        if (show_rate) {
-            const rate_part = std.fmt.bufPrint(buf[pos..], " | {s}", .{rate_str}) catch "";
-            pos += rate_part.len;
-        }
-        if (show_eta) {
-            const eta_part = std.fmt.bufPrint(buf[pos..], " | {s}", .{eta_str}) catch "";
-            pos += eta_part.len;
-        }
-
-        buf[pos] = ')';
-        pos += 1;
-        @memcpy(buf[pos .. pos + reset_code.len], reset_code);
-        pos += reset_code.len;
-        return pos;
+        try w.writeAll(dim_code);
+        try w.writeAll(" (");
+        try w.writeAll(size_str);
+        if (show_rate) try w.print(" | {s}", .{rate_str});
+        if (show_eta) try w.print(" | {s}", .{eta_str});
+        try w.writeByte(')');
+        try w.writeAll(reset_code);
     }
 
     fn drawIndeterminate(self: *const ProgressBar) void {
         const cols = queryCols();
 
         var buf: [512]u8 = undefined;
-        var pos: usize = 0;
+        var w = std.Io.Writer.fixed(&buf);
 
         const move_up: u16 = if (self.multi) |mp| mp.total_lines - self.line_index else 0;
-        pos = writeCursorUp(&buf, pos, move_up);
-
-        buf[pos] = '\r';
-        pos += 1;
+        writeCursorUp(&w, move_up);
 
         const size_kb = self.cur() / 1024;
         var size_buf: [32]u8 = undefined;
@@ -766,42 +680,29 @@ pub const ProgressBar = struct {
         const full_width = self.prefixCols() + 1 + size_str.len + 3 + rate_str.len + 1;
         const collapse = if (cols) |c| full_width > @as(usize, c) else false;
 
-        if (collapse) {
-            pos = self.writeCounterLine(&buf, pos, cols.?, size_str);
-        } else {
-            // writeLabel already renders the animated spinner as the line glyph.
-            pos = self.writeLabel(&buf, pos);
+        body: {
+            w.writeByte('\r') catch break :body;
 
-            const use_color = color.isColorEnabled();
-            const dim_code = if (use_color) color.SemanticStyle.detail.code() else "";
-            const reset_code = if (use_color) color.Style.reset.code() else "";
+            if (collapse) {
+                self.writeCounterLine(&w, cols.?, size_str) catch break :body;
+            } else {
+                // writeLabel already renders the animated spinner as the line glyph.
+                self.writeLabel(&w) catch break :body;
 
-            @memcpy(buf[pos .. pos + dim_code.len], dim_code);
-            pos += dim_code.len;
-            buf[pos] = '(';
-            pos += 1;
+                const use_color = color.isColorEnabled();
+                const dim_code = if (use_color) color.SemanticStyle.detail.code() else "";
+                const reset_code = if (use_color) color.Style.reset.code() else "";
 
-            const info = std.fmt.bufPrint(buf[pos..], "{s} | {s}", .{ size_str, rate_str }) catch "";
-            pos += info.len;
-
-            buf[pos] = ')';
-            pos += 1;
-            @memcpy(buf[pos .. pos + reset_code.len], reset_code);
-            pos += reset_code.len;
+                w.writeAll(dim_code) catch break :body;
+                w.writeByte('(') catch break :body;
+                w.print("{s} | {s}", .{ size_str, rate_str }) catch break :body;
+                w.writeByte(')') catch break :body;
+                w.writeAll(reset_code) catch break :body;
+            }
         }
 
-        // Erase to end of line (see renderDeterminate for rationale).
-        const erase = "\x1b[K";
-        @memcpy(buf[pos .. pos + erase.len], erase);
-        pos += erase.len;
-
-        pos = writeCursorDown(&buf, pos, move_up);
-        if (move_up > 0) {
-            buf[pos] = '\r';
-            pos += 1;
-        }
-
-        writeStderrAll(buf[0..pos]);
+        writeEraseTail(&w, move_up);
+        writeStderrAll(w.buffered());
     }
 };
 
@@ -1031,18 +932,211 @@ test "ProgressBar.line_index past u8 round-trips through MultiProgress render" {
 }
 
 test "ProgressBar render survives label larger than the draw buffer" {
-    // Long custom-tap labels must clip, not panic the @memcpy bound check
-    // in safe builds (buf is 768 determinate / 512 indeterminate).
+    // Long custom-tap labels must be a caught, dropped write — never a panic
+    // in safe builds (buf is 768 determinate / 512 indeterminate). Each frame
+    // must stay a valid prefix: it starts with the `\r` lead and ends with the
+    // `\x1b[K` erase, force-appended even though the body overflowed, so the
+    // row is never left dirty.
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
     const label: [600]u8 = @splat('x');
 
+    var det_buf: std.ArrayList(u8) = .empty;
+    defer det_buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &det_buf);
     var det = ProgressBar.init(&label, 100);
     det.is_tty = true;
     det.update(50);
-    det.finish();
+    endStderrCapture();
+    try std.testing.expect(std.mem.startsWith(u8, det_buf.items, "\r"));
+    try std.testing.expect(std.mem.endsWith(u8, det_buf.items, "\x1b[K"));
 
+    var indet_buf: std.ArrayList(u8) = .empty;
+    defer indet_buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &indet_buf);
     var indet = ProgressBar.init(&label, 0);
     indet.is_tty = true;
-    indet.update(0);
+    indet.update(1234);
+    endStderrCapture();
+    try std.testing.expect(std.mem.startsWith(u8, indet_buf.items, "\r"));
+    try std.testing.expect(std.mem.endsWith(u8, indet_buf.items, "\x1b[K"));
+}
+
+// With `tail_reserve` gone, a label that nearly fills the buffer keeps its
+// full length and the bar/percent/detail tail drops — "write what fits,
+// refuse the rest". The trailing erase is still force-appended so the row
+// stays clean even though the body overflowed.
+test "overflow keeps the full label and drops the tail, still erasing" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    setColsForTest(null); // unknown width: nothing clips the visible line
+    defer setColsForTest(null);
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    // 750 'x' nearly fills the 768-byte determinate buffer: the label fits in
+    // full, but the bar/percent/detail behind it cannot.
+    const label: [750]u8 = @splat('x');
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init(&label, 100);
+    bar.is_tty = true;
+    bar.update(50);
+
+    const frame = buf.items;
+    try std.testing.expectEqual(@as(usize, 750), std.mem.count(u8, frame, "x"));
+    try std.testing.expect(std.mem.indexOfScalar(u8, frame, '%') == null);
+    try std.testing.expect(std.mem.endsWith(u8, frame, "\x1b[K"));
+}
+
+// In a multi-progress group the tail is erase + cursor-down + `\r`, not just
+// the erase. An overflowed body must still force-append the whole tail so the
+// group's cursor-up/down math stays balanced and the row is never left dirty.
+test "overflow in a multi-progress row still restores the cursor" {
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+    setColsForTest(null);
+    defer setColsForTest(null);
+
+    var mp = MultiProgress.init(4);
+    defer mp.finish();
+    const label: [740]u8 = @splat('x');
+
+    var bar = ProgressBar.init(&label, 100);
+    bar.multi = &mp;
+    bar.line_index = 1; // move_up = total_lines - line_index = 3
+    bar.update(50);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    bar.drawDeterminate();
+    endStderrCapture();
+
+    const frame = buf.items;
+    try std.testing.expect(std.mem.startsWith(u8, frame, "\x1b[3A")); // cursor-up lead
+    try std.testing.expectEqual(@as(usize, 740), std.mem.count(u8, frame, "x"));
+    try std.testing.expect(std.mem.indexOf(u8, frame, "\x1b[K") != null); // erase present
+    try std.testing.expect(std.mem.endsWith(u8, frame, "\x1b[3B\r")); // cursor-down + CR restore
+}
+
+// Byte-goldens pinning each helper's `*Writer` output to the bytes `main`
+// emitted for the same fixed input — so the bounded-writer conversion is a
+// byte-for-byte preservation on the happy path, not a rewrite that drifts.
+// Color/emoji forced off keeps the glyph the deterministic "*" done marker.
+test "writeLabel emits the same bytes as the hand-rolled appends" {
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    var bar = ProgressBar.init("abc", 100);
+    bar.update(100); // done → glyph "*"
+    try bar.writeLabel(&w);
+    try std.testing.expectEqualStrings("  * abc ", w.buffered());
+}
+
+test "writeCounterLine emits the same bytes as the hand-rolled appends" {
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    var bar = ProgressBar.init("abc", 100);
+    bar.update(100);
+    try bar.writeCounterLine(&w, 40, "100%");
+    try std.testing.expectEqualStrings("  * abc 100%", w.buffered());
+}
+
+test "writeDetail emits the same bytes as the hand-rolled appends" {
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    var bar = ProgressBar.init("x", 100);
+    bar.update(50);
+    bar.start_time_ms = nowMs() + 1_000_000; // force rate ≤ 0 so the readout is fixed
+    try bar.writeDetail(&w, null, 30);
+    try std.testing.expectEqualStrings(" (0/0 KB | --)", w.buffered());
+}
+
+test "writeCursorUp/Down emit the same bytes as the hand-rolled appends" {
+    var up_buf: [16]u8 = undefined;
+    var up = std.Io.Writer.fixed(&up_buf);
+    ProgressBar.writeCursorUp(&up, 3);
+    try std.testing.expectEqualStrings("\x1b[3A", up.buffered());
+
+    var down_buf: [16]u8 = undefined;
+    var down = std.Io.Writer.fixed(&down_buf);
+    ProgressBar.writeCursorDown(&down, 2);
+    try std.testing.expectEqualStrings("\x1b[2B", down.buffered());
+
+    var zero_buf: [16]u8 = undefined;
+    var zero = std.Io.Writer.fixed(&zero_buf);
+    ProgressBar.writeCursorUp(&zero, 0); // n == 0 is a no-op
+    try std.testing.expectEqualStrings("", zero.buffered());
+}
+
+// End-to-end happy-path golden: on a normal (non-overflowing) frame the
+// bounded writer emits the exact bytes, in the exact order, that the
+// hand-rolled cursor produced on `main` — lead, label, bar, percent, detail,
+// erase.
+test "drawDeterminate emits main's exact happy-path frame" {
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+    setColsForTest(null);
+    defer setColsForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    var bar = ProgressBar.init("dl", 100);
+    bar.is_tty = true;
+    bar.update(100); // done → glyph "*", full bar
+    bar.start_time_ms = nowMs() + 1_000_000; // force rate ≤ 0 so the readout is fixed
+
+    beginStderrCapture(std.testing.allocator, &buf);
+    bar.drawDeterminate();
+    endStderrCapture();
+
+    const expected = "\r  * dl " ++ ("=" ** 30) ++ " 100% (0/0 KB | --)\x1b[K";
+    try std.testing.expectEqualStrings(expected, buf.items);
+}
+
+// Same happy-path pin for the separate indeterminate routine: spinner glyph,
+// label, then the dim `(size | rate)` readout and the erase.
+test "drawIndeterminate emits main's exact happy-path frame" {
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+    setColsForTest(null);
+    defer setColsForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    var bar = ProgressBar.init("st", 0);
+    bar.is_tty = true;
+    bar.spinner_frame.store(0, .monotonic); // pin the glyph
+    bar.update(2048); // 2 KB
+    bar.start_time_ms = nowMs() + 1_000_000; // force rate ≤ 0
+
+    beginStderrCapture(std.testing.allocator, &buf);
+    bar.drawIndeterminate();
+    endStderrCapture();
+
+    const expected = "\r  \xe2\xa0\x99 st (2 KB | --)\x1b[K"; // ⠙ spinner frame 0
+    try std.testing.expectEqualStrings(expected, buf.items);
 }
 
 test "restoreTerminal is callable without an active MultiProgress" {
