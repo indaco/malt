@@ -32,7 +32,10 @@ const InstallError = install_record_mod.InstallError;
 const install_sink_mod = @import("install/sink.zig");
 const post_install_mod = @import("install/post_install.zig");
 const install_mod = @import("install.zig");
+const outdated_mod = @import("outdated.zig");
 const pin_mod = @import("pin.zig");
+
+const OutdatedEntry = outdated_mod.OutdatedEntry;
 
 const UpgradeFlag = enum { quiet, cask, formula, dry_run, force, pinned, isolate_deps, use_system_ruby };
 
@@ -103,6 +106,99 @@ fn printSummary(tally: Tally, dry_run: bool) void {
     if (tally.checked() == 0) return;
     var buf: [160]u8 = undefined;
     output.notice("{s}", .{tally.summaryLine(&buf, dry_run)});
+}
+
+/// Side-channel collector for a full `mt upgrade --dry-run`. `Tally` is
+/// counters only, so the would-upgrade *rows* are gathered here as
+/// snapshot-shaped `OutdatedEntry`s to warm the shared `outdated.json`.
+/// `tainted` trips at any decision point that cannot emit a snapshot-shaped
+/// row (tap formulas decide by commit sha, not version): the caller then
+/// skips the warm rather than persist a snapshot that under-reports.
+const EntrySink = struct {
+    allocator: std.mem.Allocator,
+    formulas: std.ArrayList(OutdatedEntry) = .empty,
+    casks: std.ArrayList(OutdatedEntry) = .empty,
+    tainted: bool = false,
+
+    fn init(allocator: std.mem.Allocator) EntrySink {
+        return .{ .allocator = allocator };
+    }
+
+    fn deinit(self: *EntrySink) void {
+        freeEntries(self.allocator, &self.formulas);
+        freeEntries(self.allocator, &self.casks);
+    }
+
+    /// Formula would-upgrade row: `installed` is revision-qualified
+    /// (`1.2_2`, not bare `1.2`) so the warmed entry matches
+    /// `assembleEntries` byte-for-byte.
+    fn collectFormula(self: *EntrySink, name: []const u8, version: []const u8, revision: i64, latest: []const u8) void {
+        var buf: [256]u8 = undefined;
+        const installed = formula_mod.pkgVersion(&buf, version, revision) catch version;
+        self.append(&self.formulas, name, installed, latest);
+    }
+
+    /// Cask would-upgrade row: casks have no revision, so `installed` is
+    /// the bare recorded version — the same shape `assembleEntries` emits
+    /// for a `0 AS revision` cask row.
+    fn collectCask(self: *EntrySink, token: []const u8, installed: []const u8, latest: []const u8) void {
+        self.append(&self.casks, token, installed, latest);
+    }
+
+    /// Dupe the three fields into the sink's allocator. A dupe/append
+    /// failure taints the sink: a dropped row would silently under-report,
+    /// so the caller must skip the warm rather than persist a partial set.
+    fn append(self: *EntrySink, list: *std.ArrayList(OutdatedEntry), name: []const u8, installed: []const u8, latest: []const u8) void {
+        const entry = dupEntry(self.allocator, name, installed, latest) catch {
+            self.tainted = true;
+            return;
+        };
+        list.append(self.allocator, entry) catch {
+            freeEntry(self.allocator, entry);
+            self.tainted = true;
+        };
+    }
+};
+
+fn dupEntry(allocator: std.mem.Allocator, name: []const u8, installed: []const u8, latest: []const u8) !OutdatedEntry {
+    const n = try allocator.dupe(u8, name);
+    errdefer allocator.free(n);
+    const i = try allocator.dupe(u8, installed);
+    errdefer allocator.free(i);
+    const l = try allocator.dupe(u8, latest);
+    return .{ .name = n, .installed = i, .latest = l };
+}
+
+fn freeEntry(allocator: std.mem.Allocator, e: OutdatedEntry) void {
+    allocator.free(e.name);
+    allocator.free(e.installed);
+    allocator.free(e.latest);
+}
+
+fn freeEntries(allocator: std.mem.Allocator, list: *std.ArrayList(OutdatedEntry)) void {
+    for (list.items) |e| freeEntry(allocator, e);
+    list.deinit(allocator);
+}
+
+/// Gate the snapshot warm to a *complete* dry-run audit. A narrowed run
+/// (names, `--cask`/`--formula`, `--pinned`), a failed walk, or a tainted
+/// collector would each persist a partial snapshot and make the Outdated
+/// view silently under-report — so every one vetoes the write. A real
+/// (non-dry-run) upgrade never warms: the pre-upgrade set is stale the
+/// instant kegs mutate.
+const WarmGate = struct {
+    dry_run: bool = false,
+    has_names: bool = false,
+    cask_only: bool = false,
+    formula_only: bool = false,
+    pinned_only: bool = false,
+    walk_failed: bool = false,
+    tainted: bool = false,
+};
+
+fn shouldWarmSnapshot(g: WarmGate) bool {
+    return g.dry_run and !g.has_names and !g.cask_only and !g.formula_only and
+        !g.pinned_only and !g.walk_failed and !g.tainted;
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -218,17 +314,39 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // the bulk-mode signal: per-package "already current" lines are
         // suppressed in favour of one summary footer printed below.
         var tally: Tally = .{};
+        // Collect the would-upgrade rows only when a warm could actually
+        // fire: a full, unnarrowed dry-run. The sink threads down both
+        // passes alongside `tally`; a real upgrade or any narrowing passes
+        // `null` so nothing is gathered.
+        var sink: EntrySink = .init(allocator);
+        defer sink.deinit();
+        const warm_candidate = dry_run and !cask_only and !formula_only and !pinned_only;
+        const sink_ptr: ?*EntrySink = if (warm_candidate) &sink else null;
         if (!cask_only) {
-            upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, &tally) catch {
+            upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, &tally, sink_ptr) catch {
                 any_failed = true;
             };
         }
         if (!formula_only) {
-            upgradeAllCasks(ctx, allocator, &db, &api, prefix, dry_run, force, pinned_only, &tally) catch {
+            upgradeAllCasks(ctx, allocator, &db, &api, prefix, dry_run, force, pinned_only, &tally, sink_ptr) catch {
                 any_failed = true;
             };
         }
         printSummary(tally, dry_run);
+
+        // Best-effort warm of the shared outdated snapshot from the dry-run's
+        // own audit — a cache-write failure never changes exit code or output.
+        // Reuses the `{prefix}/cache` dir already resolved above.
+        if (shouldWarmSnapshot(.{
+            .dry_run = dry_run,
+            .cask_only = cask_only,
+            .formula_only = formula_only,
+            .pinned_only = pinned_only,
+            .walk_failed = any_failed,
+            .tainted = sink.tainted,
+        })) {
+            outdated_mod.writeSnapshotEntries(ctx, allocator, cache_dir, sink.formulas.items, sink.casks.items) catch {};
+        }
     } else {
         // Upgrade each named package — formula first, then cask. A failed
         // or aborted name aggregates into `any_failed` and the loop moves
@@ -236,14 +354,14 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // tally keeps each named package's per-package line and no footer.
         for (names.items) |name| {
             if (!cask_only and isFormulaInstalled(&db, name)) {
-                upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, null) catch {
+                upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, null, null) catch {
                     any_failed = true;
                     other_failed = true;
                 };
                 continue;
             }
             // Not a formula (or --cask): try cask
-            upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only, null) catch |e| {
+            upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only, null, null) catch |e| {
                 any_failed = true;
                 if (e == error.AppRunning) app_running = true else other_failed = true;
             };
@@ -339,6 +457,7 @@ fn upgradeFormula(
     isolate_deps: bool,
     use_system_ruby: []const []const u8,
     tally: ?*Tally,
+    sink: ?*EntrySink,
 ) !void {
     // Honor pins before any network or filesystem work — the whole
     // point is that a pinned keg never gets touched. Audit mode
@@ -368,7 +487,7 @@ fn upgradeFormula(
     // before touching `formulae.brew.sh`. `old.tap` is owned and lives
     // until this function returns, so it is safe to pass across the call.
     if (!install_args_mod.isCoreTap(old.tap)) {
-        return upgradeTapFormula(ctx, allocator, name, old.tap, db, prefix, dry_run, force, audit_mode, tally);
+        return upgradeTapFormula(ctx, allocator, name, old.tap, db, prefix, dry_run, force, audit_mode, tally, sink);
     }
 
     // Reconstruct the revision-aware path label for the old keg so
@@ -400,6 +519,7 @@ fn upgradeFormula(
 
     if (dry_run) {
         if (tally) |t| t.would_upgrade += 1;
+        if (sink) |s| s.collectFormula(name, old.version, old.revision, formula.pkg_version);
         output.info("Dry run: would upgrade {s} {s} -> {s}", .{ name, old.version, formula.pkg_version });
         // Same vocabulary across install/upgrade/migrate — one parser fits all.
         output.emitNdjsonEvent(.would_install, name, null);
@@ -584,6 +704,7 @@ fn upgradeTapFormula(
     force: bool,
     audit_mode: bool,
     tally: ?*Tally,
+    sink: ?*EntrySink,
 ) !void {
     if (pinSkip(db, name, force, audit_mode)) {
         output.skip("{s} is pinned, skipped", .{name});
@@ -642,6 +763,10 @@ fn upgradeTapFormula(
 
     if (dry_run) {
         if (tally) |t| t.would_upgrade += 1;
+        // Tap formulae decide by commit sha, not version — no snapshot-shaped
+        // `latest` exists here, so taint and skip the warm rather than persist
+        // an under-reporting snapshot.
+        if (sink) |s| s.tainted = true;
         const short_len = @min(@as(usize, 8), fresh_sha.len);
         output.info("Dry run: would refresh tap {s} to {s} for {s}", .{ tap_label, fresh_sha[0..short_len], name });
         output.emitNdjsonEvent(.would_install, name, null);
@@ -703,6 +828,7 @@ fn upgradeRoutedTapCask(
     dry_run: bool,
     force: bool,
     tally: ?*Tally,
+    sink: ?*EntrySink,
 ) TapRouteError!void {
     const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse return error.Aborted;
     if (slash == 0 or slash == tap_label.len - 1) return error.Aborted;
@@ -753,6 +879,13 @@ fn upgradeRoutedTapCask(
 
     if (dry_run) {
         if (tally) |t| t.would_upgrade += 1;
+        if (sink) |s| {
+            // Qualify with the .rb revision to match `assembleEntries`'
+            // tap-cask latest (`pkgVersion(version, revision)`).
+            var latest_buf: [256]u8 = undefined;
+            const latest = formula_mod.pkgVersion(&latest_buf, rb_info.version, rb_info.revision) catch rb_info.version;
+            s.collectCask(token, installed_version, latest);
+        }
         output.info("Dry run: would upgrade cask {s} {s} -> {s}", .{ token, installed_version, rb_info.version });
         output.emitNdjsonEvent(.would_install, token, null);
         return;
@@ -856,6 +989,7 @@ fn upgradeTapCaskFallback(
     dry_run: bool,
     force: bool,
     tally: ?*Tally,
+    sink: ?*EntrySink,
 ) error{AppRunning}!bool {
     const taps = tap_mod.list(allocator, db) catch return false;
     defer {
@@ -871,7 +1005,7 @@ fn upgradeTapCaskFallback(
     for (taps) |t| {
         if (install_args_mod.isCoreTap(t.name)) continue;
 
-        upgradeRoutedTapCask(ctx, allocator, token, t.name, installed_version, db, prefix, dry_run, force, tally) catch |e| switch (e) {
+        upgradeRoutedTapCask(ctx, allocator, token, t.name, installed_version, db, prefix, dry_run, force, tally, sink) catch |e| switch (e) {
             // Either "tap doesn't own this token" or "something went
             // wrong with this tap" — neither is fatal to the probe.
             error.NotInTap, error.Aborted => continue,
@@ -985,6 +1119,7 @@ fn upgradeAllFormulas(
     isolate_deps: bool,
     use_system_ruby: []const []const u8,
     tally: *Tally,
+    sink: ?*EntrySink,
 ) !void {
     const sql: [:0]const u8 = if (pinned_only)
         "SELECT name, version FROM kegs WHERE pinned = 1 ORDER BY name;"
@@ -1023,7 +1158,7 @@ fn upgradeAllFormulas(
     defer failed_names.deinit(allocator);
 
     for (names.items) |name| {
-        upgradeFormula(ctx, allocator, name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby, tally) catch {
+        upgradeFormula(ctx, allocator, name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby, tally, sink) catch {
             failed_count += 1;
             tally.failed += 1;
             // failed_count is the authoritative counter; list is for UX only.
@@ -1043,7 +1178,7 @@ fn upgradeAllFormulas(
 // Cask upgrade
 // ---------------------------------------------------------------------------
 
-fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, audit_mode: bool, tally: ?*Tally) !void {
+fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, audit_mode: bool, tally: ?*Tally, sink: ?*EntrySink) !void {
     if (pinSkip(db, token, force, audit_mode)) {
         output.skip("{s} is pinned, skipped", .{token});
         output.emitNdjsonEvent(.pinned, token, null);
@@ -1063,7 +1198,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // core-API casks fall through to the API path below.
     if (installed.tap()) |tap_label| {
         if (!install_args_mod.isCoreTap(tap_label)) {
-            upgradeRoutedTapCask(ctx, allocator, token, tap_label, installed.version(), db, prefix, dry_run, force, tally) catch |e| switch (e) {
+            upgradeRoutedTapCask(ctx, allocator, token, tap_label, installed.version(), db, prefix, dry_run, force, tally, sink) catch |e| switch (e) {
                 error.NotInTap => {
                     output.err("Cask {s} is no longer in tap {s}", .{ token, tap_label });
                     return error.Aborted;
@@ -1080,7 +1215,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // third-party tap if the core API 404s — the probe also backfills
     // `casks.tap` for the next invocation.
     const cask_json = api.fetchCask(token) catch {
-        if (try upgradeTapCaskFallback(ctx, allocator, token, installed.version(), db, prefix, dry_run, force, tally)) return;
+        if (try upgradeTapCaskFallback(ctx, allocator, token, installed.version(), db, prefix, dry_run, force, tally, sink)) return;
         output.err("Could not fetch cask info for {s}", .{token});
         return error.Aborted;
     };
@@ -1101,6 +1236,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
 
     if (dry_run) {
         if (tally) |t| t.would_upgrade += 1;
+        if (sink) |s| s.collectCask(token, installed_version, parsed_cask.version);
         output.info("Dry run: would upgrade cask {s} {s} -> {s}", .{ token, installed_version, parsed_cask.version });
         output.emitNdjsonEvent(.would_install, token, null);
         return;
@@ -1190,7 +1326,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     if (tally) |t| t.upgraded += 1;
 }
 
-fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, pinned_only: bool, tally: *Tally) !void {
+fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, pinned_only: bool, tally: *Tally, sink: ?*EntrySink) !void {
     const sql: [:0]const u8 = if (pinned_only)
         "SELECT token, version FROM casks WHERE pinned = 1 ORDER BY token;"
     else
@@ -1227,7 +1363,7 @@ fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite
     defer failed_tokens.deinit(allocator);
 
     for (tokens.items) |token| {
-        upgradeCask(ctx, allocator, token, db, api, prefix, dry_run, force, pinned_only, tally) catch {
+        upgradeCask(ctx, allocator, token, db, api, prefix, dry_run, force, pinned_only, tally, sink) catch {
             failed_count += 1;
             tally.failed += 1;
             // failed_count is authoritative; list is for UX only.
@@ -1274,6 +1410,41 @@ pub fn collectMissingDepNames(
 // real MALT_PREFIX fixture is available.
 
 const color = @import("../ui/color.zig");
+
+test "EntrySink.collectFormula qualifies installed with revision and routes by kind" {
+    var sink = EntrySink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    sink.collectFormula("foo", "1.2", 3, "1.3");
+    sink.collectFormula("baz", "2.5", 0, "2.6");
+    sink.collectCask("bar", "4.0", "4.1");
+
+    try std.testing.expect(!sink.tainted);
+    try std.testing.expectEqual(@as(usize, 2), sink.formulas.items.len);
+    try std.testing.expectEqual(@as(usize, 1), sink.casks.items.len);
+    // Revision-qualified installed is the load-bearing shape-parity invariant:
+    // a bare `1.2` would make the warmed snapshot diverge from `mt outdated`.
+    try std.testing.expectEqualStrings("foo", sink.formulas.items[0].name);
+    try std.testing.expectEqualStrings("1.2_3", sink.formulas.items[0].installed);
+    try std.testing.expectEqualStrings("1.3", sink.formulas.items[0].latest);
+    // Revision 0 stays bare — `2.5`, never `2.5_0`.
+    try std.testing.expectEqualStrings("2.5", sink.formulas.items[1].installed);
+    try std.testing.expectEqualStrings("bar", sink.casks.items[0].name);
+    try std.testing.expectEqualStrings("4.0", sink.casks.items[0].installed);
+}
+
+test "shouldWarmSnapshot warms only a clean full no-args dry-run" {
+    try std.testing.expect(shouldWarmSnapshot(.{ .dry_run = true }));
+    // A real upgrade never warms — the pre-upgrade set is stale once kegs mutate.
+    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = false }));
+    // Any narrowing or incompleteness persists a partial snapshot → veto.
+    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = true, .has_names = true }));
+    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = true, .cask_only = true }));
+    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = true, .formula_only = true }));
+    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = true, .pinned_only = true }));
+    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = true, .walk_failed = true }));
+    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = true, .tainted = true }));
+}
 
 test "Tally.checked sums every outcome bucket" {
     const t: Tally = .{ .upgraded = 1, .would_upgrade = 2, .up_to_date = 45, .pinned = 1, .failed = 3 };
