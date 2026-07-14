@@ -38,6 +38,10 @@ pub const seq = struct {
     pub const cursor_hide = "\x1b[?25l";
     pub const cursor_show = "\x1b[?25h";
     pub const erase_line = "\x1b[K"; // erase from cursor to end of line
+    // Bracket a frame so a supporting terminal buffers the whole repaint and
+    // swaps it atomically; a terminal that ignores them still renders correctly.
+    pub const sync_begin = "\x1b[?2026h";
+    pub const sync_end = "\x1b[?2026l";
 };
 
 /// Write a 1-based cursor-position (CUP) sequence into a caller buffer, the
@@ -153,6 +157,8 @@ test "alt-screen and cursor escape sequences are the expected bytes" {
     try std.testing.expectEqualStrings("\x1b[?25l", seq.cursor_hide);
     try std.testing.expectEqualStrings("\x1b[?25h", seq.cursor_show);
     try std.testing.expectEqualStrings("\x1b[K", seq.erase_line);
+    try std.testing.expectEqualStrings("\x1b[?2026h", seq.sync_begin);
+    try std.testing.expectEqualStrings("\x1b[?2026l", seq.sync_end);
 }
 
 test "cursorMove writes a 1-based CUP sequence" {

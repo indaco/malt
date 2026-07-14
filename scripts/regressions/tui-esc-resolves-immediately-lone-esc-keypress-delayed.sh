@@ -43,9 +43,10 @@ quitwait 2
 ACTIONS
 
 # The launch-audit spinner may repaint stale frames inside the window, so
-# judge only the LAST full frame (frames start with the \e[2J clear): by the
-# end of the settle window Esc must have produced a cleared-filter repaint.
-perl -0777 -ne 'my ($s) = /\@\@PRE_ESC\@\@(.*)\@\@POST_ESC\@\@/s or exit; my @f = split /\x1b\[2J/, $s; print $f[-1] // ""' "$cap" >"$seg"
+# judge only the LAST full frame (each frame opens with the \e[?2026h sync
+# marker): by the end of the settle window Esc must have produced a
+# cleared-filter repaint.
+perl -0777 -ne 'my ($s) = /\@\@PRE_ESC\@\@(.*)\@\@POST_ESC\@\@/s or exit; my @f = split /\x1b\[\?2026h/, $s; print $f[-1] // ""' "$cap" >"$seg"
 
 if [[ ! -s "$seg" ]]; then
   echo "REGRESSION: lone Esc emitted nothing — it did not resolve until the next key" >&2
