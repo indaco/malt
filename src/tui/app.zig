@@ -290,12 +290,15 @@ fn stepNormal(allocator: std.mem.Allocator, mt_path: []const u8, a: *App, key: K
     return .none;
 }
 
-/// Pure render: full-screen clear, then each region painted at its cursor
-/// position. A frame carries no raw newline — positioning is by cursor moves —
-/// so `(state, cols, rows)` fully determines the bytes and resize is a re-render.
+/// Pure render: each region repaints in place at its cursor position — no
+/// whole-screen clear, since every region self-erases and covers its rectangle,
+/// so there is no blank window to flicker. The frame is bracketed in synchronized
+/// output so a supporting terminal also swaps it atomically. A frame carries no
+/// raw newline — positioning is by cursor moves — so `(state, cols, rows)` fully
+/// determines the bytes and resize is a re-render.
 pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 {
     var f: tab.Frame = .{ .buf = buf };
-    f.put("\x1b[2J"); // clear; every region then positions its own cursor
+    f.put(term.seq.sync_begin); // open the atomic frame; every region positions its own cursor
     switch (layout.compute(cols, rows)) {
         .too_small => renderTooSmall(&f, cols, rows),
         .ok => |r| {
@@ -360,6 +363,7 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
             }
         },
     }
+    f.put(term.seq.sync_end); // close the atomic frame
     return f.slice();
 }
 
@@ -748,10 +752,15 @@ fn ciSet(environ: std.process.Environ) bool {
     return v.len != 0;
 }
 
-/// Frame byte capacity for a geometry: 4 bytes/cell (max UTF-8) + per-line
-/// cursor/SGR overhead + clear/slack. Grown on resize, never per-frame.
+/// Frame byte capacity for a geometry, re-derived so a worst-case full-height
+/// frame provably fits with no truncation. Per line ≤ 48: a CUP move (≤14), the
+/// self-erase `\x1b[K` (3), and up to two SGR role/reset pairs (~31). Per cell ≤ 4
+/// (max UTF-8). Frame-level: a 256-byte fixed slack plus the two synchronized-
+/// output markers that now bracket every frame (the dropped `2J` freed its 4).
+/// Grown on resize, never per-frame.
 fn frameCap(size: term.Size) usize {
-    return @as(usize, size.cols) * size.rows * 4 + @as(usize, size.rows) * 48 + 256;
+    const markers = term.seq.sync_begin.len + term.seq.sync_end.len; // bracket the frame once
+    return @as(usize, size.cols) * size.rows * 4 + @as(usize, size.rows) * 48 + 256 + markers;
 }
 
 fn writeAll(fd: std.posix.fd_t, bytes: []const u8) void {
@@ -1791,6 +1800,59 @@ test "renderFrame uses cursor positioning and never emits a raw newline" {
     const out = renderFrame(&buf, &a, 80, 24);
     try std.testing.expect(std.mem.indexOfScalar(u8, out, '\n') == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Installed") != null);
+}
+
+test "renderFrame emits no whole-screen clear: the frame repaints in place" {
+    // The flicker fix. Every region self-erases (moveClear) and covers its
+    // rectangle, so the whole-screen `\x1b[2J` — the blank window between clear
+    // and redraw — is gone; an in-place overwrite has no blank state to expose.
+    var a: App = .{};
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2J") == null);
+}
+
+test "renderFrame brackets every frame in synchronized output" {
+    // `?2026h` first and `?2026l` last so a supporting terminal buffers the whole
+    // repaint and swaps it atomically; correctness holds where 2026 is ignored.
+    var a: App = .{};
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 24);
+    try std.testing.expect(std.mem.startsWith(u8, out, "\x1b[?2026h"));
+    try std.testing.expect(std.mem.endsWith(u8, out, "\x1b[?2026l"));
+}
+
+test "renderFrame brackets even the too-small fallback frame" {
+    // The bracket is unconditional: the fallback path is still one atomic frame.
+    var a: App = .{};
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 2); // too few rows → fallback path
+    try std.testing.expect(std.mem.startsWith(u8, out, "\x1b[?2026h"));
+    try std.testing.expect(std.mem.endsWith(u8, out, "\x1b[?2026l"));
+}
+
+test "frameCap holds a worst-case full-height frame with no truncation" {
+    // A frame denser than any real one at this geometry: sync-bracketed, every
+    // row positioned+erased (moveClear), styled (role + reset), and packed with a
+    // 4-byte max-width glyph in every cell. Rendered into a buffer sized exactly
+    // `frameCap`, it must survive intact — the trailing marker proves the buffer
+    // never truncated (Frame.put silently stops at the buffer end).
+    const size: term.Size = .{ .cols = 200, .rows = 60 };
+    const buf = try std.testing.allocator.alloc(u8, frameCap(size));
+    defer std.testing.allocator.free(buf);
+    var f: tab.Frame = .{ .buf = buf };
+    f.put("\x1b[?2026h");
+    var r: u16 = 1;
+    while (r <= size.rows) : (r += 1) {
+        f.moveClear(r, 1);
+        f.put(color.roleCode(.accent));
+        var c: u16 = 0;
+        while (c < size.cols) : (c += 1) f.putContent("𝟶"); // U+1D7F6, 4 bytes
+        f.put(color.Style.reset.code());
+    }
+    f.put("\x1b[?2026l");
+    try std.testing.expect(std.mem.endsWith(u8, f.slice(), "\x1b[?2026l"));
+    try std.testing.expect(f.slice().len <= frameCap(size));
 }
 
 test "a recoverable banner renders in the footer in place of the help line" {
