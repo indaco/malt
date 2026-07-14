@@ -306,29 +306,6 @@ test "MultiProgress indeterminate render uses cursor-move math" {
     mp.finish();
 }
 
-test "Spinner non-TTY fallback writes a single info line" {
-    var s = progress_mod.Spinner.init("working...");
-    // Leave is_tty false (default on non-interactive CI) — exercises the
-    // non-TTY branch in start() and stop() short-circuit.
-    s.start();
-    s.stop();
-}
-
-test "Spinner stop is a no-op when inactive" {
-    var s = progress_mod.Spinner.init("idle");
-    s.stop(); // inactive → early return
-}
-
-test "Spinner drawFrame executes across frames" {
-    // Drive the spinner's background thread briefly, then stop it. This
-    // exercises spinLoop + drawFrame for at least one iteration.
-    var s = progress_mod.Spinner.init("spin");
-    s.is_tty = true;
-    s.start();
-    test_io.sleepNanos(std.Options.debug_io, 150 * std.time.ns_per_ms);
-    s.stop();
-}
-
 // --- output.zig coverage ---
 //
 // All output helpers write to stderr. We just need to call them so kcov

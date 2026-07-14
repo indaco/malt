@@ -125,16 +125,6 @@ fn nowNs() i128 {
     return std.Io.Clock.real.now(pkg_io).toNanoseconds();
 }
 
-/// Sleeps for `ns` nanoseconds against the package io. Returns false when
-/// a cancellation request reached the io subsystem before the sleep
-/// finished, so spin/poll callers can bail rather than swallow the signal.
-fn sleepNs(ns: u64) bool {
-    std.Io.sleep(pkg_io, std.Io.Duration.fromNanoseconds(@intCast(ns)), .awake) catch |e| switch (e) {
-        error.Canceled => return false,
-    };
-    return true;
-}
-
 /// Single-line plain-mode event: `<label>: <status>\n`. No colour, no
 /// glyph, no rate-limited redraws — one byte stream that survives `tee`
 /// and CI log scrapers without `term_sanitize` having to fight it.
@@ -153,8 +143,8 @@ fn writePlainLine(label: []const u8, status: []const u8) void {
     output.writeStderrAll(line);
 }
 
-/// Best-effort restore of terminal state mutated by `MultiProgress.init`
-/// or `Spinner.start`: re-enable autowrap, show the cursor, return to
+/// Best-effort restore of terminal state mutated by `MultiProgress.init`:
+/// re-enable autowrap, show the cursor, return to
 /// column 0. Safe to call from a panic / signal handler — the bytes are
 /// idempotent, and writes silently drop when stderr is unconfigured.
 /// When the TUI registered a raw terminal, its crash restore (alt-screen
@@ -743,166 +733,6 @@ pub const SingleBar = struct {
     }
 };
 
-/// Single-line animated spinner for blocking operations.
-///
-/// Unlike ProgressBar, the Spinner owns a background thread that redraws the
-/// current frame at 10 Hz while the caller does synchronous work. Typical use:
-///
-///     var s = Spinner.init("Materializing ansible to cellar...");
-///     s.start();
-///     // ... long synchronous work ...
-///     s.stop();
-///     output.success("ansible installed", .{});
-///
-/// On non-TTY or quiet mode, `start()` falls back to a single info-style
-/// line and `stop()` is a no-op, so callers don't need to special-case.
-pub const Spinner = struct {
-    message: []const u8,
-    stop_flag: std.atomic.Value(bool),
-    thread: ?std.Thread,
-    is_tty: bool,
-    active: bool,
-
-    pub fn init(message: []const u8) Spinner {
-        return .{
-            .message = message,
-            .stop_flag = std.atomic.Value(bool).init(false),
-            .thread = null,
-            .is_tty = supportsAnsi(),
-            .active = false,
-        };
-    }
-
-    pub fn start(self: *Spinner) void {
-        if (output.isQuiet()) return;
-
-        if (!self.is_tty) {
-            self.writeFallbackLine();
-            return;
-        }
-
-        writeStderrAll("\x1b[?25l"); // hide cursor
-        self.active = true;
-        self.thread = std.Thread.spawn(.{}, spinLoop, .{self}) catch blk: {
-            // Thread spawn failed: restore cursor and emit the static fallback line.
-            self.active = false;
-            writeStderrAll("\x1b[?25h");
-            self.writeFallbackLine();
-            break :blk null;
-        };
-    }
-
-    /// Assemble one dim info line ("<detail>pfx message<reset>\n") in a
-    /// stack buffer and write it once so EPIPE surfaces at a single site.
-    fn writeFallbackLine(self: *const Spinner) void {
-        var buf: [512]u8 = undefined;
-        var pos: usize = 0;
-        const use_color = color.isColorEnabled();
-
-        if (use_color) {
-            const detail = color.SemanticStyle.detail.code();
-            @memcpy(buf[pos .. pos + detail.len], detail);
-            pos += detail.len;
-        }
-        const pfx: []const u8 = if (color.isEmojiEnabled()) "  \xe2\x96\xb8 " else "  > ";
-        @memcpy(buf[pos .. pos + pfx.len], pfx);
-        pos += pfx.len;
-        const reset_len = if (use_color) color.Style.reset.code().len else 0;
-        const msg_len = @min(self.message.len, buf.len - pos - reset_len - 1);
-        @memcpy(buf[pos .. pos + msg_len], self.message[0..msg_len]);
-        pos += msg_len;
-        if (use_color) {
-            const reset_code = color.Style.reset.code();
-            @memcpy(buf[pos .. pos + reset_code.len], reset_code);
-            pos += reset_code.len;
-        }
-        buf[pos] = '\n';
-        pos += 1;
-
-        writeStderrAll(buf[0..pos]);
-    }
-
-    /// Signal the background thread to exit, join it, then clear the line
-    /// and restore the cursor. Safe to call even if `start()` took the
-    /// non-TTY fallback path.
-    pub fn stop(self: *Spinner) void {
-        if (!self.active) return;
-        self.stop_flag.store(true, .release);
-        if (self.thread) |t| {
-            t.join();
-            self.thread = null;
-        }
-        // \r → col 0, ESC[K → clear line, ESC[?25h → show cursor
-        writeStderrAll("\r\x1b[K\x1b[?25h");
-        self.active = false;
-    }
-
-    fn spinLoop(self: *Spinner) void {
-        var frame: u8 = 0;
-        while (!self.stop_flag.load(.acquire)) {
-            self.drawFrame(frame);
-            frame +%= 1;
-            if (!sleepNs(100 * std.time.ns_per_ms)) break;
-        }
-    }
-
-    fn drawFrame(self: *const Spinner, frame: u8) void {
-        var buf: [512]u8 = undefined;
-        var pos: usize = 0;
-
-        // \r to col 0
-        buf[pos] = '\r';
-        pos += 1;
-
-        // "  " indent matching output.info style
-        buf[pos] = ' ';
-        pos += 1;
-        buf[pos] = ' ';
-        pos += 1;
-
-        const use_color = color.isColorEnabled();
-
-        // Info-coloured spinner glyph.
-        if (use_color) {
-            const c = color.SemanticStyle.info.code();
-            @memcpy(buf[pos .. pos + c.len], c);
-            pos += c.len;
-        }
-        const g = spinner_frames.frames[frame % spinner_frames.count];
-        @memcpy(buf[pos .. pos + g.len], g);
-        pos += g.len;
-        if (use_color) {
-            const r = color.Style.reset.code();
-            @memcpy(buf[pos .. pos + r.len], r);
-            pos += r.len;
-        }
-        buf[pos] = ' ';
-        pos += 1;
-
-        // Dim message text
-        if (use_color) {
-            const d = color.SemanticStyle.detail.code();
-            @memcpy(buf[pos .. pos + d.len], d);
-            pos += d.len;
-        }
-        const msg_len = @min(self.message.len, buf.len - pos - 16);
-        @memcpy(buf[pos .. pos + msg_len], self.message[0..msg_len]);
-        pos += msg_len;
-        if (use_color) {
-            const r = color.Style.reset.code();
-            @memcpy(buf[pos .. pos + r.len], r);
-            pos += r.len;
-        }
-
-        // Erase to end of line
-        const erase = "\x1b[K";
-        @memcpy(buf[pos .. pos + erase.len], erase);
-        pos += erase.len;
-
-        writeStderrAll(buf[0..pos]);
-    }
-};
-
 test "MultiProgress accepts a line count beyond u8 without truncation" {
     output.setQuiet(true);
     defer output.setQuiet(false);
@@ -1145,65 +975,6 @@ test "restoreTerminal is callable without an active MultiProgress" {
     // re-entrant, and idempotent.
     restoreTerminal();
     restoreTerminal();
-}
-
-// Patches an inner Io's vtable so `sleep` reports cancellation on the
-// configured call index; non-canceled sleeps return immediately so the
-// 100 ms spinner cadence doesn't pad the test runtime.
-const CancelSleepProbe = struct {
-    var vtable: std.Io.VTable = undefined;
-    var sleep_calls: usize = 0;
-    var cancel_at: usize = 1;
-
-    fn wrap(inner: std.Io, cancel_at_call: usize) std.Io {
-        vtable = inner.vtable.*;
-        vtable.sleep = sleepMaybeCanceled;
-        sleep_calls = 0;
-        cancel_at = cancel_at_call;
-        return .{ .userdata = inner.userdata, .vtable = &vtable };
-    }
-
-    fn sleepMaybeCanceled(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
-        sleep_calls += 1;
-        if (sleep_calls >= cancel_at) return error.Canceled;
-    }
-};
-
-test "sleepNs returns true when the sleep completes normally" {
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const prev_io = pkg_io;
-    pkg_io = threaded.io();
-    defer pkg_io = prev_io;
-
-    try std.testing.expect(sleepNs(0));
-}
-
-test "sleepNs returns false when sleep is cancelled" {
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const prev_io = pkg_io;
-    pkg_io = CancelSleepProbe.wrap(threaded.io(), 1);
-    defer pkg_io = prev_io;
-
-    try std.testing.expect(!sleepNs(100));
-    try std.testing.expectEqual(@as(usize, 1), CancelSleepProbe.sleep_calls);
-}
-
-test "sleepNs propagates cancellation when called repeatedly" {
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const prev_io = pkg_io;
-    pkg_io = CancelSleepProbe.wrap(threaded.io(), 3);
-    defer pkg_io = prev_io;
-
-    // Two normal sleeps complete and report true; the third trips Canceled,
-    // pinning that the helper isn't latched after the first non-cancelled
-    // return and matches the spin-loop's per-tick break contract.
-    try std.testing.expect(sleepNs(0));
-    try std.testing.expect(sleepNs(0));
-    try std.testing.expect(!sleepNs(0));
-    try std.testing.expectEqual(@as(usize, 3), CancelSleepProbe.sleep_calls);
 }
 
 // `MALT_PROGRESS` contract: explicit env wins over CI auto-detect, an
