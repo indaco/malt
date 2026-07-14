@@ -464,6 +464,130 @@ test "summaryMessage picks the message that matches the active scope" {
     );
 }
 
+test "warmSnapshotFromRecompute writes the in-hand entries on a full-keg walk" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+
+    const formulas = [_]OutdatedEntry{
+        .{ .name = @constCast("wget"), .installed = @constCast("1.21.3"), .latest = @constCast("1.21.4") },
+    };
+    const casks = [_]OutdatedEntry{
+        .{ .name = @constCast("firefox"), .installed = @constCast("120.0"), .latest = @constCast("121.0") },
+    };
+
+    warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, .all, .{}, &formulas, &casks);
+
+    const read = readSnapshot(io, std.testing.allocator, cache_dir) orelse
+        return error.SnapshotUnreadable;
+    defer snap_mod.freeSnapshot(std.testing.allocator, read);
+    try std.testing.expectEqual(@as(usize, 1), read.formulas.len);
+    try std.testing.expectEqualStrings("wget", read.formulas[0].name);
+    try std.testing.expectEqualStrings("1.21.4", read.formulas[0].latest);
+    try std.testing.expectEqual(@as(usize, 1), read.casks.len);
+    try std.testing.expectEqualStrings("firefox", read.casks[0].name);
+}
+
+test "warmSnapshotFromRecompute writes no snapshot on a narrowed walk" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+
+    const formulas = [_]OutdatedEntry{
+        .{ .name = @constCast("wget"), .installed = @constCast("1.21.3"), .latest = @constCast("1.21.4") },
+    };
+
+    // A pinned/tap/formula-only walk is not the full keg set; warming from it
+    // would persist a partial snapshot the next reader would trust as complete.
+    warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, .pinned_only, .{ .pinned_only = true }, &formulas, &.{});
+
+    try std.testing.expect(readSnapshot(io, std.testing.allocator, cache_dir) == null);
+}
+
+test "warmSnapshotFromRecompute gate is closed for every narrowed walk, not just pinned" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+
+    const entries = [_]OutdatedEntry{
+        .{ .name = @constCast("wget"), .installed = @constCast("1.21.3"), .latest = @constCast("1.21.4") },
+    };
+
+    // Every scope that audited a subset must leave the snapshot alone. Covering
+    // the whole switch guards against a future filter flipping the gate open.
+    const narrowed = [_]struct { filter: KegFilter, scope: ScopeFlags }{
+        .{ .filter = .all, .scope = .{ .formula_only = true } },
+        .{ .filter = .all, .scope = .{ .cask_only = true } },
+        .{ .filter = .{ .by_tap = "user/repo" }, .scope = .{ .tap = "user/repo" } },
+    };
+    for (narrowed) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cache_dir = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+
+        warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, case.filter, case.scope, &entries, &entries);
+        try std.testing.expect(readSnapshot(io, std.testing.allocator, cache_dir) == null);
+    }
+}
+
+test "warmSnapshotFromRecompute writes an empty snapshot when a full walk finds nothing outdated" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+
+    // The zero-keg full recompute: an empty audit still writes, so a later
+    // cached read serves "nothing outdated" instead of a stale snapshot.
+    warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, .all, .{}, &.{}, &.{});
+
+    const read = readSnapshot(io, std.testing.allocator, cache_dir) orelse
+        return error.SnapshotUnreadable;
+    defer snap_mod.freeSnapshot(std.testing.allocator, read);
+    try std.testing.expectEqual(@as(usize, 0), read.formulas.len);
+    try std.testing.expectEqual(@as(usize, 0), read.casks.len);
+}
+
+test "warmSnapshotFromRecompute swallows a write failure without crashing" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+
+    // Point cache_dir at a regular file so writing `<dir>/outdated.json` hits
+    // ENOTDIR. The best-effort gate must absorb the failure so a snapshot
+    // hiccup never sinks the recompute the user already saw, and leave nothing
+    // half-written behind.
+    (try tmp.dir.createFile(io, "not_a_dir", .{})).close(io);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const file_as_dir = try std.fmt.bufPrint(&path_buf, "{s}/not_a_dir", .{base});
+    warmSnapshotFromRecompute(&ctx, std.testing.allocator, file_as_dir, .all, .{}, &.{}, &.{});
+    try std.testing.expect(readSnapshot(io, std.testing.allocator, file_as_dir) == null);
+}
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "outdated")) return;
 
@@ -726,15 +850,35 @@ fn recomputeAndEmit(
         .cask_rows = c_rows orelse &.{},
     });
 
-    // Refresh the snapshot only when we walked the full keg set; any
-    // narrowed recompute (pinned, tap, formula-only, cask-only) would
-    // mislead the next reader. Best-effort: a write failure shouldn't
-    // shadow the listing the user already saw.
+    // Warm the shared snapshot from the entries we just audited instead of
+    // re-auditing the same keg set inside `refreshSnapshot`.
+    warmSnapshotFromRecompute(ctx, allocator, cache_dir, filter, scope, f_entries orelse &.{}, c_entries orelse &.{});
+}
+
+fn warmSnapshotFromRecompute(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    cache_dir: []const u8,
+    filter: KegFilter,
+    scope: ScopeFlags,
+    f_entries: []const OutdatedEntry,
+    c_entries: []const OutdatedEntry,
+) void {
+    // Warm only from a full-keg walk. The snapshot's readers — the cached
+    // `mt outdated` serve path and the TUI Outdated tab — treat it as the
+    // whole outdated set: they filter it against the live DB but never
+    // re-expand it, so anything absent reads as "up to date". A narrowed
+    // recompute (pinned, tap, formula-only, cask-only) audits only a subset,
+    // so persisting it here would silently under-report every keg it skipped.
+    // `refresh_ok ⇒ full-keg audit` is the invariant that prevents that.
     const refresh_ok = switch (filter) {
         .all => !scope.cask_only and !scope.formula_only,
         .pinned_only, .by_tap => false,
     };
-    if (refresh_ok) {
-        refreshSnapshot(ctx, allocator, db, &api, cache_dir, workers_override) catch {};
-    }
+    if (!refresh_ok) return;
+
+    // Best-effort: a write failure must not shadow the listing the user
+    // already saw. The entries are the recompute's own audit, so this warms
+    // the snapshot without the second full audit `refreshSnapshot` would run.
+    writeSnapshotEntries(ctx, allocator, cache_dir, f_entries, c_entries) catch {};
 }
