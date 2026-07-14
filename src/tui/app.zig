@@ -170,6 +170,11 @@ fn routeToTab(allocator: std.mem.Allocator, mt_path: []const u8, a: *App, key: K
 }
 
 fn renderActive(a: *const App, f: *tab.Frame, rect: tab.Rect) void {
+    // Erase the whole content rectangle before the tab paints, so any
+    // variable-height region (a short list, an empty hint, a shrunk doctor band)
+    // can't ghost once the 2J is gone; the tab overwrites the rows it uses. Safe
+    // because the chrome resets SGR above, so the erase clears to default bg.
+    tab.blankRemainder(f, rect, 0);
     switch (a.active) {
         inline else => |t| moduleFor(t).render(&@field(a.states, @tagName(t)), f, rect),
     }
@@ -942,6 +947,29 @@ test "a data-free App renders the full chrome so the skeleton paint is real" {
     for ([_][]const u8{ "Search", "Installed", "Outdated", "Services", "Doctor" }) |title|
         try std.testing.expect(std.mem.indexOf(u8, out, title) != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "quit") != null); // footer help present
+}
+
+test "renderActive covers its whole content rectangle so a self-drawn tab leaves no ghost row" {
+    // The doctor draws its own band (variable-height rules) above a short list, so
+    // its painted height is well under a tall rectangle. Every unpainted row of the
+    // delegated rectangle must still be erased so nothing survives once the
+    // whole-screen clear is gone — the shell covers the rectangle at the dispatch
+    // seam, before the tab paints, so no tab (band, list, hint) can ghost.
+    const findings = [_]doctor.Row{
+        .{ .id = "stale_lock", .severity = .warn, .title = "Stale lock" },
+        .{ .id = "malt_prefix", .severity = .ok, .title = "MALT_PREFIX" },
+    };
+    var app: App = .{ .active = .doctor };
+    app.states.doctor.items = &findings; // band + 2-row list — far shorter than the rect
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    renderActive(&app, &f, .{ .row = 3, .col = 1, .width = 60, .height = 20 });
+    const out = f.slice();
+    // Rows 3..22 are the rectangle; the bottom rows neither the band nor the list
+    // reaches are still addressed and erased in place — the invariant the dropped 2J
+    // relies on. At HEAD the doctor emits no erase anywhere, so these are absent.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[22;1H\x1b[K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[18;1H\x1b[K") != null);
 }
 
 test "tab cycles and 1-5 jump to a tab" {
