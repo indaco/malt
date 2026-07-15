@@ -15,6 +15,7 @@
 const std = @import("std");
 const testing = std.testing;
 
+const bytes = @import("../ui/bytes.zig");
 const color = @import("../ui/color.zig");
 const cmd = @import("cmd.zig");
 const ctx = @import("ctx.zig");
@@ -220,21 +221,6 @@ fn severityLabel(sev: Severity) []const u8 {
         .err => "error",
         .info => "in progress",
     };
-}
-
-/// Byte formatter replicated from the CLI's `formatBytes` (the leaf rule forbids
-/// importing `cli/*`) so a reclaimable figure reads identically across
-/// `mt doctor` / `mt purge` and the TUI: same units, same 1024 step, same
-/// one-decimal shape. Pinned to that shape by a boundary test.
-fn humanBytes(bytes: u64, buf: []u8) []const u8 {
-    const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB" };
-    var value: f64 = @floatFromInt(bytes);
-    var unit: usize = 0;
-    while (value >= 1024.0 and unit + 1 < units.len) {
-        value /= 1024.0;
-        unit += 1;
-    }
-    return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ value, units[unit] }) catch "?";
 }
 
 // ─── health band ─────────────────────────────────────────────────────
@@ -462,7 +448,7 @@ fn buildReclaimHeader(lb: *tab.Frame, rc: Reclaim) void {
     lb.put(color.roleCode(.muted));
     lb.put("Reclaimable: ");
     var bbuf: [24]u8 = undefined;
-    lb.put(humanBytes(rc.cask_bytes +| rc.tap_cache_bytes, &bbuf));
+    lb.put(bytes.humanize(rc.cask_bytes +| rc.tap_cache_bytes, &bbuf));
     lb.put(color.Style.reset.code());
 }
 
@@ -471,12 +457,12 @@ fn buildReclaimHeader(lb: *tab.Frame, rc: Reclaim) void {
 /// hint lives on its own sub-line (`buildReclaimHint`), so the bullet reads as the
 /// figure and the hint as the action. `label` carries any suffix (the cask's
 /// retained-versions note).
-fn buildReclaimBullet(lb: *tab.Frame, bytes: u64, label: []const u8) void {
+fn buildReclaimBullet(lb: *tab.Frame, bytes_val: u64, label: []const u8) void {
     lb.put(color.roleCode(.muted));
     lb.put(infoGlyph());
     lb.put(" ");
     var bbuf: [24]u8 = undefined;
-    lb.put(humanBytes(bytes, &bbuf));
+    lb.put(bytes.humanize(bytes_val, &bbuf));
     lb.put(" ");
     lb.put(label);
     lb.put(color.Style.reset.code());
@@ -1354,16 +1340,6 @@ test "the band paints above the findings list" {
 
 // ─── reclaimable advisory ─────────────────────────────────────────────
 
-test "humanBytes matches the CLI's formatBytes shape at the unit boundaries" {
-    var buf: [16]u8 = undefined;
-    try testing.expectEqualStrings("0.0 B", humanBytes(0, &buf));
-    try testing.expectEqualStrings("1023.0 B", humanBytes(1023, &buf));
-    try testing.expectEqualStrings("1.0 KB", humanBytes(1024, &buf));
-    try testing.expectEqualStrings("1.5 KB", humanBytes(1536, &buf));
-    try testing.expectEqualStrings("1.0 MB", humanBytes(1024 * 1024, &buf));
-    try testing.expectEqualStrings("1.0 GB", humanBytes(1024 * 1024 * 1024, &buf));
-}
-
 test "reclaimable breaks into a header total plus one labelled bullet per source" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
@@ -1534,11 +1510,11 @@ test "a loaded doctor read repoints findings + reclaimable stats; a cleared read
     var storage: Storage = .{};
     var shared: ctx.SharedModel = .{};
     defer storage.deinit(allocator);
-    const bytes =
+    const json =
         \\{"checks":[{"id":"a","severity":"warn","title":"A","fixable":true,"fix_class":"stale_lock"}],
         \\"cask_history":{"retained_versions":3,"bytes":4096},"tap_cache":{"bytes":512}}
     ;
-    const parsed = try doctor_json.parse(allocator, bytes);
+    const parsed = try doctor_json.parse(allocator, json);
     _ = update(allocator, "/bin/mt", &st, &storage, &shared, .{ .loaded = .{ .doctor = parsed } });
     try testing.expectEqual(@as(usize, 1), st.items.len);
     // The reclaimable figures ride through to the tab so the band can show them.
