@@ -12,6 +12,8 @@ const testing = std.testing;
 const malt = @import("malt");
 const list_json = malt.tui_json_list;
 const info_json = malt.tui_json_info;
+const installed = malt.tui_tab_installed;
+const tab = malt.tui_tab;
 const test_io = @import("test_io");
 
 fn readFixture(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
@@ -63,4 +65,26 @@ test "info parser consumes the recorded mt info <pkg> --json fixture" {
     try testing.expectEqual(@as(usize, 7), parsed.info.dependencies.len);
     try testing.expectEqualStrings("brotli", parsed.info.dependencies[0]);
     try testing.expectEqualStrings("zstd", parsed.info.dependencies[6]);
+}
+
+test "hitTest maps clicks onto the rows parsed from the mt list fixture" {
+    const bytes = try readFixture(testing.allocator, "tui_list.json");
+    defer testing.allocator.free(bytes);
+
+    var parsed = try list_json.parse(testing.allocator, bytes);
+    defer parsed.deinit();
+
+    // Heading at row 1, so the four fixture rows sit at rows 2..5.
+    const s = installed.State{ .items = parsed.items };
+    const rect = tab.Rect{ .row = 1, .col = 1, .width = 80, .height = 10 };
+
+    // A click resolves to the fixture row painted there — index cross-checked by name.
+    const second = installed.hitTest(&s, rect, 3, 1).?;
+    try testing.expectEqual(@as(usize, 1), second.index);
+    try testing.expectEqualStrings("curl", parsed.items[second.index].name);
+    try testing.expect(second.open);
+
+    try testing.expectEqual(@as(usize, 3), installed.hitTest(&s, rect, 5, 1).?.index); // last row
+    try testing.expect(installed.hitTest(&s, rect, 6, 1) == null); // past the four rows
+    try testing.expect(installed.hitTest(&s, rect, 1, 1) == null); // the heading row
 }

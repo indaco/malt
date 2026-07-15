@@ -119,6 +119,14 @@ pub fn blankRemainder(f: *Frame, rect: Rect, painted: u16) void {
     while (i < rect.height) : (i += 1) f.moveClear(rect.row + i, rect.col);
 }
 
+/// Where a click landed: the list `index` it maps to, and whether that row has a
+/// detail pane worth opening (`open`). The result type of the tab contract's
+/// **optional** `hitTest(s, rect, click_row, click_col) ?Hit` decl. Optional
+/// because only tabs with a clickable list implement it — the shell gates the
+/// call on `@hasDecl`, so Doctor/Services/Outdated carry neither the method nor a
+/// dead arm, and `verify` never requires it.
+pub const Hit = struct { index: usize, open: bool };
+
 /// A multi-select row checkbox: unselected, selected, or blocked (a row that
 /// can't be selected — pinned in Outdated, already-installed in Search).
 pub const Check = enum { off, on, blocked };
@@ -215,6 +223,10 @@ pub fn verify(comptime M: type) void {
     // `step`/`update` are the Elm effect seam: they return a `cmd.Cmd` and own the
     // tab's parse storage, so a conforming tab must expose one — reported here.
     if (!@hasDecl(M, "Storage")) @compileError(@typeName(M) ++ ": tab must expose `pub const Storage`");
+    // `hitTest(s, rect, click_row, click_col) ?Hit` is an OPTIONAL contract decl:
+    // only tabs with a clickable list expose it, and the shell gates the call on
+    // `@hasDecl`. Deliberately not required here, so a tab with no detail pane
+    // carries no dead arm.
 }
 
 // ─── tests ───────────────────────────────────────────────────────────
