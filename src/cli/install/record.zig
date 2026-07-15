@@ -129,22 +129,31 @@ pub const RecordOpts = struct {
     in_transaction: bool = false,
 };
 
-/// Record a keg in the database. Returns the keg_id.
-/// Errors propagate as `sqlite.SqliteError` so callers can route the
-/// underlying cause through `db.errMsg()` instead of seeing a flat
-/// `RecordFailed` — particularly load-bearing for the upgrade path
-/// where a UNIQUE collision must surface to the user.
-///
-/// `bin_isolated` is the user's per-keg "don't link bin/sbin into
-/// prefix/bin" intent; it round-trips so a later upgrade reads back
-/// the same policy without the user re-passing a flag.
-pub fn recordKeg(
-    db: *sqlite.Database,
-    formula: *const formula_mod.Formula,
+/// The flat write surface for the `kegs` INSERT — exactly the nine
+/// columns the SQL binds, nothing more. Callers holding a `Formula` go
+/// through the `recordKeg` adapter; the tap/local path (which holds a
+/// `ResolvedRubyFormula`, not a `Formula`) builds this directly instead
+/// of synthesizing a fake `Formula`.
+pub const KegFields = struct {
+    name: []const u8,
+    full_name: []const u8,
+    version: []const u8,
+    revision: i64,
+    tap: []const u8,
     store_sha256: []const u8,
     cellar_path: []const u8,
     install_reason: []const u8,
     bin_isolated: bool,
+};
+
+/// The one `kegs` INSERT for the install path. Returns the keg_id.
+/// Errors propagate as `sqlite.SqliteError` so callers can route the
+/// underlying cause through `db.errMsg()` instead of seeing a flat
+/// `RecordFailed` — particularly load-bearing for the upgrade path
+/// where a UNIQUE collision must surface to the user.
+pub fn recordKegFields(
+    db: *sqlite.Database,
+    f: KegFields,
     opts: RecordOpts,
 ) sqlite.SqliteError!i64 {
     if (!opts.in_transaction) {
@@ -166,15 +175,15 @@ pub fn recordKeg(
     var stmt = try db.prepare(sql);
     defer stmt.finalize();
 
-    try stmt.bindText(1, formula.name);
-    try stmt.bindText(2, formula.full_name);
-    try stmt.bindText(3, formula.version);
-    try stmt.bindInt(4, formula.revision);
-    try stmt.bindText(5, formula.tap);
-    try stmt.bindText(6, store_sha256);
-    try stmt.bindText(7, cellar_path);
-    try stmt.bindText(8, install_reason);
-    try stmt.bindInt(9, if (bin_isolated) 1 else 0);
+    try stmt.bindText(1, f.name);
+    try stmt.bindText(2, f.full_name);
+    try stmt.bindText(3, f.version);
+    try stmt.bindInt(4, f.revision);
+    try stmt.bindText(5, f.tap);
+    try stmt.bindText(6, f.store_sha256);
+    try stmt.bindText(7, f.cellar_path);
+    try stmt.bindText(8, f.install_reason);
+    try stmt.bindInt(9, if (f.bin_isolated) 1 else 0);
 
     _ = try stmt.step();
 
@@ -185,6 +194,34 @@ pub fn recordKeg(
     }
 
     return keg_id;
+}
+
+/// Thin `Formula`-shaped adapter over `recordKegFields`, kept so the
+/// install/upgrade callers don't move.
+///
+/// `bin_isolated` is the user's per-keg "don't link bin/sbin into
+/// prefix/bin" intent; it round-trips so a later upgrade reads back
+/// the same policy without the user re-passing a flag.
+pub fn recordKeg(
+    db: *sqlite.Database,
+    formula: *const formula_mod.Formula,
+    store_sha256: []const u8,
+    cellar_path: []const u8,
+    install_reason: []const u8,
+    bin_isolated: bool,
+    opts: RecordOpts,
+) sqlite.SqliteError!i64 {
+    return recordKegFields(db, .{
+        .name = formula.name,
+        .full_name = formula.full_name,
+        .version = formula.version,
+        .revision = formula.revision,
+        .tap = formula.tap,
+        .store_sha256 = store_sha256,
+        .cellar_path = cellar_path,
+        .install_reason = install_reason,
+        .bin_isolated = bin_isolated,
+    }, opts);
 }
 
 /// Delete a keg record (rollback / replaced-old-row helper). Wipes
@@ -283,4 +320,150 @@ pub fn ensureDirs(ctx: *const AppCtx, prefix: []const u8) !void {
             else => continue,
         };
     }
+}
+
+const testing = std.testing;
+const schema = @import("../../db/schema.zig");
+
+fn openTestDb() !sqlite.Database {
+    var db = try sqlite.Database.open(":memory:");
+    errdefer db.close();
+    try schema.initSchema(&db);
+    return db;
+}
+
+fn readIntCol(db: *sqlite.Database, sql: [:0]const u8, name: []const u8) !i64 {
+    var stmt = try db.prepare(sql);
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    if (!try stmt.step()) return error.NoRow;
+    return stmt.columnInt(0);
+}
+
+fn readTextCol(db: *sqlite.Database, sql: [:0]const u8, name: []const u8, buf: []u8) ![]const u8 {
+    var stmt = try db.prepare(sql);
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    if (!try stmt.step()) return error.NoRow;
+    const raw = stmt.columnText(0) orelse return error.NoText;
+    const slice = std.mem.sliceTo(raw, 0);
+    @memcpy(buf[0..slice.len], slice);
+    return buf[0..slice.len];
+}
+
+test "recordKegFields round-trips revision and bin_isolated as zero for tap/local" {
+    var db = try openTestDb();
+    defer db.close();
+
+    _ = try recordKegFields(&db, .{
+        .name = "roundtrip",
+        .full_name = "acme/roundtrip",
+        .version = "1.0.0",
+        .revision = 0,
+        .tap = "acme/tap",
+        .store_sha256 = "deadbeef",
+        .cellar_path = "/opt/malt/Cellar/roundtrip/1.0.0",
+        .install_reason = "direct",
+        .bin_isolated = false,
+    }, .{});
+
+    try testing.expectEqual(@as(i64, 0), try readIntCol(&db, "SELECT revision FROM kegs WHERE name = ?1;", "roundtrip"));
+    try testing.expectEqual(@as(i64, 0), try readIntCol(&db, "SELECT bin_isolated FROM kegs WHERE name = ?1;", "roundtrip"));
+}
+
+test "recordKeg adapter persists the formula's fields identically" {
+    var db = try openTestDb();
+    defer db.close();
+
+    const json =
+        \\{"name":"adapter","full_name":"acme/adapter","tap":"acme/tap","revision":3,"versions":{"stable":"2.1.0"}}
+    ;
+    var formula = try formula_mod.parseFormula(testing.allocator, json);
+    defer formula.deinit();
+
+    _ = try recordKeg(&db, &formula, "shashasha", "/opt/malt/Cellar/adapter/2.1.0", "direct", true, .{});
+
+    try testing.expectEqual(@as(i64, 3), try readIntCol(&db, "SELECT revision FROM kegs WHERE name = ?1;", "adapter"));
+    try testing.expectEqual(@as(i64, 1), try readIntCol(&db, "SELECT bin_isolated FROM kegs WHERE name = ?1;", "adapter"));
+
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("acme/adapter", try readTextCol(&db, "SELECT full_name FROM kegs WHERE name = ?1;", "adapter", &buf));
+    try testing.expectEqualStrings("2.1.0", try readTextCol(&db, "SELECT version FROM kegs WHERE name = ?1;", "adapter", &buf));
+    try testing.expectEqualStrings("acme/tap", try readTextCol(&db, "SELECT tap FROM kegs WHERE name = ?1;", "adapter", &buf));
+    try testing.expectEqualStrings("shashasha", try readTextCol(&db, "SELECT store_sha256 FROM kegs WHERE name = ?1;", "adapter", &buf));
+}
+
+test "recordKegFields opens its own transaction under default opts" {
+    var db = try openTestDb();
+    defer db.close();
+
+    // No caller transaction: the fn must BEGIN/COMMIT itself so the row lands.
+    _ = try recordKegFields(&db, .{
+        .name = "owntxn",
+        .full_name = "acme/owntxn",
+        .version = "1.0.0",
+        .revision = 0,
+        .tap = "acme/tap",
+        .store_sha256 = "sha",
+        .cellar_path = "/c",
+        .install_reason = "direct",
+        .bin_isolated = false,
+    }, .{});
+
+    // Committed → a fresh BEGIN succeeds (no lingering open transaction).
+    try db.beginTransaction();
+    try db.commit();
+    try testing.expectEqual(@as(i64, 0), try readIntCol(&db, "SELECT revision FROM kegs WHERE name = ?1;", "owntxn"));
+}
+
+test "recordKegFields leaves the caller's transaction intact when in_transaction" {
+    var db = try openTestDb();
+    defer db.close();
+
+    try db.beginTransaction();
+    _ = try recordKegFields(&db, .{
+        .name = "callertxn",
+        .full_name = "acme/callertxn",
+        .version = "1.0.0",
+        .revision = 0,
+        .tap = "acme/tap",
+        .store_sha256 = "sha",
+        .cellar_path = "/c",
+        .install_reason = "direct",
+        .bin_isolated = false,
+    }, .{ .in_transaction = true });
+    // The fn must not have COMMITted: the caller's txn is still open, so this
+    // commit succeeds. A premature inner commit would make this error.
+    try db.commit();
+
+    try testing.expectEqual(@as(i64, 0), try readIntCol(&db, "SELECT revision FROM kegs WHERE name = ?1;", "callertxn"));
+}
+
+test "recordKegFields inherits an existing pin via COALESCE-MAX on force-reinstall" {
+    var db = try openTestDb();
+    defer db.close();
+
+    const fields = KegFields{
+        .name = "pinned-pkg",
+        .full_name = "acme/pinned-pkg",
+        .version = "1.0.0",
+        .revision = 0,
+        .tap = "acme/tap",
+        .store_sha256 = "sha",
+        .cellar_path = "/c",
+        .install_reason = "direct",
+        .bin_isolated = false,
+    };
+    _ = try recordKegFields(&db, fields, .{});
+
+    // User pins the keg, then a force-reinstall re-records the same row.
+    {
+        var stmt = try db.prepare("UPDATE kegs SET pinned = 1 WHERE name = ?1;");
+        defer stmt.finalize();
+        try stmt.bindText(1, "pinned-pkg");
+        _ = try stmt.step();
+    }
+    _ = try recordKegFields(&db, fields, .{});
+
+    try testing.expectEqual(@as(i64, 1), try readIntCol(&db, "SELECT pinned FROM kegs WHERE name = ?1;", "pinned-pkg"));
 }
