@@ -325,7 +325,7 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
             f.put(tab_bar.render(&tb, app.active, tabTitles(), cols));
             f.put(color.Style.reset.code()); // a truncated active title must not bleed bold downward
 
-            f.moveTo(r.filter.row, 1);
+            f.moveClear(r.filter.row, 1); // variable-width chrome: self-erase or a shrinking query ghosts its caret
             var fb: [filter_input.max_len + 8]u8 = undefined;
             f.put(filter_input.render(&fb, activeFilterLabel(app), activeFilterText(app), app.editing, cols));
 
@@ -1218,6 +1218,21 @@ test "renderFrame shows the committed filter and the editing footer" {
     const out = renderFrame(&buf, &a, 80, 24);
     try std.testing.expect(std.mem.indexOf(u8, out, "filter: jq_") != null); // filter line with caret
     try std.testing.expect(std.mem.indexOf(u8, out, "accept") != null); // editing footer
+}
+
+test "renderFrame self-erases the filter row so a shrinking query drops its caret" {
+    // The filter line is variable-width shared chrome; once the 2J is gone it
+    // must own its line from col 1 rightward (moveClear), or backspacing leaves
+    // last frame's caret ghosting one column right. render emits no style, so
+    // the row's `\x1b[K` sits immediately before the label.
+    var a: App = .{};
+    stepA(&a, ch('2'));
+    stepA(&a, ch('/'));
+    stepA(&a, ch('j'));
+    stepA(&a, ch('q'));
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[Kfilter: jq") != null);
 }
 
 test "the Search tab labels its input box as a query, not a filter" {
