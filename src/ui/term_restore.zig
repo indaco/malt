@@ -10,10 +10,11 @@
 const std = @import("std");
 
 /// Everything a crashing raw-mode process must emit: leave the alt screen,
-/// show the cursor, re-enable autowrap, return to column 0. Emitting
-/// `?1049l` while not on the alt buffer is a no-op on xterm-family
-/// terminals, so the crash path never tracks alt-screen state separately.
-pub const restore_seq = "\x1b[?1049l\x1b[?25h\x1b[?7h\r";
+/// show the cursor, re-enable autowrap, return to column 0, and stop mouse
+/// reporting so a dead shell isn't buried in report bytes. Emitting these
+/// while the mode was never entered is a no-op on xterm-family terminals, so
+/// the crash path never tracks alt-screen or mouse state separately.
+pub const restore_seq = "\x1b[?1049l\x1b[?25h\x1b[?7h\r\x1b[?1000l\x1b[?1006l";
 
 // The flag flips `.release` only after fd/termios are in place, so a crash
 // path's `.acquire` load never observes a half-written registration.
@@ -77,6 +78,13 @@ pub fn installCrashSignals() void {
 // pins that HUP and QUIT get the same restore-then-die wiring. SA_RESETHAND
 // is not asserted here — Darwin does not report it back through a sigaction
 // query — its effect is covered by the death-by-signal test below.
+test "restore_seq disables mouse tracking so a dead shell stops receiving reports" {
+    try std.testing.expectEqualStrings(
+        "\x1b[?1049l\x1b[?25h\x1b[?7h\r\x1b[?1000l\x1b[?1006l",
+        restore_seq,
+    );
+}
+
 test "installCrashSignals wires TERM/HUP/QUIT to the restore handler" {
     var prev: [crash_signals.len]std.posix.Sigaction = undefined;
     for (crash_signals, 0..) |sig, i| std.posix.sigaction(sig, null, &prev[i]);
