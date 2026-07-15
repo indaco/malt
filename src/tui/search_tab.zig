@@ -471,11 +471,11 @@ fn searchArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const Stat
 /// The committed query's `mt search --json` read, or `Cmd.none` for an empty query.
 fn searchReadCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State) cmd.Cmd {
     const argv = (searchArgv(allocator, mt_path, s) catch return .none) orelse return .none;
-    return .{ .read = .{ .argv = argv, .mode = .blocking, .parse = cmd.parserFor(.search, search_json.parse), .tag = .search, .fail_op = search_fail_op } };
+    return .{ .read = .{ .argv = argv, .mode = .polled, .parse = cmd.parserFor(.search, search_json.parse), .tag = .search, .fail_op = search_fail_op } };
 }
 
 /// The shell commits the filter-as-query on Enter and asks for this. Flips `phase`
-/// to `searching` before the blocking read (the shell repaints first); the fold
+/// to `searching` before the polled read (the shell repaints first); the fold
 /// resets it to `loaded`, and a failed read resets it via `update` on `.failed`.
 pub fn searchCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *State) cmd.Cmd {
     const c = searchReadCmd(allocator, mt_path, s);
@@ -489,7 +489,7 @@ pub fn searchCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *State) c
 fn openSearchInfoCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State) cmd.Cmd {
     const m = selectedMatch(s) orelse return .none; // empty list: no-op
     const argv = cmd.jsonArgv(allocator, mt_path, &.{ "info", m.name }) catch return .none;
-    return .{ .read = .{ .argv = argv, .mode = .blocking, .parse = cmd.parserFor(.info, info_json.parse), .tag = .search, .fail_op = info_fail_op } };
+    return .{ .read = .{ .argv = argv, .mode = .polled, .parse = cmd.parserFor(.info, info_json.parse), .tag = .search, .fail_op = info_fail_op } };
 }
 
 /// The basket's `mt install …` mutation, or `Cmd.none` when nothing installable is
@@ -1166,6 +1166,31 @@ test "searchCmd on an empty query is a no-op and leaves the phase alone" {
     var st: State = .{ .phase = .idle };
     try testing.expect(searchCmd(testing.allocator, "/bin/mt", &st) == .none);
     try testing.expectEqual(Phase.idle, st.phase);
+}
+
+test "searchReadCmd and openSearchInfoCmd build polled reads so the searching frame reflows on resize" {
+    const alloc = testing.allocator;
+
+    // The committed-query search runs polled, off the frozen blocking path, so a
+    // SIGWINCH reflows the "searching…" frame on the next tick instead of after the read.
+    var s: State = .{};
+    s.chrome.filter.push("fire");
+    const search_eff = searchReadCmd(alloc, "/opt/homebrew/bin/mt", &s);
+    defer alloc.free(search_eff.read.argv);
+    try testing.expectEqual(cmd.Cmd.Mode.polled, search_eff.read.mode);
+    try testing.expectEqual(cmd.MsgTag.search, search_eff.read.tag);
+
+    // The info read for the selected hit inherits the same polled path (same tag).
+    var storage: Storage = .{};
+    defer storage.deinit(alloc);
+    storage.search = try search_json.parse(alloc,
+        \\{"results":[{"name":"bat","type":"formula","installed":false}]}
+    );
+    var info_state: State = .{ .items = storage.search.?.items };
+    const info_eff = openSearchInfoCmd(alloc, "/opt/homebrew/bin/mt", &info_state);
+    defer alloc.free(info_eff.read.argv);
+    try testing.expectEqual(cmd.Cmd.Mode.polled, info_eff.read.mode);
+    try testing.expectEqual(cmd.MsgTag.search, info_eff.read.tag);
 }
 
 test "searchArgv builds `mt search <query> --json` for the committed query" {
