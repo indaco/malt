@@ -49,6 +49,19 @@ pub fn visible(items: []const []const u8, view: View, height: u16) []const []con
     return items[start .. start + want];
 }
 
+/// Which list index a click at 1-based screen row `click_row` lands on, given a
+/// list occupying `height` rows from `list_top` (1-based) at `view.offset` over
+/// `len` rows. `null` when the click is above/below the list or past the last
+/// populated row. Pure — the single source of truth for click→index mapping.
+pub fn rowAt(view: View, list_top: u16, height: u16, len: usize, click_row: u16) ?usize {
+    if (height == 0 or len == 0) return null;
+    // Saturating adds keep the leaf panic-free on absurd geometry/offsets: any
+    // overflow saturates past the guards and resolves to null, never traps.
+    if (click_row < list_top or click_row >= list_top +| height) return null;
+    const idx = view.offset +| (click_row - list_top);
+    return if (idx < len) idx else null; // clicked a blank row past the populated tail
+}
+
 /// The longest prefix of `row` that fits in `max_cols` display columns, cut only
 /// on a rune or escape-sequence boundary. Returns a sub-slice of `row`. Runes
 /// are one column each (grapheme-naive, matching `ui/term_sanitize`); ANSI
@@ -152,4 +165,49 @@ test "runeLen clamps a multibyte lead to the bytes that remain" {
     try std.testing.expectEqual(@as(usize, 2), runeLen("\xc3\xa9", 0));
     try std.testing.expectEqual(@as(usize, 1), runeLen("\xc3", 0)); // promised 2, only 1 left
     try std.testing.expectEqual(@as(usize, 1), runeLen("\xff", 0)); // invalid lead
+}
+
+test "rowAt maps unscrolled rows to their indices" {
+    const v: View = .{ .offset = 0, .selected = 0 };
+    try std.testing.expectEqual(@as(?usize, 0), rowAt(v, 1, 5, 20, 1)); // top row → index 0
+    try std.testing.expectEqual(@as(?usize, 4), rowAt(v, 1, 5, 20, 5)); // last visible → height-1
+}
+
+test "rowAt adds the scroll offset" {
+    const v: View = .{ .offset = 5, .selected = 5 };
+    try std.testing.expectEqual(@as(?usize, 5), rowAt(v, 1, 5, 20, 1)); // top row → offset
+}
+
+test "rowAt rejects clicks outside the list band" {
+    const v: View = .{ .offset = 0, .selected = 0 };
+    try std.testing.expectEqual(@as(?usize, null), rowAt(v, 3, 5, 20, 2)); // above list_top
+    try std.testing.expectEqual(@as(?usize, null), rowAt(v, 1, 5, 20, 6)); // at list_top+height
+}
+
+test "rowAt rejects an empty list and a zero-height viewport" {
+    const v: View = .{ .offset = 0, .selected = 0 };
+    try std.testing.expectEqual(@as(?usize, null), rowAt(v, 1, 5, 0, 1)); // len == 0
+    try std.testing.expectEqual(@as(?usize, null), rowAt(v, 1, 0, 20, 1)); // height == 0
+}
+
+test "rowAt rejects a blank row past the populated tail" {
+    const v: View = .{ .offset = 0, .selected = 0 };
+    // len 3, viewport 5: rows 4 and 5 are blank tail.
+    try std.testing.expectEqual(@as(?usize, null), rowAt(v, 1, 5, 3, 4));
+}
+
+test "rowAt lands the first and last populated rows exactly" {
+    // Heading offset (list_top = 3), scrolled offset 2, partially-filled tail (len 4).
+    const v: View = .{ .offset = 2, .selected = 2 };
+    try std.testing.expectEqual(@as(?usize, 2), rowAt(v, 3, 5, 4, 3)); // first populated → offset
+    try std.testing.expectEqual(@as(?usize, 3), rowAt(v, 3, 5, 4, 4)); // last populated (index 3)
+    try std.testing.expectEqual(@as(?usize, null), rowAt(v, 3, 5, 4, 5)); // one past → blank
+}
+
+test "rowAt saturates extreme geometry and offset instead of panicking" {
+    // list_top + height (u16) and offset + delta (usize) would overflow with plain
+    // `+`; saturating adds must resolve past the guards to null, never trap.
+    const max_usize = std.math.maxInt(usize);
+    try std.testing.expectEqual(@as(?usize, null), rowAt(.{}, 65535, 1, 20, 65535)); // u16 add
+    try std.testing.expectEqual(@as(?usize, null), rowAt(.{ .offset = max_usize }, 1, 5, 20, 2)); // usize add
 }
