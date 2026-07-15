@@ -392,3 +392,22 @@ test "execute logs with no args returns InvalidArgs" {
 // protocol. The happy path (finding and tailing the log file) is covered by
 // the supervisor_pure_test suite via a direct tailLog call; here we limit the
 // CLI-level coverage to the error branches that never reach stdout.
+
+test "writeServicesJson: an errored row serialises as state \"errored\" without a schema bump" {
+    // Contract pin: `errored` reaches the JSON surface as a plain state value,
+    // not a new field, so `schema_version` stays 1. State is sourced from the
+    // enum so the byte contract tracks any rename of the variant.
+    const errored = malt.services_supervisor.runtimeStateName(.errored);
+    const rows = [_]services_cli.JsonRow{
+        .{ .name = "redis", .state = errored, .auto_start = true, .keg_name = "redis", .schedule = "" },
+    };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try services_cli.writeServicesJson(&aw.writer, &rows);
+    try testing.expectEqualStrings(
+        "{\"schema_version\":1,\"services\":[" ++
+            "{\"name\":\"redis\",\"state\":\"errored\",\"auto_start\":true,\"keg_name\":\"redis\",\"schedule\":\"\"}" ++
+            "]}\n",
+        aw.written(),
+    );
+}
