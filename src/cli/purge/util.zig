@@ -4,6 +4,7 @@
 const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
 const output = @import("../../ui/output.zig");
+const bytes = @import("../../ui/bytes.zig");
 const args_mod = @import("args.zig");
 
 pub const Error = args_mod.Error;
@@ -22,15 +23,10 @@ pub const TierResult = struct {
     error_kind: ?[]const u8 = null,
 };
 
-pub fn formatBytes(bytes: u64, buf: []u8) []const u8 {
-    const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB" };
-    var value: f64 = @floatFromInt(bytes);
-    var unit: usize = 0;
-    while (value >= 1024.0 and unit + 1 < units.len) {
-        value /= 1024.0;
-        unit += 1;
-    }
-    return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ value, units[unit] }) catch "?";
+/// Canonical CLI name, preserved as a one-line delegator onto the shared
+/// ui/ humanizer; the `purge.zig` re-export stays valid.
+pub fn formatBytes(bytes_val: u64, buf: []u8) []const u8 {
+    return bytes.humanize(bytes_val, buf);
 }
 
 pub fn pathSize(io: std.Io, allocator: std.mem.Allocator, path: []const u8) u64 {
@@ -188,11 +184,9 @@ test "openDbTri opens a freshly created sqlite file" {
     }
 }
 
-test "formatBytes scales B/KB/MB and caps at TB" {
+test "formatBytes delegates to the shared humanizer" {
+    // Thin smoke check: the full boundary matrix lives in ui/bytes.zig; this
+    // keeps the public CLI name covered at its own site after delegation.
     var buf: [32]u8 = undefined;
-    try testing.expectEqualStrings("0.0 B", formatBytes(0, &buf));
-    try testing.expectEqualStrings("1.0 KB", formatBytes(1024, &buf));
-    try testing.expectEqualStrings("1.0 MB", formatBytes(1024 * 1024, &buf));
-    const huge: u64 = 5 * 1024 * 1024 * 1024 * 1024;
-    try testing.expect(std.mem.endsWith(u8, formatBytes(huge, &buf), "TB"));
+    try testing.expectEqualStrings("1.5 KB", formatBytes(1536, &buf));
 }
