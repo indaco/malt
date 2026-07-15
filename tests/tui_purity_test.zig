@@ -99,7 +99,8 @@ fn importAllowed(importer_dir: []const u8, path: []const u8) bool {
         std.mem.eql(u8, resolved, "src/ui/term_sanitize.zig") or
         std.mem.eql(u8, resolved, "src/ui/termsize.zig") or
         std.mem.eql(u8, resolved, "src/ui/term_restore.zig") or
-        std.mem.eql(u8, resolved, "src/ui/spinner_frames.zig");
+        std.mem.eql(u8, resolved, "src/ui/spinner_frames.zig") or
+        std.mem.eql(u8, resolved, "src/ui/bytes.zig");
 }
 
 /// Normalise `rel` against `base` into a repo-relative POSIX path, collapsing
@@ -158,6 +159,11 @@ test "importAllowed permits the shared term_restore leaf" {
 test "importAllowed permits the shared spinner_frames leaf" {
     try testing.expect(importAllowed("src/tui", "../ui/spinner_frames.zig"));
     try testing.expect(importAllowed("src/tui/json", "../../ui/spinner_frames.zig"));
+}
+
+test "importAllowed permits the shared bytes humanizer leaf" {
+    try testing.expect(importAllowed("src/tui", "../ui/bytes.zig"));
+    try testing.expect(importAllowed("src/tui/json", "../../ui/bytes.zig"));
 }
 
 test "importAllowed rejects an outward reach from any depth" {
