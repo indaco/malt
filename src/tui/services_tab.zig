@@ -112,13 +112,15 @@ pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storag
     return .none;
 }
 
-/// The three state buckets the dot encodes. `state` is bucketed rather than
-/// matched exhaustively, so any unrecognized value lands in `unknown`.
-const Status = enum { running, stopped, unknown };
+/// The state buckets the dot encodes. `state` is bucketed rather than matched
+/// exhaustively, so any unrecognized value lands in `unknown`; only `errored`
+/// is pulled out of that fallthrough so a failing service reads as danger.
+const Status = enum { running, stopped, errored, unknown };
 
 fn statusOf(state: []const u8) Status {
     if (std.mem.eql(u8, state, "running")) return .running;
     if (std.mem.eql(u8, state, "stopped") or std.mem.eql(u8, state, "not-loaded")) return .stopped;
+    if (std.mem.eql(u8, state, "errored")) return .errored;
     return .unknown; // loaded / degraded / any future or unusual state
 }
 
@@ -126,6 +128,7 @@ fn dotGlyph(st: Status) []const u8 {
     return switch (st) {
         .running => "●",
         .stopped => "○",
+        .errored => "●", // shares the filled dot with running; the danger colour carries the failure
         .unknown => "◌",
     };
 }
@@ -134,6 +137,7 @@ fn dotStyle(st: Status) color.Role {
     return switch (st) {
         .running => .success, // a live service reads as healthy
         .stopped => .muted,
+        .errored => .danger, // at-a-glance failure signal
         .unknown => .muted,
     };
 }
@@ -413,6 +417,13 @@ test "statusOf buckets known states and treats anything else as unknown" {
     try testing.expectEqual(Status.unknown, statusOf("loaded"));
     try testing.expectEqual(Status.unknown, statusOf("degraded"));
     try testing.expectEqual(Status.unknown, statusOf(""));
+    // errored breaks out of the muted unknown bucket; the fallthrough is unchanged.
+    try testing.expectEqual(Status.errored, statusOf("errored"));
+}
+
+test "dotStyle maps errored to the danger role, not the muted unknown style" {
+    try testing.expectEqual(color.Role.danger, dotStyle(.errored));
+    try testing.expectEqual(color.Role.muted, dotStyle(.unknown));
 }
 
 test "render heads the columns in bold, indented past the status dot" {
@@ -517,6 +528,19 @@ test "render of an unusual state does not crash and uses the unknown dot" {
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "degraded") != null);
     try testing.expect(std.mem.indexOf(u8, out, "◌") != null); // unknown dot
+}
+
+test "render flags an errored service with the danger dot, not the muted unknown" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const only = [_]Row{.{ .name = "loopy", .state = "errored", .auto_start = true, .keg_name = "loopy" }};
+    const s: State = .{ .items = &only };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "errored") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "●") != null); // filled dot, shared with running
+    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.danger)) != null); // in danger red
+    try testing.expect(std.mem.indexOf(u8, out, "◌") == null); // never the muted unknown dot
 }
 
 test "render narrows to the filter" {
