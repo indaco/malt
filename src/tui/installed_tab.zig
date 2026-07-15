@@ -24,6 +24,7 @@ const scroll_list = @import("scroll_list.zig");
 const list_json = @import("json/list.zig");
 const info_json = @import("json/info.zig");
 const color = @import("../ui/color.zig");
+const bytes = @import("../ui/bytes.zig");
 
 pub const Pkg = list_json.Pkg;
 
@@ -180,7 +181,7 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
         var deps_buf: [512]u8 = undefined;
         const fields = [_]detail_pane.Field{
             .{ .label = "Tap", .value = if (d.info.tap.len != 0) d.info.tap else "-" },
-            .{ .label = "Size", .value = humanSize(&size_buf, d.pkg.size_bytes) },
+            .{ .label = "Size", .value = bytes.humanizeOpt(d.pkg.size_bytes, &size_buf) },
             .{ .label = "Linked", .value = yesNo(d.pkg.linked) },
             .{ .label = "Pinned", .value = if (d.pkg.pinned) "yes" else "no" },
             .{ .label = "Dependencies", .value = joinDeps(&deps_buf, d.info.dependencies) },
@@ -239,8 +240,9 @@ fn renderGuard(name: []const u8, f: *tab.Frame, rect: tab.Rect) void {
     f.put(color.Style.reset.code());
 }
 
-/// One list row: name and version in fixed columns, a humanized size, then the
-/// pinned / unlinked markers. ASCII columns, grapheme-naive like the rest.
+/// One list row: name and version in fixed columns, the shared humanized size
+/// (`"-"` when unknown), then the pinned / unlinked markers. ASCII columns,
+/// grapheme-naive like the rest.
 fn formatRow(buf: []u8, p: Pkg) []const u8 {
     var len: usize = 0;
     appendPad(buf, &len, p.name, 22);
@@ -248,23 +250,12 @@ fn formatRow(buf: []u8, p: Pkg) []const u8 {
     appendPad(buf, &len, p.version, 14);
     append(buf, &len, " ");
     var size_buf: [16]u8 = undefined;
-    appendPad(buf, &len, humanSize(&size_buf, p.size_bytes), 10);
+    appendPad(buf, &len, bytes.humanizeOpt(p.size_bytes, &size_buf), 10);
     if (p.pinned) append(buf, &len, " pinned");
     if (p.linked) |l| {
         if (!l) append(buf, &len, " unlinked");
     }
     return buf[0..len];
-}
-
-/// Bytes → "1.8 MB". Null (no `--size`) renders as "-".
-fn humanSize(buf: []u8, bytes: ?u64) []const u8 {
-    const b = bytes orelse return "-";
-    const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB" };
-    var v: f64 = @floatFromInt(b);
-    var u: usize = 0;
-    while (v >= 1024.0 and u + 1 < units.len) : (u += 1) v /= 1024.0;
-    if (u == 0) return std.fmt.bufPrint(buf, "{d} B", .{b}) catch "-";
-    return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ v, units[u] }) catch "-";
 }
 
 fn yesNo(b: ?bool) []const u8 {
@@ -304,8 +295,8 @@ fn appendPad(buf: []u8, len: *usize, s: []const u8, width: usize) void {
 /// infrastructure: parses to a temporary and returns only the count, touching no
 /// `Storage` — the shared `installed_count` writer (app/header-side) sources its
 /// number here so the hub need not import the list parser.
-pub fn countFromJson(allocator: std.mem.Allocator, bytes: []const u8) list_json.Error!usize {
-    const parsed = try list_json.parse(allocator, bytes);
+pub fn countFromJson(allocator: std.mem.Allocator, json: []const u8) list_json.Error!usize {
+    const parsed = try list_json.parse(allocator, json);
     defer parsed.deinit();
     return parsed.items.len;
 }
@@ -616,6 +607,38 @@ test "render lists rows with name, version, and a humanized size" {
     try testing.expect(std.mem.indexOf(u8, out, "brotli") != null);
     try testing.expect(std.mem.indexOf(u8, out, "8.20.0") != null);
     try testing.expect(std.mem.indexOf(u8, out, "MB") != null); // size humanized
+}
+
+test "installed row renders a sub-KB size with the canonical decimal shape" {
+    var buf: [row_buf_len]u8 = undefined;
+    // The convergence: sub-KB sizes now carry the decimal like every other surface.
+    const small = Pkg{ .name = "a", .version = "1", .kind = .formula, .pinned = false, .size_bytes = 512, .linked = true };
+    try testing.expect(std.mem.indexOf(u8, formatRow(&buf, small), "512.0 B") != null);
+    const zero = Pkg{ .name = "a", .version = "1", .kind = .formula, .pinned = false, .size_bytes = 0, .linked = true };
+    try testing.expect(std.mem.indexOf(u8, formatRow(&buf, zero), "0.0 B") != null);
+}
+
+test "the sub-KB size field stays padded to the width-10 column" {
+    var buf: [row_buf_len]u8 = undefined;
+    // name(22)+" "+version(14)+" " = 38; the widest sub-KB string "1023.0 B" (8) fits the pad.
+    const widest = Pkg{ .name = "a", .version = "1", .kind = .formula, .pinned = false, .size_bytes = 1023, .linked = true };
+    try testing.expectEqualStrings("1023.0 B  ", formatRow(&buf, widest)[38..48]);
+}
+
+test "an unknown size still renders as a dash, padded to the width-10 column" {
+    var buf: [row_buf_len]u8 = undefined;
+    // Nullable behaviour is preserved across the switch to the shared humanizer.
+    const unknown = Pkg{ .name = "a", .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = true };
+    try testing.expectEqualStrings("-         ", formatRow(&buf, unknown)[38..48]);
+}
+
+test "the detail pane renders a sub-KB size with the canonical decimal shape" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const pkg = Pkg{ .name = "a", .version = "1", .kind = .formula, .pinned = false, .size_bytes = 512, .linked = true };
+    const s: State = .{ .items = &.{pkg}, .detail = .{ .pkg = pkg, .info = .{} } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "512.0 B") != null);
 }
 
 test "render shows pinned and unlinked markers" {
