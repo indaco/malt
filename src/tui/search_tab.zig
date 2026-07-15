@@ -547,10 +547,10 @@ pub fn update(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, stor
             },
         },
         .mutated => |code| return foldInstall(allocator, mt_path, s, storage, shared, code),
-        .cleared => return .none, // search/info reads are never `allow_empty`
-        .failed => {
-            // Leave the "searching…" phase behind the banner (already set): the last
-            // good results, or guidance if none ever loaded — never a stuck spinner.
+        // A 0-byte exit-0 read shouldn't reach search on the happy path, but if it
+        // does it must reset the phase like `.failed`, never strand the spinner.
+        .cleared, .failed => {
+            // Fall back to the last good results, or guidance if none ever loaded.
             s.phase = if (storage.search != null) .loaded else .idle;
             return .none;
         },
@@ -1569,6 +1569,18 @@ test "update on a failed search falls back to the last-good results, keeping the
     try testing.expectEqual(Phase.loaded, st.phase);
     try testing.expectEqual(@as(usize, 2), st.items.len);
     try testing.expectEqual(@as(usize, 1), st.chrome.view.selected);
+}
+
+test "update on a cleared search (empty polled read) leaves no stuck searching phase" {
+    var st: State = .{ .phase = .searching }; // as the pre-read paint left it
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .cleared);
+    try testing.expect(next == .none);
+    // A 0-byte exit-0 read must reset the phase like `.failed` does, never strand
+    // the body on the spinner.
+    try testing.expectEqual(Phase.idle, st.phase);
 }
 
 test "update on a loaded search parse swaps in the ranked results and lands loaded" {
