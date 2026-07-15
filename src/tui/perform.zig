@@ -259,9 +259,14 @@ fn readBytes(io: std.Io, allocator: std.mem.Allocator, painter: Painter, loading
     return switch (r.mode) {
         .blocking => if (r.allow_empty) spawn.readJsonAllowEmpty(io, allocator, r.argv) else @as(?[]u8, try spawn.readJson(io, allocator, r.argv)),
         .polled => blk: {
-            // Keep `loading` set across the poll so each tick paints the spinner.
-            loading.* = true;
-            defer loading.* = false;
+            // Keep `loading` set across the poll so each tick paints the footer spinner —
+            // except search, which owns its own body "searching…" indicator (mirrors the
+            // `r.tag != .search` gate `performRead` uses for the pre-read paint).
+            const light = r.tag != .search;
+            if (light) loading.* = true;
+            defer if (light) {
+                loading.* = false;
+            };
             break :blk try spawn.readJsonPolled(io, allocator, r.argv, r.max_ok_exit, painter);
         },
         .background => unreachable,
@@ -368,6 +373,46 @@ test "anyFetchActive tracks slot occupancy, not payload" {
     try testing.expect(anyFetchActive(&fetches)); // one in flight → the loop multiplexes
 
     reapTabFetch(t.io(), testing.allocator, &fetches.getPtr(.outdated).*.?); // reap the live child + free its buf
+}
+
+// Observe `loading` from inside a poll tick: the polled reader fires `on_tick` on
+// every ≤80 ms timeout, so a child that outlives one timeout lets the test see
+// whether the footer spinner flag was raised while the read was in flight.
+const LoadWatch = struct {
+    loading: *const bool,
+    ticks: usize = 0,
+    seen_true: bool = false,
+    fn tick(ctx_ptr: *anyopaque) void {
+        const self: *LoadWatch = @ptrCast(@alignCast(ctx_ptr)); // Painter's ctx round-trip, set from a *LoadWatch just below
+        self.ticks += 1;
+        if (self.loading.*) self.seen_true = true;
+    }
+};
+
+test "a polled search read keeps the footer clean while any other tag lights it" {
+    // Search owns its body "searching…" indicator, so the footer "Loading…" flag must
+    // stay dark on the polled arm — every other polled read still raises it per tick.
+    var t = std.Io.Threaded.init(testing.allocator, .{});
+    defer t.deinit();
+    var frame: []u8 = &.{};
+    var loading = false;
+
+    // `/bin/sleep` holds stdout open past one poll timeout (no output, exit 0), so a
+    // tick fires mid-read and the read then resolves to an empty document (null).
+    var search_watch: LoadWatch = .{ .loading = &loading };
+    const search_painter: Painter = .{ .fd = 0, .frame = &frame, .on_tick = .{ .ctx = &search_watch, .call = LoadWatch.tick } };
+    const search_read: cmd.Cmd.Read = .{ .argv = &.{ "/bin/sleep", "0.2" }, .mode = .polled, .parse = unusedParse, .tag = .search };
+    try testing.expect((try readBytes(t.io(), testing.allocator, search_painter, &loading, search_read)) == null);
+    try testing.expect(search_watch.ticks > 0); // the poll actually ticked mid-read
+    try testing.expect(!search_watch.seen_true); // …and the footer stayed clean throughout
+    try testing.expect(!loading); // false after the call
+
+    var outdated_watch: LoadWatch = .{ .loading = &loading };
+    const outdated_painter: Painter = .{ .fd = 0, .frame = &frame, .on_tick = .{ .ctx = &outdated_watch, .call = LoadWatch.tick } };
+    const outdated_read: cmd.Cmd.Read = .{ .argv = &.{ "/bin/sleep", "0.2" }, .mode = .polled, .parse = unusedParse, .tag = .outdated };
+    try testing.expect((try readBytes(t.io(), testing.allocator, outdated_painter, &loading, outdated_read)) == null);
+    try testing.expect(outdated_watch.seen_true); // the footer spinner lit across the poll
+    try testing.expect(!loading); // deferred back to false after the call
 }
 
 test "reapAllFetches tears down every in-flight fetch (no leak, no zombie)" {
