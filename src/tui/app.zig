@@ -94,6 +94,10 @@ comptime {
 /// `scroll_list.clamp` still bounds it to the real list.
 const page_step = 10;
 
+/// Rows the wheel scrolls per notch — the conventional 3-row step. A one-line UX
+/// tunable; like paging, it just nudges `selected` and lets `clamp` bound it.
+const wheel_step = 3;
+
 pub const App = struct {
     active: Tab = .search,
     editing: bool = false,
@@ -803,6 +807,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     errdefer t.restore();
     try t.hideCursor();
     errdefer t.restore();
+    try t.enableMouse(); // wheel/click reports; restore() disables it on any exit
+    errdefer t.restore();
     term.installWinch(fd);
 
     // The prefix the dashboard acts on, resolved the way the rest of malt does.
@@ -878,7 +884,10 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
                     try serviceKey(io, allocator, &t, painter, &fetches, &app, &app.storages, k.key);
                     if (app.quit) break;
                 },
-                .mouse => |m| consumed += m.consumed, // decoded but not yet wired to a handler
+                .mouse => |m| {
+                    consumed += m.consumed;
+                    try serviceMouse(io, allocator, &t, painter, &fetches, &app, &app.storages, m.mouse);
+                },
             }
         }
         // A buffered tail can be a lone Esc, which the blocking read would sit
@@ -922,6 +931,30 @@ fn serviceKey(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: 
     try onEntryReload(io, allocator, t, painter, fetches, app, store);
 }
 
+/// One decoded mouse report's turn. Takes the full `serviceKey` argument list so
+/// the later click arms (left = select, right = open) slot in without a signature
+/// change; today only the wheel acts, a pure `selected` nudge that render's
+/// `clamp` bounds — so it never needs the list length or viewport height. Every
+/// non-wheel event (left/right press, any release) is a deliberate no-op until the
+/// click work lands; the moment `?1000` tracking is on, those all flow in here.
+fn serviceMouse(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, m: keys.Mouse) RunError!void {
+    // The uninstall guard is modal for the wheel too: freeze here rather than
+    // routing through the key-trap, which would read the notch as a cancel.
+    if (app.active == .installed and app.states.installed.confirm_uninstall != null) return;
+    switch (m.button) {
+        64 => activeChrome(app).view.selected -|= wheel_step, // wheel up
+        65 => activeChrome(app).view.selected += wheel_step, // wheel down
+        else => {}, // press/release for the click work — inert for now
+    }
+    // Held for the click arms (left = select, right = open); the wheel needs none.
+    _ = io;
+    _ = allocator;
+    _ = t;
+    _ = painter;
+    _ = fetches;
+    _ = store;
+}
+
 fn repaint(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) std.mem.Allocator.Error!void {
     const size = term.currentSize();
     const need = frameCap(size);
@@ -956,6 +989,27 @@ fn echoArgv(allocator: std.mem.Allocator, doc: []const u8) std.mem.Allocator.Err
     argv[0] = "/bin/echo";
     argv[1] = doc;
     return argv;
+}
+
+// Synthetic decoded mouse reports, exactly as the decode loop hands `serviceMouse`.
+const wheel_up: keys.Mouse = .{ .button = 64, .col = 1, .row = 1, .press = true };
+const wheel_down: keys.Mouse = .{ .button = 65, .col = 1, .row = 1, .press = true };
+const left_press: keys.Mouse = .{ .button = 0, .col = 5, .row = 3, .press = true };
+const left_release: keys.Mouse = .{ .button = 0, .col = 5, .row = 3, .press = false };
+
+/// Drive `serviceMouse` in place for a wheel/no-op/modal test. Builds the same
+/// headless rig the pump tests use; the wheel arms touch only `app`, so io/term
+/// stay unused just as the loop's mouse turn leaves them until the click work.
+fn serviceMouseA(a: *App, m: keys.Mouse) !void {
+    var thr = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer thr.deinit();
+    var store: Storages = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    var frame: []u8 = try std.testing.allocator.alloc(u8, 256);
+    defer std.testing.allocator.free(frame);
+    var tm = term.Term.init(thr.io(), -1);
+    try serviceMouse(thr.io(), std.testing.allocator, &tm, testPainter(&frame), &fetches, a, &store, m);
 }
 
 test "a data-free App renders the full chrome so the skeleton paint is real" {
@@ -1160,6 +1214,90 @@ test "page keys jump by a page and saturate; home returns to the top" {
     stepA(&a, .down);
     stepA(&a, .home);
     try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+}
+
+test "a wheel notch moves the selection by a step; up saturates at zero" {
+    var a: App = .{};
+    try serviceMouseA(&a, wheel_down);
+    try std.testing.expectEqual(@as(usize, 3), activeChrome(&a).view.selected); // conventional 3-row notch
+    try serviceMouseA(&a, wheel_down);
+    try std.testing.expectEqual(@as(usize, 6), activeChrome(&a).view.selected);
+    try serviceMouseA(&a, wheel_up);
+    try serviceMouseA(&a, wheel_up);
+    try serviceMouseA(&a, wheel_up); // 6 − 9 saturates, no underflow
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+}
+
+test "a wheel notch scrolls the rendered viewport, not just the cursor" {
+    // A list far taller than any 80x24 content band, so a deep selection forces a
+    // non-zero offset — proving render's `clamp` follows the wheel nudge.
+    const pkgs = comptime blk: {
+        var arr: [40]installed.Pkg = undefined;
+        for (&arr, 0..) |*p, i|
+            p.* = .{ .name = std.fmt.comptimePrint("pkg{d:0>3}", .{i}), .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null };
+        break :blk arr;
+    };
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &pkgs;
+    for (0..10) |_| try serviceMouseA(&a, wheel_down); // 10 notches → selected 30
+    try std.testing.expectEqual(@as(usize, 30), activeChrome(&a).view.selected);
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pkg030") != null); // the selection is on screen
+    try std.testing.expect(std.mem.indexOf(u8, out, "pkg000") == null); // the top scrolled off — offset followed
+}
+
+test "the wheel scrolls the filtered list while the filter is being edited" {
+    var a: App = .{ .active = .installed };
+    stepA(&a, ch('/')); // enter filter editing
+    try std.testing.expect(a.editing);
+    try serviceMouseA(&a, wheel_down);
+    try std.testing.expectEqual(@as(usize, 3), activeChrome(&a).view.selected); // wheel stays live under the box
+    try std.testing.expect(a.editing); // the notch scrolled without disturbing edit mode
+}
+
+test "a left-press and its release are no-ops until the click work lands" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &guard_pkgs;
+    try serviceMouseA(&a, left_press);
+    try serviceMouseA(&a, left_release);
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected); // selection unmoved
+    try std.testing.expect(!a.editing);
+    try std.testing.expect(!a.quit);
+    try std.testing.expect(a.states.installed.confirm_uninstall == null); // nothing armed
+}
+
+test "a modifier-flagged wheel is inert, never a partial-code scroll" {
+    // SGR folds modifiers into the button (shift +4, alt +8, ctrl +16), so a
+    // modified wheel is 68/80/… — not the plain 64/65 the wheel acts on — and must
+    // fall through the no-op default rather than scroll on a stray code.
+    var a: App = .{};
+    const modified = [_]keys.Mouse{
+        .{ .button = 80, .col = 1, .row = 1, .press = true }, // ctrl + wheel-up
+        .{ .button = 81, .col = 1, .row = 1, .press = true }, // ctrl + wheel-down
+        .{ .button = 68, .col = 1, .row = 1, .press = true }, // shift + wheel-up
+    };
+    for (modified) |m| try serviceMouseA(&a, m);
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+}
+
+test "the horizontal wheel is inert — the list has no sideways axis" {
+    // SGR encodes horizontal wheel as 66/67; there is nothing to scroll sideways,
+    // so these no-op rather than nudge the vertical selection.
+    var a: App = .{};
+    try serviceMouseA(&a, .{ .button = 66, .col = 1, .row = 1, .press = true }); // wheel-left
+    try serviceMouseA(&a, .{ .button = 67, .col = 1, .row = 1, .press = true }); // wheel-right
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+}
+
+test "the uninstall-confirm modal freezes the wheel so a notch cannot cancel the guard" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &guard_pkgs;
+    stepA(&a, ch('x')); // arm the guard on row 0
+    try std.testing.expect(a.states.installed.confirm_uninstall != null);
+    try serviceMouseA(&a, wheel_down);
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected); // frozen — no scroll
+    try std.testing.expect(a.states.installed.confirm_uninstall != null); // guard intact, never routed to the key-trap
 }
 
 test "a non-command printable key in normal mode is inert (routed, no state change)" {
