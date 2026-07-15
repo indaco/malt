@@ -316,14 +316,41 @@ fn setStatus(db: *sqlite.Database, name: []const u8, status: []const u8) Supervi
     _ = stmt.step() catch return SupervisorError.DatabaseError;
 }
 
-pub const RuntimeState = enum { not_loaded, loaded, running };
+pub const RuntimeState = enum { not_loaded, loaded, running, errored };
 
 pub fn runtimeStateName(s: RuntimeState) []const u8 {
     return switch (s) {
         .not_loaded => "not-loaded",
         .loaded => "loaded",
         .running => "running",
+        .errored => "errored",
     };
+}
+
+/// Derive `label`'s runtime state from `launchctl list` stdout. Pure over
+/// `(stdout, label)` — no Io, no allocator — so the Status-column semantics
+/// are unit-testable without spawning launchctl.
+fn parseRuntime(stdout: []const u8, label: []const u8) RuntimeState {
+    var lines = std.mem.splitScalar(u8, stdout, '\n');
+    // Skip header (PID Status Label).
+    _ = lines.next();
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        const pid_field = fields.next() orelse continue;
+        const status_field = fields.next() orelse continue;
+        const lbl = fields.next() orelse continue;
+        if (!std.mem.eql(u8, lbl, label)) continue;
+        // Status is the job's last exit; signed so a signal-kill's leading
+        // `-` parses. A nonzero last exit is a failure regardless of whether
+        // a PID is currently up (status-dominant); an unreadable status is
+        // not evidence of health either, so it fails toward errored too.
+        const status = std.fmt.parseInt(i64, status_field, 10) catch return .errored;
+        if (status != 0) return .errored;
+        if (pid_field.len == 1 and pid_field[0] == '-') return .loaded;
+        return .running;
+    }
+    return .not_loaded;
 }
 
 /// Query launchctl for the runtime state of `label`. Returns `.not_loaded`
@@ -346,20 +373,7 @@ pub fn queryRuntime(io: std.Io, allocator: std.mem.Allocator, label: []const u8)
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
-    // Skip header (PID Status Label).
-    _ = lines.next();
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        var fields = std.mem.tokenizeAny(u8, line, " \t");
-        const pid_field = fields.next() orelse continue;
-        _ = fields.next() orelse continue; // status code
-        const lbl = fields.next() orelse continue;
-        if (!std.mem.eql(u8, lbl, label)) continue;
-        if (pid_field.len == 1 and pid_field[0] == '-') return .loaded;
-        return .running;
-    }
-    return .not_loaded;
+    return parseRuntime(result.stdout, label);
 }
 
 pub fn hasService(db: *sqlite.Database, name: []const u8) bool {
@@ -662,4 +676,70 @@ test "followLog flushes data appended before sleep cancellation lands" {
 
     try testing.expect(std.mem.indexOf(u8, aw.written(), "tail-bytes\n") != null);
     try testing.expectEqual(@as(usize, 2), CancelSleepProbe.sleep_calls);
+}
+
+test "runtimeStateName maps errored to \"errored\"" {
+    try testing.expectEqualStrings("errored", runtimeStateName(.errored));
+}
+
+// parseRuntime fixture matrix. Each case is a synthetic `launchctl list`
+// dump (header + line[s]) + label → expected RuntimeState. These pin the
+// Status-column semantics that were untestable while the only entry point
+// shelled out to the real launchctl.
+const launchctl_header = "PID\tStatus\tLabel\n";
+
+test "parseRuntime: live PID and clean exit is running" {
+    const out = launchctl_header ++ "1234\t0\tcom.clean\n";
+    try testing.expectEqual(RuntimeState.running, parseRuntime(out, "com.clean"));
+}
+
+test "parseRuntime: no PID and clean exit is loaded" {
+    const out = launchctl_header ++ "-\t0\tcom.loaded\n";
+    try testing.expectEqual(RuntimeState.loaded, parseRuntime(out, "com.loaded"));
+}
+
+test "parseRuntime: an absent label falls through to not_loaded" {
+    const out = launchctl_header ++ "1234\t0\tcom.clean\n";
+    try testing.expectEqual(RuntimeState.not_loaded, parseRuntime(out, "com.nope"));
+}
+
+test "parseRuntime: a malformed line whose label never matches is not_loaded" {
+    const out = launchctl_header ++ "garbage line no columns\n";
+    try testing.expectEqual(RuntimeState.not_loaded, parseRuntime(out, "com.x"));
+}
+
+test "parseRuntime: header-only and empty stdout are not_loaded" {
+    try testing.expectEqual(RuntimeState.not_loaded, parseRuntime(launchctl_header, "com.x"));
+    try testing.expectEqual(RuntimeState.not_loaded, parseRuntime("", "com.x"));
+}
+
+test "parseRuntime: no PID and nonzero exit is errored" {
+    const out = launchctl_header ++ "-\t1\tcom.dead\n";
+    try testing.expectEqual(RuntimeState.errored, parseRuntime(out, "com.dead"));
+}
+
+test "parseRuntime: live PID with nonzero exit is errored (status-dominant)" {
+    const out = launchctl_header ++ "4321\t2\tcom.loop\n";
+    try testing.expectEqual(RuntimeState.errored, parseRuntime(out, "com.loop"));
+}
+
+test "parseRuntime: a signal-kill negative status is errored" {
+    const out = launchctl_header ++ "-\t-15\tcom.killed\n";
+    try testing.expectEqual(RuntimeState.errored, parseRuntime(out, "com.killed"));
+}
+
+test "parseRuntime: a matched line with a non-integer status is errored" {
+    // A status we cannot read is not evidence of health, so fail toward errored.
+    const out = launchctl_header ++ "4321\tnotanint\tcom.x\n";
+    try testing.expectEqual(RuntimeState.errored, parseRuntime(out, "com.x"));
+}
+
+test "parseRuntime: finds the target row past earlier non-matching services" {
+    // Real launchctl output is many rows; the target's own state must win,
+    // not the first row's — guards both early-return and wrong-row matching.
+    const out = launchctl_header ++
+        "1234\t0\tcom.healthy\n" ++
+        "-\t0\tcom.other\n" ++
+        "4321\t2\tcom.target\n";
+    try testing.expectEqual(RuntimeState.errored, parseRuntime(out, "com.target"));
 }
