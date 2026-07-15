@@ -878,6 +878,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
                     try serviceKey(io, allocator, &t, painter, &fetches, &app, &app.storages, k.key);
                     if (app.quit) break;
                 },
+                .mouse => |m| consumed += m.consumed, // decoded but not yet wired to a handler
             }
         }
         // A buffered tail can be a lone Esc, which the blocking read would sit
