@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
+const bytes = @import("../../ui/bytes.zig");
 
 pub const Entry = struct {
     token: []const u8,
@@ -75,18 +76,18 @@ pub fn collectCensus(
         const tok = std.mem.sliceTo(tok_ptr, 0);
         const ver = std.mem.sliceTo(ver_ptr, 0);
 
-        const bytes = perVersionFootprint(io, allocator, prefix, tok, ver);
+        const byte_count = perVersionFootprint(io, allocator, prefix, tok, ver);
         const tok_dup = allocator.dupe(u8, tok) catch continue;
         const ver_dup = allocator.dupe(u8, ver) catch {
             allocator.free(tok_dup);
             continue;
         };
-        list.append(allocator, .{ .token = tok_dup, .version = ver_dup, .bytes = bytes }) catch {
+        list.append(allocator, .{ .token = tok_dup, .version = ver_dup, .bytes = byte_count }) catch {
             allocator.free(tok_dup);
             allocator.free(ver_dup);
             continue;
         };
-        total_bytes += bytes;
+        total_bytes += byte_count;
     }
 
     const slice = list.toOwnedSlice(allocator) catch return empty;
@@ -153,7 +154,7 @@ fn pathSize(io: std.Io, allocator: std.mem.Allocator, path: []const u8) u64 {
 pub fn writeHumanSummary(w: *std.Io.Writer, census: Census) !void {
     if (census.entries.len == 0) return;
     var buf: [32]u8 = undefined;
-    const size = formatBytes(census.total_bytes, &buf);
+    const size = bytes.humanize(census.total_bytes, &buf);
     try w.print(
         "  > Retained cask versions: {d} ({s}). Run: mt purge --old-versions\n",
         .{ census.entries.len, size },
@@ -168,7 +169,7 @@ pub fn writeHumanEntries(w: *std.Io.Writer, census: Census) !void {
     if (census.entries.len == 0) return;
     var size_buf: [32]u8 = undefined;
     for (census.entries) |e| {
-        const size = formatBytes(e.bytes, &size_buf);
+        const size = bytes.humanize(e.bytes, &size_buf);
         try w.print("        {s} {s} ({s})\n", .{ e.token, e.version, size });
     }
 }
@@ -190,20 +191,6 @@ pub fn writeJson(w: *std.Io.Writer, census: Census) !void {
     try w.writeAll("{");
     try writeField(w, census);
     try w.writeAll("}\n");
-}
-
-/// Format a byte count as `{d:.1} {unit}` (B/KB/MB/GB/TB). Local mirror
-/// of `cli/purge/util.zig::formatBytes` — same shape, but doctor can't
-/// pull `cli/purge` across the sibling-CLI boundary.
-fn formatBytes(bytes: u64, buf: []u8) []const u8 {
-    const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB" };
-    var value: f64 = @floatFromInt(bytes);
-    var unit: usize = 0;
-    while (value >= 1024.0 and unit + 1 < units.len) {
-        value /= 1024.0;
-        unit += 1;
-    }
-    return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ value, units[unit] }) catch "?";
 }
 
 // ── inline unit tests ──────────────────────────────────────────────────────
@@ -291,9 +278,9 @@ test "collectCensus reports retained versions plus on-disk bytes" {
 
 test "writeHumanSummary emits a one-liner with count + scaled bytes when non-empty" {
     // Pin the exact bytes doctor's human path appends after the check
-    // rows. The byte total is `formatBytes`-shaped (matches purge's
-    // freed-bytes reporter) so users see one consistent size format
-    // across `doctor` and `purge --old-versions`.
+    // rows. The byte total is humanized through the shared ui/ sink, so
+    // users see one consistent size format across `doctor` and
+    // `purge --old-versions`.
     var entries = [_]Entry{
         .{ .token = "alpha", .version = "1.0", .bytes = 64 },
         .{ .token = "alpha", .version = "1.5", .bytes = 128 },

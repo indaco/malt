@@ -20,6 +20,7 @@ const client_mod = @import("../net/client.zig");
 const mirror_mod = @import("../net/mirror.zig");
 const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
+const bytes = @import("../ui/bytes.zig");
 pub const cask_history = @import("doctor/cask_history.zig");
 const fix_mod = @import("doctor/fix.zig");
 pub const FixKind = fix_mod.FixKind;
@@ -259,13 +260,13 @@ pub fn emitCaskHistoryReport(allocator: std.mem.Allocator, io: std.Io, prefix: [
 /// noise. The `--json` view is a member of the merged document built in
 /// `emitDoctorJson`. Pure read; safe to invoke from `execute` post-checks.
 pub fn emitTapCacheReport(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) void {
-    const bytes = tap_cache_mod.bytesUnder(io, allocator, prefix);
+    const byte_count = tap_cache_mod.bytesUnder(io, allocator, prefix);
 
-    if (bytes == 0) return;
+    if (byte_count == 0) return;
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     var size_buf: [32]u8 = undefined;
-    const size = formatBytes(bytes, &size_buf);
+    const size = bytes.humanize(byte_count, &size_buf);
     aw.writer.print("  > Tap archive cache: {s}. Run: mt purge --cache\n", .{size}) catch return;
     output.writeStderrAll(aw.written());
 }
@@ -384,21 +385,6 @@ pub fn emitDoctorJson(allocator: std.mem.Allocator, io: std.Io, prefix: []const 
     defer aw.deinit();
     writeDoctorJson(&aw.writer, findings, census, tap_cache_bytes, taps) catch return;
     output.writeStdoutAll(aw.written());
-}
-
-/// Local mirror of `cli/purge/util.zig::formatBytes` / the cask-history
-/// formatter — doctor can't reach across the sibling-CLI boundary into
-/// `cli/purge`, and the byte format must match what `purge --cache`
-/// would surface so users see one number shape across both commands.
-fn formatBytes(bytes: u64, buf: []u8) []const u8 {
-    const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB" };
-    var value: f64 = @floatFromInt(bytes);
-    var unit: usize = 0;
-    while (value >= 1024.0 and unit + 1 < units.len) {
-        value /= 1024.0;
-        unit += 1;
-    }
-    return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ value, units[unit] }) catch "?";
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
