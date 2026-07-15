@@ -20,6 +20,7 @@ const ghcr_mod = @import("../../net/ghcr.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
 const post_install_mod = @import("../install/post_install.zig");
+const record = @import("../install/record.zig");
 const install_sink_mod = @import("../install/sink.zig");
 const post_install_queue_mod = @import("post_install_queue.zig");
 
@@ -177,7 +178,7 @@ pub fn migrateKeg(
     defer if (deps.db_mu) |m| if (!db_mu_unlocked) m.unlock(ctx.io);
 
     if (!formula.keg_only) {
-        const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
+        const keg_id = record.recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct", false, .{}) catch {
             output.err("    {s}: failed to record in database", .{keg_name});
             cellar_mod.remove(ctx.io, deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
@@ -201,7 +202,7 @@ pub fn migrateKeg(
         };
         recordDeps(deps.db, keg_id, &formula);
     } else {
-        const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
+        const keg_id = record.recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct", false, .{}) catch {
             cellar_mod.remove(ctx.io, deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
@@ -320,7 +321,7 @@ fn migrateFromLocalCellar(
     var full_name_buf: [full_name_buf_len]u8 = undefined;
     const full_name = std.fmt.bufPrint(&full_name_buf, "{s}/{s}", .{ receipt.tap, keg_name }) catch keg_name;
 
-    const keg_id = recordKegFields(deps.db, .{
+    const keg_id = record.recordKegFields(deps.db, .{
         .name = keg_name,
         .full_name = full_name,
         .version = receipt.version,
@@ -329,7 +330,8 @@ fn migrateFromLocalCellar(
         .store_sha256 = "",
         .cellar_path = keg.path,
         .install_reason = "direct",
-    }) catch {
+        .bin_isolated = false,
+    }, .{}) catch {
         output.err("    {s}: failed to record in database", .{keg_name});
         cellar_mod.remove(ctx.io, deps.prefix, keg_name, receipt.version) catch {};
         return .failed_install;
@@ -635,69 +637,6 @@ fn incrementRefLocked(
 
 // ── DB helpers (same pattern as install.zig) ────────────────────────
 
-/// Field bundle accepted by both the formula path (extracted from
-/// `Formula`) and the local-Cellar fallback (extracted from
-/// `INSTALL_RECEIPT.json`). Keeping the DB write surface flat means
-/// the two callers exercise byte-identical SQL.
-const KegFields = struct {
-    name: []const u8,
-    full_name: []const u8,
-    version: []const u8,
-    revision: i64,
-    tap: []const u8,
-    store_sha256: []const u8,
-    cellar_path: []const u8,
-    install_reason: []const u8,
-};
-
-fn recordKeg(
-    db: *sqlite.Database,
-    formula: *const formula_mod.Formula,
-    store_sha256: []const u8,
-    cellar_path: []const u8,
-    install_reason: []const u8,
-) !i64 {
-    return recordKegFields(db, .{
-        .name = formula.name,
-        .full_name = formula.full_name,
-        .version = formula.version,
-        .revision = formula.revision,
-        .tap = formula.tap,
-        .store_sha256 = store_sha256,
-        .cellar_path = cellar_path,
-        .install_reason = install_reason,
-    });
-}
-
-fn recordKegFields(db: *sqlite.Database, f: KegFields) !i64 {
-    db.beginTransaction() catch return error.RecordFailed;
-    errdefer db.rollback();
-
-    // The COALESCE on `pinned` carries any existing user pin across
-    // INSERT OR REPLACE so re-migrating doesn't silently drop holds.
-    var stmt = db.prepare(
-        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, pinned)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));",
-    ) catch return error.RecordFailed;
-    defer stmt.finalize();
-
-    stmt.bindText(1, f.name) catch return error.RecordFailed;
-    stmt.bindText(2, f.full_name) catch return error.RecordFailed;
-    stmt.bindText(3, f.version) catch return error.RecordFailed;
-    stmt.bindInt(4, f.revision) catch return error.RecordFailed;
-    stmt.bindText(5, f.tap) catch return error.RecordFailed;
-    stmt.bindText(6, f.store_sha256) catch return error.RecordFailed;
-    stmt.bindText(7, f.cellar_path) catch return error.RecordFailed;
-    stmt.bindText(8, f.install_reason) catch return error.RecordFailed;
-
-    _ = stmt.step() catch return error.RecordFailed;
-
-    const keg_id = getLastInsertId(db) catch return error.RecordFailed;
-    db.commit() catch return error.RecordFailed;
-
-    return keg_id;
-}
-
 fn deleteKeg(db: *sqlite.Database, keg_id: i64) sqlite.SqliteError!void {
     var stmt = try db.prepare("DELETE FROM kegs WHERE id = ?1;");
     defer stmt.finalize();
@@ -725,14 +664,6 @@ fn recordDepsFromList(db: *sqlite.Database, keg_id: i64, dep_names: []const []co
         stmt.bindText(2, dep_name) catch continue;
         _ = stmt.step() catch {};
     }
-}
-
-fn getLastInsertId(db: *sqlite.Database) !i64 {
-    var stmt = db.prepare("SELECT last_insert_rowid();") catch return error.RecordFailed;
-    defer stmt.finalize();
-    const has_row = stmt.step() catch return error.RecordFailed;
-    if (!has_row) return error.RecordFailed;
-    return stmt.columnInt(0);
 }
 
 pub fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
@@ -1007,14 +938,14 @@ test "incrementRef under db_mu keeps each worker's keg_id bound to its own kegs 
             return std.mem.eql(u8, std.mem.sliceTo(got, 0), name);
         }
 
-        fn record(c: *@This(), iters: usize) void {
+        fn recordLoop(c: *@This(), iters: usize) void {
             var i: usize = 0;
             while (i < iters) : (i += 1) {
                 const n = c.keg_seq.fetchAdd(1, .monotonic);
                 var name_buf: [32]u8 = undefined;
                 const name = std.fmt.bufPrint(&name_buf, "keg-{d}", .{n}) catch unreachable;
                 c.db_mu.lockUncancelable(c.io);
-                if (recordKegFields(c.db, .{
+                if (record.recordKegFields(c.db, .{
                     .name = name,
                     .full_name = name,
                     .version = "1",
@@ -1023,7 +954,8 @@ test "incrementRef under db_mu keeps each worker's keg_id bound to its own kegs 
                     .store_sha256 = "",
                     .cellar_path = "",
                     .install_reason = "direct",
-                })) |keg_id| {
+                    .bin_isolated = false,
+                }, .{})) |keg_id| {
                     recordDepsFromList(c.db, keg_id, &.{"libdep"});
                     if (!nameMatches(c.db, keg_id, name)) c.leaked.store(true, .monotonic);
                 } else |_| {}
@@ -1052,7 +984,7 @@ test "incrementRef under db_mu keeps each worker's keg_id bound to its own kegs 
 
     const h1 = try std.Thread.spawn(.{}, Ctx.hammer, .{&ctx});
     const h2 = try std.Thread.spawn(.{}, Ctx.hammer, .{&ctx});
-    Ctx.record(&ctx, 4000);
+    Ctx.recordLoop(&ctx, 4000);
     h1.join();
     h2.join();
 
@@ -1075,4 +1007,43 @@ test "incrementRefLocked on the serial path (db_mu null) still bumps the refcoun
     try stmt.bindText(1, "deadbeef");
     try std.testing.expect(try stmt.step());
     try std.testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+}
+
+test "migrate keg record through the shared seam preserves pin inheritance, bin_isolated=0, and own-txn commit" {
+    const schema = @import("../../db/schema.zig");
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const fields = record.KegFields{
+        .name = "wget",
+        .full_name = "wget",
+        .version = "1.21",
+        .revision = 0,
+        .tap = "",
+        .store_sha256 = "",
+        .cellar_path = "/opt/malt/Cellar/wget/1.21",
+        .install_reason = "direct",
+        // migrate has no bin-isolation intent — byte-identical to the old omit→default.
+        .bin_isolated = false,
+    };
+
+    // First migrate-style record, then a user pin, then a re-migrate of the
+    // same name: COALESCE-MAX must carry the pin across INSERT OR REPLACE.
+    const id1 = try record.recordKegFields(&db, fields, .{});
+    {
+        var s = try db.prepare("UPDATE kegs SET pinned = 1 WHERE id = ?1;");
+        defer s.finalize();
+        try s.bindInt(1, id1);
+        _ = try s.step();
+    }
+    _ = try record.recordKegFields(&db, fields, .{});
+
+    // Fresh statement reads the committed row: pin inherited, bin_isolated 0.
+    var q = try db.prepare("SELECT pinned, bin_isolated FROM kegs WHERE name = ?1;");
+    defer q.finalize();
+    try q.bindText(1, "wget");
+    try std.testing.expect(try q.step());
+    try std.testing.expectEqual(@as(i64, 1), q.columnInt(0));
+    try std.testing.expectEqual(@as(i64, 0), q.columnInt(1));
 }
