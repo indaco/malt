@@ -831,22 +831,21 @@ pub fn materializeRubyFormula(
 
     var keg_id: i64 = 0;
     {
-        // The COALESCE on `pinned` carries any existing user pin across
-        // INSERT OR REPLACE so a force-reinstall preserves the hold.
-        var stmt = db.prepare(
-            "INSERT OR REPLACE INTO kegs (name, full_name, version, tap, store_sha256, cellar_path, install_reason, pinned)" ++
-                " VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'direct', COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));",
-        ) catch return InstallError.RecordFailed;
-        defer stmt.finalize();
-        stmt.bindText(1, resolved.name) catch return InstallError.RecordFailed;
-        stmt.bindText(2, resolved.full_name) catch return InstallError.RecordFailed;
-        stmt.bindText(3, resolved.version) catch return InstallError.RecordFailed;
-        stmt.bindText(4, resolved.tap_label) catch return InstallError.RecordFailed;
-        stmt.bindText(5, resolved.sha256) catch return InstallError.RecordFailed;
-        stmt.bindText(6, cellar_path) catch return InstallError.RecordFailed;
-        _ = stmt.step() catch return InstallError.RecordFailed;
-
-        keg_id = record.getLastInsertId(db) catch return InstallError.RecordFailed;
+        // Route through the canonical seam inside the caller-owned txn.
+        // revision/bin_isolated stay at their schema defaults (0) — a
+        // tap/local formula has no bin-isolation intent — and the seam's
+        // default `inherit_pin` reproduces the COALESCE-MAX pin carry-over.
+        keg_id = record.recordKegFields(db, .{
+            .name = resolved.name,
+            .full_name = resolved.full_name,
+            .version = resolved.version,
+            .revision = 0,
+            .tap = resolved.tap_label,
+            .store_sha256 = resolved.sha256,
+            .cellar_path = cellar_path,
+            .install_reason = "direct",
+            .bin_isolated = false,
+        }, .{ .in_transaction = true }) catch return InstallError.RecordFailed;
 
         if (resolved.tap_registration) |t| {
             // `COALESCE` in tap_mod.add pins the commit on first install
