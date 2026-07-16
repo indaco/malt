@@ -60,9 +60,15 @@ fn visibleWidth(s: []const u8) usize {
     return w;
 }
 
-/// Render the bar — titles separated by two spaces, the active one wrapped in
-/// bold + reset. SGR is zero-width to `scroll_list.truncate`, so only the
-/// visible runes are bounded by `cols`. Returns a prefix of `buf`.
+/// Bytes a caller's render buffer must hold. `append` clamps at capacity, so a
+/// buffer this size keeps `cols` the *only* thing that truncates the bar — a
+/// capacity cut would drop titles `tabAt` still maps, and a click could switch to
+/// a tab that was never drawn. The app's title/theme sweep pins the bound.
+pub const buf_cap: usize = 256;
+
+/// Render the bar — titles separated by `sep`, the active one wrapped in accent +
+/// reverse + bold. SGR is zero-width to `scroll_list.truncate`, so only the visible
+/// runes are bounded by `cols`. Returns a prefix of `buf`.
 pub fn render(buf: []u8, active: Tab, titles: [count][]const u8, cols: u16) []const u8 {
     var len: usize = 0;
     for (titles, 0..) |t, i| {
