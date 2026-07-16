@@ -212,6 +212,13 @@ fn filterRow(size: term.Size) ?u16 {
     };
 }
 
+fn tabBarRow(size: term.Size) ?u16 {
+    return switch (layout.compute(size.cols, size.rows)) {
+        .too_small => null,
+        .ok => |r| r.tab_bar.row,
+    };
+}
+
 /// Hit-test a click against the active tab's list, or null when the tab exposes no
 /// `hitTest` (Doctor/Services have no clickable list). The `@hasDecl` gate keeps
 /// those tabs free of a dead arm, matching the optional tab contract.
@@ -984,7 +991,19 @@ fn serviceMouse(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter
     // A left-click on the query/filter input row focuses it for typing — mouse parity
     // with `/`. It sits above the list, so it never collides with a row hit-test.
     if (m.button == 0) {
-        if (filterRow(term.currentSize())) |fr| if (m.row == fr) {
+        const size = term.currentSize();
+        // A left-click on a tab title switches to it — mouse parity with `tab`/digits,
+        // including the on-entry load, or the tab paints empty under a counted header.
+        // A gap hits nothing; either way the bar never falls through to the list.
+        if (tabBarRow(size)) |tbr| if (m.row == tbr) {
+            if (tab_bar.tabAt(tabTitles(), size.cols, m.col)) |clicked| {
+                app.active = clicked;
+                app.editing = false; // the click is navigation: arrive ready for commands
+                try onEntryReload(io, allocator, t, painter, fetches, app, store);
+            }
+            return;
+        };
+        if (filterRow(size)) |fr| if (m.row == fr) {
             app.editing = true;
             return;
         };
@@ -1465,6 +1484,67 @@ test "a right-press on a Search basket row selects it but opens nothing" {
     try serviceMouseA(&a, rightAt(first_row + 2)); // row 8 → second basket row
     try std.testing.expectEqual(@as(usize, 1), a.states.search.chrome.view.selected);
     try std.testing.expect(!a.shared.banner.isSet()); // basket has no detail pane — no read
+}
+
+// The tab-bar row at 80x24, and the first column of the "Installed" title.
+const tab_bar_row: u16 = 2;
+const installed_title_col: u16 = 10;
+const outdated_title_col: u16 = 22;
+const tab_divider_col: u16 = 7;
+
+fn leftAtCol(row: u16, col: u16) keys.Mouse {
+    return .{ .button = 0, .col = col, .row = row, .press = true };
+}
+
+test "a left-press on a tab title switches to it, leaving that tab's state untouched" {
+    var a: App = .{ .active = .search };
+    a.states.installed.items = &click_pkgs;
+    a.states.installed.chrome.view.selected = 2; // the tab keeps its own cursor
+    try serviceMouseA(&a, leftAtCol(tab_bar_row, installed_title_col));
+    try std.testing.expectEqual(Tab.installed, a.active);
+    try std.testing.expectEqual(@as(usize, 2), a.states.installed.chrome.view.selected); // cursor kept
+    try std.testing.expect(a.states.installed.detail == null);
+    try serviceMouseA(&a, leftAt(first_row)); // the body still hit-tests the new tab
+
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+}
+
+test "a click-switch runs the tab's lazy on-entry load, like tab and the digits do" {
+    // Without the reload the tab arrives empty while the header still counts its kegs.
+    var a: App = .{ .active = .search, .mt_path = "/bin/echo" };
+    defer a.storages.deinit(std.testing.allocator);
+    a.shared.dirty.insert(.installed);
+    try serviceMouseA(&a, leftAtCol(tab_bar_row, installed_title_col));
+    try std.testing.expectEqual(Tab.installed, a.active);
+    try std.testing.expect(!a.shared.dirty.contains(.installed)); // the on-entry load ran
+}
+
+test "a click-switch mid-edit lands in normal mode, keeping the filter it leaves behind" {
+    // The click is navigation: the arrived-at tab must take the next keystroke as a
+    // command, not as filter text. `tab` can't switch mid-edit, so only the mouse gets here.
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &click_pkgs;
+    stepA(&a, ch('/'));
+    stepA(&a, ch('c'));
+    try serviceMouseA(&a, leftAtCol(tab_bar_row, outdated_title_col));
+    try std.testing.expectEqual(Tab.outdated, a.active);
+    try std.testing.expect(!a.editing);
+    try std.testing.expectEqualStrings("c", a.states.installed.chrome.filter.slice()); // kept, as Enter does
+}
+
+test "a left-press on a tab-bar divider leaves the active tab alone" {
+    var a: App = .{ .active = .search };
+    a.states.search.items = &search_matches;
+    a.states.search.phase = .loaded;
+    try serviceMouseA(&a, leftAtCol(tab_bar_row, tab_divider_col));
+    try std.testing.expectEqual(Tab.search, a.active); // a gap hits no title
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected); // and picks no row
+}
+
+test "a right-press on the tab bar is inert — only left switches tabs" {
+    var a: App = .{ .active = .search };
+    try serviceMouseA(&a, .{ .button = 2, .col = installed_title_col, .row = tab_bar_row, .press = true });
+    try std.testing.expectEqual(Tab.search, a.active);
 }
 
 test "a click on a tab with no hit-test is a no-op, never a crash" {
