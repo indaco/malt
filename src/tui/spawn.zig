@@ -261,7 +261,9 @@ fn around(ctrl: anytype, body: anytype) !void {
 }
 
 /// Live controller over a `term.Term`: leave drops everything entered, enter
-/// re-establishes raw + alt-screen + hidden cursor in the same order `run` does.
+/// re-establishes raw + alt-screen + hidden cursor + mouse tracking in the same
+/// order `run` does. `leave` disables the mouse, so `enter` must re-arm it or the
+/// dashboard comes back from a child keyboard-only.
 const TermCtrl = struct {
     t: *term.Term,
     fn leave(self: TermCtrl) void {
@@ -271,6 +273,7 @@ const TermCtrl = struct {
         try self.t.enterRaw();
         try self.t.enterAltScreen();
         try self.t.hideCursor();
+        try self.t.enableMouse();
     }
 };
 
@@ -508,6 +511,22 @@ const FakeBody = struct {
         if (self.fails) return error.Spawn;
     }
 };
+
+test "the real re-enter re-arms mouse tracking, not just raw and the alt-screen" {
+    // The fakes above pin the leave/enter *order*; this pins what `enter` restores.
+    // `leave` disables the mouse, so an enter that forgets it leaves the dashboard
+    // keyboard-only for the rest of the session.
+    var fds: [2]std.posix.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    // A non-null `saved` trips enterRaw's idempotent guard, so the re-enter runs
+    // against a pipe without a tty probe.
+    var t: term.Term = .{ .io = undefined, .fd = fds[1], .saved = std.mem.zeroes(std.posix.termios) };
+    try (TermCtrl{ .t = &t }).enter();
+    try testing.expect(t.mouse_on); // the wheel and clicks live again, like the keys
+}
 
 test "runInline order: leave → spawn → re-enter, ending in the dashboard" {
     var log: std.ArrayList(u8) = .empty;
