@@ -165,11 +165,34 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     renderList(s, f, r);
 }
 
+pub const Hit = tab.Hit;
+
+/// The list's on-screen geometry: the sub-rect below the heading, the view
+/// `clamp`ed to that height, and the filtered row `count`. The single source of
+/// truth `render` and `hitTest` share, so the painted rows and the hit-test can
+/// never disagree about where a row is.
+fn listGeometry(s: *const State, rect: tab.Rect) struct { list: tab.Rect, view: scroll_list.View, count: usize } {
+    const nf = filteredCount(s.items, s.chrome.filter.slice());
+    // The bold heading rides row 0 and costs the list one row.
+    const list: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    return .{ .list = list, .view = scroll_list.clamp(s.chrome.view, nf, list.height), .count = nf };
+}
+
+/// Map a click to the list row it lands on. `open` is always false — Outdated has
+/// no detail pane, so the shell's left-press moves the cursor and picks the row;
+/// a right-press finds nothing to open. `click_col` is unused: rows are full-width.
+pub fn hitTest(s: *const State, rect: tab.Rect, click_row: u16, click_col: u16) ?Hit {
+    _ = click_col; // full-width rows: the column carries no row identity
+    const g = listGeometry(s, rect);
+    const idx = scroll_list.rowAt(g.view, g.list.row, g.list.height, g.count, click_row) orelse return null;
+    return .{ .index = idx, .open = false };
+}
+
 fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     if (rect.height == 0) return;
     const filter = s.chrome.filter.slice();
-    const nf = filteredCount(s.items, filter);
-    if (nf == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "Everything is up to date.");
+    const g = listGeometry(s, rect);
+    if (g.count == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "Everything is up to date.");
     // A fixed bold heading rides above the list and costs it one row.
     tab.renderHeading(f, rect, 4, &.{
         .{ .label = "NAME", .width = 22 },
@@ -177,9 +200,9 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         .{ .label = "AVAILABLE", .width = 12 },
         .{ .label = "KIND", .width = 8 },
     });
-    const list: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    const list = g.list;
     if (list.height == 0) return; // the heading took the only row
-    const v = scroll_list.clamp(s.chrome.view, nf, list.height);
+    const v = g.view;
 
     var fi: usize = 0;
     for (s.items, 0..) |p, i| {
@@ -743,6 +766,66 @@ test "render on an empty list shows the up-to-date placeholder, not a blank pane
     const s: State = .{ .items = &.{} };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 }); // must not trap
     try std.testing.expect(std.mem.indexOf(u8, f.slice(), "up to date") != null);
+}
+
+test "hitTest maps a click on the first list row to a selectable, unopenable row" {
+    const s: State = .{ .items = &sample };
+    // rect.row = 5 → heading at 5, list starts at 6. Clicking row 6 hits index 0.
+    const hit = hitTest(&s, .{ .row = 5, .col = 1, .width = 80, .height = 10 }, 6, 1);
+    try testing.expectEqual(@as(?usize, 0), if (hit) |h| h.index else null);
+    try testing.expect(!hit.?.open); // no detail pane: an Outdated row is upgraded, not opened
+}
+
+test "hitTest rejects the heading row and rows above the list" {
+    const s: State = .{ .items = &sample };
+    const rect: tab.Rect = .{ .row = 5, .col = 1, .width = 80, .height = 10 };
+    try testing.expect(hitTest(&s, rect, 5, 1) == null); // the heading row
+    try testing.expect(hitTest(&s, rect, 4, 1) == null); // above the list
+}
+
+test "hitTest resolves against the filtered list, not the raw items" {
+    var s: State = .{ .items = &sample };
+    s.chrome.filter.push("f"); // firefox, ffmpeg
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    try testing.expectEqual(@as(?usize, 0), hitTest(&s, rect, 2, 1).?.index); // first filtered row
+    try testing.expectEqual(@as(?usize, 1), hitTest(&s, rect, 3, 1).?.index); // second filtered row
+    try testing.expect(hitTest(&s, rect, 4, 1) == null); // past the two matches
+}
+
+test "hitTest adds the scrolled view offset" {
+    var s: State = .{ .items = &sample };
+    s.chrome.view.selected = 3; // forces clamp to scroll a 2-tall list to offset 2
+    // rect.height 3 → list height 2; the top list row (row 2) maps to the offset.
+    const hit = hitTest(&s, .{ .row = 1, .col = 1, .width = 80, .height = 3 }, 2, 1);
+    try testing.expectEqual(@as(?usize, 2), hit.?.index);
+}
+
+test "hitTest rejects a blank row past the populated tail" {
+    var s: State = .{ .items = &sample };
+    s.chrome.filter.push("curl"); // one match
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    try testing.expectEqual(@as(?usize, 0), hitTest(&s, rect, 2, 1).?.index); // the one match
+    try testing.expect(hitTest(&s, rect, 3, 1) == null); // blank tail
+}
+
+test "hitTest on an empty list hits nothing" {
+    const s: State = .{ .items = &.{} }; // count 0 must reach rowAt, not a stray index
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    try testing.expect(hitTest(&s, rect, 2, 1) == null);
+}
+
+test "hitTest when the heading ate the only row hits nothing" {
+    const s: State = .{ .items = &sample };
+    // height 1 → list.height 0. The list height, not the rect height, drives the hit.
+    try testing.expect(hitTest(&s, .{ .row = 1, .col = 1, .width = 80, .height = 1 }, 2, 1) == null);
+}
+
+test "hitTest ignores the column — a click anywhere on the row hits it" {
+    const s: State = .{ .items = &sample };
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    // The checkbox occupies the first 4 cols; clicking it must not differ from the name.
+    try testing.expectEqual(@as(?usize, 0), hitTest(&s, rect, 2, 1).?.index);
+    try testing.expectEqual(@as(?usize, 0), hitTest(&s, rect, 2, 60).?.index);
 }
 
 test "the cores tolerate a checked slice shorter than items without trapping" {

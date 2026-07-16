@@ -213,8 +213,8 @@ fn filterRow(size: term.Size) ?u16 {
 }
 
 /// Hit-test a click against the active tab's list, or null when the tab exposes no
-/// `hitTest` (Doctor/Services/Outdated have no clickable list). The `@hasDecl` gate
-/// keeps those tabs free of a dead arm, matching the optional tab contract.
+/// `hitTest` (Doctor/Services have no clickable list). The `@hasDecl` gate keeps
+/// those tabs free of a dead arm, matching the optional tab contract.
 fn activeHitTest(app: *const App, body: tab.Rect, click_row: u16, click_col: u16) ?tab.Hit {
     switch (app.active) {
         inline else => |t| {
@@ -1334,6 +1334,13 @@ const click_pkgs = [_]installed.Pkg{
     .{ .name = "pkgc", .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null },
 };
 
+// Index 2 (pkgc) is pinned: shown, but held back from any bulk upgrade.
+const click_rows = [_]outdated.Row{
+    .{ .name = "pkga", .installed = "1", .latest = "2", .kind = .formula, .pinned = false, .tap = "" },
+    .{ .name = "pkgb", .installed = "1", .latest = "2", .kind = .formula, .pinned = false, .tap = "" },
+    .{ .name = "pkgc", .installed = "1", .latest = "2", .kind = .formula, .pinned = true, .tap = "" },
+};
+
 const search_matches = [_]search.Match{
     .{ .name = "wget", .kind = .formula, .installed = false },
     .{ .name = "curl", .kind = .formula, .installed = false },
@@ -1372,6 +1379,64 @@ test "a left-press on a Search results row picks it into the basket" {
     try std.testing.expectEqual(@as(usize, 1), a.states.search.chrome.view.selected); // cursor moved
     try std.testing.expectEqual(@as(usize, 1), a.states.search.selected_count); // picked into the basket
     try std.testing.expect(a.states.search.detail == null); // still no pane
+}
+
+test "a left-press on an Outdated row picks it for the upgrade batch" {
+    var a: App = .{ .active = .outdated };
+    var checked = [_]bool{false} ** 3;
+    a.states.outdated.items = &click_rows;
+    a.states.outdated.checked = &checked;
+    try serviceMouseA(&a, leftAt(first_row + 1)); // second list row
+    try std.testing.expectEqual(@as(usize, 1), activeChrome(&a).view.selected); // cursor moved
+    try std.testing.expect(checked[1]); // the click picks the row, same as `space`
+    try std.testing.expect(!checked[0]); // and only that row
+}
+
+test "a left-press mid-filter moves the cursor without picking or typing into the box" {
+    var a: App = .{ .active = .outdated };
+    var checked = [_]bool{false} ** 3;
+    a.states.outdated.items = &click_rows;
+    a.states.outdated.checked = &checked;
+    stepA(&a, ch('/')); // start editing the filter
+    try serviceMouseA(&a, leftAt(first_row + 1));
+    try std.testing.expectEqual(@as(usize, 1), activeChrome(&a).view.selected); // the cursor still follows
+    // The pick rides a synthesized `space`, which the filter editor drops. That keeps
+    // the click from picking *and* from typing a blank — both hang on `space` staying
+    // inert mid-edit.
+    try std.testing.expect(!checked[1]);
+    try std.testing.expectEqualStrings("", activeChrome(&a).filter.slice());
+    try std.testing.expect(a.editing); // and the click doesn't end the edit
+}
+
+test "a left-press on a pinned Outdated row moves the cursor but never picks it" {
+    var a: App = .{ .active = .outdated };
+    var checked = [_]bool{false} ** 3;
+    a.states.outdated.items = &click_rows;
+    a.states.outdated.checked = &checked;
+    try serviceMouseA(&a, leftAt(first_row + 2)); // pkgc, pinned
+    try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
+    try std.testing.expect(!checked[2]); // the pin outranks the click, as it does `space`
+}
+
+test "a right-press on an Outdated row moves the cursor but finds no pane to open" {
+    var a: App = .{ .active = .outdated };
+    var checked = [_]bool{false} ** 3;
+    a.states.outdated.items = &click_rows;
+    a.states.outdated.checked = &checked;
+    try serviceMouseA(&a, rightAt(first_row + 1));
+    try std.testing.expectEqual(@as(usize, 1), activeChrome(&a).view.selected); // cursor still moves
+    try std.testing.expect(!checked[1]); // right-press never picks
+    try std.testing.expect(!a.shared.banner.isSet()); // and starts no upgrade
+}
+
+test "a click below the populated Outdated rows leaves the cursor alone" {
+    var a: App = .{ .active = .outdated };
+    var checked = [_]bool{false} ** 3;
+    a.states.outdated.items = &click_rows;
+    a.states.outdated.checked = &checked;
+    try serviceMouseA(&a, leftAt(first_row + 7)); // blank tail past the three rows
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+    for (checked) |c| try std.testing.expect(!c); // a miss picks nothing
 }
 
 test "a right-press on an Installed row selects it and runs the open (Enter) path" {
