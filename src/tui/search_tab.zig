@@ -152,6 +152,45 @@ pub fn title() []const u8 {
     return "Search";
 }
 
+pub const Hit = tab.Hit;
+
+/// One list view's on-screen geometry: the sub-rect the rows occupy, the `clamp`ed
+/// view, and the row `count`. The single source of truth each `render` path shares
+/// with `hitTest`, so a painted row and the hit-test can never disagree.
+const Geometry = struct { list: tab.Rect, view: scroll_list.View, count: usize };
+
+/// Results geometry: the bold heading rides row 0, so the list starts one row down.
+/// Detail-pane docking is deliberately ignored here (as in Installed) — the shell
+/// feeds `hitTest` the pre-dock rect.
+fn resultsGeometry(s: *const State, rect: tab.Rect) Geometry {
+    const list: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    return .{ .list = list, .view = scroll_list.clamp(s.chrome.view, s.items.len, list.height), .count = s.items.len };
+}
+
+/// Basket geometry: the dim count title and the heading each cost a row, so the
+/// list starts two rows down.
+fn basketGeometry(s: *const State, rect: tab.Rect) Geometry {
+    const list: tab.Rect = .{ .row = rect.row + 2, .col = rect.col, .width = rect.width, .height = rect.height -| 2 };
+    return .{ .list = list, .view = scroll_list.clamp(s.chrome.view, s.basket.len, list.height), .count = s.basket.len };
+}
+
+/// Map a click to the row it lands on, branching on the active view. `Hit.open` is
+/// a capability flag the shell reads on a right-click: results rows open info
+/// (parity with Enter), basket rows do not (their verb is remove), so a right-click
+/// there is a no-op. A left-click uses only `index` to move the cursor. `click_col`
+/// is unused — rows are full-width.
+pub fn hitTest(s: *const State, rect: tab.Rect, click_row: u16, click_col: u16) ?Hit {
+    _ = click_col; // full-width rows: the column carries no row identity
+    const g = switch (s.view) {
+        // The results list is painted only when loaded; while a re-query is
+        // searching, stale items linger behind a status line, so map nothing.
+        .results => if (s.phase == .loaded) resultsGeometry(s, rect) else return null,
+        .basket => basketGeometry(s, rect), // the basket is phase-independent
+    };
+    const idx = scroll_list.rowAt(g.view, g.list.row, g.list.height, g.count, click_row) orelse return null;
+    return .{ .index = idx, .open = s.view == .results };
+}
+
 /// The tab's action keys, surfaced in the shared footer next to the global keys.
 /// The contract default is the results view; the shell calls `footerHintFor` with
 /// the live view so the footer tracks `l`.
@@ -322,9 +361,10 @@ fn renderBasket(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         .{ .label = "NAME", .width = 28 },
         .{ .label = "KIND", .width = 8 },
     });
-    const list: tab.Rect = .{ .row = head.row + 1, .col = head.col, .width = head.width, .height = head.height -| 1 };
+    const g = basketGeometry(s, rect);
+    const list = g.list;
     if (list.height == 0) return; // the heading took the only row
-    const v = scroll_list.clamp(s.chrome.view, s.basket.len, list.height);
+    const v = g.view;
     for (s.basket, 0..) |e, i| {
         if (i < v.offset) continue;
         const screen = i - v.offset;
@@ -400,9 +440,10 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         .{ .label = "NAME", .width = 28 },
         .{ .label = "KIND", .width = 8 },
     });
-    const list: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    const g = resultsGeometry(s, rect);
+    const list = g.list;
     if (list.height == 0) return; // the heading took the only row
-    const v = scroll_list.clamp(s.chrome.view, s.items.len, list.height);
+    const v = g.view;
     for (s.items, 0..) |m, i| {
         if (i < v.offset) continue;
         const screen = i - v.offset;
@@ -1627,4 +1668,98 @@ test "a failed install retains the basket behind a recoverable banner and does n
     try testing.expect(next == .none); // no re-query on failure
     try testing.expectEqual(@as(usize, 1), st.selected_count); // basket retained for retry
     try testing.expect(std.mem.startsWith(u8, shared.banner.slice(), "install failed"));
+}
+
+// ── Hit-test tests ─────────────────────────────────────────────────────────
+
+test "hitTest in the results view maps a click to the row it lands on, openable" {
+    const s: State = .{ .items = &sample, .phase = .loaded };
+    // rect.row = 1 → heading at 1, list starts at 2. Rows 2/3/4 map to 0/1/2.
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    try testing.expectEqual(@as(?usize, 0), hitTest(&s, rect, 2, 1).?.index);
+    try testing.expectEqual(@as(?usize, 2), hitTest(&s, rect, 4, 1).?.index);
+    try testing.expect(hitTest(&s, rect, 2, 1).?.open); // a results row opens info
+}
+
+test "hitTest results index lines up with selectedMatch for the same row" {
+    var s: State = .{ .items = &sample, .phase = .loaded };
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    const hit = hitTest(&s, rect, 4, 1).?; // ripgrep's row
+    s.chrome.view.selected = hit.index; // move the cursor there, as a left-click would
+    try testing.expectEqualStrings("ripgrep", selectedMatch(&s).?.name); // Enter opens the same hit
+}
+
+test "hitTest rejects the results heading row and rows above the list" {
+    const s: State = .{ .items = &sample, .phase = .loaded };
+    const rect: tab.Rect = .{ .row = 5, .col = 1, .width = 80, .height = 10 };
+    try testing.expect(hitTest(&s, rect, 5, 1) == null); // the heading row
+    try testing.expect(hitTest(&s, rect, 4, 1) == null); // above the list
+}
+
+test "hitTest in the basket view maps a click to the row, select-only" {
+    const s: State = .{ .phase = .loaded, .view = .basket, .basket = &basket_sample };
+    // Basket adds a title row: title at 1, heading at 2, list starts at 3.
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    try testing.expectEqual(@as(?usize, 0), hitTest(&s, rect, 3, 1).?.index);
+    try testing.expectEqual(@as(?usize, 1), hitTest(&s, rect, 4, 1).?.index);
+    try testing.expect(!hitTest(&s, rect, 3, 1).?.open); // the basket has no info action
+}
+
+test "hitTest rejects the basket title and heading rows" {
+    const s: State = .{ .phase = .loaded, .view = .basket, .basket = &basket_sample };
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    try testing.expect(hitTest(&s, rect, 1, 1) == null); // the title row
+    try testing.expect(hitTest(&s, rect, 2, 1) == null); // the heading row
+}
+
+test "hitTest adds the scrolled view offset in each view" {
+    var r: State = .{ .items = &sample, .phase = .loaded };
+    r.chrome.view.selected = 2; // clamp scrolls the 2-tall results list to offset 1
+    // rect.height 3 → results list height 2; the top list row (row 2) maps to the offset.
+    try testing.expectEqual(@as(?usize, 1), hitTest(&r, .{ .row = 1, .col = 1, .width = 80, .height = 3 }, 2, 1).?.index);
+
+    var b: State = .{ .phase = .loaded, .view = .basket, .basket = &basket_sample };
+    b.chrome.view.selected = 1; // clamp scrolls the 1-tall basket list to offset 1
+    // rect.height 3 → basket list height 1 (title+heading cost two); top row (row 3) maps to the offset.
+    try testing.expectEqual(@as(?usize, 1), hitTest(&b, .{ .row = 1, .col = 1, .width = 80, .height = 3 }, 3, 1).?.index);
+}
+
+test "hitTest rejects a blank row past the populated tail in each view" {
+    const r: State = .{ .items = &sample, .phase = .loaded }; // 3 hits
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    try testing.expectEqual(@as(?usize, 2), hitTest(&r, rect, 4, 1).?.index); // last hit
+    try testing.expect(hitTest(&r, rect, 5, 1) == null); // blank tail
+
+    const b: State = .{ .phase = .loaded, .view = .basket, .basket = &basket_sample }; // 2 picks
+    try testing.expectEqual(@as(?usize, 1), hitTest(&b, rect, 4, 1).?.index); // last pick
+    try testing.expect(hitTest(&b, rect, 5, 1) == null); // blank tail
+}
+
+test "hitTest hits nothing on an empty results list or empty basket" {
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    const r: State = .{ .items = &.{}, .phase = .loaded }; // count 0 must reach rowAt
+    try testing.expect(hitTest(&r, rect, 2, 1) == null);
+    const b: State = .{ .phase = .loaded, .view = .basket, .basket = &.{} };
+    try testing.expect(hitTest(&b, rect, 3, 1) == null);
+}
+
+test "hitTest is inert in the results view while a re-query is searching" {
+    // A re-query flips to `searching` but keeps the last results in `items`; the
+    // screen shows "searching…", not the list, so a click must not resolve a stale row.
+    const s: State = .{ .items = &sample, .phase = .searching };
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    try testing.expect(hitTest(&s, rect, 2, 1) == null);
+}
+
+test "hitTest hits nothing when the heading or title eats the only rows" {
+    const r: State = .{ .items = &sample, .phase = .loaded };
+    // Results height 1 → the heading takes the only row, no list band.
+    try testing.expect(hitTest(&r, .{ .row = 1, .col = 1, .width = 80, .height = 1 }, 2, 1) == null);
+
+    const b: State = .{ .phase = .loaded, .view = .basket, .basket = &basket_sample };
+    // Basket height 2 → title + heading take both rows, no list band.
+    try testing.expect(hitTest(&b, .{ .row = 1, .col = 1, .width = 80, .height = 2 }, 3, 1) == null);
+    // Zero-height rect in either view is a clean null, never a trap.
+    try testing.expect(hitTest(&r, .{ .row = 1, .col = 1, .width = 80, .height = 0 }, 1, 1) == null);
+    try testing.expect(hitTest(&b, .{ .row = 1, .col = 1, .width = 80, .height = 0 }, 1, 1) == null);
 }
