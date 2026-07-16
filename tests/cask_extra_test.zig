@@ -26,6 +26,51 @@ test "isAppRunningPub returns false for a path no pgrep match can cover" {
     try testing.expect(!cask.CaskInstaller.isAppRunningPub(threaded.io(), "/nonexistent/Sentinel-path-never-running.app"));
 }
 
+/// True when a live process matches `pattern`. Bracket the pattern's first byte or
+/// this probe matches its own command line.
+fn pgrepMatches(io: std.Io, pattern: []const u8) bool {
+    var child = std.process.spawn(io, .{
+        .argv = &.{ "pgrep", "-f", pattern },
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return false;
+    const term = child.wait(io) catch return false;
+    return switch (term) {
+        .exited => |code| code == 0,
+        .signal, .stopped, .unknown => false,
+    };
+}
+
+test "a concurrent probe's own command line never reads as the app running" {
+    // Two uninstalls of one cask overlap: each probe carries its pattern in its argv,
+    // so an unquoted one matches the other and both refuse. The stand-in below is that
+    // second probe, held live for the length of the check.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const path = "/nonexistent/Racing-probe-never-running.app";
+    var buf: [256]u8 = undefined;
+    const pattern = cask.pgrepPattern(&buf, path).?;
+
+    const marker = "malt_probe_stand_in_marker";
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/bin/sh", "-c", "read x", marker, pattern },
+        .stdin = .pipe, // blocks on the unwritten pipe, so it stays one live process
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    defer child.kill(io); // kill also reaps
+
+    // Spawn→exec is async: settle before asserting, or the check passes on an absent
+    // stand-in. `[m]` keeps this poll from matching itself.
+    var tries: usize = 0;
+    while (tries < 300 and !pgrepMatches(io, "[m]alt_probe_stand_in_marker")) : (tries += 1) {}
+    try testing.expect(pgrepMatches(io, "[m]alt_probe_stand_in_marker")); // stand-in is live
+
+    try testing.expect(!cask.CaskInstaller.isAppRunningPub(io, path));
+}
+
 test "CaskInstaller.uninstall on a missing token returns UninstallFailed" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
