@@ -1251,9 +1251,34 @@ pub fn verifyFileSha256(io: std.Io, file_path: []const u8, expected: ?[]const u8
     if (!hash_mod.constantTimeEql(u8, &got, expected_hash)) return error.Sha256Mismatch;
 }
 
+/// ERE metacharacters, which a bundle name may legitimately contain.
+const ere_meta = "\\.[]()*+?{}|^$";
+
+/// Quote `app_path` into a `pgrep -f` pattern: it must match the app's own argv but
+/// never the literal path, since every probe carries the pattern in its own command
+/// line and would otherwise read a racing probe as the app running. Null if it does
+/// not fit `buf`.
+pub fn pgrepPattern(buf: []u8, app_path: []const u8) ?[]const u8 {
+    if (app_path.len == 0) return null;
+    var w: std.Io.Writer = .fixed(buf); // a short path only overruns on absurd input
+    if (std.mem.indexOfAny(u8, app_path, ere_meta) != null) {
+        for (app_path) |c| {
+            if (std.mem.indexOfScalar(u8, ere_meta, c) != null) w.writeByte('\\') catch return null;
+            w.writeByte(c) catch return null;
+        }
+    } else {
+        // Nothing to quote, so the pattern still reads as itself: class the first byte.
+        w.print("[{c}]{s}", .{ app_path[0], app_path[1..] }) catch return null;
+    }
+    return w.buffered();
+}
+
 /// Check if an application is currently running by its path.
 fn isAppRunning(io: std.Io, app_path: []const u8) bool {
-    const argv = [_][]const u8{ "pgrep", "-f", app_path };
+    // pgrep -f reads its pattern as a regex over every process's whole command line.
+    var pat_buf: [std.Io.Dir.max_path_bytes * 2 + 2]u8 = undefined;
+    const pattern = pgrepPattern(&pat_buf, app_path) orelse return false;
+    const argv = [_][]const u8{ "pgrep", "-f", pattern };
     var child = std.process.spawn(io, .{
         .argv = &argv,
         .stdout = .ignore,
@@ -1448,6 +1473,49 @@ fn getFirstName(obj: std.json.ObjectMap) ?[]const u8 {
         .string => |s| return s,
         else => return null,
     }
+}
+
+test "pgrepPattern escapes the dot every .app bundle carries" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "/tmp/x/Running\\.app",
+        pgrepPattern(&buf, "/tmp/x/Running.app").?,
+    );
+}
+
+test "pgrepPattern quotes the metacharacters a bundle name can hold" {
+    // An unquoted `Notepad++.app` is an invalid regex: pgrep errors out and the
+    // running app reads as stopped.
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "/A/Notepad\\+\\+\\.app",
+        pgrepPattern(&buf, "/A/Notepad++.app").?,
+    );
+    try std.testing.expectEqualStrings(
+        "/A/Foo \\(2\\)\\.app",
+        pgrepPattern(&buf, "/A/Foo (2).app").?,
+    );
+}
+
+test "pgrepPattern classes the first byte when a path has nothing to quote" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("[/]tmp/plain", pgrepPattern(&buf, "/tmp/plain").?);
+    try std.testing.expectEqualStrings("[x]", pgrepPattern(&buf, "x").?); // shortest path
+}
+
+test "pgrepPattern never yields the raw path, so a concurrent probe cannot match it" {
+    // Each probe carries the pattern in its own argv; matching it would report the
+    // app running whenever two uninstalls race.
+    var buf: [64]u8 = undefined;
+    for ([_][]const u8{ "/tmp/x/Running.app", "/tmp/plain" }) |path| // the second has nothing to escape
+        try std.testing.expect(std.mem.indexOf(u8, pgrepPattern(&buf, path).?, path) == null);
+}
+
+test "pgrepPattern rejects an empty path and a buffer it would overrun" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(pgrepPattern(&buf, "") == null);
+    var tiny: [4]u8 = undefined;
+    try std.testing.expect(pgrepPattern(&tiny, "/tmp/x/Running.app") == null);
 }
 
 test "parseCask rejects path-traversal in token or version" {
