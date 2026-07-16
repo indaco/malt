@@ -373,7 +373,7 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
             f.put(color.Style.reset.code()); // a truncated muted segment must not bleed downward
 
             f.moveTo(r.tab_bar.row, 1);
-            var tb: [256]u8 = undefined;
+            var tb: [tab_bar.buf_cap]u8 = undefined;
             f.put(tab_bar.render(&tb, app.active, tabTitles(), cols));
             f.put(color.Style.reset.code()); // a truncated active title must not bleed bold downward
 
@@ -1110,6 +1110,26 @@ test "a data-free App renders the full chrome so the skeleton paint is real" {
     for ([_][]const u8{ "Search", "Installed", "Outdated", "Services", "Doctor" }) |title|
         try std.testing.expect(std.mem.indexOf(u8, out, title) != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "quit") != null); // footer help present
+}
+
+test "the tab-bar buffer holds every theme's fully styled bar, so only cols truncates" {
+    // Guard, not new behaviour: `render` clamps at capacity while `tabAt` models only
+    // `cols`, so a buffer cut would let a click reach a title that was never drawn.
+    // The widest case is every title accented, one of them reverse+bold on top.
+    defer color.setThemeForTest(null);
+    defer color.setBackgroundForTest(null);
+    defer color.setTruecolorForTest(null);
+    color.setTruecolorForTest(true); // truecolor codes are the longest role escapes
+    for (std.enums.values(color.Theme)) |theme| {
+        for ([_]color.Background{ .dark, .light, .unknown }) |bg| {
+            color.setThemeForTest(theme);
+            color.setBackgroundForTest(bg);
+            var tb: [tab_bar.buf_cap]u8 = undefined;
+            const out = tab_bar.render(&tb, .doctor, tabTitles(), 1000); // cols far past the bar
+            for (tabTitles()) |title|
+                try std.testing.expect(std.mem.indexOf(u8, out, title) != null);
+        }
+    }
 }
 
 test "renderActive covers its whole content rectangle so a self-drawn tab leaves no ghost row" {
