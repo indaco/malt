@@ -135,7 +135,11 @@ pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storag
     _ = storage;
     if (s.confirm_uninstall != null) return resolveGuard(allocator, mt_path, s, key);
     switch (key) {
-        .enter => return openDetailCmd(allocator, mt_path, s),
+        // Enter opens the selected row's detail pane, or toggles it closed when it is
+        // already open for that row (so a second Enter / a right-click dismisses it).
+        .enter => if (detailOpenForSelected(s)) {
+            s.detail = null;
+        } else return openDetailCmd(allocator, mt_path, s),
         .esc => s.detail = null, // close the detail pane
         // Only the tab knows its filtered row count, so the shell defers End here.
         .end => s.chrome.view.selected = filteredCount(s.items, s.chrome.filter.slice()) -| 1,
@@ -184,9 +188,37 @@ fn listGeometry(s: *const State, rect: tab.Rect) struct { list: tab.Rect, view: 
 /// cursor. `click_col` is accepted but unused — rows are full-width.
 pub fn hitTest(s: *const State, rect: tab.Rect, click_row: u16, click_col: u16) ?Hit {
     _ = click_col; // full-width rows: the column carries no row identity
-    const g = listGeometry(s, rect);
+    const g = listGeometry(s, listContentRect(s, rect)); // the rect the list actually paints into
     const idx = scroll_list.rowAt(g.view, g.list.row, g.list.height, g.count, click_row) orelse return null;
     return .{ .index = idx, .open = true }; // Installed rows open their detail pane
+}
+
+/// The detail pane's fields for the open row, borrowing the caller's scratch for the
+/// humanized size and the joined deps.
+fn detailFields(d: Detail, size_buf: []u8, deps_buf: []u8) [5]detail_pane.Field {
+    return .{
+        .{ .label = "Tap", .value = if (d.info.tap.len != 0) d.info.tap else "-" },
+        .{ .label = "Size", .value = bytes.humanizeOpt(d.pkg.size_bytes, size_buf) },
+        .{ .label = "Linked", .value = yesNo(d.pkg.linked) },
+        .{ .label = "Pinned", .value = if (d.pkg.pinned) "yes" else "no" },
+        .{ .label = "Dependencies", .value = joinDeps(deps_buf, d.info.dependencies) },
+    };
+}
+
+/// The rect `renderList` paints into: the content minus the guard banner (top) and
+/// the docked detail pane (bottom). Shared with `hitTest` so a click lands on the row
+/// under the pointer even with a pane open.
+fn listContentRect(s: *const State, rect: tab.Rect) tab.Rect {
+    var content = rect;
+    if (s.confirm_uninstall != null)
+        content = .{ .row = content.row + 1, .col = content.col, .width = content.width, .height = content.height -| 1 };
+    if (s.detail) |d| {
+        var size_buf: [16]u8 = undefined;
+        var deps_buf: [512]u8 = undefined;
+        const fields = detailFields(d, &size_buf, &deps_buf);
+        content.height -|= detail_pane.dockHeight(&fields, content.width, content.height);
+    }
+    return content;
 }
 
 /// Pure render: an optional guard banner on top, an optional detail pane at the
@@ -202,15 +234,9 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (s.detail) |d| {
         var size_buf: [16]u8 = undefined;
         var deps_buf: [512]u8 = undefined;
-        const fields = [_]detail_pane.Field{
-            .{ .label = "Tap", .value = if (d.info.tap.len != 0) d.info.tap else "-" },
-            .{ .label = "Size", .value = bytes.humanizeOpt(d.pkg.size_bytes, &size_buf) },
-            .{ .label = "Linked", .value = yesNo(d.pkg.linked) },
-            .{ .label = "Pinned", .value = if (d.pkg.pinned) "yes" else "no" },
-            .{ .label = "Dependencies", .value = joinDeps(&deps_buf, d.info.dependencies) },
-        };
-        const dh = @min(detail_pane.neededRows(&fields, content.width), content.height / 2);
-        if (dh > 0 and dh < content.height) {
+        const fields = detailFields(d, &size_buf, &deps_buf);
+        const dh = detail_pane.dockHeight(&fields, content.width, content.height);
+        if (dh > 0) {
             list_rect.height = content.height - dh;
             detail_pane.render(f, &fields, .{ .row = content.row + list_rect.height, .col = content.col, .width = content.width, .height = dh });
         }
@@ -322,6 +348,14 @@ pub fn countFromJson(allocator: std.mem.Allocator, json: []const u8) list_json.E
     const parsed = try list_json.parse(allocator, json);
     defer parsed.deinit();
     return parsed.items.len;
+}
+
+/// True when the detail pane is open for the currently selected row. The pane is
+/// opened for the selection, so a name match means it belongs to that row.
+fn detailOpenForSelected(s: *const State) bool {
+    const d = s.detail orelse return false;
+    const sel = selectedPkg(s) orelse return false;
+    return std.mem.eql(u8, d.pkg.name, sel.name);
 }
 
 /// Build the `mt info <pkg> --json` read for the selected row (a blocking read, no
@@ -491,6 +525,22 @@ test "Esc closes an open detail pane" {
     var s: State = .{ .items = &sample, .detail = .{ .pkg = sample[0], .info = .{} } };
     try testing.expect(stepKey(&s, .esc) == .none);
     try testing.expect(s.detail == null);
+}
+
+test "Enter toggles an open detail pane closed for the selected row" {
+    var s: State = .{ .items = &sample, .detail = .{ .pkg = sample[0], .info = .{ .name = "brotli" } } };
+    // selected defaults to 0 → brotli, exactly the row the pane is open for.
+    try testing.expect(stepKey(&s, .enter) == .none); // toggled closed, no new read
+    try testing.expect(s.detail == null);
+}
+
+test "Enter switches the pane to a newly selected row instead of closing it" {
+    var s: State = .{ .items = &sample, .detail = .{ .pkg = sample[0], .info = .{ .name = "brotli" } } };
+    s.chrome.view.selected = 1; // curl, while the pane belongs to brotli
+    const eff = stepKey(&s, .enter);
+    defer testing.allocator.free(eff.read.argv);
+    try testing.expect(eff == .read); // opens curl's info, not a close
+    try testing.expectEqualStrings("curl", eff.read.argv[2]);
 }
 
 test "x raises the uninstall guard, producing no effect yet" {
@@ -802,6 +852,36 @@ test "hitTest when the heading ate the only row hits nothing" {
     // height 1 → list.height 0. Clicking the first would-be list row (row 2) must
     // resolve to null: the list height (0), not the rect height (1), drives the hit.
     try testing.expect(hitTest(&s, .{ .row = 1, .col = 1, .width = 80, .height = 1 }, 2, 1) == null);
+}
+
+// A list taller than any docked layout, so a scrolled view exposes the offset
+// difference between the full rect and the pane-shrunk rect.
+const tall_sample = blk: {
+    var arr: [30]Pkg = undefined;
+    for (&arr, 0..) |*p, i|
+        p.* = .{ .name = std.fmt.comptimePrint("pkg{d:0>2}", .{i}), .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null };
+    break :blk arr;
+};
+
+test "hitTest resolves against the shrunk list when a detail pane is docked" {
+    // rect height 10 → the pane caps at 5 rows (its 5 fields need 6), so the list
+    // shrinks to rows 2..5. A click at row 8 lands in the pane, not on a list row —
+    // against the full rect it would have mis-mapped to a package.
+    const s: State = .{ .items = &tall_sample, .detail = .{ .pkg = tall_sample[0], .info = .{} } };
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    try testing.expectEqual(@as(?usize, 3), hitTest(&s, rect, 5, 1).?.index); // last shrunk row
+    try testing.expect(hitTest(&s, rect, 8, 1) == null); // the docked pane, not a row
+}
+
+test "hitTest uses the shrunk-height scroll offset when a pane is open" {
+    // Scrolled deep: the pane-shrunk clamp scrolls further than the full-rect clamp,
+    // so the top visible row is a different package under each. The click must follow
+    // the painted (shrunk) offset.
+    var s: State = .{ .items = &tall_sample, .detail = .{ .pkg = tall_sample[0], .info = .{} } };
+    s.chrome.view.selected = 20;
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    // shrunk list height 4, selected 20 → offset 17; the top list row (row 2) is item 17.
+    try testing.expectEqual(@as(?usize, 17), hitTest(&s, rect, 2, 1).?.index);
 }
 
 test "conforms to the tab contract" {

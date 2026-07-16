@@ -25,6 +25,7 @@ pub const takeResized = termsize.takeResized;
 pub const currentSize = termsize.currentSize;
 pub const setWinchInstalledForTest = termsize.setWinchInstalledForTest;
 pub const setResizedForTest = termsize.setResizedForTest;
+pub const setSizeForTest = termsize.setSizeForTest;
 
 /// Crash-only escape hatch, re-exported from `ui/term_restore` so the TUI
 /// run loop wires termination signals next to `installWinch`.
