@@ -37,6 +37,15 @@ pub fn neededRows(fields: []const Field, width: u16) u16 {
     return rows;
 }
 
+/// The height a docked pane takes for `fields` in a `height`-row region at `width`:
+/// its content rows, capped at half so the list it docks under survives; 0 when it
+/// wouldn't fit. The one place a paint and a hit-test agree on the split, so a click
+/// resolves against the same rows the pane left for the list.
+pub fn dockHeight(fields: []const Field, width: u16, height: u16) u16 {
+    const dh = @min(neededRows(fields, width), height / 2);
+    return if (dh > 0 and dh < height) dh else 0;
+}
+
 /// Paint a dim separator rule, then `fields`: a dim `label:` then its value, the
 /// value wrapped across rows (continuations indented under it) so a long message
 /// stays readable on a narrow pane instead of being cut off. Clipped to
@@ -136,6 +145,13 @@ test "neededRows grows with a wrapped value and counts at least one row per fiel
     try testing.expect(neededRows(&long, 20) > 2); // wraps to several rows at width 20
     const empty = [_]Field{.{ .label = "Deps", .value = "" }};
     try testing.expectEqual(@as(u16, 2), neededRows(&empty, 40)); // separator + the label row
+}
+
+test "dockHeight caps the pane at half the region and zeroes when it can't fit" {
+    const fields = [_]Field{ .{ .label = "A", .value = "x" }, .{ .label = "B", .value = "y" } };
+    try testing.expectEqual(@as(u16, 3), dockHeight(&fields, 40, 10)); // 3 content rows, under the half-cap
+    try testing.expectEqual(@as(u16, 2), dockHeight(&fields, 40, 4)); // half-cap wins
+    try testing.expectEqual(@as(u16, 0), dockHeight(&fields, 40, 1)); // no room for a pane
 }
 
 test "render clips fields past the pane height" {

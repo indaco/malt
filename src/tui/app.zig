@@ -184,6 +184,47 @@ fn renderActive(a: *const App, f: *tab.Frame, rect: tab.Rect) void {
     }
 }
 
+/// Split the chrome separator off the content band the way `renderFrame` does: the
+/// list tabs lose one row to the dim rule, Doctor keeps the whole band (it draws its
+/// own top rule). The one derivation the paint path and a click both use, so a click
+/// resolves against the exact rect the tab painted.
+fn bodyRect(active: Tab, content: tab.Rect) tab.Rect {
+    if (active == .doctor) return content;
+    return .{ .row = content.row + 1, .col = content.col, .width = content.width, .height = content.height -| 1 };
+}
+
+/// The body rect the active tab paints into for a given terminal size, or null
+/// below the usable minimum (where nothing is clickable). Lets a click hit-test
+/// against the same geometry `renderFrame` paints.
+fn contentBodyRect(app: *const App, size: term.Size) ?tab.Rect {
+    return switch (layout.compute(size.cols, size.rows)) {
+        .too_small => null,
+        .ok => |r| bodyRect(app.active, r.content),
+    };
+}
+
+/// The filter/query input's screen row for a terminal size, or null below the usable
+/// minimum — the row a click focuses the box on.
+fn filterRow(size: term.Size) ?u16 {
+    return switch (layout.compute(size.cols, size.rows)) {
+        .too_small => null,
+        .ok => |r| r.filter.row,
+    };
+}
+
+/// Hit-test a click against the active tab's list, or null when the tab exposes no
+/// `hitTest` (Doctor/Services/Outdated have no clickable list). The `@hasDecl` gate
+/// keeps those tabs free of a dead arm, matching the optional tab contract.
+fn activeHitTest(app: *const App, body: tab.Rect, click_row: u16, click_col: u16) ?tab.Hit {
+    switch (app.active) {
+        inline else => |t| {
+            const M = moduleFor(t);
+            if (!@hasDecl(M, "hitTest")) return null;
+            return M.hitTest(&@field(app.states, @tagName(t)), body, click_row, click_col);
+        },
+    }
+}
+
 fn activeFooterHint(a: *const App) []const u8 {
     switch (a.active) {
         inline else => |t| return moduleFor(t).footerHint(),
@@ -337,12 +378,8 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
             // the list tabs. Doctor paints its own rule at the band top, so it is
             // left out here and never shows a doubled rule; the rule costs the tab
             // one content row.
-            var body = r.content;
-            if (app.active != .doctor) {
-                tab.renderSeparator(&f, r.content, r.content.row, true);
-                body = .{ .row = r.content.row + 1, .col = r.content.col, .width = r.content.width, .height = r.content.height -| 1 };
-            }
-            renderActive(app, &f, body);
+            if (app.active != .doctor) tab.renderSeparator(&f, r.content, r.content.row, true);
+            renderActive(app, &f, bodyRect(app.active, r.content));
 
             // Footer: a rule line separating content, then — by priority — the
             // pre-read loading status, the transient error banner, or the help line.
@@ -931,28 +968,54 @@ fn serviceKey(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: 
     try onEntryReload(io, allocator, t, painter, fetches, app, store);
 }
 
-/// One decoded mouse report's turn. Takes the full `serviceKey` argument list so
-/// the later click arms (left = select, right = open) slot in without a signature
-/// change; today only the wheel acts, a pure `selected` nudge that render's
-/// `clamp` bounds — so it never needs the list length or viewport height. Every
-/// non-wheel event (left/right press, any release) is a deliberate no-op until the
-/// click work lands; the moment `?1000` tracking is on, those all flow in here.
+/// One decoded mouse report's turn. Left-press moves the selection to the row under
+/// the pointer and synthesizes `.space` — the multi-select tabs' basket toggle (inert
+/// where there is no basket, e.g. Installed). Right-press moves the selection and
+/// synthesizes `.enter`, which opens the row's detail pane or toggles it closed when
+/// it is already open for that row — reusing the whole Enter → `mt info` → pump path
+/// verbatim. A left-press on the filter/query input row focuses it for typing (mouse
+/// parity with `/`). The wheel nudges `selected`, which render's `clamp` bounds. Only a
+/// press acts; releases are inert for every button.
 fn serviceMouse(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, m: keys.Mouse) RunError!void {
-    // The uninstall guard is modal for the wheel too: freeze here rather than
-    // routing through the key-trap, which would read the notch as a cancel.
+    // The uninstall guard is modal for every button: freeze here rather than routing
+    // through the key-trap, which would read a click or a notch as a cancel.
     if (app.active == .installed and app.states.installed.confirm_uninstall != null) return;
+    if (!m.press) return; // only a press acts; a release moves and opens nothing
+    // A left-click on the query/filter input row focuses it for typing — mouse parity
+    // with `/`. It sits above the list, so it never collides with a row hit-test.
+    if (m.button == 0) {
+        if (filterRow(term.currentSize())) |fr| if (m.row == fr) {
+            app.editing = true;
+            return;
+        };
+    }
     switch (m.button) {
         64 => activeChrome(app).view.selected -|= wheel_step, // wheel up
         65 => activeChrome(app).view.selected += wheel_step, // wheel down
-        else => {}, // press/release for the click work — inert for now
+        0 => if (clickSelect(app, m)) |_| {
+            // Left picks: `.space` toggles the basket on the multi-select tabs and is
+            // inert elsewhere. Editing swallows space, so a click mid-type just moves
+            // the cursor.
+            try serviceKey(io, allocator, t, painter, fetches, app, store, .space);
+        },
+        2 => if (clickSelect(app, m)) |hit| {
+            // Right opens the row's pane, or toggles it closed on the open row. Inert
+            // while editing so a click can't pop a pane mid-type; flip `!app.editing`.
+            if (hit.open and !app.editing) try serviceKey(io, allocator, t, painter, fetches, app, store, .enter);
+        },
+        else => {}, // modified / horizontal wheel and other buttons: inert
     }
-    // Held for the click arms (left = select, right = open); the wheel needs none.
-    _ = io;
-    _ = allocator;
-    _ = t;
-    _ = painter;
-    _ = fetches;
-    _ = store;
+}
+
+/// Resolve a click to the active tab's list row and move the cursor there, returning
+/// the hit so a right-press can consult `open`. Null when the click misses a row or
+/// the tab has no clickable list. The rect is the one the tab painted, so the row
+/// under the pointer is the row selected.
+fn clickSelect(app: *App, m: keys.Mouse) ?tab.Hit {
+    const body = contentBodyRect(app, term.currentSize()) orelse return null;
+    const hit = activeHitTest(app, body, m.row, m.col) orelse return null;
+    activeChrome(app).view.selected = hit.index;
+    return hit;
 }
 
 fn repaint(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) std.mem.Allocator.Error!void {
@@ -994,13 +1057,22 @@ fn echoArgv(allocator: std.mem.Allocator, doc: []const u8) std.mem.Allocator.Err
 // Synthetic decoded mouse reports, exactly as the decode loop hands `serviceMouse`.
 const wheel_up: keys.Mouse = .{ .button = 64, .col = 1, .row = 1, .press = true };
 const wheel_down: keys.Mouse = .{ .button = 65, .col = 1, .row = 1, .press = true };
-const left_press: keys.Mouse = .{ .button = 0, .col = 5, .row = 3, .press = true };
-const left_release: keys.Mouse = .{ .button = 0, .col = 5, .row = 3, .press = false };
+
+// A left/right button report at a list row. At 80x24 the content body starts at
+// row 5 and each tab's heading eats one row, so populated list rows begin at 6.
+const first_row: u16 = 6;
+fn leftAt(row: u16) keys.Mouse {
+    return .{ .button = 0, .col = 1, .row = row, .press = true };
+}
+fn rightAt(row: u16) keys.Mouse {
+    return .{ .button = 2, .col = 1, .row = row, .press = true };
+}
 
 /// Drive `serviceMouse` in place for a wheel/no-op/modal test. Builds the same
 /// headless rig the pump tests use; the wheel arms touch only `app`, so io/term
 /// stay unused just as the loop's mouse turn leaves them until the click work.
 fn serviceMouseA(a: *App, m: keys.Mouse) !void {
+    term.setSizeForTest(.{ .cols = 80, .rows = 24 }); // deterministic geometry for the click hit-test
     var thr = std.Io.Threaded.init(std.testing.allocator, .{});
     defer thr.deinit();
     var store: Storages = .{};
@@ -1256,15 +1328,135 @@ test "the wheel scrolls the filtered list while the filter is being edited" {
     try std.testing.expect(a.editing); // the notch scrolled without disturbing edit mode
 }
 
-test "a left-press and its release are no-ops until the click work lands" {
+const click_pkgs = [_]installed.Pkg{
+    .{ .name = "pkga", .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null },
+    .{ .name = "pkgb", .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null },
+    .{ .name = "pkgc", .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null },
+};
+
+const search_matches = [_]search.Match{
+    .{ .name = "wget", .kind = .formula, .installed = false },
+    .{ .name = "curl", .kind = .formula, .installed = false },
+};
+
+const search_basket = [_]search.SelEntry{
+    .{ .name = "wget", .kind = .formula },
+    .{ .name = "curl", .kind = .formula },
+};
+
+test "a left-press selects the row under the pointer and opens no pane" {
     var a: App = .{ .active = .installed };
-    a.states.installed.items = &guard_pkgs;
-    try serviceMouseA(&a, left_press);
-    try serviceMouseA(&a, left_release);
-    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected); // selection unmoved
-    try std.testing.expect(!a.editing);
-    try std.testing.expect(!a.quit);
-    try std.testing.expect(a.states.installed.confirm_uninstall == null); // nothing armed
+    a.states.installed.items = &click_pkgs;
+    try serviceMouseA(&a, leftAt(first_row + 2)); // third list row
+    try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
+    try std.testing.expect(a.states.installed.detail == null); // select is non-committal — no pane
+    try std.testing.expect(!a.shared.banner.isSet()); // no info read ran
+}
+
+test "a left-press on the query/filter input row focuses it for typing" {
+    var a: App = .{ .active = .search };
+    a.states.search.items = &search_matches;
+    a.states.search.phase = .loaded;
+    try serviceMouseA(&a, leftAt(3)); // 80x24 layout: header 1, tab-bar 2, filter 3
+    try std.testing.expect(a.editing); // clicking the box starts editing, like `/`
+    try std.testing.expectEqual(@as(usize, 0), a.states.search.chrome.view.selected); // not a list pick
+    try std.testing.expectEqual(@as(usize, 0), a.states.search.selected_count); // nothing added to the basket
+}
+
+test "a left-press on a Search results row picks it into the basket" {
+    var a: App = .{ .active = .search };
+    defer a.storages.deinit(std.testing.allocator); // the pick allocates into the app's basket
+    a.states.search.items = &search_matches;
+    a.states.search.phase = .loaded;
+    try serviceMouseA(&a, leftAt(first_row + 1)); // second result
+    try std.testing.expectEqual(@as(usize, 1), a.states.search.chrome.view.selected); // cursor moved
+    try std.testing.expectEqual(@as(usize, 1), a.states.search.selected_count); // picked into the basket
+    try std.testing.expect(a.states.search.detail == null); // still no pane
+}
+
+test "a right-press on an Installed row selects it and runs the open (Enter) path" {
+    var a: App = .{ .active = .installed, .mt_path = "/bin/echo" }; // echo backs the info read
+    a.states.installed.items = &click_pkgs;
+    try serviceMouseA(&a, rightAt(first_row + 1)); // second list row
+    try std.testing.expectEqual(@as(usize, 1), activeChrome(&a).view.selected);
+    // The synthetic Enter reached the real info read (echo's output isn't JSON, so
+    // it banners rather than opening — the pane render itself is proven elsewhere).
+    try std.testing.expect(a.shared.banner.isSet());
+}
+
+test "a right-press on a Search results row runs the open path" {
+    var a: App = .{ .active = .search, .mt_path = "/bin/echo" };
+    a.states.search.items = &search_matches;
+    a.states.search.phase = .loaded;
+    try serviceMouseA(&a, rightAt(first_row));
+    try std.testing.expectEqual(@as(usize, 0), a.states.search.chrome.view.selected);
+    try std.testing.expect(a.shared.banner.isSet()); // results rows are openable
+}
+
+test "a right-press on a Search basket row selects it but opens nothing" {
+    var a: App = .{ .active = .search, .mt_path = "/bin/echo" };
+    a.states.search.basket = &search_basket;
+    a.states.search.view = .basket; // basket's count title + heading push its rows two down
+    try serviceMouseA(&a, rightAt(first_row + 2)); // row 8 → second basket row
+    try std.testing.expectEqual(@as(usize, 1), a.states.search.chrome.view.selected);
+    try std.testing.expect(!a.shared.banner.isSet()); // basket has no detail pane — no read
+}
+
+test "a click on a tab with no hit-test is a no-op, never a crash" {
+    var a: App = .{ .active = .services };
+    try serviceMouseA(&a, leftAt(first_row));
+    try serviceMouseA(&a, rightAt(first_row));
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+}
+
+test "the uninstall-confirm modal freezes both buttons so the guard is never cancelled" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &click_pkgs;
+    stepA(&a, ch('x')); // arm the guard on row 0
+    try std.testing.expect(a.states.installed.confirm_uninstall != null);
+    try serviceMouseA(&a, leftAt(first_row + 2));
+    try serviceMouseA(&a, rightAt(first_row + 2));
+    try std.testing.expect(a.states.installed.confirm_uninstall != null); // guard intact
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected); // no selection moved
+}
+
+test "while editing, a left-press still moves the selection" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &click_pkgs;
+    stepA(&a, ch('/')); // enter filter editing
+    try std.testing.expect(a.editing);
+    try serviceMouseA(&a, leftAt(first_row + 2));
+    try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
+    try std.testing.expect(a.editing); // click didn't disturb edit mode
+}
+
+test "while editing, a right-press moves the selection but opens no pane" {
+    var a: App = .{ .active = .installed, .mt_path = "/bin/echo" };
+    a.states.installed.items = &click_pkgs;
+    stepA(&a, ch('/'));
+    try serviceMouseA(&a, rightAt(first_row + 1));
+    try std.testing.expectEqual(@as(usize, 1), activeChrome(&a).view.selected);
+    try std.testing.expect(!a.shared.banner.isSet()); // open is inert mid-type — no read
+}
+
+test "a button release acts on nothing — only a press selects or opens" {
+    var a: App = .{ .active = .installed, .mt_path = "/bin/echo" };
+    a.states.installed.items = &click_pkgs;
+    try serviceMouseA(&a, .{ .button = 0, .col = 1, .row = first_row + 2, .press = false }); // left release
+    try serviceMouseA(&a, .{ .button = 2, .col = 1, .row = first_row + 2, .press = false }); // right release
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+    try std.testing.expect(!a.shared.banner.isSet());
+}
+
+test "clicking the exact first and last populated rows lands on the right indices" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &click_pkgs; // three rows: 6, 7, 8
+    try serviceMouseA(&a, leftAt(first_row)); // first row
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+    try serviceMouseA(&a, leftAt(first_row + 2)); // last populated row
+    try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
+    try serviceMouseA(&a, leftAt(first_row + 3)); // blank tail past the list — no move
+    try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
 }
 
 test "a modifier-flagged wheel is inert, never a partial-code scroll" {

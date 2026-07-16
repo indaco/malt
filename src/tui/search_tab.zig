@@ -183,8 +183,9 @@ pub fn hitTest(s: *const State, rect: tab.Rect, click_row: u16, click_col: u16) 
     _ = click_col; // full-width rows: the column carries no row identity
     const g = switch (s.view) {
         // The results list is painted only when loaded; while a re-query is
-        // searching, stale items linger behind a status line, so map nothing.
-        .results => if (s.phase == .loaded) resultsGeometry(s, rect) else return null,
+        // searching, stale items linger behind a status line, so map nothing. The
+        // docked info pane shrinks the list, so hit-test against the painted rect.
+        .results => if (s.phase == .loaded) resultsGeometry(s, resultsContentRect(s, rect)) else return null,
         .basket => basketGeometry(s, rect), // the basket is phase-independent
     };
     const idx = scroll_list.rowAt(g.view, g.list.row, g.list.height, g.count, click_row) orelse return null;
@@ -275,9 +276,12 @@ fn selectKey(allocator: std.mem.Allocator, s: *State, storage: *Storage) void {
 /// other meaning) is driven by the shell on filter-commit via `searchCmd`.
 pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storage: *Storage, key: tab.Key) cmd.Cmd {
     switch (key) {
-        // Enter on a result opens `mt info` for it. Committing the query is driven
-        // by the shell on filter-commit, so the two never collide.
-        .enter => if (selectedMatch(s) != null) return openSearchInfoCmd(allocator, mt_path, s),
+        // Enter on a result opens `mt info` for it, or toggles the pane closed when it
+        // is already open for that row (a second Enter / a right-click dismisses it).
+        // Committing the query is driven by the shell on filter-commit, so they never collide.
+        .enter => if (selectedMatch(s)) |m| {
+            if (resultsDetailOpen(s, m)) s.detail = null else return openSearchInfoCmd(allocator, mt_path, s);
+        },
         // `space` selects in the results view and removes in the basket view; `d`
         // is the basket-view remove alias and is inert in the results view.
         .space => selectKey(allocator, s, storage),
@@ -399,18 +403,37 @@ fn renderLoaded(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     var list_rect = r;
     if (s.detail) |info| {
         var deps_buf: [512]u8 = undefined;
-        const fields = [_]detail_pane.Field{
-            .{ .label = "Version", .value = if (info.version.len != 0) info.version else "-" },
-            .{ .label = "Tap", .value = if (info.tap.len != 0) info.tap else "-" },
-            .{ .label = "Dependencies", .value = joinDeps(&deps_buf, info.dependencies) },
-        };
-        const dh = @min(detail_pane.neededRows(&fields, r.width), r.height / 2);
-        if (dh > 0 and dh < r.height) {
+        const fields = resultsFields(info, &deps_buf);
+        const dh = detail_pane.dockHeight(&fields, r.width, r.height);
+        if (dh > 0) {
             list_rect.height = r.height - dh;
             detail_pane.render(f, &fields, .{ .row = r.row + list_rect.height, .col = r.col, .width = r.width, .height = dh });
         }
     }
     renderList(s, f, list_rect);
+}
+
+/// The info pane's fields for the open result, borrowing the caller's scratch for
+/// the joined deps.
+fn resultsFields(info: info_json.Info, deps_buf: []u8) [3]detail_pane.Field {
+    return .{
+        .{ .label = "Version", .value = if (info.version.len != 0) info.version else "-" },
+        .{ .label = "Tap", .value = if (info.tap.len != 0) info.tap else "-" },
+        .{ .label = "Dependencies", .value = joinDeps(deps_buf, info.dependencies) },
+    };
+}
+
+/// The results rect `renderLoaded` paints into: the content minus the docked info
+/// pane. Shared with `hitTest` so a click lands on the painted result even with a
+/// pane open.
+fn resultsContentRect(s: *const State, rect: tab.Rect) tab.Rect {
+    var list_rect = rect;
+    if (s.detail) |info| {
+        var deps_buf: [512]u8 = undefined;
+        const fields = resultsFields(info, &deps_buf);
+        list_rect.height -|= detail_pane.dockHeight(&fields, rect.width, rect.height);
+    }
+    return list_rect;
 }
 
 /// Comma-join a dependency list into `buf`; "none" when empty. Truncates if the
@@ -527,6 +550,13 @@ pub fn searchCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *State) c
 /// The `mt info <pkg> --json` read for the active hit, or `Cmd.none` when nothing is
 /// selected. `mt info` resolves uninstalled hits too, so a result is inspectable
 /// before any install.
+/// True when the info pane is open for the selected result — matched by name, since
+/// the pane is opened for the selection.
+fn resultsDetailOpen(s: *const State, sel: Match) bool {
+    const d = s.detail orelse return false;
+    return std.mem.eql(u8, d.name, sel.name);
+}
+
 fn openSearchInfoCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State) cmd.Cmd {
     const m = selectedMatch(s) orelse return .none; // empty list: no-op
     const argv = cmd.jsonArgv(allocator, mt_path, &.{ "info", m.name }) catch return .none;
@@ -1670,6 +1700,26 @@ test "a failed install retains the basket behind a recoverable banner and does n
     try testing.expect(std.mem.startsWith(u8, shared.banner.slice(), "install failed"));
 }
 
+test "Enter toggles an open results pane closed for the selected row" {
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var s: State = .{ .items = &sample, .phase = .loaded, .detail = .{ .name = "ripgrep" } };
+    s.chrome.view.selected = 2; // ripgrep, the row the pane is open for
+    try testing.expect(stepKey(&s, &storage, .enter) == .none); // toggled closed
+    try testing.expect(s.detail == null);
+}
+
+test "Enter switches the results pane to a newly selected row instead of closing it" {
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var s: State = .{ .items = &sample, .phase = .loaded, .detail = .{ .name = "ripgrep" } };
+    s.chrome.view.selected = 0; // wget, while the pane belongs to ripgrep
+    const eff = stepKey(&s, &storage, .enter);
+    defer testing.allocator.free(eff.read.argv);
+    try testing.expect(eff == .read); // opens wget's info
+    try testing.expectEqualStrings("wget", eff.read.argv[2]);
+}
+
 // ── Hit-test tests ─────────────────────────────────────────────────────────
 
 test "hitTest in the results view maps a click to the row it lands on, openable" {
@@ -1687,6 +1737,32 @@ test "hitTest results index lines up with selectedMatch for the same row" {
     const hit = hitTest(&s, rect, 4, 1).?; // ripgrep's row
     s.chrome.view.selected = hit.index; // move the cursor there, as a left-click would
     try testing.expectEqualStrings("ripgrep", selectedMatch(&s).?.name); // Enter opens the same hit
+}
+
+// A results list taller than any docked layout, so a scrolled view exposes the
+// offset difference between the full rect and the pane-shrunk rect.
+const tall_results = blk: {
+    var arr: [30]Match = undefined;
+    for (&arr, 0..) |*m, i|
+        m.* = .{ .name = std.fmt.comptimePrint("pkg{d:0>2}", .{i}), .kind = .formula, .installed = false };
+    break :blk arr;
+};
+
+test "hitTest resolves against the shrunk results list when a detail pane is docked" {
+    // rect height 10 → the pane caps at 4 rows (its 3 fields need 4), so the list
+    // shrinks to rows 2..6. A click at row 8 lands in the pane, not on a result.
+    const s: State = .{ .items = &tall_results, .phase = .loaded, .detail = .{} };
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    try testing.expectEqual(@as(?usize, 4), hitTest(&s, rect, 6, 1).?.index); // last shrunk row
+    try testing.expect(hitTest(&s, rect, 8, 1) == null); // the docked pane, not a result
+}
+
+test "hitTest uses the shrunk-height scroll offset when a results pane is open" {
+    var s: State = .{ .items = &tall_results, .phase = .loaded, .detail = .{} };
+    s.chrome.view.selected = 20;
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    // shrunk results list height 5, selected 20 → offset 16; the top row (row 2) is item 16.
+    try testing.expectEqual(@as(?usize, 16), hitTest(&s, rect, 2, 1).?.index);
 }
 
 test "hitTest rejects the results heading row and rows above the list" {
