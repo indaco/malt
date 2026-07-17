@@ -220,8 +220,8 @@ fn tabBarRow(size: term.Size) ?u16 {
 }
 
 /// Hit-test a click against the active tab's list, or null when the tab exposes no
-/// `hitTest` (Doctor/Services have no clickable list). The `@hasDecl` gate keeps
-/// those tabs free of a dead arm, matching the optional tab contract.
+/// `hitTest` (only Doctor has no clickable list). The `@hasDecl` gate keeps that
+/// tab free of a dead arm, matching the optional tab contract.
 fn activeHitTest(app: *const App, body: tab.Rect, click_row: u16, click_col: u16) ?tab.Hit {
     switch (app.active) {
         inline else => |t| {
@@ -1568,10 +1568,52 @@ test "a right-press on the tab bar is inert — only left switches tabs" {
 }
 
 test "a click on a tab with no hit-test is a no-op, never a crash" {
-    var a: App = .{ .active = .services };
+    var a: App = .{ .active = .doctor };
     try serviceMouseA(&a, leftAt(first_row));
     try serviceMouseA(&a, rightAt(first_row));
     try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+}
+
+const click_services = [_]services.Row{
+    .{ .name = "redis", .state = "running", .auto_start = true, .keg_name = "redis" },
+    .{ .name = "postgresql", .state = "stopped", .auto_start = false, .keg_name = "postgresql@16" },
+    .{ .name = "dnsmasq", .state = "not-loaded", .auto_start = true, .keg_name = "dnsmasq" },
+};
+
+test "a left-press on a Services row only moves the cursor — space stays inert there" {
+    var a: App = .{ .active = .services, .mt_path = "/bin/echo" };
+    a.states.services.items = &click_services;
+    try serviceMouseA(&a, leftAt(first_row + 2));
+    try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
+    try std.testing.expect(a.states.services.detail == null); // select opens nothing
+    try std.testing.expect(!a.shared.banner.isSet()); // and runs no command
+}
+
+test "a right-press on a Services row opens that row's pane with no command run" {
+    var a: App = .{ .active = .services, .mt_path = "/bin/echo" };
+    a.states.services.items = &click_services;
+    try serviceMouseA(&a, rightAt(first_row + 1));
+    try std.testing.expectEqual(@as(usize, 1), activeChrome(&a).view.selected);
+    try std.testing.expectEqualStrings("postgresql", a.states.services.detail.?.name);
+    // Every field is already on the row, so the open is pure state — no `mt` round-trip.
+    try std.testing.expect(!a.shared.banner.isSet());
+}
+
+test "with the Services pane open, a left-press picks the row the user clicked" {
+    var a: App = .{ .active = .services, .mt_path = "/bin/echo" };
+    a.states.services.items = &click_services;
+    try serviceMouseA(&a, rightAt(first_row)); // pane docks and shrinks the list
+    try serviceMouseA(&a, leftAt(first_row + 2));
+    try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
+}
+
+test "while editing, a right-press on Services moves the cursor but opens no pane" {
+    var a: App = .{ .active = .services, .mt_path = "/bin/echo" };
+    a.states.services.items = &click_services;
+    stepA(&a, ch('/'));
+    try serviceMouseA(&a, rightAt(first_row + 1));
+    try std.testing.expectEqual(@as(usize, 1), activeChrome(&a).view.selected);
+    try std.testing.expect(a.states.services.detail == null); // no pane mid-type
 }
 
 test "the uninstall-confirm modal freezes both buttons so the guard is never cancelled" {

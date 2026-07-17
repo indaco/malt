@@ -142,32 +142,67 @@ fn dotStyle(st: Status) color.Role {
     };
 }
 
-/// Pure render: the filtered + scrolled service list. The lifecycle keys live in
-/// the shared footer, so the list owns the whole rect. A pure function of
-/// `(state, rect)` so a resize is a re-render.
+/// The detail pane's fields for the open row; the values borrow the row's slices.
+fn detailFields(d: Row) [4]detail_pane.Field {
+    return .{
+        .{ .label = "Schedule", .value = if (d.schedule.len != 0) d.schedule else "-" },
+        .{ .label = "Keg", .value = if (d.keg_name.len != 0) d.keg_name else "-" },
+        .{ .label = "State", .value = d.state },
+        .{ .label = "Auto-start", .value = if (d.auto_start) "yes" else "no" },
+    };
+}
+
+/// The rect `renderList` paints into: the content minus the docked detail pane.
+/// Shared with `hitTest` so a click lands on the row under the pointer even with a
+/// pane open.
+fn listContentRect(s: *const State, rect: tab.Rect) tab.Rect {
+    var content = rect;
+    if (s.detail) |d| {
+        const fields = detailFields(d);
+        content.height -|= detail_pane.dockHeight(&fields, rect.width, rect.height);
+    }
+    return content;
+}
+
+pub const Hit = tab.Hit;
+
+/// The list's on-screen geometry: the sub-rect below the heading, the view
+/// `clamp`ed to that height, and the filtered row `count`. The single source of
+/// truth `renderList` and `hitTest` share, so paint and hit-test cannot drift.
+fn listGeometry(s: *const State, rect: tab.Rect) struct { list: tab.Rect, view: scroll_list.View, count: usize } {
+    const nf = filteredCount(s.items, s.chrome.filter.slice());
+    // The bold heading rides row 0 and costs the list one row.
+    const list: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    return .{ .list = list, .view = scroll_list.clamp(s.chrome.view, nf, list.height), .count = nf };
+}
+
+/// Map a click to the list row it lands on. A left-click uses `index` to move the
+/// cursor; a right-click consumes `open` to show the row's detail pane. `click_col`
+/// is accepted but unused — rows are full-width.
+pub fn hitTest(s: *const State, rect: tab.Rect, click_row: u16, click_col: u16) ?Hit {
+    _ = click_col; // full-width rows: the column carries no row identity
+    const g = listGeometry(s, listContentRect(s, rect)); // the rect the list actually paints into
+    const idx = scroll_list.rowAt(g.view, g.list.row, g.list.height, g.count, click_row) orelse return null;
+    return .{ .index = idx, .open = true };
+}
+
+/// Pure render: the filtered + scrolled service list, with the detail pane docked
+/// below it when open. A pure function of `(state, rect)` so a resize is a re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (r.height == 0) return;
-    var list_rect = r;
-    if (s.detail) |d| {
-        const fields = [_]detail_pane.Field{
-            .{ .label = "Schedule", .value = if (d.schedule.len != 0) d.schedule else "-" },
-            .{ .label = "Keg", .value = if (d.keg_name.len != 0) d.keg_name else "-" },
-            .{ .label = "State", .value = d.state },
-            .{ .label = "Auto-start", .value = if (d.auto_start) "yes" else "no" },
-        };
-        const dh = @min(detail_pane.neededRows(&fields, r.width), r.height / 2);
-        if (dh > 0 and dh < r.height) {
-            list_rect.height = r.height - dh;
-            detail_pane.render(f, &fields, .{ .row = r.row + list_rect.height, .col = r.col, .width = r.width, .height = dh });
-        }
-    }
+    const list_rect = listContentRect(s, r);
+    if (s.detail) |d| if (list_rect.height < r.height) {
+        const fields = detailFields(d);
+        detail_pane.render(f, &fields, .{ .row = r.row + list_rect.height, .col = r.col, .width = r.width, .height = r.height - list_rect.height });
+    };
     renderList(s, f, list_rect);
 }
 
 fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     if (rect.height == 0) return;
     const filter = s.chrome.filter.slice();
-    const nf = filteredCount(s.items, filter);
+    const g = listGeometry(s, rect);
+    const nf = g.count;
     if (nf == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "No services registered.");
     // A fixed bold heading rides above the list and costs it one row.
     tab.renderHeading(f, rect, 2, &.{
@@ -176,9 +211,9 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         .{ .label = "START", .width = 8 },
         .{ .label = "KEG", .width = 3, .gap = 0 }, // formatRow appends the keg with no separator
     });
-    const list: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    const list = g.list;
     if (list.height == 0) return; // the heading took the only row
-    const v = scroll_list.clamp(s.chrome.view, nf, list.height);
+    const v = g.view;
 
     var fi: usize = 0;
     for (s.items) |svc| {
@@ -681,6 +716,82 @@ test "a cleared services read (fresh prefix) drops to an empty list" {
     _ = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .cleared);
     try testing.expectEqual(@as(usize, 0), st.items.len);
     try testing.expect(st.detail == null);
+}
+
+test "hitTest maps a click to the list row painted under it" {
+    const s: State = .{ .items = &sample };
+    const rect: tab.Rect = .{ .row = 2, .col = 1, .width = 80, .height = 12 };
+    try testing.expectEqual(@as(usize, 0), hitTest(&s, rect, 3, 1).?.index); // first row, below the heading
+    try testing.expect(hitTest(&s, rect, 3, 1).?.open); // right-click opens the pane
+    try testing.expectEqual(@as(usize, 3), hitTest(&s, rect, 6, 1).?.index); // last row
+    try testing.expect(hitTest(&s, rect, 2, 1) == null); // the heading row
+    try testing.expect(hitTest(&s, rect, 1, 1) == null); // above the list
+    try testing.expect(hitTest(&s, rect, 7, 1) == null); // blank row past the tail
+}
+
+test "hitTest resolves through the filter and the scroll offset" {
+    var s: State = .{ .items = &sample };
+    s.chrome.filter.push("d"); // redis, dnsmasq, weird
+    const rect: tab.Rect = .{ .row = 2, .col = 1, .width = 80, .height = 12 };
+    try testing.expectEqual(@as(usize, 1), hitTest(&s, rect, 4, 1).?.index); // 2nd *filtered* row
+
+    s.chrome.filter.clear();
+    s.chrome.view.selected = 3; // a 2-row list scrolls to offset 2
+    const tight: tab.Rect = .{ .row = 2, .col = 1, .width = 80, .height = 3 };
+    try testing.expectEqual(@as(usize, 2), hitTest(&s, tight, 3, 1).?.index); // offset followed
+}
+
+test "hitTest with the detail pane open lands on the shrunk list, never inside the pane" {
+    var s: State = .{ .items = &sample };
+    _ = stepKey(&s, .enter);
+    const rect: tab.Rect = .{ .row = 2, .col = 1, .width = 60, .height = 12 };
+    // The pane docks at the bottom; the list keeps the rows above it.
+    try testing.expectEqual(@as(usize, 0), hitTest(&s, rect, 3, 1).?.index);
+    try testing.expect(hitTest(&s, rect, 11, 1) == null); // inside the pane's region
+}
+
+test "hitTest on an empty list is null — the hint is not a row" {
+    const s: State = .{ .items = &.{} };
+    try testing.expect(hitTest(&s, .{ .row = 2, .col = 1, .width = 80, .height = 12 }, 3, 1) == null);
+    // An open pane over an empty list still resolves to nothing, not to row 0.
+    var open: State = .{ .items = &.{}, .detail = sample[0] };
+    try testing.expect(hitTest(&open, .{ .row = 2, .col = 1, .width = 80, .height = 12 }, 3, 1) == null);
+}
+
+test "the pane's shrink cannot underflow the list rect at a degenerate size" {
+    var buf: [4096]u8 = undefined;
+    var s: State = .{ .items = &sample, .detail = sample[0] };
+    // Heights around the pane's own footprint are where a shrink would go negative.
+    for (0..6) |h| {
+        for ([_]u16{ 0, 4, 60 }) |w| {
+            const r: tab.Rect = .{ .row = 1, .col = 1, .width = w, .height = @intCast(h) };
+            try testing.expect(listContentRect(&s, r).height <= r.height);
+            _ = hitTest(&s, r, 2, 1); // must not trap
+            var f: tab.Frame = .{ .buf = &buf };
+            render(&s, &f, r); // must not trap
+        }
+    }
+}
+
+test "the row hitTest picks is the row selectedService opens — filtered, scrolled, paned" {
+    var s: State = .{ .items = &sample };
+    s.chrome.filter.push("d"); // redis, dnsmasq, weird
+    s.chrome.view.selected = 2;
+    _ = stepKey(&s, .enter); // dock the pane; the 3 filtered rows no longer fit, so it scrolls
+    const rect: tab.Rect = .{ .row = 2, .col = 1, .width = 60, .height = 6 };
+    // Both rows are resolved against the one frame the user is looking at: the offset is
+    // derived from the current selection, so moving the cursor re-derives it.
+    const first = hitTest(&s, rect, 3, 1).?.index; // first visible row — the offset, not row 0
+    const second = hitTest(&s, rect, 4, 1).?.index;
+    try testing.expectEqual(@as(usize, 1), first); // offset 1 followed
+    try testing.expectEqual(@as(usize, 2), second);
+    // The shell's right-click chain is exactly this: hitTest's index becomes the cursor,
+    // and the pane opens whatever selectedService then resolves to. If the two ever
+    // disagree, a click opens a row the user did not click.
+    s.chrome.view.selected = first;
+    try testing.expectEqualStrings("dnsmasq", selectedService(&s).?.name);
+    s.chrome.view.selected = second;
+    try testing.expectEqualStrings("weird", selectedService(&s).?.name);
 }
 
 test "conforms to the tab contract" {
