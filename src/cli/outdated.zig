@@ -502,7 +502,7 @@ test "pruneSnapshot keeps a pinned keg an upgrade refused to move" {
 
 test "pruneSnapshot never synthesises a snapshot that was not there" {
     // An upgrade run knows only what it touched; writing a file from that
-    // partial view is the under-reporting `WarmGate` exists to veto.
+    // partial view is the under-reporting the plan warm gate exists to veto.
     const a = std.testing.allocator;
     const io = std.Options.debug_io;
     var env = try PruneEnv.init();
