@@ -329,6 +329,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var any_failed = false;
     var app_running = false; // a named cask refused because its app is live
     var other_failed = false; // any failure that is not the app-running refusal
+    var any_upgraded = false; // at least one keg actually moved — gates the prune
 
     if (names.items.len == 0) {
         // Upgrade all. Both passes fold their per-package outcomes into one
@@ -354,6 +355,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             };
         }
         printSummary(tally, dry_run);
+        any_upgraded = tally.upgraded > 0;
 
         // Best-effort warm of the shared outdated snapshot from the dry-run's
         // own audit — a cache-write failure never changes exit code or output.
@@ -376,28 +378,35 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // there is no footer; the outcome itself is nothing to fold here.
         for (names.items) |name| {
             if (!cask_only and isFormulaInstalled(&db, name)) {
-                _ = upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, false, null) catch {
+                const outcome = upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, false, null) catch {
                     any_failed = true;
                     other_failed = true;
                     continue;
                 };
+                if (outcome == .upgraded) any_upgraded = true;
                 continue;
             }
             // Not a formula (or --cask): try cask
-            _ = upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only, false, null) catch |e| {
+            const outcome = upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only, false, null) catch |e| {
                 any_failed = true;
                 if (e == error.AppRunning) app_running = true else other_failed = true;
                 continue;
             };
+            if (outcome == .upgraded) any_upgraded = true;
         }
     }
 
-    // A real upgrade moved kegs, so the shared snapshot now lists packages at
-    // versions they no longer carry. Reconcile it against the DB — one call
-    // covers both branches above, including the named path. Best-effort: a
-    // cache write must not fail an upgrade that already succeeded. A dry-run
-    // mutates nothing, so it has nothing to reconcile.
-    if (!dry_run) outdated_mod.pruneSnapshot(ctx.io, allocator, &db, cache_dir);
+    // Only a run that actually moved a keg has anything to reconcile: the
+    // snapshot now lists packages at versions they no longer carry. A run that
+    // upgraded nothing — every package current, all pinned, all failed — must
+    // leave the file alone, or `mt upgrade` would rewrite a cache it did not
+    // invalidate. One call covers both branches above, the named path
+    // included. Best-effort: a cache write never fails an upgrade that already
+    // succeeded.
+    //
+    // No `!dry_run` needed: every path returns `.would_upgrade` from behind its
+    // dry-run guard and never reaches `.upgraded`, so a dry-run cannot set this.
+    if (any_upgraded) outdated_mod.pruneSnapshot(ctx.io, allocator, &db, cache_dir);
 
     // A batch whose only failure was a live cask app exits with the dedicated
     // code so the TUI can footer the real cause; any other failure (even mixed
