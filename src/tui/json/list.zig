@@ -57,7 +57,10 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) Error!Parsed {
         // Copy strings into the arena: the shell frees the source buffer right
         // after parsing while the tab keeps borrowing the rows.
         .allocate = .alloc_always,
-    }) catch return error.BadJson;
+    }) catch |e| switch (e) {
+        error.OutOfMemory => |o| return o,
+        else => return error.BadJson,
+    };
     errdefer doc.deinit();
 
     // Restructure into the public `Pkg` (wire key `type` → `kind`); strings stay
@@ -130,6 +133,16 @@ test "parse rejects malformed and empty input as BadJson" {
     try testing.expectError(error.BadJson, parse(testing.allocator, "not json"));
     try testing.expectError(error.BadJson, parse(testing.allocator, ""));
     try testing.expectError(error.BadJson, parse(testing.allocator, "{}")); // no installed key
+}
+
+test "parse propagates a parse-time OOM instead of relabeling it BadJson" {
+    // A real allocator exhaustion during the parse is fatal, not a malformed
+    // contract; the fatal-OOM guard must restore the terminal, not banner BadJson.
+    const bytes =
+        \\{"installed":[{"name":"a","version":"1","type":"formula","pinned":false}]}
+    ;
+    var fa = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, parse(fa.allocator(), bytes));
 }
 
 test "parsed strings own their bytes — the source buffer can be freed/overwritten" {
