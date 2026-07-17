@@ -4,7 +4,6 @@
 //! upgrade attempt, while the reverse silently skips one the user asked for.
 
 const std = @import("std");
-const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const outdated = @import("../outdated.zig");
 const api_mod = @import("../../net/api.zig");
 const sqlite = @import("../../db/sqlite.zig");
@@ -30,6 +29,16 @@ pub const Plan = struct {
     /// it never looked at.
     full_keg: bool,
 
+    /// Nothing audited, nothing provable. The fallback when a kind is
+    /// narrowed out or its audit could not read a row: `full_keg` is false,
+    /// so it can never license a snapshot write. Freeing a zero-length
+    /// slice is a no-op, so `deinit` is safe on it.
+    pub const empty: Plan = .{
+        .rows = @constCast(&[_]outdated.KegRow{}),
+        .dispositions = @constCast(&[_]outdated.Disposition{}),
+        .full_keg = false,
+    };
+
     pub fn deinit(self: *Plan, allocator: std.mem.Allocator) void {
         outdated.freeKegRows(allocator, self.rows);
         outdated.freeDispositions(allocator, self.dispositions);
@@ -54,20 +63,19 @@ fn filterFor(scope: Scope) outdated.KegFilter {
     return if (scope.pinned_only) .pinned_only else .all;
 }
 
-/// Load every row of `kind` and resolve each to a disposition.
+/// Load every row of `kind` and resolve it against the bulk version index.
+/// The index is consulted once; a tap row, a miss or a down index all stay
+/// `unknown` for phase 2, and no per-keg HEAD is fetched here.
 ///
-/// Offline skips the resolve entirely: the version index serves a cached
-/// dump at any age when offline, and a stale dump can "prove" a genuinely
-/// outdated row current — the one way this hides work instead of saving it.
+/// Offline skips the resolve entirely: the index serves a cached dump at any
+/// age when offline, and a stale dump can "prove" a genuinely outdated row
+/// current — the one way this hides work instead of saving it.
 pub fn audit(
-    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     api: *api_mod.BrewApi,
-    cache_dir: []const u8,
     kind: Kind,
     scope: Scope,
-    workers_override: ?usize,
 ) !Plan {
     const filter = filterFor(scope);
     const rows = switch (kind) {
@@ -76,15 +84,13 @@ pub fn audit(
     };
     errdefer outdated.freeKegRows(allocator, rows);
 
-    if (api.offline) {
-        const dispositions = try allocator.alloc(outdated.Disposition, rows.len);
-        @memset(dispositions, .unknown);
-        return .{ .rows = rows, .dispositions = dispositions, .full_keg = fullKeg(scope) };
-    }
-
-    const dispositions = switch (kind) {
-        .formula => try outdated.collectDispositionsFormulas(ctx, allocator, db, api, cache_dir, rows, workers_override),
-        .cask => try outdated.collectDispositionsCasks(ctx, allocator, db, api, cache_dir, rows, workers_override),
+    const dispositions = if (api.offline) blk: {
+        const ds = try allocator.alloc(outdated.Disposition, rows.len);
+        @memset(ds, .unknown);
+        break :blk ds;
+    } else switch (kind) {
+        .formula => try outdated.collectIndexDispositionsFormulas(allocator, api, rows),
+        .cask => try outdated.collectIndexDispositionsCasks(allocator, api, rows),
     };
 
     return .{ .rows = rows, .dispositions = dispositions, .full_keg = fullKeg(scope) };
@@ -180,6 +186,16 @@ fn insertPinnedKeg(db: *sqlite.Database, name: []const u8, version: []const u8) 
     try db.exec(sql);
 }
 
+fn insertKegTap(db: *sqlite.Database, name: []const u8, version: []const u8, tap: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &buf,
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap) VALUES ('{s}', '{s}', '{s}', 'deadbeef', '/opt/malt/Cellar/{s}/{s}', '{s}');",
+        .{ name, name, version, name, version, tap },
+    );
+    try db.exec(sql);
+}
+
 /// Legacy shape: no tap. `isCorePathRow` reads a NULL tap as core, so
 /// these still resolve from the bulk dump.
 fn insertCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
@@ -223,8 +239,6 @@ fn testApi(http: *client_mod.HttpClient, t: *const TempDb) api_mod.BrewApi {
     return api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, http, t.dir());
 }
 
-const test_ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
-
 test "offline leaves every row unknown even when a cached dump would prove one current" {
     // The fixture is the hazard: a dump saying alpha is already at the
     // installed version. Online that is `proven_current`. Offline the dump
@@ -241,7 +255,7 @@ test "offline leaves every row unknown even when a cached dump would prove one c
     var api = testApi(&http, &t);
     api.offline = true;
 
-    var plan = try audit(&test_ctx, testing.allocator, &t.db, &api, t.dir(), .formula, .{}, 1);
+    var plan = try audit(testing.allocator, &t.db, &api, .formula, .{});
     defer plan.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), plan.dispositions.len);
@@ -263,7 +277,7 @@ test "audit returns one disposition per row, in row order, dropping none" {
     defer http.deinit();
     var api = testApi(&http, &t);
 
-    var plan = try audit(&test_ctx, testing.allocator, &t.db, &api, t.dir(), .formula, .{}, 1);
+    var plan = try audit(testing.allocator, &t.db, &api, .formula, .{});
     defer plan.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 3), plan.dispositions.len);
@@ -294,7 +308,7 @@ test "a cask audit reads the cask table against the cask index" {
     defer http.deinit();
     var api = testApi(&http, &t);
 
-    var plan = try audit(&test_ctx, testing.allocator, &t.db, &api, t.dir(), .cask, .{}, 1);
+    var plan = try audit(testing.allocator, &t.db, &api, .cask, .{});
     defer plan.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), plan.dispositions.len);
@@ -317,7 +331,7 @@ test "a legacy NULL-tap cask resolves against the dump like any core row" {
     defer http.deinit();
     var api = testApi(&http, &t);
 
-    var plan = try audit(&test_ctx, testing.allocator, &t.db, &api, t.dir(), .cask, .{}, 1);
+    var plan = try audit(testing.allocator, &t.db, &api, .cask, .{});
     defer plan.deinit(testing.allocator);
 
     // Rows come back ordered by token: absent, behind, current.
@@ -342,7 +356,7 @@ test "a homebrew/cask-tapped cask is core and resolves against the dump" {
     defer http.deinit();
     var api = testApi(&http, &t);
 
-    var plan = try audit(&test_ctx, testing.allocator, &t.db, &api, t.dir(), .cask, .{}, 1);
+    var plan = try audit(testing.allocator, &t.db, &api, .cask, .{});
     defer plan.deinit(testing.allocator);
 
     try testing.expect(plan.dispositions[0] == .proven_current);
@@ -361,7 +375,7 @@ test "a revision-bearing dump line cannot prove a cask current" {
     defer http.deinit();
     var api = testApi(&http, &t);
 
-    var plan = try audit(&test_ctx, testing.allocator, &t.db, &api, t.dir(), .cask, .{}, 1);
+    var plan = try audit(testing.allocator, &t.db, &api, .cask, .{});
     defer plan.deinit(testing.allocator);
 
     try testing.expect(plan.dispositions[0] != .proven_current);
@@ -379,7 +393,7 @@ test "an empty cask table yields an empty plan" {
     var api = testApi(&http, &t);
 
     // A populated keg table must not leak into a cask audit.
-    var plan = try audit(&test_ctx, testing.allocator, &t.db, &api, t.dir(), .cask, .{}, 1);
+    var plan = try audit(testing.allocator, &t.db, &api, .cask, .{});
     defer plan.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 0), plan.rows.len);
@@ -397,7 +411,7 @@ test "--pinned narrows a cask audit to pinned tokens" {
     defer http.deinit();
     var api = testApi(&http, &t);
 
-    var plan = try audit(&test_ctx, testing.allocator, &t.db, &api, t.dir(), .cask, .{ .pinned_only = true }, 1);
+    var plan = try audit(testing.allocator, &t.db, &api, .cask, .{ .pinned_only = true });
     defer plan.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), plan.rows.len);
@@ -417,7 +431,7 @@ test "offline leaves a cask row unknown even when the cask dump would prove it c
     var api = testApi(&http, &t);
     api.offline = true;
 
-    var plan = try audit(&test_ctx, testing.allocator, &t.db, &api, t.dir(), .cask, .{}, 1);
+    var plan = try audit(testing.allocator, &t.db, &api, .cask, .{});
     defer plan.deinit(testing.allocator);
 
     try testing.expect(plan.dispositions[0] == .unknown);
@@ -434,7 +448,7 @@ test "--pinned audits only pinned rows and marks the plan narrowed" {
     defer http.deinit();
     var api = testApi(&http, &t);
 
-    var plan = try audit(&test_ctx, testing.allocator, &t.db, &api, t.dir(), .formula, .{ .pinned_only = true }, 1);
+    var plan = try audit(testing.allocator, &t.db, &api, .formula, .{ .pinned_only = true });
     defer plan.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), plan.rows.len);
@@ -454,11 +468,33 @@ test "an empty keg table yields an empty plan rather than an error" {
     // has its own zero-row path to get wrong.
     for ([_]bool{ false, true }) |offline| {
         api.offline = offline;
-        var plan = try audit(&test_ctx, testing.allocator, &t.db, &api, t.dir(), .formula, .{}, 1);
+        var plan = try audit(testing.allocator, &t.db, &api, .formula, .{});
         defer plan.deinit(testing.allocator);
         try testing.expectEqual(@as(usize, 0), plan.rows.len);
         try testing.expectEqual(@as(usize, 0), plan.dispositions.len);
     }
+}
+
+test "a third-party-tap row stays unknown even when the index lists it as outdated" {
+    // The audit resolves against the version index only, and the index cannot
+    // speak for a tap row: those answer to sha-truth (a HEAD move with an
+    // unchanged version constant) the index never sees. If the audit let the
+    // index prove this row current — or even mark it needs_upgrade — phase 2
+    // would lose the sha-only move. It must come back unknown and fall through.
+    var t = try TempDb.init();
+    defer t.deinit();
+    try insertKegTap(&t.db, "tapped", "1.0", "third/party");
+    // The index even disagrees with the installed version — still ignored.
+    try writeVersionsIndex(t.dir(), .formula, "tapped\t2.0\t0\n");
+
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = testApi(&http, &t);
+
+    var plan = try audit(testing.allocator, &t.db, &api, .formula, .{});
+    defer plan.deinit(testing.allocator);
+
+    try testing.expect(plan.dispositions[0] == .unknown);
 }
 
 test "an unparseable upstream version reaches the plan as unknown" {
@@ -476,7 +512,7 @@ test "an unparseable upstream version reaches the plan as unknown" {
     defer http.deinit();
     var api = testApi(&http, &t);
 
-    var plan = try audit(&test_ctx, testing.allocator, &t.db, &api, t.dir(), .formula, .{}, 1);
+    var plan = try audit(testing.allocator, &t.db, &api, .formula, .{});
     defer plan.deinit(testing.allocator);
 
     try testing.expect(plan.dispositions[0] == .unknown);
