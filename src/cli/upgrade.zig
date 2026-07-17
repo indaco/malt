@@ -186,7 +186,8 @@ fn freeEntries(allocator: std.mem.Allocator, list: *std.ArrayList(OutdatedEntry)
 /// collector would each persist a partial snapshot and make the Outdated
 /// view silently under-report — so every one vetoes the write. A real
 /// (non-dry-run) upgrade never warms: the pre-upgrade set is stale the
-/// instant kegs mutate.
+/// instant kegs mutate. It prunes instead — see `pruneSnapshot`, which
+/// subtracts the moved kegs rather than persisting a stale set.
 const WarmGate = struct {
     dry_run: bool = false,
     has_names: bool = false,
@@ -368,6 +369,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             };
         }
     }
+
+    // A real upgrade moved kegs, so the shared snapshot now lists packages at
+    // versions they no longer carry. Reconcile it against the DB — one call
+    // covers both branches above, including the named path. Best-effort: a
+    // cache write must not fail an upgrade that already succeeded. A dry-run
+    // mutates nothing, so it has nothing to reconcile.
+    if (!dry_run) outdated_mod.pruneSnapshot(ctx.io, allocator, &db, cache_dir);
 
     // A batch whose only failure was a live cask app exits with the dedicated
     // code so the TUI can footer the real cause; any other failure (even mixed
