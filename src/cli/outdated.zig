@@ -109,6 +109,46 @@ pub fn intersectWithDb(
     return out.toOwnedSlice(allocator);
 }
 
+/// Reconcile the cached snapshot against the live DB, dropping entries whose
+/// keg has moved past the `installed` the snapshot recorded. `mt upgrade` is
+/// the caller: it mutates kegs without touching the file, and the TUI's warm
+/// read parses that file raw — so an unreconciled snapshot paints a
+/// just-upgraded package as outdated until the background audit lands.
+///
+/// Reuses `intersectWithDb`, so the file converges on exactly what the
+/// DB-filtering reader would print; each array is matched against its own
+/// table, so a token that is both a formula and a cask cannot cross over.
+/// `generated_at_ms` is preserved — survivors keep the lease they earned
+/// rather than a falsely extended one.
+///
+/// Best-effort and all-or-nothing: a load failure abandons the prune outright.
+/// `intersectWithDb` yields an empty set for zero rows, so degrading a failed
+/// load to "no rows" would persist an empty array and silently under-report
+/// every package — hence `catch return` before the single write, never a
+/// partial one.
+pub fn pruneSnapshot(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, cache_dir: []const u8) void {
+    // A missing or unparseable snapshot is left alone: an upgrade run knows
+    // only what it touched and must never synthesise a whole file.
+    const snap = readSnapshot(io, allocator, cache_dir) orelse return;
+    defer freeSnapshot(allocator, snap);
+
+    const f_rows = loadFormulaRows(allocator, db, .all) catch return;
+    defer freeKegRows(allocator, f_rows);
+    const c_rows = loadCaskRows(allocator, db, .all) catch return;
+    defer freeKegRows(allocator, c_rows);
+
+    const f_entries = intersectWithDb(allocator, f_rows, snap.formulas) catch return;
+    defer freeEntrySlice(allocator, f_entries);
+    const c_entries = intersectWithDb(allocator, c_rows, snap.casks) catch return;
+    defer freeEntrySlice(allocator, c_entries);
+
+    writeSnapshot(io, allocator, cache_dir, .{
+        .generated_at_ms = snap.generated_at_ms,
+        .formulas = f_entries,
+        .casks = c_entries,
+    }) catch {};
+}
+
 fn dupEntry(allocator: std.mem.Allocator, e: OutdatedEntry) std.mem.Allocator.Error!OutdatedEntry {
     const name = try allocator.dupe(u8, e.name);
     errdefer allocator.free(name);
@@ -330,6 +370,141 @@ test "intersectWithDb keeps a revision-bumped formula" {
     try std.testing.expectEqual(@as(usize, 1), out.len);
     try std.testing.expectEqualStrings("foo", out[0].name);
     try std.testing.expectEqualStrings("1.2.3_1", out[0].installed);
+}
+
+/// Seed a temp cache dir + in-memory DB for the `pruneSnapshot` tests.
+const PruneEnv = struct {
+    tmp: std.testing.TmpDir,
+    db: sqlite.Database,
+    buf: [std.fs.max_path_bytes]u8 = undefined,
+    len: usize = 0,
+
+    fn init() !PruneEnv {
+        var env: PruneEnv = .{ .tmp = std.testing.tmpDir(.{}), .db = try sqlite.Database.open(":memory:") };
+        try schema.initSchema(&env.db);
+        env.len = try std.Io.Dir.realPath(env.tmp.dir, std.Options.debug_io, &env.buf);
+        return env;
+    }
+
+    /// Derived on call: `init` returns by value, so a stored slice would
+    /// point into the moved-from copy's buffer.
+    fn dir(self: *const PruneEnv) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    fn deinit(self: *PruneEnv) void {
+        self.db.close();
+        self.tmp.cleanup();
+    }
+};
+
+test "pruneSnapshot drops an upgraded keg, keeps an untouched one, and preserves the lease" {
+    // The whole point: `mt upgrade jq` moves the keg but the TUI's warm read
+    // parses the snapshot raw, so an unreconciled file paints jq as outdated.
+    // wget must survive — a plain delete would cost it a needless audit.
+    const a = std.testing.allocator;
+    const io = std.Options.debug_io;
+    var env = try PruneEnv.init();
+    defer env.deinit();
+
+    try env.db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES ('jq', 'jq', '1.8.0', 's', '/c'), ('wget', 'wget', '1.24', 's', '/c');
+    );
+    const stamp: i64 = 1_700_000_000_000;
+    try writeSnapshot(io, a, env.dir(), .{
+        .generated_at_ms = stamp,
+        .formulas = &.{
+            .{ .name = @constCast("jq"), .installed = @constCast("1.7.1"), .latest = @constCast("1.8.0") },
+            .{ .name = @constCast("wget"), .installed = @constCast("1.24"), .latest = @constCast("1.25") },
+        },
+        .casks = &.{},
+    });
+
+    pruneSnapshot(io, a, &env.db, env.dir());
+
+    const snap = readSnapshot(io, a, env.dir()).?;
+    defer freeSnapshot(a, snap);
+    try std.testing.expectEqual(@as(usize, 1), snap.formulas.len);
+    try std.testing.expectEqualStrings("wget", snap.formulas[0].name);
+    // A re-stamp would grant the survivor a 5-minute lease it never earned.
+    try std.testing.expectEqual(stamp, snap.generated_at_ms);
+}
+
+test "pruneSnapshot matches each array against its own table" {
+    // A token installed as both a formula and a cask must not let one array's
+    // upgrade drop the other's still-valid entry.
+    const a = std.testing.allocator;
+    const io = std.Options.debug_io;
+    var env = try PruneEnv.init();
+    defer env.deinit();
+
+    try env.db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES ('docker', 'docker', '27.0', 's', '/c');
+    );
+    try env.db.exec(
+        \\INSERT INTO casks (token, name, version, url)
+        \\VALUES ('docker', 'Docker', '4.30', 'https://example.invalid/d.dmg');
+    );
+    try writeSnapshot(io, a, env.dir(), .{
+        .generated_at_ms = 1,
+        // the formula moved 26.0 -> 27.0; the cask never budged
+        .formulas = &.{
+            .{ .name = @constCast("docker"), .installed = @constCast("26.0"), .latest = @constCast("27.0") },
+        },
+        .casks = &.{
+            .{ .name = @constCast("docker"), .installed = @constCast("4.30"), .latest = @constCast("4.31") },
+        },
+    });
+
+    pruneSnapshot(io, a, &env.db, env.dir());
+
+    const snap = readSnapshot(io, a, env.dir()).?;
+    defer freeSnapshot(a, snap);
+    try std.testing.expectEqual(@as(usize, 0), snap.formulas.len);
+    try std.testing.expectEqual(@as(usize, 1), snap.casks.len);
+    try std.testing.expectEqualStrings("docker", snap.casks[0].name);
+}
+
+test "pruneSnapshot keeps a pinned keg an upgrade refused to move" {
+    // A pin veto reports success without upgrading, so the entry is still
+    // genuinely outdated — pruning it would silently under-report.
+    const a = std.testing.allocator;
+    const io = std.Options.debug_io;
+    var env = try PruneEnv.init();
+    defer env.deinit();
+
+    try env.db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned)
+        \\VALUES ('held', 'held', '1.0', 's', '/c', 1);
+    );
+    try writeSnapshot(io, a, env.dir(), .{
+        .generated_at_ms = 1,
+        .formulas = &.{
+            .{ .name = @constCast("held"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+        },
+        .casks = &.{},
+    });
+
+    pruneSnapshot(io, a, &env.db, env.dir());
+
+    const snap = readSnapshot(io, a, env.dir()).?;
+    defer freeSnapshot(a, snap);
+    try std.testing.expectEqual(@as(usize, 1), snap.formulas.len);
+    try std.testing.expectEqualStrings("held", snap.formulas[0].name);
+}
+
+test "pruneSnapshot never synthesises a snapshot that was not there" {
+    // An upgrade run knows only what it touched; writing a file from that
+    // partial view is the under-reporting `WarmGate` exists to veto.
+    const a = std.testing.allocator;
+    const io = std.Options.debug_io;
+    var env = try PruneEnv.init();
+    defer env.deinit();
+
+    pruneSnapshot(io, a, &env.db, env.dir());
+    try std.testing.expect(readSnapshot(io, a, env.dir()) == null);
 }
 
 test "intersectWithDb drops a keg whose revision moved past the snapshot" {

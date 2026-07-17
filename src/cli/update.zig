@@ -60,8 +60,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     output.info("Cache cleared. Metadata will be re-fetched on next operation.", .{});
 }
 
-/// Best-effort: a leftover snapshot is harmless because the read path
-/// filters through the live DB; worst case is one extra recompute.
+/// Best-effort: deleting is safe because the next read recomputes; worst
+/// case is one extra audit. Note the snapshot has two readers and only one
+/// filters through the live DB — `mt outdated` intersects, the TUI's warm
+/// read parses raw — so a leftover snapshot is *not* self-correcting for
+/// the TUI. Deletion here sidesteps that; producers that keep the file must
+/// reconcile it themselves.
 fn invalidateSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8) void {
     const path = outdated_mod.snapshotPath(allocator, cache_dir) catch return;
     defer allocator.free(path);
