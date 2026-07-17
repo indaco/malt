@@ -34,6 +34,7 @@ const install_sink_mod = @import("install/sink.zig");
 const post_install_mod = @import("install/post_install.zig");
 const install_mod = @import("install.zig");
 const outdated_mod = @import("outdated.zig");
+const audit_mod = @import("upgrade/audit.zig");
 const pin_mod = @import("pin.zig");
 
 const OutdatedEntry = outdated_mod.OutdatedEntry;
@@ -66,6 +67,16 @@ const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
 pub fn pinSkip(db: *sqlite.Database, name: []const u8, force: bool, audit_mode: bool) bool {
     if (force or audit_mode) return false;
     return pin_mod.isPinned(db, name);
+}
+
+/// True when phase 1 may fold a row itself instead of handing it to phase 2.
+/// Only rows phase 2 would have called `.up_to_date` qualify: a held row
+/// reports `.pinned` and belongs in that footer column, so it falls through.
+/// The pin arm mirrors `pinSkip` over the row's own `pinned` column, which
+/// the audit already loaded — no per-row re-query.
+fn phase1Folds(d: outdated_mod.Disposition, row: outdated_mod.KegRow, force: bool, audit_mode: bool) bool {
+    if (row.pinned and !force and !audit_mode) return false;
+    return audit_mod.skips(d, force);
 }
 
 /// What a per-package upgrade decided. Returned rather than reported as a
@@ -342,15 +353,39 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // `null` so nothing is gathered.
         var sink: EntrySink = .init(allocator);
         defer sink.deinit();
-        const warm_candidate = dry_run and !cask_only and !formula_only and !pinned_only;
+
+        // Phase 1: ask upstream about every installed row in one request
+        // instead of one blocking round trip per package. A row the index
+        // proves current is folded below without ever reaching phase 2;
+        // everything else falls through to today's exact per-package path.
+        const scope: audit_mod.Scope = .{
+            .cask_only = cask_only,
+            .formula_only = formula_only,
+            .pinned_only = pinned_only,
+        };
+        // An audit that cannot even read its rows leaves nothing to upgrade —
+        // the same outcome as the SQL failure this replaced.
+        var f_plan: audit_mod.Plan = if (cask_only) .empty else audit_mod.audit(allocator, &db, &api, .formula, scope) catch .empty;
+        defer f_plan.deinit(allocator);
+        var c_plan: audit_mod.Plan = if (formula_only) .empty else audit_mod.audit(allocator, &db, &api, .cask, scope) catch .empty;
+        defer c_plan.deinit(allocator);
+
+        const checking = f_plan.rows.len + c_plan.rows.len;
+        if (checking > 0) output.info("Checking {d} packages...", .{checking});
+
+        // The warm gate reads the plan rather than the flags: a narrowed
+        // audit must never persist a snapshot of the rows it did look at.
+        // Both plans carry the same verdict; `or` picks the live one when a
+        // narrowing or a failed audit left the other empty.
+        const warm_candidate = dry_run and (f_plan.full_keg or c_plan.full_keg);
         const sink_ptr: ?*EntrySink = if (warm_candidate) &sink else null;
         if (!cask_only) {
-            upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, &tally, sink_ptr) catch {
+            upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, f_plan, &tally, sink_ptr) catch {
                 any_failed = true;
             };
         }
         if (!formula_only) {
-            upgradeAllCasks(ctx, allocator, &db, &api, prefix, dry_run, force, pinned_only, &tally, sink_ptr) catch {
+            upgradeAllCasks(ctx, allocator, &db, &api, prefix, dry_run, force, pinned_only, c_plan, &tally, sink_ptr) catch {
                 any_failed = true;
             };
         }
@@ -1217,34 +1252,11 @@ fn upgradeAllFormulas(
     pinned_only: bool,
     isolate_deps: bool,
     use_system_ruby: []const []const u8,
+    plan: audit_mod.Plan,
     tally: *Tally,
     sink: ?*EntrySink,
 ) !void {
-    const sql: [:0]const u8 = if (pinned_only)
-        "SELECT name, version FROM kegs WHERE pinned = 1 ORDER BY name;"
-    else
-        "SELECT name, version FROM kegs ORDER BY name;";
-    var stmt = db.prepare(sql) catch return;
-    defer stmt.finalize();
-
-    // Collect names first to avoid holding the statement open during upgrade
-    var names: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (names.items) |n| allocator.free(n);
-        names.deinit(allocator);
-    }
-
-    while (stmt.step() catch false) {
-        const name_ptr = stmt.columnText(0) orelse continue;
-        const name_slice = std.mem.sliceTo(name_ptr, 0);
-        const owned = allocator.dupe(u8, name_slice) catch continue;
-        names.append(allocator, owned) catch {
-            allocator.free(owned);
-            continue;
-        };
-    }
-
-    if (names.items.len == 0) {
+    if (plan.rows.len == 0) {
         // Quiet on the audit path: "no pinned kegs" is the normal idle state.
         if (!pinned_only) output.info("No formulas installed.", .{});
         return;
@@ -1256,17 +1268,24 @@ fn upgradeAllFormulas(
     var failed_names: std.ArrayList([]const u8) = .empty;
     defer failed_names.deinit(allocator);
 
-    for (names.items) |name| {
+    for (plan.rows, plan.dispositions) |row, d| {
         // Stop between packages on Ctrl-C; the in-flight fetch is torn down by
         // http.cancel, this keeps us from starting the next one.
         if (signals.isInterrupted()) break;
-        if (upgradeFormula(ctx, allocator, name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby, true, sink)) |o| {
+        if (phase1Folds(d, row, force, pinned_only)) {
+            // Fold, never drop: the footer counts every package. The event
+            // still streams so the machine-readable output is unchanged.
+            output.emitNdjsonEvent(.up_to_date, row.name, null);
+            tally.fold(.up_to_date);
+            continue;
+        }
+        if (upgradeFormula(ctx, allocator, row.name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby, true, sink)) |o| {
             tally.fold(o);
         } else |_| {
             failed_count += 1;
             tally.failed += 1;
             // failed_count is the authoritative counter; list is for UX only.
-            failed_names.append(allocator, name) catch {};
+            failed_names.append(allocator, row.name) catch {};
         }
     }
 
@@ -1427,33 +1446,8 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     return .upgraded;
 }
 
-fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, pinned_only: bool, tally: *Tally, sink: ?*EntrySink) !void {
-    const sql: [:0]const u8 = if (pinned_only)
-        "SELECT token, version FROM casks WHERE pinned = 1 ORDER BY token;"
-    else
-        "SELECT token, version FROM casks ORDER BY token;";
-    var stmt = db.prepare(sql) catch return;
-    defer stmt.finalize();
-
-    // Collect tokens first so we can free the statement before driving
-    // per-cask upgrades; each upgrade opens its own statements.
-    var tokens: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (tokens.items) |t| allocator.free(t);
-        tokens.deinit(allocator);
-    }
-
-    while (stmt.step() catch false) {
-        const token_ptr = stmt.columnText(0) orelse continue;
-        const token_slice = std.mem.sliceTo(token_ptr, 0);
-        const owned = allocator.dupe(u8, token_slice) catch continue;
-        tokens.append(allocator, owned) catch {
-            allocator.free(owned);
-            continue;
-        };
-    }
-
-    if (tokens.items.len == 0) {
+fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, pinned_only: bool, plan: audit_mod.Plan, tally: *Tally, sink: ?*EntrySink) !void {
+    if (plan.rows.len == 0) {
         // Quiet on the audit path: "no pinned casks" is the normal idle state.
         if (!pinned_only) output.info("All casks are up to date.", .{});
         return;
@@ -1463,15 +1457,20 @@ fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite
     var failed_tokens: std.ArrayList([]const u8) = .empty;
     defer failed_tokens.deinit(allocator);
 
-    for (tokens.items) |token| {
+    for (plan.rows, plan.dispositions) |row, d| {
         if (signals.isInterrupted()) break;
-        if (upgradeCask(ctx, allocator, token, db, api, prefix, dry_run, force, pinned_only, true, sink)) |o| {
+        if (phase1Folds(d, row, force, pinned_only)) {
+            output.emitNdjsonEvent(.up_to_date, row.name, null);
+            tally.fold(.up_to_date);
+            continue;
+        }
+        if (upgradeCask(ctx, allocator, row.name, db, api, prefix, dry_run, force, pinned_only, true, sink)) |o| {
             tally.fold(o);
         } else |_| {
             failed_count += 1;
             tally.failed += 1;
             // failed_count is authoritative; list is for UX only.
-            failed_tokens.append(allocator, token) catch {};
+            failed_tokens.append(allocator, row.name) catch {};
         }
     }
 
@@ -1868,7 +1867,9 @@ test "upgradeAllFormulas stops between packages once interrupted" {
     defer signals.armInterruptAfterForTest(0);
 
     var tally: Tally = .{};
-    upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, &tally, null) catch {};
+    var plan = try audit_mod.audit(alloc, &db, &api, .formula, .{});
+    defer plan.deinit(alloc);
+    upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, plan, &tally, null) catch {};
 
     // Only the first keg was attempted; the interrupt stopped the loop.
     try std.testing.expectEqual(@as(usize, 1), tally.checked());
@@ -1901,7 +1902,9 @@ test "upgradeAllFormulas processes nothing when interrupted before the loop" {
     signals.setInterruptedForTest(true);
 
     var tally: Tally = .{};
-    upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, &tally, null) catch {};
+    var plan = try audit_mod.audit(alloc, &db, &api, .formula, .{});
+    defer plan.deinit(alloc);
+    upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, plan, &tally, null) catch {};
 
     try std.testing.expectEqual(@as(usize, 0), tally.checked());
 }
@@ -1939,7 +1942,284 @@ test "upgradeAllCasks stops between casks once interrupted" {
     defer signals.armInterruptAfterForTest(0);
 
     var tally: Tally = .{};
-    upgradeAllCasks(&ctx, alloc, &db, &api, "/opt/malt", true, false, false, &tally, null) catch {};
+    var plan = try audit_mod.audit(alloc, &db, &api, .cask, .{});
+    defer plan.deinit(alloc);
+    upgradeAllCasks(&ctx, alloc, &db, &api, "/opt/malt", true, false, false, plan, &tally, null) catch {};
 
     try std.testing.expectEqual(@as(usize, 1), tally.checked());
+}
+
+test "phase 1 folds a proven-current row itself" {
+    const row: outdated_mod.KegRow = .{ .name = "alpha", .version = "1.0" };
+    try std.testing.expect(phase1Folds(.proven_current, row, false, false));
+}
+
+test "phase 1 leaves a pinned row to phase 2 so it reports as pinned, not up to date" {
+    // The footer counts `pinned` and `up to date` in separate columns, and
+    // `upgradeFormula` reports a held row as `.pinned` before it looks at any
+    // version. Folding it here would move it to the wrong column.
+    const row: outdated_mod.KegRow = .{ .name = "alpha", .version = "1.0", .pinned = true };
+    try std.testing.expect(!phase1Folds(.proven_current, row, false, false));
+}
+
+test "phase 1 folds a pinned row under --pinned, which walks pins deliberately" {
+    // `--pinned` is the audit mode that exists to walk held kegs, so the pin
+    // no longer diverts the outcome and phase 2 would report `.up_to_date`.
+    const row: outdated_mod.KegRow = .{ .name = "alpha", .version = "1.0", .pinned = true };
+    try std.testing.expect(phase1Folds(.proven_current, row, false, true));
+}
+
+test "phase 1 folds nothing under --force" {
+    const plain: outdated_mod.KegRow = .{ .name = "alpha", .version = "1.0" };
+    const held: outdated_mod.KegRow = .{ .name = "beta", .version = "1.0", .pinned = true };
+    try std.testing.expect(!phase1Folds(.proven_current, plain, true, false));
+    try std.testing.expect(!phase1Folds(.proven_current, held, true, false));
+}
+
+test "phase 1 never folds an unproven row" {
+    var latest = [_]u8{ '9', '.', '9' };
+    const row: outdated_mod.KegRow = .{ .name = "alpha", .version = "1.0" };
+    for ([_]bool{ false, true }) |audit_mode| {
+        try std.testing.expect(!phase1Folds(.unknown, row, false, audit_mode));
+        try std.testing.expect(!phase1Folds(.{ .needs_upgrade = &latest }, row, false, audit_mode));
+    }
+}
+
+/// Plant the version side-car the audit reads, so these tests resolve from
+/// disk. `http.offline` stays on: nothing here may reach the network.
+fn writeTestVersionsIndex(cache_dir: []const u8, kind: audit_mod.Kind, body: []const u8) !void {
+    const io = std.Options.debug_io;
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/api", .{cache_dir});
+    std.Io.Dir.createDirAbsolute(io, dir, .default_dir) catch {};
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const p = try std.fmt.bufPrint(&path_buf, "{s}/api/versions_{s}.txt", .{ cache_dir, @tagName(kind) });
+    const f = try std.Io.Dir.cwd().createFile(io, p, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, body);
+}
+
+test "a proven-current row is folded into the footer, not dropped from it" {
+    // The count is the point: on a mostly-current machine every excluded row
+    // must still reach `checked()`, or the footer reports 2 on a 200-package
+    // box. Nothing here touches the network — both rows resolve from the
+    // planted index and neither reaches phase 2.
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES
+        \\  ('alpha', 'alpha', '1.0', 'sha', '/cellar/alpha/1.0'),
+        \\  ('beta', 'beta', '2.0', 'sha', '/cellar/beta/2.0');
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    try writeTestVersionsIndex(cache_dir, .formula, "alpha\t1.0\t0\nbeta\t2.0\t0\n");
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true; // phase 2 would fail loudly rather than dial out
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .formula, .{});
+    defer plan.deinit(alloc);
+
+    var tally: Tally = .{};
+    try upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, plan, &tally, null);
+
+    try std.testing.expectEqual(@as(usize, 2), tally.checked());
+    try std.testing.expectEqual(@as(usize, 2), tally.up_to_date);
+    try std.testing.expectEqual(@as(usize, 0), tally.failed);
+}
+
+test "--force sends an index-proven-current row to phase 2 instead of folding it" {
+    // Force must reach phase 2 for every row: the same `alpha` the index proves
+    // current is folded without force (test above) and here must not be. With
+    // the client offline, reaching phase 2 fails loudly — so a `failed` count
+    // (not `up_to_date`) is the proof force defeated the fold at the loop, not
+    // just at the pure gate.
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('alpha', 'alpha', '1.0', 'sha', '/cellar/alpha/1.0');");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    try writeTestVersionsIndex(cache_dir, .formula, "alpha\t1.0\t0\n");
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .formula, .{});
+    defer plan.deinit(alloc);
+    try std.testing.expect(plan.dispositions[0] == .proven_current);
+
+    // force = true (8th positional).
+    var tally: Tally = .{};
+    upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, true, false, false, &.{}, plan, &tally, null) catch {};
+
+    try std.testing.expectEqual(@as(usize, 0), tally.up_to_date);
+    try std.testing.expectEqual(@as(usize, 1), tally.failed);
+    try std.testing.expectEqual(@as(usize, 1), tally.checked());
+}
+
+test "a pinned row still reports as pinned even when the index proves it current" {
+    // Phase 2 reports a held row `.pinned` before it looks at a version, and
+    // the footer counts pinned separately. Folding it as up-to-date here
+    // would silently move it to the wrong column.
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('held', 'held', '1.0', 'sha', '/cellar/held/1.0', 1);");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    try writeTestVersionsIndex(cache_dir, .formula, "held\t1.0\t0\n");
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .formula, .{});
+    defer plan.deinit(alloc);
+    try std.testing.expect(plan.dispositions[0] == .proven_current);
+
+    var tally: Tally = .{};
+    try upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, plan, &tally, null);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.pinned);
+    try std.testing.expectEqual(@as(usize, 0), tally.up_to_date);
+    try std.testing.expectEqual(@as(usize, 1), tally.checked());
+}
+
+test "a proven-current cask is folded into the footer via the cask token path" {
+    // The cask loop folds by `row.name` = token and emits its own ndjson.
+    // Formulae and casks diverge elsewhere (tap fallback, revisions), so the
+    // fold is proven against `upgradeAllCasks`, not inferred from the formula
+    // side. NULL-tap casks resolve from the bulk index like any core row.
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url) VALUES
+        \\  ('cur', 'cur', '1.0', 'https://example/cur'),
+        \\  ('cur2', 'cur2', '2.0', 'https://example/cur2');
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    try writeTestVersionsIndex(cache_dir, .cask, "cur\t1.0\t0\ncur2\t2.0\t0\n");
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true; // phase 2 would fail loudly rather than dial out
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .cask, .{});
+    defer plan.deinit(alloc);
+
+    var tally: Tally = .{};
+    try upgradeAllCasks(&ctx, alloc, &db, &api, "/opt/malt", true, false, false, plan, &tally, null);
+
+    try std.testing.expectEqual(@as(usize, 2), tally.up_to_date);
+    try std.testing.expectEqual(@as(usize, 2), tally.checked());
+    try std.testing.expectEqual(@as(usize, 0), tally.failed);
+}
+
+test "a pinned cask still reports as pinned even when the index proves it current" {
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec("INSERT INTO casks (token, name, version, url, pinned) VALUES ('held', 'held', '1.0', 'https://example/held', 1);");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    try writeTestVersionsIndex(cache_dir, .cask, "held\t1.0\t0\n");
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .cask, .{});
+    defer plan.deinit(alloc);
+    try std.testing.expect(plan.dispositions[0] == .proven_current);
+
+    var tally: Tally = .{};
+    try upgradeAllCasks(&ctx, alloc, &db, &api, "/opt/malt", true, false, false, plan, &tally, null);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.pinned);
+    try std.testing.expectEqual(@as(usize, 0), tally.up_to_date);
+    try std.testing.expectEqual(@as(usize, 1), tally.checked());
+}
+
+test "a row missing from the index is still handed to phase 2, never skipped" {
+    // The partial-miss trap: the degraded-map guard only fires when *nothing*
+    // matched, so a half-populated index is silent. The unmatched row must
+    // still be attempted — here it fails against the offline client, which
+    // proves it reached phase 2 rather than being folded away at exit 0.
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES
+        \\  ('known', 'known', '1.0', 'sha', '/cellar/known/1.0'),
+        \\  ('unlisted', 'unlisted', '1.0', 'sha', '/cellar/unlisted/1.0');
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    // `unlisted` is absent — a partial map, not a total miss.
+    try writeTestVersionsIndex(cache_dir, .formula, "known\t1.0\t0\n");
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .formula, .{});
+    defer plan.deinit(alloc);
+    try std.testing.expect(plan.dispositions[0] == .proven_current); // known
+    try std.testing.expect(plan.dispositions[1] == .unknown); // unlisted
+
+    var tally: Tally = .{};
+    upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, plan, &tally, null) catch {};
+
+    try std.testing.expectEqual(@as(usize, 1), tally.up_to_date);
+    try std.testing.expectEqual(@as(usize, 1), tally.failed);
+    try std.testing.expectEqual(@as(usize, 2), tally.checked());
 }

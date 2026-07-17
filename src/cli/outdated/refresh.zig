@@ -288,31 +288,61 @@ fn resolveViaFetch(
     }
 }
 
-/// Dispositions for `kegs`, aligned 1:1. Sort order follows `kegs`. Release
-/// with `freeDispositions`.
-pub fn collectDispositionsFormulas(
-    ctx: *const AppCtx,
+/// Dispositions resolved against the bulk version index *only* — no per-keg
+/// HEAD fetch. A row the index cannot prove (a tap row, a miss, a down index)
+/// stays `unknown` for the caller to resolve itself.
+///
+/// This is the upgrade audit's resolver, distinct from `collectDispositions`
+/// on two counts that both matter: it never pays the per-keg fetch this
+/// feature exists to remove, and — critically — it never warms a tap's cached
+/// HEAD, which a later per-keg upgrade compares against to detect a sha-only
+/// move. Resolving a tap row here would make that upgrade see no change.
+pub fn collectIndexDispositionsFormulas(
     allocator: std.mem.Allocator,
-    db: *sqlite.Database,
     api: *api_mod.BrewApi,
-    cache_dir: []const u8,
     kegs: []const KegRow,
-    workers_override: ?usize,
 ) std.mem.Allocator.Error![]Disposition {
-    return collectDispositions(ctx, allocator, db, api, cache_dir, kegs, workers_override, .formula);
+    return collectIndexDispositions(allocator, api, kegs, .formula);
 }
 
-/// Cask sibling of `collectDispositionsFormulas`. Same lifetime contract.
-pub fn collectDispositionsCasks(
-    ctx: *const AppCtx,
+/// Cask sibling of `collectIndexDispositionsFormulas`. Same lifetime contract.
+pub fn collectIndexDispositionsCasks(
     allocator: std.mem.Allocator,
-    db: *sqlite.Database,
     api: *api_mod.BrewApi,
-    cache_dir: []const u8,
     kegs: []const KegRow,
-    workers_override: ?usize,
 ) std.mem.Allocator.Error![]Disposition {
-    return collectDispositions(ctx, allocator, db, api, cache_dir, kegs, workers_override, .cask);
+    return collectIndexDispositions(allocator, api, kegs, .cask);
+}
+
+fn collectIndexDispositions(
+    allocator: std.mem.Allocator,
+    api: *api_mod.BrewApi,
+    kegs: []const KegRow,
+    kind: Kind,
+) std.mem.Allocator.Error![]Disposition {
+    const dispositions = try allocator.alloc(Disposition, kegs.len);
+    @memset(dispositions, .unknown);
+    errdefer freeDispositions(allocator, dispositions);
+    if (kegs.len == 0) return dispositions;
+
+    const api_kind: api_mod.BrewApi.Kind = switch (kind) {
+        .formula => .formula,
+        .cask => .cask,
+    };
+    // A missing or unreadable index leaves every row `unknown` — identical to
+    // having no audit at all, which is the pre-feature behaviour.
+    const bytes = api.fetchVersionsIndex(api_kind) catch return dispositions;
+    defer allocator.free(bytes);
+    var map = try buildVersionMap(allocator, bytes);
+    defer map.deinit();
+
+    // `mapDisposition` already returns `unknown` for a tap row or a miss, so
+    // no core-ness check is needed here — it is the sole minter of
+    // `proven_current` and guards itself.
+    for (kegs, 0..) |row, i| {
+        dispositions[i] = try mapDisposition(allocator, &map, row);
+    }
+    return dispositions;
 }
 
 /// The report is a projection of the dispositions — one resolution path, so
@@ -359,7 +389,7 @@ fn collectDispositions(
     defer allocator.free(needs_fetch);
     @memset(needs_fetch, false);
 
-    // Phase 1 — the bulk version map. Only fetched when at least one row
+    // Map pass — the bulk version map. Only fetched when at least one row
     // can use it; a fetch error (offline/down/schema) degrades to per-keg.
     var has_core = false;
     for (kegs) |row| {
@@ -419,7 +449,7 @@ fn collectDispositions(
     var head_cache = TapHeadResolve.init(allocator, ctx.io);
     defer head_cache.deinit();
 
-    // Phase 2 — gather the rows still needing a network resolve and run
+    // Fetch pass — gather the rows still needing a network resolve and run
     // them through the (sub-)serial-or-pool path, then scatter results.
     var n_fetch: usize = 0;
     for (needs_fetch) |f| {
