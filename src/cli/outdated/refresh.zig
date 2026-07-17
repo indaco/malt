@@ -218,6 +218,20 @@ pub fn freeDisposition(allocator: std.mem.Allocator, d: Disposition) void {
     }
 }
 
+/// Release a slice of dispositions and their payloads.
+pub fn freeDispositions(allocator: std.mem.Allocator, ds: []Disposition) void {
+    for (ds) |d| freeDisposition(allocator, d);
+    allocator.free(ds);
+}
+
+/// Read a per-keg fetch result as a disposition. A fetch resolves the latest
+/// version or it does not; it never proves a row current, so a null here is
+/// `unknown` — the fetch path has no map to compare against.
+fn fetchDisposition(latest: ?[]u8) Disposition {
+    if (latest) |l| return .{ .needs_upgrade = l };
+    return .unknown;
+}
+
 /// The only minter of `proven_current`. Core-ness is checked here rather than
 /// by the caller so no future call site can route a tap row into a version-truth
 /// verdict; tap rows answer to sha-truth, which this map cannot see.
@@ -237,32 +251,6 @@ fn mapDisposition(
     const installed = formula_mod.pkgVersion(&installed_buf, row.version, row.revision) catch return .unknown;
     if (std.mem.eql(u8, installed, latest)) return .proven_current;
     return .{ .needs_upgrade = try allocator.dupe(u8, latest) };
-}
-
-/// Resolve one keg against its version-map entry. Sets `found` to map
-/// membership (so the caller can tell "current" from "absent"), and
-/// returns a caller-owned `<stable>_<rev>` string when the row is
-/// outdated, null when it's up to date or absent.
-fn mapLatest(
-    allocator: std.mem.Allocator,
-    map: *const std.StringHashMap(VersionEntry),
-    row: KegRow,
-    found: *bool,
-) std.mem.Allocator.Error!?[]u8 {
-    const entry = map.get(row.name) orelse {
-        found.* = false;
-        return null;
-    };
-    found.* = true;
-
-    var latest_buf: [256]u8 = undefined;
-    var installed_buf: [256]u8 = undefined;
-    // pkgVersion only fails on buffer overflow — a version longer than any
-    // real keg. Treat as unresolvable rather than crash the audit.
-    const latest = formula_mod.pkgVersion(&latest_buf, entry.stable, entry.revision) catch return null;
-    const installed = formula_mod.pkgVersion(&installed_buf, row.version, row.revision) catch return null;
-    if (std.mem.eql(u8, installed, latest)) return null;
-    return try allocator.dupe(u8, latest);
 }
 
 /// Warn that the bulk version map matched none of the installed core
@@ -300,6 +288,35 @@ fn resolveViaFetch(
     }
 }
 
+/// Dispositions for `kegs`, aligned 1:1. Sort order follows `kegs`. Release
+/// with `freeDispositions`.
+pub fn collectDispositionsFormulas(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    api: *api_mod.BrewApi,
+    cache_dir: []const u8,
+    kegs: []const KegRow,
+    workers_override: ?usize,
+) std.mem.Allocator.Error![]Disposition {
+    return collectDispositions(ctx, allocator, db, api, cache_dir, kegs, workers_override, .formula);
+}
+
+/// Cask sibling of `collectDispositionsFormulas`. Same lifetime contract.
+pub fn collectDispositionsCasks(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    api: *api_mod.BrewApi,
+    cache_dir: []const u8,
+    kegs: []const KegRow,
+    workers_override: ?usize,
+) std.mem.Allocator.Error![]Disposition {
+    return collectDispositions(ctx, allocator, db, api, cache_dir, kegs, workers_override, .cask);
+}
+
+/// The report is a projection of the dispositions — one resolution path, so
+/// `mt outdated` and any auditing caller can never disagree about a row.
 fn collectOutdated(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -310,17 +327,31 @@ fn collectOutdated(
     workers_override: ?usize,
     kind: Kind,
 ) std.mem.Allocator.Error![]OutdatedEntry {
-    if (kegs.len == 0) return allocator.alloc(OutdatedEntry, 0);
+    const dispositions = try collectDispositions(ctx, allocator, db, api, cache_dir, kegs, workers_override, kind);
+    defer freeDispositions(allocator, dispositions);
+    return assembleEntries(allocator, kegs, dispositions);
+}
 
-    // Per-row latest-version slot: a caller-owned string when row `i` is
-    // outdated, null otherwise. Map lookups fill core rows here directly;
-    // `resolveViaFetch` fills the rest.
-    const latest_versions = try allocator.alloc(?[]u8, kegs.len);
-    defer allocator.free(latest_versions);
-    @memset(latest_versions, null);
-    errdefer for (latest_versions) |maybe| {
-        if (maybe) |v| allocator.free(v);
-    };
+/// Resolve every keg to what the audit could prove about it, aligned 1:1 with
+/// `kegs`. Callers own each `needs_upgrade` payload — release the slice with
+/// `freeDispositions`.
+fn collectDispositions(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    api: *api_mod.BrewApi,
+    cache_dir: []const u8,
+    kegs: []const KegRow,
+    workers_override: ?usize,
+    kind: Kind,
+) std.mem.Allocator.Error![]Disposition {
+    if (kegs.len == 0) return allocator.alloc(Disposition, 0);
+
+    // Per-row verdict slot. Rows start `unknown`: a row nothing resolves stays
+    // unproven, which costs a redundant upgrade rather than skipping a real one.
+    const dispositions = try allocator.alloc(Disposition, kegs.len);
+    @memset(dispositions, .unknown);
+    errdefer freeDispositions(allocator, dispositions);
 
     // `needs_fetch[i]` = resolve row `i` via the per-keg network path:
     // tap casks always; every row when the map is missing or degraded.
@@ -365,14 +396,12 @@ fn collectOutdated(
                 continue;
             }
             core_rows += 1;
-            var found = false;
-            const latest = try mapLatest(allocator, &map, row, &found);
-            if (found) {
-                matched += 1;
-                latest_versions[i] = latest; // null when up to date
-            }
-            // A miss on a healthy map means "no upstream info" — drop the
-            // row like a 404, no per-keg refetch.
+            // Membership, not provability: an entry that fails to parse still
+            // proves the map itself is healthy, so it must not trip the guard.
+            if (map.contains(row.name)) matched += 1;
+            dispositions[i] = try mapDisposition(allocator, &map, row);
+            // A miss on a healthy map means "no upstream info" — unknown,
+            // no per-keg refetch.
         }
 
         // Fail loud: core rows present but none matched → bad map.
@@ -418,16 +447,24 @@ fn collectOutdated(
         }
 
         try resolveViaFetch(ctx, allocator, &head_cache, db, api, cache_dir, sub_kegs, workers_override, kind, sub_latest);
-        for (sub_idx, 0..) |orig, k| latest_versions[orig] = sub_latest[k];
+        // Fetch rows are `unknown` until now (the map never wrote them), so
+        // overwriting the slot cannot strand a payload.
+        for (sub_idx, 0..) |orig, k| {
+            dispositions[orig] = fetchDisposition(sub_latest[k]);
+            sub_latest[k] = null; // ownership moved into the disposition
+        }
     }
 
-    return assembleEntries(allocator, kegs, latest_versions);
+    return dispositions;
 }
 
+/// Collapse dispositions into the report's shape: only `needs_upgrade` is a
+/// line. `proven_current` and `unknown` are both absent — the report cannot
+/// tell them apart, which is exactly the distinction callers now can.
 fn assembleEntries(
     allocator: std.mem.Allocator,
     kegs: []const KegRow,
-    latest_versions: []?[]u8,
+    dispositions: []Disposition,
 ) std.mem.Allocator.Error![]OutdatedEntry {
     var out: std.ArrayList(OutdatedEntry) = try .initCapacity(allocator, kegs.len);
     errdefer {
@@ -440,10 +477,13 @@ fn assembleEntries(
     }
 
     for (kegs, 0..) |row, i| {
-        const latest = latest_versions[i] orelse continue;
+        const latest = switch (dispositions[i]) {
+            .needs_upgrade => |l| l,
+            .proven_current, .unknown => continue,
+        };
         // Hand ownership of `latest` over to the entry; clear the
-        // slot so the errdefer above doesn't double-free it.
-        latest_versions[i] = null;
+        // slot so the caller's cleanup doesn't double-free it.
+        dispositions[i] = .unknown;
         errdefer allocator.free(latest);
 
         const name_dup = try allocator.dupe(u8, row.name);
@@ -896,7 +936,7 @@ fn fetchLatest(
     // Compare the revision-qualified installed string against the (now also
     // revision-qualified) upstream so a revision-only bump isn't read as bare.
     // `!eql` is deliberate: malt mirrors the tap as source of truth — see the
-    // policy note above `mapLatest`.
+    // outdated-policy note above `Disposition`.
     var installed_buf: [256]u8 = undefined;
     const installed = formula_mod.pkgVersion(&installed_buf, row.version, row.revision) catch row.version;
     if (std.mem.eql(u8, installed, v)) {
@@ -1290,6 +1330,52 @@ test "parseFormulaLatest qualifies stable with the top-level revision" {
 // A version that overflows pkgVersion's 256-byte buffer — the only way it
 // fails, and the parse hole the union exists to close.
 const unparseable_version = "1." ++ ("9" ** 300);
+
+test "assembleEntries: only needs_upgrade is a line; proven_current and unknown are both absent" {
+    const a = std.testing.allocator;
+    const kegs = [_]KegRow{
+        .{ .name = "cur", .version = "1.0" },
+        .{ .name = "old", .version = "1.0" },
+        .{ .name = "unk", .version = "1.0" },
+    };
+    var ds = [_]Disposition{
+        .proven_current,
+        .{ .needs_upgrade = try a.dupe(u8, "2.0") },
+        .unknown,
+    };
+    defer for (ds) |d| freeDisposition(a, d);
+
+    const entries = try assembleEntries(a, &kegs, &ds);
+    defer {
+        for (entries) |e| {
+            a.free(e.name);
+            a.free(e.installed);
+            a.free(e.latest);
+        }
+        a.free(entries);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings("old", entries[0].name);
+    try std.testing.expectEqualStrings("2.0", entries[0].latest);
+    // The payload moved into the entry; the slot must not free it again.
+    try std.testing.expect(ds[1] == .unknown);
+}
+
+test "fetchDisposition: a fetch that resolved nothing is unknown, never proven_current" {
+    // The old slot read null as "up to date"; the fetch path has no map, so it
+    // cannot prove that — porting the null through would skip a real upgrade.
+    try std.testing.expect(fetchDisposition(null) == .unknown);
+}
+
+test "fetchDisposition: a resolved latest needs upgrade and carries the version" {
+    const a = std.testing.allocator;
+    const latest = try a.dupe(u8, "2.0.0");
+    const d = fetchDisposition(latest);
+    defer freeDisposition(a, d);
+    try std.testing.expect(d == .needs_upgrade);
+    try std.testing.expectEqualStrings("2.0.0", d.needs_upgrade);
+}
 
 test "mapDisposition: an unparseable upstream version yields unknown, never proven_current" {
     const a = std.testing.allocator;
