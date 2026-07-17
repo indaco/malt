@@ -83,6 +83,12 @@ PID=$!
 # Wait until the audit emits its first per-package event (a line carrying a
 # "name" field), then interrupt. Bail as SKIP if nothing streams in time — that
 # is an environmental stall, not a swallowed signal.
+#
+# PRECONDITION: this guard only guards while the dry-run emits per-package
+# events. Stop emitting them and the SKIP below turns a dead guard green
+# instead of failing — re-point the probe at the new observable, never accept
+# the SKIP as a pass. (Only the dry-run streams these; the real bulk path
+# already reports via a summary footer.)
 waited=0
 until grep -q '"name":' "$OUT" 2>/dev/null; do
   kill -0 "$PID" 2>/dev/null || break
