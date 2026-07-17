@@ -75,8 +75,15 @@ pub fn pinSkip(db: *sqlite.Database, name: []const u8, force: bool, audit_mode: 
 /// The pin arm mirrors `pinSkip` over the row's own `pinned` column, which
 /// the audit already loaded — no per-row re-query.
 fn phase1Folds(d: outdated_mod.Disposition, row: outdated_mod.KegRow, force: bool, audit_mode: bool) bool {
-    if (row.pinned and !force and !audit_mode) return false;
+    if (pinnedHolds(row, force, audit_mode)) return false;
     return audit_mod.skips(d, force);
+}
+
+/// True when a pin holds this row back from phase 2. `--force` and the
+/// `--pinned` audit walk pins deliberately, so they clear it. The plan warm
+/// mirrors this: a held row never reaches the sink in phase 2.
+fn pinnedHolds(row: outdated_mod.KegRow, force: bool, audit_mode: bool) bool {
+    return row.pinned and !force and !audit_mode;
 }
 
 /// What a per-package upgrade decided. Returned rather than reported as a
@@ -211,26 +218,22 @@ fn freeEntries(allocator: std.mem.Allocator, list: *std.ArrayList(OutdatedEntry)
     list.deinit(allocator);
 }
 
-/// Gate the snapshot warm to a *complete* dry-run audit. A narrowed run
-/// (names, `--cask`/`--formula`, `--pinned`), a failed walk, or a tainted
-/// collector would each persist a partial snapshot and make the Outdated
-/// view silently under-report — so every one vetoes the write. A real
-/// (non-dry-run) upgrade never warms: the pre-upgrade set is stale the
-/// instant kegs mutate. It prunes instead — see `pruneSnapshot`, which
-/// subtracts the moved kegs rather than persisting a stale set.
+/// Inputs to the snapshot-warm decision. `full_keg` already encodes
+/// "unnarrowed" — a `--cask`/`--formula`/`--pinned` or named run clears it —
+/// so the gate reads the plan, not the flags.
 const WarmGate = struct {
     dry_run: bool = false,
-    has_names: bool = false,
-    cask_only: bool = false,
-    formula_only: bool = false,
-    pinned_only: bool = false,
+    full_keg: bool = false,
     walk_failed: bool = false,
     tainted: bool = false,
 };
 
-fn shouldWarmSnapshot(g: WarmGate) bool {
-    return g.dry_run and !g.has_names and !g.cask_only and !g.formula_only and
-        !g.pinned_only and !g.walk_failed and !g.tainted;
+/// Warm only a complete, clean dry-run. A failed walk or a tainted collector
+/// veto, since either would persist a partial, under-reporting snapshot. A
+/// real upgrade never warms; it prunes instead (`pruneSnapshot`), the
+/// pre-upgrade set being stale the instant kegs mutate.
+fn warmsSnapshot(g: WarmGate) bool {
+    return g.dry_run and g.full_keg and !g.walk_failed and !g.tainted;
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -377,8 +380,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // audit must never persist a snapshot of the rows it did look at.
         // Both plans carry the same verdict; `or` picks the live one when a
         // narrowing or a failed audit left the other empty.
-        const warm_candidate = dry_run and (f_plan.full_keg or c_plan.full_keg);
-        const sink_ptr: ?*EntrySink = if (warm_candidate) &sink else null;
+        const full_keg = f_plan.full_keg or c_plan.full_keg;
+        const sink_ptr: ?*EntrySink = if (dry_run and full_keg) &sink else null;
         if (!cask_only) {
             upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, f_plan, &tally, sink_ptr) catch {
                 any_failed = true;
@@ -395,14 +398,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // Best-effort warm of the shared outdated snapshot from the dry-run's
         // own audit — a cache-write failure never changes exit code or output.
         // Reuses the `{prefix}/cache` dir already resolved above.
-        if (shouldWarmSnapshot(.{
-            .dry_run = dry_run,
-            .cask_only = cask_only,
-            .formula_only = formula_only,
-            .pinned_only = pinned_only,
-            .walk_failed = any_failed,
-            .tainted = sink.tainted,
-        })) {
+        if (warmsSnapshot(.{ .dry_run = dry_run, .full_keg = full_keg, .walk_failed = any_failed, .tainted = sink.tainted })) {
             outdated_mod.writeSnapshotEntries(ctx, allocator, cache_dir, sink.formulas.items, sink.casks.items) catch {};
         }
     } else {
@@ -1279,7 +1275,13 @@ fn upgradeAllFormulas(
             tally.fold(.up_to_date);
             continue;
         }
-        if (upgradeFormula(ctx, allocator, row.name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby, true, sink)) |o| {
+        // The audit already resolved `needs_upgrade` rows, so warm them from
+        // the plan rather than having phase 2 fetch the same version again;
+        // phase 2 runs with no sink for those so the row is not collected
+        // twice. `unknown` rows carry no plan latest and still collect below.
+        if (sink) |s| if (d == .needs_upgrade and !pinnedHolds(row, force, pinned_only)) s.collectFormula(row.name, row.version, row.revision, d.needs_upgrade);
+        const phase2_sink: ?*EntrySink = if (d == .needs_upgrade) null else sink;
+        if (upgradeFormula(ctx, allocator, row.name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby, true, phase2_sink)) |o| {
             tally.fold(o);
         } else |_| {
             failed_count += 1;
@@ -1464,7 +1466,12 @@ fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite
             tally.fold(.up_to_date);
             continue;
         }
-        if (upgradeCask(ctx, allocator, row.name, db, api, prefix, dry_run, force, pinned_only, true, sink)) |o| {
+        // Warm a plan-resolved cask from the audit; casks carry no revision,
+        // so the recorded version is the entry's `installed` as-is. Phase 2
+        // runs with no sink for those rows so the cask is not collected twice.
+        if (sink) |s| if (d == .needs_upgrade and !pinnedHolds(row, force, pinned_only)) s.collectCask(row.name, row.version, d.needs_upgrade);
+        const phase2_sink: ?*EntrySink = if (d == .needs_upgrade) null else sink;
+        if (upgradeCask(ctx, allocator, row.name, db, api, prefix, dry_run, force, pinned_only, true, phase2_sink)) |o| {
             tally.fold(o);
         } else |_| {
             failed_count += 1;
@@ -1536,17 +1543,52 @@ test "EntrySink.collectFormula qualifies installed with revision and routes by k
     try std.testing.expectEqualStrings("4.0", sink.casks.items[0].installed);
 }
 
-test "shouldWarmSnapshot warms only a clean full no-args dry-run" {
-    try std.testing.expect(shouldWarmSnapshot(.{ .dry_run = true }));
+test "warmsSnapshot warms only a clean, unnarrowed dry-run" {
+    // The gate reads the plan's `full_keg` instead of re-deriving narrowing
+    // from flags: a `--cask`/`--formula`/`--pinned` run clears `full_keg`
+    // (proven in audit's own tests), and a cleared plan can never warm.
+    try std.testing.expect(warmsSnapshot(.{ .dry_run = true, .full_keg = true }));
     // A real upgrade never warms — the pre-upgrade set is stale once kegs mutate.
-    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = false }));
-    // Any narrowing or incompleteness persists a partial snapshot → veto.
-    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = true, .has_names = true }));
-    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = true, .cask_only = true }));
-    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = true, .formula_only = true }));
-    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = true, .pinned_only = true }));
-    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = true, .walk_failed = true }));
-    try std.testing.expect(!shouldWarmSnapshot(.{ .dry_run = true, .tainted = true }));
+    try std.testing.expect(!warmsSnapshot(.{ .full_keg = true }));
+    // A narrowed audit (full_keg cleared) would persist a partial snapshot.
+    try std.testing.expect(!warmsSnapshot(.{ .dry_run = true }));
+    // A failed walk or a tainted collector each veto the write.
+    try std.testing.expect(!warmsSnapshot(.{ .dry_run = true, .full_keg = true, .walk_failed = true }));
+    try std.testing.expect(!warmsSnapshot(.{ .dry_run = true, .full_keg = true, .tainted = true }));
+}
+
+test "each narrowing clears full_keg so the plan warm is refused" {
+    // The live temptation: the audit is natively narrowable, so a `--pinned`,
+    // `--cask` or `--formula` plan must never license a snapshot warm. Ties
+    // scope → full_keg → gate end to end, per the ordering constraint.
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('held', 'held', '1.0', 'sha', '/cellar/held/1.0', 1);");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    try writeTestVersionsIndex(cache_dir, .formula, "held\t2.0\t0\n");
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+
+    for ([_]audit_mod.Scope{
+        .{ .pinned_only = true },
+        .{ .cask_only = true },
+        .{ .formula_only = true },
+    }) |scope| {
+        var plan = try audit_mod.audit(alloc, &db, &api, .formula, scope);
+        defer plan.deinit(alloc);
+        try std.testing.expect(!plan.full_keg);
+        try std.testing.expect(!warmsSnapshot(.{ .dry_run = true, .full_keg = plan.full_keg }));
+    }
 }
 
 test "Tally.fold routes each outcome to its own counter" {
@@ -1999,6 +2041,146 @@ fn writeTestVersionsIndex(cache_dir: []const u8, kind: audit_mod.Kind, body: []c
     try f.writeStreamingAll(io, body);
 }
 
+/// Plant the cached formula document phase 2 reads, so an `unknown` row can
+/// resolve to a would-upgrade offline of any network. `parseFormula` needs
+/// only name + `versions.stable`.
+fn writeTestFormulaCache(cache_dir: []const u8, name: []const u8, stable: []const u8) !void {
+    const io = std.Options.debug_io;
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/api", .{cache_dir});
+    std.Io.Dir.createDirAbsolute(io, dir, .default_dir) catch {};
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const p = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
+    const f = try std.Io.Dir.cwd().createFile(io, p, .{});
+    defer f.close(io);
+    var body_buf: [256]u8 = undefined;
+    const body = try std.fmt.bufPrint(&body_buf, "{{\"name\":\"{s}\",\"versions\":{{\"stable\":\"{s}\"}}}}", .{ name, stable });
+    try f.writeStreamingAll(io, body);
+}
+
+/// Cask sibling of `writeTestFormulaCache`; `parseCask` needs token, version
+/// and url, so phase 2 can resolve a would-upgrade cask offline of the network.
+fn writeTestCaskCache(cache_dir: []const u8, token: []const u8, version: []const u8) !void {
+    const io = std.Options.debug_io;
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/api", .{cache_dir});
+    std.Io.Dir.createDirAbsolute(io, dir, .default_dir) catch {};
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const p = try std.fmt.bufPrint(&path_buf, "{s}/api/cask_{s}.json", .{ cache_dir, token });
+    const f = try std.Io.Dir.cwd().createFile(io, p, .{});
+    defer f.close(io);
+    var body_buf: [256]u8 = undefined;
+    const body = try std.fmt.bufPrint(&body_buf, "{{\"token\":\"{s}\",\"version\":\"{s}\",\"url\":\"https://example.com/x.dmg\"}}", .{ token, version });
+    try f.writeStreamingAll(io, body);
+}
+
+test "the warmed formula set merges plan and phase-2 rows, each once, freed once" {
+    // The merge, entire: a `needs_upgrade` row (warmed from the plan), an
+    // `unknown` row the index never listed (warmed by phase 2's fetch), and a
+    // `proven_current` row (excluded, current). The result must be exactly the
+    // two would-upgrade rows — the plan row appearing once, not doubled by a
+    // second phase-2 collect — and the test allocator proves it all frees once.
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES
+        \\  ('cur', 'cur', '5.0', 'sha', '/cellar/cur/5.0'),
+        \\  ('miss', 'miss', '1.0', 'sha', '/cellar/miss/1.0'),
+        \\  ('up', 'up', '1.0', 'sha', '/cellar/up/1.0');
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    // Index lists `cur` (current) and `up` (behind); `miss` is absent.
+    try writeTestVersionsIndex(cache_dir, .formula, "cur\t5.0\t0\nup\t2.0\t0\n");
+    // Phase 2 fetches only rows the plan could not exclude: `miss` and `up`.
+    try writeTestFormulaCache(cache_dir, "miss", "3.0");
+    try writeTestFormulaCache(cache_dir, "up", "2.0");
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .formula, .{});
+    defer plan.deinit(alloc);
+    try std.testing.expect(plan.dispositions[0] == .proven_current); // cur
+    try std.testing.expect(plan.dispositions[1] == .unknown); // miss
+    try std.testing.expectEqualStrings("2.0", plan.dispositions[2].needs_upgrade); // up
+
+    var sink = EntrySink.init(alloc);
+    defer sink.deinit();
+    var tally: Tally = .{};
+    try upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, plan, &tally, &sink);
+
+    // Exactly the two would-upgrade rows: `miss` (phase 2) then `up` (plan),
+    // in row order, with `up` present once. `cur` contributes nothing.
+    try std.testing.expectEqual(@as(usize, 2), sink.formulas.items.len);
+    try std.testing.expectEqualStrings("miss", sink.formulas.items[0].name);
+    try std.testing.expectEqualStrings("3.0", sink.formulas.items[0].latest);
+    try std.testing.expectEqualStrings("up", sink.formulas.items[1].name);
+    try std.testing.expectEqualStrings("2.0", sink.formulas.items[1].latest);
+    try std.testing.expect(!sink.tainted);
+    try std.testing.expectEqual(@as(usize, 1), tally.up_to_date); // cur
+    try std.testing.expectEqual(@as(usize, 2), tally.would_upgrade); // miss + up
+}
+
+test "the warmed cask set merges plan and phase-2 rows, each once, freed once" {
+    // The cask walker is separate code from the formula one, so its half of
+    // the merge is proven independently: `up` (plan-resolved) must appear once,
+    // not doubled by phase 2's own collect; `miss` (index-absent) is warmed by
+    // phase 2's fetch; `cur` (proven current) contributes nothing.
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url) VALUES
+        \\  ('cur', 'cur', '5.0', 'https://example/cur'),
+        \\  ('miss', 'miss', '1.0', 'https://example/miss'),
+        \\  ('up', 'up', '1.0', 'https://example/up');
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    try writeTestVersionsIndex(cache_dir, .cask, "cur\t5.0\t0\nup\t2.0\t0\n");
+    try writeTestCaskCache(cache_dir, "miss", "3.0");
+    try writeTestCaskCache(cache_dir, "up", "2.0");
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .cask, .{});
+    defer plan.deinit(alloc);
+    try std.testing.expect(plan.dispositions[0] == .proven_current); // cur
+    try std.testing.expect(plan.dispositions[1] == .unknown); // miss
+    try std.testing.expectEqualStrings("2.0", plan.dispositions[2].needs_upgrade); // up
+
+    var sink = EntrySink.init(alloc);
+    defer sink.deinit();
+    var tally: Tally = .{};
+    try upgradeAllCasks(&ctx, alloc, &db, &api, "/opt/malt", true, false, false, plan, &tally, &sink);
+
+    try std.testing.expectEqual(@as(usize, 2), sink.casks.items.len);
+    try std.testing.expectEqualStrings("miss", sink.casks.items[0].name);
+    try std.testing.expectEqualStrings("3.0", sink.casks.items[0].latest);
+    try std.testing.expectEqualStrings("up", sink.casks.items[1].name);
+    try std.testing.expectEqualStrings("2.0", sink.casks.items[1].latest);
+    try std.testing.expect(!sink.tainted);
+    try std.testing.expectEqual(@as(usize, 1), tally.up_to_date); // cur
+    try std.testing.expectEqual(@as(usize, 2), tally.would_upgrade); // miss + up
+}
+
 test "a proven-current row is folded into the footer, not dropped from it" {
     // The count is the point: on a mostly-current machine every excluded row
     // must still reach `checked()`, or the footer reports 2 on a 200-package
@@ -2222,4 +2404,119 @@ test "a row missing from the index is still handed to phase 2, never skipped" {
     try std.testing.expectEqual(@as(usize, 1), tally.up_to_date);
     try std.testing.expectEqual(@as(usize, 1), tally.failed);
     try std.testing.expectEqual(@as(usize, 2), tally.checked());
+}
+
+test "a needs_upgrade formula is warmed from the plan, not phase 2's fetch" {
+    // The merge's formula half: the audit already resolved `latest`, so the
+    // warm takes it from the plan without waiting on phase 2. Proven by going
+    // offline — phase 2 fails to fetch, yet the entry still lands. The strings
+    // come from the plan and the row, so no network can supply them.
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('behind', 'behind', '1.0', 'sha', '/cellar/behind/1.0');");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    try writeTestVersionsIndex(cache_dir, .formula, "behind\t2.0\t0\n");
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true; // phase 2's fetch fails; the plan still warms the row
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .formula, .{});
+    defer plan.deinit(alloc);
+    try std.testing.expectEqualStrings("2.0", plan.dispositions[0].needs_upgrade);
+
+    var sink = EntrySink.init(alloc);
+    defer sink.deinit();
+    var tally: Tally = .{};
+    upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, plan, &tally, &sink) catch {};
+
+    try std.testing.expectEqual(@as(usize, 1), sink.formulas.items.len);
+    try std.testing.expectEqualStrings("behind", sink.formulas.items[0].name);
+    try std.testing.expectEqualStrings("1.0", sink.formulas.items[0].installed);
+    try std.testing.expectEqualStrings("2.0", sink.formulas.items[0].latest);
+    try std.testing.expect(!sink.tainted);
+}
+
+test "a needs_upgrade cask is warmed from the plan, not phase 2's fetch" {
+    // The merge's cask half, symmetric with the formula case above: a NULL-tap
+    // cask the index proves behind is warmed from the plan even though the
+    // offline fetch below cannot reach its cask document.
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec("INSERT INTO casks (token, name, version, url) VALUES ('vlc', 'vlc', '1.0', 'https://example/vlc');");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    try writeTestVersionsIndex(cache_dir, .cask, "vlc\t2.0\t0\n");
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .cask, .{});
+    defer plan.deinit(alloc);
+    try std.testing.expectEqualStrings("2.0", plan.dispositions[0].needs_upgrade);
+
+    var sink = EntrySink.init(alloc);
+    defer sink.deinit();
+    var tally: Tally = .{};
+    upgradeAllCasks(&ctx, alloc, &db, &api, "/opt/malt", true, false, false, plan, &tally, &sink) catch {};
+
+    try std.testing.expectEqual(@as(usize, 1), sink.casks.items.len);
+    try std.testing.expectEqualStrings("vlc", sink.casks.items[0].name);
+    try std.testing.expectEqualStrings("1.0", sink.casks.items[0].installed);
+    try std.testing.expectEqualStrings("2.0", sink.casks.items[0].latest);
+    try std.testing.expect(!sink.tainted);
+}
+
+test "a pinned needs_upgrade row stays out of the warm, as phase 2's pinSkip would keep it" {
+    // A held-but-outdated row reports `.pinned` in phase 2 and never collects,
+    // so the plan warm must skip it too or the snapshot would gain a row the
+    // sink never had. `held` is pinned and the index proves it behind.
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('held', 'held', '1.0', 'sha', '/cellar/held/1.0', 1);");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    try writeTestVersionsIndex(cache_dir, .formula, "held\t2.0\t0\n");
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, cache_dir);
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .formula, .{});
+    defer plan.deinit(alloc);
+    try std.testing.expectEqualStrings("2.0", plan.dispositions[0].needs_upgrade);
+
+    var sink = EntrySink.init(alloc);
+    defer sink.deinit();
+    var tally: Tally = .{};
+    upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, plan, &tally, &sink) catch {};
+
+    try std.testing.expectEqual(@as(usize, 0), sink.formulas.items.len);
+    try std.testing.expectEqual(@as(usize, 1), tally.pinned);
 }
