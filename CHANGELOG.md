@@ -4,6 +4,138 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.20.10 - 2026-07-10
+
+### Highlights
+
+v0.20.10 makes `mt doctor --fix` safe to run without second-guessing it, and stops installs from ever fetching a build for the wrong machine.
+
+- **A Doctor `--fix` you can trust.** Repairs now serialize behind the prefix lock and reap orphaned store entries atomically, so a partial or concurrent fix can't corrupt your install or leave a reference row pointing at nothing.
+- **No more false repairs.** Doctor leaves an intact symlink alone when its target is only temporarily unreachable, rather than tearing down something you still need.
+- **Installs that match your machine.** `mt install` never resolves a tap artifact built for the wrong architecture, so you can't end up with a binary that won't run.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **doctor:** reap orphan store entries atomically so a partial delete never outlives its ref row ([3a3911b9](https://github.com/indaco/malt/commit/3a3911b9)) ([#643](https://github.com/indaco/malt/pull/643))
+- **install:** never resolve a tap artifact for the wrong architecture ([c4750739](https://github.com/indaco/malt/commit/c4750739)) ([#642](https://github.com/indaco/malt/pull/642))
+- **doctor:** serialize --fix prefix mutations behind malt.lock ([4aa1e7e9](https://github.com/indaco/malt/commit/4aa1e7e9)) ([#641](https://github.com/indaco/malt/pull/641))
+- **doctor:** don't remove an intact symlink whose target is inaccessible ([0942e30b](https://github.com/indaco/malt/commit/0942e30b)) ([#640](https://github.com/indaco/malt/pull/640))
+- **doctor:** repair a stale lock by truncating instead of unlinking it ([fb86840d](https://github.com/indaco/malt/commit/fb86840d)) ([#639](https://github.com/indaco/malt/pull/639))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.20.9 - 2026-07-09
+
+### Highlights
+
+v0.20.9 brings malt in step with Homebrew v6's declarative post-install steps and polishes a batch of rough edges in `mt tui`.
+
+- **Compatible with Homebrew v6 install steps.** Homebrew is migrating formulae from Ruby `post_install` blocks to the declarative `post_install_steps` framework - malt now runs those steps natively across install, upgrade, and migrate, so packages keep setting themselves up correctly as upstream converts.
+- **A steadier TUI.** Wrapped rows no longer split multi-byte characters, `End` jumps to the last row in every tab, a lone `Esc` resolves immediately, uninstall acts on the package you confirmed - not the live selection - and the terminal is restored cleanly on panic or termination.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **ui/progress:** make shared progress counters race-free under concurrent repaints ([1c9e7a62](https://github.com/indaco/malt/commit/1c9e7a62)) ([#638](https://github.com/indaco/malt/pull/638))
+- **tui:** keep wrapped rows on UTF-8 rune boundaries ([9f338aaa](https://github.com/indaco/malt/commit/9f338aaa)) ([#637](https://github.com/indaco/malt/pull/637))
+- **install:** run declarative post-install steps across install, upgrade, and migrate ([675fea29](https://github.com/indaco/malt/commit/675fea29)) ([#636](https://github.com/indaco/malt/pull/636))
+- **tui:** make End jump to the last row in every tab ([4cf0d4f7](https://github.com/indaco/malt/commit/4cf0d4f7)) ([#635](https://github.com/indaco/malt/pull/635))
+- **tui:** resolve a lone Esc immediately instead of on the next keypress ([9cc4d503](https://github.com/indaco/malt/commit/9cc4d503)) ([#634](https://github.com/indaco/malt/pull/634))
+- **tui:** uninstall the package the guard was armed on, not the live selection ([7239deca](https://github.com/indaco/malt/commit/7239deca)) ([#633](https://github.com/indaco/malt/pull/633))
+- **tui:** restore the terminal on panic and termination signals ([2a74397e](https://github.com/indaco/malt/commit/2a74397e)) ([#631](https://github.com/indaco/malt/pull/631))
+
+### ✅ Tests
+
+- **install:** stop the Ruby fallback route test reading the live homebrew-core tap ([98dd9777](https://github.com/indaco/malt/commit/98dd9777)) ([#632](https://github.com/indaco/malt/pull/632))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.20.8 - 2026-07-08
+
+### 🩹 Fixes
+
+- **core/sandbox:** grant sandbox writes under resolved roots for symlinked prefixes ([4e1f08df](https://github.com/indaco/malt/commit/4e1f08df)) ([#630](https://github.com/indaco/malt/pull/630))
+- **ci:** verify the committed pins manifest instead of re-enumerating live formulas ([5a8c820a](https://github.com/indaco/malt/commit/5a8c820a)) ([#629](https://github.com/indaco/malt/pull/629))
+- **core/cellar:** pour bottle etc/var overlays and relocate embedded config paths ([bfa89cac](https://github.com/indaco/malt/commit/bfa89cac)) ([#628](https://github.com/indaco/malt/pull/628))
+- **core/dsl:** run post_install against revisioned keg paths and surface command failures ([14ed80f9](https://github.com/indaco/malt/commit/14ed80f9)) ([#626](https://github.com/indaco/malt/pull/626))
+- **cli:** route the help command's argument to its command topic ([0329e0e6](https://github.com/indaco/malt/commit/0329e0e6)) ([#625](https://github.com/indaco/malt/pull/625))
+- **update:** remove the twin's .old backup and show help without starting the updater ([025d3753](https://github.com/indaco/malt/commit/025d3753)) ([#623](https://github.com/indaco/malt/pull/623))
+- **cli:** report overlong unknown commands cleanly instead of panicking ([b7799aaa](https://github.com/indaco/malt/commit/b7799aaa)) ([#622](https://github.com/indaco/malt/pull/622))
+- **cli:** forward brew's real exit code and diagnose a broken brew in the fallback ([05b027bf](https://github.com/indaco/malt/commit/05b027bf)) ([#621](https://github.com/indaco/malt/pull/621))
+- **update:** report a restored self-update as a clean failure, not a broken rollback ([30c51138](https://github.com/indaco/malt/commit/30c51138)) ([#620](https://github.com/indaco/malt/pull/620))
+
+### 🏡 Chores
+
+- **core:** drop upstream-removed formulas from the pins manifest ([c59b16f9](https://github.com/indaco/malt/commit/c59b16f9)) ([#627](https://github.com/indaco/malt/pull/627))
+- **core:** drop upstream-removed formulas from the pins manifest ([12e0f098](https://github.com/indaco/malt/commit/12e0f098)) ([#624](https://github.com/indaco/malt/pull/624))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.20.7 - 2026-07-06
+
+### 🩹 Fixes
+
+- **security:** reject path separators in tap-supplied names and versions ([f8eaef2](https://github.com/indaco/malt/commit/f8eaef2)) ([#618](https://github.com/indaco/malt/pull/618))
+- **services:** reject path separators in service label at the validation gate ([c17ad19](https://github.com/indaco/malt/commit/c17ad19)) ([#616](https://github.com/indaco/malt/pull/616))
+- **upgrade:** stop spurious "database is locked" when a formula gains a new dependency ([fdb4b5a](https://github.com/indaco/malt/commit/fdb4b5a)) ([#615](https://github.com/indaco/malt/pull/615))
+- **security:** enforce the terminal sanitizer's anti-injection guarantee ([4ddb33c](https://github.com/indaco/malt/commit/4ddb33c)) ([#613](https://github.com/indaco/malt/pull/613))
+
+### 🏡 Chores
+
+- **pins:** drop formulae upstream no longer runs post_install for ([693469d](https://github.com/indaco/malt/commit/693469d)) ([#619](https://github.com/indaco/malt/pull/619))
+- **pins:** refresh homebrew-core source manifest ([a98b07f](https://github.com/indaco/malt/commit/a98b07f)) ([#614](https://github.com/indaco/malt/pull/614))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.20.6 - 2026-07-03
+
+### 🩹 Fixes
+
+- **bundle:** escape names and versions in JSON, Brewfile and receipt emitters ([b456a2a](https://github.com/indaco/malt/commit/b456a2a)) ([#612](https://github.com/indaco/malt/pull/612))
+- **cli/run:** forward the run binary's exit code, args, and failures ([8e4fd68](https://github.com/indaco/malt/commit/8e4fd68)) ([#611](https://github.com/indaco/malt/pull/611))
+- **cli:** stop consuming global flags after the -- separator ([6e568f6](https://github.com/indaco/malt/commit/6e568f6)) ([#610](https://github.com/indaco/malt/pull/610))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.20.5 - 2026-07-03
 
 ### 🩹 Fixes
