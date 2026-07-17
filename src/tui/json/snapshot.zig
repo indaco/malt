@@ -33,7 +33,10 @@ const WireDoc = struct { outdated: []const WireRow };
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) outdated_json.Error!outdated_json.Parsed {
     const snap = std.json.parseFromSlice(Snapshot, allocator, bytes, .{
         .ignore_unknown_fields = true,
-    }) catch return error.BadJson;
+    }) catch |e| switch (e) {
+        error.OutOfMemory => |o| return o,
+        else => return error.BadJson,
+    };
     defer snap.deinit();
 
     var rows: std.ArrayList(WireRow) = .empty;
@@ -112,6 +115,16 @@ test "parse tolerates a missing casks array" {
 test "parse rejects malformed input as BadJson" {
     try testing.expectError(error.BadJson, parse(testing.allocator, "not json"));
     try testing.expectError(error.BadJson, parse(testing.allocator, ""));
+}
+
+test "parse propagates a parse-time OOM instead of relabeling it BadJson" {
+    // A real allocator exhaustion during the envelope parse is fatal, not a
+    // malformed snapshot; the fatal-OOM guard must restore the terminal.
+    const bytes =
+        \\{"version":2,"generated_at_ms":0,"formulas":[{"name":"wget","installed":"1.24.5","latest":"1.25.0"}],"casks":[]}
+    ;
+    var fa = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, parse(fa.allocator(), bytes));
 }
 
 test "read returns null when the snapshot file is absent" {
