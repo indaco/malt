@@ -199,6 +199,46 @@ fn isCorePathRow(row: KegRow) bool {
 // `--dry-run`. Matching Homebrew's `PkgVersion` ordering instead would risk a
 // divergent comparator silently skipping a real upgrade — a worse failure mode.
 
+/// What the audit could prove about one row. `proven_current` is the only
+/// answer that lets a caller skip work, so it is mintable on exactly one
+/// path — see `mapDisposition`. Anything unproven is `unknown`, which costs
+/// a redundant upgrade attempt; the reverse would silently skip a real one.
+pub const Disposition = union(enum) {
+    proven_current,
+    /// Caller owns `latest`; release with `freeDisposition`.
+    needs_upgrade: []u8,
+    unknown,
+};
+
+/// Release a disposition's owned payload. Safe on every variant.
+pub fn freeDisposition(allocator: std.mem.Allocator, d: Disposition) void {
+    switch (d) {
+        .needs_upgrade => |latest| allocator.free(latest),
+        .proven_current, .unknown => {},
+    }
+}
+
+/// The only minter of `proven_current`. Core-ness is checked here rather than
+/// by the caller so no future call site can route a tap row into a version-truth
+/// verdict; tap rows answer to sha-truth, which this map cannot see.
+fn mapDisposition(
+    allocator: std.mem.Allocator,
+    map: *const std.StringHashMap(VersionEntry),
+    row: KegRow,
+) std.mem.Allocator.Error!Disposition {
+    if (!isCorePathRow(row)) return .unknown;
+    const entry = map.get(row.name) orelse return .unknown;
+
+    var latest_buf: [256]u8 = undefined;
+    var installed_buf: [256]u8 = undefined;
+    // pkgVersion only fails on buffer overflow. Unproven, so `unknown`:
+    // reading it as current would skip a real upgrade.
+    const latest = formula_mod.pkgVersion(&latest_buf, entry.stable, entry.revision) catch return .unknown;
+    const installed = formula_mod.pkgVersion(&installed_buf, row.version, row.revision) catch return .unknown;
+    if (std.mem.eql(u8, installed, latest)) return .proven_current;
+    return .{ .needs_upgrade = try allocator.dupe(u8, latest) };
+}
+
 /// Resolve one keg against its version-map entry. Sets `found` to map
 /// membership (so the caller can tell "current" from "absent"), and
 /// returns a caller-owned `<stable>_<rev>` string when the row is
@@ -1245,6 +1285,73 @@ test "parseFormulaLatest qualifies stable with the top-level revision" {
     const bare = parseFormulaLatest(a, "{\"versions\":{\"stable\":\"1.2.3\"}}") orelse return error.ParseFailed;
     defer a.free(bare);
     try std.testing.expectEqualStrings("1.2.3", bare);
+}
+
+// A version that overflows pkgVersion's 256-byte buffer — the only way it
+// fails, and the parse hole the union exists to close.
+const unparseable_version = "1." ++ ("9" ** 300);
+
+test "mapDisposition: an unparseable upstream version yields unknown, never proven_current" {
+    const a = std.testing.allocator;
+    var map = try buildVersionMap(a, "wget\t" ++ unparseable_version ++ "\t0\n");
+    defer map.deinit();
+
+    const d = try mapDisposition(a, &map, .{ .name = "wget", .version = unparseable_version });
+    defer freeDisposition(a, d);
+    try std.testing.expect(d == .unknown);
+}
+
+test "mapDisposition: a core row with byte-equal qualified versions is proven_current" {
+    const a = std.testing.allocator;
+    var map = try buildVersionMap(a, "wget\t1.21.4\t0\n");
+    defer map.deinit();
+
+    const d = try mapDisposition(a, &map, .{ .name = "wget", .version = "1.21.4" });
+    defer freeDisposition(a, d);
+    try std.testing.expect(d == .proven_current);
+}
+
+test "mapDisposition: same version with a different revision needs upgrade, not proven_current" {
+    const a = std.testing.allocator;
+    var map = try buildVersionMap(a, "wget\t1.21.4\t2\n");
+    defer map.deinit();
+
+    const d = try mapDisposition(a, &map, .{ .name = "wget", .version = "1.21.4", .revision = 1 });
+    defer freeDisposition(a, d);
+    try std.testing.expect(d == .needs_upgrade);
+    try std.testing.expectEqualStrings("1.21.4_2", d.needs_upgrade);
+}
+
+test "mapDisposition: a core row missing from the map is unknown, not proven_current" {
+    const a = std.testing.allocator;
+    var map = try buildVersionMap(a, "curl\t8.0.0\t0\n");
+    defer map.deinit();
+
+    // The set-difference trap: absent must never read as current.
+    const d = try mapDisposition(a, &map, .{ .name = "wget", .version = "1.21.4" });
+    defer freeDisposition(a, d);
+    try std.testing.expect(d == .unknown);
+}
+
+test "mapDisposition: a tap row is unknown even when the map claims it is current" {
+    const a = std.testing.allocator;
+    var map = try buildVersionMap(a, "wget\t1.21.4\t0\n");
+    defer map.deinit();
+
+    // Version-truth must not answer for a row that lives by sha-truth.
+    const d = try mapDisposition(a, &map, .{ .name = "wget", .version = "1.21.4", .tap = "user/repo" });
+    defer freeDisposition(a, d);
+    try std.testing.expect(d == .unknown);
+}
+
+test "mapDisposition: a NULL-tap row is core and, absent from the map, is unknown" {
+    const a = std.testing.allocator;
+    var map = try buildVersionMap(a, "curl\t8.0.0\t0\n");
+    defer map.deinit();
+
+    const d = try mapDisposition(a, &map, .{ .name = "firefox", .version = "1.0", .tap = null });
+    defer freeDisposition(a, d);
+    try std.testing.expect(d == .unknown);
 }
 
 test "isCorePathRow routes core rows to the map and third-party taps per-HEAD" {
