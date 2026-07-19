@@ -1,6 +1,8 @@
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const testing = std.testing;
+const schema = @import("../db/schema.zig");
 
 pub const StoreError = error{ CommitFailed, RemoveFailed, NotFound, OutOfMemory, RefCountError };
 
@@ -109,17 +111,98 @@ pub const Store = struct {
     /// Find store entries with refcount == 0.
     pub fn orphans(self: *Store) StoreError!std.ArrayList([]const u8) {
         var list: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (list.items) |item| self.allocator.free(item);
+            list.deinit(self.allocator);
+        }
         var stmt = self.db.prepare(
             "SELECT store_sha256 FROM store_refs WHERE refcount <= 0;",
-        ) catch return list;
+        ) catch return StoreError.RefCountError;
         defer stmt.finalize();
 
-        while (stmt.step() catch null) |has_row| {
-            if (!has_row) break;
+        while (stmt.step() catch return StoreError.RefCountError) {
             const sha = stmt.columnText(0) orelse continue;
-            const owned = self.allocator.dupe(u8, std.mem.sliceTo(sha, 0)) catch continue;
-            list.append(self.allocator, owned) catch continue;
+            const owned = self.allocator.dupe(u8, std.mem.sliceTo(sha, 0)) catch
+                return StoreError.OutOfMemory;
+            list.append(self.allocator, owned) catch {
+                self.allocator.free(owned);
+                return StoreError.OutOfMemory;
+            };
         }
         return list;
     }
 };
+
+fn openSchemaDb() !sqlite.Database {
+    var db = try sqlite.Database.open(":memory:");
+    errdefer db.close();
+    try schema.initSchema(&db);
+    return db;
+}
+
+test "orphans surfaces a prepare failure as RefCountError, not an empty list" {
+    var db = try openSchemaDb();
+    defer db.close();
+    // Drop the table the SELECT targets so prepare fails loud.
+    try db.exec("DROP TABLE store_refs;");
+
+    var store = Store.init(std.Options.debug_io, testing.allocator, &db, "");
+    try testing.expectError(StoreError.RefCountError, store.orphans());
+}
+
+test "orphans frees the duplicated sha and returns OutOfMemory when the append fails" {
+    var db = try openSchemaDb();
+    defer db.close();
+    try db.exec("INSERT INTO store_refs (store_sha256, refcount) VALUES ('a', 0);");
+
+    // fail_index 1: the dupe (alloc #0) succeeds, the list's first growth (#1)
+    // fails - so a dropped `owned` is a real leak the base allocator catches.
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    var store = Store.init(std.Options.debug_io, failing.allocator(), &db, "");
+    try testing.expectError(StoreError.OutOfMemory, store.orphans());
+}
+
+test "orphans frees already-collected shas via errdefer on a mid-scan OOM" {
+    var db = try openSchemaDb();
+    defer db.close();
+    try db.exec("INSERT INTO store_refs (store_sha256, refcount) VALUES ('a', 0), ('b', 0);");
+
+    // fail_index 2: row 'a' is dupe'd (#0) and appended (#1); the second row's
+    // dupe (#2) fails, so the errdefer must free the already-collected 'a'.
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 2 });
+    var store = Store.init(std.Options.debug_io, failing.allocator(), &db, "");
+    try testing.expectError(StoreError.OutOfMemory, store.orphans());
+}
+
+test "orphans skips a NULL store_sha256 row and still returns the real orphan" {
+    var db = try openSchemaDb();
+    defer db.close();
+    // SQLite permits NULL in a TEXT PRIMARY KEY that isn't NOT NULL, so the
+    // `columnText orelse continue` branch is reachable, not dead.
+    try db.exec("INSERT INTO store_refs (store_sha256, refcount) VALUES (NULL, 0), ('real', 0);");
+
+    var store = Store.init(std.Options.debug_io, testing.allocator, &db, "");
+    var list = try store.orphans();
+    defer {
+        for (list.items) |item| testing.allocator.free(item);
+        list.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 1), list.items.len);
+    try testing.expectEqualStrings("real", list.items[0]);
+}
+
+test "orphans returns exactly the refcount-zero rows and skips referenced rows" {
+    var db = try openSchemaDb();
+    defer db.close();
+    try db.exec(
+        "INSERT INTO store_refs (store_sha256, refcount) VALUES ('zero_a', 0), ('zero_b', 0), ('held', 3);",
+    );
+
+    var store = Store.init(std.Options.debug_io, testing.allocator, &db, "");
+    var list = try store.orphans();
+    defer {
+        for (list.items) |item| testing.allocator.free(item);
+        list.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 2), list.items.len);
+}
