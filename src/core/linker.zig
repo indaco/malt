@@ -21,8 +21,8 @@ pub const Linker = struct {
     /// recursing into nested subdirs (lib/pkgconfig, share/man, …).
     /// `bin`/`sbin` lead so the bin-isolated variant is a tail slice
     /// (`[2..]`). The install path also reads this to decide whether an
-    /// extracted archive produced anything linkable at all — keep that
-    /// check and `link` reading the same list so they cannot drift.
+    /// extracted archive produced anything linkable at all. `link` and
+    /// `checkConflicts` both slice this one list, so they cannot drift.
     pub const linkable_dirs = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc" };
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, prefix: []const u8) Linker {
@@ -34,9 +34,8 @@ pub const Linker = struct {
     /// policy — otherwise a dep installed under isolation would falsely
     /// trigger a conflict against a keg whose bins were never linked.
     pub fn checkConflicts(self: *Linker, keg_path: []const u8, bin_isolated: bool) ![]Conflict {
-        const dirs_full = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc" };
-        const dirs_isolated = [_][]const u8{ "lib", "include", "share", "etc" };
-        const dirs_to_check: []const []const u8 = if (bin_isolated) &dirs_isolated else &dirs_full;
+        // Same slice `link` uses: bin-isolated drops the leading bin/sbin.
+        const dirs_to_check: []const []const u8 = if (bin_isolated) linkable_dirs[2..] else &linkable_dirs;
         var conflicts: std.ArrayList(Conflict) = .empty;
 
         for (dirs_to_check) |subdir| {
@@ -386,4 +385,21 @@ test "isKegLinked reflects whether the keg has link rows" {
     try testing.expect(!isKegLinked(&db, 2));
     // A keg id that doesn't exist is simply "not linked".
     try testing.expect(!isKegLinked(&db, 999));
+}
+
+test "conflict-check dir set is derived from linkable_dirs for both isolation modes" {
+    // Locks checkConflicts and link onto the one canonical list: the
+    // non-isolated set is the whole list, the isolated set is the bin/sbin
+    // tail. A one-sided edit to linkable_dirs must break this, not drift.
+    const full: []const []const u8 = &Linker.linkable_dirs;
+    const isolated: []const []const u8 = Linker.linkable_dirs[2..];
+
+    const expected_full = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc" };
+    const expected_isolated = [_][]const u8{ "lib", "include", "share", "etc" };
+
+    try testing.expectEqual(expected_full.len, full.len);
+    for (full, expected_full) |got, want| try testing.expectEqualStrings(want, got);
+
+    try testing.expectEqual(expected_isolated.len, isolated.len);
+    for (isolated, expected_isolated) |got, want| try testing.expectEqualStrings(want, got);
 }
