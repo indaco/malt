@@ -43,6 +43,12 @@ regressions-static:
 test: regressions-static
     zig build test --summary all
 
+# Run the full regression pool (token + built binary + per-script timeout).
+# Pass script names to run a subset; MALT_REGRESSION_TIMEOUT overrides the cap.
+[group('test')]
+regressions *scripts:
+    @./scripts/run-regressions.sh {{ scripts }}
+
 # Run tests under kcov, print line-coverage percentage, and refresh
 # the README badge SVG at .github/badges/coverage.svg.
 # HTML report lands at coverage/merged/kcov-merged/index.html.
