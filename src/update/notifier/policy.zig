@@ -112,6 +112,17 @@ pub fn notifierDisabled(environ: std.process.Environ) bool {
     return notifierDisabledFromValue(std.process.Environ.getPosix(environ, "MALT_NO_VERSION_NOTIFIER"));
 }
 
+/// Automation seam: bypass the non-TTY suppression so a scripted run can
+/// assert the notice without allocating a pty. Same literal-`"1"` rule.
+pub fn assumeTtyFromValue(value: ?[]const u8) bool {
+    const v = value orelse return false;
+    return std.mem.eql(u8, v, "1");
+}
+
+pub fn assumeTty(environ: std.process.Environ) bool {
+    return assumeTtyFromValue(std.process.Environ.getPosix(environ, "MALT_VERSION_NOTIFIER_ASSUME_TTY"));
+}
+
 // --- inline tests --------------------------------------------------------
 
 test "shouldNotify: equal versions never notify (with or without leading v)" {
@@ -175,6 +186,14 @@ test "notifierDisabledFromValue: only literal \"1\" disables (matches MALT_ALLOW
     try std.testing.expect(!notifierDisabledFromValue("true"));
     try std.testing.expect(!notifierDisabledFromValue("yes"));
     try std.testing.expect(notifierDisabledFromValue("1"));
+}
+
+test "assumeTtyFromValue: only literal \"1\" bypasses the TTY gate" {
+    try std.testing.expect(!assumeTtyFromValue(null));
+    try std.testing.expect(!assumeTtyFromValue(""));
+    try std.testing.expect(!assumeTtyFromValue("0"));
+    try std.testing.expect(!assumeTtyFromValue("true"));
+    try std.testing.expect(assumeTtyFromValue("1"));
 }
 
 test "isCiFromValues: any non-empty wins" {
