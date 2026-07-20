@@ -63,114 +63,110 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     // can't resolve the other arch's self-consistent (checksum-passing) pair.
     var saw_arch_marker = false;
 
-    var line_start: usize = 0;
-    for (rb_content, 0..) |ch, idx| {
-        if (ch == '\n' or idx == rb_content.len - 1) {
-            const line_end = if (ch == '\n') idx else idx + 1;
-            const line = std.mem.trim(u8, rb_content[line_start..line_end], " \t\r");
-            line_start = idx + 1;
+    var it = std.mem.splitScalar(u8, rb_content, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        // Uniform skip; the sha256 kwarg continuation below thus tolerates a blank
+        // line between its arm:/intel: halves rather than treating it as a reset.
+        if (line.len == 0) continue;
 
-            // Extract version (global)
-            if (version == null) {
-                if (extractQuoted(line, "version \"")) |v| {
-                    version = v;
-                }
+        // Extract version (global)
+        if (version == null) {
+            if (extractQuoted(line, "version \"")) |v| {
+                version = v;
             }
-
-            // Extract `revision N` (global, unquoted integer). Ignored by the
-            // install path; the outdated audit uses it to spot revision bumps.
-            if (revision == 0 and std.mem.startsWith(u8, line, "revision ")) {
-                const rest = std.mem.trim(u8, line["revision ".len..], " \t");
-                revision = std.fmt.parseInt(i64, rest, 10) catch 0;
-            }
-
-            // Track on_macos block. The cask DSL uses this as the only
-            // platform gate, so being inside it is enough to consume
-            // url + arch + multi-arch sha256 directives.
-            if (std.mem.indexOf(u8, line, "on_macos") != null) {
-                in_macos = true;
-                in_correct_section = true;
-            }
-
-            // CPU section (Hardware::CPU / on_arm / on_intel). Not gated on
-            // `on_macos`: these markers also appear at top level, and missing
-            // them there is what let a wrong-arch pair reach the fallback.
-            // `on_*` is anchored to the line start (block opener) so the token
-            // in a `desc`/comment string never mis-flags a flat formula.
-            const has_arm = std.mem.startsWith(u8, line, "on_arm") or
-                std.mem.indexOf(u8, line, "Hardware::CPU.arm?") != null;
-            const has_intel = std.mem.startsWith(u8, line, "on_intel") or
-                std.mem.indexOf(u8, line, "Hardware::CPU.intel?") != null;
-            // Each arch marker re-scopes the section to whether the block is
-            // ours. Without `end` tracking the flag is otherwise sticky, so a
-            // non-matching block (or the first block under `on_macos` on the
-            // other arch) would leak its url/sha256 across the boundary.
-            if (has_arm or has_intel) {
-                saw_arch_marker = true;
-                in_correct_section = (is_arm and has_arm) or (!is_arm and has_intel);
-            }
-
-            // arch directive — only meaningful inside on_macos.
-            if (in_macos and arch_token.len == 0 and std.mem.startsWith(u8, line, "arch ")) {
-                arch_token = pickKwArg(line["arch ".len..], is_arm) orelse arch_token;
-            }
-
-            // Multi-arch sha256: the directive may span two lines
-            // (`sha256 arm: "...", \n  intel: "..."`). Track whether the
-            // previous trimmed line opened a `sha256` directive so the
-            // continuation line can still pick the platform value.
-            if (in_macos and sha256 == null) {
-                if (std.mem.startsWith(u8, line, "sha256 ")) {
-                    const body = line["sha256 ".len..];
-                    if (lineStartsWithKwArg(body)) {
-                        if (pickKwArg(body, is_arm)) |s| sha256 = s;
-                        prev_in_kwarg_sha256 = sha256 == null;
-                    }
-                } else if (prev_in_kwarg_sha256) {
-                    if (pickKwArg(line, is_arm)) |s| sha256 = s;
-                    // Continuation lines never re-open the directive — a
-                    // missed match means the second arg is the one we
-                    // didn't want, so stop hunting for more.
-                    prev_in_kwarg_sha256 = false;
-                } else prev_in_kwarg_sha256 = false;
-            } else prev_in_kwarg_sha256 = false;
-
-            // Extract URL and SHA256 within the correct section
-            if (in_correct_section) {
-                if (url == null) {
-                    if (extractQuoted(line, "url \"")) |u| {
-                        url = u;
-                    }
-                }
-                if (sha256 == null) {
-                    if (extractQuoted(line, "sha256 \"")) |s| {
-                        sha256 = s;
-                    }
-                }
-            }
-
-            // If we have both, stop
-            if (url != null and sha256 != null) break;
         }
+
+        // Extract `revision N` (global, unquoted integer). Ignored by the
+        // install path; the outdated audit uses it to spot revision bumps.
+        if (revision == 0 and std.mem.startsWith(u8, line, "revision ")) {
+            const rest = std.mem.trim(u8, line["revision ".len..], " \t");
+            revision = std.fmt.parseInt(i64, rest, 10) catch 0;
+        }
+
+        // Track on_macos block. The cask DSL uses this as the only
+        // platform gate, so being inside it is enough to consume
+        // url + arch + multi-arch sha256 directives.
+        if (std.mem.indexOf(u8, line, "on_macos") != null) {
+            in_macos = true;
+            in_correct_section = true;
+        }
+
+        // CPU section (Hardware::CPU / on_arm / on_intel). Not gated on
+        // `on_macos`: these markers also appear at top level, and missing
+        // them there is what let a wrong-arch pair reach the fallback.
+        // `on_*` is anchored to the line start (block opener) so the token
+        // in a `desc`/comment string never mis-flags a flat formula.
+        const has_arm = std.mem.startsWith(u8, line, "on_arm") or
+            std.mem.indexOf(u8, line, "Hardware::CPU.arm?") != null;
+        const has_intel = std.mem.startsWith(u8, line, "on_intel") or
+            std.mem.indexOf(u8, line, "Hardware::CPU.intel?") != null;
+        // Each arch marker re-scopes the section to whether the block is
+        // ours. Without `end` tracking the flag is otherwise sticky, so a
+        // non-matching block (or the first block under `on_macos` on the
+        // other arch) would leak its url/sha256 across the boundary.
+        if (has_arm or has_intel) {
+            saw_arch_marker = true;
+            in_correct_section = (is_arm and has_arm) or (!is_arm and has_intel);
+        }
+
+        // arch directive — only meaningful inside on_macos.
+        if (in_macos and arch_token.len == 0 and std.mem.startsWith(u8, line, "arch ")) {
+            arch_token = pickKwArg(line["arch ".len..], is_arm) orelse arch_token;
+        }
+
+        // Multi-arch sha256: the directive may span two lines
+        // (`sha256 arm: "...", \n  intel: "..."`). Track whether the
+        // previous trimmed line opened a `sha256` directive so the
+        // continuation line can still pick the platform value.
+        if (in_macos and sha256 == null) {
+            if (std.mem.startsWith(u8, line, "sha256 ")) {
+                const body = line["sha256 ".len..];
+                if (lineStartsWithKwArg(body)) {
+                    if (pickKwArg(body, is_arm)) |s| sha256 = s;
+                    prev_in_kwarg_sha256 = sha256 == null;
+                }
+            } else if (prev_in_kwarg_sha256) {
+                if (pickKwArg(line, is_arm)) |s| sha256 = s;
+                // Continuation lines never re-open the directive — a
+                // missed match means the second arg is the one we
+                // didn't want, so stop hunting for more.
+                prev_in_kwarg_sha256 = false;
+            } else prev_in_kwarg_sha256 = false;
+        } else prev_in_kwarg_sha256 = false;
+
+        // Extract URL and SHA256 within the correct section
+        if (in_correct_section) {
+            if (url == null) {
+                if (extractQuoted(line, "url \"")) |u| {
+                    url = u;
+                }
+            }
+            if (sha256 == null) {
+                if (extractQuoted(line, "sha256 \"")) |s| {
+                    sha256 = s;
+                }
+            }
+        }
+
+        // If we have both, stop
+        if (url != null and sha256 != null) break;
     }
 
     // Global url/sha256 fallback. Skip when an arch-segmented formula yielded
     // NEITHER field for our arch — else it grabs the whole other-arch pair.
     // A partial block (our url + a shared global sha256) still completes.
     if ((url == null or sha256 == null) and !(saw_arch_marker and url == null and sha256 == null)) {
-        var ls: usize = 0;
-        for (rb_content, 0..) |ch, idx| {
-            if (ch == '\n' or idx == rb_content.len - 1) {
-                const le = if (ch == '\n') idx else idx + 1;
-                const ln = std.mem.trim(u8, rb_content[ls..le], " \t\r");
-                ls = idx + 1;
+        var fallback_it = std.mem.splitScalar(u8, rb_content, '\n');
+        while (fallback_it.next()) |raw| {
+            const ln = std.mem.trim(u8, raw, " \t\r");
+            if (ln.len == 0) continue;
 
-                if (url == null) {
-                    if (extractQuoted(ln, "url \"")) |u| url = u;
-                }
-                if (sha256 == null) {
-                    if (extractQuoted(ln, "sha256 \"")) |s| sha256 = s;
-                }
+            if (url == null) {
+                if (extractQuoted(ln, "url \"")) |u| url = u;
+            }
+            if (sha256 == null) {
+                if (extractQuoted(ln, "sha256 \"")) |s| sha256 = s;
             }
         }
     }
@@ -370,12 +366,10 @@ pub fn extractQuoted(line: []const u8, prefix: []const u8) ?[]const u8 {
 /// casks that omit the directive. Anchored to the trimmed line start
 /// so a stray mention in a comment or `desc` string does not match.
 pub fn parseCaskBinary(rb_content: []const u8) ?[]const u8 {
-    var line_start: usize = 0;
-    for (rb_content, 0..) |ch, idx| {
-        if (ch != '\n' and idx != rb_content.len - 1) continue;
-        const line_end = if (ch == '\n') idx else idx + 1;
-        const line = std.mem.trim(u8, rb_content[line_start..line_end], " \t\r");
-        line_start = idx + 1;
+    var it = std.mem.splitScalar(u8, rb_content, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
         if (!std.mem.startsWith(u8, line, "binary \"")) continue;
         if (extractQuoted(line, "binary \"")) |b| return b;
     }
@@ -387,12 +381,10 @@ pub fn parseCaskBinary(rb_content: []const u8) ?[]const u8 {
 /// directory; absence flips a `.zip` URL away from the cask path so a
 /// formula bottle is still extracted into the Cellar.
 pub fn parseCaskApp(rb_content: []const u8) ?[]const u8 {
-    var line_start: usize = 0;
-    for (rb_content, 0..) |ch, idx| {
-        if (ch != '\n' and idx != rb_content.len - 1) continue;
-        const line_end = if (ch == '\n') idx else idx + 1;
-        const line = std.mem.trim(u8, rb_content[line_start..line_end], " \t\r");
-        line_start = idx + 1;
+    var it = std.mem.splitScalar(u8, rb_content, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
         if (!std.mem.startsWith(u8, line, "app \"")) continue;
         if (extractQuoted(line, "app \"")) |a| return a;
     }
@@ -776,4 +768,126 @@ test "parseRubyFormula: a formula carrying a def install block still parses" {
     const got = parseRubyFormula(rb) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("2.24.0", got.version);
     try std.testing.expectEqualStrings("deadbeef", got.sha256);
+}
+
+// Trailing-newline characterization. `splitScalar` (the upcoming line-iteration
+// idiom) yields one extra empty segment when a body ends in `\n`; these pin that
+// the empty segment stays inert across every split site so the refactor is a
+// diff a reviewer checks against "bodies untouched", not a re-derivation.
+
+test "parseRubyFormula: trailing newline parses identically to no trailing newline" {
+    const body =
+        \\class Foo < Formula
+        \\  url "https://example.com/foo-1.2.3.tar.gz"
+        \\  sha256 "deadbeef"
+        \\  version "1.2.3"
+        \\end
+    ;
+    const base = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("1.2.3", base.version);
+    try std.testing.expectEqualDeep(parseRubyFormula(body), parseRubyFormula(body ++ "\n"));
+}
+
+test "parseRubyFormula: url/sha256 fallback tolerates a trailing newline" {
+    // url resolves inside on_macos; the global sha256 is completed by the second
+    // (fallback) split site — the case the trailing-newline segment could perturb.
+    const body =
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  sha256 "deadbeef"
+        \\  on_macos do
+        \\    url "https://example.com/foo-1.2.3.tar.gz"
+        \\  end
+        \\end
+    ;
+    const base = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("https://example.com/foo-1.2.3.tar.gz", base.url);
+    try std.testing.expectEqualStrings("deadbeef", base.sha256);
+    try std.testing.expectEqualDeep(parseRubyFormula(body), parseRubyFormula(body ++ "\n"));
+}
+
+test "parseRubyFormula: arch-segmented body with a trailing newline resolves the arch" {
+    // The state machine (in_macos / in_correct_section) is the part most at risk
+    // if an empty segment were ever non-inert, so cover it explicitly.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const arm =
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_arm do
+        \\    url "https://example.com/foo-1.2.3-arm.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    ;
+    const intel =
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_intel do
+        \\    url "https://example.com/foo-1.2.3-intel.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  end
+        \\end
+    ;
+    const body = if (is_arm) arm else intel;
+    const body_nl = if (is_arm) arm ++ "\n" else intel ++ "\n";
+    const base = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings(if (is_arm) "aaaaaaaa" else "bbbbbbbb", base.sha256);
+    try std.testing.expectEqualDeep(parseRubyFormula(body), parseRubyFormula(body_nl));
+}
+
+test "parseCaskBinary: trailing newline parses the binary directive identically" {
+    const body =
+        \\cask "demo" do
+        \\  binary "longbridge"
+        \\end
+    ;
+    try std.testing.expectEqualStrings("longbridge", parseCaskBinary(body).?);
+    try std.testing.expectEqualDeep(parseCaskBinary(body), parseCaskBinary(body ++ "\n"));
+}
+
+test "parseCaskApp: trailing newline parses the .app bundle name identically" {
+    const body =
+        \\cask "deck" do
+        \\  url "https://example.com/deck.dmg"
+        \\  app "Deck.app"
+        \\end
+    ;
+    try std.testing.expectEqualStrings("Deck.app", parseCaskApp(body).?);
+    try std.testing.expectEqualDeep(parseCaskApp(body), parseCaskApp(body ++ "\n"));
+}
+
+test "parseRubyFormula: a blank line inside a split sha256 kwarg is skipped, not a terminator" {
+    // The uniform empty-line guard skips a blank line, so a `sha256 <arch>:` whose
+    // running-arch value sits on the line after a blank still resolves. Real casks
+    // never split a kwarg across a blank line; this pins the tolerant behaviour.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const body = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_macos do
+        \\    url "https://example.com/foo.tar.gz"
+        \\    sha256 intel: "iiiiiiii",
+        \\
+        \\           arm: "aaaaaaaa"
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_macos do
+        \\    url "https://example.com/foo.tar.gz"
+        \\    sha256 arm: "aaaaaaaa",
+        \\
+        \\           intel: "iiiiiiii"
+        \\  end
+        \\end
+    ;
+    const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings(if (is_arm) "aaaaaaaa" else "iiiiiiii", got.sha256);
+}
+
+test "rb_parse entry points return null on empty input" {
+    try std.testing.expect(parseRubyFormula("") == null);
+    try std.testing.expect(parseCaskBinary("") == null);
+    try std.testing.expect(parseCaskApp("") == null);
 }
