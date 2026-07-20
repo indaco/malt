@@ -24,6 +24,7 @@ pub const cli_link = @import("cli/link.zig");
 pub const cli_list = @import("cli/list.zig");
 pub const cli_migrate = @import("cli/migrate.zig");
 pub const cli_migrate_manifest = @import("cli/migrate/manifest.zig");
+pub const cli_migrate_outcomes = @import("cli/migrate/outcomes.zig");
 pub const cli_migrate_parallel = @import("cli/migrate/parallel.zig");
 pub const cli_outdated = @import("cli/outdated.zig");
 pub const cli_pin = @import("cli/pin.zig");
