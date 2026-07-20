@@ -18,7 +18,6 @@ const atomic = @import("../fs/atomic.zig");
 const codesign = @import("../macho/codesign.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
-const pool_mod = @import("../net/client_pool.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
 const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
@@ -313,119 +312,20 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     if (parallel_flag) {
         last_run_parallel = true;
-
-        const worker_count = parallel_mod.boundWorkerCount(
-            parallel_mod.workerCountFromLiveEnv(ctx),
-            keg_names.items.len,
-        );
-
-        // Enforce the SQLite-threadsafe contract the pool depends on
-        // (lock-free `isInstalled` reads vs `db_mu`-holding writers).
-        // Skip when only one worker will actually run — single-thread
-        // can't race.
-        if (worker_count >= 2) {
-            parallel_mod.ensureSerializedThreading() catch {
-                output.err("malt was built without SQLite serialized threading; parallel migrate disabled. Rebuild with -DSQLITE_THREADSAFE=1 or set MALT_MIGRATE_PARALLEL_WORKERS=1.", .{});
-                return error.Aborted;
-            };
-        }
-
-        // Borrowed clients keep TLS contexts warm across kegs without
-        // paying a fresh handshake per worker.
-        var http_pool = pool_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, @intCast(@max(worker_count, 1))) catch {
-            output.err("Failed to initialise HTTP client pool", .{});
-            return error.Aborted;
-        };
-        defer http_pool.deinit();
-        http_pool.setOfflineAll(ctx.offline);
-
-        var db_mu: std.Io.Mutex = .init;
-        var manifest_mu: std.Io.Mutex = .init;
-
-        const outcomes = try allocator.alloc(parallel_mod.KegOutcome, keg_names.items.len);
-        defer allocator.free(outcomes);
-        // Pre-populated so an interrupted/short-circuited slot still has a
-        // defined outcome — `.cancelled` so untouched kegs surface as
-        // "you cancelled before I touched it" rather than "I had it already".
-        for (outcomes, 0..) |*o, i| o.* = .{ .name = keg_names.items[i], .result = .cancelled };
-
-        // Pre-filter manifest+DB-confirmed skips so the multi-progress
-        // line count matches actual work — drawing a "✓" for kegs that
-        // never ran would be misleading. The serial path already does
-        // this inline; for parallel we hoist it ahead of bar allocation.
-        const bar_for_keg = try allocator.alloc(?*progress_mod.ProgressBar, keg_names.items.len);
-        defer allocator.free(bar_for_keg);
-        @memset(bar_for_keg, null);
-
-        var work_indices: std.ArrayList(usize) = .empty;
-        defer work_indices.deinit(allocator);
-        try work_indices.ensureTotalCapacity(allocator, keg_names.items.len);
-        var max_name_len: u8 = 0;
-        for (keg_names.items, 0..) |name, i| {
-            if (manifest.contains(name) and keg_mod.isInstalled(&db, name)) {
-                outcomes[i] = .{ .name = name, .result = .skipped_installed };
-                continue;
-            }
-            work_indices.appendAssumeCapacity(i);
-            const len: u8 = @intCast(@min(name.len, 255));
-            if (len > max_name_len) max_name_len = len;
-        }
-
-        // u16 cap: kegs past the first 65,535 still migrate but render no
-        // progress bar. Practically unreachable on a real Homebrew install.
-        const work_count: u16 = @intCast(@min(work_indices.items.len, std.math.maxInt(u16)));
-        var multi = progress_mod.MultiProgress.init(work_count);
-        defer multi.finish();
-
-        const bars = try allocator.alloc(progress_mod.ProgressBar, work_count);
-        defer allocator.free(bars);
-
-        for (work_indices.items[0..work_count], 0..) |keg_idx, slot| {
-            const slot_u16: u16 = @intCast(slot);
-            bars[slot] = progress_mod.ProgressBar.init(keg_names.items[keg_idx], 0);
-            bars[slot].label_width = max_name_len;
-            bars[slot].line_index = slot_u16;
-            bars[slot].multi = &multi;
-            // Initial frame so each reserved row has visible content
-            // before its worker is scheduled.
-            bars[slot].update(0);
-            bar_for_keg[keg_idx] = &bars[slot];
-        }
-        // Hand the group its bars so the first worker to see a resize can
-        // repaint every row at the new width. Set after the loop — the alloc
-        // is uninitialised until each slot is written.
-        multi.bars = bars;
-
-        var pool: parallel_mod.Pool = .{
+        try parallel_mod.runMigration(allocator, .{
             .app_ctx = ctx,
-            .next_idx = std.atomic.Value(usize).init(0),
             .keg_names = keg_names.items,
-            .outcomes = outcomes,
             .cache_dir = cache_dir,
             .prefix = prefix,
             .homebrew_prefix = brew_prefix,
             .use_system_ruby_scope = use_system_ruby_scope.items,
-            .http_pool = &http_pool,
             .store = &store,
             .linker = &linker,
             .db = &db,
-            .db_mu = &db_mu,
             .manifest = &manifest,
-            .manifest_mu = &manifest_mu,
             .manifest_path = manifest_path,
-            .manifest_allocator = allocator,
             .post_install_queue = &post_install_queue,
-            .worker_backing = std.heap.smp_allocator,
-            .bar_for_keg = bar_for_keg,
-        };
-        try parallel_mod.run(allocator, &pool, worker_count);
-        // Mirror the serial loop's interrupt UX so users running with
-        // --parallel still see "Interrupted" instead of silent skips.
-        if (signals.isInterrupted()) {
-            output.warn("Interrupted — skipping remaining kegs.", .{});
-        }
-
-        for (outcomes) |o| try buckets.record(allocator, o.name, o.result);
+        }, buckets);
     } else {
         // Width of the widest keg name so per-keg bars line up vertically
         // with each other (and with `install`'s download phase).

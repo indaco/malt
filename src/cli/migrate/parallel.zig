@@ -16,6 +16,7 @@ const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
 const keg_mod = @import("keg.zig");
 const manifest_mod = @import("manifest.zig");
+const outcomes_mod = @import("outcomes.zig");
 const post_install_queue_mod = @import("post_install_queue.zig");
 
 /// Surfaced when the linked SQLite isn't in serialized threading mode.
@@ -62,6 +63,13 @@ pub fn boundWorkerCount(requested: u32, jobs: usize) u32 {
     if (jobs == 0) return 0;
     const j: u32 = if (jobs > max_workers) max_workers else @intCast(jobs);
     return @min(requested, j);
+}
+
+/// Multi-progress reserves one line per work item (already-migrated kegs
+/// are pre-filtered out and get none), capped at u16 — kegs past 65,535
+/// still migrate but render no bar. The bar slice length must equal this.
+pub fn barCount(work_items: usize) u16 {
+    return @intCast(@min(work_items, std.math.maxInt(u16)));
 }
 
 /// Outcome plus name so the orchestrator can drain into the same
@@ -215,6 +223,139 @@ pub fn run(allocator: std.mem.Allocator, pool: *Pool, worker_count: u32) !void {
     for (threads[0..spawned]) |t| t.join();
 }
 
+/// Irreducible shared state the orchestrator hands the parallel runner —
+/// mirrors the caller-supplied `Pool` fields. The runner builds the `Pool`
+/// (and its internal mutexes, client pool, and bars) from this itself.
+pub const Inputs = struct {
+    app_ctx: *const AppCtx,
+    keg_names: []const []const u8,
+    cache_dir: []const u8,
+    prefix: []const u8,
+    homebrew_prefix: []const u8,
+    use_system_ruby_scope: []const []const u8,
+    store: *store_mod.Store,
+    linker: *linker_mod.Linker,
+    db: *sqlite.Database,
+    manifest: *manifest_mod.Manifest,
+    manifest_path: []const u8,
+    post_install_queue: *post_install_queue_mod.Queue,
+};
+
+/// Runs the whole `--parallel` migrate: bounds workers, enforces the
+/// SQLite-serialized contract, warms the client pool, wires the
+/// multi-progress bars, drives the pool, then drains outcomes into
+/// `buckets`. Hard-fails (non-serialized SQLite, pool init) return
+/// `error.Aborted` with the message already emitted.
+pub fn runMigration(allocator: std.mem.Allocator, in: Inputs, buckets: outcomes_mod.Buckets) !void {
+    const ctx = in.app_ctx;
+
+    const worker_count = boundWorkerCount(workerCountFromLiveEnv(ctx), in.keg_names.len);
+
+    // Enforce the SQLite-threadsafe contract the pool depends on (lock-free
+    // `isInstalled` reads vs `db_mu`-holding writers). Skip when only one
+    // worker will actually run — single-thread can't race.
+    if (worker_count >= 2) {
+        ensureSerializedThreading() catch {
+            output.err("malt was built without SQLite serialized threading; parallel migrate disabled. Rebuild with -DSQLITE_THREADSAFE=1 or set MALT_MIGRATE_PARALLEL_WORKERS=1.", .{});
+            return error.Aborted;
+        };
+    }
+
+    // Borrowed clients keep TLS contexts warm across kegs without paying a
+    // fresh handshake per worker.
+    var http_pool = pool_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, @intCast(@max(worker_count, 1))) catch {
+        output.err("Failed to initialise HTTP client pool", .{});
+        return error.Aborted;
+    };
+    defer http_pool.deinit();
+    http_pool.setOfflineAll(ctx.offline);
+
+    var db_mu: std.Io.Mutex = .init;
+    var manifest_mu: std.Io.Mutex = .init;
+
+    const outcomes = try allocator.alloc(KegOutcome, in.keg_names.len);
+    defer allocator.free(outcomes);
+    // Pre-populated so an interrupted/short-circuited slot still has a
+    // defined outcome — `.cancelled` so untouched kegs surface as "you
+    // cancelled before I touched it" rather than "I had it already".
+    for (outcomes, 0..) |*o, i| o.* = .{ .name = in.keg_names[i], .result = .cancelled };
+
+    // Pre-filter manifest+DB-confirmed skips so the multi-progress line
+    // count matches actual work — drawing a "✓" for kegs that never ran
+    // would be misleading. The serial path already does this inline.
+    const bar_for_keg = try allocator.alloc(?*progress_mod.ProgressBar, in.keg_names.len);
+    defer allocator.free(bar_for_keg);
+    @memset(bar_for_keg, null);
+
+    var work_indices: std.ArrayList(usize) = .empty;
+    defer work_indices.deinit(allocator);
+    try work_indices.ensureTotalCapacity(allocator, in.keg_names.len);
+    var max_name_len: u8 = 0;
+    for (in.keg_names, 0..) |name, i| {
+        if (in.manifest.contains(name) and keg_mod.isInstalled(in.db, name)) {
+            outcomes[i] = .{ .name = name, .result = .skipped_installed };
+            continue;
+        }
+        work_indices.appendAssumeCapacity(i);
+        const len: u8 = @intCast(@min(name.len, 255));
+        if (len > max_name_len) max_name_len = len;
+    }
+
+    const work_count = barCount(work_indices.items.len);
+    var multi = progress_mod.MultiProgress.init(work_count);
+    defer multi.finish();
+
+    const bars = try allocator.alloc(progress_mod.ProgressBar, work_count);
+    defer allocator.free(bars);
+
+    for (work_indices.items[0..work_count], 0..) |keg_idx, slot| {
+        const slot_u16: u16 = @intCast(slot);
+        bars[slot] = progress_mod.ProgressBar.init(in.keg_names[keg_idx], 0);
+        bars[slot].label_width = max_name_len;
+        bars[slot].line_index = slot_u16;
+        bars[slot].multi = &multi;
+        // Initial frame so each reserved row has visible content before its
+        // worker is scheduled.
+        bars[slot].update(0);
+        bar_for_keg[keg_idx] = &bars[slot];
+    }
+    // Hand the group its bars so the first worker to see a resize can
+    // repaint every row at the new width. Set after the loop — the alloc
+    // is uninitialised until each slot is written.
+    multi.bars = bars;
+
+    var pool: Pool = .{
+        .app_ctx = ctx,
+        .next_idx = std.atomic.Value(usize).init(0),
+        .keg_names = in.keg_names,
+        .outcomes = outcomes,
+        .cache_dir = in.cache_dir,
+        .prefix = in.prefix,
+        .homebrew_prefix = in.homebrew_prefix,
+        .use_system_ruby_scope = in.use_system_ruby_scope,
+        .http_pool = &http_pool,
+        .store = in.store,
+        .linker = in.linker,
+        .db = in.db,
+        .db_mu = &db_mu,
+        .manifest = in.manifest,
+        .manifest_mu = &manifest_mu,
+        .manifest_path = in.manifest_path,
+        .manifest_allocator = allocator,
+        .post_install_queue = in.post_install_queue,
+        .worker_backing = std.heap.smp_allocator,
+        .bar_for_keg = bar_for_keg,
+    };
+    try run(allocator, &pool, worker_count);
+    // Mirror the serial loop's interrupt UX so users running with
+    // --parallel still see "Interrupted" instead of silent skips.
+    if (signals.isInterrupted()) {
+        output.warn("Interrupted — skipping remaining kegs.", .{});
+    }
+
+    for (outcomes) |o| try buckets.record(allocator, o.name, o.result);
+}
+
 // ── Inline unit tests ──────────────────────────────────────────────
 
 test "ensureSerializedThreadingMode passes on mode 1 (serialized)" {
@@ -261,6 +402,13 @@ test "boundWorkerCount caps by job count" {
     try std.testing.expectEqual(@as(u32, 2), boundWorkerCount(4, 2));
     try std.testing.expectEqual(@as(u32, 4), boundWorkerCount(4, 10));
     try std.testing.expectEqual(@as(u32, 0), boundWorkerCount(4, 0));
+}
+
+test "barCount reserves one line per work item, capped at u16" {
+    try std.testing.expectEqual(@as(u16, 0), barCount(0));
+    try std.testing.expectEqual(@as(u16, 3), barCount(3));
+    // Kegs past the u16 line count still migrate but render no bar.
+    try std.testing.expectEqual(std.math.maxInt(u16), barCount(@as(usize, std.math.maxInt(u16)) + 5));
 }
 
 // Pre-set SIGINT with an empty manifest: every slot falls through the
