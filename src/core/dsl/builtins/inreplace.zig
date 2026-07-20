@@ -5,6 +5,7 @@
 const std = @import("std");
 const values = @import("../values.zig");
 const sandbox = @import("../sandbox.zig");
+const read = @import("../../../fs/read.zig");
 const pathname = @import("pathname.zig");
 const text_replace = @import("../../../text_replace.zig");
 
@@ -38,7 +39,7 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
         return BuiltinError.PathSandboxViolation;
 
     // Read file contents
-    const content = readFileAllAbsolute(ctx.io, ctx.allocator, path, 4 * 1024 * 1024) catch {
+    const content = read.readFileAllAbsolute(ctx.io, ctx.allocator, path, 4 * 1024 * 1024) catch {
         return Value{ .nil = {} };
     };
 
@@ -125,23 +126,6 @@ fn writeDirectly(ctx: ExecCtx, path: []const u8, content: []const u8) void {
     defer out.close(ctx.io);
     // Fallback path already logged a warning; no error channel left to surface.
     out.writeStreamingAll(ctx.io, content) catch {};
-}
-
-/// Read the entire contents of an absolute file path into a caller-owned slice.
-fn readFileAllAbsolute(io: std.Io, allocator: std.mem.Allocator, abs_path: []const u8, max_bytes: usize) ![]u8 {
-    const f = try std.Io.Dir.openFileAbsolute(io, abs_path, .{});
-    defer f.close(io);
-    const st = try f.stat(io);
-    const size = @min(@as(u64, max_bytes), st.size);
-    const buf = try allocator.alloc(u8, @intCast(size));
-    errdefer allocator.free(buf);
-    const n = try f.readPositionalAll(io, buf, 0);
-    if (n == buf.len) return buf;
-    if (allocator.resize(buf, n)) return buf[0..n];
-    const shrunk = try allocator.alloc(u8, n);
-    @memcpy(shrunk, buf[0..n]);
-    allocator.free(buf);
-    return shrunk;
 }
 
 test "atomic-write failure message preserves the underlying error name" {
