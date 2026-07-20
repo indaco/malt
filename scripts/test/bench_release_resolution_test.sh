@@ -85,6 +85,36 @@ check_pred "FAIL never trips" 1 over_threshold "FAIL" "30"
 check_pred "empty median never trips" 1 over_threshold "" "30"
 check_pred "disabled ceiling (0) off" 1 over_threshold "999" "0"
 
+echo "emit_skipped_peers:"
+# A peer whose binary never built is dropped from the active tool list, so its
+# README cell would render blank - silently hiding that the comparison lost a
+# column. emit_skipped_peers must stamp a loud marker instead. We capture the
+# emitted key=value lines by pointing GITHUB_OUTPUT at a temp file.
+GITHUB_OUTPUT=$(mktemp)
+emitted() { grep "^$1=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-; }
+
+# Missing binary + recorded reason -> loud marker in both cold and warm cells.
+# NB_BIN/ZB_BIN are read by emit_skipped_peers (sourced globals), not locally.
+: >"$GITHUB_OUTPUT"
+# shellcheck disable=SC2034
+NB_BIN="/nonexistent/nb"
+# shellcheck disable=SC2034
+ZB_BIN=$(command -v sh) # an existing executable: an *active* peer, not skipped
+set_result skip_nb "build failed"
+emit_skipped_peers tree
+check "skipped peer cold cell is a marker" "⚠️ build failed" "$(emitted nb_cold_disp)"
+check "skipped peer warm cell is a marker" "⚠️ build failed" "$(emitted nb_warm)"
+check "active peer cold cell not clobbered" "" "$(emitted zb_cold_disp)"
+check "active peer warm cell not clobbered" "" "$(emitted zb_warm)"
+
+# Missing binary + no recorded reason -> generic n/a marker (never blank).
+: >"$GITHUB_OUTPUT"
+set_result skip_nb ""
+emit_skipped_peers tree
+check "no-reason skip falls back to n/a" "⚠️ n/a" "$(emitted nb_cold_disp)"
+
+rm -f "$GITHUB_OUTPUT"
+
 if [ "$fail" -ne 0 ]; then
   echo "bench release-resolution tests FAILED" >&2
   exit 1
