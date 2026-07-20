@@ -777,3 +777,89 @@ test "parseRubyFormula: a formula carrying a def install block still parses" {
     try std.testing.expectEqualStrings("2.24.0", got.version);
     try std.testing.expectEqualStrings("deadbeef", got.sha256);
 }
+
+// Trailing-newline characterization. `splitScalar` (the upcoming line-iteration
+// idiom) yields one extra empty segment when a body ends in `\n`; these pin that
+// the empty segment stays inert across every split site so the refactor is a
+// diff a reviewer checks against "bodies untouched", not a re-derivation.
+
+test "parseRubyFormula: trailing newline parses identically to no trailing newline" {
+    const body =
+        \\class Foo < Formula
+        \\  url "https://example.com/foo-1.2.3.tar.gz"
+        \\  sha256 "deadbeef"
+        \\  version "1.2.3"
+        \\end
+    ;
+    const base = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("1.2.3", base.version);
+    try std.testing.expectEqualDeep(parseRubyFormula(body), parseRubyFormula(body ++ "\n"));
+}
+
+test "parseRubyFormula: url/sha256 fallback tolerates a trailing newline" {
+    // url resolves inside on_macos; the global sha256 is completed by the second
+    // (fallback) split site — the case the trailing-newline segment could perturb.
+    const body =
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  sha256 "deadbeef"
+        \\  on_macos do
+        \\    url "https://example.com/foo-1.2.3.tar.gz"
+        \\  end
+        \\end
+    ;
+    const base = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("https://example.com/foo-1.2.3.tar.gz", base.url);
+    try std.testing.expectEqualStrings("deadbeef", base.sha256);
+    try std.testing.expectEqualDeep(parseRubyFormula(body), parseRubyFormula(body ++ "\n"));
+}
+
+test "parseRubyFormula: arch-segmented body with a trailing newline resolves the arch" {
+    // The state machine (in_macos / in_correct_section) is the part most at risk
+    // if an empty segment were ever non-inert, so cover it explicitly.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const arm =
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_arm do
+        \\    url "https://example.com/foo-1.2.3-arm.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    ;
+    const intel =
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_intel do
+        \\    url "https://example.com/foo-1.2.3-intel.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  end
+        \\end
+    ;
+    const body = if (is_arm) arm else intel;
+    const body_nl = if (is_arm) arm ++ "\n" else intel ++ "\n";
+    const base = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings(if (is_arm) "aaaaaaaa" else "bbbbbbbb", base.sha256);
+    try std.testing.expectEqualDeep(parseRubyFormula(body), parseRubyFormula(body_nl));
+}
+
+test "parseCaskBinary: trailing newline parses the binary directive identically" {
+    const body =
+        \\cask "demo" do
+        \\  binary "longbridge"
+        \\end
+    ;
+    try std.testing.expectEqualStrings("longbridge", parseCaskBinary(body).?);
+    try std.testing.expectEqualDeep(parseCaskBinary(body), parseCaskBinary(body ++ "\n"));
+}
+
+test "parseCaskApp: trailing newline parses the .app bundle name identically" {
+    const body =
+        \\cask "deck" do
+        \\  url "https://example.com/deck.dmg"
+        \\  app "Deck.app"
+        \\end
+    ;
+    try std.testing.expectEqualStrings("Deck.app", parseCaskApp(body).?);
+    try std.testing.expectEqualDeep(parseCaskApp(body), parseCaskApp(body ++ "\n"));
+}
