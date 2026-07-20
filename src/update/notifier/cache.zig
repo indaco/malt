@@ -6,6 +6,7 @@
 const std = @import("std");
 
 const atomic = @import("../../fs/atomic.zig");
+const read = @import("../../fs/read.zig");
 const output = @import("../../ui/output.zig");
 
 const cache_filename = "version-notify.json";
@@ -140,7 +141,7 @@ pub fn replaceState(state: *?State, allocator: std.mem.Allocator, new_value: Sta
 
 /// Returns null when the file is absent (a torn or first run).
 pub fn readCache(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !?State {
-    const bytes = readFileAllAbsolute(io, allocator, path, 64 * 1024) catch |e| switch (e) {
+    const bytes = read.readFileAllAbsolute(io, allocator, path, 64 * 1024) catch |e| switch (e) {
         error.FileNotFound => return null,
         else => return e,
     };
@@ -158,23 +159,6 @@ pub fn writeCache(io: std.Io, path: []const u8, state: State) !void {
     var buf: [1024]u8 = undefined;
     const encoded = try encodeState(&buf, state);
     try atomic.atomicWriteFile(io, path, encoded);
-}
-
-/// Read the entire contents of an absolute file path into a caller-owned slice.
-fn readFileAllAbsolute(io: std.Io, allocator: std.mem.Allocator, abs_path: []const u8, max_bytes: usize) ![]u8 {
-    const f = try std.Io.Dir.openFileAbsolute(io, abs_path, .{});
-    defer f.close(io);
-    const st = try f.stat(io);
-    const size = @min(@as(u64, max_bytes), st.size);
-    const buf = try allocator.alloc(u8, @intCast(size));
-    errdefer allocator.free(buf);
-    const n = try f.readPositionalAll(io, buf, 0);
-    if (n == buf.len) return buf;
-    if (allocator.resize(buf, n)) return buf[0..n];
-    const shrunk = try allocator.alloc(u8, n);
-    @memcpy(shrunk, buf[0..n]);
-    allocator.free(buf);
-    return shrunk;
 }
 
 // --- inline tests --------------------------------------------------------
