@@ -1813,6 +1813,69 @@ test "manifest preserves pre-existing entries across a run with new failures" {
     try testing.expect(!loaded.contains("newfail"));
 }
 
+// Serial per-keg persistence timing: a keg that migrates must be recorded
+// in the resume manifest even when a later keg in the same run fails. Pins
+// the "persist after each success, before the next keg" contract — a fresh
+// success survives on disk regardless of a subsequent failure.
+test "serial: a migrated keg is persisted even when a later keg fails" {
+    resetOutput();
+
+    const brew = try scratchDir("brew_persist_timing");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt_z: [:0]const u8 = "/tmp/mt_persist_timing";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // "widget": core keg with a receipt → migrates via the local-Cellar
+    // fallback once its API lookup 404s. "ghostfail": no receipt, so the
+    // same 404 leaves nothing to fall back to → `.failed_api`.
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/widget/2.0", .{brew});
+    defer testing.allocator.free(keg_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
+    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    defer testing.allocator.free(receipt_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\{"source":{"tap":"homebrew/core","versions":{"stable":"2.0"}}}
+        );
+    }
+    try seedFakeBrew(brew, &.{"ghostfail"});
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    for ([_][]const u8{ "widget", "ghostfail" }) |name| {
+        const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.404", .{ cache_api, name });
+        defer testing.allocator.free(marker);
+        (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"--quiet"});
+
+    const manifest_path = try std.fmt.allocPrint(testing.allocator, "{s}/cache/migrate.progress.json", .{mt_z});
+    defer testing.allocator.free(manifest_path);
+    var loaded = try malt.cli_migrate_manifest.loadFromPath(&malt.app_ctx.debug_ctx, testing.allocator, manifest_path);
+    defer loaded.deinit();
+    try testing.expect(loaded.contains("widget"));
+    try testing.expect(!loaded.contains("ghostfail"));
+}
+
 // `MALT_MIGRATE_PARALLEL_WORKERS` parses correctly in unit tests, but
 // the live-env path goes through `workerCountFromLiveEnv` — wire it
 // up here so a future refactor that broke the env name would fail.

@@ -29,6 +29,7 @@ const KegResult = keg_mod.KegResult;
 const MigrateDeps = keg_mod.MigrateDeps;
 const migrateKeg = keg_mod.migrateKeg;
 const manifest_mod = @import("migrate/manifest.zig");
+const outcomes_mod = @import("migrate/outcomes.zig");
 const parallel_mod = @import("migrate/parallel.zig");
 const post_install_queue_mod = @import("migrate/post_install_queue.zig");
 
@@ -286,6 +287,17 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var cancelled_names: std.ArrayList([]const u8) = .empty;
     defer cancelled_names.deinit(allocator);
 
+    // One drain target both arms share so the six-way KegResult
+    // categorization lives at a single site.
+    const buckets: outcomes_mod.Buckets = .{
+        .migrated = &migrated_names,
+        .skipped_installed = &skipped_installed_names,
+        .skipped_post_install = &skipped_post_install_names,
+        .skipped_no_bottle = &skipped_no_bottle_names,
+        .failed = &failed_names,
+        .cancelled = &cancelled_names,
+    };
+
     // Honour Ctrl-C raised during setup, before any network work starts.
     if (signals.isInterrupted()) {
         output.warn("Interrupted before migration.", .{});
@@ -413,24 +425,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.warn("Interrupted — skipping remaining kegs.", .{});
         }
 
-        for (outcomes) |o| {
-            switch (o.result) {
-                .migrated => try migrated_names.append(allocator, o.name),
-                .skipped_installed => try skipped_installed_names.append(allocator, o.name),
-                .skipped_post_install => try skipped_post_install_names.append(allocator, o.name),
-                .skipped_no_bottle => try skipped_no_bottle_names.append(allocator, o.name),
-                .failed_api, .failed_download, .failed_install => try failed_names.append(allocator, o.name),
-                .cancelled => try cancelled_names.append(allocator, o.name),
-            }
-        }
+        for (outcomes) |o| try buckets.record(allocator, o.name, o.result);
     } else {
         // Width of the widest keg name so per-keg bars line up vertically
         // with each other (and with `install`'s download phase).
-        var max_name_len: u8 = 0;
-        for (keg_names.items) |n| {
-            const len: u8 = @intCast(@min(n.len, 255));
-            if (len > max_name_len) max_name_len = len;
-        }
+        const max_name_len = outcomes_mod.maxNameLen(keg_names.items);
 
         for (keg_names.items) |keg_name| {
             // Stop at the next keg boundary when the user hits Ctrl-C.
@@ -472,29 +471,21 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             });
             bar.finish();
 
+            // Persist after each success so a crash leaves the next run with
+            // the smallest possible to-do list. Hoisted out of the drain so
+            // categorization stays pure; the parallel path persists in-worker.
+            if (result == .migrated) {
+                manifest.add(keg_name) catch |e| {
+                    output.warn("Resume manifest update failed for {s}: {s}", .{ keg_name, @errorName(e) });
+                };
+                manifest.writeAtomic(ctx.io, allocator, manifest_path) catch |e| {
+                    output.warn("Resume manifest write failed: {s}", .{@errorName(e)});
+                };
+            }
             // OOM on per-category bookkeeping must not be swallowed: the summary
             // counts and JSON arrays come from these lists, and a silent drop
             // reports fewer failures than actually occurred.
-            switch (result) {
-                .migrated => {
-                    try migrated_names.append(allocator, keg_name);
-                    // Persist after each success so a crash leaves the next
-                    // run with the smallest possible to-do list.
-                    manifest.add(keg_name) catch |e| {
-                        output.warn("Resume manifest update failed for {s}: {s}", .{ keg_name, @errorName(e) });
-                    };
-                    manifest.writeAtomic(ctx.io, allocator, manifest_path) catch |e| {
-                        output.warn("Resume manifest write failed: {s}", .{@errorName(e)});
-                    };
-                },
-                .skipped_installed => try skipped_installed_names.append(allocator, keg_name),
-                .skipped_post_install => try skipped_post_install_names.append(allocator, keg_name),
-                .skipped_no_bottle => try skipped_no_bottle_names.append(allocator, keg_name),
-                .failed_api, .failed_download, .failed_install => try failed_names.append(allocator, keg_name),
-                // The serial loop exits on Ctrl-C before migrateKeg ever
-                // returns; this arm exists only so the switch stays exhaustive.
-                .cancelled => try cancelled_names.append(allocator, keg_name),
-            }
+            try buckets.record(allocator, keg_name, result);
         }
     }
 
