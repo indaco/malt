@@ -852,6 +852,29 @@ finalize_results() {
   done
 }
 
+# emit_skipped_peers <pkg>
+#
+# nanobrew/zerobrew always have a README column. When a peer fails to build (a
+# broken upstream release tag, a missing toolchain) it is dropped from the
+# active tool list, so finalize_results never emits its cell and the workflow
+# renders a *blank* - silently passing off a missing comparison as if it were
+# data. Stamp a loud marker for any declared peer whose binary is absent so the
+# published table never lies. Active peers (binary present) are left to
+# finalize_results; this only fills the holes it leaves behind.
+emit_skipped_peers() {
+  local pkg="$1" tool bin reason
+  for tool in nb zb; do
+    case "$tool" in
+    nb) bin="$NB_BIN" ;;
+    zb) bin="$ZB_BIN" ;;
+    esac
+    [ -x "$bin" ] && continue
+    reason=$(get_result "skip_$tool")
+    emit_output "${tool}_cold_disp=⚠️ ${reason:-n/a}"
+    emit_output "${tool}_warm=⚠️ ${reason:-n/a}"
+  done
+}
+
 # --- orchestration -----------------------------------------------------------
 
 run_bench_for() {
@@ -878,6 +901,7 @@ run_bench_for() {
   done
 
   finalize_results "$pkg" "${tools[@]}"
+  [ "$SKIP_OTHERS" = "1" ] || emit_skipped_peers "$pkg"
 }
 
 # --- run ---------------------------------------------------------------------
@@ -900,11 +924,18 @@ if [ "$BENCH_STRESS" -gt 0 ]; then
 fi
 
 if [ "$SKIP_OTHERS" != "1" ]; then
-  build_nanobrew || warn "nanobrew build failed — skipping"
+  build_nanobrew || {
+    warn "nanobrew build failed — skipping"
+    set_result skip_nb "build failed"
+  }
   if command -v cargo >/dev/null 2>&1; then
-    build_zerobrew || warn "zerobrew build failed — skipping"
+    build_zerobrew || {
+      warn "zerobrew build failed — skipping"
+      set_result skip_zb "build failed"
+    }
   else
     warn "cargo missing — skipping zerobrew"
+    set_result skip_zb "n/a"
   fi
 fi
 
