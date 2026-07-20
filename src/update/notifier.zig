@@ -83,6 +83,9 @@ fn suppressed(io: std.Io, environ: std.process.Environ, cmd_str: []const u8) boo
     if (output.isQuiet() or output.isJson() or output.isNdjson() or output.isDryRun()) return true;
     if (policy.notifierDisabled(environ)) return true;
     if (policy.isCi(environ)) return true;
+    // The assume-TTY seam lets scripted runs exercise the notice without a
+    // pty; it bypasses only this gate, not the CI/quiet/json suppressors.
+    if (policy.assumeTty(environ)) return false;
     const stderr_file: std.Io.File = .{ .handle = std.posix.STDERR_FILENO, .flags = .{ .nonblocking = false } };
     if (!(stderr_file.isTty(io) catch false)) return true;
     return false;

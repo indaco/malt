@@ -5,10 +5,10 @@
 # still told "A newer malt is available", i.e. nagged to downgrade.
 #
 # Pre-seed a fresh cache (far-future checked_at => never stale, so no
-# network is needed) naming a LOWER latest than the running version, force
-# a TTY (the notifier suppresses on non-TTY stderr), and assert it stays
+# network is needed) naming a LOWER latest than the running version, bypass
+# the non-TTY suppression via the assume-TTY seam, and assert it stays
 # silent. Exits non-zero when the downgrade nag is present, 0 once the
-# semver guard lands. No network; finishes well under 30s.
+# semver guard lands. No network, no pty; finishes well under 30s.
 
 set -euo pipefail
 
@@ -29,10 +29,10 @@ future=$(($(date +%s) + 86400))
 printf '{"checked_at":%d,"latest_tag":"v0.0.1","current_seen":"%s","last_attempt":%d}\n' \
   "$future" "$cur" "$future" >"$tmp/version-notify.json"
 
-# Force a TTY (notifier is suppressed on non-TTY stderr); clear CI/json/quiet
-# suppressors. `script -q /dev/null` allocates a pty on macOS.
+# Bypass the non-TTY suppression via the assume-TTY seam; clear CI/json/quiet
+# suppressors. Deterministic in any runner (CI, background); no pty needed.
 out="$(env -u CI -u GITHUB_ACTIONS MALT_CACHE="$tmp" \
-  script -q /dev/null "$BIN" list 2>&1 || true)"
+  MALT_VERSION_NOTIFIER_ASSUME_TTY=1 "$BIN" list 2>&1 || true)"
 
 if grep -q "A newer malt is available" <<<"$out"; then
   echo "FAIL: notifier nagged about v0.0.1 while on $cur (latest < current must be silent)" >&2
@@ -44,7 +44,7 @@ fi
 printf '{"checked_at":%d,"latest_tag":"v999.0.0","current_seen":"%s","last_attempt":%d}\n' \
   "$future" "$cur" "$future" >"$tmp/version-notify.json"
 out_hi="$(env -u CI -u GITHUB_ACTIONS MALT_CACHE="$tmp" \
-  script -q /dev/null "$BIN" list 2>&1 || true)"
+  MALT_VERSION_NOTIFIER_ASSUME_TTY=1 "$BIN" list 2>&1 || true)"
 if ! grep -q "A newer malt is available" <<<"$out_hi"; then
   echo "FAIL: notifier stayed silent about v999.0.0 while on $cur (real update suppressed)" >&2
   exit 1
