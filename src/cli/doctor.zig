@@ -921,19 +921,19 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
     };
     defer store_dir.close(ctx.io);
 
+    // Prepare the orphan-classification statement once, drive it per entry.
+    // A prepare failure means we cannot classify — report clean, same as the
+    // old per-entry `catch continue` draining the loop to zero.
+    var probe = fix_mod.OrphanProbe.init(&db) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer probe.deinit();
+
     var orphan_count: u32 = 0;
     var iter = store_dir.iterate();
     while (iter.next(ctx.io) catch null) |entry| {
-        // Each entry is a sha256 dir; classify via store_refs.
-        var stmt = db.prepare(
-            "SELECT refcount FROM store_refs WHERE store_sha256 = ?1;",
-        ) catch continue;
-        defer stmt.finalize();
-        stmt.bindText(1, entry.name) catch continue;
-        const has_row = stmt.step() catch false;
-        const refcount: i64 = if (has_row) stmt.columnInt(0) else 0;
-        // No ref row ⇒ warm / in-flight commit purge cannot clear; not an orphan.
-        if (fix_mod.isPurgeableOrphan(has_row, refcount)) orphan_count += 1;
+        if (probe.isOrphan(entry.name)) orphan_count += 1;
     }
 
     if (orphan_count == 0) {
@@ -1604,6 +1604,83 @@ test "checkBrokenSymlinks: an intact link with an inaccessible target is not rep
 
     const ctx: CheckCtx = .{ .allocator = allocator, .prefix = prefix, .io = io, .environ = .empty };
     try testing.expectEqual(CheckResult.ok, checkBrokenSymlinks(ctx, "Broken symlinks"));
+}
+
+test "checkOrphanedStore: counts only refcount<=0 rows across store entries" {
+    // Parity guard for the shared-probe swap: one orphan, one live ref, one
+    // no-row entry must warn with exactly one orphan — a miscount (probe reuse
+    // or the count-vs-remove policy leaking) flips the outcome or the number.
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [std.fs.max_path_bytes]u8 = undefined;
+    const prefix = pb[0..try std.Io.Dir.realPath(tmp.dir, io, &pb)];
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&buf, "{s}/db", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, db_dir);
+    var db_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    try db.exec(
+        \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY, refcount INTEGER NOT NULL DEFAULT 1);
+        \\INSERT INTO store_refs VALUES ('orphan', 0);
+        \\INSERT INTO store_refs VALUES ('live', 2);
+    );
+    db.close();
+
+    for ([_][]const u8{ "orphan", "live", "norow" }) |sha| {
+        var eb: [std.fs.max_path_bytes]u8 = undefined;
+        const entry = try std.fmt.bufPrint(&eb, "{s}/store/{s}", .{ prefix, sha });
+        try std.Io.Dir.cwd().createDirPath(io, entry);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    output.beginStderrCapture(allocator, &out);
+    defer output.endStderrCapture();
+
+    const ctx: CheckCtx = .{ .allocator = allocator, .prefix = prefix, .io = io, .environ = .empty };
+    try testing.expectEqual(CheckResult.warn_status, checkOrphanedStore(ctx, "Orphaned store entries"));
+    try testing.expect(std.mem.indexOf(u8, out.items, "1 orphaned store entry") != null);
+}
+
+test "checkOrphanedStore: a store with no refcount<=0 row is ok" {
+    // Pins the clean branch of the probe swap: live-ref and no-row entries
+    // must not warn.
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [std.fs.max_path_bytes]u8 = undefined;
+    const prefix = pb[0..try std.Io.Dir.realPath(tmp.dir, io, &pb)];
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&buf, "{s}/db", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, db_dir);
+    var db_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    try db.exec(
+        \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY, refcount INTEGER NOT NULL DEFAULT 1);
+        \\INSERT INTO store_refs VALUES ('live', 2);
+    );
+    db.close();
+
+    for ([_][]const u8{ "live", "norow" }) |sha| {
+        var eb: [std.fs.max_path_bytes]u8 = undefined;
+        const entry = try std.fmt.bufPrint(&eb, "{s}/store/{s}", .{ prefix, sha });
+        try std.Io.Dir.cwd().createDirPath(io, entry);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    output.beginStderrCapture(allocator, &out);
+    defer output.endStderrCapture();
+
+    const ctx: CheckCtx = .{ .allocator = allocator, .prefix = prefix, .io = io, .environ = .empty };
+    try testing.expectEqual(CheckResult.ok, checkOrphanedStore(ctx, "Orphaned store entries"));
 }
 
 test "checks table includes the mirror-overrides row" {
