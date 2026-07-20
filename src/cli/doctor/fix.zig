@@ -215,6 +215,10 @@ fn walkOrphans(io: std.Io, prefix: []const u8, do_remove: bool) OrphanSweep {
     var db = sqlite.Database.open(db_path) catch return result;
     defer db.close();
 
+    // Prepare the orphan-classification statement once, drive it per entry.
+    var probe = OrphanProbe.init(&db) catch return result;
+    defer probe.deinit();
+
     var store_path_buf: [512]u8 = undefined;
     const store_path = std.fmt.bufPrint(&store_path_buf, "{s}/store", .{prefix}) catch return result;
     var store_dir = std.Io.Dir.openDirAbsolute(io, store_path, .{ .iterate = true }) catch return result;
@@ -222,7 +226,7 @@ fn walkOrphans(io: std.Io, prefix: []const u8, do_remove: bool) OrphanSweep {
 
     var iter = store_dir.iterate();
     while (iter.next(io) catch null) |entry| {
-        if (!isOrphanRow(&db, entry.name)) continue;
+        if (!probe.isOrphan(entry.name)) continue;
         if (do_remove and !removeEntry(io, prefix, &db, entry.name)) {
             result.blocked += 1;
             if (result.reason == null) result.reason = "could not remove store entry";
@@ -301,14 +305,31 @@ pub fn isPurgeableOrphan(has_row: bool, refcount: i64) bool {
     return has_row and refcount <= 0;
 }
 
-fn isOrphanRow(db: *sqlite.Database, sha: []const u8) bool {
-    var stmt = db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;") catch return false;
-    defer stmt.finalize();
-    stmt.bindText(1, sha) catch return false;
-    const has_row = stmt.step() catch false;
-    const refcount: i64 = if (has_row) stmt.columnInt(0) else 0;
-    return isPurgeableOrphan(has_row, refcount);
-}
+/// Owns the orphan-classification statement so a sweep prepares it once and
+/// drives it per entry via `reset` + rebind, instead of re-preparing the same
+/// SQL for every store row. Borrows the `Database` (holds only the statement),
+/// so the caller must keep `db` alive for the probe's lifetime.
+pub const OrphanProbe = struct {
+    stmt: sqlite.Statement,
+
+    pub fn init(db: *sqlite.Database) sqlite.SqliteError!OrphanProbe {
+        return .{ .stmt = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;") };
+    }
+
+    pub fn deinit(self: *OrphanProbe) void {
+        self.stmt.finalize();
+    }
+
+    /// Classify one store entry. Fails closed to "not an orphan" on any DB
+    /// error, preserving the reap loop's swallow-and-skip posture.
+    pub fn isOrphan(self: *OrphanProbe, sha: []const u8) bool {
+        self.stmt.reset() catch return false;
+        self.stmt.bindText(1, sha) catch return false;
+        const has_row = self.stmt.step() catch return false;
+        const refcount: i64 = if (has_row) self.stmt.columnInt(0) else 0;
+        return isPurgeableOrphan(has_row, refcount);
+    }
+};
 
 fn deleteRefRow(db: *sqlite.Database, sha: []const u8) void {
     var stmt = db.prepare("DELETE FROM store_refs WHERE store_sha256 = ?1;") catch return;
@@ -765,6 +786,35 @@ test "isPurgeableOrphan: only a refcount<=0 row is an orphan" {
     try std.testing.expect(!isPurgeableOrphan(true, 1));
     // No ref row: a warm / in-flight commit purge cannot clear — not an orphan.
     try std.testing.expect(!isPurgeableOrphan(false, 0));
+}
+
+test "OrphanProbe: one probe reset-drives orphan / live-ref / no-row shas in sequence" {
+    // Driving all three shas through a single probe is the point: it proves
+    // reset-then-rebind works across rows — the lifecycle the old per-call
+    // prepare/finalize never exercised.
+    const io = std.Options.debug_io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pb: [std.fs.max_path_bytes]u8 = undefined;
+    const prefix = pb[0..try std.Io.Dir.realPath(tmp.dir, io, &pb)];
+
+    var db_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try db.exec(
+        \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY, refcount INTEGER NOT NULL DEFAULT 1);
+        \\INSERT INTO store_refs VALUES ('orphan', 0);
+        \\INSERT INTO store_refs VALUES ('live', 2);
+    );
+
+    var probe = try OrphanProbe.init(&db);
+    defer probe.deinit();
+    try std.testing.expect(probe.isOrphan("orphan")); // row, refcount <= 0
+    try std.testing.expect(!probe.isOrphan("live")); // row, refcount >= 1
+    try std.testing.expect(!probe.isOrphan("missing")); // no row
+    // Reusable after a positive hit: same probe instance, sha reused.
+    try std.testing.expect(probe.isOrphan("orphan"));
 }
 
 test "isDanglingLinkError: only a missing target is dangling" {
