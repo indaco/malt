@@ -557,7 +557,7 @@ fn upstreamLatest(
             // drop the row from the audit.
             if (row.tap) |tap_label| {
                 if (!install_args_mod.isCoreTap(tap_label)) {
-                    break :blk tapFormulaLatestVersion(alloc, head_cache, db, io, environ, tap_label, row.name, api.offline);
+                    break :blk tapFormulaLatestVersion(alloc, head_cache, db, io, environ, tap_label, row.name, api.http);
                 }
             }
             const json = api.fetchFormula(row.name) catch break :blk null;
@@ -570,7 +570,7 @@ fn upstreamLatest(
             // drop the row from the audit. Same shape as `upgradeCask`.
             if (row.tap) |tap_label| {
                 if (!install_args_mod.isCoreTap(tap_label)) {
-                    break :blk tapCaskLatestVersion(alloc, head_cache, db, io, environ, tap_label, row.name, api.offline);
+                    break :blk tapCaskLatestVersion(alloc, head_cache, db, io, environ, tap_label, row.name, api.http);
                 }
             }
             const json = api.fetchCask(row.name) catch break :blk null;
@@ -851,7 +851,7 @@ fn tapRawLatestVersion(
     environ: std.process.Environ,
     tap_label: []const u8,
     name: []const u8,
-    offline: bool,
+    http: *client_mod.HttpClient,
     subtrees: []const forge.RawKind,
     noun: []const u8,
 ) ?[]u8 {
@@ -871,11 +871,9 @@ fn tapRawLatestVersion(
     const urls = tap_mod.resolveTapBaseUrls(alloc, db, tap_label) catch return null;
     defer urls.deinit(alloc);
 
-    var http = client_mod.HttpClient.init(io, environ, alloc);
-    defer http.deinit();
-    http.offline = offline;
-
-    return tapVersionFromSubtrees(alloc, &http, environ, urls.forge, urls.raw_base, fresh_sha, name, subtrees, noun, tap_label);
+    // Reuse the caller's pooled client (it already carries the correct
+    // offline flag) so every tap row shares one kept-alive connection.
+    return tapVersionFromSubtrees(alloc, http, environ, urls.forge, urls.raw_base, fresh_sha, name, subtrees, noun, tap_label);
 }
 
 /// Fetch the `.rb` via the shared `tap.fetchRawFile` leaf (first 200 wins) and
@@ -931,9 +929,9 @@ fn tapCaskLatestVersion(
     environ: std.process.Environ,
     tap_label: []const u8,
     token: []const u8,
-    offline: bool,
+    http: *client_mod.HttpClient,
 ) ?[]u8 {
-    return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, token, offline, &.{.cask}, "cask");
+    return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, token, http, &.{.cask}, "cask");
 }
 
 /// Tap formula: `Formula/<name>.rb`, falling back to a root-layout `<name>.rb`.
@@ -945,9 +943,9 @@ fn tapFormulaLatestVersion(
     environ: std.process.Environ,
     tap_label: []const u8,
     name: []const u8,
-    offline: bool,
+    http: *client_mod.HttpClient,
 ) ?[]u8 {
-    return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, name, offline, &.{ .formula, .formula_root }, "formula");
+    return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, name, http, &.{ .formula, .formula_root }, "formula");
 }
 
 /// Serial-path single-row check. Returns a caller-owned latest-version
@@ -1581,6 +1579,50 @@ test "tapVersionFromSubtrees qualifies the resolved version with the .rb revisio
     defer if (v) |vv| std.testing.allocator.free(vv);
     try std.testing.expect(v != null);
     try std.testing.expectEqualStrings("1.2.3_2", v.?);
+}
+
+test "tap rows reuse the caller-supplied client (the tap path constructs no HttpClient)" {
+    // The reuse property is the whole point of threading the pooled client:
+    // a tap row must fetch its `.rb` through the client it is handed, never a
+    // per-row throwaway. Proven network-free with an offline client — only a
+    // helper that actually uses the injected client honours its offline flag;
+    // a re-introduced self-init would build its own online client and reach
+    // the network. Both a formula and a cask row ride the same one client.
+    const schema = @import("../../db/schema.zig");
+
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // Seed the HEAD resolve so the row skips the network HEAD leg and reaches
+    // the `.rb` fetch, where the injected client governs the outcome.
+    var head_cache = TapHeadResolve.init(std.testing.allocator, io);
+    defer head_cache.deinit();
+    const Seed = struct {
+        fn resolve(_: *anyopaque, a: std.mem.Allocator, _: []const u8) ?[]const u8 {
+            return a.dupe(u8, "0123456789abcdef0123456789abcdef01234567") catch null;
+        }
+    };
+    var dummy: u8 = 0;
+    _ = head_cache.getOrResolve("user/repo", .{ .userdata = &dummy, .resolve = Seed.resolve });
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.offline = true;
+
+    const f = tapFormulaLatestVersion(std.testing.allocator, &head_cache, &db, io, std.process.Environ.empty, "user/repo", "pkg", &http);
+    const c = tapCaskLatestVersion(std.testing.allocator, &head_cache, &db, io, std.process.Environ.empty, "user/repo", "tok", &http);
+    if (f) |v| std.testing.allocator.free(v);
+    if (c) |v| std.testing.allocator.free(v);
+
+    // Offline injected client → the fetch short-circuits, network-free.
+    try std.testing.expect(f == null);
+    try std.testing.expect(c == null);
 }
 
 test "buildVersionMap skips malformed lines without aborting" {
