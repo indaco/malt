@@ -7,12 +7,34 @@ const malt = @import("malt");
 const test_io = @import("test_io");
 const testing = std.testing;
 
+/// Scratch tree under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures.
+const Fixture = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(tag: []const u8) !Fixture {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try test_io.uniqueTempPath(arena.allocator(), "linker", tag);
+        const base_z = try arena.allocator().dupeZ(u8, base);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
+        return .{ .arena = arena, .base = base_z };
+    }
+
+    fn deinit(self: *Fixture) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "atomic symlink via tmp+rename pattern" {
     // Verify the atomic symlink pattern used in linker.zig:
     // create at tmp name, then rename into place.
-    const tmp_dir = "/tmp/malt_link_test";
-    test_io.makeDirAbsolute(std.Options.debug_io, tmp_dir) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tmp_dir) catch {};
+    var fx = try Fixture.init("link_test");
+    defer fx.deinit();
+    const tmp_dir = fx.base;
 
     var dir = try test_io.openDirAbsolute(std.Options.debug_io, tmp_dir, .{});
     defer dir.close(std.Options.debug_io);
@@ -38,9 +60,9 @@ test "atomic symlink via tmp+rename pattern" {
 }
 
 test "symlink replacement is atomic" {
-    const tmp_dir = "/tmp/malt_link_replace_test";
-    test_io.makeDirAbsolute(std.Options.debug_io, tmp_dir) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tmp_dir) catch {};
+    var fx = try Fixture.init("link_replace_test");
+    defer fx.deinit();
+    const tmp_dir = fx.base;
 
     var dir = try test_io.openDirAbsolute(std.Options.debug_io, tmp_dir, .{});
     defer dir.close(std.Options.debug_io);
@@ -75,9 +97,9 @@ test "symlink replacement is atomic" {
 }
 
 test "conflict detection by reading existing symlink targets" {
-    const tmp_dir = "/tmp/malt_conflict_test";
-    test_io.makeDirAbsolute(std.Options.debug_io, tmp_dir) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tmp_dir) catch {};
+    var fx = try Fixture.init("conflict_test");
+    defer fx.deinit();
+    const tmp_dir = fx.base;
 
     var dir = try test_io.openDirAbsolute(std.Options.debug_io, tmp_dir, .{});
     defer dir.close(std.Options.debug_io);

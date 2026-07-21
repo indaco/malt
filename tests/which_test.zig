@@ -20,14 +20,9 @@ const c = struct {
 /// `bin/<name>` symlink pointing at it. Returns the prefix path; caller
 /// frees + deletes it.
 fn makePrefixWithKeg(suffix: []const u8, name: []const u8, version: []const u8) ![:0]u8 {
-    const prefix = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/malt_which_{d}_{s}",
-        .{ test_io.nanoTimestamp(
-            std.Options.debug_io,
-        ), suffix },
-        0,
-    );
+    const base = try test_io.uniqueTempPath(testing.allocator, "which", suffix);
+    defer testing.allocator.free(base);
+    const prefix = try std.fmt.allocPrintSentinel(testing.allocator, "{s}", .{base}, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     const keg_bin = try std.fmt.allocPrint(

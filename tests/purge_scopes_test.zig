@@ -25,13 +25,9 @@ const ScratchPrefix = struct {
     path: [:0]u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !ScratchPrefix {
-        const ts = test_io.nanoTimestamp(std.Options.debug_io);
-        const path = try std.fmt.allocPrintSentinel(
-            allocator,
-            "/tmp/malt_purge_scopes_{s}_{d}",
-            .{ tag, ts },
-            0,
-        );
+        const base = try test_io.uniqueTempPath(allocator, "purge_scopes", tag);
+        defer allocator.free(base);
+        const path = try std.fmt.allocPrintSentinel(allocator, "{s}", .{base}, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
@@ -434,9 +430,9 @@ test "--wipe --yes --backup writes the manifest before the delete pass" {
     try writeFileAt(allocator, &.{ prefix.path, "Cellar", "marker" }, "x");
 
     // Backup lives outside the wipe target so the assertion can read it.
-    const backup_path = try std.fmt.allocPrint(allocator, "/tmp/malt_wipe_backup_{d}.txt", .{
-        test_io.nanoTimestamp(std.Options.debug_io),
-    });
+    const backup_base = try test_io.uniqueTempPath(allocator, "wipe", "backup");
+    defer allocator.free(backup_base);
+    const backup_path = try std.fmt.allocPrint(allocator, "{s}.txt", .{backup_base});
     defer allocator.free(backup_path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, backup_path) catch {};
 
@@ -464,9 +460,7 @@ test "--wipe --yes --backup creates a nested absolute manifest path" {
     try writeFileAt(allocator, &.{ prefix.path, "Cellar", "marker" }, "x");
 
     // grandparent (`.../mani`) intentionally absent; lives outside the prefix.
-    const root = try std.fmt.allocPrint(allocator, "/tmp/malt_wipe_nested_{d}", .{
-        test_io.nanoTimestamp(std.Options.debug_io),
-    });
+    const root = try test_io.uniqueTempPath(allocator, "wipe", "nested");
     defer allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const backup_path = try std.fmt.allocPrint(allocator, "{s}/mani/a/backup.txt", .{root});

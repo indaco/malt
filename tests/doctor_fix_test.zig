@@ -23,20 +23,13 @@ const c = struct {
 };
 const UF_IMMUTABLE: c_uint = 0x00000002;
 
-fn randHex(buf: *[16]u8) void {
-    var rand: [8]u8 = undefined;
-    fs_compat.randomBytes(std.Options.debug_io, &rand);
-    const hex_chars = "0123456789abcdef";
-    for (rand, 0..) |b, i| {
-        buf[i * 2] = hex_chars[b >> 4];
-        buf[i * 2 + 1] = hex_chars[b & 0x0f];
-    }
-}
-
+/// Process-unique scratch prefix, so overlapping test runs cannot wipe each
+/// other's fixtures. Written into the caller's buffer via a fixed allocator.
 fn makePrefix(prefix_buf: *[128]u8, label: []const u8) ![]const u8 {
-    var hex: [16]u8 = undefined;
-    randHex(&hex);
-    const prefix = try std.fmt.bufPrint(prefix_buf, "/tmp/malt-doctor-fix-{s}-{s}", .{ label, &hex });
+    var scratch: [512]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const unique = try test_io.uniqueTempPath(fba.allocator(), "doctor_fix", label);
+    const prefix = try std.fmt.bufPrint(prefix_buf, "{s}", .{unique});
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try fs_compat.makeDirAbsolute(std.Options.debug_io, prefix);
     return prefix;

@@ -17,14 +17,11 @@ const c = struct {
 };
 
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
-    const path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/malt_cli_tap_{d}_{s}",
-        .{ test_io.nanoTimestamp(
-            std.Options.debug_io,
-        ), suffix },
-        0,
-    );
+    // Process-unique: a bare timestamp collides between overlapping runs.
+    const raw = try test_io.uniqueTempPath(testing.allocator, "cli_tap", suffix);
+    defer testing.allocator.free(raw);
+    const path = try testing.allocator.dupeZ(u8, raw);
+    errdefer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
@@ -50,11 +47,14 @@ test "execute with --json on a prefix with no db/ directory still emits `[]`" {
     // Fresh MALT_PREFIX where the `db/` dir doesn't exist yet: `sqlite.open`
     // fails. CI consumers piping through `jq` need a parseable empty array,
     // not silently-empty stdout.
-    const path = "/tmp/malt_cli_tap_fresh_no_db";
+    const raw = try test_io.uniqueTempPath(testing.allocator, "cli_tap", "fresh_no_db");
+    defer testing.allocator.free(raw);
+    const path = try testing.allocator.dupeZ(u8, raw);
+    defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
-    _ = c.setenv("MALT_PREFIX", path, 1);
+    _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
     const prior_json = malt.output.isJson();

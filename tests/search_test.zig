@@ -90,18 +90,25 @@ test "findNameMatches rejects over-long queries to keep lowercase buf bounded" {
 
 // --- fetchNamesIndex cache read path (no network) ---
 
+/// Scratch cache under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures.
 const TempCacheDir = struct {
-    path: []const u8,
+    arena: std.heap.ArenaAllocator,
+    path: [:0]const u8,
 
-    fn init(comptime tag: []const u8) !TempCacheDir {
-        const p = "/tmp/malt_search_test_" ++ tag;
+    fn init(tag: []const u8) !TempCacheDir {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try test_io.uniqueTempPath(arena.allocator(), "search", tag);
+        const p = try arena.allocator().dupeZ(u8, base);
         test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, p);
-        return .{ .path = p };
+        return .{ .arena = arena, .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        self.arena.deinit();
     }
 
     fn writeCacheFile(self: *TempCacheDir, rel: []const u8, content: []const u8) !void {

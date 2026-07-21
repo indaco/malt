@@ -34,12 +34,8 @@ const fake_formula_json =
     \\}
 ;
 
-fn uniquePrefix(suffix: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_install_iso_{d}_{s}",
-        .{ test_io.nanoTimestamp(std.Options.debug_io), suffix },
-    );
+fn uniquePrefix(suffix: []const u8) ![]const u8 {
+    return test_io.uniqueTempPath(testing.allocator, "install_iso", suffix);
 }
 
 fn makeKegWithBin(prefix: []const u8, name: []const u8, version: []const u8) ![]u8 {
@@ -388,12 +384,9 @@ test "execute accepts --isolate-deps without erroring during dry-run" {
 // counts as proof the parser reached past the flag stage; raising
 // any other error means the flag was rejected.
 fn runFlagAcceptanceProbe(suffix: []const u8, flag: []const u8) !void {
-    const prefix = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/malt_iso_probe_{d}_{s}",
-        .{ test_io.nanoTimestamp(std.Options.debug_io), suffix },
-        0,
-    );
+    const base = try test_io.uniqueTempPath(testing.allocator, "iso_probe", suffix);
+    defer testing.allocator.free(base);
+    const prefix = try testing.allocator.dupeZ(u8, base);
     defer testing.allocator.free(prefix);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix);

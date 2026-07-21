@@ -35,17 +35,49 @@ fn newInstaller(threaded: *std.Io.Threaded, db: *sqlite.Database, prefix: [:0]co
     return cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, db, prefix);
 }
 
+/// Scratch tree under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures.
+const Fixture = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(tag: []const u8) !Fixture {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try test_io.uniqueTempPath(arena.allocator(), "font_install", tag);
+        const base_z = try arena.allocator().dupeZ(u8, base);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
+        return .{ .arena = arena, .base = base_z };
+    }
+
+    /// Absolute path to `sub` inside the fixture; valid until `deinit`.
+    fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}/{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Fixture) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "placeExtracted routes a font cask: places files and returns the Caskroom manifest path" {
     const io = std.Options.debug_io;
     // Non-default prefix → resolveFontsDir lands in <prefix>/Fonts, isolating
     // the test from the real ~/Library/Fonts.
-    const prefix: [:0]const u8 = "/tmp/malt_font_install_it";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    var fx = try Fixture.init("basic");
+    defer fx.deinit();
+    const prefix = fx.base;
 
-    const extract = prefix ++ "/extract";
-    try putFile(io, extract ++ "/ttf/FiraCode-Bold.ttf", "BOLD");
-    try putFile(io, extract ++ "/HackNerdFont-Regular.ttf", "HACK");
+    const extract = fx.p("extract");
+    try putFile(io, fx.p("extract/ttf/FiraCode-Bold.ttf"), "BOLD");
+    try putFile(io, fx.p("extract/HackNerdFont-Regular.ttf"), "HACK");
 
     const cask_json =
         \\{"token":"font-fira-code","name":["FiraCode"],"version":"6.2","desc":"","homepage":"",
@@ -67,29 +99,32 @@ test "placeExtracted routes a font cask: places files and returns the Caskroom m
     var installer = newInstaller(&threaded, &db, prefix);
 
     // app_dir is irrelevant on the font path; pass a scratch one.
-    const app_path = try installer.placeExtracted(extract, prefix ++ "/Applications", &c);
+    const app_path = try installer.placeExtracted(extract, fx.p("Applications"), &c);
     defer testing.allocator.free(app_path);
 
     // Returns the manifest path under Caskroom/<token>/<version>/.
-    try testing.expectEqualStrings(prefix ++ "/Caskroom/font-fira-code/6.2/" ++ cask_font.MANIFEST_NAME, app_path);
+    try testing.expectEqualStrings(fx.p("Caskroom/font-fira-code/6.2/" ++ cask_font.MANIFEST_NAME), app_path);
 
     // Both fonts placed by basename into <prefix>/Fonts.
-    const fonts = prefix ++ "/Fonts";
-    try expectFileBody(io, fonts ++ "/FiraCode-Bold.ttf", "BOLD");
-    try expectFileBody(io, fonts ++ "/HackNerdFont-Regular.ttf", "HACK");
+    const fira = fx.p("Fonts/FiraCode-Bold.ttf");
+    const hack = fx.p("Fonts/HackNerdFont-Regular.ttf");
+    try expectFileBody(io, fira, "BOLD");
+    try expectFileBody(io, hack, "HACK");
 
     // Manifest lists every placed absolute path, newline-joined.
-    try expectFileBody(io, app_path, fonts ++ "/FiraCode-Bold.ttf\n" ++ fonts ++ "/HackNerdFont-Regular.ttf");
+    const manifest_body = try std.fmt.allocPrint(testing.allocator, "{s}\n{s}", .{ fira, hack });
+    defer testing.allocator.free(manifest_body);
+    try expectFileBody(io, app_path, manifest_body);
 }
 
 test "placeExtracted prefers the font branch when a cask carries both app and font artifacts" {
     const io = std.Options.debug_io;
-    const prefix: [:0]const u8 = "/tmp/malt_font_install_mixed_it";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    var fx = try Fixture.init("mixed");
+    defer fx.deinit();
+    const prefix = fx.base;
 
-    const extract = prefix ++ "/extract";
-    try putFile(io, extract ++ "/A.ttf", "AAA");
+    const extract = fx.p("extract");
+    try putFile(io, fx.p("extract/A.ttf"), "AAA");
 
     // A non-empty font stanza must win over a sibling app stanza so a font
     // cask never falls into the .app demand below it.
@@ -109,23 +144,23 @@ test "placeExtracted prefers the font branch when a cask carries both app and fo
     defer threaded.deinit();
     var installer = newInstaller(&threaded, &db, prefix);
 
-    const app_path = try installer.placeExtracted(extract, prefix ++ "/Applications", &c);
+    const app_path = try installer.placeExtracted(extract, fx.p("Applications"), &c);
     defer testing.allocator.free(app_path);
 
-    try testing.expectEqualStrings(prefix ++ "/Caskroom/mixed/3.0/" ++ cask_font.MANIFEST_NAME, app_path);
-    try expectFileBody(io, prefix ++ "/Fonts/A.ttf", "AAA");
+    try testing.expectEqualStrings(fx.p("Caskroom/mixed/3.0/" ++ cask_font.MANIFEST_NAME), app_path);
+    try expectFileBody(io, fx.p("Fonts/A.ttf"), "AAA");
 }
 
 test "placeExtracted drops a traversal entry and manifests only the safe font" {
     const io = std.Options.debug_io;
-    const prefix: [:0]const u8 = "/tmp/malt_font_install_evil_it";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    var fx = try Fixture.init("evil");
+    defer fx.deinit();
+    const prefix = fx.base;
 
-    const extract = prefix ++ "/extract";
-    try putFile(io, extract ++ "/Good.ttf", "GOOD");
+    const extract = fx.p("extract");
+    try putFile(io, fx.p("extract/Good.ttf"), "GOOD");
     // A file the cask must never be able to reach via a `..` hop.
-    try putFile(io, prefix ++ "/secret", "SECRET");
+    try putFile(io, fx.p("secret"), "SECRET");
 
     const cask_json =
         \\{"token":"evil","name":["Evil"],"version":"1.0","desc":"","homepage":"",
@@ -143,25 +178,24 @@ test "placeExtracted drops a traversal entry and manifests only the safe font" {
     defer threaded.deinit();
     var installer = newInstaller(&threaded, &db, prefix);
 
-    const app_path = try installer.placeExtracted(extract, prefix ++ "/Applications", &c);
+    const app_path = try installer.placeExtracted(extract, fx.p("Applications"), &c);
     defer testing.allocator.free(app_path);
 
     // Only the safe font is placed and recorded; the `..` entry is skipped.
-    const fonts = prefix ++ "/Fonts";
-    try expectFileBody(io, app_path, fonts ++ "/Good.ttf");
-    try expectFileBody(io, fonts ++ "/Good.ttf", "GOOD");
-    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, fonts ++ "/secret", .{}));
+    try expectFileBody(io, app_path, fx.p("Fonts/Good.ttf"));
+    try expectFileBody(io, fx.p("Fonts/Good.ttf"), "GOOD");
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, fx.p("Fonts/secret"), .{}));
 }
 
 test "placeExtracted on an all-unsafe font cask places nothing and records an empty manifest" {
     const io = std.Options.debug_io;
-    const prefix: [:0]const u8 = "/tmp/malt_font_install_allevil_it";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    var fx = try Fixture.init("allevil");
+    defer fx.deinit();
+    const prefix = fx.base;
 
-    const extract = prefix ++ "/extract";
-    try putFile(io, extract ++ "/decoy.ttf", "DECOY");
-    try putFile(io, prefix ++ "/secret", "SECRET");
+    const extract = fx.p("extract");
+    try putFile(io, fx.p("extract/decoy.ttf"), "DECOY");
+    try putFile(io, fx.p("secret"), "SECRET");
 
     // Every stanza is attacker-crafted: a `..` hop and an absolute path. The
     // worst case must be a no-op, never a traversal or a crash.
@@ -181,25 +215,25 @@ test "placeExtracted on an all-unsafe font cask places nothing and records an em
     defer threaded.deinit();
     var installer = newInstaller(&threaded, &db, prefix);
 
-    const app_path = try installer.placeExtracted(extract, prefix ++ "/Applications", &c);
+    const app_path = try installer.placeExtracted(extract, fx.p("Applications"), &c);
     defer testing.allocator.free(app_path);
 
     // A manifest is still written (the recorded app_path stays valid) but it
     // lists nothing, and no file escaped into the Fonts dir.
     try expectFileBody(io, app_path, "");
-    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, prefix ++ "/Fonts/secret", .{}));
-    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, prefix ++ "/Fonts/hosts", .{}));
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, fx.p("Fonts/secret"), .{}));
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, fx.p("Fonts/hosts"), .{}));
 }
 
 test "placeExtracted leaves a normal app zip on the .app path and writes no font manifest" {
     const io = std.Options.debug_io;
-    const prefix: [:0]const u8 = "/tmp/malt_font_install_app_it";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    var fx = try Fixture.init("app");
+    defer fx.deinit();
+    const prefix = fx.base;
 
-    const extract = prefix ++ "/extract";
-    const app_dir = prefix ++ "/Applications";
-    try putFile(io, extract ++ "/Foo.app/Contents/Info.plist", "PLIST");
+    const extract = fx.p("extract");
+    const app_dir = fx.p("Applications");
+    try putFile(io, fx.p("extract/Foo.app/Contents/Info.plist"), "PLIST");
     try test_io.cwd().createDirPath(io, app_dir);
 
     const cask_json =
@@ -223,9 +257,9 @@ test "placeExtracted leaves a normal app zip on the .app path and writes no font
 
     // App branch: returns the promoted bundle path, whose contents are now
     // in place under app_dir.
-    try testing.expectEqualStrings(app_dir ++ "/Foo.app", app_path);
-    try expectFileBody(io, app_dir ++ "/Foo.app/Contents/Info.plist", "PLIST");
+    try testing.expectEqualStrings(fx.p("Applications/Foo.app"), app_path);
+    try expectFileBody(io, fx.p("Applications/Foo.app/Contents/Info.plist"), "PLIST");
 
     // The font dispatch did not fire: no Caskroom manifest was written.
-    try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(io, prefix ++ "/Caskroom", .{}));
+    try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(io, fx.p("Caskroom"), .{}));
 }

@@ -15,15 +15,12 @@ const c = struct {
     extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 };
 
+/// Scratch MALT_PREFIX under a process-unique base, so overlapping test runs
+/// cannot wipe each other's fixtures. Caller frees and removes the tree.
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
-    const path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/malt_install_exec_{d}_{s}",
-        .{ test_io.nanoTimestamp(
-            std.Options.debug_io,
-        ), suffix },
-        0,
-    );
+    const unique = try test_io.uniqueTempPath(testing.allocator, "install_exec", suffix);
+    defer testing.allocator.free(unique);
+    const path = try testing.allocator.dupeZ(u8, unique);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -60,13 +57,11 @@ fn seedFormulaCache(prefix: []const u8, name: []const u8, json: []const u8) !voi
 }
 
 test "execute --dry-run prints a plan for a cached formula" {
-    const prefix_z: [:0]const u8 = "/tmp/mm";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
-    const prefix: []const u8 = prefix_z;
-    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    const prefix_z = try setupPrefix("mm");
+    defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
+    const prefix: []const u8 = prefix_z;
 
     const json =
         \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"",
@@ -98,10 +93,8 @@ test "execute --dry-run prints a plan for a cached formula" {
 }
 
 test "execute with --formula forces formula-only and errors on an unresolvable name" {
-    const prefix_z: [:0]const u8 = "/tmp/mf";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
-    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    const prefix_z = try setupPrefix("mf");
+    defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
@@ -121,10 +114,8 @@ test "execute with --formula forces formula-only and errors on an unresolvable n
 }
 
 test "execute with a tap-formula-shaped name routes through the tap path in dry-run" {
-    const prefix_z: [:0]const u8 = "/tmp/mt";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
-    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    const prefix_z = try setupPrefix("mt");
+    defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
@@ -147,10 +138,8 @@ test "execute with neither --formula nor --cask: 404 cache markers route through
     // `installCask`'s `fetchCask` 404s too → both catches now count into
     // `failed_count` so a single-package miss exits non-zero. The two
     // `.404` markers keep the test offline-clean — no network roundtrip.
-    const prefix_z: [:0]const u8 = "/tmp/mcft";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
-    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    const prefix_z = try setupPrefix("mcft");
+    defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
@@ -180,10 +169,8 @@ test "execute in offline mode with no cached snapshot exits PartialFailure on th
     // when `ctx.offline` is set and the formula isn't cached, the catch
     // prints the snapshot-miss line *without* probing cask. T-049 counts
     // that miss into `failed_count` so the exit code is non-zero.
-    const prefix_z: [:0]const u8 = "/tmp/mofl";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
-    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    const prefix_z = try setupPrefix("mofl");
+    defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
@@ -208,13 +195,11 @@ test "execute --dry-run with one cached + one 404 package exits PartialFailure" 
     // dispatch loop counts the miss. Pre-fix the dry-run early return
     // ignored `failed_count` and exited 0; the gate now mirrors the
     // empty-list path so any planned-vs-failed mismatch surfaces.
-    const prefix_z: [:0]const u8 = "/tmp/mmix";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
-    const prefix: []const u8 = prefix_z;
-    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    const prefix_z = try setupPrefix("mmix");
+    defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
+    const prefix: []const u8 = prefix_z;
 
     const json =
         \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"",
@@ -261,10 +246,8 @@ test "Ctrl-C between pool and link sweeps !job.succeeded and exits PartialFailur
     // first poll (poll 3 after L581 + iter 1 L588) so the worker exits
     // before draining the queue, the pool joins with !job.succeeded,
     // and the new sweep + gate surfaces PartialFailure.
-    const prefix_z: [:0]const u8 = "/tmp/mirq2";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
-    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    const prefix_z = try setupPrefix("mirq2");
+    defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
@@ -313,10 +296,8 @@ test "Ctrl-C mid-resolution after a counted miss exits PartialFailure" {
     // had counted a miss. The arm seam flips the flag on the 3rd poll
     // so iter 1 dispatches (and fails) and iter 2's interrupt check
     // fires the new gate.
-    const prefix_z: [:0]const u8 = "/tmp/mirq";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
-    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    const prefix_z = try setupPrefix("mirq");
+    defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
@@ -350,10 +331,8 @@ test "Ctrl-C mid-resolution after a counted miss exits PartialFailure" {
 }
 
 test "execute --dry-run with an already-installed package short-circuits" {
-    const prefix_z: [:0]const u8 = "/tmp/mi";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
-    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    const prefix_z = try setupPrefix("mi");
+    defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
@@ -373,7 +352,9 @@ test "execute --dry-run with an already-installed package short-circuits" {
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
     try stmt.bindText(4, "0" ** 64);
-    try stmt.bindText(5, "/tmp/mi/Cellar/seeded/1.0");
+    const cellar_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{prefix_z});
+    defer testing.allocator.free(cellar_path);
+    try stmt.bindText(5, cellar_path);
     _ = try stmt.step();
     stmt.finalize();
     db.close();
@@ -418,10 +399,8 @@ test "execute --only-dependencies on a leaf formula plans nothing" {
     // Leaf formula → after dropping top-level the queue is empty, so the
     // "Dry run: would install ..." line never fires. Pins the early-return
     // branch so a future refactor cannot accidentally print a 0-package plan.
-    const prefix_z: [:0]const u8 = "/tmp/mol";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
-    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    const prefix_z = try setupPrefix("mol");
+    defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
@@ -469,10 +448,8 @@ test "execute --only-deps --dry-run plans deps but skips the requested formula" 
     // the cheapest way to assert the plan's contents from the outside.
     // The earlier `--only-dependencies` test pins the brew-parity alias;
     // this one pins the canonical short spelling.
-    const prefix_z: [:0]const u8 = "/tmp/mod";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
-    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    const prefix_z = try setupPrefix("mod");
+    defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
@@ -545,10 +522,8 @@ test "execute --dry-run routes a revisioned formula through the install pipeline
     // → collectFormulaJobs → print plan → return. A revisioned formula
     // exercises every call site that reads `formula.pkg_version` in
     // place of the plain `version`.
-    const prefix_z: [:0]const u8 = "/tmp/mr";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
-    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    const prefix_z = try setupPrefix("mr");
+    defer testing.allocator.free(prefix_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 

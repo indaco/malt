@@ -188,14 +188,9 @@ test "upgrade emits bracketing lock_acquired + install_complete under ndjson" {
     // through lock acquire → "no formulas installed" → release without
     // touching the network. The test pins the bracketing events so the
     // ndjson stream stays well-formed even when no work is done.
-    const path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/malt_ndjson_upgrade_{d}",
-        .{test_io.nanoTimestamp(
-            std.Options.debug_io,
-        )},
-        0,
-    );
+    const base = try test_io.uniqueTempPath(testing.allocator, "ndjson", "upgrade");
+    defer testing.allocator.free(base);
+    const path = try testing.allocator.dupeZ(u8, base);
     defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};

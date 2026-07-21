@@ -197,11 +197,7 @@ test "MismatchInfo formats cleanly through the worker's log template" {
 
 test "body SHA check and verify agree on the same body's SHA" {
     const test_io = @import("test_io");
-    const path = try std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_bottle_roundtrip_{d}",
-        .{test_io.nanoTimestamp(std.Options.debug_io)},
-    );
+    const path = try test_io.uniqueTempPath(testing.allocator, "bottle_roundtrip", "sha");
     defer testing.allocator.free(path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
 

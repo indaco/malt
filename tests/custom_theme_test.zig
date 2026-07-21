@@ -9,14 +9,13 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 
 const color = malt.color;
 const output = malt.output;
 const theme_file = malt.theme_file;
 const tab_bar = malt.tui_tab_bar;
 
-const base = "/tmp/malt_custom_theme_test";
-const fixture = base ++ "/themes.json";
 const dbg_io = std.Options.debug_io;
 
 // Distinct truecolor values so the assertions cannot pass by coincidence.
@@ -33,25 +32,51 @@ const valid_file =
 
 const titles: [tab_bar.count][]const u8 = .{ "Search", "Installed", "Outdated", "Services", "Doctor" };
 
-fn cleanup() void {
-    var tmp = std.Io.Dir.openDirAbsolute(dbg_io, "/tmp", .{}) catch return;
-    defer tmp.close(dbg_io);
-    tmp.deleteTree(dbg_io, "malt_custom_theme_test") catch {};
-}
+/// Themes file under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures. Owns the environ block that points at it.
+const Fixture = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+    file: [:0]const u8,
+    environ: std.process.Environ,
 
-fn writeFixture(body: []const u8) !void {
-    cleanup();
-    try std.Io.Dir.createDirAbsolute(dbg_io, base, .default_dir);
-    const f = try std.Io.Dir.createFileAbsolute(dbg_io, fixture, .{});
-    defer f.close(dbg_io);
-    try f.writeStreamingAll(dbg_io, body);
-}
+    fn init(tag: []const u8) !Fixture {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+        const unique = try test_io.uniqueTempPath(a, "custom_theme", tag);
+        const base = try a.dupeZ(u8, unique);
+        test_io.deleteTreeAbsolute(dbg_io, base) catch {};
+        try std.Io.Dir.createDirAbsolute(dbg_io, base, .default_dir);
+        const file = try std.fmt.allocPrintSentinel(a, "{s}/themes.json", .{base}, 0);
+        const kv = try std.fmt.allocPrintSentinel(a, "MALT_THEMES_FILE={s}", .{file}, 0);
+        const block = try a.allocSentinel(?[*:0]const u8, 1, null);
+        block[0] = kv.ptr;
+        return .{
+            .arena = arena,
+            .base = base,
+            .file = file,
+            .environ = .{ .block = .{ .slice = block } },
+        };
+    }
+
+    fn write(self: *Fixture, body: []const u8) !void {
+        const f = try std.Io.Dir.createFileAbsolute(dbg_io, self.file, .{});
+        defer f.close(dbg_io);
+        try f.writeStreamingAll(dbg_io, body);
+    }
+
+    fn deinit(self: *Fixture) void {
+        test_io.deleteTreeAbsolute(dbg_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
 
 /// Seed environ (pointing MALT_THEMES_FILE at the fixture, MALT_THEME unset so
 /// the file's `default` selects), force a truecolor tier, and boot-load the file
 /// the way `main` does.
-fn boot() color.InstallResult {
-    const environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"MALT_THEMES_FILE=" ++ fixture} } };
+fn boot(fx: *Fixture) color.InstallResult {
+    const environ = fx.environ;
     color.setRuntime(dbg_io, environ);
     color.setForTest(true, false); // colour on so CLI output emits SGR
     color.setTruecolorForTest(true);
@@ -68,13 +93,14 @@ fn reset() void {
     color.setForTest(null, null);
     color.setTruecolorForTest(null);
     color.setBackgroundForTest(null);
-    cleanup();
 }
 
 test "a valid themes file recolours both a CLI line and a TUI frame" {
-    try writeFixture(valid_file);
+    var fx = try Fixture.init("valid");
+    defer fx.deinit();
+    try fx.write(valid_file);
     defer reset();
-    try testing.expectEqual(color.InstallResult.loaded, boot());
+    try testing.expectEqual(color.InstallResult.loaded, boot(&fx));
 
     // TUI frame: the tab bar paints titles through color.roleCode(.accent).
     var fb: [256]u8 = undefined;
@@ -91,9 +117,11 @@ test "a valid themes file recolours both a CLI line and a TUI frame" {
 }
 
 test "a malformed themes file leaves built-in output unchanged" {
-    try writeFixture("{\"version\":1,\"themes\":{\"x\":{\"polarity\":\"dark\"}}}"); // missing roles
+    var fx = try Fixture.init("malformed");
+    defer fx.deinit();
+    try fx.write("{\"version\":1,\"themes\":{\"x\":{\"polarity\":\"dark\"}}}"); // missing roles
     defer reset();
-    try testing.expectEqual(color.InstallResult.rejected, boot());
+    try testing.expectEqual(color.InstallResult.rejected, boot(&fx));
 
     // The TUI frame must carry the built-in default accent, not a custom one.
     const builtin_accent = color.resolveRole(.default, .accent, .unknown, true);

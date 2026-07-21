@@ -25,6 +25,38 @@ fn unsetCache() void {
     _ = c.unsetenv("MALT_CACHE");
 }
 
+/// Scratch tree under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures.
+const Fixture = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(tag: []const u8) !Fixture {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try test_io.uniqueTempPath(arena.allocator(), "atomic", tag);
+        const base_z = try arena.allocator().dupeZ(u8, base);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
+        return .{ .arena = arena, .base = base_z };
+    }
+
+    /// Absolute path to `sub` inside the fixture; valid until `deinit`.
+    fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}/{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Fixture) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "maltPrefixOrAbort returns default when env unset" {
     unsetPrefix();
     const got = atomic.maltPrefixOrAbort();
@@ -263,18 +295,16 @@ test "maltCacheDir honours MALT_CACHE env var" {
 }
 
 test "createTempDir creates a unique directory under the prefix and cleanup removes it" {
-    const base = "/tmp/malt_atomic_ctmp";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    test_io.makeDirAbsolute(std.Options.debug_io, base) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    setPrefix("/tmp/malt_atomic_ctmp");
+    var fx = try Fixture.init("ctmp");
+    defer fx.deinit();
+    setPrefix(fx.base);
     defer unsetPrefix();
 
     const dir = try atomic.createTempDir(std.Options.debug_io, testing.allocator, "label");
     defer testing.allocator.free(dir);
 
     // Must exist as an absolute dir under {prefix}/tmp/
-    try testing.expect(std.mem.startsWith(u8, dir, "/tmp/malt_atomic_ctmp/tmp/label_"));
+    try testing.expect(std.mem.startsWith(u8, dir, fx.p("tmp/label_")));
     var open_dir = try test_io.openDirAbsolute(std.Options.debug_io, dir, .{});
     open_dir.close(std.Options.debug_io);
 
@@ -283,13 +313,11 @@ test "createTempDir creates a unique directory under the prefix and cleanup remo
 }
 
 test "atomicRename moves a file within the same filesystem" {
-    const base = "/tmp/malt_atomic_rename";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    test_io.makeDirAbsolute(std.Options.debug_io, base) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var fx = try Fixture.init("rename");
+    defer fx.deinit();
 
-    const src = "/tmp/malt_atomic_rename/src.txt";
-    const dst = "/tmp/malt_atomic_rename/dst.txt";
+    const src = fx.p("src.txt");
+    const dst = fx.p("dst.txt");
     const f = try test_io.createFileAbsolute(std.Options.debug_io, src, .{});
     try f.writeStreamingAll(std.Options.debug_io, "payload");
     f.close(std.Options.debug_io);
@@ -312,12 +340,10 @@ test "cleanupTempDir is a no-op on a non-existent path" {
 // file, never a partial write. These tests cover the observable
 // contract — fresh path, overwrite, no stale tempfile, missing parent.
 test "atomicWriteFile writes full payload to a fresh path" {
-    const base = "/tmp/malt_atomic_write_fresh";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    try test_io.makeDirAbsolute(std.Options.debug_io, base);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var fx = try Fixture.init("write_fresh");
+    defer fx.deinit();
 
-    const dst = base ++ "/cache.json";
+    const dst = fx.p("cache.json");
     try atomic.atomicWriteFile(std.Options.debug_io, dst, "{\"formulae\":[]}");
 
     const f = try test_io.openFileAbsolute(std.Options.debug_io, dst, .{});
@@ -328,12 +354,10 @@ test "atomicWriteFile writes full payload to a fresh path" {
 }
 
 test "atomicWriteFile replaces an existing file's contents in one step" {
-    const base = "/tmp/malt_atomic_write_replace";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    try test_io.makeDirAbsolute(std.Options.debug_io, base);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var fx = try Fixture.init("write_replace");
+    defer fx.deinit();
 
-    const dst = base ++ "/cache.json";
+    const dst = fx.p("cache.json");
     // Seed with old bytes so we can prove the replacement lands whole.
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, dst, .{});
@@ -351,17 +375,15 @@ test "atomicWriteFile replaces an existing file's contents in one step" {
 }
 
 test "atomicWriteFile leaves no sibling .tmp files behind on success" {
-    const base = "/tmp/malt_atomic_write_no_tmp";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    try test_io.makeDirAbsolute(std.Options.debug_io, base);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var fx = try Fixture.init("write_no_tmp");
+    defer fx.deinit();
 
-    const dst = base ++ "/cache.json";
+    const dst = fx.p("cache.json");
     try atomic.atomicWriteFile(std.Options.debug_io, dst, "payload");
 
     // Only `cache.json` must remain — a stale tempfile would accumulate
     // across calls and eventually blow up a user's cache dir.
-    var dir = try test_io.openDirAbsolute(std.Options.debug_io, base, .{ .iterate = true });
+    var dir = try test_io.openDirAbsolute(std.Options.debug_io, fx.base, .{ .iterate = true });
     defer dir.close(std.Options.debug_io);
     var iter = dir.iterate();
     var count: usize = 0;
@@ -388,12 +410,10 @@ test "atomicWriteFile surfaces FileNotFound when the parent dir is missing" {
 // when its only caller (the macho/patcher) is refactored.
 
 test "atomicReplaceFile preserves the existing file's mode" {
-    const base = "/tmp/malt_atomic_replace_preserve";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    try test_io.makeDirAbsolute(std.Options.debug_io, base);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var fx = try Fixture.init("replace_preserve");
+    defer fx.deinit();
 
-    const dst = base ++ "/wrapper";
+    const dst = fx.p("wrapper");
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, dst, .{});
         defer f.close(std.Options.debug_io);
@@ -415,12 +435,10 @@ test "atomicReplaceFile preserves the existing file's mode" {
 }
 
 test "atomicReplaceFile writes a fresh file when dst is missing" {
-    const base = "/tmp/malt_atomic_replace_fresh";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    try test_io.makeDirAbsolute(std.Options.debug_io, base);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var fx = try Fixture.init("replace_fresh");
+    defer fx.deinit();
 
-    const dst = base ++ "/new.txt";
+    const dst = fx.p("new.txt");
     try atomic.atomicReplaceFile(std.Options.debug_io, dst, "hello");
 
     const f = try test_io.openFileAbsolute(std.Options.debug_io, dst, .{});
@@ -434,11 +452,11 @@ test "atomicReplaceFile leaves the original intact when staging fails" {
     // Root would bypass the 0o555 the test relies on to fail the rename.
     if (std.c.geteuid() == 0) return error.SkipZigTest;
 
-    const base = "/tmp/malt_atomic_replace_intact";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    try test_io.makeDirAbsolute(std.Options.debug_io, base);
+    // Declared first so its deleteTree runs after the unlock defer below.
+    var fx = try Fixture.init("replace_intact");
+    defer fx.deinit();
 
-    const dst = base ++ "/wrapper";
+    const dst = fx.p("wrapper");
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, dst, .{});
         defer f.close(std.Options.debug_io);
@@ -447,19 +465,18 @@ test "atomicReplaceFile leaves the original intact when staging fails" {
 
     // Lock the parent so the helper cannot stage a sibling tempfile.
     {
-        var d = try test_io.openDirAbsolute(std.Options.debug_io, base, .{});
+        var d = try test_io.openDirAbsolute(std.Options.debug_io, fx.base, .{});
         defer d.close(std.Options.debug_io);
         const handle: std.Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
         handle.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(0o555)) catch return error.SkipZigTest;
     }
     defer {
         unlock: {
-            var d = test_io.openDirAbsolute(std.Options.debug_io, base, .{}) catch break :unlock;
+            var d = test_io.openDirAbsolute(std.Options.debug_io, fx.base, .{}) catch break :unlock;
             defer d.close(std.Options.debug_io);
             const handle: std.Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
             handle.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(0o755)) catch {};
         }
-        test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
     }
 
     // Whatever error the helper surfaces, the load-bearing invariant is
@@ -467,7 +484,7 @@ test "atomicReplaceFile leaves the original intact when staging fails" {
     _ = atomic.atomicReplaceFile(std.Options.debug_io, dst, "NEW") catch {};
 
     {
-        var d = try test_io.openDirAbsolute(std.Options.debug_io, base, .{});
+        var d = try test_io.openDirAbsolute(std.Options.debug_io, fx.base, .{});
         defer d.close(std.Options.debug_io);
         const handle: std.Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
         try handle.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(0o755));
@@ -481,19 +498,17 @@ test "atomicReplaceFile leaves the original intact when staging fails" {
 }
 
 test "atomicRename moves a directory tree within the same filesystem" {
-    const base = "/tmp/malt_atomic_rename_dir";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    test_io.makeDirAbsolute(std.Options.debug_io, base) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var fx = try Fixture.init("rename_dir");
+    defer fx.deinit();
 
-    const src = "/tmp/malt_atomic_rename_dir/src";
-    const dst = "/tmp/malt_atomic_rename_dir/dst";
+    const src = fx.p("src");
+    const dst = fx.p("dst");
     try test_io.makeDirAbsolute(std.Options.debug_io, src);
 
     // Put a file inside so an accidental copy+delete fallback would be
     // observable — a plain `rename(2)` on a same-FS directory must not
     // drop child entries.
-    const child = "/tmp/malt_atomic_rename_dir/src/inner.txt";
+    const child = fx.p("src/inner.txt");
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, child, .{});
         defer f.close(std.Options.debug_io);

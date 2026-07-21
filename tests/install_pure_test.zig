@@ -752,13 +752,7 @@ test "isInstalled is false before recordKeg, true after" {
 }
 
 test "pruneCellarForReinstall wipes an existing Cellar dir so --force can re-materialize" {
-    const prefix = try std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_prune_cellar_{d}",
-        .{test_io.nanoTimestamp(
-            std.Options.debug_io,
-        )},
-    );
+    const prefix = try test_io.uniqueTempPath(testing.allocator, "prune", "cellar");
     defer testing.allocator.free(prefix);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -783,13 +777,7 @@ test "pruneCellarForReinstall wipes an existing Cellar dir so --force can re-mat
 }
 
 test "pruneCellarForReinstall is a no-op when the destination is missing" {
-    const prefix = try std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_prune_cellar_missing_{d}",
-        .{test_io.nanoTimestamp(
-            std.Options.debug_io,
-        )},
-    );
+    const prefix = try test_io.uniqueTempPath(testing.allocator, "prune", "cellar_missing");
     defer testing.allocator.free(prefix);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -1056,13 +1044,7 @@ test "deleteKeg removes the row and isInstalled reports false again" {
 }
 
 test "ensureDirs creates every required subdirectory under a fresh prefix" {
-    const prefix = try std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_install_ensure_dirs_{d}",
-        .{test_io.nanoTimestamp(
-            std.Options.debug_io,
-        )},
-    );
+    const prefix = try test_io.uniqueTempPath(testing.allocator, "install", "ensure_dirs");
     defer testing.allocator.free(prefix);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};

@@ -12,12 +12,18 @@ const sqlite = malt.sqlite;
 const schema = malt.schema;
 const supervisor = malt.services_supervisor;
 
+/// Scratch DB under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures.
 const TempDb = struct {
-    dir: []const u8,
+    arena: std.heap.ArenaAllocator,
+    dir: [:0]const u8,
     db: sqlite.Database,
 
-    fn init(comptime tag: []const u8) !TempDb {
-        const dir = "/tmp/malt_services_test_" ++ tag;
+    fn init(tag: []const u8) !TempDb {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try test_io.uniqueTempPath(arena.allocator(), "services", tag);
+        const dir = try arena.allocator().dupeZ(u8, base);
         test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, dir);
         var db_path_buf: [256]u8 = undefined;
@@ -25,12 +31,23 @@ const TempDb = struct {
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
-        return .{ .dir = dir, .db = db };
+        return .{ .arena = arena, .dir = dir, .db = db };
+    }
+
+    /// Absolute path to `sub` inside the scratch dir; valid until `deinit`.
+    fn p(self: *TempDb, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}/{s}",
+            .{ self.dir, sub },
+            0,
+        ) catch @panic("OOM");
     }
 
     fn deinit(self: *TempDb) void {
         self.db.close();
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
+        self.arena.deinit();
     }
 };
 
@@ -90,7 +107,7 @@ test "tailLog returns last N lines of a small file" {
     var t = try TempDb.init("tail");
     defer t.deinit();
 
-    const log_path = "/tmp/malt_services_test_tail/sample.log";
+    const log_path = t.p("sample.log");
     {
         var f = try test_io.createFileAbsolute(std.Options.debug_io, log_path, .{ .truncate = true });
         defer f.close(std.Options.debug_io);

@@ -21,14 +21,8 @@ const c = struct {
     extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 };
 
-fn uniqueSandbox(suffix: []const u8) ![]u8 {
-    const p = try std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_dsl_builtins_{d}_{s}",
-        .{ test_io.nanoTimestamp(
-            std.Options.debug_io,
-        ), suffix },
-    );
+fn uniqueSandbox(suffix: []const u8) ![]const u8 {
+    const p = try test_io.uniqueTempPath(testing.allocator, "dsl_builtins", suffix);
     test_io.cwd().createDirPath(std.Options.debug_io, p) catch {};
     return p;
 }

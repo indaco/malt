@@ -85,7 +85,10 @@ test "BrewApi.fetchFormula composes with HttpClient.offline so cache hits still 
     defer http.deinit();
     http.offline = true;
 
-    const tmp = "/tmp/malt_offline_int_compose";
+    // Process-unique root: a fixed /tmp name lets an overlapping run's
+    // deleteTree wipe this fixture mid-test.
+    const tmp = try test_io.uniqueTempPath(testing.allocator, "offline", "int_compose");
+    defer testing.allocator.free(tmp);
     test_io.deleteTreeAbsolute(std.Options.debug_io, tmp) catch {};
     try test_io.makeDirAbsolute(std.Options.debug_io, tmp);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, tmp) catch {};

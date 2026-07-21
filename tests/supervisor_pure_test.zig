@@ -17,6 +17,38 @@ const c = struct {
     extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 };
 
+/// Scratch tree under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures.
+const Fixture = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(tag: []const u8) !Fixture {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try test_io.uniqueTempPath(arena.allocator(), "supervisor", tag);
+        const base_z = try arena.allocator().dupeZ(u8, base);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
+        return .{ .arena = arena, .base = base_z };
+    }
+
+    /// Absolute path to `sub` inside the fixture; valid until `deinit`.
+    fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}/{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Fixture) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "SupervisorCtx bundles allocator and db into one param" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -88,12 +120,12 @@ test "list is empty on a fresh database and hasService returns false" {
 }
 
 test "register writes a plist and a DB row that list reports back" {
-    const prefix = "/tmp/malt_sup_register";
-    const cellar = "/tmp/malt_sup_register/Cellar/testkeg/1.0";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    var fx = try Fixture.init("register");
+    defer fx.deinit();
+    const prefix = fx.base;
+    const cellar = fx.p("Cellar/testkeg/1.0");
     _ = c.setenv("MALT_PREFIX", prefix, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -103,12 +135,12 @@ test "register writes a plist and a DB row that list reports back" {
     // log paths must live under malt_prefix.
     const spec = plist_mod.ServiceSpec{
         .label = "com.malt.test.svc",
-        .program_args = &.{ "/tmp/malt_sup_register/Cellar/testkeg/1.0/bin/echo", "hi" },
+        .program_args = &.{ fx.p("Cellar/testkeg/1.0/bin/echo"), "hi" },
         .working_dir = null,
         .env = &.{},
         .keep_alive = false,
-        .stdout_path = "/tmp/malt_sup_register/out.log",
-        .stderr_path = "/tmp/malt_sup_register/err.log",
+        .stdout_path = fx.p("out.log"),
+        .stderr_path = fx.p("err.log"),
     };
     const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
     try supervisor.register(ctx, spec, "testkeg", true, cellar, prefix);
@@ -131,12 +163,12 @@ test "register writes a plist and a DB row that list reports back" {
 }
 
 test "register writes an interval plist with StartInterval and RunAtLoad false" {
-    const prefix = "/tmp/malt_sup_interval";
-    const cellar = "/tmp/malt_sup_interval/Cellar/testkeg/1.0";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    var fx = try Fixture.init("interval");
+    defer fx.deinit();
+    const prefix = fx.base;
+    const cellar = fx.p("Cellar/testkeg/1.0");
     _ = c.setenv("MALT_PREFIX", prefix, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -144,9 +176,9 @@ test "register writes an interval plist with StartInterval and RunAtLoad false" 
 
     const spec = plist_mod.ServiceSpec{
         .label = "com.malt.test.interval",
-        .program_args = &.{"/tmp/malt_sup_interval/Cellar/testkeg/1.0/bin/backup"},
-        .stdout_path = "/tmp/malt_sup_interval/out.log",
-        .stderr_path = "/tmp/malt_sup_interval/err.log",
+        .program_args = &.{fx.p("Cellar/testkeg/1.0/bin/backup")},
+        .stdout_path = fx.p("out.log"),
+        .stderr_path = fx.p("err.log"),
         .schedule = .{ .interval = 3600 },
     };
     const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
@@ -168,12 +200,12 @@ test "register writes an interval plist with StartInterval and RunAtLoad false" 
 }
 
 test "register stores a cron schedule label that list reports back" {
-    const prefix = "/tmp/malt_sup_cron_label";
-    const cellar = prefix ++ "/Cellar/testkeg/1.0";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    var fx = try Fixture.init("cron_label");
+    defer fx.deinit();
+    const prefix = fx.base;
+    const cellar = fx.p("Cellar/testkeg/1.0");
     _ = c.setenv("MALT_PREFIX", prefix, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -184,9 +216,9 @@ test "register stores a cron schedule label that list reports back" {
     const entries = [_]plist_mod.CalendarInterval{.{ .minute = 30, .hour = 4, .weekday = 6 }};
     const spec = plist_mod.ServiceSpec{
         .label = "com.malt.test.cron",
-        .program_args = &.{cellar ++ "/bin/backup"},
-        .stdout_path = prefix ++ "/out.log",
-        .stderr_path = prefix ++ "/err.log",
+        .program_args = &.{fx.p("Cellar/testkeg/1.0/bin/backup")},
+        .stdout_path = fx.p("out.log"),
+        .stderr_path = fx.p("err.log"),
         .schedule = .{ .calendar = &entries },
     };
     const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
@@ -219,9 +251,9 @@ test "register rejects an out-of-range interval via the validate gate" {
 }
 
 test "tailLog writes the last N lines into the provided writer" {
-    const path = "/tmp/malt_sup_tail.log";
-    test_io.cwd().deleteFile(std.Options.debug_io, path) catch {};
-    defer test_io.cwd().deleteFile(std.Options.debug_io, path) catch {};
+    var fx = try Fixture.init("tail");
+    defer fx.deinit();
+    const path = fx.p("tail.log");
 
     const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{});
     try f.writeStreamingAll(std.Options.debug_io, "a\nb\nc\nd\ne\n");

@@ -22,13 +22,9 @@ const Scratch = struct {
     path: [:0]u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
-        const ts = test_io.nanoTimestamp(std.Options.debug_io);
-        const path = try std.fmt.allocPrintSentinel(
-            allocator,
-            "/tmp/malt_list_cli_{s}_{d}",
-            .{ tag, ts },
-            0,
-        );
+        const base = try test_io.uniqueTempPath(allocator, "list_cli", tag);
+        defer allocator.free(base);
+        const path = try allocator.dupeZ(u8, base);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
@@ -96,7 +92,10 @@ test "execute --help short-circuits" {
 
 test "execute on a fresh prefix with no db is a clean no-op" {
     // No db/ subdir → SQLite open fails → list takes the "empty dir" branch.
-    const path = "/tmp/malt_list_cli_no_db";
+    const base = try test_io.uniqueTempPath(testing.allocator, "list_cli", "no_db");
+    defer testing.allocator.free(base);
+    const path = try testing.allocator.dupeZ(u8, base);
+    defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};

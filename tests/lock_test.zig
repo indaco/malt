@@ -10,11 +10,7 @@ const lock = @import("malt").lock;
 const io = std.Options.debug_io;
 
 fn uniquePath(suffix: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_lock_test_{d}_{s}",
-        .{ test_io.nanoTimestamp(io), suffix },
-    );
+    return test_io.uniqueTempPath(testing.allocator, "lock_test", suffix);
 }
 
 test "acquire writes pid, release clears the file, holderPid parses back" {

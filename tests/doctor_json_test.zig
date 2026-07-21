@@ -18,11 +18,10 @@ const store_mod = malt.store;
 const output = malt.output;
 
 const Scratch = struct {
-    path: []u8,
+    path: []const u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
-        const ts = test_io.nanoTimestamp(std.Options.debug_io);
-        const path = try std.fmt.allocPrint(allocator, "/tmp/malt_doctor_json_{s}_{d}", .{ tag, ts });
+        const path = try test_io.uniqueTempPath(allocator, "doctor_json", tag);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const subs = [_][]const u8{ "store", "Cellar", "Caskroom", "opt", "bin", "lib", "tmp", "cache", "db" };

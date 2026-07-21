@@ -15,14 +15,9 @@ const c = struct {
 };
 
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
-    const path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/malt_cli_services_{d}_{s}",
-        .{ test_io.nanoTimestamp(
-            std.Options.debug_io,
-        ), suffix },
-        0,
-    );
+    const base = try test_io.uniqueTempPath(testing.allocator, "cli_services", suffix);
+    defer testing.allocator.free(base);
+    const path = try testing.allocator.dupeZ(u8, base);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
@@ -119,7 +114,10 @@ test "execute start/stop/restart with wrong arity returns InvalidArgs" {
 test "execute list --json on a prefix with no db/ directory emits `[]`" {
     // `openDb` auto-creates `db/` and the sqlite file. CI consumers piping
     // through `jq` need a parseable empty array on first run.
-    const path = "/tmp/malt_cli_services_fresh_no_db";
+    const base = try test_io.uniqueTempPath(testing.allocator, "cli_services", "fresh_no_db");
+    defer testing.allocator.free(base);
+    const path = try testing.allocator.dupeZ(u8, base);
+    defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};

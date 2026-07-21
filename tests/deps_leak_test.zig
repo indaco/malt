@@ -27,40 +27,48 @@ const client_mod = malt.client;
 /// Minimal on-disk SQLite DB wrapper: just enough to let
 /// `deps.resolve()` run `isInstalled` lookups.
 const TempDb = struct {
+    arena: std.heap.ArenaAllocator,
     dir: []const u8,
     db: sqlite.Database,
 
-    fn init(comptime tag: []const u8) !TempDb {
-        const dir = "/tmp/malt_deps_leak_test_" ++ tag;
+    fn init(tag: []const u8) !TempDb {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const dir = try test_io.uniqueTempPath(arena.allocator(), "deps_leak_test", tag);
         test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
         var buf: [256]u8 = undefined;
         const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(path);
         errdefer db.close();
         try schema.initSchema(&db);
-        return .{ .dir = dir, .db = db };
+        return .{ .arena = arena, .dir = dir, .db = db };
     }
 
     fn deinit(self: *TempDb) void {
         self.db.close();
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
+        self.arena.deinit();
     }
 };
 
 /// Cache directory wrapper used to pre-seed `BrewApi` with fake
 /// formula JSON files, short-circuiting the network.
 const TempCacheDir = struct {
+    arena: std.heap.ArenaAllocator,
     path: []const u8,
 
-    fn init(comptime tag: []const u8) !TempCacheDir {
-        const p = "/tmp/malt_deps_leak_cache_" ++ tag;
+    fn init(tag: []const u8) !TempCacheDir {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const p = try test_io.uniqueTempPath(arena.allocator(), "deps_leak_cache", tag);
         test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, p);
-        return .{ .path = p };
+        return .{ .arena = arena, .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        self.arena.deinit();
     }
 
     fn writeFormula(self: *TempCacheDir, name: []const u8, json: []const u8) !void {

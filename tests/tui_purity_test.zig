@@ -315,14 +315,19 @@ fn writeFixture(io: std.Io, abs_path: []const u8, content: []const u8) !void {
 // correct in isolation.
 test "the anti-cycle scan flags a guarded file that imports the hub, and only that file" {
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_anticycle_fixture";
+    // Process-unique base so an overlapping test run cannot wipe these
+    // fixtures mid-scan.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const base = try test_io.uniqueTempPath(arena.allocator(), "tui_purity", "anticycle");
     test_io.deleteTreeAbsolute(io, base) catch {};
     try test_io.makeDirAbsolute(io, base);
     defer test_io.deleteTreeAbsolute(io, base) catch {};
 
-    try writeFixture(io, base ++ "/evil_tab.zig", "const app = @import(\"app.zig\");\n");
-    try writeFixture(io, base ++ "/ctx.zig", "const term = @import(\"term.zig\");\n"); // clean sink
-    try writeFixture(io, base ++ "/list.zig", "const app = @import(\"app.zig\");\n"); // not guarded → ignored
+    const a = arena.allocator();
+    try writeFixture(io, try std.fmt.allocPrint(a, "{s}/evil_tab.zig", .{base}), "const app = @import(\"app.zig\");\n");
+    try writeFixture(io, try std.fmt.allocPrint(a, "{s}/ctx.zig", .{base}), "const term = @import(\"term.zig\");\n"); // clean sink
+    try writeFixture(io, try std.fmt.allocPrint(a, "{s}/list.zig", .{base}), "const app = @import(\"app.zig\");\n"); // not guarded → ignored
 
     var failures: std.ArrayList([]const u8) = .empty;
     defer {

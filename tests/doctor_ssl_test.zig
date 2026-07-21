@@ -15,17 +15,13 @@ const test_io = @import("test_io");
 const doctor = malt.doctor;
 const output = malt.output;
 
-fn uniquePrefix(suffix: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_doctor_ssl_{d}_{s}",
-        .{ test_io.nanoTimestamp(std.Options.debug_io), suffix },
-    );
+fn uniquePrefix(suffix: []const u8) ![]const u8 {
+    return test_io.uniqueTempPath(testing.allocator, "doctor_ssl", suffix);
 }
 
 /// Seed a scratch prefix. `with_ca` links `opt/ca-certificates` (the
 /// "installed" signal); `with_cert` lands `etc/openssl@3/cert.pem`.
-fn makePrefix(suffix: []const u8, with_ca: bool, with_cert: bool) ![]u8 {
+fn makePrefix(suffix: []const u8, with_ca: bool, with_cert: bool) ![]const u8 {
     const prefix = try uniquePrefix(suffix);
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
     if (with_ca) {

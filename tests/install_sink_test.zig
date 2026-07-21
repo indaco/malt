@@ -56,7 +56,10 @@ const RecordingSink = struct {
 };
 
 test "installAll routes the per-keg failure line through the injected sink" {
-    const prefix_z: [:0]const u8 = "/tmp/malt_install_sink_route";
+    const unique = try test_io.uniqueTempPath(testing.allocator, "install_sink", "route");
+    defer testing.allocator.free(unique);
+    const prefix_z = try testing.allocator.dupeZ(u8, unique);
+    defer testing.allocator.free(prefix_z);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
@@ -96,7 +99,9 @@ fn runUnresolvable(
     suffix: []const u8,
     out_buf: *std.ArrayList(u8),
 ) anyerror!void {
-    const prefix = try std.fmt.allocPrintSentinel(testing.allocator, "/tmp/malt_install_sink_{s}", .{suffix}, 0);
+    const unique = try test_io.uniqueTempPath(testing.allocator, "install_sink", suffix);
+    defer testing.allocator.free(unique);
+    const prefix = try testing.allocator.dupeZ(u8, unique);
     defer testing.allocator.free(prefix);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix);

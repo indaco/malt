@@ -12,8 +12,10 @@ const test_io = @import("test_io");
 const swap = malt.update_swap;
 const fs_compat = test_io;
 
-fn resetScratch(allocator: std.mem.Allocator, tag: []const u8) ![]u8 {
-    const dir = try std.fmt.allocPrint(allocator, "/tmp/malt_swap_test_{s}", .{tag});
+/// Process-unique scratch root, so overlapping test runs cannot wipe each
+/// other's fixtures.
+fn resetScratch(allocator: std.mem.Allocator, tag: []const u8) ![]const u8 {
+    const dir = try test_io.uniqueTempPath(allocator, "swap", tag);
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     return dir;
@@ -40,7 +42,7 @@ fn modeBits(path: []const u8) !u32 {
 /// Build a scratch dir + its target/new/old/staged triple of paths.
 /// All four live in the same dir so rename-based atomicity holds.
 const Paths = struct {
-    dir: []u8,
+    dir: []const u8,
     target: []u8,
     new: []u8,
     old: []u8,

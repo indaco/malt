@@ -63,33 +63,63 @@ test "classify: setuid bit does not count as writable" {
 
 // ── walker integration ────────────────────────────────────────────
 
-test "walkPrefix: clean tree yields no findings" {
-    const base = "/tmp/malt_perms_clean";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, base ++ "/bin");
-    (try test_io.createFileAbsolute(std.Options.debug_io, base ++ "/bin/foo", .{})).close(std.Options.debug_io);
+/// Scratch tree under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures.
+const Fixture = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
 
-    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, base, perms.currentUid(), 64);
+    fn init(tag: []const u8) !Fixture {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try test_io.uniqueTempPath(arena.allocator(), "perms", tag);
+        const base_z = try arena.allocator().dupeZ(u8, base);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
+        return .{ .arena = arena, .base = base_z };
+    }
+
+    /// Absolute path to `sub` inside the fixture; valid until `deinit`.
+    fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}/{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Fixture) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
+const c = struct {
+    extern "c" fn chmod(path: [*:0]const u8, mode: u16) c_int;
+};
+
+test "walkPrefix: clean tree yields no findings" {
+    var fx = try Fixture.init("clean");
+    defer fx.deinit();
+    try test_io.cwd().createDirPath(std.Options.debug_io, fx.p("bin"));
+    (try test_io.createFileAbsolute(std.Options.debug_io, fx.p("bin/foo"), .{})).close(std.Options.debug_io);
+
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, fx.base, perms.currentUid(), 64);
     defer perms.freeFindings(testing.allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
 
 test "walkPrefix: detects other-writable file" {
-    const base = "/tmp/malt_perms_other_writable";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, base);
-    const path = base ++ "/world_writable.txt";
+    var fx = try Fixture.init("other_writable");
+    defer fx.deinit();
+    const path = fx.p("world_writable.txt");
     (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
 
     // chmod o+w
-    const c = struct {
-        extern "c" fn chmod(path: [*:0]const u8, mode: u16) c_int;
-    };
     if (c.chmod(path, 0o666) != 0) return error.TestUnexpectedResult;
 
-    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, base, perms.currentUid(), 64);
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, fx.base, perms.currentUid(), 64);
     defer perms.freeFindings(testing.allocator, findings);
 
     // Must find at least the world_writable file; may also flag the
@@ -107,25 +137,20 @@ test "walkPrefix: detects other-writable file" {
 test "walkPrefix: a symlink is judged on itself, not its target" {
     // The walker stats with SYMLINK_NOFOLLOW so a symlink planted in the prefix
     // cannot make it report (or clear) the permissions of something elsewhere.
-    const base = "/tmp/malt_perms_nofollow";
-    const target = "/tmp/malt_perms_nofollow_target.txt";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    test_io.deleteTreeAbsolute(std.Options.debug_io, target) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, target) catch {};
+    var fx = try Fixture.init("nofollow");
+    defer fx.deinit();
+    // The target lives outside the walked tree, so only following the link
+    // could surface its mode.
+    var outside = try Fixture.init("nofollow_target");
+    defer outside.deinit();
 
-    try test_io.cwd().createDirPath(std.Options.debug_io, base);
+    const target = outside.p("target.txt");
     (try test_io.createFileAbsolute(std.Options.debug_io, target, .{})).close(std.Options.debug_io);
-
-    const c = struct {
-        extern "c" fn chmod(path: [*:0]const u8, mode: u16) c_int;
-    };
     if (c.chmod(target, 0o666) != 0) return error.TestUnexpectedResult;
 
-    const link = base ++ "/link";
-    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, target, link, .{});
+    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, target, fx.p("link"), .{});
 
-    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, base, perms.currentUid(), 64);
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, fx.base, perms.currentUid(), 64);
     defer perms.freeFindings(testing.allocator, findings);
 
     // Following would inherit the target's 0o666 and flag the link.
@@ -147,22 +172,18 @@ test "walkPrefix: missing prefix returns empty findings, no error" {
 }
 
 test "walkPrefix: respects max_findings cap" {
-    const base = "/tmp/malt_perms_cap";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, base);
-    const c = struct {
-        extern "c" fn chmod(path: [*:0]const u8, mode: u16) c_int;
-    };
+    var fx = try Fixture.init("cap");
+    defer fx.deinit();
     // Seed 5 world-writable files.
     for (0..5) |i| {
-        var buf: [64]u8 = undefined;
-        const p = try std.fmt.bufPrintSentinel(&buf, "{s}/f{d}", .{ base, i }, 0);
+        var buf: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buf, "f{d}", .{i});
+        const p = fx.p(name);
         (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
         if (c.chmod(p.ptr, 0o666) != 0) return error.TestUnexpectedResult;
     }
 
-    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, base, perms.currentUid(), 2);
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, fx.base, perms.currentUid(), 2);
     defer perms.freeFindings(testing.allocator, findings);
     try testing.expect(findings.len <= 2);
 }
