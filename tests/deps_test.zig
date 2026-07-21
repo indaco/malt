@@ -394,6 +394,49 @@ test "resolve fails the resolve when a dep's sub-fetch fails" {
     );
 }
 
+test "resolve's only failure across the module boundary is ResolutionFailed" {
+    // Boundary check on the public re-export: `DepError` is what a consumer of
+    // `malt.deps` may have to handle, so the exhaustive switch below stops
+    // compiling the moment the set grows a variant nobody can produce.
+    try comptime testing.expect(deps_mod.DepError == error{ResolutionFailed});
+    const e: deps_mod.DepError = error.ResolutionFailed;
+    switch (e) {
+        error.ResolutionFailed => {},
+    }
+}
+
+test "resolve walks a dependency cycle to completion through the public module" {
+    const alloc = testing.allocator;
+
+    var dir = try TempCacheDir.init("resolve_cycle");
+    defer dir.deinit();
+
+    // ring_a → ring_b → ring_a, served from disk so nothing dials out.
+    try dir.writeFormula("ring_a", "{\"name\":\"ring_a\",\"dependencies\":[\"ring_b\"]}");
+    try dir.writeFormula("ring_b", "{\"name\":\"ring_b\",\"dependencies\":[\"ring_a\"]}");
+
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
+
+    var tdb = try TempDb.init("resolve_cycle");
+    defer tdb.deinit();
+
+    var cache = deps_mod.FormulaCache.init(alloc);
+    defer cache.deinit();
+
+    // A back-edge is collapsed by the visited set, never reported: the resolve
+    // succeeds and each name lands once.
+    const deps = try deps_mod.resolve(std.Options.debug_io, alloc, "ring_a", &api, &tdb.db, &cache);
+    defer {
+        for (deps) |d| alloc.free(d.name);
+        alloc.free(deps);
+    }
+
+    try testing.expectEqual(@as(usize, 1), deps.len);
+    try testing.expectEqualStrings("ring_b", deps[0].name);
+}
+
 // --- ensureOptLink / stale-cellar heal coverage ---------------------------
 
 test "resolve treats a DB keg with a vanished cellar_path as not-installed" {
