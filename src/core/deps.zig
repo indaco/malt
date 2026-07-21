@@ -1,4 +1,4 @@
-//! malt — BFS dep resolution with cycle detection and orphan finding.
+//! malt — BFS dep resolution and orphan finding.
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
@@ -7,9 +7,7 @@ const atomic = @import("../fs/atomic.zig");
 const formula_mod = @import("formula.zig");
 
 pub const DepError = error{
-    CycleDetected,
     ResolutionFailed,
-    OutOfMemory,
 };
 
 pub const ResolvedDep = struct {
@@ -97,9 +95,12 @@ pub fn resolve(
     api: *api_mod.BrewApi,
     db: *sqlite.Database,
     cache: *FormulaCache,
-) ![]ResolvedDep {
+) DepError![]ResolvedDep {
     var result: std.ArrayList(ResolvedDep) = .empty;
 
+    // Records "seen at all", not "seen on this path": a back-edge and a
+    // diamond collapse to the same event, so a repeat name is dropped and
+    // never reported. That is what guarantees termination on any graph shape.
     var visited = std.StringHashMap(void).init(allocator);
     defer visited.deinit();
 
@@ -608,4 +609,91 @@ test "resolve aborts when a transitive dependency's formula can't be fetched" {
         error.ResolutionFailed,
         resolve(io, testing.allocator, "rootpkg", &api, &db, &cache),
     );
+}
+
+test "resolve's declared error set is the one it can actually return" {
+    // Guards the drift this signature binding closes: an aspirational variant
+    // added to `DepError`, or a `return` of an undeclared error, must fail
+    // here (or at compile time) instead of surviving review.
+    const ret = @typeInfo(@TypeOf(resolve)).@"fn".return_type.?;
+    try testing.expect(@typeInfo(ret).error_union.error_set == DepError);
+}
+
+test "resolve terminates on a dependency cycle, listing each name once" {
+    const client_mod = @import("../net/client.zig");
+    const schema_mod = @import("../db/schema.zig");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, "/tmp/malt_resolve_cycle_cache");
+    api.base_url = "http://127.0.0.1:9";
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema_mod.initSchema(&db);
+
+    var cache = FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+    // Both nodes primed so getDeps never dials out: cyclea → cycleb → cyclea.
+    _ = try cache.getOrParse(
+        "cyclea",
+        "{\"name\":\"cyclea\",\"versions\":{\"stable\":\"1.0\"}," ++
+            "\"dependencies\":[\"cycleb\"],\"oldnames\":[]}",
+    );
+    _ = try cache.getOrParse(
+        "cycleb",
+        "{\"name\":\"cycleb\",\"versions\":{\"stable\":\"1.0\"}," ++
+            "\"dependencies\":[\"cyclea\"],\"oldnames\":[]}",
+    );
+
+    // Policy: a repeat name is collapsed by `visited`, never reported. The
+    // back-edge to the root is simply dropped and the walk ends.
+    const deps = try resolve(io, testing.allocator, "cyclea", &api, &db, &cache);
+    defer {
+        for (deps) |d| testing.allocator.free(d.name);
+        testing.allocator.free(deps);
+    }
+
+    try testing.expectEqual(@as(usize, 1), deps.len);
+    try testing.expectEqualStrings("cycleb", deps[0].name);
+}
+
+test "resolve drops a self-dependency instead of listing the root as its own dep" {
+    const client_mod = @import("../net/client.zig");
+    const schema_mod = @import("../db/schema.zig");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, "/tmp/malt_resolve_selfcycle_cache");
+    api.base_url = "http://127.0.0.1:9";
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema_mod.initSchema(&db);
+
+    var cache = FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+    _ = try cache.getOrParse(
+        "selfdep",
+        "{\"name\":\"selfdep\",\"versions\":{\"stable\":\"1.0\"}," ++
+            "\"dependencies\":[\"selfdep\"],\"oldnames\":[]}",
+    );
+
+    // Shortest cycle: the root reaches the queue-side dedup rather than the
+    // fan-out one, so it exercises the other half of the collapse.
+    const deps = try resolve(io, testing.allocator, "selfdep", &api, &db, &cache);
+    defer {
+        for (deps) |d| testing.allocator.free(d.name);
+        testing.allocator.free(deps);
+    }
+
+    try testing.expectEqual(@as(usize, 0), deps.len);
 }
