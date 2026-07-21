@@ -356,7 +356,7 @@ pub fn notice(comptime fmt: []const u8, args: anytype) void {
 pub fn question(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ? " else "  ? ";
+    const prefix: []const u8 = "  ? ";
     const colorize = color.isColorEnabled();
     lockStderr();
     defer unlockStderr();
