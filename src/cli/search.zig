@@ -32,8 +32,7 @@ pub fn shouldRunLocal(scope: Scope) bool {
 /// Should the API path run? `.installed` is the only scope that bypasses
 /// it entirely; everything else (including `.default`, which mirrors
 /// `brew search`) reaches for the index.
-pub fn shouldRunApi(scope: Scope, has_local_hit: bool) bool {
-    _ = has_local_hit;
+pub fn shouldRunApi(scope: Scope) bool {
     return switch (scope) {
         .default, .api, .all => true,
         .installed => false,
@@ -136,20 +135,16 @@ test "parseScope: ignores non-scope flags and positional args" {
 }
 
 test "shouldRunApi: default mirrors brew search and hits the API" {
-    try testing.expect(shouldRunApi(.default, false));
-    try testing.expect(shouldRunApi(.default, true));
+    try testing.expect(shouldRunApi(.default));
 }
 
 test "shouldRunApi: installed never hits API" {
-    try testing.expect(!shouldRunApi(.installed, false));
-    try testing.expect(!shouldRunApi(.installed, true));
+    try testing.expect(!shouldRunApi(.installed));
 }
 
 test "shouldRunApi: api and all always hit API" {
-    try testing.expect(shouldRunApi(.api, true));
-    try testing.expect(shouldRunApi(.api, false));
-    try testing.expect(shouldRunApi(.all, true));
-    try testing.expect(shouldRunApi(.all, false));
+    try testing.expect(shouldRunApi(.api));
+    try testing.expect(shouldRunApi(.all));
 }
 
 test "shouldRunLocal: default and api skip the local DB" {
@@ -417,10 +412,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         } else |_| {}
     }
 
-    const has_local_hit = formula.exact or cask.exact or
-        formula.matches.len != 0 or cask.matches.len != 0;
-
-    if (shouldRunApi(scope, has_local_hit)) {
+    if (shouldRunApi(scope)) {
         const cache_dir = atomic.maltCacheDir(allocator) catch {
             output.err("Failed to determine cache directory", .{});
             return error.Aborted;
@@ -464,7 +456,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 if (search_formula) formula = api_formula;
                 if (search_cask) cask = api_cask;
             },
-            .installed => unreachable, // shouldRunApi(.installed, …) is false.
+            .installed => unreachable, // shouldRunApi(.installed) is false.
         }
     }
 
