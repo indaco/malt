@@ -164,13 +164,39 @@ pub fn diff(
     installed_formulas: []const []const u8,
     installed_casks: []const []const u8,
 ) CleanupError!Plan {
+    return planByMembership(allocator, manifest, installed_formulas, installed_casks, false);
+}
+
+/// Compute the purge plan: every installed name the manifest *does* list,
+/// returned sorted by name. Backs `bundle remove --purge`. Intersecting with
+/// installed state is what keeps a member that was never installed here from
+/// reaching the uninstall dispatcher.
+pub fn selectMembers(
+    allocator: std.mem.Allocator,
+    manifest: manifest_mod.Manifest,
+    installed_formulas: []const []const u8,
+    installed_casks: []const []const u8,
+) CleanupError!Plan {
+    return planByMembership(allocator, manifest, installed_formulas, installed_casks, true);
+}
+
+/// Shared body for `diff` and `selectMembers`. Same set operation — filter
+/// installed state by manifest membership — differing only in which side is
+/// kept, so the ownership and sort rules stay in one place.
+fn planByMembership(
+    allocator: std.mem.Allocator,
+    manifest: manifest_mod.Manifest,
+    installed_formulas: []const []const u8,
+    installed_casks: []const []const u8,
+    keep_members: bool,
+) CleanupError!Plan {
     var formulas: std.ArrayList([]const u8) = .empty;
     errdefer freeOwnedNames(allocator, &formulas);
     var casks: std.ArrayList([]const u8) = .empty;
     errdefer freeOwnedNames(allocator, &casks);
 
     for (installed_formulas) |name| {
-        if (manifestHasFormula(manifest, name)) continue;
+        if (manifestHasFormula(manifest, name) != keep_members) continue;
         const owned = allocator.dupe(u8, name) catch return CleanupError.OutOfMemory;
         formulas.append(allocator, owned) catch {
             allocator.free(owned);
@@ -178,7 +204,7 @@ pub fn diff(
         };
     }
     for (installed_casks) |name| {
-        if (manifestHasCask(manifest, name)) continue;
+        if (manifestHasCask(manifest, name) != keep_members) continue;
         const owned = allocator.dupe(u8, name) catch return CleanupError.OutOfMemory;
         casks.append(allocator, owned) catch {
             allocator.free(owned);
@@ -434,6 +460,115 @@ test "diff entries are sorted alphabetically" {
     defer m.deinit();
 
     var plan = try diff(
+        testing.allocator,
+        m,
+        &[_][]const u8{ "zsh", "abc", "midline" },
+        &[_][]const u8{},
+    );
+    defer plan.deinit();
+
+    try testing.expectEqualStrings("abc", plan.formulas[0]);
+    try testing.expectEqualStrings("midline", plan.formulas[1]);
+    try testing.expectEqualStrings("zsh", plan.formulas[2]);
+}
+
+// `selectMembers` is the inverse of `diff` and backs `bundle remove --purge`:
+// cleanup removes what the manifest does NOT list, purge removes what it does.
+// The intersection with installed state is what keeps purge from trying to
+// uninstall a member that was never installed on this machine.
+
+test "selectMembers returns installed formulas that the manifest lists" {
+    var m = try testManifest(testing.allocator, &.{ "wget", "jq" }, &.{});
+    defer m.deinit();
+
+    var plan = try selectMembers(
+        testing.allocator,
+        m,
+        &[_][]const u8{ "wget", "ripgrep", "jq", "fzf" },
+        &[_][]const u8{},
+    );
+    defer plan.deinit();
+
+    try testing.expectEqual(@as(usize, 2), plan.formulas.len);
+    try testing.expectEqualStrings("jq", plan.formulas[0]);
+    try testing.expectEqualStrings("wget", plan.formulas[1]);
+    try testing.expectEqual(@as(usize, 0), plan.casks.len);
+}
+
+test "selectMembers returns installed casks that the manifest lists" {
+    var m = try testManifest(testing.allocator, &.{}, &.{ "ghostty", "firefox" });
+    defer m.deinit();
+
+    var plan = try selectMembers(
+        testing.allocator,
+        m,
+        &[_][]const u8{},
+        &[_][]const u8{ "ghostty", "chrome" },
+    );
+    defer plan.deinit();
+
+    try testing.expectEqual(@as(usize, 0), plan.formulas.len);
+    try testing.expectEqual(@as(usize, 1), plan.casks.len);
+    try testing.expectEqualStrings("ghostty", plan.casks[0]);
+}
+
+// The load-bearing safety property: a manifest member that is not installed
+// must never reach the uninstall dispatcher.
+test "selectMembers skips manifest members that are not installed" {
+    var m = try testManifest(testing.allocator, &.{ "wget", "never-installed" }, &.{"absent-cask"});
+    defer m.deinit();
+
+    var plan = try selectMembers(
+        testing.allocator,
+        m,
+        &[_][]const u8{"wget"},
+        &[_][]const u8{},
+    );
+    defer plan.deinit();
+
+    try testing.expectEqual(@as(usize, 1), plan.formulas.len);
+    try testing.expectEqualStrings("wget", plan.formulas[0]);
+    try testing.expectEqual(@as(usize, 0), plan.casks.len);
+}
+
+test "selectMembers is empty when the manifest shares nothing with installed state" {
+    var m = try testManifest(testing.allocator, &.{"wget"}, &.{});
+    defer m.deinit();
+
+    var plan = try selectMembers(
+        testing.allocator,
+        m,
+        &[_][]const u8{ "ripgrep", "fzf" },
+        &[_][]const u8{},
+    );
+    defer plan.deinit();
+
+    try testing.expect(plan.isEmpty());
+}
+
+// diff and selectMembers must partition installed state, or purge and cleanup
+// would disagree about who owns a package.
+test "selectMembers and diff partition the installed set" {
+    var m = try testManifest(testing.allocator, &.{ "wget", "jq" }, &.{});
+    defer m.deinit();
+    const installed = [_][]const u8{ "wget", "ripgrep", "jq", "fzf" };
+
+    var kept = try selectMembers(testing.allocator, m, &installed, &.{});
+    defer kept.deinit();
+    var dropped = try diff(testing.allocator, m, &installed, &.{});
+    defer dropped.deinit();
+
+    try testing.expectEqual(installed.len, kept.formulas.len + dropped.formulas.len);
+    for (kept.formulas) |k| {
+        for (dropped.formulas) |d| try testing.expect(!std.mem.eql(u8, k, d));
+    }
+}
+
+test "selectMembers entries are sorted alphabetically" {
+    var m = try testManifest(testing.allocator, &.{ "zsh", "abc", "midline" }, &.{});
+    defer m.deinit();
+
+    var plan = try selectMembers(
         testing.allocator,
         m,
         &[_][]const u8{ "zsh", "abc", "midline" },
