@@ -496,15 +496,6 @@ pub fn encodeInstallHint(
     );
 }
 
-/// Convenience: format a line into `scratch` and write it to `w`.
-/// Same safety profile as the existing `bufPrint` + `writeAll`
-/// pattern used elsewhere in this file — avoids duplicating the
-/// 4 KiB stack buffer at every call site.
-fn writeLine(w: *std.Io.Writer, scratch: []u8, comptime fmt: []const u8, args: anytype) !void {
-    const line = std.fmt.bufPrint(scratch, fmt, args) catch return;
-    try w.writeAll(line);
-}
-
 /// Open the malt database if present. Returns `null` for any failure
 /// (missing parent directory, permission error, corrupt file) so the
 /// caller can degrade to a stateless response instead of bailing.
