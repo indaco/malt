@@ -18,25 +18,17 @@ const schema = malt.schema;
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
     extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-    extern "c" fn getpid() c_int;
 };
 
 // --- Integration: collectOutdatedFormulas / collectOutdatedCasks ---
-
-// Per-init counter; with the pid it makes every cache dir unique across both
-// concurrent processes and repeated inits within one process.
-var temp_seq = std.atomic.Value(u32).init(0);
 
 const TempCacheDir = struct {
     allocator: std.mem.Allocator,
     path: []const u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !TempCacheDir {
-        // Unique per process+init so overlapping test runs never share a tree
-        // (a shared tree let one init's deleteTree wipe another's seeded cache).
-        const p = try std.fmt.allocPrint(allocator, "/tmp/malt_outdated_test_{s}_{d}_{d}", .{
-            tag, c.getpid(), temp_seq.fetchAdd(1, .monotonic),
-        });
+        // A shared tree let one init's deleteTree wipe another's seeded cache.
+        const p = try test_io.uniqueTempPath(allocator, "outdated_test", tag);
         errdefer allocator.free(p);
         test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, p);
@@ -1452,9 +1444,7 @@ test "readSnapshot returns null on garbage contents" {
 test "writeSnapshot creates the cache directory if missing" {
     // Unique per process+init so overlapping runs don't share this dir; it must
     // not exist yet, so writeSnapshot is the one that creates it.
-    const path = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_outdated_test_snapshot_mkdir_{d}_{d}", .{
-        c.getpid(), temp_seq.fetchAdd(1, .monotonic),
-    });
+    const path = try test_io.uniqueTempPath(testing.allocator, "outdated_test", "snapshot_mkdir");
     defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};

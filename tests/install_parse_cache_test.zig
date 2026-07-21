@@ -17,21 +17,10 @@ const sqlite = malt.sqlite;
 const schema = malt.schema;
 const test_io = @import("test_io");
 
-const sys = struct {
-    extern "c" fn getpid() c_int;
-};
-
-var temp_seq = std.atomic.Value(u32).init(0);
-
-/// Build a process-unique temp path. Two overlapping `zig build test` runs
-/// (or a manual run racing the pre-push hook) otherwise share a fixed path,
-/// and one run's `deleteTree` wipes the other's seeded API cache — which
-/// silently falls through to the real network and fails on a 404.
-/// Mirrors the same fix in `tests/outdated_test.zig`.
+/// A shared path would let one run's `deleteTree` wipe the other's seeded API
+/// cache, which then silently falls through to the real network and 404s.
 fn uniqueTempPath(allocator: std.mem.Allocator, tag: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "/tmp/malt_parse_cache_test_{s}_{d}_{d}", .{
-        tag, sys.getpid(), temp_seq.fetchAdd(1, .monotonic),
-    });
+    return test_io.uniqueTempPath(allocator, "parse_cache_test", tag);
 }
 
 const TempDb = struct {
