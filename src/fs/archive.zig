@@ -89,7 +89,7 @@ fn sniffMagic(io: std.Io, absolute_path: []const u8, out: []u8) !usize {
 ///
 /// Hard-link entries (zig 0.16's `std.tar.FileKind` lacks `.hard_link`)
 /// are recovered via a raw header pre-scan and re-applied with
-/// `std.c.link` after `pipeToFileSystem` returns.
+/// `std.Io.Dir.hardLink` after `pipeToFileSystem` returns.
 pub fn extractTarGz(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !void {
     var magic: [2]u8 = undefined;
     const n = try sniffMagic(io, archive_path, &magic);
@@ -133,7 +133,7 @@ pub fn extractTarGz(io: std.Io, archive_path: []const u8, dest_dir: []const u8) 
     };
 
     if (hardlinks.len > 0) {
-        try applyHardLinks(dest_dir, hardlinks);
+        try applyHardLinks(io, dir, hardlinks);
     }
 }
 
@@ -142,22 +142,14 @@ const HardLink = struct {
     target: []const u8,
 };
 
-/// Recreate each `target -> name` hard link inside `dest_dir`. Uses
-/// `linkat` with flags=0 (no AT_SYMLINK_FOLLOW) so a hardlink whose
-/// target is itself a symlink shares the symlink inode rather than the
-/// symlink's target inode - macOS `link(2)` follows by default, which
-/// would let an archive craft a hardlink that escapes via a symlink hop.
-fn applyHardLinks(dest_dir: []const u8, links: []const HardLink) !void {
-    var target_buf: [std.Io.Dir.max_path_bytes * 2]u8 = undefined;
-    var name_buf: [std.Io.Dir.max_path_bytes * 2]u8 = undefined;
+/// Recreate each `target -> name` hard link inside `dir`. `follow_symlinks`
+/// stays false (the default): macOS `link(2)` follows, which would let an
+/// archive craft a hardlink that escapes via a symlink hop. Paths stay relative
+/// to the open handle so no absolute path is rebuilt from an entry name.
+fn applyHardLinks(io: std.Io, dir: std.Io.Dir, links: []const HardLink) !void {
     for (links) |hl| {
-        const target_z = std.fmt.bufPrintZ(&target_buf, "{s}/{s}", .{ dest_dir, hl.target }) catch
+        std.Io.Dir.hardLink(dir, hl.target, dir, hl.name, io, .{}) catch
             return error.ExtractionFailed;
-        const name_z = std.fmt.bufPrintZ(&name_buf, "{s}/{s}", .{ dest_dir, hl.name }) catch
-            return error.ExtractionFailed;
-        if (std.c.linkat(std.c.AT.FDCWD, target_z.ptr, std.c.AT.FDCWD, name_z.ptr, 0) != 0) {
-            return error.ExtractionFailed;
-        }
     }
 }
 
