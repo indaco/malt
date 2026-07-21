@@ -259,3 +259,106 @@ test "all install, migrate, and upgrade completions expose --use-system-ruby" {
         try std.testing.expect(count >= 3);
     }
 }
+
+/// Slice a script between `start` and the next `end`. Flag assertions have to
+/// be scoped to one command's block: a bare `indexOf("--services")` over the
+/// whole script is satisfied by `backup --services` and proves nothing about
+/// `bundle`.
+fn sectionAfter(script: []const u8, start: []const u8, end: []const u8) ![]const u8 {
+    const s = std.mem.indexOf(u8, script, start) orelse return error.MissingSectionStart;
+    const rest = script[s + start.len ..];
+    const e = std.mem.indexOf(u8, rest, end) orelse return error.MissingSectionEnd;
+    return rest[0..e];
+}
+
+/// The bash per-command flag table, excluding the earlier positional-completion
+/// `case`, which also has `bundle)` and `services)` labels.
+fn bashFlagsFor(command: []const u8) ![]const u8 {
+    const table = try sectionAfter(completions.bash_script, "local cmd_flags=\"\"", "esac");
+    return sectionAfter(table, command, "\n");
+}
+
+fn zshCaseFor(command: []const u8) ![]const u8 {
+    return sectionAfter(completions.zsh_script, command, ";;");
+}
+
+test "bundle completions advertise only flags bundle.zig parses" {
+    // --from-installed was advertised for a mode that does not exist: `bundle
+    // create` always populates from installed, so the flag could never change
+    // anything. Its absence is the assertion.
+    try testing.expect(std.mem.indexOf(u8, completions.bash_script, "from-installed") == null);
+    try testing.expect(std.mem.indexOf(u8, completions.zsh_script, "from-installed") == null);
+    try testing.expect(std.mem.indexOf(u8, completions.fish_script, "from-installed") == null);
+}
+
+test "all bundle completions expose --services" {
+    try expectContains(try bashFlagsFor("bundle)"), "--services");
+    try expectContains(try zshCaseFor("                bundle)"), "'--services[");
+    try expectContains(completions.fish_script, "__malt_using_command bundle' -l services");
+}
+
+test "all bundle completions expose --purge" {
+    try expectContains(try bashFlagsFor("bundle)"), "--purge");
+    try expectContains(try zshCaseFor("                bundle)"), "'--purge[");
+    try expectContains(completions.fish_script, "__malt_using_command bundle' -l purge");
+}
+
+test "all migrate completions expose --parallel" {
+    try expectContains(try bashFlagsFor("migrate)"), "--parallel");
+    try expectContains(try zshCaseFor("                migrate)"), "'--parallel[");
+    try expectContains(completions.fish_script, "__malt_using_command migrate'    -l parallel");
+}
+
+test "zsh completes uses and deps flags" {
+    // zsh had no case for either command, so it fell through to no completion
+    // at all while bash and fish offered flags.
+    const uses = try zshCaseFor("                uses)");
+    try expectContains(uses, "--recursive");
+    try expectContains(uses, "--json");
+
+    const deps = try zshCaseFor("                deps)");
+    try expectContains(deps, "--recursive");
+    try expectContains(deps, "--installed");
+    try expectContains(deps, "--json");
+}
+
+test "zsh services completions offer flags alongside the subcommands" {
+    const services = try zshCaseFor("                services)");
+    try expectContains(services, "--tail");
+    try expectContains(services, "--stderr");
+    try expectContains(services, "--follow");
+    // The subcommands must survive the switch from _values to _arguments.
+    try expectContains(services, "list start stop restart status logs");
+}
+
+test "zsh bundle completions offer flags alongside the subcommands" {
+    const bundle = try zshCaseFor("                bundle)");
+    try expectContains(bundle, "--dry-run");
+    try expectContains(bundle, "--format");
+    try expectContains(bundle, "install cleanup create list remove export import");
+}
+
+test "fish ls alias completes the same flags as list" {
+    // `ls` is an alias of `list` (main.zig command table), so a user who types
+    // the short form must not silently lose --tap/--size/--linked.
+    for ([_][]const u8{ "versions", "formula", "cask", "pinned", "tap", "json", "size", "linked" }) |flag| {
+        var buf: [64]u8 = undefined;
+        const needle = try std.fmt.bufPrint(&buf, "__malt_using_command ls'   -l {s}", .{flag});
+        try expectContains(completions.fish_script, needle);
+    }
+}
+
+test "zsh line continuations are single backslashes" {
+    // Zig multiline literals do no escape processing, so a doubled backslash
+    // reaches zsh as an escaped backslash rather than a continuation: the
+    // command ends early and the remaining flag specs run as commands. This
+    // parses cleanly under `zsh -n`, so only a shape check catches it.
+    var it = std.mem.splitScalar(u8, completions.zsh_script, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trimEnd(u8, line, " \t");
+        if (std.mem.endsWith(u8, trimmed, "\\\\")) {
+            std.debug.print("doubled backslash continuation: '{s}'\n", .{trimmed});
+            return error.DoubledBackslash;
+        }
+    }
+}
