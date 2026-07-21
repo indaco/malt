@@ -9,6 +9,17 @@ pub const path = std.fs.path;
 pub const max_path_bytes = std.Io.Dir.max_path_bytes;
 pub const max_name_bytes = std.Io.Dir.max_name_bytes;
 
+var temp_seq = std.atomic.Value(u32).init(0);
+
+/// Scratch path unique to this process and call. A fixed `/tmp` name is shared
+/// by any overlapping run — a manual `zig build test` racing the pre-push hook —
+/// and one run's `deleteTree` then wipes the other's fixtures mid-test.
+pub fn uniqueTempPath(allocator: std.mem.Allocator, group: []const u8, tag: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "/tmp/malt_{s}_{s}_{d}_{d}", .{
+        group, tag, std.c.getpid(), temp_seq.fetchAdd(1, .monotonic),
+    });
+}
+
 /// Lazy `/dev/null` handle used to sink writes under the test runner. The
 /// runner owns fd 1 for its IPC protocol, and dumps any captured stderr
 /// next to a "failed command:" trailer — both swamp the summary with noise
