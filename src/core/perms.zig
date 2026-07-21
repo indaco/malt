@@ -23,8 +23,8 @@ pub const PermReport = struct {
 /// is unit-testable without real files.
 pub fn classifyPermissions(
     mode: u16,
-    file_uid: std.c.uid_t,
-    current_uid: std.c.uid_t,
+    file_uid: std.posix.uid_t,
+    current_uid: std.posix.uid_t,
 ) PermReport {
     return .{
         .group_writable = (mode & 0o020) != 0,
@@ -44,11 +44,6 @@ pub fn freeFindings(allocator: std.mem.Allocator, findings: []WalkFinding) void 
     allocator.free(findings);
 }
 
-/// macOS lstat — doesn't follow symlinks; used here so a malicious
-/// symlink can't make the walker stat the target instead of the link
-/// itself. The Stat shape matches std.c.Stat on macOS.
-extern "c" fn lstat(path: [*:0]const u8, buf: *std.c.Stat) c_int;
-
 /// Walk `prefix` recursively and collect every entry whose permissions
 /// violate `classifyPermissions`. Caps at `max_findings` to bound
 /// memory on pathologically large prefixes.
@@ -56,7 +51,7 @@ pub fn walkPrefix(
     io: std.Io,
     allocator: std.mem.Allocator,
     prefix: []const u8,
-    current_uid: std.c.uid_t,
+    current_uid: std.posix.uid_t,
     max_findings: usize,
 ) ![]WalkFinding {
     var findings: std.ArrayList(WalkFinding) = .empty;
@@ -90,7 +85,7 @@ pub fn walkPrefix(
 fn checkPath(
     allocator: std.mem.Allocator,
     path: []const u8,
-    current_uid: std.c.uid_t,
+    current_uid: std.posix.uid_t,
     findings: *std.ArrayList(WalkFinding),
     max_findings: usize,
 ) !void {
@@ -102,8 +97,11 @@ fn checkPath(
     cstr_buf[path.len] = 0;
     const cstr: [*:0]const u8 = @ptrCast(&cstr_buf);
 
+    // NOFOLLOW: a planted symlink must not redirect the walker to its target.
+    // Still libc — no std peer on 0.16 surfaces st_uid.
     var st: std.c.Stat = undefined;
-    if (lstat(cstr, &st) != 0) return; // skip unstatable entries silently
+    if (std.c.fstatat(std.c.AT.FDCWD, cstr, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0)
+        return; // skip unstatable entries silently
 
     const mode: u16 = @intCast(st.mode & 0o777);
     const report = classifyPermissions(mode, st.uid, current_uid);
@@ -116,7 +114,7 @@ fn checkPath(
     };
 }
 
-pub fn currentUid() std.c.uid_t {
+pub fn currentUid() std.posix.uid_t {
     return std.c.getuid();
 }
 
