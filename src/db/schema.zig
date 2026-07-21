@@ -17,8 +17,9 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
         \\);
     );
 
-    // 2. kegs. `bin_isolated` is added by v10's ALTER on upgraded DBs;
-    //    the fresh shape ships with it so both paths converge.
+    // 2. kegs. The fresh shape ships both the v5 UNIQUE and the
+    //    `bin_isolated` v10 adds by ALTER on upgraded DBs, so the v4→v5
+    //    step short-circuits here instead of rebuilding an empty table.
     try db.exec(
         \\CREATE TABLE IF NOT EXISTS kegs (
         \\    id            INTEGER PRIMARY KEY,
@@ -33,7 +34,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
         \\    pinned        INTEGER NOT NULL DEFAULT 0,
         \\    install_reason TEXT NOT NULL DEFAULT 'direct',
         \\    bin_isolated  INTEGER NOT NULL DEFAULT 0,
-        \\    UNIQUE(name, version)
+        \\    UNIQUE(name, version, revision)
         \\);
     );
     try db.exec("CREATE INDEX IF NOT EXISTS idx_kegs_name ON kegs(name);");
@@ -735,8 +736,17 @@ test "ensureForeignKeysOn is idempotent when FKs are already on" {
     try testing.expect(try foreignKeysOn(&db));
 }
 
-/// Copy out `sqlite_master.sql` for `kegs`. The text is owned by the
-/// statement, so it has to be copied before the statement finalizes.
+/// True iff `name` is a registered index. The v5 rebuild drops `kegs`,
+/// taking its indexes with it, so a missing one is a real regression.
+fn indexExists(db: *sqlite.Database, name: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    return try stmt.step();
+}
+
+/// The statement owns the text, so it has to be copied out before
+/// finalize.
 fn kegsCreateSql(db: *sqlite.Database, buf: []u8) ![]const u8 {
     var stmt = try db.prepare(
         \\SELECT sql FROM sqlite_master
@@ -748,6 +758,64 @@ fn kegsCreateSql(db: *sqlite.Database, buf: []u8) ![]const u8 {
     if (sql.len > buf.len) return error.NoSpaceLeft;
     @memcpy(buf[0..sql.len], sql);
     return buf[0..sql.len];
+}
+
+// If the fresh CREATE ever drifts off the v5 UNIQUE again, the v4→v5
+// probe misses and fresh DBs silently resume rebuilding an empty table
+// with FKs off. These two pin the short-circuit from both sides.
+
+test "fresh DB ships kegs at the v5 UNIQUE without a rebuild (v5 shape)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    var buf: [1024]u8 = undefined;
+    const sql = try kegsCreateSql(&db, &buf);
+
+    // Unquoted name: the rebuild's RENAME tail would have quoted it.
+    try testing.expect(std.mem.indexOf(u8, sql, "CREATE TABLE kegs") != null);
+    const unique = std.mem.indexOf(u8, sql, "UNIQUE(name, version, revision)") orelse
+        return error.TestExpectedV5Unique;
+    // Inline, i.e. created — not appended by the v9→v10 ALTER.
+    const isolated = std.mem.indexOf(u8, sql, "bin_isolated") orelse
+        return error.TestExpectedBinIsolated;
+    try testing.expect(isolated < unique);
+
+    // The rebuild used to drop and re-create these; nothing does now.
+    try testing.expect(try indexExists(&db, "idx_kegs_name"));
+    try testing.expect(try indexExists(&db, "idx_kegs_store"));
+
+    // The short-circuit still has to bump the marker and let the rest of
+    // the ladder run.
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
+}
+
+test "v4→v5 migration is idempotent when kegs already carries the v5 UNIQUE" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES ('foo', 'foo', '1.0', 'sha-foo', '/c/foo/1.0');
+    );
+    // Rewind past v5 twice: the probe must keep choosing the marker-only
+    // branch rather than rebuilding a table that is already correct.
+    try db.exec("DELETE FROM schema_version WHERE version >= 5;");
+    try migrate(&db);
+    try db.exec("DELETE FROM schema_version WHERE version >= 5;");
+    try migrate(&db);
+
+    var buf: [1024]u8 = undefined;
+    const sql = try kegsCreateSql(&db, &buf);
+    try testing.expect(std.mem.indexOf(u8, sql, "CREATE TABLE \"kegs\"") == null);
+
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
+
+    var probe = try db.prepare("SELECT COUNT(*) FROM kegs WHERE name='foo';");
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    try testing.expectEqual(@as(i64, 1), probe.columnInt(0));
 }
 
 // Without the success-path hard re-enable, a SQLITE_BUSY storm during
