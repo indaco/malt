@@ -235,3 +235,18 @@ test "bundle and services have help topics" {
     try testing.expect(std.mem.indexOf(u8, help.helpFor("services"), "malt services") != null);
     try testing.expect(std.mem.indexOf(u8, help.helpFor("services"), "restart") != null);
 }
+
+test "uninstall help no longer advertises the unimplemented --zap" {
+    // --zap promised a cask deep clean that no parser ever read, so running it
+    // silently did nothing while implying preferences and caches were removed.
+    // Nothing parses a cask `zap` stanza yet, so the honest state is silence.
+    try testing.expect(std.mem.indexOf(u8, help.helpFor("uninstall"), "--zap") == null);
+}
+
+test "upgrade help no longer advertises the no-op --all" {
+    // A nameless `upgrade` already does formulas + casks, so --all could only
+    // ever mean "the default". It is not a Homebrew flag either - `brew upgrade
+    // --all` errors with "invalid option" - so there was no compatibility to
+    // preserve, just a line implying the default is narrower than it is.
+    try testing.expect(std.mem.indexOf(u8, help.helpFor("upgrade"), "--all") == null);
+}

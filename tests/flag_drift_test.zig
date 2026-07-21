@@ -74,24 +74,9 @@ const Exception = struct {
     reason: []const u8,
 };
 
-const exceptions = [_]Exception{
-    // Plural aliases accepted for Homebrew muscle memory. The shells offer the
-    // singular canonical spelling on purpose - completing both doubles the
-    // candidate list for no gain.
-    .{ .command = "list", .flag = "--formulae", .reason = "plural alias; shells offer --formula" },
-    .{ .command = "list", .flag = "--casks", .reason = "plural alias; shells offer --cask" },
-    .{ .command = "search", .flag = "--formulae", .reason = "plural alias; shells offer --formula" },
-    .{ .command = "search", .flag = "--casks", .reason = "plural alias; shells offer --cask" },
-    .{ .command = "outdated", .flag = "--formulae", .reason = "plural alias; shells offer --formula" },
-
-    // Advertised but unimplemented. These are real defects the guard found:
-    // help and the shells promise a flag no parser reads, so passing it is
-    // silently ignored. Listed here so the guard stays green while the
-    // implement-or-remove call is made; delete the entry either way.
-    .{ .command = "uninstall", .flag = "--zap", .reason = "documented at help.zig but no parser reads it" },
-    .{ .command = "upgrade", .flag = "--all", .reason = "documented at help.zig but no parser reads it" },
-    .{ .command = "services", .flag = "--system", .reason = "described in a supervisor comment; never implemented" },
-};
+/// Empty on purpose. Every difference the guard found has been resolved in the
+/// code rather than excused here; an entry should be rare and short-lived.
+const exceptions = [_]Exception{};
 
 fn isGlobal(flag: []const u8) bool {
     for (global_flags) |g| if (std.mem.eql(u8, g, flag)) return true;
