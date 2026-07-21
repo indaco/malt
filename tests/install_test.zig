@@ -47,24 +47,50 @@ fn postInstallFormulaJson() []const u8 {
 /// Opens a fresh temp-dir SQLite DB with the current schema applied.
 /// The caller is responsible for closing the returned DB and removing
 /// the temp dir.
+/// The temp dir lives under a process-unique base, so overlapping test runs
+/// cannot wipe each other's fixtures.
 const TempDb = struct {
+    arena: std.heap.ArenaAllocator,
     dir: []const u8,
     db: sqlite.Database,
 
-    fn init(comptime tag: []const u8) !TempDb {
-        const dir = "/tmp/malt_install_test_" ++ tag;
+    fn init(tag: []const u8) !TempDb {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const dir = try test_io.uniqueTempPath(arena.allocator(), "install_test", tag);
         test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
-        return .{ .dir = dir, .db = db };
+        return .{ .arena = arena, .dir = dir, .db = db };
     }
 
     fn deinit(self: *TempDb) void {
         self.db.close();
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
+        self.arena.deinit();
+    }
+};
+
+/// Scratch dir under a process-unique base, for the BrewApi cache roots the
+/// tests seed and delete.
+const TempDir = struct {
+    arena: std.heap.ArenaAllocator,
+    path: []const u8,
+
+    fn init(tag: []const u8) !TempDir {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const p = try test_io.uniqueTempPath(arena.allocator(), "install_test", tag);
+        test_io.makeDirAbsolute(std.Options.debug_io, p) catch {};
+        return .{ .arena = arena, .path = p };
+    }
+
+    fn deinit(self: *TempDir) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        self.arena.deinit();
     }
 };
 
@@ -96,9 +122,9 @@ test "collectFormulaJobs queues a steps-migrated formula despite post_install_de
         "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/glowsteps/blobs\"," ++
         "\"files\":{\"all\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/glowsteps\",\"sha256\":\"deadbeef\"}}}}}";
 
-    const cache_dir = "/tmp/malt_install_test_postinstall_steps_cache";
-    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    var cache_fx = try TempDir.init("postinstall_steps_cache");
+    defer cache_fx.deinit();
+    const cache_dir = cache_fx.path;
 
     var http = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
@@ -138,9 +164,9 @@ test "collectFormulaJobs queues a formula with a post_install hook" {
     // skipped and the API / pool pointers are never dereferenced.
     const json = postInstallFormulaJson();
 
-    const cache_dir = "/tmp/malt_install_test_postinstall_accept_cache";
-    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    var cache_fx = try TempDir.init("postinstall_accept_cache");
+    defer cache_fx.deinit();
+    const cache_dir = cache_fx.path;
 
     var http = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
@@ -379,9 +405,9 @@ test "collectFormulaJobs queues the main formula when nothing is installed" {
     // empty dep list skips the parallel-fetch phase.
     const json = bottleJsonWithoutDeps("hello");
 
-    const cache_dir = "/tmp/malt_install_test_happy_path_cache";
-    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    var cache_fx = try TempDir.init("happy_path_cache");
+    defer cache_fx.deinit();
+    const cache_dir = cache_fx.path;
 
     var http = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
@@ -498,10 +524,9 @@ test "collectFormulaJobs queues a dep and its parent from a seeded cache" {
     var tdb = try TempDb.init("with_dep");
     defer tdb.deinit();
 
-    const cache_dir = "/tmp/malt_install_test_with_dep_cache";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
-    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    var cache_fx = try TempDir.init("with_dep_cache");
+    defer cache_fx.deinit();
+    const cache_dir = cache_fx.path;
 
     // Seed BOTH the dep and the root formula JSON. deps.resolve re-fetches
     // the root from the API to discover its dep list (even though
@@ -549,10 +574,9 @@ test "collectFormulaJobs deduplicates deps already queued by a prior call" {
     var tdb = try TempDb.init("dedup_dep");
     defer tdb.deinit();
 
-    const cache_dir = "/tmp/malt_install_test_dedup_cache";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
-    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    var cache_fx = try TempDir.init("dedup_cache");
+    defer cache_fx.deinit();
+    const cache_dir = cache_fx.path;
 
     const dep_json = bottleJsonWithoutDeps("beta");
     try seedCache(cache_dir, "beta", dep_json);
@@ -627,9 +651,9 @@ test "collectFormulaJobs with post_install leaves the DB untouched" {
 
     const json = postInstallFormulaJson();
 
-    const cache_dir = "/tmp/malt_install_test_postinstall_db_cache";
-    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    var cache_fx = try TempDir.init("postinstall_db_cache");
+    defer cache_fx.deinit();
+    const cache_dir = cache_fx.path;
 
     var http = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
@@ -691,9 +715,9 @@ test "collectFormulaJobs carries the _<revision> suffix in version_str" {
         \\ }}}}
     ;
 
-    const cache_dir = "/tmp/malt_install_test_rev_jobs_cache";
-    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    var cache_fx = try TempDir.init("rev_jobs_cache");
+    defer cache_fx.deinit();
+    const cache_dir = cache_fx.path;
 
     var http = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
@@ -731,9 +755,9 @@ test "collectFormulaJobs leaves plain-version formulas unchanged" {
 
     const json = postInstallFormulaJson(); // revision: 0 fixture.
 
-    const cache_dir = "/tmp/malt_install_test_norev_jobs_cache";
-    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    var cache_fx = try TempDir.init("norev_jobs_cache");
+    defer cache_fx.deinit();
+    const cache_dir = cache_fx.path;
 
     var http = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
@@ -824,10 +848,9 @@ test "collectFormulaJobs leaves no parsed-tree leaks under testing.allocator (>=
     var tdb = try TempDb.init("parsed_tree_leak");
     defer tdb.deinit();
 
-    const cache_dir = "/tmp/malt_install_test_parsed_tree_leak_cache";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
-    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    var cache_fx = try TempDir.init("parsed_tree_leak_cache");
+    defer cache_fx.deinit();
+    const cache_dir = cache_fx.path;
 
     try seedCache(cache_dir, "dep_a", bottleJsonUniqueSha("dep_a", "aa"));
     try seedCache(cache_dir, "dep_b", bottleJsonUniqueSha("dep_b", "bb"));

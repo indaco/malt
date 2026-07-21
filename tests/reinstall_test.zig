@@ -28,12 +28,9 @@ fn pathExists(path: []const u8) bool {
 }
 
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
-    const path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/malt_reinstall_{d}_{s}",
-        .{ test_io.nanoTimestamp(std.Options.debug_io), suffix },
-        0,
-    );
+    const base = try test_io.uniqueTempPath(testing.allocator, "reinstall", suffix);
+    defer testing.allocator.free(base);
+    const path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}", .{base}, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);

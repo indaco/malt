@@ -186,10 +186,8 @@ test "writeFailureMarker preserves prior cache and bumps last_attempt" {
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
 
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_fail_{d}", .{fs_compat.nanoTimestamp(
-        std.Options.debug_io,
-    )});
+    const dir = try test_io.uniqueTempPath(allocator, "notify", "fail");
+    defer allocator.free(dir);
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
@@ -224,10 +222,10 @@ test "markUpdatedTo bumps current_seen so a manual --check stops the nag" {
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
 
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/malt_notify_check_{d}", .{fs_compat.nanoTimestamp(
-        std.Options.debug_io,
-    )});
+    const dir_base = try test_io.uniqueTempPath(allocator, "notify", "check");
+    defer allocator.free(dir_base);
+    const dir = try std.fmt.allocPrintSentinel(allocator, "{s}", .{dir_base}, 0);
+    defer allocator.free(dir);
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
@@ -262,10 +260,8 @@ test "writeFailureMarker on a first-ever run records only the failed attempt" {
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
 
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_first_{d}", .{fs_compat.nanoTimestamp(
-        std.Options.debug_io,
-    )});
+    const dir = try test_io.uniqueTempPath(allocator, "notify", "first");
+    defer allocator.free(dir);
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
@@ -295,10 +291,8 @@ test "writeCache + readCache full round-trip on disk" {
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
 
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_test_{d}", .{fs_compat.nanoTimestamp(
-        std.Options.debug_io,
-    )});
+    const dir = try test_io.uniqueTempPath(allocator, "notify", "test");
+    defer allocator.free(dir);
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
@@ -325,10 +319,8 @@ test "writeCache creates the parent directory when absent" {
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
 
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_mkdir_{d}", .{fs_compat.nanoTimestamp(
-        std.Options.debug_io,
-    )});
+    const dir = try test_io.uniqueTempPath(allocator, "notify", "mkdir");
+    defer allocator.free(dir);
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
@@ -349,10 +341,10 @@ test "writeCache creates the parent directory when absent" {
 
 test "readCache: missing file is null, not an error" {
     const io = std.Options.debug_io;
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&buf, "/tmp/malt_notify_absent_{d}.json", .{fs_compat.nanoTimestamp(
-        std.Options.debug_io,
-    )});
+    const base = try test_io.uniqueTempPath(testing.allocator, "notify", "absent");
+    defer testing.allocator.free(base);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}.json", .{base});
+    defer testing.allocator.free(path);
     fs_compat.deleteFileAbsolute(std.Options.debug_io, path) catch {};
     const got = try notifier.readCache(io, testing.allocator, path);
     try testing.expect(got == null);
@@ -360,10 +352,8 @@ test "readCache: missing file is null, not an error" {
 
 test "readCache: corrupt file surfaces InvalidPayload (caller can choose to ignore)" {
     const io = std.Options.debug_io;
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_corrupt_{d}", .{fs_compat.nanoTimestamp(
-        std.Options.debug_io,
-    )});
+    const dir = try test_io.uniqueTempPath(testing.allocator, "notify", "corrupt");
+    defer testing.allocator.free(dir);
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};

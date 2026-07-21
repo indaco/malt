@@ -141,7 +141,8 @@ test "verifyCosignBlob returns CosignNotFound when the binary is missing" {
 test "verifyCosignBlob accepts a cosign that exits 0" {
     var lio = LiveIo.init();
     defer lio.deinit();
-    const path = "/tmp/malt_fake_cosign_ok";
+    const path = try fs_compat.uniqueTempPath(testing.allocator, "verify", "fake_cosign_ok");
+    defer testing.allocator.free(path);
     try writeFakeCosign(path, 0);
     defer fs_compat.deleteFileAbsolute(std.Options.debug_io, path) catch {};
 
@@ -161,12 +162,15 @@ test "verifyCosignBlob finds a bare 'cosign' via PATH (regression: gh#151)" {
     // `/usr/local/bin:/bin/:/usr/bin` and missed `/opt/homebrew/bin`. Drop
     // a fake `cosign` into a scratch dir, prepend to PATH, and assert
     // bare-name spawn resolves it.
-    const dir = "/tmp/malt_cosign_path_lookup";
+    const dir = try fs_compat.uniqueTempPath(testing.allocator, "verify", "cosign_path_lookup");
+    defer testing.allocator.free(dir);
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
-    try writeFakeCosign(dir ++ "/cosign", 0);
+    const fake_cosign = try std.fmt.allocPrint(testing.allocator, "{s}/cosign", .{dir});
+    defer testing.allocator.free(fake_cosign);
+    try writeFakeCosign(fake_cosign, 0);
 
     // Snapshot PATH before mutating: `getenv` points into libc's environ,
     // which `setenv` may realloc, so copy into a stable sentinel buffer.
@@ -206,7 +210,7 @@ const Fixture = struct {
     cosign_bin: []const u8,
 
     fn setup(allocator: std.mem.Allocator, tag: []const u8, tarball_bytes: []const u8, checksums_bytes: []const u8, cosign_exit: u8) !Fixture {
-        const dir = try std.fmt.allocPrint(allocator, "/tmp/malt_verifyall_{s}", .{tag});
+        const dir = try fs_compat.uniqueTempPath(allocator, "verifyall", tag);
         fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
 
@@ -338,7 +342,8 @@ test "verifyAll streams a large tarball without loading it whole (smoke)" {
     if (mib == 0) return error.SkipZigTest;
     const total: usize = mib * 1024 * 1024;
 
-    const dir = "/tmp/malt_verifyall_smoke";
+    const dir = try fs_compat.uniqueTempPath(testing.allocator, "verifyall", "smoke");
+    defer testing.allocator.free(dir);
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
@@ -444,7 +449,8 @@ test "verifyAll rejects a multi-chunk tarball whose content was tampered" {
 test "verifyCosignBlob errors when cosign exits non-zero" {
     var lio = LiveIo.init();
     defer lio.deinit();
-    const path = "/tmp/malt_fake_cosign_fail";
+    const path = try fs_compat.uniqueTempPath(testing.allocator, "verify", "fake_cosign_fail");
+    defer testing.allocator.free(path);
     try writeFakeCosign(path, 1);
     defer fs_compat.deleteFileAbsolute(std.Options.debug_io, path) catch {};
 

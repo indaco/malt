@@ -410,14 +410,9 @@ test "collectOutdated fetch fallback detects an upstream revision-only bump" {
 // --- --pinned-only filter ---
 
 fn setupPinnedPrefix(suffix: []const u8) ![:0]u8 {
-    const path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/malt_outdated_pinned_{d}_{s}",
-        .{ test_io.nanoTimestamp(
-            std.Options.debug_io,
-        ), suffix },
-        0,
-    );
+    const base = try test_io.uniqueTempPath(testing.allocator, "outdated_pinned", suffix);
+    defer testing.allocator.free(base);
+    const path = try testing.allocator.dupeZ(u8, base);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
@@ -1029,14 +1024,9 @@ const UpdateEnv = struct {
     cache_path: [:0]u8,
 
     fn init(suffix: []const u8) !UpdateEnv {
-        const prefix = try std.fmt.allocPrintSentinel(
-            testing.allocator,
-            "/tmp/malt_update_test_{d}_{s}",
-            .{ test_io.nanoTimestamp(
-                std.Options.debug_io,
-            ), suffix },
-            0,
-        );
+        const prefix_base = try test_io.uniqueTempPath(testing.allocator, "update_test", suffix);
+        defer testing.allocator.free(prefix_base);
+        const prefix = try testing.allocator.dupeZ(u8, prefix_base);
         const cache = try std.fmt.allocPrintSentinel(
             testing.allocator,
             "{s}/cache",

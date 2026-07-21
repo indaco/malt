@@ -23,13 +23,9 @@ const Scratch = struct {
     path: [:0]u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
-        const ts = test_io.nanoTimestamp(std.Options.debug_io);
-        const path = try std.fmt.allocPrintSentinel(
-            allocator,
-            "/tmp/malt_upgrade_{s}_{d}",
-            .{ tag, ts },
-            0,
-        );
+        const base = try test_io.uniqueTempPath(allocator, "upgrade", tag);
+        defer allocator.free(base);
+        const path = try std.fmt.allocPrintSentinel(allocator, "{s}", .{base}, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
@@ -269,11 +265,14 @@ test "execute --pinned --dry-run audits without leaking the parsed Formula" {
 test "execute --dry-run on a fresh prefix without db dir exits silently" {
     // No db/ subdir — lock acquire fails, dry-run takes the silent
     // exit branch instead of surfacing it as contention.
-    const path = "/tmp/malt_upgrade_no_db_dir_dry";
+    const unique = try test_io.uniqueTempPath(testing.allocator, "upgrade", "no_db_dir_dry");
+    defer testing.allocator.free(unique);
+    const path = try testing.allocator.dupeZ(u8, unique);
+    defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
-    _ = c.setenv("MALT_PREFIX", path, 1);
+    _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
     output.setDryRun(true);

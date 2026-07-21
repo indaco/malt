@@ -15,12 +15,17 @@ const install = malt.install;
 const install_sink = malt.install_sink;
 const output = malt.output;
 
+/// Scratch DB under a process-unique dir, so overlapping test runs cannot
+/// wipe each other's fixtures.
 const TempDb = struct {
+    arena: std.heap.ArenaAllocator,
     dir: []const u8,
     db: sqlite.Database,
 
-    fn init(comptime tag: []const u8) !TempDb {
-        const dir = "/tmp/malt_bundle_test_" ++ tag;
+    fn init(tag: []const u8) !TempDb {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const dir = try test_io.uniqueTempPath(arena.allocator(), "bundle", tag);
         test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, dir);
         var db_path_buf: [256]u8 = undefined;
@@ -28,12 +33,13 @@ const TempDb = struct {
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
-        return .{ .dir = dir, .db = db };
+        return .{ .arena = arena, .dir = dir, .db = db };
     }
 
     fn deinit(self: *TempDb) void {
         self.db.close();
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
+        self.arena.deinit();
     }
 };
 
@@ -345,7 +351,10 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
     // `cmdInstall`, so the local arm never fires and the runner ran with
     // `dry_run = false`. Pin the contract: when `output.isDryRun()` is true,
     // the runner must skip `recordBundle`, leaving the `bundles` table empty.
-    const dir_z: [:0]const u8 = "/tmp/malt_bundle_dry_run_cli_wire";
+    const dir = try test_io.uniqueTempPath(testing.allocator, "bundle", "dry_run_cli_wire");
+    defer testing.allocator.free(dir);
+    const dir_z = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dir_z);
     test_io.deleteTreeAbsolute(std.Options.debug_io, dir_z) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, dir_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, dir_z) catch {};

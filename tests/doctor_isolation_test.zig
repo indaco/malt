@@ -10,12 +10,8 @@ const sqlite = malt.sqlite;
 const schema = malt.schema;
 const output = malt.output;
 
-fn uniquePrefix(suffix: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_doctor_iso_{d}_{s}",
-        .{ test_io.nanoTimestamp(std.Options.debug_io), suffix },
-    );
+fn uniquePrefix(suffix: []const u8) ![]const u8 {
+    return test_io.uniqueTempPath(testing.allocator, "doctor_iso", suffix);
 }
 
 // Seed: direct keg with bin links, isolated dep with no bin links, and

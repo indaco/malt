@@ -34,19 +34,54 @@ fn newInstaller(threaded: *std.Io.Threaded, db: *sqlite.Database, prefix: [:0]co
     return cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, db, prefix);
 }
 
+/// Scratch tree under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures.
+const Fixture = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(tag: []const u8) !Fixture {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try test_io.uniqueTempPath(arena.allocator(), "font_uninstall", tag);
+        const base_z = try arena.allocator().dupeZ(u8, base);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
+        return .{ .arena = arena, .base = base_z };
+    }
+
+    /// Absolute path to `sub` inside the fixture; valid until `deinit`.
+    fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}/{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Fixture) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "uninstall unlinks every font listed in the manifest, then drops Caskroom and the DB row" {
     const io = std.Options.debug_io;
-    const prefix: [:0]const u8 = "/tmp/malt_font_uninstall_it";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    var fx = try Fixture.init("basic");
+    defer fx.deinit();
+    const prefix = fx.base;
 
     // Reconstruct the post-install on-disk state without driving a real
     // install: two placed fonts plus the manifest that records them.
-    const fonts = prefix ++ "/Fonts";
-    try putFile(io, fonts ++ "/A.ttf", "AAA");
-    try putFile(io, fonts ++ "/B.ttf", "BBB");
-    const manifest_path = prefix ++ "/Caskroom/font-x/1.0/" ++ cask_font.MANIFEST_NAME;
-    try cask_font.writeManifest(io, manifest_path, fonts ++ "/A.ttf\n" ++ fonts ++ "/B.ttf");
+    const font_a = fx.p("Fonts/A.ttf");
+    const font_b = fx.p("Fonts/B.ttf");
+    try putFile(io, font_a, "AAA");
+    try putFile(io, font_b, "BBB");
+    const manifest_path = fx.p("Caskroom/font-x/1.0/" ++ cask_font.MANIFEST_NAME);
+    const manifest_body = try std.fmt.allocPrint(testing.allocator, "{s}\n{s}", .{ font_a, font_b });
+    defer testing.allocator.free(manifest_body);
+    try cask_font.writeManifest(io, manifest_path, manifest_body);
 
     var c = try cask.parseCask(testing.allocator, font_cask_json);
     defer c.deinit();
@@ -65,27 +100,29 @@ test "uninstall unlinks every font listed in the manifest, then drops Caskroom a
 
     // Every manifested font is gone, the Caskroom (and the manifest) is wiped,
     // and the DB row is cleared.
-    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, fonts ++ "/A.ttf", .{}));
-    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, fonts ++ "/B.ttf", .{}));
-    try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(io, prefix ++ "/Caskroom/font-x", .{}));
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, font_a, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, font_b, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(io, fx.p("Caskroom/font-x"), .{}));
     try testing.expect(!cask.isInstalled(&db, "font-x"));
 }
 
 test "uninstall removes only manifested fonts and tolerates a stale entry" {
     const io = std.Options.debug_io;
-    const prefix: [:0]const u8 = "/tmp/malt_font_uninstall_precise_it";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    var fx = try Fixture.init("precise");
+    defer fx.deinit();
+    const prefix = fx.base;
 
-    const fonts = prefix ++ "/Fonts";
-    try putFile(io, fonts ++ "/A.ttf", "AAA"); // manifested, present
-    try putFile(io, fonts ++ "/Keep.ttf", "KEEP"); // a co-resident font from another cask
+    const font_a = fx.p("Fonts/A.ttf");
+    try putFile(io, font_a, "AAA"); // manifested, present
+    try putFile(io, fx.p("Fonts/Keep.ttf"), "KEEP"); // a co-resident font from another cask
 
     // The manifest also lists a font that was already manually deleted; the
     // stale entry must not abort uninstall, and Keep.ttf (never recorded here)
     // must survive — the manifest is the exact record of what this cask placed.
-    const manifest_path = prefix ++ "/Caskroom/font-x/1.0/" ++ cask_font.MANIFEST_NAME;
-    try cask_font.writeManifest(io, manifest_path, fonts ++ "/A.ttf\n" ++ fonts ++ "/Gone.ttf");
+    const manifest_path = fx.p("Caskroom/font-x/1.0/" ++ cask_font.MANIFEST_NAME);
+    const manifest_body = try std.fmt.allocPrint(testing.allocator, "{s}\n{s}", .{ font_a, fx.p("Fonts/Gone.ttf") });
+    defer testing.allocator.free(manifest_body);
+    try cask_font.writeManifest(io, manifest_path, manifest_body);
 
     var c = try cask.parseCask(testing.allocator, font_cask_json);
     defer c.deinit();
@@ -101,8 +138,8 @@ test "uninstall removes only manifested fonts and tolerates a stale entry" {
 
     try installer.uninstall("font-x");
 
-    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, fonts ++ "/A.ttf", .{}));
-    try expectKept(io, fonts ++ "/Keep.ttf", "KEEP");
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, font_a, .{}));
+    try expectKept(io, fx.p("Fonts/Keep.ttf"), "KEEP");
     try testing.expect(!cask.isInstalled(&db, "font-x"));
 }
 
@@ -113,15 +150,14 @@ fn expectKept(io: std.Io, path: []const u8, body: []const u8) !void {
 }
 
 test "uninstall survives a missing manifest and still clears the DB row" {
-    const io = std.Options.debug_io;
-    const prefix: [:0]const u8 = "/tmp/malt_font_uninstall_drift_it";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    var fx = try Fixture.init("drift");
+    defer fx.deinit();
+    const prefix = fx.base;
 
     // The Caskroom (and its manifest) was manually nuked: app_path points at a
     // manifest that no longer exists. Uninstall must treat this as "nothing to
     // unlink" and still finish cleaning the DB row.
-    const manifest_path = prefix ++ "/Caskroom/font-x/1.0/" ++ cask_font.MANIFEST_NAME;
+    const manifest_path = fx.p("Caskroom/font-x/1.0/" ++ cask_font.MANIFEST_NAME);
 
     var c = try cask.parseCask(testing.allocator, font_cask_json);
     defer c.deinit();

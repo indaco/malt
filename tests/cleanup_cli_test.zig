@@ -23,13 +23,9 @@ const ScratchPrefix = struct {
     path: [:0]u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !ScratchPrefix {
-        const ts = test_io.nanoTimestamp(std.Options.debug_io);
-        const path = try std.fmt.allocPrintSentinel(
-            allocator,
-            "/tmp/malt_cleanup_cli_{s}_{d}",
-            .{ tag, ts },
-            0,
-        );
+        const base = try test_io.uniqueTempPath(allocator, "cleanup_cli", tag);
+        defer allocator.free(base);
+        const path = try allocator.dupeZ(u8, base);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
@@ -119,13 +115,9 @@ test "cleanup with no extra args matches purge --housekeeping byte-for-byte" {
 test "cleanup --help shows cleanup's help, not purge's" {
     const allocator = testing.allocator;
 
-    const ts = test_io.nanoTimestamp(std.Options.debug_io);
-    const path = try std.fmt.allocPrintSentinel(
-        allocator,
-        "/tmp/malt_cleanup_help_{d}",
-        .{ts},
-        0,
-    );
+    const base = try test_io.uniqueTempPath(allocator, "cleanup_help", "out");
+    defer allocator.free(base);
+    const path = try allocator.dupeZ(u8, base);
     defer allocator.free(path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
 

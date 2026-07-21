@@ -25,13 +25,9 @@ const Scratch = struct {
     path: [:0]u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
-        const ts = test_io.nanoTimestamp(std.Options.debug_io);
-        const path = try std.fmt.allocPrintSentinel(
-            allocator,
-            "/tmp/malt_info_exec_{s}_{d}",
-            .{ tag, ts },
-            0,
-        );
+        const base = try test_io.uniqueTempPath(allocator, "info_exec", tag);
+        defer allocator.free(base);
+        const path = try allocator.dupeZ(u8, base);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const subs = [_][]const u8{ "db", "Cellar", "Caskroom", "cache/api" };
@@ -120,13 +116,9 @@ fn captureExecute(
     // stderr is a TTY (e.g. under `kcov`).
     color.setForTest(false, null);
 
-    const ts = test_io.nanoTimestamp(std.Options.debug_io);
-    const cap_path = try std.fmt.allocPrintSentinel(
-        allocator,
-        "/tmp/malt_info_cap_{s}_{d}",
-        .{ tag, ts },
-        0,
-    );
+    const cap_base = try test_io.uniqueTempPath(allocator, "info_cap", tag);
+    defer allocator.free(cap_base);
+    const cap_path = try allocator.dupeZ(u8, cap_base);
     defer allocator.free(cap_path);
     defer test_io.deleteFileAbsolute(std.Options.debug_io, cap_path) catch {};
 

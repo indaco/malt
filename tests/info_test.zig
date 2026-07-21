@@ -19,28 +19,54 @@ const c = struct {
     extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 };
 
+/// Scratch tree under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures.
+const Fixture = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(tag: []const u8) !Fixture {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try test_io.uniqueTempPath(arena.allocator(), "info", tag);
+        const base_z = try arena.allocator().dupeZ(u8, base);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
+        return .{ .arena = arena, .base = base_z };
+    }
+
+    /// Absolute path to `sub` inside the fixture; valid until `deinit`.
+    fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}/{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Fixture) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "openDb returns null when the prefix has no db/ directory" {
     // Fresh prefix with no db/ subdir at all — SQLite's OPEN_CREATE
     // cannot create intermediate dirs, so the open must fail and
     // the helper must turn that into a null instead of an error.
-    const prefix = "/tmp/malt_info_test_missing_db";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
-    try test_io.makeDirAbsolute(std.Options.debug_io, prefix);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    var fx = try Fixture.init("missing_db");
+    defer fx.deinit();
 
-    try testing.expect(info.openDb(prefix) == null);
+    try testing.expect(info.openDb(fx.base) == null);
 }
 
 test "openDb succeeds and returns a usable handle when db/ exists" {
-    const prefix = "/tmp/malt_info_test_ok_db";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
-    try test_io.makeDirAbsolute(std.Options.debug_io, prefix);
-    var db_buf: [512]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
-    try test_io.makeDirAbsolute(std.Options.debug_io, db_dir);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    var fx = try Fixture.init("ok_db");
+    defer fx.deinit();
+    try test_io.makeDirAbsolute(std.Options.debug_io, fx.p("db"));
 
-    var db = info.openDb(prefix) orelse return error.ExpectedDatabase;
+    var db = info.openDb(fx.base) orelse return error.ExpectedDatabase;
     defer db.close();
 }
 
@@ -48,8 +74,8 @@ test "openDb returns null when the prefix itself does not exist" {
     // A completely absent prefix path — typical when MALT_PREFIX is
     // pointed at a freshly-minted directory that hasn't been
     // populated by any malt command yet.
-    const prefix = "/tmp/malt_info_test_no_prefix_at_all";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    const prefix = try test_io.uniqueTempPath(testing.allocator, "info", "no_prefix_at_all");
+    defer testing.allocator.free(prefix);
     try testing.expect(info.openDb(prefix) == null);
 }
 
@@ -60,11 +86,10 @@ test "openDb returns null when the prefix itself does not exist" {
 // build a tiny kegs+dependencies fixture and pin the caller-observable
 // list, including the empty-deps and not-installed edges.
 
-fn makeDepsDb(tag: []const u8) !sqlite.Database {
-    var path_buf: [256]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt_info_deps_test_{s}.db", .{tag}, 0);
-    test_io.deleteFileAbsolute(std.Options.debug_io, path) catch {};
-    var db = try sqlite.Database.open(path);
+/// The db lives inside `fx` so `fx.deinit()` takes the `-wal`/`-shm`
+/// siblings with it. Close the returned db before the fixture goes.
+fn makeDepsDb(fx: *Fixture) !sqlite.Database {
+    var db = try sqlite.Database.open(fx.p("deps.db"));
     try schema.initSchema(&db);
     return db;
 }
@@ -96,7 +121,9 @@ fn freeDepsSlice(deps: []const []const u8) void {
 }
 
 test "collectInstalledDeps reads a fixture keg's recorded deps, alphabetised" {
-    var db = try makeDepsDb("populated");
+    var fx = try Fixture.init("deps_populated");
+    defer fx.deinit(); // runs after db.close(): LIFO
+    var db = try makeDepsDb(&fx);
     defer db.close();
 
     // Insert deps out of order to prove the reader sorts rather than
@@ -114,7 +141,9 @@ test "collectInstalledDeps reads a fixture keg's recorded deps, alphabetised" {
 }
 
 test "collectInstalledDeps returns an empty slice for an installed leaf" {
-    var db = try makeDepsDb("leaf");
+    var fx = try Fixture.init("deps_leaf");
+    defer fx.deinit(); // runs after db.close(): LIFO
+    var db = try makeDepsDb(&fx);
     defer db.close();
 
     _ = try insertKegRow(&db, "tree");
@@ -126,7 +155,9 @@ test "collectInstalledDeps returns an empty slice for an installed leaf" {
 }
 
 test "collectInstalledDeps returns an empty slice when the keg is not installed" {
-    var db = try makeDepsDb("absent");
+    var fx = try Fixture.init("deps_absent");
+    defer fx.deinit(); // runs after db.close(): LIFO
+    var db = try makeDepsDb(&fx);
     defer db.close();
 
     const deps = info.collectInstalledDeps(testing.allocator, &db, "ghost");
@@ -147,8 +178,9 @@ const Prefix = struct {
     path: [:0]u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Prefix {
-        const ts = test_io.nanoTimestamp(std.Options.debug_io);
-        const path = try std.fmt.allocPrintSentinel(allocator, "/tmp/malt_info_dispatch_{s}_{d}", .{ tag, ts }, 0);
+        const base = try test_io.uniqueTempPath(allocator, "info_dispatch", tag);
+        defer allocator.free(base);
+        const path = try allocator.dupeZ(u8, base);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
         defer allocator.free(db_dir);
@@ -202,8 +234,9 @@ const Prefix = struct {
 // Drive `info.execute` with stdout backed by a real fd so the encoder
 // writes survive for byte assertions; offline so no network is attempted.
 fn captureInfo(allocator: std.mem.Allocator, args: []const []const u8, tag: []const u8) ![]u8 {
-    const ts = test_io.nanoTimestamp(std.Options.debug_io);
-    const cap_path = try std.fmt.allocPrintSentinel(allocator, "/tmp/malt_info_cap_{s}_{d}", .{ tag, ts }, 0);
+    const cap_base = try test_io.uniqueTempPath(allocator, "info_cap", tag);
+    defer allocator.free(cap_base);
+    const cap_path = try allocator.dupeZ(u8, cap_base);
     defer allocator.free(cap_path);
     defer test_io.deleteFileAbsolute(std.Options.debug_io, cap_path) catch {};
 

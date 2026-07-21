@@ -10,14 +10,8 @@ const sqlite = malt.sqlite;
 const schema = malt.schema;
 const linker_mod = malt.linker;
 
-fn uniquePrefix(suffix: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_linker_test_{d}_{s}",
-        .{ test_io.nanoTimestamp(
-            std.Options.debug_io,
-        ), suffix },
-    );
+fn uniquePrefix(suffix: []const u8) ![]const u8 {
+    return test_io.uniqueTempPath(testing.allocator, "linker_test", suffix);
 }
 
 fn makeKegWithBinary(prefix: []const u8, name: []const u8, version: []const u8, bin_name: []const u8) ![]u8 {

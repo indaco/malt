@@ -51,24 +51,30 @@ test "formula dependencies parsed from JSON" {
 
 // --- findOrphans / resolve coverage (seeded DB, no network) ---
 
+/// The scratch dir sits under a process-unique base, so overlapping test runs
+/// cannot wipe each other's fixtures.
 const TempDb = struct {
+    arena: std.heap.ArenaAllocator,
     dir: []const u8,
     db: sqlite.Database,
 
-    fn init(comptime tag: []const u8) !TempDb {
-        const dir = "/tmp/malt_deps_test_" ++ tag;
+    fn init(tag: []const u8) !TempDb {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const dir = try test_io.uniqueTempPath(arena.allocator(), "deps_test", tag);
         test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
         var buf: [256]u8 = undefined;
         const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(path);
         errdefer db.close();
         try schema.initSchema(&db);
-        return .{ .dir = dir, .db = db };
+        return .{ .arena = arena, .dir = dir, .db = db };
     }
 
     fn deinit(self: *TempDb) void {
         self.db.close();
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
+        self.arena.deinit();
     }
 };
 
@@ -209,17 +215,21 @@ test "ResolvedDep carries name and already_installed flag" {
 // --- resolve() BFS tests with a cache-backed BrewApi (no network) ---
 
 const TempCacheDir = struct {
+    arena: std.heap.ArenaAllocator,
     path: []const u8,
 
-    fn init(comptime tag: []const u8) !TempCacheDir {
-        const p = "/tmp/malt_deps_cache_" ++ tag;
+    fn init(tag: []const u8) !TempCacheDir {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const p = try test_io.uniqueTempPath(arena.allocator(), "deps_cache", tag);
         test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, p);
-        return .{ .path = p };
+        return .{ .arena = arena, .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        self.arena.deinit();
     }
 
     fn writeFormula(self: *TempCacheDir, name: []const u8, json: []const u8) !void {
@@ -474,11 +484,14 @@ test "resolve treats a DB keg with a vanished cellar_path as not-installed" {
 }
 
 const TempPrefix = struct {
+    arena: std.heap.ArenaAllocator,
     root: []const u8,
     db: sqlite.Database,
 
-    fn init(comptime tag: []const u8) !TempPrefix {
-        const root = "/tmp/malt_opt_link_" ++ tag;
+    fn init(tag: []const u8) !TempPrefix {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const root = try test_io.uniqueTempPath(arena.allocator(), "opt_link", tag);
         test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, root);
         errdefer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
@@ -488,12 +501,13 @@ const TempPrefix = struct {
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
-        return .{ .root = root, .db = db };
+        return .{ .arena = arena, .root = root, .db = db };
     }
 
     fn deinit(self: *TempPrefix) void {
         self.db.close();
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.root) catch {};
+        self.arena.deinit();
     }
 
     fn cellarFor(self: *const TempPrefix, name: []const u8, version: []const u8) ![]const u8 {

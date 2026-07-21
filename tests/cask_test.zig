@@ -15,6 +15,38 @@ fn testIo() std.Io {
     return std.Options.debug_io;
 }
 
+/// Scratch tree under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures.
+const Fixture = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(tag: []const u8) !Fixture {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try test_io.uniqueTempPath(arena.allocator(), "cask", tag);
+        const base_z = try arena.allocator().dupeZ(u8, base);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
+        return .{ .arena = arena, .base = base_z };
+    }
+
+    /// Absolute path to `sub` inside the fixture; valid until `deinit`.
+    fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}/{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Fixture) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 // --- artifactTypeFromUrl ---
 
 test "artifactTypeFromUrl detects .dmg" {
@@ -123,16 +155,11 @@ const test_cask_json_v2 =
     \\}
 ;
 
-fn openTempCaskDb(comptime tag: []const u8) !struct { dir: []const u8, db: sqlite.Database } {
-    const dir = "/tmp/malt_cask_recordinstall_" ++ tag;
-    test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
-    try test_io.makeDirAbsolute(std.Options.debug_io, dir);
-    var buf: [256]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
-    var db = try sqlite.Database.open(path);
+fn openTempCaskDb(fx: *Fixture) !sqlite.Database {
+    var db = try sqlite.Database.open(fx.p("test.db"));
     errdefer db.close();
     try schema.initSchema(&db);
-    return .{ .dir = dir, .db = db };
+    return db;
 }
 
 fn readCaskPinned(db: *sqlite.Database, token: []const u8) !bool {
@@ -145,39 +172,37 @@ fn readCaskPinned(db: *sqlite.Database, token: []const u8) !bool {
 }
 
 test "recordInstall preserves an existing pinned flag (force-upgrade keeps the hold)" {
-    var t = try openTempCaskDb("preserve_pin");
-    defer {
-        t.db.close();
-        test_io.deleteTreeAbsolute(std.Options.debug_io, t.dir) catch {};
-    }
+    var fx = try Fixture.init("recordinstall_preserve_pin");
+    defer fx.deinit();
+    var db = try openTempCaskDb(&fx);
+    defer db.close();
 
     // Seed firefox at version 1 with pinned = 1.
-    try t.db.exec(
+    try db.exec(
         \\INSERT INTO casks (token, name, version, url, pinned)
         \\VALUES ('firefox', 'Firefox', '123.0', 'https://example.invalid', 1);
     );
-    try std.testing.expectEqual(true, try readCaskPinned(&t.db, "firefox"));
+    try std.testing.expectEqual(true, try readCaskPinned(&db, "firefox"));
 
     // Simulate a force-upgrade rewriting the row at version 200.
     var c2 = try cask.parseCask(std.testing.allocator, test_cask_json_v2);
     defer c2.deinit();
-    try cask.recordInstall(&t.db, &c2, "/Applications/Firefox.app", null);
+    try cask.recordInstall(&db, &c2, "/Applications/Firefox.app", null);
 
-    try std.testing.expectEqual(true, try readCaskPinned(&t.db, "firefox"));
+    try std.testing.expectEqual(true, try readCaskPinned(&db, "firefox"));
 }
 
 test "recordInstall on a fresh cask defaults pinned to 0" {
-    var t = try openTempCaskDb("fresh_pin");
-    defer {
-        t.db.close();
-        test_io.deleteTreeAbsolute(std.Options.debug_io, t.dir) catch {};
-    }
+    var fx = try Fixture.init("recordinstall_fresh_pin");
+    defer fx.deinit();
+    var db = try openTempCaskDb(&fx);
+    defer db.close();
 
     var c2 = try cask.parseCask(std.testing.allocator, test_cask_json_v2);
     defer c2.deinit();
-    try cask.recordInstall(&t.db, &c2, "/Applications/Firefox.app", null);
+    try cask.recordInstall(&db, &c2, "/Applications/Firefox.app", null);
 
-    try std.testing.expectEqual(false, try readCaskPinned(&t.db, "firefox"));
+    try std.testing.expectEqual(false, try readCaskPinned(&db, "firefox"));
 }
 
 // --- parseAppName ---
@@ -451,9 +476,10 @@ test "isOutdated surfaces SqliteError when schema is missing" {
 const CHUNK: usize = 64 * 1024;
 
 fn tempFilePath(tag: []const u8, buf: []u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "/tmp/malt_cask_verify_{s}_{d}", .{ tag, malt_fs.nanoTimestamp(
-        std.Options.debug_io,
-    ) });
+    // Process-unique: a bare timestamp collides between overlapping runs.
+    const p = try test_io.uniqueTempPath(testing.allocator, "cask_verify", tag);
+    defer testing.allocator.free(p);
+    return std.fmt.bufPrint(buf, "{s}", .{p});
 }
 
 fn writeFile(path: []const u8, bytes: []const u8) !void {
@@ -664,9 +690,10 @@ test "verifyFileSha256 propagates FileNotFound rather than Sha256Mismatch" {
 // ── findAppInDir: owns the returned name past iterator teardown ─────
 
 fn scratchDir(tag: []const u8, buf: []u8) ![]const u8 {
-    const p = try std.fmt.bufPrint(buf, "/tmp/malt_cask_findapp_{s}_{d}", .{ tag, malt_fs.nanoTimestamp(
-        std.Options.debug_io,
-    ) });
+    // Process-unique: a bare timestamp collides between overlapping runs.
+    const raw = try test_io.uniqueTempPath(testing.allocator, "cask_findapp", tag);
+    defer testing.allocator.free(raw);
+    const p = try std.fmt.bufPrint(buf, "{s}", .{raw});
     try malt_fs.makeDirAbsolute(std.Options.debug_io, p);
     return p;
 }
@@ -952,10 +979,9 @@ test "artifactTypeFromTag maps unknown strings to .unknown" {
 
 test "sweepOwnedVersionCache deletes only the token's own recorded versions" {
     const io = testIo();
-    const prefix = "/tmp/malt_cask_sweep";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
-    try test_io.cwd().createDirPath(io, prefix ++ "/cache/Cask");
+    var fx = try Fixture.init("sweep");
+    defer fx.deinit();
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -966,10 +992,10 @@ test "sweepOwnedVersionCache deletes only the token's own recorded versions" {
     try cask.recordCaskVersion(&db, "git", "2.38.0", "u", "aa", "dmg", null);
 
     const seeds = [_][]const u8{
-        prefix ++ "/cache/Cask/git-2.39.0.dmg", // owned current — removed
-        prefix ++ "/cache/Cask/git-2.38.0.dmg", // owned rollback — removed
-        prefix ++ "/cache/Cask/git-lfs-2.0.dmg", // prefix sibling — must survive
-        prefix ++ "/cache/Cask/git.dmg", // legacy unprefixed — untouched here
+        fx.p("cache/Cask/git-2.39.0.dmg"), // owned current — removed
+        fx.p("cache/Cask/git-2.38.0.dmg"), // owned rollback — removed
+        fx.p("cache/Cask/git-lfs-2.0.dmg"), // prefix sibling — must survive
+        fx.p("cache/Cask/git.dmg"), // legacy unprefixed — untouched here
     };
     for (seeds) |p| {
         const f = try test_io.createFileAbsolute(io, p, .{ .truncate = true });
@@ -977,7 +1003,7 @@ test "sweepOwnedVersionCache deletes only the token's own recorded versions" {
         try f.writeStreamingAll(io, "x");
     }
 
-    cask.sweepOwnedVersionCache(io, &db, prefix, "git");
+    cask.sweepOwnedVersionCache(io, &db, fx.base, "git");
 
     // Recorded versions gone; the prefix sibling and legacy shape survive.
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, seeds[0], .{}));
@@ -998,10 +1024,9 @@ test "sweepOwnedVersionCache is a no-op when the token has no history rows" {
 
 test "sweepOwnedVersionCache handles a dash-bearing version without touching siblings" {
     const io = testIo();
-    const prefix = "/tmp/malt_cask_sweep_rev";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
-    try test_io.cwd().createDirPath(io, prefix ++ "/cache/Cask");
+    var fx = try Fixture.init("sweep_rev");
+    defer fx.deinit();
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -1011,15 +1036,15 @@ test "sweepOwnedVersionCache handles a dash-bearing version without touching sib
     // the sibling token `git-lfs`. Exact `<token>-<version>` is the only signal.
     try cask.recordCaskVersion(&db, "git", "2.39.0-1", "u", "aa", "dmg", null);
 
-    const owned = prefix ++ "/cache/Cask/git-2.39.0-1.dmg";
-    const sibling = prefix ++ "/cache/Cask/git-lfs-2.0.dmg";
+    const owned = fx.p("cache/Cask/git-2.39.0-1.dmg");
+    const sibling = fx.p("cache/Cask/git-lfs-2.0.dmg");
     for ([_][]const u8{ owned, sibling }) |p| {
         const f = try test_io.createFileAbsolute(io, p, .{ .truncate = true });
         defer f.close(io);
         try f.writeStreamingAll(io, "x");
     }
 
-    cask.sweepOwnedVersionCache(io, &db, prefix, "git");
+    cask.sweepOwnedVersionCache(io, &db, fx.base, "git");
 
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, owned, .{}));
     try test_io.accessAbsolute(io, sibling, .{});
@@ -1027,10 +1052,9 @@ test "sweepOwnedVersionCache handles a dash-bearing version without touching sib
 
 test "sweepOwnedVersionCache sweeps a pre-v7 row with NULL artifact_type" {
     const io = testIo();
-    const prefix = "/tmp/malt_cask_sweep_null";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
-    try test_io.cwd().createDirPath(io, prefix ++ "/cache/Cask");
+    var fx = try Fixture.init("sweep_null");
+    defer fx.deinit();
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -1042,14 +1066,14 @@ test "sweepOwnedVersionCache sweeps a pre-v7 row with NULL artifact_type" {
         \\VALUES ('git', '2.39.0', 'https://x.invalid/git.zip');
     );
 
-    const owned = prefix ++ "/cache/Cask/git-2.39.0.zip";
+    const owned = fx.p("cache/Cask/git-2.39.0.zip");
     {
         const f = try test_io.createFileAbsolute(io, owned, .{ .truncate = true });
         defer f.close(io);
         try f.writeStreamingAll(io, "x");
     }
 
-    cask.sweepOwnedVersionCache(io, &db, prefix, "git");
+    cask.sweepOwnedVersionCache(io, &db, fx.base, "git");
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, owned, .{}));
 }
 
@@ -1057,31 +1081,23 @@ test "sweepOwnedVersionCache sweeps a pre-v7 row with NULL artifact_type" {
 
 test "reinstallFromHistory refuses when no history row matches" {
     const io = testIo();
-    const prefix: [:0]const u8 = "/tmp/malt_cask_reinstall_missing";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
-    try test_io.cwd().createDirPath(io, prefix);
+    var fx = try Fixture.init("reinstall_missing");
+    defer fx.deinit();
 
-    var buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&buf, "{s}/test.db", .{prefix});
-    var db = try sqlite.Database.open(db_path);
+    var db = try sqlite.Database.open(fx.p("test.db"));
     defer db.close();
     try schema.initSchema(&db);
 
-    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, prefix);
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base);
     try testing.expectError(cask.CaskError.InstallFailed, installer.reinstallFromHistory("missing-token", "1.0"));
 }
 
 test "reinstallFromHistory refuses on a history row whose artifact_type is unknown" {
     const io = testIo();
-    const prefix: [:0]const u8 = "/tmp/malt_cask_reinstall_unknown";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
-    try test_io.cwd().createDirPath(io, prefix);
+    var fx = try Fixture.init("reinstall_unknown");
+    defer fx.deinit();
 
-    var buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&buf, "{s}/test.db", .{prefix});
-    var db = try sqlite.Database.open(db_path);
+    var db = try sqlite.Database.open(fx.p("test.db"));
     defer db.close();
     try schema.initSchema(&db);
 
@@ -1090,7 +1106,7 @@ test "reinstallFromHistory refuses on a history row whose artifact_type is unkno
         \\VALUES ('mystery', '1.0', 'https://x.invalid/m.bin', 'aa', 'unknown');
     );
 
-    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, prefix);
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base);
     try testing.expectError(cask.CaskError.InstallFailed, installer.reinstallFromHistory("mystery", "1.0"));
 }
 
@@ -1257,15 +1273,11 @@ test "lookupCaskVersion returns null when a required column is NULL" {
 
 test "uninstall removes per-version cache files and drops every cask_versions row" {
     const io = testIo();
-    const prefix: [:0]const u8 = "/tmp/malt_cask_uninstall_sweep";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
-    try test_io.cwd().createDirPath(io, prefix);
-    try test_io.cwd().createDirPath(io, prefix ++ "/cache/Cask");
+    var fx = try Fixture.init("uninstall_sweep");
+    defer fx.deinit();
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
 
-    var buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&buf, "{s}/test.db", .{prefix});
-    var db = try sqlite.Database.open(db_path);
+    var db = try sqlite.Database.open(fx.p("test.db"));
     defer db.close();
     try schema.initSchema(&db);
 
@@ -1281,25 +1293,25 @@ test "uninstall removes per-version cache files and drops every cask_versions ro
         \\       ('flux-markdown', '1.32.427', 'u', 'aa', 'dmg');
     );
     for ([_][]const u8{
-        prefix ++ "/cache/Cask/flux-markdown-1.30.0.dmg",
-        prefix ++ "/cache/Cask/flux-markdown-1.32.427.dmg",
-        prefix ++ "/cache/Cask/flux-markdown.dmg", // legacy unprefixed
+        fx.p("cache/Cask/flux-markdown-1.30.0.dmg"),
+        fx.p("cache/Cask/flux-markdown-1.32.427.dmg"),
+        fx.p("cache/Cask/flux-markdown.dmg"), // legacy unprefixed
     }) |p| {
         const f = try test_io.createFileAbsolute(io, p, .{ .truncate = true });
         defer f.close(io);
         try f.writeStreamingAll(io, "x");
     }
 
-    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, prefix);
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base);
     // Uninstall paths the app via app_path; the test seed names a path
     // outside the sandbox so the real /Applications wipe is a no-op.
     installer.uninstall("flux-markdown") catch {};
 
     // Per-version + legacy cache files all gone.
     for ([_][]const u8{
-        prefix ++ "/cache/Cask/flux-markdown-1.30.0.dmg",
-        prefix ++ "/cache/Cask/flux-markdown-1.32.427.dmg",
-        prefix ++ "/cache/Cask/flux-markdown.dmg",
+        fx.p("cache/Cask/flux-markdown-1.30.0.dmg"),
+        fx.p("cache/Cask/flux-markdown-1.32.427.dmg"),
+        fx.p("cache/Cask/flux-markdown.dmg"),
     }) |p| {
         try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, p, .{}));
     }

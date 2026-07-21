@@ -24,13 +24,9 @@ const Scratch = struct {
     path: [:0]u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
-        const ts = test_io.nanoTimestamp(std.Options.debug_io);
-        const path = try std.fmt.allocPrintSentinel(
-            allocator,
-            "/tmp/malt_deps_cli_{s}_{d}",
-            .{ tag, ts },
-            0,
-        );
+        const base = try test_io.uniqueTempPath(allocator, "deps_cli", tag);
+        defer allocator.free(base);
+        const path = try allocator.dupeZ(u8, base);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
@@ -113,11 +109,14 @@ test "execute with no positional formula returns Aborted" {
 
 test "execute on a fresh prefix without --installed still completes" {
     // No db, no api hit either — must degrade cleanly without panic.
-    const path = "/tmp/malt_deps_cli_no_db";
+    const unique = try test_io.uniqueTempPath(testing.allocator, "deps_cli", "no_db");
+    defer testing.allocator.free(unique);
+    const path = try testing.allocator.dupeZ(u8, unique);
+    defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
-    _ = c.setenv("MALT_PREFIX", path, 1);
+    _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
     const ctx = ctxWithSink();

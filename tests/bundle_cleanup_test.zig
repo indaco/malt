@@ -16,7 +16,10 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
     // We can't inject a fake dispatcher through `cli_bundle.execute`, so
     // dry-run is the proof — any uninstall would mutate the database, and
     // we assert it stays intact.
-    const dir_z: [:0]const u8 = "/tmp/malt_bundle_cleanup_cli_dry_run";
+    const dir = try test_io.uniqueTempPath(testing.allocator, "bundle_cleanup", "cli_dry_run");
+    defer testing.allocator.free(dir);
+    const dir_z = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dir_z);
     test_io.deleteTreeAbsolute(std.Options.debug_io, dir_z) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, dir_z);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, dir_z) catch {};

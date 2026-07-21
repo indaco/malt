@@ -13,12 +13,9 @@ const sqlite = malt.sqlite;
 const schema = malt.schema;
 
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
-    const path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/malt_installkfb_{d}_{s}",
-        .{ test_io.nanoTimestamp(std.Options.debug_io), suffix },
-        0,
-    );
+    const base = try test_io.uniqueTempPath(testing.allocator, "installkfb", suffix);
+    defer testing.allocator.free(base);
+    const path = try testing.allocator.dupeZ(u8, base);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     // Mandatory layout subdirs — Cellar / store live here.

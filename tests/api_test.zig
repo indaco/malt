@@ -49,17 +49,23 @@ test "validateName rejects slashes and spaces" {
 // --- BrewApi cache tests (no network) ---
 
 const TempCacheDir = struct {
+    arena: std.heap.ArenaAllocator,
     path: []const u8,
 
-    fn init(comptime tag: []const u8) !TempCacheDir {
-        const p = "/tmp/malt_api_test_" ++ tag;
+    /// Process-unique root: a fixed /tmp name lets an overlapping run's
+    /// deleteTree wipe this fixture mid-test.
+    fn init(tag: []const u8) !TempCacheDir {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const p = try test_io.uniqueTempPath(arena.allocator(), "api", tag);
         test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, p);
-        return .{ .path = p };
+        return .{ .arena = arena, .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        self.arena.deinit();
     }
 
     fn writeCacheFile(self: *TempCacheDir, rel: []const u8, content: []const u8) !void {

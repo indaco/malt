@@ -8,24 +8,30 @@ const sqlite = malt.sqlite;
 const schema = malt.schema;
 const test_io = @import("test_io");
 
+/// Scratch DB under a process-unique dir, so overlapping test runs cannot
+/// wipe each other's fixtures.
 const TempDb = struct {
+    arena: std.heap.ArenaAllocator,
     dir: []const u8,
     db: sqlite.Database,
 
-    fn init(comptime tag: []const u8) !TempDb {
-        const dir = "/tmp/malt_schema_v2_test_" ++ tag;
+    fn init(tag: []const u8) !TempDb {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const dir = try test_io.uniqueTempPath(arena.allocator(), "schema_v2", tag);
         test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, dir);
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
-        return .{ .dir = dir, .db = db };
+        return .{ .arena = arena, .dir = dir, .db = db };
     }
 
     fn deinit(self: *TempDb) void {
         self.db.close();
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
+        self.arena.deinit();
     }
 };
 

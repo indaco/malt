@@ -42,14 +42,46 @@ fn newInstaller(threaded: *std.Io.Threaded, db: *sqlite.Database, prefix: [:0]co
     return cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, db, prefix);
 }
 
+/// Scratch tree under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures.
+const Fixture = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(tag: []const u8) !Fixture {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try test_io.uniqueTempPath(arena.allocator(), "font_rollback", tag);
+        const base_z = try arena.allocator().dupeZ(u8, base);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
+        return .{ .arena = arena, .base = base_z };
+    }
+
+    /// Absolute path to `sub` inside the fixture; valid until `deinit`.
+    fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}/{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Fixture) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "placeExtracted honors font_entries_override on an artifact-less cask" {
     const io = std.Options.debug_io;
-    const prefix: [:0]const u8 = "/tmp/malt_font_rollback_override_it";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    var fx = try Fixture.init("override");
+    defer fx.deinit();
+    const prefix = fx.base;
 
-    const extract = prefix ++ "/extract";
-    try putFile(io, extract ++ "/ttf/A.ttf", "AAA");
+    const extract = fx.p("extract");
+    try putFile(io, fx.p("extract/ttf/A.ttf"), "AAA");
 
     var c = try cask.parseCask(testing.allocator, synthetic_json);
     defer c.deinit();
@@ -68,11 +100,11 @@ test "placeExtracted honors font_entries_override on an artifact-less cask" {
     const entries = [_]cask_font.FontEntry{.{ .source = "ttf/A.ttf", .target = null }};
     installer.font_entries_override = &entries;
 
-    const app_path = try installer.placeExtracted(extract, prefix ++ "/Applications", &c);
+    const app_path = try installer.placeExtracted(extract, fx.p("Applications"), &c);
     defer testing.allocator.free(app_path);
 
-    try testing.expectEqualStrings(prefix ++ "/Caskroom/font-x/1.0/" ++ cask_font.MANIFEST_NAME, app_path);
-    try expectFileBody(io, prefix ++ "/Fonts/A.ttf", "AAA");
+    try testing.expectEqualStrings(fx.p("Caskroom/font-x/1.0/" ++ cask_font.MANIFEST_NAME), app_path);
+    try expectFileBody(io, fx.p("Fonts/A.ttf"), "AAA");
 }
 
 const font_cask_json =
@@ -86,13 +118,13 @@ const font_cask_json =
 
 test "font_entries_override is re-sanitized: a tampered sidecar entry cannot traverse" {
     const io = std.Options.debug_io;
-    const prefix: [:0]const u8 = "/tmp/malt_font_rollback_tamper_it";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    var fx = try Fixture.init("tamper");
+    defer fx.deinit();
+    const prefix = fx.base;
 
-    const extract = prefix ++ "/extract";
-    try putFile(io, extract ++ "/Good.ttf", "GOOD");
-    try putFile(io, prefix ++ "/secret", "SECRET");
+    const extract = fx.p("extract");
+    try putFile(io, fx.p("extract/Good.ttf"), "GOOD");
+    try putFile(io, fx.p("secret"), "SECRET");
 
     var c = try cask.parseCask(testing.allocator, synthetic_json);
     defer c.deinit();
@@ -113,23 +145,22 @@ test "font_entries_override is re-sanitized: a tampered sidecar entry cannot tra
     };
     installer.font_entries_override = &entries;
 
-    const app_path = try installer.placeExtracted(extract, prefix ++ "/Applications", &c);
+    const app_path = try installer.placeExtracted(extract, fx.p("Applications"), &c);
     defer testing.allocator.free(app_path);
 
-    const fonts = prefix ++ "/Fonts";
-    try expectFileBody(io, fonts ++ "/Good.ttf", "GOOD");
-    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, fonts ++ "/secret", .{}));
+    try expectFileBody(io, fx.p("Fonts/Good.ttf"), "GOOD");
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, fx.p("Fonts/secret"), .{}));
 }
 
 test "a fresh font install persists a per-version sidecar that round-trips the stanzas" {
     const io = std.Options.debug_io;
-    const prefix: [:0]const u8 = "/tmp/malt_font_rollback_sidecar_it";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    var fx = try Fixture.init("sidecar");
+    defer fx.deinit();
+    const prefix = fx.base;
 
-    const extract = prefix ++ "/extract";
-    try putFile(io, extract ++ "/ttf/A.ttf", "AAA");
-    try putFile(io, extract ++ "/B.ttf", "BBB");
+    const extract = fx.p("extract");
+    try putFile(io, fx.p("extract/ttf/A.ttf"), "AAA");
+    try putFile(io, fx.p("extract/B.ttf"), "BBB");
 
     var c = try cask.parseCask(testing.allocator, font_cask_json);
     defer c.deinit();
@@ -144,7 +175,7 @@ test "a fresh font install persists a per-version sidecar that round-trips the s
 
     // Installing (the font branch) must persist the stanzas next to the cached
     // artifact so a later rollback can restore them offline, JSON-free.
-    const app_path = try installer.placeExtracted(extract, prefix ++ "/Applications", &c);
+    const app_path = try installer.placeExtracted(extract, fx.p("Applications"), &c);
     defer testing.allocator.free(app_path);
 
     var spec = (try installer.readFontSpec("font-x", "1.0")).?;
@@ -167,20 +198,19 @@ fn readSpecUnderOom(alloc: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]
 
 test "readFontSpec frees its buffers on allocation failure" {
     const io = std.Options.debug_io;
-    const prefix: [:0]const u8 = "/tmp/malt_font_rollback_oom_it";
-    test_io.deleteTreeAbsolute(io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
-    try putFile(io, prefix ++ "/cache/Cask/font-x-1.0.fonts", "ttf/A.ttf\t/x/Renamed.ttf\nB.ttf\n");
+    var fx = try Fixture.init("oom");
+    defer fx.deinit();
+    try putFile(io, fx.p("cache/Cask/font-x-1.0.fonts"), "ttf/A.ttf\t/x/Renamed.ttf\nB.ttf\n");
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
-    try testing.checkAllAllocationFailures(testing.allocator, readSpecUnderOom, .{ &db, prefix });
+    try testing.checkAllAllocationFailures(testing.allocator, readSpecUnderOom, .{ &db, fx.base });
 }
 
 test "readFontSpec returns null when no sidecar was written" {
-    const prefix: [:0]const u8 = "/tmp/malt_font_rollback_nospec_it";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    var fx = try Fixture.init("nospec");
+    defer fx.deinit();
+    const prefix = fx.base;
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();

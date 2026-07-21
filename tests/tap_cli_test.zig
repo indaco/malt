@@ -24,13 +24,11 @@ const Scratch = struct {
     path: [:0]u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
-        const ts = test_io.nanoTimestamp(std.Options.debug_io);
-        const path = try std.fmt.allocPrintSentinel(
-            allocator,
-            "/tmp/malt_tap_cli_{s}_{d}",
-            .{ tag, ts },
-            0,
-        );
+        // Process-unique: a bare timestamp collides between overlapping runs.
+        const raw = try test_io.uniqueTempPath(allocator, "tap_cli", tag);
+        defer allocator.free(raw);
+        const path = try allocator.dupeZ(u8, raw);
+        errdefer allocator.free(path);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
@@ -119,11 +117,14 @@ test "execute --help short-circuits without opening the database" {
 }
 
 test "execute on a fresh prefix with no db is a clean no-op" {
-    const path = "/tmp/malt_tap_cli_no_db";
+    const raw = try test_io.uniqueTempPath(testing.allocator, "tap_cli", "no_db");
+    defer testing.allocator.free(raw);
+    const path = try testing.allocator.dupeZ(u8, raw);
+    defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
-    _ = c.setenv("MALT_PREFIX", path, 1);
+    _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
     quiet();

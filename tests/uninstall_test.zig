@@ -24,13 +24,9 @@ const ScratchPrefix = struct {
     path: [:0]u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !ScratchPrefix {
-        const ts = test_io.nanoTimestamp(std.Options.debug_io);
-        const path = try std.fmt.allocPrintSentinel(
-            allocator,
-            "/tmp/malt_uninstall_{s}_{d}",
-            .{ tag, ts },
-            0,
-        );
+        const base = try test_io.uniqueTempPath(allocator, "uninstall", tag);
+        defer allocator.free(base);
+        const path = try std.fmt.allocPrintSentinel(allocator, "{s}", .{base}, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});

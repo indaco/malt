@@ -9,10 +9,42 @@ const test_io = @import("test_io");
 const testing = std.testing;
 const cli_run = malt.cli_run;
 
+/// Scratch tree under a process-unique base, so overlapping test runs cannot
+/// wipe each other's fixtures.
+const Fixture = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(tag: []const u8) !Fixture {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try test_io.uniqueTempPath(arena.allocator(), "run", tag);
+        const base_z = try arena.allocator().dupeZ(u8, base);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
+        return .{ .arena = arena, .base = base_z };
+    }
+
+    /// Absolute path to `sub` inside the fixture; valid until `deinit`.
+    fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}/{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Fixture) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "findCachedBinary returns the path when the cached binary exists" {
-    const base = "/tmp/malt_run_keep_hit";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var fx = try Fixture.init("keep_hit");
+    defer fx.deinit();
+    const base = fx.base;
 
     const sha = "abc123";
     const pkg = "jq";
@@ -38,9 +70,9 @@ test "findCachedBinary returns the path when the cached binary exists" {
 }
 
 test "findCachedBinary reports miss when the cache is empty" {
-    const base = "/tmp/malt_run_keep_miss";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var fx = try Fixture.init("keep_miss");
+    defer fx.deinit();
+    const base = fx.base;
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -55,9 +87,9 @@ test "findCachedBinary reports miss when the cache is empty" {
 // a probe for another SHA — guards against accidental cross-version reuse
 // when an upstream rebuilds with the same `version` string.
 test "findCachedBinary keys cache slot on sha256, not just pkg+version" {
-    const base = "/tmp/malt_run_keep_sha_isolation";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var fx = try Fixture.init("keep_sha_isolation");
+    defer fx.deinit();
+    const base = fx.base;
 
     const sha_a = "aaa111";
     const sha_b = "bbb222";
@@ -85,9 +117,9 @@ test "findCachedBinary keys cache slot on sha256, not just pkg+version" {
 }
 
 test "findCachedBinary requires the version directory to match" {
-    const base = "/tmp/malt_run_keep_ver_isolation";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var fx = try Fixture.init("keep_ver_isolation");
+    defer fx.deinit();
+    const base = fx.base;
 
     const sha = "abc";
     const pkg = "jq";
@@ -113,9 +145,9 @@ test "findCachedBinary requires the version directory to match" {
 // time out (flock is per-process on the SAME fd path here, but separate
 // LockFile.acquire calls open new fds, which on macOS/Linux contend).
 test "LockFile blocks a second acquire on the same path" {
-    const lock_path = "/tmp/malt_run_keep_lock_test.lock";
-    test_io.deleteFileAbsolute(std.Options.debug_io, lock_path) catch {};
-    defer test_io.deleteFileAbsolute(std.Options.debug_io, lock_path) catch {};
+    var fx = try Fixture.init("keep_lock_test");
+    defer fx.deinit();
+    const lock_path = fx.p("lock");
 
     const io = std.Options.debug_io;
     var first = try malt.lock.LockFile.acquire(io, lock_path, 1_000);

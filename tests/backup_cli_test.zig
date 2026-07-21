@@ -24,13 +24,11 @@ const Scratch = struct {
     path: [:0]u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
-        const ts = test_io.nanoTimestamp(std.Options.debug_io);
-        const path = try std.fmt.allocPrintSentinel(
-            allocator,
-            "/tmp/malt_backup_exec_{s}_{d}",
-            .{ tag, ts },
-            0,
-        );
+        // Process-unique: a bare timestamp collides between overlapping runs.
+        const raw = try test_io.uniqueTempPath(allocator, "backup_exec", tag);
+        defer allocator.free(raw);
+        const path = try allocator.dupeZ(u8, raw);
+        errdefer allocator.free(path);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
@@ -126,11 +124,14 @@ test "execute --output without a value is rejected" {
 test "execute fails fast when the database is unopenable" {
     // No DB file pre-created and no db/ dir means SQLite cannot create
     // the file (no parent). That's the DatabaseError branch.
-    const path = "/tmp/malt_backup_no_db_dir";
+    const raw = try test_io.uniqueTempPath(testing.allocator, "backup_cli", "no_db_dir");
+    defer testing.allocator.free(raw);
+    const path = try testing.allocator.dupeZ(u8, raw);
+    defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
-    _ = c.setenv("MALT_PREFIX", path, 1);
+    _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
     quiet();

@@ -77,12 +77,8 @@ fn runTar(argv: []const []const u8) !void {
     }
 }
 
-fn uniqueBase(suffix: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_bottle_dl_{d}_{s}",
-        .{ test_io.nanoTimestamp(std.Options.debug_io), suffix },
-    );
+fn uniqueBase(suffix: []const u8) ![]const u8 {
+    return test_io.uniqueTempPath(testing.allocator, "bottle_dl", suffix);
 }
 
 fn hexSha(bytes: []const u8) [64]u8 {

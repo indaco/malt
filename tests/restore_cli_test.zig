@@ -22,13 +22,11 @@ const Scratch = struct {
     path: [:0]u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
-        const ts = test_io.nanoTimestamp(std.Options.debug_io);
-        const path = try std.fmt.allocPrintSentinel(
-            allocator,
-            "/tmp/malt_restore_{s}_{d}",
-            .{ tag, ts },
-            0,
-        );
+        // Process-unique: a bare timestamp collides between overlapping runs.
+        const raw = try test_io.uniqueTempPath(allocator, "restore", tag);
+        defer allocator.free(raw);
+        const path = try allocator.dupeZ(u8, raw);
+        errdefer allocator.free(path);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, path);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
