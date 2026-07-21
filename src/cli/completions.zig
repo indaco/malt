@@ -155,21 +155,21 @@ pub const bash_script =
     \\        backup)           cmd_flags="--output -o --versions --services --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
-    \\        uninstall|remove) cmd_flags="--cask --force --zap --dry-run" ;;
-    \\        upgrade)          cmd_flags="--all --cask --formula --dry-run --pinned --force -f --isolate-deps --isolate-dependencies --use-system-ruby=" ;;
-    \\        outdated)         cmd_flags="--json --formula --cask --pinned-only --tap --refresh --quiet -q" ;;
+    \\        uninstall|remove) cmd_flags="--cask --force --dry-run" ;;
+    \\        upgrade)          cmd_flags="--cask --formula --dry-run --pinned --force -f --isolate-deps --isolate-dependencies --use-system-ruby=" ;;
+    \\        outdated)         cmd_flags="--json --formula --formulae --cask --casks --pinned-only --tap --refresh --quiet -q" ;;
     \\        update)           cmd_flags="--check --quiet -q" ;;
     \\        version)          cmd_flags="--check --yes -y --no-verify --cleanup" ;;
-    \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --tap --json --size --linked --quiet -q" ;;
+    \\        list|ls)          cmd_flags="--versions --formula --formulae --cask --casks --pinned --tap --json --size --linked --quiet -q" ;;
     \\        info)             cmd_flags="--formula --cask --json" ;;
-    \\        search)           cmd_flags="--formula --cask --json --installed --api --all --offline" ;;
+    \\        search)           cmd_flags="--formula --formulae --cask --casks --json --installed --api --all --offline" ;;
     \\        uses)             cmd_flags="--recursive -r --json --quiet -q" ;;
     \\        deps)             cmd_flags="--recursive -r --installed --json --quiet -q" ;;
     \\        which)            cmd_flags="--json" ;;
     \\        migrate)          cmd_flags="--dry-run --parallel --use-system-ruby=" ;;
     \\        rollback)         cmd_flags="--dry-run --list --to --json" ;;
     \\        link)             cmd_flags="--overwrite --force -f --isolate --all" ;;
-    \\        services)         cmd_flags="--tail --stderr --follow -f --system --json" ;;
+    \\        services)         cmd_flags="--tail --stderr --follow -f --json" ;;
     \\        bundle)           cmd_flags="--dry-run -n --format --services --purge --yes -y --isolate-deps --isolate-dependencies" ;;
     \\        run)              cmd_flags="--keep" ;;
     \\        doctor)           cmd_flags="--fix --dry-run --post-install-status" ;;
@@ -296,13 +296,11 @@ pub const zsh_script =
     \\                    _arguments \
     \\                        '--cask[Treat the name as a cask]' \
     \\                        '--force[Remove even if depended on]' \
-    \\                        '--zap[Deep clean (cask only)]' \
     \\                        '--dry-run[Show what would be removed]' \
     \\                        '*::package:'
     \\                    ;;
     \\                upgrade)
     \\                    _arguments \
-    \\                        '--all[Upgrade everything]' \
     \\                        '--cask[Upgrade casks only]' \
     \\                        '--formula[Upgrade formulas only]' \
     \\                        '--dry-run[Show what would be upgraded]' \
@@ -345,7 +343,9 @@ pub const zsh_script =
     \\                    _arguments \
     \\                        '--json[Output as JSON]' \
     \\                        '--formula[Show outdated formulas only]' \
+    \\                        '--formulae[Alias of --formula]' \
     \\                        '--cask[Show outdated casks only]' \
+    \\                        '--casks[Alias of --cask]' \
     \\                        '--pinned-only[Audit pinned formulas + casks only]' \
     \\                        '--tap[Only packages from <label> (e.g. user/repo)]:tap label:' \
     \\                        '--refresh[Force live recompute, bypass the cached snapshot]' \
@@ -360,7 +360,9 @@ pub const zsh_script =
     \\                    _arguments \
     \\                        '--versions[Show version numbers]' \
     \\                        '--formula[Formulas only]' \
+    \\                        '--formulae[Alias of --formula]' \
     \\                        '--cask[Casks only]' \
+    \\                        '--casks[Alias of --cask]' \
     \\                        '--pinned[Pinned packages only]' \
     \\                        '--tap[Only packages from <label> (e.g. user/repo)]:tap label:' \
     \\                        '--json[Output as JSON]' \
@@ -378,7 +380,9 @@ pub const zsh_script =
     \\                search)
     \\                    _arguments \
     \\                        '--formula[Search formulas only]' \
+    \\                        '--formulae[Alias of --formula]' \
     \\                        '--cask[Search casks only]' \
+    \\                        '--casks[Alias of --cask]' \
     \\                        '--installed[Local DB only, no network]' \
     \\                        '--api[Force Homebrew API path]' \
     \\                        '--all[Run local + API and merge results]' \
@@ -461,7 +465,6 @@ pub const zsh_script =
     \\                        '--tail[Number of trailing log lines]:lines:' \
     \\                        '--stderr[Read stderr instead of stdout]' \
     \\                        '(--follow -f)'{--follow,-f}'[Tail appended bytes until SIGINT]' \
-    \\                        '--system[Operate on system-level services]' \
     \\                        '--json[Output as JSON]' \
     \\                        '1:subcommand:(list start stop restart status logs)'
     \\                    ;;
@@ -623,15 +626,12 @@ pub const fish_script =
     \\    # uninstall / remove
     \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l cask    -d 'Treat the name as a cask'
     \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l force   -d 'Remove even if depended on'
-    \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l zap     -d 'Deep clean (cask only)'
     \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l cask    -d 'Treat the name as a cask'
     \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l force   -d 'Remove even if depended on'
-    \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l zap     -d 'Deep clean (cask only)'
     \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l dry-run -d 'Preview'
     \\
     \\    # upgrade
-    \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l all     -d 'Upgrade everything'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l cask    -d 'Casks only'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l formula -d 'Formulas only'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l dry-run -d 'Preview'
@@ -644,7 +644,9 @@ pub const fish_script =
     \\    # outdated
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l json        -d 'JSON output'
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l formula     -d 'Formulas only'
+    \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l formulae    -d 'Alias of --formula'
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l cask        -d 'Casks only'
+    \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l casks       -d 'Alias of --cask'
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l pinned-only -d 'Pinned formulas + casks only'
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l tap         -x -d 'Only packages from <label>'
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l refresh     -d 'Force live recompute, bypass the cached snapshot'
@@ -655,7 +657,9 @@ pub const fish_script =
     \\    # list / ls
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l versions -d 'Show version numbers'
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l formula  -d 'Formulas only'
+    \\    complete -c $__malt_bin -n '__malt_using_command list' -l formulae -d 'Alias of --formula'
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l cask     -d 'Casks only'
+    \\    complete -c $__malt_bin -n '__malt_using_command list' -l casks    -d 'Alias of --cask'
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l pinned   -d 'Pinned only'
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l tap      -x -d 'Only packages from <label>'
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l json     -d 'JSON output'
@@ -663,7 +667,9 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l linked   -d 'With --json: add link status'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l versions -d 'Show version numbers'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l formula  -d 'Formulas only'
+    \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l formulae -d 'Alias of --formula'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l cask     -d 'Casks only'
+    \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l casks    -d 'Alias of --cask'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l pinned   -d 'Pinned only'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l tap      -x -d 'Only packages from <label>'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l json     -d 'JSON output'
@@ -677,7 +683,9 @@ pub const fish_script =
     \\
     \\    # search
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l formula   -d 'Formulas only'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l formulae  -d 'Alias of --formula'
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l cask      -d 'Casks only'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l casks     -d 'Alias of --cask'
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l installed -d 'Local DB only, no network'
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l api       -d 'Force Homebrew API path'
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l all       -d 'Run local + API and merge'

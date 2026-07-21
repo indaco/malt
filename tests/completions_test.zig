@@ -125,7 +125,9 @@ test "all outdated completions expose --tap" {
     // per-command _arguments block names it with a `:tap label:` slot;
     // fish declares it with `-x` so the next token is treated as the
     // label and not eaten by file completion.
-    try expectContains(completions.bash_script, "outdated)         cmd_flags=\"--json --formula --cask --pinned-only --tap");
+    // Scoped to outdated's own flag list rather than pinning the whole string,
+    // which broke whenever an unrelated flag was added to the same line.
+    try expectContains(try bashFlagsFor("outdated)"), "--tap");
     try expectContains(completions.zsh_script, "'--tap[Only packages from <label> (e.g. user/repo)]:tap label:'");
     try expectContains(completions.fish_script, "'__malt_using_command outdated' -l tap");
 }
@@ -360,5 +362,27 @@ test "zsh line continuations are single backslashes" {
             std.debug.print("doubled backslash continuation: '{s}'\n", .{trimmed});
             return error.DoubledBackslash;
         }
+    }
+}
+
+test "no shell advertises the removed phantom flags" {
+    // uninstall --zap, services --system and upgrade --all were offered by the
+    // shells but read by no parser. Their absence is the assertion.
+    inline for (.{ completions.bash_script, completions.zsh_script, completions.fish_script }) |script| {
+        try testing.expect(std.mem.indexOf(u8, script, "zap") == null);
+        try testing.expect(std.mem.indexOf(u8, script, "--system") == null);
+        try testing.expect(std.mem.indexOf(u8, script, "-l system") == null);
+    }
+    // `--all` is scoped: search, tap and link keep their real ones.
+    try expectNotContains(try bashFlagsFor("upgrade)"), "--all");
+    try expectNotContains(try zshCaseFor("                upgrade)"), "'--all[");
+    try testing.expect(std.mem.indexOf(u8, completions.fish_script, "__malt_using_command upgrade' -l all") == null);
+    try expectContains(try bashFlagsFor("search)"), "--all");
+}
+
+fn expectNotContains(haystack: []const u8, needle: []const u8) !void {
+    if (std.mem.indexOf(u8, haystack, needle) != null) {
+        std.debug.print("expected section to NOT contain '{s}'\n", .{needle});
+        return error.UnexpectedSubstring;
     }
 }

@@ -137,7 +137,6 @@ const uninstall_help =
     \\
     \\Flags:
     \\  --force        Remove even if other packages depend on it
-    \\  --zap          Deep clean (cask only)
     \\  --dry-run      Show what would be removed
     \\
 ;
@@ -152,7 +151,6 @@ const upgrade_help =
     \\(e.g. an upstream revert) — preview with --dry-run.
     \\
     \\Flags:
-    \\  --all          Upgrade everything (formulas + casks)
     \\  --cask         Upgrade casks only
     \\  --formula      Upgrade formulas only
     \\  --dry-run      Show what would be upgraded
