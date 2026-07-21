@@ -735,6 +735,21 @@ test "ensureForeignKeysOn is idempotent when FKs are already on" {
     try testing.expect(try foreignKeysOn(&db));
 }
 
+/// Copy out `sqlite_master.sql` for `kegs`. The text is owned by the
+/// statement, so it has to be copied before the statement finalizes.
+fn kegsCreateSql(db: *sqlite.Database, buf: []u8) ![]const u8 {
+    var stmt = try db.prepare(
+        \\SELECT sql FROM sqlite_master
+        \\WHERE type='table' AND name='kegs';
+    );
+    defer stmt.finalize();
+    if (!try stmt.step()) return error.NoKegsTable;
+    const sql = std.mem.sliceTo(stmt.columnText(0) orelse return error.NoKegsTable, 0);
+    if (sql.len > buf.len) return error.NoSpaceLeft;
+    @memcpy(buf[0..sql.len], sql);
+    return buf[0..sql.len];
+}
+
 // Without the success-path hard re-enable, a SQLITE_BUSY storm during
 // the v5 commit window would leave the connection FK-off for the rest
 // of its lifetime — every later ON DELETE CASCADE would silently
@@ -743,8 +758,80 @@ test "migrate leaves PRAGMA foreign_keys ON after a successful v5 rebuild" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
 
-    try initSchema(&db);
+    // Pre-v5 shape: the two-column UNIQUE is what makes the v5 probe
+    // miss and the rebuild run. Do not "modernise" it — the witness
+    // assertions below fail loudly if it drifts.
+    try db.exec(
+        \\CREATE TABLE schema_version (
+        \\    version INTEGER PRIMARY KEY,
+        \\    applied TEXT NOT NULL DEFAULT (datetime('now'))
+        \\);
+    );
+    try db.exec(
+        \\CREATE TABLE kegs (
+        \\    id            INTEGER PRIMARY KEY,
+        \\    name          TEXT NOT NULL,
+        \\    full_name     TEXT NOT NULL,
+        \\    version       TEXT NOT NULL,
+        \\    revision      INTEGER NOT NULL DEFAULT 0,
+        \\    tap           TEXT,
+        \\    store_sha256  TEXT NOT NULL,
+        \\    cellar_path   TEXT NOT NULL,
+        \\    installed_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        \\    pinned        INTEGER NOT NULL DEFAULT 0,
+        \\    install_reason TEXT NOT NULL DEFAULT 'direct',
+        \\    UNIQUE(name, version)
+        \\);
+    );
+    try db.exec(
+        \\CREATE TABLE dependencies (
+        \\    keg_id     INTEGER NOT NULL REFERENCES kegs(id) ON DELETE CASCADE,
+        \\    dep_name   TEXT NOT NULL,
+        \\    dep_type   TEXT NOT NULL DEFAULT 'runtime',
+        \\    PRIMARY KEY (keg_id, dep_name)
+        \\);
+    );
+    // v5→v6 is the one step with no missing-table guard; without `casks`
+    // the ladder aborts before it can prove anything about the rebuild.
+    try db.exec(
+        \\CREATE TABLE casks (
+        \\    id            INTEGER PRIMARY KEY,
+        \\    token         TEXT NOT NULL UNIQUE,
+        \\    name          TEXT NOT NULL,
+        \\    version       TEXT NOT NULL,
+        \\    url           TEXT NOT NULL,
+        \\    sha256        TEXT
+        \\);
+    );
+
+    // Real rows, so the copy step and foreign_key_check tail run against
+    // data instead of an empty table.
+    try db.exec(
+        \\INSERT INTO kegs (id, name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES (7, 'libgit2', 'libgit2', '1.9.2', 0, 'sha-old', '/c/libgit2/1.9.2');
+    );
+    try db.exec("INSERT INTO dependencies(keg_id, dep_name) VALUES (7, 'pcre2');");
+    try db.exec("INSERT INTO schema_version (version) VALUES (4);");
+
+    try migrate(&db);
+
     try testing.expect(try foreignKeysOn(&db));
+
+    // Rebuild witness: the migration's `ALTER TABLE ... RENAME` tail
+    // leaves the table name quoted; a direct CREATE does not.
+    var buf: [1024]u8 = undefined;
+    const sql = try kegsCreateSql(&db, &buf);
+    try testing.expect(std.mem.indexOf(u8, sql, "CREATE TABLE \"kegs\"") != null);
+    try testing.expect(std.mem.indexOf(u8, sql, "UNIQUE(name, version, revision)") != null);
+
+    // The seeded row and its FK child survived the copy.
+    var stmt = try db.prepare(
+        \\SELECT COUNT(*) FROM dependencies d JOIN kegs k ON k.id = d.keg_id
+        \\WHERE k.name = 'libgit2' AND d.dep_name = 'pcre2';
+    );
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
 }
 
 // Regression: a Homebrew revision-bump upgrade ("1.9.2" → "1.9.2_2")
