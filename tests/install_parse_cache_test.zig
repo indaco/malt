@@ -17,12 +17,31 @@ const sqlite = malt.sqlite;
 const schema = malt.schema;
 const test_io = @import("test_io");
 
+const sys = struct {
+    extern "c" fn getpid() c_int;
+};
+
+var temp_seq = std.atomic.Value(u32).init(0);
+
+/// Build a process-unique temp path. Two overlapping `zig build test` runs
+/// (or a manual run racing the pre-push hook) otherwise share a fixed path,
+/// and one run's `deleteTree` wipes the other's seeded API cache — which
+/// silently falls through to the real network and fails on a 404.
+/// Mirrors the same fix in `tests/outdated_test.zig`.
+fn uniqueTempPath(allocator: std.mem.Allocator, tag: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "/tmp/malt_parse_cache_test_{s}_{d}_{d}", .{
+        tag, sys.getpid(), temp_seq.fetchAdd(1, .monotonic),
+    });
+}
+
 const TempDb = struct {
+    allocator: std.mem.Allocator,
     dir: []const u8,
     db: sqlite.Database,
 
-    fn init(comptime tag: []const u8) !TempDb {
-        const dir = "/tmp/malt_parse_cache_test_" ++ tag;
+    fn init(allocator: std.mem.Allocator, tag: []const u8) !TempDb {
+        const dir = try uniqueTempPath(allocator, tag);
+        errdefer allocator.free(dir);
         // Wipe leftover test.db / test.db-wal / test.db-shm from a prior
         // run; a stale SHM makes the WAL pragma flake on re-open.
         test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
@@ -32,12 +51,13 @@ const TempDb = struct {
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
-        return .{ .dir = dir, .db = db };
+        return .{ .allocator = allocator, .dir = dir, .db = db };
     }
 
     fn deinit(self: *TempDb) void {
         self.db.close();
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
+        self.allocator.free(self.dir);
     }
 };
 
@@ -102,10 +122,11 @@ fn rootJsonWithFiveDeps() []const u8 {
 test "collectFormulaJobs parses each formula exactly once via shared cache" {
     const alloc = testing.allocator;
 
-    var tdb = try TempDb.init("six_dep_cache");
+    var tdb = try TempDb.init(alloc, "six_dep_cache");
     defer tdb.deinit();
 
-    const cache_dir = "/tmp/malt_parse_cache_test_six_dep_cache_apicache";
+    const cache_dir = try uniqueTempPath(alloc, "six_dep_cache_apicache");
+    defer alloc.free(cache_dir);
     test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
     test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
@@ -179,10 +200,11 @@ test "FormulaCache holds at most one entry per unique dep across the run" {
     // re-fetches. A 6-dep graph caps at 6 entries, full stop.
     const alloc = testing.allocator;
 
-    var tdb = try TempDb.init("bound");
+    var tdb = try TempDb.init(alloc, "bound");
     defer tdb.deinit();
 
-    const cache_dir = "/tmp/malt_parse_cache_test_bound_apicache";
+    const cache_dir = try uniqueTempPath(alloc, "bound_apicache");
+    defer alloc.free(cache_dir);
     test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
     test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
@@ -244,7 +266,8 @@ test "resolve walks deps for JSON missing the name field" {
     // so synthetic fixtures and any upstream API quirk keep resolving.
     const alloc = testing.allocator;
 
-    const cache_dir = "/tmp/malt_parse_cache_test_no_name_apicache";
+    const cache_dir = try uniqueTempPath(alloc, "no_name_apicache");
+    defer alloc.free(cache_dir);
     test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
     test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
@@ -276,7 +299,7 @@ test "resolve walks deps for JSON missing the name field" {
     defer http.deinit();
     var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &http, cache_dir);
 
-    var tdb = try TempDb.init("no_name");
+    var tdb = try TempDb.init(alloc, "no_name");
     defer tdb.deinit();
 
     var formula_cache = deps_mod.FormulaCache.init(alloc);
@@ -330,10 +353,11 @@ test "shared deps across multi-package install collapse to one parse" {
     // half of the per-invocation parse-once guarantee.
     const alloc = testing.allocator;
 
-    var tdb = try TempDb.init("multi_pkg");
+    var tdb = try TempDb.init(alloc, "multi_pkg");
     defer tdb.deinit();
 
-    const cache_dir = "/tmp/malt_parse_cache_test_multi_pkg_apicache";
+    const cache_dir = try uniqueTempPath(alloc, "multi_pkg_apicache");
+    defer alloc.free(cache_dir);
     test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
     test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
