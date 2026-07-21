@@ -4,6 +4,7 @@ const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
+const help_mod = @import("help.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const signals = @import("../core/signals.zig");
@@ -66,13 +67,11 @@ pub fn servicesStart(ctx: *const AppCtx, allocator: std.mem.Allocator, name: []c
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len == 0 or
-        std.mem.eql(u8, args[0], "-h") or
-        std.mem.eql(u8, args[0], "--help"))
-    {
-        try printHelp(ctx);
+    if (args.len == 0) {
+        printHelp(ctx);
         return;
     }
+    if (help_mod.showIfRequested(ctx, args[0..1], "services")) return;
 
     const sub = args[0];
     const rest = args[1..];
@@ -274,20 +273,9 @@ test "writeServicesJson: emits the schedule label as a trailing field per row" {
     );
 }
 
-fn printHelp(ctx: *const AppCtx) !void {
-    const msg =
-        \\Usage: malt services <subcommand> [args]
-        \\
-        \\Subcommands:
-        \\  list              Show registered services.
-        \\  start <name>      Bootstrap the service under launchd.
-        \\  stop <name>       Boot the service out of launchd.
-        \\  restart <name>    stop then start.
-        \\  status [name]     Show registered state (falls back to list).
-        \\  logs <name> [--tail N] [--stderr] [--follow|-f]
-        \\                    Print the last N lines of the service log.
-        \\                    --follow / -f tails appended bytes until SIGINT.
-        \\
-    ;
-    ctx.stderr.writeStreamingAll(ctx.io, msg) catch {};
+/// Bare `malt services` is a usage error, so the text goes to stderr. An
+/// explicit `--help` is a successful request and goes to stdout via
+/// `showIfRequested`. Both read the same text from `help.zig`.
+fn printHelp(ctx: *const AppCtx) void {
+    ctx.stderr.writeStreamingAll(ctx.io, help_mod.helpFor("services")) catch {};
 }

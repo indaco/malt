@@ -48,6 +48,8 @@ pub fn helpFor(command: []const u8) []const u8 {
         .{ "which", which_help },
         .{ "pin", pin_help },
         .{ "unpin", unpin_help },
+        .{ "bundle", bundle_help },
+        .{ "services", services_help },
         .{ "tui", tui_help },
         .{ "version", version_help },
     });
@@ -657,6 +659,49 @@ const deps_help =
     \\  malt deps --recursive ffmpeg
     \\  malt deps --installed -r node@20
     \\  malt --json deps wget
+    \\
+;
+
+const bundle_help =
+    \\Usage: malt bundle <subcommand> [args]
+    \\
+    \\Subcommands:
+    \\  install [--isolate-deps] [file]
+    \\                              Install formulae/casks/taps/services from a Brewfile or Maltfile.json.
+    \\                              --isolate-deps keeps transitive runtime deps out of <prefix>/bin
+    \\                              and <prefix>/sbin (per-keg state, replays on upgrade).
+    \\  cleanup [--yes] [--dry-run] [file]
+    \\                              Uninstall packages present on disk but absent from the Brewfile.
+    \\  create  [--format brewfile|json] [--services] [path]
+    \\                              Write currently-installed set to a bundle file.
+    \\                              --services also emits auto-start services (JSON only).
+    \\  list                        List bundles registered in the database.
+    \\  remove  [--purge] [--yes] [--dry-run] <name>
+    \\                              Unregister a bundle. Without --purge the members stay
+    \\                              installed; --purge also uninstalls every member that is
+    \\                              currently installed (typed confirm unless --yes).
+    \\  export  [--format brewfile|json] [--services] [name]
+    \\                              Print bundle (or current install) to stdout.
+    \\                              --services also emits auto-start services (JSON only).
+    \\  import  <file>              Register a bundle definition without installing.
+    \\
+    \\Lookup order for install/export without an explicit path:
+    \\  ./Brewfile, ./Maltfile.json, ~/.config/malt/Brewfile, ~/.config/malt/Maltfile.json
+    \\
+;
+
+const services_help =
+    \\Usage: malt services <subcommand> [args]
+    \\
+    \\Subcommands:
+    \\  list              Show registered services.
+    \\  start <name>      Bootstrap the service under launchd.
+    \\  stop <name>       Boot the service out of launchd.
+    \\  restart <name>    stop then start.
+    \\  status [name]     Show registered state (falls back to list).
+    \\  logs <name> [--tail N] [--stderr] [--follow|-f]
+    \\                    Print the last N lines of the service log.
+    \\                    --follow / -f tails appended bytes until SIGINT.
     \\
 ;
 

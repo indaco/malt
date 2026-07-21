@@ -6,6 +6,7 @@ const AppCtx = @import("../app_ctx.zig").AppCtx;
 const brewfile_mod = @import("../core/bundle/brewfile.zig");
 const brewfile_emit = @import("../core/bundle/brewfile_emit.zig");
 const cleanup_mod = @import("../core/bundle/cleanup.zig");
+const help_mod = @import("help.zig");
 const manifest_mod = @import("../core/bundle/manifest.zig");
 const runner_mod = @import("../core/bundle/runner.zig");
 const schema = @import("../db/schema.zig");
@@ -130,13 +131,11 @@ pub fn describeError(err: BundleError) []const u8 {
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len == 0 or
-        std.mem.eql(u8, args[0], "-h") or
-        std.mem.eql(u8, args[0], "--help"))
-    {
-        try printHelp(ctx);
+    if (args.len == 0) {
+        printHelp(ctx);
         return;
     }
+    if (help_mod.showIfRequested(ctx, args[0..1], "bundle")) return;
 
     const sub = args[0];
     const rest = args[1..];
@@ -804,35 +803,11 @@ fn openDb(ctx: *const AppCtx) !sqlite.Database {
     return db;
 }
 
-fn printHelp(ctx: *const AppCtx) !void {
-    const msg =
-        \\Usage: malt bundle <subcommand> [args]
-        \\
-        \\Subcommands:
-        \\  install [--isolate-deps] [file]
-        \\                              Install formulae/casks/taps/services from a Brewfile or Maltfile.json.
-        \\                              --isolate-deps keeps transitive runtime deps out of <prefix>/bin
-        \\                              and <prefix>/sbin (per-keg state, replays on upgrade).
-        \\  cleanup [--yes] [--dry-run] [file]
-        \\                              Uninstall packages present on disk but absent from the Brewfile.
-        \\  create  [--format brewfile|json] [--services] [path]
-        \\                              Write currently-installed set to a bundle file.
-        \\                              --services also emits auto-start services (JSON only).
-        \\  list                        List bundles registered in the database.
-        \\  remove  [--purge] [--yes] [--dry-run] <name>
-        \\                              Unregister a bundle. Without --purge the members stay
-        \\                              installed; --purge also uninstalls every member that is
-        \\                              currently installed (typed confirm unless --yes).
-        \\  export  [--format brewfile|json] [--services] [name]
-        \\                              Print bundle (or current install) to stdout.
-        \\                              --services also emits auto-start services (JSON only).
-        \\  import  <file>              Register a bundle definition without installing.
-        \\
-        \\Lookup order for install/export without an explicit path:
-        \\  ./Brewfile, ./Maltfile.json, ~/.config/malt/Brewfile, ~/.config/malt/Maltfile.json
-        \\
-    ;
-    ctx.stderr.writeStreamingAll(ctx.io, msg) catch {};
+/// Bare `malt bundle` is a usage error, so the text goes to stderr. An explicit
+/// `--help` is a successful request and goes to stdout via `showIfRequested`,
+/// matching every other command. Both read the same text from `help.zig`.
+fn printHelp(ctx: *const AppCtx) void {
+    ctx.stderr.writeStreamingAll(ctx.io, help_mod.helpFor("bundle")) catch {};
 }
 
 test "remove: bare name defaults to unregister-only" {

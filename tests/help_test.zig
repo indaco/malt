@@ -39,12 +39,13 @@ test "showIfRequested returns true for long --help" {
 test "showIfRequested covers every documented command (exercises every branch of the static map)" {
     const ctx = quietCtx();
     const commands = [_][]const u8{
-        "install",  "uninstall",   "upgrade", "update",
-        "outdated", "list",        "info",    "search",
-        "doctor",   "tap",         "migrate", "rollback",
-        "run",      "link",        "unlink",  "pin",
-        "unpin",    "completions", "backup",  "restore",
-        "purge",    "tui",         "version", "not-a-real-command",
+        "install",  "uninstall",          "upgrade", "update",
+        "outdated", "list",               "info",    "search",
+        "doctor",   "tap",                "migrate", "rollback",
+        "run",      "link",               "unlink",  "pin",
+        "unpin",    "completions",        "backup",  "restore",
+        "purge",    "tui",                "version", "bundle",
+        "services", "not-a-real-command",
     };
     const args = [_][]const u8{"--help"};
     for (commands) |cmd| {
@@ -223,4 +224,14 @@ test "help command falls back gracefully for unknown topics" {
 
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
     try testing.expect(std.mem.indexOf(u8, result.stdout, "No help available.") != null);
+}
+
+test "bundle and services have help topics" {
+    // Both commands used to own a local printHelp, so `malt help bundle` fell
+    // through to the generic "No help available" fallback while `--help`
+    // worked. One text, reachable both ways.
+    try testing.expect(std.mem.indexOf(u8, help.helpFor("bundle"), "malt bundle") != null);
+    try testing.expect(std.mem.indexOf(u8, help.helpFor("bundle"), "--purge") != null);
+    try testing.expect(std.mem.indexOf(u8, help.helpFor("services"), "malt services") != null);
+    try testing.expect(std.mem.indexOf(u8, help.helpFor("services"), "restart") != null);
 }
