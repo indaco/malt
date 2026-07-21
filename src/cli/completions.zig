@@ -155,7 +155,7 @@ pub const bash_script =
     \\        backup)           cmd_flags="--output -o --versions --services --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
-    \\        uninstall|remove) cmd_flags="--force --zap --dry-run" ;;
+    \\        uninstall|remove) cmd_flags="--cask --force --zap --dry-run" ;;
     \\        upgrade)          cmd_flags="--all --cask --formula --dry-run --pinned --force -f --isolate-deps --isolate-dependencies --use-system-ruby=" ;;
     \\        outdated)         cmd_flags="--json --formula --cask --pinned-only --tap --refresh --quiet -q" ;;
     \\        update)           cmd_flags="--check --quiet -q" ;;
@@ -166,13 +166,13 @@ pub const bash_script =
     \\        uses)             cmd_flags="--recursive -r --json --quiet -q" ;;
     \\        deps)             cmd_flags="--recursive -r --installed --json --quiet -q" ;;
     \\        which)            cmd_flags="--json" ;;
-    \\        migrate)          cmd_flags="--dry-run --use-system-ruby=" ;;
+    \\        migrate)          cmd_flags="--dry-run --parallel --use-system-ruby=" ;;
     \\        rollback)         cmd_flags="--dry-run --list --to --json" ;;
     \\        link)             cmd_flags="--overwrite --force -f --isolate --all" ;;
     \\        services)         cmd_flags="--tail --stderr --follow -f --system --json" ;;
-    \\        bundle)           cmd_flags="--dry-run -n --format --from-installed --purge --yes -y --isolate-deps --isolate-dependencies" ;;
+    \\        bundle)           cmd_flags="--dry-run -n --format --services --purge --yes -y --isolate-deps --isolate-dependencies" ;;
     \\        run)              cmd_flags="--keep" ;;
-    \\        doctor)           cmd_flags="--fix --dry-run" ;;
+    \\        doctor)           cmd_flags="--fix --dry-run --post-install-status" ;;
     \\        tap)              cmd_flags="--refresh --all --pin --repo --host --forge --url --force --yes -y --json" ;;
     \\    esac
     \\
@@ -294,6 +294,7 @@ pub const zsh_script =
     \\                    ;;
     \\                uninstall|remove)
     \\                    _arguments \
+    \\                        '--cask[Treat the name as a cask]' \
     \\                        '--force[Remove even if depended on]' \
     \\                        '--zap[Deep clean (cask only)]' \
     \\                        '--dry-run[Show what would be removed]' \
@@ -318,6 +319,21 @@ pub const zsh_script =
     \\                run)
     \\                    _arguments \
     \\                        '--keep[Cache extracted bottle under {cache}/run/<sha256>/]' \
+    \\                        '*::package:'
+    \\                    ;;
+    \\                uses)
+    \\                    _arguments \
+    \\                        '(--recursive -r)'{--recursive,-r}'[Include transitive dependents]' \
+    \\                        '--json[Output as JSON]' \
+    \\                        '(--quiet -q)'{--quiet,-q}'[Suppress status messages]' \
+    \\                        '*::package:'
+    \\                    ;;
+    \\                deps)
+    \\                    _arguments \
+    \\                        '(--recursive -r)'{--recursive,-r}'[Walk transitive deps]' \
+    \\                        '--installed[Restrict to locally-resolved kegs]' \
+    \\                        '--json[Output as JSON]' \
+    \\                        '(--quiet -q)'{--quiet,-q}'[Suppress status messages]' \
     \\                        '*::package:'
     \\                    ;;
     \\                which)
@@ -371,8 +387,9 @@ pub const zsh_script =
     \\                        '*::query:'
     \\                    ;;
     \\                migrate)
-    \\                    _arguments \\
-    \\                        '--dry-run[Preview without executing]' \\
+    \\                    _arguments \
+    \\                        '--dry-run[Preview without executing]' \
+    \\                        '--parallel[Migrate kegs concurrently with a bounded worker pool]' \
     \\                        '--use-system-ruby=[Run post_install via system Ruby for the named kegs]:names:'
     \\                    ;;
     \\                rollback)
@@ -440,23 +457,24 @@ pub const zsh_script =
     \\                        '1:subcommand:(update)'
     \\                    ;;
     \\                services)
-    \\                    _values 'subcommand' \
-    \\                        'list[Show registered services and runtime state]' \
-    \\                        'start[Bootstrap a service under launchd]' \
-    \\                        'stop[Boot a service out of launchd]' \
-    \\                        'restart[stop then start]' \
-    \\                        'status[Show registered + runtime state]' \
-    \\                        'logs[Tail a service log file]'
+    \\                    _arguments \
+    \\                        '--tail[Number of trailing log lines]:lines:' \
+    \\                        '--stderr[Read stderr instead of stdout]' \
+    \\                        '(--follow -f)'{--follow,-f}'[Tail appended bytes until SIGINT]' \
+    \\                        '--system[Operate on system-level services]' \
+    \\                        '--json[Output as JSON]' \
+    \\                        '1:subcommand:(list start stop restart status logs)'
     \\                    ;;
     \\                bundle)
-    \\                    _values 'subcommand' \
-    \\                        'install[Install members of a Brewfile/Maltfile.json]' \
-    \\                        'cleanup[Uninstall packages absent from the Brewfile]' \
-    \\                        'create[Write currently-installed set to a bundle file]' \
-    \\                        'list[List bundles registered in the database]' \
-    \\                        'remove[Unregister a bundle]' \
-    \\                        'export[Print bundle to stdout]' \
-    \\                        'import[Register a bundle definition without installing]'
+    \\                    _arguments \
+    \\                        '(--dry-run -n)'{--dry-run,-n}'[Preview without installing/uninstalling]' \
+    \\                        '--format[Output format]:format:(brewfile json)' \
+    \\                        '--services[Include auto-start services (JSON only)]' \
+    \\                        '--purge[With remove: also uninstall the members]' \
+    \\                        '(--yes -y)'{--yes,-y}'[Skip the confirmation prompt]' \
+    \\                        '--isolate-deps[Apply isolation to transitive deps of every member]' \
+    \\                        '--isolate-dependencies[Alias of --isolate-deps]' \
+    \\                        '1:subcommand:(install cleanup create list remove export import)'
     \\                    ;;
     \\                tap)
     \\                    _arguments \
@@ -475,7 +493,8 @@ pub const zsh_script =
     \\                doctor)
     \\                    _arguments \
     \\                        '--fix[Apply safe-class fixers; with <id>, only that class]::fix-id:(stale_lock orphaned_store broken_symlinks)' \
-    \\                        '--dry-run[Preview the fix plan without applying]'
+    \\                        '--dry-run[Preview the fix plan without applying]' \
+    \\                        '--post-install-status[Report post_install state per keg]'
     \\                    ;;
     \\            esac
     \\            ;;
@@ -602,9 +621,11 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l json    -d 'JSON output'
     \\
     \\    # uninstall / remove
+    \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l cask    -d 'Treat the name as a cask'
     \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l force   -d 'Remove even if depended on'
     \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l zap     -d 'Deep clean (cask only)'
     \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l dry-run -d 'Preview'
+    \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l cask    -d 'Treat the name as a cask'
     \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l force   -d 'Remove even if depended on'
     \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l zap     -d 'Deep clean (cask only)'
     \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l dry-run -d 'Preview'
@@ -644,7 +665,10 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l formula  -d 'Formulas only'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l cask     -d 'Casks only'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l pinned   -d 'Pinned only'
+    \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l tap      -x -d 'Only packages from <label>'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l json     -d 'JSON output'
+    \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l size     -d 'With --json: add on-disk size_bytes'
+    \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l linked   -d 'With --json: add link status'
     \\
     \\    # info
     \\    complete -c $__malt_bin -n '__malt_using_command info' -l formula -d 'Formula only'
@@ -677,9 +701,11 @@ pub const fish_script =
     \\    # doctor — --fix takes an optional safe-fix class id
     \\    complete -c $__malt_bin -n '__malt_using_command doctor' -l fix -r -a 'stale_lock orphaned_store broken_symlinks' -d 'Apply safe-class fixers; with <id>, only that class'
     \\    complete -c $__malt_bin -n '__malt_using_command doctor' -l dry-run -d 'Preview the fix plan without applying'
+    \\    complete -c $__malt_bin -n '__malt_using_command doctor' -l post-install-status -d 'Report post_install state per keg'
     \\
     \\    # migrate / rollback
     \\    complete -c $__malt_bin -n '__malt_using_command migrate'    -l dry-run -d 'Preview'
+    \\    complete -c $__malt_bin -n '__malt_using_command migrate'    -l parallel -d 'Migrate kegs concurrently with a bounded worker pool'
     \\    complete -c $__malt_bin -n '__malt_using_command migrate'    -l use-system-ruby -d 'Run post_install via system Ruby for the named kegs'
     \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l list    -d 'List every reachable store entry'
@@ -771,8 +797,8 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l dry-run -s n  -d 'Preview without installing/uninstalling'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l yes     -s y  -d 'Skip the cleanup confirmation prompt'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l format -r -a 'brewfile json' -d 'Output format'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l from-installed -d 'Populate from installed packages'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l purge          -d 'Also uninstall members on remove'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l services       -d 'Include auto-start services (JSON only)'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l purge          -d 'With remove: also uninstall the members'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l isolate-deps         -d 'Apply isolation to transitive deps of every member'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l isolate-dependencies -d 'Alias of --isolate-deps'
     \\end
