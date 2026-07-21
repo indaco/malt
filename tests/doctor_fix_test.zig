@@ -104,6 +104,60 @@ test "fixStaleLock: dead PID lock is truncated in place, not unlinked" {
     try testing.expect(!fix.fixStaleLock(io, prefix));
 }
 
+test "fixStaleLock: a holder we cannot signal is left alone" {
+    // A root-owned malt holding the lock while doctor runs unprivileged: kill(2)
+    // reports EPERM, not ESRCH. Clearing on EPERM would drop the lock metadata
+    // of a live operation, so the holder must read as live.
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root can signal pid 1
+
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "epermlock");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+
+    var lock_buf: [256]u8 = undefined;
+    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    try writeFile(lock_path, "1"); // launchd: live, never signalable by us
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const before = try statAbsolute(io, lock_path);
+    try testing.expect(!fix.probeStaleLock(io, prefix));
+    try testing.expect(!fix.fixStaleLock(io, prefix));
+
+    // Untouched, not merely un-unlinked: the pid must survive intact.
+    const after = try statAbsolute(io, lock_path);
+    try testing.expectEqual(before.size, after.size);
+}
+
+test "fixStaleLock: a corrupt zero PID is stale, not an endless operation" {
+    // kill(0, 0) targets our own process group and succeeds, so a truncated or
+    // garbled lock file would otherwise pin doctor at "operation in flight".
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "zeropidlock");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+
+    var lock_buf: [256]u8 = undefined;
+    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    try writeFile(lock_path, "0");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try testing.expect(fix.probeStaleLock(io, prefix));
+    try testing.expect(fix.fixStaleLock(io, prefix));
+}
+
 test "fixStaleLock: live PID is left alone" {
     var prefix_buf: [128]u8 = undefined;
     const prefix = try makePrefix(&prefix_buf, "livelock");

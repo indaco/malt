@@ -91,11 +91,7 @@ pub fn operationInFlight(io: std.Io, prefix: []const u8) bool {
     return pidAlive(pid);
 }
 
-/// kill(pid, 0): true when the process exists (and is signalable). Shared by
-/// `operationInFlight` and `checkStaleLock` so live-vs-dead stays one rule.
-fn pidAlive(pid: std.posix.pid_t) bool {
-    return std.c.kill(pid, @enumFromInt(0)) == 0;
-}
+const pidAlive = fix_mod.pidAlive;
 
 /// One entry in the health walk. `run` prints its row(s) and returns
 /// the walker's tally tag.
@@ -1791,11 +1787,4 @@ test "runChecks: an info_status finding counts as neither warning nor error" {
     }, &table);
     try testing.expectEqual(@as(u32, 0), tally.warnings);
     try testing.expectEqual(@as(u32, 0), tally.errors);
-}
-
-test "pidAlive: true for our own PID, false for a dead one" {
-    // The downgrade gates on this: a live holder means an operation is in
-    // flight; a dead PID is a stale lock that must not mask real findings.
-    try testing.expect(pidAlive(std.c.getpid()));
-    try testing.expect(!pidAlive(999999));
 }

@@ -78,12 +78,25 @@ pub fn planFixes(c: Conditions) Plan {
 
 const StaleLockState = enum { absent, live, stale };
 
+/// kill(pid, 0): does the process exist? The one live-vs-dead rule, shared by
+/// the doctor walker and the `--fix` probe.
+///
+/// Only ESRCH means gone. EPERM means it exists and we merely may not signal it
+/// (root-owned holder, unprivileged doctor) — reading that as dead would let
+/// `--fix` clear a lock guarding a live operation.
+pub fn pidAlive(pid: std.posix.pid_t) bool {
+    // kill(2) reads <= 0 as a process group, which would signal ourselves and
+    // report a corrupt "0" lock file as live forever.
+    if (pid <= 0) return false;
+    std.posix.kill(pid, @enumFromInt(0)) catch |e| return e != error.ProcessNotFound;
+    return true;
+}
+
 fn probeStaleLockState(io: std.Io, prefix: []const u8) StaleLockState {
     var lock_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return .absent;
     const pid = lock_mod.LockFile.holderPid(io, lock_path) orelse return .absent;
-    const is_alive = std.c.kill(pid, @enumFromInt(0)) == 0;
-    return if (is_alive) .live else .stale;
+    return if (pidAlive(pid)) .live else .stale;
 }
 
 /// True when the lock file holds a PID that no longer exists.
@@ -776,6 +789,25 @@ test "fixStaleLock: missing lock file is a no-op" {
 
 test "probeStaleLock: missing prefix returns false" {
     try std.testing.expect(!probeStaleLock(std.Options.debug_io, "/nonexistent/malt/prefix"));
+}
+
+test "pidAlive: true for our own PID, false for a dead one" {
+    // The doctor downgrade gates on this: a live holder means an operation is
+    // in flight; a dead PID is a stale lock that must not mask real findings.
+    try std.testing.expect(pidAlive(std.c.getpid()));
+    try std.testing.expect(!pidAlive(999999));
+}
+
+test "pidAlive: a process we may not signal counts as alive" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root can signal pid 1
+    try std.testing.expect(pidAlive(1)); // launchd: live, never signalable
+}
+
+test "pidAlive: non-positive PIDs are dead, not process groups" {
+    // A corrupt lock file parses to 0 or a negative; kill(2) would read those
+    // as "our process group" and report an in-flight operation that never ends.
+    try std.testing.expect(!pidAlive(0));
+    try std.testing.expect(!pidAlive(-1));
 }
 
 test "isPurgeableOrphan: only a refcount<=0 row is an orphan" {
