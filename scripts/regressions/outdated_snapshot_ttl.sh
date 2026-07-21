@@ -45,6 +45,18 @@ fail() {
   exit 1
 }
 
+# The snapshot is only rewritten by the last statement of a *successful*
+# recompute, so a command that died earlier leaves the seeded snapshot in
+# place and looks exactly like the bug. Judge the exit code first.
+run_outdated() {
+  local out
+  if ! out=$("$@" outdated 2>&1); then
+    printf '  \xe2\x9c\x97 mt outdated exited non-zero — inconclusive, not a TTL regression\n' >&2
+    printf '%s\n' "$out" >&2
+    exit 2
+  fi
+}
+
 # Initialise the schema with zero kegs: `mt list` migrates only when db/ exists.
 mkdir -p "$PREFIX/db" "$MALT_CACHE"
 "$BIN" list >/dev/null 2>&1 || true
@@ -61,7 +73,7 @@ seed_snapshot() {
 
 # (1) Online + stale (10 min > 5 min TTL) -> recompute overwrites the snapshot.
 seed_snapshot 600
-"$BIN" outdated >/dev/null 2>&1 || true
+run_outdated "$BIN"
 if grep -q '9.9' "$SNAP"; then
   fail "online stale snapshot was served, not recomputed — TTL acted as a warning only (the bug)"
 fi
@@ -69,7 +81,7 @@ pass "online stale snapshot is recomputed (bogus entry gone)"
 
 # (2) Online + fresh (1 min < 5 min TTL) -> snapshot served, left intact.
 seed_snapshot 60
-"$BIN" outdated >/dev/null 2>&1 || true
+run_outdated "$BIN"
 if ! grep -q '9.9' "$SNAP"; then
   fail "online fresh snapshot was recomputed — the cache window is gone (over-recompute)"
 fi
@@ -77,7 +89,7 @@ pass "online fresh snapshot is served (cache window preserved)"
 
 # (3) Offline + stale -> served and NOT overwritten (no under-reporting offline).
 seed_snapshot 600
-MALT_OFFLINE=1 "$BIN" outdated >/dev/null 2>&1 || true
+MALT_OFFLINE=1 run_outdated "$BIN"
 if ! grep -q '9.9' "$SNAP"; then
   fail "offline stale snapshot was overwritten — would under-report when it cannot refresh"
 fi
