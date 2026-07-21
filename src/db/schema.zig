@@ -17,8 +17,9 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
         \\);
     );
 
-    // 2. kegs. `bin_isolated` is added by v10's ALTER on upgraded DBs;
-    //    the fresh shape ships with it so both paths converge.
+    // 2. kegs. The fresh shape ships both the v5 UNIQUE and the
+    //    `bin_isolated` v10 adds by ALTER on upgraded DBs, so the v4→v5
+    //    step short-circuits here instead of rebuilding an empty table.
     try db.exec(
         \\CREATE TABLE IF NOT EXISTS kegs (
         \\    id            INTEGER PRIMARY KEY,
@@ -33,7 +34,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
         \\    pinned        INTEGER NOT NULL DEFAULT 0,
         \\    install_reason TEXT NOT NULL DEFAULT 'direct',
         \\    bin_isolated  INTEGER NOT NULL DEFAULT 0,
-        \\    UNIQUE(name, version)
+        \\    UNIQUE(name, version, revision)
         \\);
     );
     try db.exec("CREATE INDEX IF NOT EXISTS idx_kegs_name ON kegs(name);");
@@ -735,6 +736,88 @@ test "ensureForeignKeysOn is idempotent when FKs are already on" {
     try testing.expect(try foreignKeysOn(&db));
 }
 
+/// True iff `name` is a registered index. The v5 rebuild drops `kegs`,
+/// taking its indexes with it, so a missing one is a real regression.
+fn indexExists(db: *sqlite.Database, name: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    return try stmt.step();
+}
+
+/// The statement owns the text, so it has to be copied out before
+/// finalize.
+fn kegsCreateSql(db: *sqlite.Database, buf: []u8) ![]const u8 {
+    var stmt = try db.prepare(
+        \\SELECT sql FROM sqlite_master
+        \\WHERE type='table' AND name='kegs';
+    );
+    defer stmt.finalize();
+    if (!try stmt.step()) return error.NoKegsTable;
+    const sql = std.mem.sliceTo(stmt.columnText(0) orelse return error.NoKegsTable, 0);
+    if (sql.len > buf.len) return error.NoSpaceLeft;
+    @memcpy(buf[0..sql.len], sql);
+    return buf[0..sql.len];
+}
+
+// If the fresh CREATE ever drifts off the v5 UNIQUE again, the v4→v5
+// probe misses and fresh DBs silently resume rebuilding an empty table
+// with FKs off. These two pin the short-circuit from both sides.
+
+test "fresh DB ships kegs at the v5 UNIQUE without a rebuild (v5 shape)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    var buf: [1024]u8 = undefined;
+    const sql = try kegsCreateSql(&db, &buf);
+
+    // Unquoted name: the rebuild's RENAME tail would have quoted it.
+    try testing.expect(std.mem.indexOf(u8, sql, "CREATE TABLE kegs") != null);
+    const unique = std.mem.indexOf(u8, sql, "UNIQUE(name, version, revision)") orelse
+        return error.TestExpectedV5Unique;
+    // Inline, i.e. created — not appended by the v9→v10 ALTER.
+    const isolated = std.mem.indexOf(u8, sql, "bin_isolated") orelse
+        return error.TestExpectedBinIsolated;
+    try testing.expect(isolated < unique);
+
+    // The rebuild used to drop and re-create these; nothing does now.
+    try testing.expect(try indexExists(&db, "idx_kegs_name"));
+    try testing.expect(try indexExists(&db, "idx_kegs_store"));
+
+    // The short-circuit still has to bump the marker and let the rest of
+    // the ladder run.
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
+}
+
+test "v4→v5 migration is idempotent when kegs already carries the v5 UNIQUE" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES ('foo', 'foo', '1.0', 'sha-foo', '/c/foo/1.0');
+    );
+    // Rewind past v5 twice: the probe must keep choosing the marker-only
+    // branch rather than rebuilding a table that is already correct.
+    try db.exec("DELETE FROM schema_version WHERE version >= 5;");
+    try migrate(&db);
+    try db.exec("DELETE FROM schema_version WHERE version >= 5;");
+    try migrate(&db);
+
+    var buf: [1024]u8 = undefined;
+    const sql = try kegsCreateSql(&db, &buf);
+    try testing.expect(std.mem.indexOf(u8, sql, "CREATE TABLE \"kegs\"") == null);
+
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
+
+    var probe = try db.prepare("SELECT COUNT(*) FROM kegs WHERE name='foo';");
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    try testing.expectEqual(@as(i64, 1), probe.columnInt(0));
+}
+
 // Without the success-path hard re-enable, a SQLITE_BUSY storm during
 // the v5 commit window would leave the connection FK-off for the rest
 // of its lifetime — every later ON DELETE CASCADE would silently
@@ -743,8 +826,80 @@ test "migrate leaves PRAGMA foreign_keys ON after a successful v5 rebuild" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
 
-    try initSchema(&db);
+    // Pre-v5 shape: the two-column UNIQUE is what makes the v5 probe
+    // miss and the rebuild run. Do not "modernise" it — the witness
+    // assertions below fail loudly if it drifts.
+    try db.exec(
+        \\CREATE TABLE schema_version (
+        \\    version INTEGER PRIMARY KEY,
+        \\    applied TEXT NOT NULL DEFAULT (datetime('now'))
+        \\);
+    );
+    try db.exec(
+        \\CREATE TABLE kegs (
+        \\    id            INTEGER PRIMARY KEY,
+        \\    name          TEXT NOT NULL,
+        \\    full_name     TEXT NOT NULL,
+        \\    version       TEXT NOT NULL,
+        \\    revision      INTEGER NOT NULL DEFAULT 0,
+        \\    tap           TEXT,
+        \\    store_sha256  TEXT NOT NULL,
+        \\    cellar_path   TEXT NOT NULL,
+        \\    installed_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        \\    pinned        INTEGER NOT NULL DEFAULT 0,
+        \\    install_reason TEXT NOT NULL DEFAULT 'direct',
+        \\    UNIQUE(name, version)
+        \\);
+    );
+    try db.exec(
+        \\CREATE TABLE dependencies (
+        \\    keg_id     INTEGER NOT NULL REFERENCES kegs(id) ON DELETE CASCADE,
+        \\    dep_name   TEXT NOT NULL,
+        \\    dep_type   TEXT NOT NULL DEFAULT 'runtime',
+        \\    PRIMARY KEY (keg_id, dep_name)
+        \\);
+    );
+    // v5→v6 is the one step with no missing-table guard; without `casks`
+    // the ladder aborts before it can prove anything about the rebuild.
+    try db.exec(
+        \\CREATE TABLE casks (
+        \\    id            INTEGER PRIMARY KEY,
+        \\    token         TEXT NOT NULL UNIQUE,
+        \\    name          TEXT NOT NULL,
+        \\    version       TEXT NOT NULL,
+        \\    url           TEXT NOT NULL,
+        \\    sha256        TEXT
+        \\);
+    );
+
+    // Real rows, so the copy step and foreign_key_check tail run against
+    // data instead of an empty table.
+    try db.exec(
+        \\INSERT INTO kegs (id, name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES (7, 'libgit2', 'libgit2', '1.9.2', 0, 'sha-old', '/c/libgit2/1.9.2');
+    );
+    try db.exec("INSERT INTO dependencies(keg_id, dep_name) VALUES (7, 'pcre2');");
+    try db.exec("INSERT INTO schema_version (version) VALUES (4);");
+
+    try migrate(&db);
+
     try testing.expect(try foreignKeysOn(&db));
+
+    // Rebuild witness: the migration's `ALTER TABLE ... RENAME` tail
+    // leaves the table name quoted; a direct CREATE does not.
+    var buf: [1024]u8 = undefined;
+    const sql = try kegsCreateSql(&db, &buf);
+    try testing.expect(std.mem.indexOf(u8, sql, "CREATE TABLE \"kegs\"") != null);
+    try testing.expect(std.mem.indexOf(u8, sql, "UNIQUE(name, version, revision)") != null);
+
+    // The seeded row and its FK child survived the copy.
+    var stmt = try db.prepare(
+        \\SELECT COUNT(*) FROM dependencies d JOIN kegs k ON k.id = d.keg_id
+        \\WHERE k.name = 'libgit2' AND d.dep_name = 'pcre2';
+    );
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
 }
 
 // Regression: a Homebrew revision-bump upgrade ("1.9.2" → "1.9.2_2")

@@ -86,8 +86,8 @@ pub fn searchLocalKind(
     const qlower = std.ascii.lowerString(qbuf[0..query.len], query);
 
     const sql: []const u8 = switch (kind) {
-        // DISTINCT collapses the per-version `UNIQUE(name, version)` rows
-        // back to one entry per package.
+        // DISTINCT collapses the per-`UNIQUE(name, version, revision)`
+        // rows back to one entry per package.
         .formula => "SELECT DISTINCT name FROM kegs ORDER BY name;",
         .cask => "SELECT token FROM casks ORDER BY token;",
     };
