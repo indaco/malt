@@ -145,7 +145,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (std.mem.eql(u8, sub, "cleanup")) return cmdCleanup(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "create")) return cmdCreate(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "list")) return cmdList(ctx);
-    if (std.mem.eql(u8, sub, "remove")) return cmdRemove(ctx, rest);
+    if (std.mem.eql(u8, sub, "remove")) return cmdRemove(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "export")) return cmdExport(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "import")) return cmdImport(ctx, allocator, rest);
 
@@ -332,21 +332,156 @@ fn cmdList(ctx: *const AppCtx) !void {
     if (!any) output.info("no bundles registered", .{});
 }
 
-fn cmdRemove(ctx: *const AppCtx, rest: []const []const u8) !void {
-    if (rest.len != 1) {
+const RemoveArgs = struct { name: []const u8, purge: bool, yes: bool, dry_run: bool };
+
+/// Parse `bundle remove` args. Null signals a missing or duplicated <name>,
+/// which the caller reports as InvalidArgs. `--dry-run` seeds from the global
+/// so `malt --dry-run bundle remove --purge` previews, matching cleanup.
+fn resolveRemoveArgs(rest: []const []const u8, global_dry_run: bool) ?RemoveArgs {
+    var name: ?[]const u8 = null;
+    var purge = false;
+    var yes = false;
+    var dry_run = global_dry_run;
+    for (rest) |a| {
+        if (std.mem.eql(u8, a, "--purge")) {
+            purge = true;
+        } else if (std.mem.eql(u8, a, "--yes") or std.mem.eql(u8, a, "-y")) {
+            yes = true;
+        } else if (std.mem.eql(u8, a, "--dry-run") or std.mem.eql(u8, a, "-n")) {
+            dry_run = true;
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            output.warn("ignored flag: {s}", .{a});
+        } else {
+            if (name != null) return null;
+            name = a;
+        }
+    }
+    return .{
+        .name = name orelse return null,
+        .purge = purge,
+        .yes = yes,
+        .dry_run = dry_run,
+    };
+}
+
+fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
+    const args = resolveRemoveArgs(rest, output.isDryRun()) orelse {
         output.err("bundle remove: expected <name>", .{});
         return BundleError.InvalidArgs;
+    };
+
+    if (args.purge) try purgeMembers(ctx, allocator, args);
+
+    // Unregister last: on a failed purge we return above, leaving the row in
+    // place so the command stays retryable rather than orphaning the members.
+    if (args.dry_run) {
+        output.info("dry-run: keeping bundle registration for {s}", .{args.name});
+        return;
     }
-    const name = rest[0];
     var db = try openDb(ctx);
     defer db.close();
 
     var stmt = db.prepare("DELETE FROM bundles WHERE name = ?;") catch
         return BundleError.DatabaseError;
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return BundleError.DatabaseError;
+    stmt.bindText(1, args.name) catch return BundleError.DatabaseError;
     _ = stmt.step() catch return BundleError.DatabaseError;
-    output.success("bundle removed: {s}", .{name});
+    output.success("bundle removed: {s}", .{args.name});
+}
+
+/// Uninstall the members of a registered bundle. The `bundles` row stores a
+/// manifest path, not a member list, so the file has to be re-read; a missing
+/// or unparsable manifest is a hard error rather than a silent unregister,
+/// since the caller asked to remove packages and we cannot know which.
+fn purgeMembers(ctx: *const AppCtx, allocator: std.mem.Allocator, args: RemoveArgs) !void {
+    const path = try lookupManifestPath(ctx, allocator, args.name);
+    defer allocator.free(path);
+    output.info("using bundle file: {s}", .{path});
+
+    var diag = brewfile_mod.Diagnostics.init(allocator);
+    defer diag.deinit();
+    var manifest = try readManifest(ctx, allocator, path, &diag);
+    defer manifest.deinit();
+    for (diag.warnings.items) |w| output.warn("{s}", .{w});
+
+    var plan: cleanup_mod.Plan = blk: {
+        var db = try openDb(ctx);
+        defer db.close();
+        var installed = cleanup_mod.collectInstalled(allocator, &db) catch
+            return BundleError.DatabaseError;
+        defer installed.deinit();
+        var p = cleanup_mod.selectMembers(
+            allocator,
+            manifest,
+            installed.formulas,
+            installed.casks,
+        ) catch return BundleError.RunnerFailed;
+        errdefer p.deinit();
+        cleanup_mod.orderForRemoval(allocator, &db, &p) catch
+            return BundleError.DatabaseError;
+        break :blk p;
+    };
+    defer plan.deinit();
+
+    if (plan.isEmpty()) {
+        output.info("no installed members to purge", .{});
+        return;
+    }
+
+    output.info("purge plan:", .{});
+    for (plan.formulas) |n| output.plain("  - {s}", .{n});
+    for (plan.casks) |n| output.plain("  - {s} (cask)", .{n});
+
+    if (args.dry_run) {
+        output.info("dry-run: skipping uninstall", .{});
+        return;
+    }
+
+    if (!args.yes and !output.confirmTyped("yes", "Type 'yes' to remove these packages: ")) {
+        output.warn("aborted", .{});
+        return BundleError.InvalidArgs;
+    }
+
+    const dispatcher = cleanupDispatcher(ctx);
+    var report = cleanup_mod.run(allocator, plan, .{
+        .dry_run = false,
+        .dispatcher = &dispatcher,
+    }) catch |e| {
+        output.err("bundle purge failed: {s}", .{@errorName(e)});
+        return BundleError.RunnerFailed;
+    };
+    defer report.deinit();
+
+    if (report.hasFailure()) {
+        output.err("bundle purge completed with {d} failure(s)", .{report.failures.len});
+        return BundleError.RunnerFailed;
+    }
+}
+
+/// Resolve a registered bundle name to its manifest path. Caller owns the
+/// returned slice.
+fn lookupManifestPath(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+) ![]const u8 {
+    var db = try openDb(ctx);
+    defer db.close();
+
+    var stmt = db.prepare("SELECT manifest_path FROM bundles WHERE name = ?;") catch
+        return BundleError.DatabaseError;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return BundleError.DatabaseError;
+
+    if (!(stmt.step() catch return BundleError.DatabaseError)) {
+        output.err("bundle not registered: {s}", .{name});
+        return BundleError.BundlefileNotFound;
+    }
+    const raw = stmt.columnText(0) orelse {
+        output.err("bundle {s} has no recorded manifest path", .{name});
+        return BundleError.BundlefileNotFound;
+    };
+    return allocator.dupe(u8, std.mem.sliceTo(raw, 0)) catch return BundleError.DatabaseError;
 }
 
 const CreateArgs = struct { format: Format, out_path: []const u8, include_services: bool };
@@ -684,7 +819,10 @@ fn printHelp(ctx: *const AppCtx) !void {
         \\                              Write currently-installed set to a bundle file.
         \\                              --services also emits auto-start services (JSON only).
         \\  list                        List bundles registered in the database.
-        \\  remove <name>               Unregister a bundle (does NOT uninstall members).
+        \\  remove  [--purge] [--yes] [--dry-run] <name>
+        \\                              Unregister a bundle. Without --purge the members stay
+        \\                              installed; --purge also uninstalls every member that is
+        \\                              currently installed (typed confirm unless --yes).
         \\  export  [--format brewfile|json] [--services] [name]
         \\                              Print bundle (or current install) to stdout.
         \\                              --services also emits auto-start services (JSON only).
@@ -695,6 +833,44 @@ fn printHelp(ctx: *const AppCtx) !void {
         \\
     ;
     ctx.stderr.writeStreamingAll(ctx.io, msg) catch {};
+}
+
+test "remove: bare name defaults to unregister-only" {
+    const a = resolveRemoveArgs(&.{"work"}, false).?;
+    try std.testing.expectEqualStrings("work", a.name);
+    // The default must stay non-destructive: `bundle remove` predates --purge
+    // and callers rely on it leaving packages installed.
+    try std.testing.expect(!a.purge);
+    try std.testing.expect(!a.yes);
+    try std.testing.expect(!a.dry_run);
+}
+
+test "remove: flags parse in any position relative to the name" {
+    const before = resolveRemoveArgs(&.{ "--purge", "--yes", "work" }, false).?;
+    try std.testing.expectEqualStrings("work", before.name);
+    try std.testing.expect(before.purge);
+    try std.testing.expect(before.yes);
+
+    const after = resolveRemoveArgs(&.{ "work", "--purge", "-y" }, false).?;
+    try std.testing.expectEqualStrings("work", after.name);
+    try std.testing.expect(after.purge);
+    try std.testing.expect(after.yes);
+}
+
+test "remove: --dry-run is set by the flag or inherited from the global" {
+    try std.testing.expect(resolveRemoveArgs(&.{ "work", "--dry-run" }, false).?.dry_run);
+    try std.testing.expect(resolveRemoveArgs(&.{ "work", "-n" }, false).?.dry_run);
+    // `malt --dry-run bundle remove --purge` must preview, not uninstall:
+    // main.zig strips the global, so the flag can only arrive this way.
+    try std.testing.expect(resolveRemoveArgs(&.{"work"}, true).?.dry_run);
+}
+
+test "remove: a missing or duplicated name is rejected" {
+    try std.testing.expect(resolveRemoveArgs(&.{}, false) == null);
+    try std.testing.expect(resolveRemoveArgs(&.{"--purge"}, false) == null);
+    // Two positionals are ambiguous; silently purging the second would be
+    // destructive, so refuse rather than guess.
+    try std.testing.expect(resolveRemoveArgs(&.{ "work", "home" }, false) == null);
 }
 
 test "create: explicit out_path wins regardless of --format position" {

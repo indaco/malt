@@ -721,7 +721,10 @@ Subcommands:
                               Write currently-installed set to a bundle file.
                               --services also emits auto-start services (JSON only).
   list                        List bundles registered in the database.
-  remove <name>               Unregister a bundle (does NOT uninstall members).
+  remove  [--purge] [--yes] [--dry-run] <name>
+                              Unregister a bundle. Without --purge the members stay
+                              installed; --purge also uninstalls every member that is
+                              currently installed (typed confirm unless --yes).
   export  [--format brewfile|json] [--services] [name]
                               Print bundle (or current install) to stdout.
                               --services also emits auto-start services (JSON only).
