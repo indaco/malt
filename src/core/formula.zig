@@ -455,7 +455,183 @@ pub fn parsePkgVersion(label: []const u8) ParsedPkgVersion {
     return .{ .version = label[0..us], .revision = rev };
 }
 
+/// Direction of a version move, installed → upstream. `incomparable` is
+/// load-bearing: a caller acting on `older` never acts on a guess.
+pub const Rel = enum { older, same, newer, incomparable };
+
+/// Which way upstream moved relative to what is installed, or decline.
+/// Advisory: `outdated` still triggers on byte inequality, so a wrong
+/// answer here mislabels a row and can never hide an upgrade. No
+/// pre-release ranking table — measured over real Homebrew transitions it
+/// buys almost nothing and costs confident wrong answers.
+pub fn relate(installed: []const u8, upstream: []const u8) Rel {
+    if (std.mem.eql(u8, installed, upstream)) return .same;
+
+    const a = parsePkgVersion(installed);
+    const b = parsePkgVersion(upstream);
+    return switch (relateVersion(a.version, b.version)) {
+        .same => if (b.revision > a.revision)
+            .newer
+        else if (b.revision < a.revision)
+            .older
+        else
+            .same,
+        .older => .older,
+        .newer => .newer,
+        .incomparable => .incomparable,
+    };
+}
+
+/// Walk both versions in runs of digits and non-digits. Digit runs
+/// compare numerically; a differing non-digit run gives up.
+fn relateVersion(a: []const u8, b: []const u8) Rel {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < a.len and j < b.len) {
+        const digits = std.ascii.isDigit(a[i]);
+        if (digits != std.ascii.isDigit(b[j])) return .incomparable;
+
+        const a_end = runEnd(a, i, digits);
+        const b_end = runEnd(b, j, digits);
+        if (digits) {
+            switch (compareDigitRun(a[i..a_end], b[j..b_end])) {
+                .lt => return .newer,
+                .gt => return .older,
+                .eq => {},
+            }
+        } else if (!std.mem.eql(u8, a[i..a_end], b[j..b_end])) return .incomparable;
+
+        i = a_end;
+        j = b_end;
+    }
+    if (i == a.len and j == b.len) return .same;
+
+    // A tail with letters is a pre-release marker this refuses to rank; an
+    // all-zero tail is the padding Homebrew applies anyway (`1.0` is `1.0.0`).
+    const tail = if (i < a.len) a[i..] else b[j..];
+    var significant = false;
+    for (tail) |c| {
+        if (std.ascii.isAlphabetic(c)) return .incomparable;
+        if (std.ascii.isDigit(c) and c != '0') significant = true;
+    }
+    if (!significant) return .same;
+    return if (i < a.len) .older else .newer;
+}
+
+fn runEnd(s: []const u8, start: usize, digits: bool) usize {
+    var k = start;
+    while (k < s.len and std.ascii.isDigit(s[k]) == digits) k += 1;
+    return k;
+}
+
+/// Numeric order without parsing, so a long run (a date stamp) cannot
+/// overflow.
+fn compareDigitRun(a: []const u8, b: []const u8) std.math.Order {
+    const x = std.mem.trimStart(u8, a, "0");
+    const y = std.mem.trimStart(u8, b, "0");
+    if (x.len != y.len) return std.math.order(x.len, y.len);
+    return std.mem.order(u8, x, y);
+}
+
 const testing = std.testing;
+
+test "relate reads an ordinary forward move as newer" {
+    // The overwhelmingly common case; multi-digit and date-stamped runs
+    // both have to compare numerically rather than byte-wise.
+    try testing.expectEqual(Rel.newer, relate("1.9", "1.10"));
+    try testing.expectEqual(Rel.newer, relate("1.2.3", "1.2.4"));
+    try testing.expectEqual(Rel.newer, relate("20240115", "20240116"));
+}
+
+test "relate lets the revision decide when the versions match" {
+    // Keeps the comparator agreeing with `pkgVersion`'s own output.
+    try testing.expectEqual(Rel.same, relate("1.2.3", "1.2.3"));
+    try testing.expectEqual(Rel.newer, relate("1.2.3", "1.2.3_1"));
+    try testing.expectEqual(Rel.older, relate("1.2.3_2", "1.2.3_1"));
+}
+
+test "relate reads a yanked release as older" {
+    // A real pip-audit transition: the event this whole signal exists for.
+    try testing.expectEqual(Rel.older, relate("2.4.15", "2.4.14"));
+}
+
+test "relate catches a mistyped bump" {
+    // A real llvm transition nobody intended, which review did not catch.
+    try testing.expectEqual(Rel.older, relate("19.1.3", "1.19.4"));
+}
+
+test "relate gives up rather than rank pre-release markers" {
+    // Ranking these is the tempting mistake: a wrong answer would turn a
+    // legitimate upgrade into a false alarm.
+    try testing.expectEqual(Rel.incomparable, relate("1.0rc2", "1.0"));
+    try testing.expectEqual(Rel.incomparable, relate("1.0", "1.0beta"));
+}
+
+test "relate misreads a date-scheme change as older" {
+    // A real minio transition, pinned deliberately: both sides open with a
+    // digit run, so the walk answers confidently and wrongly. Recorded so
+    // nobody "fixes" it by accident; nothing blocks on the label.
+    try testing.expectEqual(Rel.older, relate("20250312180418", "2025-04-03T14-56-28Z"));
+}
+
+test "relate treats a zero-padded tail as the same version" {
+    // Homebrew pads a missing component with zero, so `1.0` and `1.0.0` are
+    // one version. Reading the longer side as newer would cry downgrade on a
+    // tap that merely dropped a trailing `.0`.
+    try testing.expectEqual(Rel.same, relate("1.0.0", "1.0"));
+    try testing.expectEqual(Rel.same, relate("1.0", "1.0.0"));
+    try testing.expectEqual(Rel.newer, relate("1.2", "1.2.3"));
+    try testing.expectEqual(Rel.older, relate("1.2.3", "1.2"));
+}
+
+test "relate ignores leading zeros inside a component" {
+    try testing.expectEqual(Rel.same, relate("1.02", "1.2"));
+    try testing.expectEqual(Rel.newer, relate("1.02", "1.10"));
+}
+
+test "relate declines when the two sides start with different run kinds" {
+    // Also the empty-label guard: nothing here may index past an end.
+    try testing.expectEqual(Rel.incomparable, relate("1.0", "v1.0"));
+    try testing.expectEqual(Rel.incomparable, relate("", "beta"));
+    try testing.expectEqual(Rel.newer, relate("", "1.0"));
+}
+
+test "relate reads the version before the revision" {
+    // A revision bump never rescues a version that moved backward.
+    try testing.expectEqual(Rel.older, relate("1.2.4", "1.2.3_5"));
+}
+
+test "relate answers the same question both ways round" {
+    // Swapping the arguments must mirror the answer, never invent or lose
+    // one: `upgrade` reads the pair in the opposite order from `outdated`.
+    const pairs = [_][2][]const u8{
+        .{ "1.9", "1.10" },        .{ "1.2.3", "1.2.3_1" },
+        .{ "2.4.15", "2.4.14" },   .{ "1.0rc2", "1.0" },
+        .{ "1.0.0", "1.0" },       .{ "1.2.3,4567", "1.2.4,4600" },
+        .{ "20240115", "2024-1" }, .{ "", "1.0" },
+    };
+    for (pairs) |p| {
+        const forward = relate(p[0], p[1]);
+        const back = relate(p[1], p[0]);
+        try testing.expectEqual(switch (forward) {
+            .older => Rel.newer,
+            .newer => Rel.older,
+            .same => Rel.same,
+            .incomparable => Rel.incomparable,
+        }, back);
+    }
+}
+
+test "relate misreads a dropped cask build suffix as older" {
+    // Measured at 7 in 54,850 real cask transitions. Special-casing it would
+    // grow the comparator for a rounding error, so it is recorded, not fixed.
+    try testing.expectEqual(Rel.older, relate("1.4.3,167", "1.4.3"));
+}
+
+test "relate walks cask-shaped build suffixes" {
+    // The `,build` comma is an identical non-digit run and must not block.
+    try testing.expectEqual(Rel.newer, relate("1.2.3,4567", "1.2.4,4600"));
+}
 
 test "parsePkgVersion splits revision suffix" {
     const r = parsePkgVersion("1.9.2_2");
