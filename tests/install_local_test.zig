@@ -454,8 +454,11 @@ test "expandTildePath returns null when HOME is unset and ~/ is used" {
 // leaves no room for the usual pid/seq suffix — 7 random hex digits is what
 // fits, and it still keeps concurrent runs off each other's scratch dir.
 fn scratchPrefix() ![:0]u8 {
-    const rnd = test_io.randomInt(std.Options.debug_io, u32) & 0x0FFF_FFFF;
-    const dir = try std.fmt.allocPrintSentinel(testing.allocator, "/tmp/m{x:0>7}", .{rnd}, 0);
+    // `ml_` keeps the path inside the `/tmp/ml_*` family `scripts/clean.sh`
+    // sweeps; a bare `/tmp/m<hex>` matches no glob there and would leak a
+    // whole Cellar tree on every crashed run.
+    const rnd = test_io.randomInt(std.Options.debug_io, u32) & 0x000F_FFFF;
+    const dir = try std.fmt.allocPrintSentinel(testing.allocator, "/tmp/ml_{x:0>5}", .{rnd}, 0);
     errdefer testing.allocator.free(dir);
     std.debug.assert(dir.len <= "/opt/homebrew".len);
     test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
