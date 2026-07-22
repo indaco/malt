@@ -1434,6 +1434,52 @@ fn formatMaterializeFailure(buf: []u8, name: []const u8, err: cellar_mod.CellarE
     return result catch "Failed to materialize <truncated>";
 }
 
+// ── inline unit tests ──────────────────────────────────────────────────────
+
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 test "installFlagsFromOpts matches what the --cask --isolate-deps argv path parsed" {
     // Byte-parity oracle for dropping the argv round-trip: the flags built
     // directly from InstallAllOpts must equal what parse() derived from the
@@ -1467,21 +1513,16 @@ test "promoteIsolatedDepIfAny opt-links the revisioned dir, not the raw version"
     defer threaded.deinit();
     const io = threaded.io();
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_promote_rev_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("promote_rev");
+    defer s.deinit();
+    const prefix = s.base;
 
-    var mk_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const keg_lib = try std.fmt.bufPrint(&mk_buf, "{s}/Cellar/zlib/1.3_1/lib", .{prefix});
+    const keg_lib = s.p("/Cellar/zlib/1.3_1/lib");
     try std.Io.Dir.cwd().createDirPath(io, keg_lib);
-    var db_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    const db_dir = s.p("/db");
     try std.Io.Dir.cwd().createDirPath(io, db_dir);
 
-    var dbp_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&dbp_buf, "{s}/db/malt.db", .{prefix}, 0);
+    const db_path = s.p("/db/malt.db");
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -1500,8 +1541,7 @@ test "promoteIsolatedDepIfAny opt-links the revisioned dir, not the raw version"
 
     // opt/zlib must resolve (accessAbsolute follows the symlink; a
     // dangling link would surface FileNotFound).
-    var opt_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const opt = try std.fmt.bufPrint(&opt_buf, "{s}/opt/zlib", .{prefix});
+    const opt = s.p("/opt/zlib");
     try std.Io.Dir.accessAbsolute(io, opt, .{});
 
     // …and the row is promoted: direct + no longer bin-isolated.
@@ -1548,21 +1588,14 @@ test "kegPresent returns true only when <prefix>/Cellar/<name> exists" {
     defer threaded.deinit();
     const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(
-        &path_buf,
-        "/tmp/malt_kegpresent_{d}",
-        .{ts},
-    );
-    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    var s = try Scratch.init("kegpresent");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
 
     try testing.expect(!kegPresent(&ctx, prefix, "ghost"));
 
-    var keg_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const keg = try std.fmt.bufPrint(&keg_buf, "{s}/Cellar/ghost", .{prefix});
+    const keg = s.p("/Cellar/ghost");
     try std.Io.Dir.cwd().createDirPath(ctx.io, keg);
 
     try testing.expect(kegPresent(&ctx, prefix, "ghost"));
@@ -1584,15 +1617,12 @@ test "install: --download-only suppresses the --force reinstall prune" {
     defer threaded.deinit();
     const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_dlonly_force_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    var s = try Scratch.init("dlonly_force");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
 
-    var keg_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const keg = try std.fmt.bufPrint(&keg_buf, "{s}/Cellar/wget/1.21", .{prefix});
+    const keg = s.p("/Cellar/wget/1.21");
     try std.Io.Dir.cwd().createDirPath(ctx.io, keg);
 
     // download-only gate is false → prune skipped → keg survives.
@@ -1616,29 +1646,23 @@ test "pruneOtherCellarVersionsForReinstall removes sibling versions but keeps th
     defer threaded.deinit();
     const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_prune_siblings_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    var s = try Scratch.init("prune_siblings");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
 
-    var old_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const old_keg = try std.fmt.bufPrint(&old_buf, "{s}/Cellar/pcre2/10.47/bin", .{prefix});
+    const old_keg = s.p("/Cellar/pcre2/10.47/bin");
     try std.Io.Dir.cwd().createDirPath(ctx.io, old_keg);
 
-    var new_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const new_keg = try std.fmt.bufPrint(&new_buf, "{s}/Cellar/pcre2/10.47_1/bin", .{prefix});
+    const new_keg = s.p("/Cellar/pcre2/10.47_1/bin");
     try std.Io.Dir.cwd().createDirPath(ctx.io, new_keg);
 
     pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "pcre2", "10.47_1");
 
-    var old_root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const old_root = try std.fmt.bufPrint(&old_root_buf, "{s}/Cellar/pcre2/10.47", .{prefix});
+    const old_root = s.p("/Cellar/pcre2/10.47");
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(ctx.io, old_root, .{}));
 
-    var new_root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const new_root = try std.fmt.bufPrint(&new_root_buf, "{s}/Cellar/pcre2/10.47_1", .{prefix});
+    const new_root = s.p("/Cellar/pcre2/10.47_1");
     try std.Io.Dir.accessAbsolute(ctx.io, new_root, .{});
 }
 
@@ -1649,21 +1673,17 @@ test "pruneOtherCellarVersionsForReinstall is a no-op when only the kept version
     defer threaded.deinit();
     const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_prune_siblings_solo_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    var s = try Scratch.init("prune_siblings_solo");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
 
-    var keep_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const keep_keg = try std.fmt.bufPrint(&keep_buf, "{s}/Cellar/libgit2/1.9.3/lib", .{prefix});
+    const keep_keg = s.p("/Cellar/libgit2/1.9.3/lib");
     try std.Io.Dir.cwd().createDirPath(ctx.io, keep_keg);
 
     pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "libgit2", "1.9.3");
 
-    var keep_root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const keep_root = try std.fmt.bufPrint(&keep_root_buf, "{s}/Cellar/libgit2/1.9.3", .{prefix});
+    const keep_root = s.p("/Cellar/libgit2/1.9.3");
     try std.Io.Dir.accessAbsolute(ctx.io, keep_root, .{});
 }
 
@@ -1674,12 +1694,10 @@ test "pruneOtherCellarVersionsForReinstall is a no-op when the package dir does 
     defer threaded.deinit();
     const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_prune_siblings_absent_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    var s = try Scratch.init("prune_siblings_absent");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
 
     // No `Cellar/ghost` ever created — sweep must not fault, panic, or leak.
     pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "ghost", "1.0");
@@ -1695,12 +1713,10 @@ test "pruneOtherCellarVersionsForReinstall sweeps multiple stale siblings in one
     defer threaded.deinit();
     const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_prune_siblings_many_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    var s = try Scratch.init("prune_siblings_many");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
 
     const versions = [_][]const u8{ "10.46", "10.47", "10.47_1", "10.48" };
     for (versions) |v| {
@@ -1732,27 +1748,22 @@ test "pruneOtherCellarVersionsForReinstall ignores non-directory entries" {
     defer threaded.deinit();
     const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_prune_siblings_files_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    var s = try Scratch.init("prune_siblings_files");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
 
-    var pkg_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const pkg_path = try std.fmt.bufPrint(&pkg_buf, "{s}/Cellar/pcre2", .{prefix});
+    const pkg_path = s.p("/Cellar/pcre2");
     try std.Io.Dir.cwd().createDirPath(ctx.io, pkg_path);
 
-    var stray_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const stray = try std.fmt.bufPrint(&stray_buf, "{s}/.DS_Store", .{pkg_path});
+    const stray = s.p("/Cellar/pcre2/.DS_Store");
     {
         const f = try std.Io.Dir.cwd().createFile(ctx.io, stray, .{});
         defer f.close(ctx.io);
         try f.writeStreamingAll(ctx.io, "stray");
     }
 
-    var keep_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const keep_keg = try std.fmt.bufPrint(&keep_buf, "{s}/10.47_1/bin", .{pkg_path});
+    const keep_keg = s.p("/Cellar/pcre2/10.47_1/bin");
     try std.Io.Dir.cwd().createDirPath(ctx.io, keep_keg);
 
     pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "pcre2", "10.47_1");
@@ -1771,20 +1782,16 @@ test "pruneOtherCellarVersionsForReinstall tolerates keep_version absent on disk
     defer threaded.deinit();
     const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_prune_siblings_nokeep_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    var s = try Scratch.init("prune_siblings_nokeep");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
 
-    var stale_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const stale = try std.fmt.bufPrint(&stale_buf, "{s}/Cellar/pcre2/10.47/bin", .{prefix});
+    const stale = s.p("/Cellar/pcre2/10.47/bin");
     try std.Io.Dir.cwd().createDirPath(ctx.io, stale);
 
     pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "pcre2", "10.47_1");
 
-    var stale_root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const stale_root = try std.fmt.bufPrint(&stale_root_buf, "{s}/Cellar/pcre2/10.47", .{prefix});
+    const stale_root = s.p("/Cellar/pcre2/10.47");
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(ctx.io, stale_root, .{}));
 }

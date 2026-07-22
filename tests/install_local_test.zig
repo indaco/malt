@@ -450,19 +450,27 @@ test "expandTildePath returns null when HOME is unset and ~/ is used" {
 // private temp directory so checkPrefixLength passes and the store /
 // Cellar work stays hermetic.
 
-// MALT_PREFIX must be ≤ 13 bytes (Mach-O in-place patching budget), so
-// each test picks its own static short prefix rather than embedding a
-// timestamp. Different suffixes keep concurrent tests from colliding.
-fn setupPrefix(comptime fixed: [:0]const u8) !void {
-    comptime std.debug.assert(fixed.len <= "/opt/homebrew".len);
-    test_io.deleteTreeAbsolute(std.Options.debug_io, fixed) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, fixed);
-    _ = c.setenv("MALT_PREFIX", fixed.ptr, 1);
+// MALT_PREFIX must be ≤ 13 bytes (Mach-O in-place patching budget), which
+// leaves no room for the usual pid/seq suffix — 7 random hex digits is what
+// fits, and it still keeps concurrent runs off each other's scratch dir.
+fn scratchPrefix() ![:0]u8 {
+    // `ml_` keeps the path inside the `/tmp/ml_*` family `scripts/clean.sh`
+    // sweeps; a bare `/tmp/m<hex>` matches no glob there and would leak a
+    // whole Cellar tree on every crashed run.
+    const rnd = test_io.randomInt(std.Options.debug_io, u32) & 0x000F_FFFF;
+    const dir = try std.fmt.allocPrintSentinel(testing.allocator, "/tmp/ml_{x:0>5}", .{rnd}, 0);
+    errdefer testing.allocator.free(dir);
+    std.debug.assert(dir.len <= "/opt/homebrew".len);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+    _ = c.setenv("MALT_PREFIX", dir.ptr, 1);
+    return dir;
 }
 
-fn cleanupPrefix(comptime fixed: [:0]const u8) void {
-    test_io.deleteTreeAbsolute(std.Options.debug_io, fixed) catch {};
+fn cleanupPrefix(dir: [:0]u8) void {
+    test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     _ = c.unsetenv("MALT_PREFIX");
+    testing.allocator.free(dir);
 }
 
 fn writeFile(abs_path: []const u8, content: []const u8) !void {
@@ -483,8 +491,7 @@ test "execute --local rejects --cask combination (contradictory)" {
     // Casks are .app bundles, formulas are source archives — a single
     // argv cannot mean both. Reject up front so the user does not get
     // confusing mid-flight errors.
-    const prefix: [:0]const u8 = "/tmp/mlj";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     try testing.expectError(
@@ -497,8 +504,7 @@ test "execute --local rejects --formula combination (redundant)" {
     // `--local` already implies formula mode. Accepting `--formula`
     // alongside would leave the semantics ambiguous if the flag
     // matrix ever grows, so refuse it at the boundary.
-    const prefix: [:0]const u8 = "/tmp/mlk";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     try testing.expectError(
@@ -511,8 +517,7 @@ test "execute --local rejects --use-system-ruby combination (no effect)" {
     // Local installs don't run the Ruby post_install path, so the
     // trust-widening flag has no effect here. Refusing the combo
     // stops users from thinking it does.
-    const prefix: [:0]const u8 = "/tmp/mll";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     try testing.expectError(
@@ -529,8 +534,7 @@ test "execute --local without a path operand exits cleanly (error.Aborted)" {
     // `error.Aborted` is the project-wide contract for "user-facing CLI
     // error, message already emitted, no stack trace please" — matches
     // how other commands signal missing-arg failures.
-    const prefix: [:0]const u8 = "/tmp/mla";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     try testing.expectError(
@@ -543,8 +547,7 @@ test "execute --local with a missing file exits with PartialFailure" {
     // installLocalFormula catches its own error and logs via output.err.
     // execute() counts the dispatch-time failure into `failed_count` so a
     // single-package miss surfaces as a non-zero exit instead of silent 0.
-    const prefix: [:0]const u8 = "/tmp/mlb";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -552,9 +555,11 @@ test "execute --local with a missing file exits with PartialFailure" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    // Never created — inside this run's prefix so no sibling run can make it exist.
+    const missing = try std.fmt.allocPrint(arena.allocator(), "{s}/missing.rb", .{prefix});
     try testing.expectError(
         install_record.InstallError.PartialFailure,
-        install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", "/tmp/mlb_missing.rb" }),
+        install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", missing }),
     );
 }
 
@@ -562,8 +567,7 @@ test "execute --local with a non-.rb realpath is rejected before parse" {
     // Pass a real file whose basename does not end in .rb. The realpath
     // + basename check rejects it cleanly and the dispatcher surfaces the
     // miss as PartialFailure.
-    const prefix: [:0]const u8 = "/tmp/mlc";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/notaformula", .{prefix});
@@ -585,8 +589,7 @@ test "execute --local --dry-run with a valid .rb prints a plan" {
     // The happy dry-run path exercises: open → realpath → readToEnd →
     // parseRubyFormula → installLocalFormula.materializeRubyFormula dry-run
     // branch. No network, no Cellar writes.
-    const prefix: [:0]const u8 = "/tmp/mld";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{prefix});
@@ -605,8 +608,7 @@ test "execute autodetects a .rb path even without --local (tilde-style hint)" {
     // Shape-based detection: a `./`-prefixed or absolute `.rb` path is
     // routed through installLocalFormula without the explicit flag. The
     // warning is printed inside installLocalFormula itself.
-    const prefix: [:0]const u8 = "/tmp/mle";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{prefix});
@@ -625,8 +627,7 @@ test "execute --local tolerates a world-writable fixture (advisory only)" {
     // The permission warning is advisory — the install continues and
     // reaches dry-run normally. Regression guard: if fstatRisk() ever
     // escalates to a hard error, this test will trip.
-    const prefix: [:0]const u8 = "/tmp/mlw";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/hello.rb", .{prefix});
@@ -652,8 +653,7 @@ test "execute --local rejects a .rb whose archive URL is not https" {
     // hand-authored .rb cannot smuggle a file:// or plaintext http://
     // URL past the HTTPS gate — the download must be refused before
     // the HTTP client touches the URL at all.
-    const prefix: [:0]const u8 = "/tmp/mlz";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/evil.rb", .{prefix});
@@ -688,8 +688,7 @@ test "execute --local --dry-run accepts a cask DSL multi-arch fixture and reache
     // materializeTapCask's dry-run leaf. The dry-run breadcrumb on
     // stdout is the observable that proves the parser handed back
     // version + url + sha256.
-    const prefix: [:0]const u8 = "/tmp/mlm";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/rebased.rb", .{prefix});
@@ -733,8 +732,7 @@ test "execute --local --dry-run accepts a cask DSL multi-arch fixture and reache
 }
 
 test "execute --local rejects a malformed .rb (missing version/url/sha256)" {
-    const prefix: [:0]const u8 = "/tmp/mlf";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/broken.rb", .{prefix});
@@ -797,13 +795,17 @@ fn seedLocalKeg(
 }
 
 test "isInstalled sees a locally-recorded keg by name" {
-    const prefix: [:0]const u8 = "/tmp/mlh";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    try test_io.cwd().createDirPath(std.Options.debug_io, "/tmp/mlh/db");
-    const db_path = "/tmp/mlh/db/malt.db";
-    try seedLocalKeg(db_path, prefix, "wget", "1.0", "/tmp/mlh/wget.rb");
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    defer testing.allocator.free(db_path);
+    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{prefix});
+    defer testing.allocator.free(rb_path);
+    try seedLocalKeg(db_path, prefix, "wget", "1.0", rb_path);
 
     var db = try sqlite.Database.open(db_path);
     defer db.close();
@@ -814,15 +816,20 @@ test "uninstall + purge CLI flow treats tap='local' rows like any other keg" {
     // Dry-run uninstall: the name lookup succeeds, no network, no writes.
     // The point here is that uninstall.zig's `WHERE name = ?1` path
     // doesn't filter on tap — local kegs are first-class.
-    const prefix: [:0]const u8 = "/tmp/mli";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
-    try test_io.cwd().createDirPath(std.Options.debug_io, "/tmp/mli/db");
-    try seedLocalKeg("/tmp/mli/db/malt.db", prefix, "wget", "1.0", "/tmp/mli/wget.rb");
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    defer testing.allocator.free(db_path);
+    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{prefix});
+    defer testing.allocator.free(rb_path);
+    try seedLocalKeg(db_path, prefix, "wget", "1.0", rb_path);
 
     // Reopen to confirm the row is queryable with a fresh handle.
-    var db = try sqlite.Database.open("/tmp/mli/db/malt.db");
+    var db = try sqlite.Database.open(db_path);
     defer db.close();
 
     var stmt = try db.prepare("SELECT tap, full_name FROM kegs WHERE name = ?1;");
@@ -832,12 +839,11 @@ test "uninstall + purge CLI flow treats tap='local' rows like any other keg" {
     const tap = std.mem.sliceTo(stmt.columnText(0).?, 0);
     const full = std.mem.sliceTo(stmt.columnText(1).?, 0);
     try testing.expectEqualStrings("local", tap);
-    try testing.expectEqualStrings("/tmp/mli/wget.rb", full);
+    try testing.expectEqualStrings(rb_path, full);
 }
 
 test "execute --local rejects a directory path (not a regular file)" {
-    const prefix: [:0]const u8 = "/tmp/mlg";
-    try setupPrefix(prefix);
+    const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
 
     // Use the prefix itself as the target — it exists but is a directory.

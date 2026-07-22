@@ -113,13 +113,51 @@ fn rmrf(path: []const u8) void {
     std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
 }
 
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 test "openDbTri returns .absent when the db dir does not exist" {
     // SQLite open would otherwise CREATE a fresh file. The .absent
     // branch only fires when the parent dir is missing AND the file
     // never pre-existed — that's the "fresh prefix" UX contract.
-    const prefix = "/tmp/malt_openDbTri_absent";
-    rmrf(prefix);
-    defer rmrf(prefix);
+    var s = try Scratch.init("openDbTri_absent");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
     // Deliberately do NOT create the db/ subdir.
 
@@ -135,16 +173,16 @@ test "openDbTri returns .absent when the db dir does not exist" {
 }
 
 test "openDbTri returns .unreadable when malt.db is not a valid sqlite file" {
-    const prefix = "/tmp/malt_openDbTri_corrupt";
-    rmrf(prefix);
-    defer rmrf(prefix);
+    var s = try Scratch.init("openDbTri_corrupt");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
-    const db_dir = prefix ++ "/db";
+    const db_dir = s.p("/db");
     try std.Io.Dir.cwd().createDirPath(fs_test_io, db_dir);
 
     // Plant a non-sqlite blob at db/malt.db so the open path fails AFTER
     // the file has been observed to exist — that's the .unreadable branch.
-    const db_path = prefix ++ "/db/malt.db";
+    const db_path = s.p("/db/malt.db");
     const f = try std.Io.Dir.createFileAbsolute(fs_test_io, db_path, .{ .truncate = true });
     defer f.close(fs_test_io);
     try f.writeStreamingAll(fs_test_io, "this is not a valid sqlite header");
@@ -161,11 +199,11 @@ test "openDbTri returns .unreadable when malt.db is not a valid sqlite file" {
 }
 
 test "openDbTri opens a freshly created sqlite file" {
-    const prefix = "/tmp/malt_openDbTri_ok";
-    rmrf(prefix);
-    defer rmrf(prefix);
+    var s = try Scratch.init("openDbTri_ok");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
-    const db_dir = prefix ++ "/db";
+    const db_dir = s.p("/db");
     try std.Io.Dir.cwd().createDirPath(fs_test_io, db_dir);
 
     // Pre-create a real sqlite file so the open path succeeds.

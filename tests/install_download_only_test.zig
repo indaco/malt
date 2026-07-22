@@ -382,7 +382,10 @@ test "--download-only --cask is plumbed into the cask path and threads the flag"
     // though the row exists — and the run still terminates with a
     // cask-fetch error (because there's no network in this test, the
     // cache lookup for the cask JSON misses).
-    const prefix_z: [:0]const u8 = "/tmp/mc_dl";
+    const base = try test_io.uniqueTempPath(testing.allocator, "install_dlonly", "cask_bypass");
+    defer testing.allocator.free(base);
+    const prefix_z = try testing.allocator.dupeZ(u8, base);
+    defer testing.allocator.free(prefix_z);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);

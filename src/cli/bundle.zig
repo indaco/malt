@@ -810,6 +810,50 @@ fn printHelp(ctx: *const AppCtx) void {
     ctx.stderr.writeStreamingAll(ctx.io, help_mod.helpFor("bundle")) catch {};
 }
 
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 test "remove: bare name defaults to unregister-only" {
     const a = resolveRemoveArgs(&.{"work"}, false).?;
     try std.testing.expectEqualStrings("work", a.name);
@@ -874,14 +918,10 @@ test "writeManifest creates parent directories for a nested output path" {
     // A nested out_path whose parent is missing must be created, not fail with
     // no file — parity with `backup -o` / `purge --backup`.
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = std.fmt.bufPrint(&buf, "/tmp/malt_bundle_nested_{d}", .{ts}) catch unreachable;
-    std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    var s = try Scratch.init("bundle_nested");
+    defer s.deinit();
 
-    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/a/b/Brewfile", .{root}) catch unreachable;
+    const dest = s.p("/a/b/Brewfile");
 
     var manifest = manifest_mod.Manifest.init(std.testing.allocator);
     defer manifest.deinit();

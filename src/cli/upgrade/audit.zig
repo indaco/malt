@@ -134,35 +134,80 @@ test "--pinned selects the pinned-only keg filter" {
     try testing.expect(filterFor(.{ .cask_only = true }) == .all);
 }
 
-/// Tmp tree + schema-initialised db, doubling as the api cache dir so a
+const fs_test_io = std.Options.debug_io;
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Stands in for `std.testing.tmpDir`, which builds under `.zig-cache` — a
+/// tree the build system owns and rewrites underneath a concurrent test run.
+/// The base is process- and call-unique so overlapping runs sharing /tmp
+/// cannot delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+    dir: std.Io.Dir,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const raw = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        std.Io.Dir.cwd().deleteTree(fs_test_io, raw) catch {};
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so paths
+        // the code under test returns compare equal to `base`.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
+        errdefer d.close(fs_test_io);
+        const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
+        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        return .{ .arena = arena, .base = base, .dir = d };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        self.dir.close(fs_test_io);
+        std.Io.Dir.cwd().deleteTree(fs_test_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
+/// Scratch tree + schema-initialised db, doubling as the api cache dir so a
 /// planted side-car is the only version truth these tests can reach.
 const TempDb = struct {
-    tmp: std.testing.TmpDir,
-    dir_buf: [std.fs.max_path_bytes]u8 = undefined,
-    dir_len: usize = 0,
+    scratch: Scratch,
     db: sqlite.Database = undefined,
 
-    fn init() !TempDb {
-        var self: TempDb = .{ .tmp = std.testing.tmpDir(.{}) };
-        errdefer self.tmp.cleanup();
-        self.dir_len = try std.Io.Dir.realPath(self.tmp.dir, std.Options.debug_io, &self.dir_buf);
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{self.dir()}, 0);
-        self.db = try sqlite.Database.open(path);
+    fn init(comptime tag: []const u8) !TempDb {
+        var self: TempDb = .{ .scratch = try Scratch.init(tag) };
+        errdefer self.scratch.deinit();
+        self.db = try sqlite.Database.open(self.scratch.p("/test.db"));
         errdefer self.db.close();
         try schema.initSchema(&self.db);
         return self;
     }
 
-    /// Computed, not stored: a stored slice would dangle the moment the
-    /// struct is returned by value.
     fn dir(self: *const TempDb) []const u8 {
-        return self.dir_buf[0..self.dir_len];
+        return self.scratch.base;
     }
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        self.tmp.cleanup();
+        self.scratch.deinit();
     }
 };
 
@@ -244,7 +289,7 @@ test "offline leaves every row unknown even when a cached dump would prove one c
     // installed version. Online that is `proven_current`. Offline the dump
     // may be arbitrarily stale, so trusting it could prove a genuinely
     // outdated row current — the one way this pre-filter hides work.
-    var t = try TempDb.init();
+    var t = try TempDb.init("offline_unknown_formula");
     defer t.deinit();
     try insertKeg(&t.db, "alpha", "1.0");
     try writeVersionsIndex(t.dir(), .formula, "alpha\t1.0\t0\n");
@@ -266,7 +311,7 @@ test "audit returns one disposition per row, in row order, dropping none" {
     // Mixed provability: a row the dump proves current, a row it says is
     // behind, and a row it never mentions. All three must survive — phase 2
     // needs every row, and a dropped one is an upgrade that never happens.
-    var t = try TempDb.init();
+    var t = try TempDb.init("disposition_per_row");
     defer t.deinit();
     try insertKeg(&t.db, "alpha", "1.0");
     try insertKeg(&t.db, "beta", "1.0");
@@ -295,7 +340,7 @@ test "a cask audit reads the cask table against the cask index" {
     // Casks are a separate table, column and side-car. Without this, a
     // swapped switch arm would resolve casks against formula versions and
     // still pass every other test here.
-    var t = try TempDb.init();
+    var t = try TempDb.init("cask_index");
     defer t.deinit();
     try insertCask(&t.db, "shared", "1.0");
     try insertKeg(&t.db, "shared", "1.0");
@@ -320,7 +365,7 @@ test "a legacy NULL-tap cask resolves against the dump like any core row" {
     // The shape v5-era rows still carry. A NULL tap reads as core, so this
     // is the one cask arrangement the bulk dump can prove current — and the
     // one most likely to be mistaken for unattributed and skipped.
-    var t = try TempDb.init();
+    var t = try TempDb.init("legacy_null_tap_cask");
     defer t.deinit();
     try insertCask(&t.db, "current", "1.0");
     try insertCask(&t.db, "behind", "1.0");
@@ -347,7 +392,7 @@ test "a legacy NULL-tap cask resolves against the dump like any core row" {
 test "a homebrew/cask-tapped cask is core and resolves against the dump" {
     // The backfilled counterpart of the NULL-tap row above: attribution to
     // the core cask tap must not change the verdict.
-    var t = try TempDb.init();
+    var t = try TempDb.init("homebrew_cask_tap");
     defer t.deinit();
     try insertCaskTap(&t.db, "labelled", "1.0", "homebrew/cask");
     try writeVersionsIndex(t.dir(), .cask, "labelled\t1.0\t0\n");
@@ -366,7 +411,7 @@ test "a revision-bearing dump line cannot prove a cask current" {
     // Casks carry no revision — the row is always revision 0. So a dump
     // line claiming one qualifies to `1.0_1`, which is not the installed
     // `1.0`. Unproven, and the upgrade attempt is the safe answer.
-    var t = try TempDb.init();
+    var t = try TempDb.init("cask_revision_line");
     defer t.deinit();
     try insertCask(&t.db, "tok", "1.0");
     try writeVersionsIndex(t.dir(), .cask, "tok\t1.0\t1\n");
@@ -384,7 +429,7 @@ test "a revision-bearing dump line cannot prove a cask current" {
 }
 
 test "an empty cask table yields an empty plan" {
-    var t = try TempDb.init();
+    var t = try TempDb.init("empty_cask_table");
     defer t.deinit();
     try insertKeg(&t.db, "alpha", "1.0");
 
@@ -401,7 +446,7 @@ test "an empty cask table yields an empty plan" {
 }
 
 test "--pinned narrows a cask audit to pinned tokens" {
-    var t = try TempDb.init();
+    var t = try TempDb.init("pinned_cask_narrow");
     defer t.deinit();
     try insertCask(&t.db, "loose", "1.0");
     try t.db.exec("INSERT INTO casks (token, name, version, url, pinned) VALUES ('held', 'held', '1.0', 'https://example.com', 1);");
@@ -420,7 +465,7 @@ test "--pinned narrows a cask audit to pinned tokens" {
 }
 
 test "offline leaves a cask row unknown even when the cask dump would prove it current" {
-    var t = try TempDb.init();
+    var t = try TempDb.init("offline_unknown_cask");
     defer t.deinit();
     try insertCask(&t.db, "tok", "1.0");
     try writeVersionsIndex(t.dir(), .cask, "tok\t1.0\t0\n");
@@ -438,7 +483,7 @@ test "offline leaves a cask row unknown even when the cask dump would prove it c
 }
 
 test "--pinned audits only pinned rows and marks the plan narrowed" {
-    var t = try TempDb.init();
+    var t = try TempDb.init("pinned_keg_narrow");
     defer t.deinit();
     try insertKeg(&t.db, "loose", "1.0");
     try insertPinnedKeg(&t.db, "held", "1.0");
@@ -457,7 +502,7 @@ test "--pinned audits only pinned rows and marks the plan narrowed" {
 }
 
 test "an empty keg table yields an empty plan rather than an error" {
-    var t = try TempDb.init();
+    var t = try TempDb.init("empty_keg_table");
     defer t.deinit();
 
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
@@ -481,7 +526,7 @@ test "a third-party-tap row stays unknown even when the index lists it as outdat
     // unchanged version constant) the index never sees. If the audit let the
     // index prove this row current — or even mark it needs_upgrade — phase 2
     // would lose the sha-only move. It must come back unknown and fall through.
-    var t = try TempDb.init();
+    var t = try TempDb.init("third_party_tap_unknown");
     defer t.deinit();
     try insertKegTap(&t.db, "tapped", "1.0", "third/party");
     // The index even disagrees with the installed version — still ignored.
@@ -500,7 +545,7 @@ test "a third-party-tap row stays unknown even when the index lists it as outdat
 test "an unparseable upstream version reaches the plan as unknown" {
     // The disposition layer's guarantee, re-asserted here so the two cannot
     // drift apart: a version too long to qualify is unproven, never current.
-    var t = try TempDb.init();
+    var t = try TempDb.init("unparseable_version");
     defer t.deinit();
     try insertKeg(&t.db, "alpha", "1.0");
 

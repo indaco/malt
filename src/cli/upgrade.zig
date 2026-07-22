@@ -1521,6 +1521,58 @@ pub fn collectMissingDepNames(
 
 const color = @import("../ui/color.zig");
 
+const fs_test_io = std.Options.debug_io;
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Stands in for `std.testing.tmpDir`, which builds under `.zig-cache` — a
+/// tree the build system owns and rewrites underneath a concurrent test run.
+/// The base is process- and call-unique so overlapping runs sharing /tmp
+/// cannot delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+    dir: std.Io.Dir,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const raw = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        std.Io.Dir.cwd().deleteTree(fs_test_io, raw) catch {};
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so paths
+        // the code under test returns compare equal to `base`.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
+        errdefer d.close(fs_test_io);
+        const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
+        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        return .{ .arena = arena, .base = base, .dir = d };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        self.dir.close(fs_test_io);
+        std.Io.Dir.cwd().deleteTree(fs_test_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "EntrySink.collectFormula qualifies installed with revision and routes by kind" {
     var sink = EntrySink.init(std.testing.allocator);
     defer sink.deinit();
@@ -1569,10 +1621,9 @@ test "each narrowing clears full_keg so the plan warm is refused" {
     try schema.initSchema(&db);
     try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('held', 'held', '1.0', 'sha', '/cellar/held/1.0', 1);");
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("narrow_clears_full_keg");
+    defer s.deinit();
+    const cache_dir = s.base;
     try writeTestVersionsIndex(cache_dir, .formula, "held\t2.0\t0\n");
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
@@ -1782,15 +1833,11 @@ test "upgradeDbAtomic re-records dependency edges so cleanup keeps live runtime 
 // — the failure this bug produced. `readOldKeg` copies the row into owned
 // storage and finalizes the statement first, so the parent stays writable.
 test "readOldKeg releases the WAL read snapshot before a second connection advances the WAL" {
-    const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
-    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&pbuf, "{s}/kegs.db", .{base});
+    var s = try Scratch.init("read_old_keg_wal");
+    defer s.deinit();
+    const path = s.p("/kegs.db");
 
     // Connection A stands in for the parent upgrade connection.
     var a = try sqlite.Database.open(path);
@@ -1889,10 +1936,9 @@ test "upgradeAllFormulas stops between packages once interrupted" {
     );
 
     // Offline so each fetch fails instantly from a cache miss — no network.
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("formulas_interrupt_between");
+    defer s.deinit();
+    const cache_dir = s.base;
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
     defer http.deinit();
@@ -1929,10 +1975,9 @@ test "upgradeAllFormulas processes nothing when interrupted before the loop" {
         \\VALUES ('aaa', 'aaa', '1.0', 's1', '/c/aaa/1.0', NULL);
     );
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("formulas_interrupt_before");
+    defer s.deinit();
+    const cache_dir = s.base;
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
     defer http.deinit();
     http.offline = true;
@@ -1966,10 +2011,9 @@ test "upgradeAllCasks stops between casks once interrupted" {
         \\  ('bbb', 'bbb', '1.0', 'https://example/bbb');
     );
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("casks_interrupt_between");
+    defer s.deinit();
+    const cache_dir = s.base;
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
     defer http.deinit();
     http.offline = true;
@@ -2093,10 +2137,9 @@ test "the warmed formula set merges plan and phase-2 rows, each once, freed once
         \\  ('up', 'up', '1.0', 'sha', '/cellar/up/1.0');
     );
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("warm_formula_merge");
+    defer s.deinit();
+    const cache_dir = s.base;
     // Index lists `cur` (current) and `up` (behind); `miss` is absent.
     try writeTestVersionsIndex(cache_dir, .formula, "cur\t5.0\t0\nup\t2.0\t0\n");
     // Phase 2 fetches only rows the plan could not exclude: `miss` and `up`.
@@ -2148,10 +2191,9 @@ test "the warmed cask set merges plan and phase-2 rows, each once, freed once" {
         \\  ('up', 'up', '1.0', 'https://example/up');
     );
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("warm_cask_merge");
+    defer s.deinit();
+    const cache_dir = s.base;
     try writeTestVersionsIndex(cache_dir, .cask, "cur\t5.0\t0\nup\t2.0\t0\n");
     try writeTestCaskCache(cache_dir, "miss", "3.0");
     try writeTestCaskCache(cache_dir, "up", "2.0");
@@ -2198,10 +2240,9 @@ test "a proven-current row is folded into the footer, not dropped from it" {
         \\  ('beta', 'beta', '2.0', 'sha', '/cellar/beta/2.0');
     );
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("proven_current_fold");
+    defer s.deinit();
+    const cache_dir = s.base;
     try writeTestVersionsIndex(cache_dir, .formula, "alpha\t1.0\t0\nbeta\t2.0\t0\n");
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
@@ -2234,10 +2275,9 @@ test "--force sends an index-proven-current row to phase 2 instead of folding it
     try schema.initSchema(&db);
     try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('alpha', 'alpha', '1.0', 'sha', '/cellar/alpha/1.0');");
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("force_defeats_fold");
+    defer s.deinit();
+    const cache_dir = s.base;
     try writeTestVersionsIndex(cache_dir, .formula, "alpha\t1.0\t0\n");
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
@@ -2270,10 +2310,9 @@ test "a pinned row still reports as pinned even when the index proves it current
     try schema.initSchema(&db);
     try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('held', 'held', '1.0', 'sha', '/cellar/held/1.0', 1);");
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("pinned_row_reports_pinned");
+    defer s.deinit();
+    const cache_dir = s.base;
     try writeTestVersionsIndex(cache_dir, .formula, "held\t1.0\t0\n");
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
@@ -2310,10 +2349,9 @@ test "a proven-current cask is folded into the footer via the cask token path" {
         \\  ('cur2', 'cur2', '2.0', 'https://example/cur2');
     );
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("proven_current_cask_fold");
+    defer s.deinit();
+    const cache_dir = s.base;
     try writeTestVersionsIndex(cache_dir, .cask, "cur\t1.0\t0\ncur2\t2.0\t0\n");
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
@@ -2341,10 +2379,9 @@ test "a pinned cask still reports as pinned even when the index proves it curren
     try schema.initSchema(&db);
     try db.exec("INSERT INTO casks (token, name, version, url, pinned) VALUES ('held', 'held', '1.0', 'https://example/held', 1);");
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("pinned_cask_reports_pinned");
+    defer s.deinit();
+    const cache_dir = s.base;
     try writeTestVersionsIndex(cache_dir, .cask, "held\t1.0\t0\n");
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
@@ -2381,10 +2418,9 @@ test "a row missing from the index is still handed to phase 2, never skipped" {
         \\  ('unlisted', 'unlisted', '1.0', 'sha', '/cellar/unlisted/1.0');
     );
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("unlisted_row_phase2");
+    defer s.deinit();
+    const cache_dir = s.base;
     // `unlisted` is absent — a partial map, not a total miss.
     try writeTestVersionsIndex(cache_dir, .formula, "known\t1.0\t0\n");
 
@@ -2419,10 +2455,9 @@ test "a needs_upgrade formula is warmed from the plan, not phase 2's fetch" {
     try schema.initSchema(&db);
     try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('behind', 'behind', '1.0', 'sha', '/cellar/behind/1.0');");
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("warm_formula_from_plan");
+    defer s.deinit();
+    const cache_dir = s.base;
     try writeTestVersionsIndex(cache_dir, .formula, "behind\t2.0\t0\n");
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
@@ -2458,10 +2493,9 @@ test "a needs_upgrade cask is warmed from the plan, not phase 2's fetch" {
     try schema.initSchema(&db);
     try db.exec("INSERT INTO casks (token, name, version, url) VALUES ('vlc', 'vlc', '1.0', 'https://example/vlc');");
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("warm_cask_from_plan");
+    defer s.deinit();
+    const cache_dir = s.base;
     try writeTestVersionsIndex(cache_dir, .cask, "vlc\t2.0\t0\n");
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
@@ -2497,10 +2531,9 @@ test "a pinned needs_upgrade row stays out of the warm, as phase 2's pinSkip wou
     try schema.initSchema(&db);
     try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('held', 'held', '1.0', 'sha', '/cellar/held/1.0', 1);");
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = cbuf[0..try std.Io.Dir.realPath(tmp.dir, ctx.io, &cbuf)];
+    var s = try Scratch.init("pinned_outdated_no_warm");
+    defer s.deinit();
+    const cache_dir = s.base;
     try writeTestVersionsIndex(cache_dir, .formula, "held\t2.0\t0\n");
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);

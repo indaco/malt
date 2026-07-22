@@ -33,13 +33,36 @@ const testing = std.testing;
 // Blocking debug IO drives the real syscalls each test needs.
 const test_io = std.Options.debug_io;
 
-// Unique per-run absolute path so parallel test binaries never collide on
-// a shared /tmp name.
-fn tmpPath(buf: []u8, label: []const u8) []const u8 {
-    const ts = std.Io.Clock.real.now(test_io).toNanoseconds();
-    // A max_path_bytes buffer cannot overflow this short format.
-    return std.fmt.bufPrint(buf, "/tmp/malt_read_{s}_{d}", .{ label, ts }) catch unreachable;
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(test_io, path) catch {};
 }
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch path under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_read_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
 
 fn writeTmp(path: []const u8, bytes: []const u8) !void {
     const f = try std.Io.Dir.cwd().createFile(test_io, path, .{ .truncate = true });
@@ -48,10 +71,10 @@ fn writeTmp(path: []const u8, bytes: []const u8) !void {
 }
 
 test "empty file returns a zero-length slice" {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = tmpPath(&buf, "empty");
+    var s = try Scratch.init("empty");
+    defer s.deinit();
+    const path = s.base;
     try writeTmp(path, "");
-    defer std.Io.Dir.cwd().deleteTree(test_io, path) catch {};
 
     const out = try readFileAllAbsolute(test_io, testing.allocator, path, 1024);
     defer testing.allocator.free(out);
@@ -59,10 +82,10 @@ test "empty file returns a zero-length slice" {
 }
 
 test "file smaller than the cap returns full contents" {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = tmpPath(&buf, "small");
+    var s = try Scratch.init("small");
+    defer s.deinit();
+    const path = s.base;
     try writeTmp(path, "hello");
-    defer std.Io.Dir.cwd().deleteTree(test_io, path) catch {};
 
     const out = try readFileAllAbsolute(test_io, testing.allocator, path, 1024);
     defer testing.allocator.free(out);
@@ -70,10 +93,10 @@ test "file smaller than the cap returns full contents" {
 }
 
 test "file exactly at the cap returns full contents" {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = tmpPath(&buf, "exact");
+    var s = try Scratch.init("exact");
+    defer s.deinit();
+    const path = s.base;
     try writeTmp(path, "abcdefgh");
-    defer std.Io.Dir.cwd().deleteTree(test_io, path) catch {};
 
     const out = try readFileAllAbsolute(test_io, testing.allocator, path, 8);
     defer testing.allocator.free(out);
@@ -81,10 +104,10 @@ test "file exactly at the cap returns full contents" {
 }
 
 test "file larger than the cap is silently truncated to the cap" {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = tmpPath(&buf, "trunc");
+    var s = try Scratch.init("trunc");
+    defer s.deinit();
+    const path = s.base;
     try writeTmp(path, "0123456789ABCDEFGHIJ"); // 20 bytes
-    defer std.Io.Dir.cwd().deleteTree(test_io, path) catch {};
 
     const out = try readFileAllAbsolute(test_io, testing.allocator, path, 8);
     defer testing.allocator.free(out);
@@ -142,9 +165,10 @@ const ShrinkTrigger = struct {
 test "a missing file surfaces error.FileNotFound" {
     // readCache switches on exactly this error to mean "no cache yet", so the
     // helper must keep surfacing it rather than mapping it to something else.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = tmpPath(&buf, "absent");
-    std.Io.Dir.cwd().deleteTree(test_io, path) catch {};
+    // Unique but deliberately never created.
+    var s = try Scratch.init("absent");
+    defer s.deinit();
+    const path = s.base;
     try testing.expectError(
         error.FileNotFound,
         readFileAllAbsolute(test_io, testing.allocator, path, 1024),
@@ -152,10 +176,10 @@ test "a missing file surfaces error.FileNotFound" {
 }
 
 test "short read falls back to a fresh allocation when resize fails" {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = tmpPath(&buf, "shrink");
+    var s = try Scratch.init("shrink");
+    defer s.deinit();
+    const path = s.base;
     try writeTmp(path, "0123456789"); // 10 bytes; buffer sized to 10
-    defer std.Io.Dir.cwd().deleteTree(test_io, path) catch {};
 
     var trigger = ShrinkTrigger{
         .parent = testing.allocator,

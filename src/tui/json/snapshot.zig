@@ -80,6 +80,57 @@ pub fn read(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8) ?ou
 
 const testing = std.testing;
 
+const fs_test_io = std.Options.debug_io;
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Stands in for std.testing.tmpDir, which builds under .zig-cache — a tree the
+/// build system owns and rewrites underneath concurrent test runs. The base is
+/// process- and call-unique so overlapping runs can't delete each other's
+/// fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+    dir: std.Io.Dir,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const raw = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        std.Io.Dir.cwd().deleteTree(fs_test_io, raw) catch {};
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
+        // code under test returns compare equal to `base`.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
+        errdefer d.close(fs_test_io);
+        const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
+        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        return .{ .arena = arena, .base = base, .dir = d };
+    }
+
+    /// Absolute path to `sub` (leading slash included); valid until deinit.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        self.dir.close(fs_test_io);
+        std.Io.Dir.cwd().deleteTree(fs_test_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "parse maps formulas and casks to kinded rows, unpinned and untagged" {
     const bytes =
         \\{"version":2,"generated_at_ms":1700000000000,
@@ -138,12 +189,11 @@ test "read round-trips a snapshot written to a temp cache dir" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+    var s = try Scratch.init("snapshot_read_roundtrip");
+    defer s.deinit();
+    const cache_dir = s.base;
 
-    var f = try tmp.dir.createFile(io, "outdated.json", .{});
+    var f = try s.dir.createFile(io, "outdated.json", .{});
     try f.writeStreamingAll(io, "{\"version\":2,\"generated_at_ms\":0,\"formulas\":[{\"name\":\"tree\",\"installed\":\"2.1.0\",\"latest\":\"2.2.0\"}],\"casks\":[]}");
     f.close(io);
 

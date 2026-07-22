@@ -16,6 +16,17 @@ const schema = malt.schema;
 const output = malt.output;
 const color = malt.color;
 
+/// These tests drive the local lookup and the not-found path, so the API
+/// leg only has to fail. Reaching it over the network makes that slow and
+/// dependent on connectivity, and under a tracer `connect` reports ISCONN,
+/// which the standard library treats as a bug and panics on. Offline fails
+/// the same leg without leaving the process.
+const offline_ctx: malt.app_ctx.AppCtx = .{
+    .io = std.Options.debug_io,
+    .environ = .empty,
+    .offline = true,
+};
+
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
     extern "c" fn unsetenv(name: [*:0]const u8) c_int;
@@ -145,7 +156,7 @@ test "execute --help short-circuits without touching the database" {
     defer s.deinit(testing.allocator);
     quiet();
     defer unquiet();
-    try info.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--help"});
+    try info.execute(&offline_ctx, testing.allocator, &.{"--help"});
 }
 
 test "execute with no positional package returns Aborted" {
@@ -155,7 +166,7 @@ test "execute with no positional package returns Aborted" {
     defer unquiet();
     try testing.expectError(
         error.Aborted,
-        info.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{}),
+        info.execute(&offline_ctx, testing.allocator, &.{}),
     );
 }
 
@@ -169,7 +180,7 @@ test "execute prints info for a locally-installed formula" {
     quiet();
     defer unquiet();
 
-    try info.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"wget"});
+    try info.execute(&offline_ctx, testing.allocator, &.{"wget"});
 }
 
 test "execute prints JSON info for a locally-installed formula" {
@@ -185,7 +196,7 @@ test "execute prints JSON info for a locally-installed formula" {
         output.setMode(prior_mode);
     }
 
-    try info.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"wget"});
+    try info.execute(&offline_ctx, testing.allocator, &.{"wget"});
 }
 
 // --- installed cask path ----------------------------------------------
@@ -198,7 +209,7 @@ test "execute prints info for a locally-installed cask" {
     quiet();
     defer unquiet();
 
-    try info.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"firefox"});
+    try info.execute(&offline_ctx, testing.allocator, &.{"firefox"});
 }
 
 test "execute --cask only inspects the casks table" {
@@ -212,7 +223,7 @@ test "execute --cask only inspects the casks table" {
     quiet();
     defer unquiet();
 
-    try info.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--cask", "firefox" });
+    try info.execute(&offline_ctx, testing.allocator, &.{ "--cask", "firefox" });
 }
 
 test "execute --formula only inspects the kegs table" {
@@ -224,7 +235,7 @@ test "execute --formula only inspects the kegs table" {
     quiet();
     defer unquiet();
 
-    try info.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--formula", "wget" });
+    try info.execute(&offline_ctx, testing.allocator, &.{ "--formula", "wget" });
 }
 
 // --- not-installed path -----------------------------------------------
@@ -245,7 +256,7 @@ test "execute on a missing package without API cache prints not-installed" {
     quiet();
     defer unquiet();
 
-    try info.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"definitely-not-a-real-package"});
+    try info.execute(&offline_ctx, testing.allocator, &.{"definitely-not-a-real-package"});
 }
 
 test "execute on a missing package with --json emits a not-installed JSON object" {
@@ -260,7 +271,7 @@ test "execute on a missing package with --json emits a not-installed JSON object
         output.setMode(prior_mode);
     }
 
-    try info.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"ghost-pkg"});
+    try info.execute(&offline_ctx, testing.allocator, &.{"ghost-pkg"});
 }
 
 // --- API-cache fallback path -------------------------------------------
@@ -293,7 +304,7 @@ test "execute falls back to cached API formula metadata for a not-locally-instal
     quiet();
     defer unquiet();
 
-    try info.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"jq"});
+    try info.execute(&offline_ctx, testing.allocator, &.{"jq"});
 }
 
 // --- end-to-end stdout capture: tap surfacing -------------------------

@@ -673,13 +673,58 @@ pub fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
     return stmt.step() catch false;
 }
 
-test "findTapFormulaRb prefers the receipt's source.path when it exists and ends in .rb" {
-    const dir = "/tmp/malt_taprb_src";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+// ─── inline test scratch ──────────────────────────────────────────────
 
-    const rb = dir ++ "/glow.rb";
+const dbg_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(dbg_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
+test "findTapFormulaRb prefers the receipt's source.path when it exists and ends in .rb" {
+    var s = try Scratch.init("taprb_src");
+    defer s.deinit();
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, s.base, .default_dir);
+
+    const rb = s.p("/glow.rb");
     const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, rb, .{ .truncate = true });
     f.close(std.Options.debug_io);
 
@@ -697,13 +742,13 @@ test "findTapFormulaRb prefers the receipt's source.path when it exists and ends
 }
 
 test "findTapFormulaRb falls back to the canonical sharded tap layout when source.path is stale" {
-    const dir = "/tmp/malt_taprb_sharded";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    var s = try Scratch.init("taprb_sharded");
+    defer s.deinit();
+    const dir = s.base;
 
-    const formula_dir = dir ++ "/Library/Taps/charmbracelet/homebrew-tap/Formula/g";
+    const formula_dir = s.p("/Library/Taps/charmbracelet/homebrew-tap/Formula/g");
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, formula_dir);
-    const rb = formula_dir ++ "/glow.rb";
+    const rb = s.p("/Library/Taps/charmbracelet/homebrew-tap/Formula/g/glow.rb");
     (try std.Io.Dir.createFileAbsolute(std.Options.debug_io, rb, .{ .truncate = true }))
         .close(std.Options.debug_io);
 
@@ -721,13 +766,13 @@ test "findTapFormulaRb falls back to the canonical sharded tap layout when sourc
 }
 
 test "findTapFormulaRb falls back to the flat tap layout when sharded is absent" {
-    const dir = "/tmp/malt_taprb_flat";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    var s = try Scratch.init("taprb_flat");
+    defer s.deinit();
+    const dir = s.base;
 
-    const formula_dir = dir ++ "/Library/Taps/user/homebrew-private/Formula";
+    const formula_dir = s.p("/Library/Taps/user/homebrew-private/Formula");
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, formula_dir);
-    const rb = formula_dir ++ "/widget.rb";
+    const rb = s.p("/Library/Taps/user/homebrew-private/Formula/widget.rb");
     (try std.Io.Dir.createFileAbsolute(std.Options.debug_io, rb, .{ .truncate = true }))
         .close(std.Options.debug_io);
 
@@ -745,13 +790,13 @@ test "findTapFormulaRb falls back to the flat tap layout when sharded is absent"
 }
 
 test "findTapFormulaRb does not double-prefix when the tap repo already starts with homebrew-" {
-    const dir = "/tmp/malt_taprb_no_double";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    var s = try Scratch.init("taprb_no_double");
+    defer s.deinit();
+    const dir = s.base;
 
-    const formula_dir = dir ++ "/Library/Taps/user/homebrew-foo/Formula/w";
+    const formula_dir = s.p("/Library/Taps/user/homebrew-foo/Formula/w");
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, formula_dir);
-    const rb = formula_dir ++ "/widget.rb";
+    const rb = s.p("/Library/Taps/user/homebrew-foo/Formula/w/widget.rb");
     (try std.Io.Dir.createFileAbsolute(std.Options.debug_io, rb, .{ .truncate = true }))
         .close(std.Options.debug_io);
 
@@ -770,10 +815,10 @@ test "findTapFormulaRb does not double-prefix when the tap repo already starts w
 }
 
 test "findTapFormulaRb returns null when neither the receipt path nor the canonical layout exists" {
-    const dir = "/tmp/malt_taprb_none";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    var s = try Scratch.init("taprb_none");
+    defer s.deinit();
+    const dir = s.base;
     try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
 
     try std.testing.expect(findTapFormulaRb(
         std.Options.debug_io,
@@ -786,10 +831,14 @@ test "findTapFormulaRb returns null when neither the receipt path nor the canoni
 }
 
 test "findTapFormulaRb refuses a malformed tap (missing slash) instead of guessing a path" {
+    // The scratch base is deliberately never created: the tap is rejected
+    // before any path is touched.
+    var s = try Scratch.init("taprb_bad");
+    defer s.deinit();
     try std.testing.expect(findTapFormulaRb(
         std.Options.debug_io,
         std.testing.allocator,
-        "/tmp/malt_taprb_bad",
+        s.base,
         "noslash",
         "glow",
         "",
@@ -797,12 +846,11 @@ test "findTapFormulaRb refuses a malformed tap (missing slash) instead of guessi
 }
 
 test "readFileToOwnedSlice trims allocation when expected_size exceeds bytes read" {
-    const dir = "/tmp/malt_receipt_short_read";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    var s = try Scratch.init("receipt_short_read");
+    defer s.deinit();
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, s.base, .default_dir);
 
-    const path = dir ++ "/short.json";
+    const path = s.p("/short.json");
     {
         const w = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
         defer w.close(std.Options.debug_io);
@@ -820,12 +868,11 @@ test "readFileToOwnedSlice trims allocation when expected_size exceeds bytes rea
 }
 
 test "readFileToOwnedSlice returns the full buffer when expected_size matches bytes read" {
-    const dir = "/tmp/malt_receipt_exact_read";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    var s = try Scratch.init("receipt_exact_read");
+    defer s.deinit();
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, s.base, .default_dir);
 
-    const path = dir ++ "/exact.json";
+    const path = s.p("/exact.json");
     const payload = "{\"version\":1}";
     {
         const w = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
@@ -842,13 +889,13 @@ test "readFileToOwnedSlice returns the full buffer when expected_size matches by
 }
 
 test "readInstallReceipt round-trips a real INSTALL_RECEIPT.json under DebugAllocator" {
-    const dir = "/tmp/malt_install_receipt_roundtrip";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    var s = try Scratch.init("install_receipt_roundtrip");
+    defer s.deinit();
+    const dir = s.base;
     try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
 
     const payload = "{\"source\":{\"versions\":{\"stable\":\"1.0\"}},\"tap\":\"u/t\"}";
-    const path = dir ++ "/INSTALL_RECEIPT.json";
+    const path = s.p("/INSTALL_RECEIPT.json");
     {
         const w = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
         defer w.close(std.Options.debug_io);

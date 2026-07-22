@@ -584,13 +584,56 @@ pub fn provisionShippedCaBundle(io: std.Io, prefix: []const u8, name: []const u8
     std.Io.Dir.symLinkAbsolute(io, shipped, dest, .{}) catch {};
 }
 
-test "extractRbPostInstallBody: returns the body when the .rb defines post_install" {
-    const dir = "/tmp/malt_pi_decl_yes";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+const fs_test_io = std.Options.debug_io;
 
-    const rb = dir ++ "/glow.rb";
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
+test "extractRbPostInstallBody: returns the body when the .rb defines post_install" {
+    var s = try Scratch.init("pi_decl_yes");
+    defer s.deinit();
+    try std.Io.Dir.createDirAbsolute(fs_test_io, s.base, .default_dir);
+
+    const rb = s.p("/glow.rb");
     const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, rb, .{ .truncate = true });
     try f.writeStreamingAll(std.Options.debug_io,
         \\class Glow < Formula
@@ -609,12 +652,11 @@ test "extractRbPostInstallBody: returns the body when the .rb defines post_insta
 }
 
 test "extractRbPostInstallBody: null when the .rb has no post_install block" {
-    const dir = "/tmp/malt_pi_decl_no";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    var s = try Scratch.init("pi_decl_no");
+    defer s.deinit();
+    try std.Io.Dir.createDirAbsolute(fs_test_io, s.base, .default_dir);
 
-    const rb = dir ++ "/quiet.rb";
+    const rb = s.p("/quiet.rb");
     const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, rb, .{ .truncate = true });
     try f.writeStreamingAll(std.Options.debug_io,
         \\class Quiet < Formula
@@ -628,10 +670,13 @@ test "extractRbPostInstallBody: null when the .rb has no post_install block" {
 }
 
 test "extractRbPostInstallBody: null when the .rb is missing entirely" {
+    // Deliberately never created; still unique so a sibling run can't race it.
+    var s = try Scratch.init("pi_decl_missing");
+    defer s.deinit();
     try std.testing.expect(extractRbPostInstallBody(
         std.Options.debug_io,
         std.testing.allocator,
-        "/tmp/malt_pi_decl_missing/never.rb",
+        s.p("/never.rb"),
     ) == null);
 }
 
@@ -669,30 +714,30 @@ fn writeShippedBundle(prefix: []const u8, name: []const u8, content: []const u8)
 }
 
 test "provisionShippedCaBundle: links cert.pem to the shipped cacert.pem when absent" {
-    const prefix = "/tmp/malt_ca_provision_link";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    var s = try Scratch.init("ca_provision_link");
+    defer s.deinit();
+    const prefix = s.base;
     try writeShippedBundle(prefix, "ca-certificates", "MOZILLA-BUNDLE");
 
     provisionShippedCaBundle(std.Options.debug_io, prefix, "ca-certificates");
 
     // cert.pem now resolves (opt-anchored) to the shipped bundle.
-    const dest = prefix ++ "/etc/ca-certificates/cert.pem";
+    const dest = s.p("/etc/ca-certificates/cert.pem");
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().readLink(std.Options.debug_io, dest, &buf);
-    try std.testing.expectEqualStrings(prefix ++ "/opt/ca-certificates/share/ca-certificates/cacert.pem", buf[0..n]);
+    try std.testing.expectEqualStrings(s.p("/opt/ca-certificates/share/ca-certificates/cacert.pem"), buf[0..n]);
 }
 
 test "provisionShippedCaBundle: leaves an existing cert.pem untouched" {
-    const prefix = "/tmp/malt_ca_provision_keep";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    var s = try Scratch.init("ca_provision_keep");
+    defer s.deinit();
+    const prefix = s.base;
     try writeShippedBundle(prefix, "ca-certificates", "MOZILLA-BUNDLE");
 
     // A post_install (or system-Ruby regeneration) already wrote a real bundle.
-    const etc_dir = prefix ++ "/etc/ca-certificates";
+    const etc_dir = s.p("/etc/ca-certificates");
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, etc_dir);
-    const dest = etc_dir ++ "/cert.pem";
+    const dest = s.p("/etc/ca-certificates/cert.pem");
     {
         const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, dest, .{ .truncate = true });
         try f.writeStreamingAll(std.Options.debug_io, "REAL-KEYCHAIN-BUNDLE");
@@ -707,35 +752,35 @@ test "provisionShippedCaBundle: leaves an existing cert.pem untouched" {
 }
 
 test "provisionShippedCaBundle: no-op when the keg ships no cacert.pem" {
-    const prefix = "/tmp/malt_ca_provision_noop";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    var s = try Scratch.init("ca_provision_noop");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
 
     provisionShippedCaBundle(std.Options.debug_io, prefix, "tree");
 
-    const dest = prefix ++ "/etc/tree/cert.pem";
+    const dest = s.p("/etc/tree/cert.pem");
     if (std.Io.Dir.cwd().access(std.Options.debug_io, dest, .{})) |_| {
         return error.TestUnexpectedResult; // a non-CA keg must not get a cert.pem
     } else |_| {}
 }
 
 test "provisionShippedCaBundle: self-heals a stale dangling cert.pem symlink" {
-    const prefix = "/tmp/malt_ca_provision_dangle";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    var s = try Scratch.init("ca_provision_dangle");
+    defer s.deinit();
+    const prefix = s.base;
     try writeShippedBundle(prefix, "ca-certificates", "MOZILLA-BUNDLE");
 
     // A prior install left cert.pem pointing at a now-removed target.
-    const etc_dir = prefix ++ "/etc/ca-certificates";
+    const etc_dir = s.p("/etc/ca-certificates");
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, etc_dir);
-    const dest = etc_dir ++ "/cert.pem";
-    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, prefix ++ "/gone/cacert.pem", dest, .{});
+    const dest = s.p("/etc/ca-certificates/cert.pem");
+    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, s.p("/gone/cacert.pem"), dest, .{});
 
     provisionShippedCaBundle(std.Options.debug_io, prefix, "ca-certificates");
 
     // Repointed at the shipped bundle rather than left dangling.
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().readLink(std.Options.debug_io, dest, &buf);
-    try std.testing.expectEqualStrings(prefix ++ "/opt/ca-certificates/share/ca-certificates/cacert.pem", buf[0..n]);
+    try std.testing.expectEqualStrings(s.p("/opt/ca-certificates/share/ca-certificates/cacert.pem"), buf[0..n]);
 }

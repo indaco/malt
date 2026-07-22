@@ -652,6 +652,46 @@ pub const TapHeadResolve = struct {
     }
 };
 
+const fs_test_io = std.Options.debug_io;
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Stands in for std.testing.tmpDir, which builds under .zig-cache - a tree the
+/// build system owns and rewrites underneath concurrent test runs. The pid and
+/// sequence keep overlapping runs from deleting each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+    dir: std.Io.Dir,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const raw = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        std.Io.Dir.cwd().deleteTree(fs_test_io, raw) catch {};
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
+        // code under test reports compare equal to `base`.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
+        errdefer d.close(fs_test_io);
+        const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
+        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        return .{ .arena = arena, .base = base, .dir = d };
+    }
+
+    fn deinit(self: *Scratch) void {
+        self.dir.close(fs_test_io);
+        std.Io.Dir.cwd().deleteTree(fs_test_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "TapHeadResolve: second call for same label returns cached value (no second resolve)" {
     var cache = TapHeadResolve.init(std.testing.allocator, std.Options.debug_io);
     defer cache.deinit();
@@ -1182,10 +1222,9 @@ test "writeSnapshotEntries writes a snapshot the reader round-trips field-for-fi
     const io = threaded.io();
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+    var s = try Scratch.init("refresh_snapshot_roundtrip");
+    defer s.deinit();
+    const cache_dir = s.base;
 
     const formulas = [_]OutdatedEntry{
         .{ .name = @constCast("wget"), .installed = @constCast("1.21.3"), .latest = @constCast("1.21.4") },

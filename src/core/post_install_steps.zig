@@ -722,6 +722,48 @@ fn testIo() std.Io {
     return std.Options.debug_io;
 }
 
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(testIo(), path) catch {};
+}
+
 fn uniquePrefix(io: std.Io) ![]u8 {
     var rand: [8]u8 = undefined;
     io.random(&rand);
@@ -981,13 +1023,20 @@ test "a planted directory symlink cannot redirect a later step outside the prefi
 test "a step resolving outside the prefix is refused and logged as a sandbox violation" {
     var h = try TestHarness.init();
     defer h.deinit();
+    const a = h.arena.allocator();
 
-    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
-        \\[{"type":"mkdir_p","path":{"base":"absolute","path":"/tmp/malt_steps_escape_zz"}}]
-    )));
+    // Path is runtime-built so the target the refused step names is the very
+    // one asserted absent below, even with test binaries running concurrently.
+    var s = try Scratch.init("steps_escape_zz");
+    defer s.deinit();
+    const steps = try std.fmt.allocPrint(a,
+        \\[{{"type":"mkdir_p","path":{{"base":"absolute","path":"{s}"}}}}]
+    , .{s.base});
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h, steps)));
     try testing.expect(h.flog.hasFatal());
     var escaped = true;
-    _ = std.Io.Dir.openDirAbsolute(h.io, "/tmp/malt_steps_escape_zz", .{}) catch {
+    _ = std.Io.Dir.openDirAbsolute(h.io, s.base, .{}) catch {
         escaped = false;
     };
     try testing.expect(!escaped);
@@ -1075,10 +1124,14 @@ test "a confinement violation aborts the remaining steps like the DSL interprete
     defer h.deinit();
     const a = h.arena.allocator();
 
-    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
-        \\[{"type":"mkdir_p","path":{"base":"absolute","path":"/tmp/malt_steps_escape_abort"}},
-        \\ {"type":"mkdir_p","path":{"base":"var","path":"after-violation"}}]
-    )));
+    var s = try Scratch.init("steps_escape_abort");
+    defer s.deinit();
+    const steps = try std.fmt.allocPrint(a,
+        \\[{{"type":"mkdir_p","path":{{"base":"absolute","path":"{s}"}}}},
+        \\ {{"type":"mkdir_p","path":{{"base":"var","path":"after-violation"}}}}]
+    , .{s.base});
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h, steps)));
     try testing.expect(h.flog.hasFatal());
     // The step after the violation must never have run.
     const after = try std.fmt.allocPrint(a, "{s}/var/after-violation", .{h.prefix});

@@ -13,6 +13,38 @@ const SandboxError = sandbox.SandboxError;
 const cellar = "/opt/malt/Cellar/foo/1.0";
 const prefix = "/opt/malt";
 
+/// Stands in for `std.testing.tmpDir`, which roots its scratch under
+/// `.zig-cache` — a tree the build system rewrites underneath a running
+/// test — and whose handle these tests used to drop without cleaning up.
+const Scratch = struct {
+    path: []u8,
+    dir: std.Io.Dir,
+
+    fn init(tag: []const u8) !Scratch {
+        const io = std.Options.debug_io;
+        const raw = try test_io.uniqueTempPath(testing.allocator, "dsl_sandbox", tag);
+        defer testing.allocator.free(raw);
+        test_io.deleteTreeAbsolute(io, raw) catch {};
+        try test_io.cwd().createDirPath(io, raw);
+        errdefer test_io.deleteTreeAbsolute(io, raw) catch {};
+
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so the
+        // paths the sandbox walker reports compare equal to `path`.
+        var dir = try test_io.openDirAbsolute(io, raw, .{});
+        errdefer dir.close(io);
+        var buf: [test_io.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.realPath(dir, io, &buf);
+        return .{ .path = try testing.allocator.dupe(u8, buf[0..n]), .dir = dir };
+    }
+
+    fn deinit(self: *Scratch) void {
+        const io = std.Options.debug_io;
+        self.dir.close(io);
+        test_io.deleteTreeAbsolute(io, self.path) catch {};
+        testing.allocator.free(self.path);
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Valid paths
 // ---------------------------------------------------------------------------
@@ -170,9 +202,9 @@ test "sandbox: validateWriteDir is lenient when the whole prefix subtree is abse
     // ancestor (the tmp root, `/opt`, …) and reject. This is environment-
     // independent: the prefix dir below deliberately does not exist.
     const io = std.Options.debug_io;
-    const tmp = std.testing.tmpDir(.{});
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base = buf[0..try std.Io.Dir.realPath(tmp.dir, io, &buf)];
+    var s = try Scratch.init("absent_subtree");
+    defer s.deinit();
+    const base = s.path;
 
     const absent_prefix = try std.fs.path.join(testing.allocator, &.{ base, "no_such_prefix" });
     defer testing.allocator.free(absent_prefix);
@@ -188,11 +220,11 @@ test "sandbox: validateWriteDir is lenient when the whole prefix subtree is abse
 
 test "sandbox: validateWriteDir catches an intermediate-directory symlink escape" {
     const io = std.Options.debug_io;
-    const tmp = std.testing.tmpDir(.{});
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = buf[0..try std.Io.Dir.realPath(tmp.dir, io, &buf)];
+    var s = try Scratch.init("symlink_escape");
+    defer s.deinit();
+    const tmp_path = s.path;
 
-    try std.Io.Dir.createDirPath(tmp.dir, io, "cellar/pkg/1.0/bin");
+    try std.Io.Dir.createDirPath(s.dir, io, "cellar/pkg/1.0/bin");
 
     // bin/escape is a directory symlink pointing out of the keg.
     const link_dir = try std.fs.path.join(testing.allocator, &.{ tmp_path, "cellar", "pkg", "1.0", "bin", "escape" });

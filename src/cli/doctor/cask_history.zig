@@ -203,17 +203,27 @@ fn rmrf(path: []const u8) void {
     std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
 }
 
-/// Build a unique scratch prefix with the dir skeleton doctor's walker
-/// expects (`db/`, `cache/Cask/`, `Caskroom/`). Caller frees the slice.
-fn seedScratch(allocator: std.mem.Allocator, tag: []const u8) ![:0]u8 {
-    const ts: u32 = @intCast(std.Io.Clock.real.now(fs_test_io).toMilliseconds() & 0xffff_ffff);
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Unique scratch prefix. Keyed on pid plus a monotonic counter, not a
+/// millisecond clock: two runs starting in the same millisecond collided
+/// and wiped each other's fixtures. Caller frees the slice.
+fn uniquePrefix(allocator: std.mem.Allocator, tag: []const u8) ![:0]u8 {
     const prefix = try std.fmt.allocPrintSentinel(
         allocator,
-        "/tmp/malt_doctor_cask_history_{s}_{x}",
-        .{ tag, ts },
+        "/tmp/malt_doctor_cask_history_{s}_{d}_{d}",
+        .{ tag, std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
         0,
     );
     rmrf(prefix);
+    return prefix;
+}
+
+/// Build a unique scratch prefix with the dir skeleton doctor's walker
+/// expects (`db/`, `cache/Cask/`, `Caskroom/`). Caller frees the slice.
+fn seedScratch(allocator: std.mem.Allocator, tag: []const u8) ![:0]u8 {
+    const prefix = try uniquePrefix(allocator, tag);
+    errdefer allocator.free(prefix);
     inline for ([_][]const u8{ "/db", "/cache/Cask", "/Caskroom" }) |sub| {
         var sub_buf: [600]u8 = undefined;
         const sub_path = try std.fmt.bufPrint(&sub_buf, "{s}{s}", .{ prefix, sub });
@@ -443,9 +453,11 @@ test "collectCensus on a fresh prefix returns an empty census" {
     // is the silent default; doctor's human path skips its summary
     // line when this branch is taken.
     const allocator = testing.allocator;
-    const prefix = "/tmp/malt_doctor_cask_history_fresh";
-    rmrf(prefix);
-    defer rmrf(prefix);
+    const prefix = try uniquePrefix(allocator, "fresh");
+    defer {
+        rmrf(prefix);
+        allocator.free(prefix);
+    }
     try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
 
     var census = collectCensus(allocator, fs_test_io, prefix);

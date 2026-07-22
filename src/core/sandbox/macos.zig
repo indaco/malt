@@ -491,6 +491,50 @@ fn wexitstatus(status: c_int) u8 {
 // ---------------------------------------------------------------------------
 // tests
 
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 test "validatePathForProfile accepts normal absolute paths" {
     try validatePathForProfile("/opt/malt");
     try validatePathForProfile("/opt/malt/Cellar/foo/1.2.3");
@@ -545,24 +589,32 @@ test "renderRubyProfile grants IPC only when allow_ipc is set" {
 // symlinked root (macOS /tmp → /private/tmp) must also grant its
 // resolved form or every write under it is silently denied.
 test "renderRubyProfile also grants writes under the resolved roots for symlinked paths" {
-    _ = std.c.mkdir("/tmp/malt_sbx_profile_test", 0o755); // EEXIST is fine
-    defer _ = std.c.rmdir("/tmp/malt_sbx_profile_test");
+    var s = try Scratch.init("sbx_profile_test");
+    defer s.deinit();
+    _ = std.c.mkdir(s.base.ptr, 0o755); // EEXIST is fine
+
+    const a = s.arena.allocator();
+    // Does not exist on disk — must fall back to the literal alone.
+    const keg = s.p("/Cellar/foo/1.0");
 
     const profile = try renderRubyProfile(
         std.testing.allocator,
-        // Does not exist on disk — must fall back to the literal alone.
-        "/tmp/malt_sbx_profile_test/Cellar/foo/1.0",
-        "/tmp/malt_sbx_profile_test",
+        keg,
+        s.base,
         .{},
     );
     defer std.testing.allocator.free(profile);
 
     // Literal rules stay (fail-open to today's behaviour)...
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/tmp/malt_sbx_profile_test/etc\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/tmp/malt_sbx_profile_test/Cellar/foo/1.0\")") != null);
+    const lit_etc = try std.fmt.allocPrint(a, "(subpath \"{s}/etc\")", .{s.base});
+    const lit_keg = try std.fmt.allocPrint(a, "(subpath \"{s}\")", .{keg});
+    try std.testing.expect(std.mem.indexOf(u8, profile, lit_etc) != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, lit_keg) != null);
     // ...and the resolved prefix is granted too.
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/private/tmp/malt_sbx_profile_test/etc\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/private/tmp/malt_sbx_profile_test/var\")") != null);
+    const res_etc = try std.fmt.allocPrint(a, "(subpath \"/private{s}/etc\")", .{s.base});
+    const res_var = try std.fmt.allocPrint(a, "(subpath \"/private{s}/var\")", .{s.base});
+    try std.testing.expect(std.mem.indexOf(u8, profile, res_etc) != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, res_var) != null);
 }
 
 test "renderRubyProfile does not duplicate rules for already-resolved roots" {

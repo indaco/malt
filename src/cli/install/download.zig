@@ -849,6 +849,50 @@ fn testJob(succeeded: bool) DownloadJob {
     };
 }
 
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 test "assignDownloadLineIndices skips already-cached jobs" {
     var jobs = [_]DownloadJob{ testJob(false), testJob(true), testJob(false) };
     const count = assignDownloadLineIndices(&jobs);
@@ -1038,7 +1082,11 @@ test "installKegFromBottle returns NoBottle before reaching ghcr/store when no p
     defer ghcr.deinit();
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
-    var store = store_mod.Store.init(ctx_value.io, std.testing.allocator, &db, "/tmp/malt_iknfb_test");
+    // Prefix stays unique but is never created: the resolveBottle
+    // short-circuit must return before any path under it is touched.
+    var s = try Scratch.init("iknfb_test");
+    defer s.deinit();
+    var store = store_mod.Store.init(ctx_value.io, std.testing.allocator, &db, s.base);
 
     try std.testing.expectError(
         InstallError.NoBottle,
@@ -1047,7 +1095,7 @@ test "installKegFromBottle returns NoBottle before reaching ghcr/store when no p
             std.testing.allocator,
             .{ .ghcr = &ghcr, .http = &http, .store = &store },
             &formula,
-            "/tmp/malt_iknfb_test",
+            s.base,
         ),
     );
 }
@@ -1061,20 +1109,13 @@ test "downloadBottleToStore returns false when the store already holds the bottl
     defer threaded.deinit();
     const ctx_value: AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    const ts = std.Io.Clock.real.now(ctx_value.io).toNanoseconds();
-    const prefix_path = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "/tmp/malt_dlonly_skip_{d}",
-        .{ts},
-    );
-    defer std.testing.allocator.free(prefix_path);
-    std.Io.Dir.cwd().deleteTree(ctx_value.io, prefix_path) catch {};
+    var s = try Scratch.init("dlonly_skip");
+    defer s.deinit();
+    const prefix_path = s.base;
     try std.Io.Dir.cwd().createDirPath(ctx_value.io, prefix_path);
-    defer std.Io.Dir.cwd().deleteTree(ctx_value.io, prefix_path) catch {};
 
     const sha = "ba" ** 32;
-    const seeded = try std.fmt.allocPrint(std.testing.allocator, "{s}/store/{s}", .{ prefix_path, sha });
-    defer std.testing.allocator.free(seeded);
+    const seeded = s.p("/store/" ++ sha);
     try std.Io.Dir.cwd().createDirPath(ctx_value.io, seeded);
 
     var http = client_mod.HttpClient.init(ctx_value.io, ctx_value.environ, std.testing.allocator);

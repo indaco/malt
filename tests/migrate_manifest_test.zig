@@ -11,14 +11,9 @@ const manifest = malt.cli_migrate_manifest;
 const fs_compat = test_io;
 
 fn scratchManifestPath(suffix: []const u8) ![:0]u8 {
-    return std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/mt_manifest_{d}_{s}.json",
-        .{ fs_compat.nanoTimestamp(
-            std.Options.debug_io,
-        ), suffix },
-        0,
-    );
+    const base = try test_io.uniqueTempPath(testing.allocator, "manifest", suffix);
+    defer testing.allocator.free(base);
+    return std.fmt.allocPrintSentinel(testing.allocator, "{s}.json", .{base}, 0);
 }
 
 test "loadFromPath returns an empty manifest when the file does not exist" {

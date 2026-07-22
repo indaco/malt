@@ -381,6 +381,49 @@ fn freeOwnedNames(allocator: std.mem.Allocator, list: *std.ArrayList([]const u8)
 
 const testing = std.testing;
 const schema = @import("../../db/schema.zig");
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
 
 fn testManifest(
     parent: std.mem.Allocator,
@@ -708,13 +751,11 @@ test "run records per-member failures and keeps going" {
 }
 
 test "orderForRemoval reorders formulas so dependents land before their deps" {
-    const dir = "/tmp/malt_bundle_cleanup_topo_inline";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    var s = try Scratch.init("bundle_cleanup_topo_inline");
+    defer s.deinit();
+    try std.Io.Dir.createDirAbsolute(fs_test_io, s.base, .default_dir);
 
-    var db_path_buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
+    const db_path = s.p("/test.db");
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -766,13 +807,11 @@ test "orderForRemoval reorders formulas so dependents land before their deps" {
 }
 
 test "orderForRemoval falls back to alphabetical when the dep graph cycles" {
-    const dir = "/tmp/malt_bundle_cleanup_topo_cycle";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    var s = try Scratch.init("bundle_cleanup_topo_cycle");
+    defer s.deinit();
+    try std.Io.Dir.createDirAbsolute(fs_test_io, s.base, .default_dir);
 
-    var db_path_buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
+    const db_path = s.p("/test.db");
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -829,13 +868,11 @@ test "orderForRemoval falls back to alphabetical when the dep graph cycles" {
 }
 
 test "orderForRemoval is a no-op when no in-plan deps exist" {
-    const dir = "/tmp/malt_bundle_cleanup_topo_noop";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    var s = try Scratch.init("bundle_cleanup_topo_noop");
+    defer s.deinit();
+    try std.Io.Dir.createDirAbsolute(fs_test_io, s.base, .default_dir);
 
-    var db_path_buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
+    const db_path = s.p("/test.db");
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
@@ -860,13 +897,11 @@ test "orderForRemoval is a no-op when no in-plan deps exist" {
 }
 
 test "collectInstalled returns direct formulas and every cask, sorted" {
-    const dir = "/tmp/malt_bundle_cleanup_collect_inline";
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    var s = try Scratch.init("bundle_cleanup_collect_inline");
+    defer s.deinit();
+    try std.Io.Dir.createDirAbsolute(fs_test_io, s.base, .default_dir);
 
-    var db_path_buf: [256]u8 = undefined;
-    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
+    const db_path = s.p("/test.db");
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);

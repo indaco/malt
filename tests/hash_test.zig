@@ -8,6 +8,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const hash = malt.hash;
 
 /// 64 KiB — internal SHA256 read chunk. Boundary cases are expressed
@@ -18,9 +19,8 @@ fn testIo() std.Io {
     return std.Options.debug_io;
 }
 
-fn tempPath(tag: []const u8, buf: []u8) ![]const u8 {
-    const ts = std.Io.Clock.real.now(testIo()).toNanoseconds();
-    return std.fmt.bufPrint(buf, "/tmp/malt_hash_test_{s}_{d}", .{ tag, ts });
+fn tempPath(tag: []const u8) ![]const u8 {
+    return test_io.uniqueTempPath(testing.allocator, "hash_test", tag);
 }
 
 fn writeFile(path: []const u8, bytes: []const u8) !void {
@@ -44,8 +44,8 @@ fn referenceRaw(bytes: []const u8) [32]u8 {
 }
 
 test "hashFileSha256Raw returns the canonical empty digest" {
-    var buf: [128]u8 = undefined;
-    const p = try tempPath("empty_raw", &buf);
+    const p = try tempPath("empty_raw");
+    defer testing.allocator.free(p);
     try writeFile(p, "");
     defer deleteFile(p);
 
@@ -61,8 +61,8 @@ test "hashFileSha256Raw returns the canonical empty digest" {
 }
 
 test "hashFileSha256Raw matches NIST 'abc' vector" {
-    var buf: [128]u8 = undefined;
-    const p = try tempPath("abc_raw", &buf);
+    const p = try tempPath("abc_raw");
+    defer testing.allocator.free(p);
     try writeFile(p, "abc");
     defer deleteFile(p);
 
@@ -84,8 +84,8 @@ test "hashFileSha256Raw streams past the chunk boundary" {
     defer testing.allocator.free(payload);
     fillPattern(payload);
 
-    var buf: [128]u8 = undefined;
-    const p = try tempPath("multi_raw", &buf);
+    const p = try tempPath("multi_raw");
+    defer testing.allocator.free(p);
     try writeFile(p, payload);
     defer deleteFile(p);
 
@@ -95,15 +95,18 @@ test "hashFileSha256Raw streams past the chunk boundary" {
 }
 
 test "hashFileSha256Raw propagates FileNotFound" {
+    // Never created — unique only so a sibling run can't make it exist.
+    const absent = try tempPath("absent_xyzzy");
+    defer testing.allocator.free(absent);
     try testing.expectError(
         error.FileNotFound,
-        hash.hashFileSha256Raw(testIo(), "/tmp/malt_hash_test_absent_xyzzy.bin"),
+        hash.hashFileSha256Raw(testIo(), absent),
     );
 }
 
 test "hashFileSha256Hex is the lowercase hex of hashFileSha256Raw" {
-    var buf: [128]u8 = undefined;
-    const p = try tempPath("hex_match", &buf);
+    const p = try tempPath("hex_match");
+    defer testing.allocator.free(p);
     try writeFile(p, "hello world");
     defer deleteFile(p);
 

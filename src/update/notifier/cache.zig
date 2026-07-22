@@ -163,6 +163,50 @@ pub fn writeCache(io: std.Io, path: []const u8, state: State) !void {
 
 // --- inline tests --------------------------------------------------------
 
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 test "cacheDirFrom: precedence is MALT_CACHE > XDG_CACHE_HOME > HOME" {
     var buf: [256]u8 = undefined;
     {
@@ -264,13 +308,9 @@ test "writeCache + readCache round-trip on a real file" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notifier_rt_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
-    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    var s = try Scratch.init("notifier_rt");
+    defer s.deinit();
+    const path = s.p("/version-notify.json");
 
     try writeCache(io, path, .{
         .checked_at = 1714400000,
@@ -294,13 +334,10 @@ test "writeCache replaces an existing cache atomically (rename, not in-place tru
     defer threaded.deinit();
     const io = threaded.io();
 
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notifier_atomic_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
-    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    var s = try Scratch.init("notifier_atomic");
+    defer s.deinit();
+    const dir = s.base;
+    const path = s.p("/version-notify.json");
 
     try writeCache(io, path, .{
         .checked_at = 1714400000,
@@ -377,8 +414,9 @@ test "readCache: missing file is null, not an error" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&buf, "/tmp/malt_notifier_absent_{d}.json", .{std.Io.Clock.real.now(io).toNanoseconds()});
+    var s = try Scratch.init("notifier_absent");
+    defer s.deinit();
+    const path = s.p(".json");
     std.Io.Dir.deleteFileAbsolute(io, path) catch {};
     const got = try readCache(io, std.testing.allocator, path);
     try std.testing.expect(got == null);

@@ -30,13 +30,42 @@ fn minimalJson(alloc: std.mem.Allocator) ![]const u8 {
     , .{});
 }
 
+/// Stands in for `std.testing.tmpDir`, which roots its scratch under
+/// `.zig-cache` — a tree the build system rewrites underneath a running
+/// test — and whose handle this file used to drop without cleaning up.
+const Scratch = struct {
+    path: []u8,
+
+    fn init(tag: []const u8) !Scratch {
+        const io = std.Options.debug_io;
+        const raw = try test_io.uniqueTempPath(testing.allocator, "dsl_symlink", tag);
+        defer testing.allocator.free(raw);
+        test_io.deleteTreeAbsolute(io, raw) catch {};
+        try test_io.cwd().createDirPath(io, raw);
+        errdefer test_io.deleteTreeAbsolute(io, raw) catch {};
+
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so the
+        // link target the interpreter writes compares equal to `path`.
+        var dir = try test_io.openDirAbsolute(io, raw, .{});
+        defer dir.close(io);
+        var buf: [test_io.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.realPath(dir, io, &buf);
+        return .{ .path = try testing.allocator.dupe(u8, buf[0..n]) };
+    }
+
+    fn deinit(self: *Scratch) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        testing.allocator.free(self.path);
+    }
+};
+
 /// Build `<prefix>/Cellar/testpkg/1.0`, `<prefix>/etc`, and the keg's
-/// `share/` (where the symlink source lives). Returns the owned prefix.
-fn makePrefix() ![]const u8 {
-    const tmp = std.testing.tmpDir(.{});
-    var buf: [test_io.max_path_bytes]u8 = undefined;
-    const n = try std.Io.Dir.realPath(tmp.dir, std.Options.debug_io, &buf);
-    const prefix = try testing.allocator.dupe(u8, buf[0..n]);
+/// `share/` (where the symlink source lives). Returned by value so the
+/// caller owns the cleanup.
+fn makePrefix() !Scratch {
+    var s = try Scratch.init("prefix");
+    errdefer s.deinit();
+    const prefix = s.path;
 
     const cellar_share = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/testpkg/1.0/share", .{prefix});
     defer testing.allocator.free(cellar_share);
@@ -51,7 +80,7 @@ fn makePrefix() ![]const u8 {
     defer testing.allocator.free(src);
     (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
 
-    return prefix;
+    return s;
 }
 
 test "install_symlink: ca-certificates-shaped post_install lands the cert symlink" {
@@ -59,8 +88,9 @@ test "install_symlink: ca-certificates-shaped post_install lands the cert symlin
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const prefix = try makePrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makePrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const json = try minimalJson(alloc);
     var f = try formula_mod.parseFormula(alloc, json);
@@ -110,8 +140,9 @@ test "install_symlink: positional form lands the link by basename end-to-end" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const prefix = try makePrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makePrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const json = try minimalJson(alloc);
     var f = try formula_mod.parseFormula(alloc, json);
@@ -143,8 +174,9 @@ test "install_symlink: rm_f clears a pre-existing regular file before relinking"
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const prefix = try makePrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makePrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Pre-seed etc/cert.pem as a *regular file* — the stale state
     // ca-certificates' `rm_f` is there to clear.

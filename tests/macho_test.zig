@@ -5,9 +5,30 @@ const std = @import("std");
 const testing = std.testing;
 const macho = std.macho;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const parser = malt.parser;
 const patcher = malt.patcher;
 const codesign = malt.codesign;
+
+/// Stands in for `std.testing.tmpDir`, which roots its scratch under
+/// `.zig-cache` — a tree the build system rewrites underneath a running test.
+const Scratch = struct {
+    path: []u8,
+
+    fn init(tag: []const u8) !Scratch {
+        const io = std.Options.debug_io;
+        const raw = try test_io.uniqueTempPath(testing.allocator, "macho", tag);
+        defer testing.allocator.free(raw);
+        test_io.deleteTreeAbsolute(io, raw) catch {};
+        try test_io.cwd().createDirPath(io, raw);
+        return .{ .path = try testing.allocator.dupe(u8, raw) };
+    }
+
+    fn deinit(self: *Scratch) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        testing.allocator.free(self.path);
+    }
+};
 
 test "isMachO detects MH_MAGIC_64" {
     var buf: [4]u8 = undefined;
@@ -311,16 +332,14 @@ test "patchPaths preserves trailing NUL at max_path_len-1 boundary" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+    var scratch = try Scratch.init("same_length_patch");
+    defer scratch.deinit();
 
-    var dir_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_abs_len = try std.Io.Dir.realPath(tmp.dir, io, &dir_path_buf);
     var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const full_path = try std.fmt.bufPrint(
         &full_path_buf,
         "{s}/fixture.bin",
-        .{dir_path_buf[0..dir_abs_len]},
+        .{scratch.path},
     );
     {
         const f = try std.Io.Dir.createFileAbsolute(io, full_path, .{});

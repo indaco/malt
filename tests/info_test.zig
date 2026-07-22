@@ -13,6 +13,7 @@ const info = malt.cli_info;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const output = malt.output;
+const color = malt.color;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -234,6 +235,11 @@ const Prefix = struct {
 // Drive `info.execute` with stdout backed by a real fd so the encoder
 // writes survive for byte assertions; offline so no network is attempted.
 fn captureInfo(allocator: std.mem.Allocator, args: []const []const u8, tag: []const u8) ![]u8 {
+    // Colour is decided by whether stderr is a TTY, not by where the text
+    // goes, so an interactive run writes escapes into this capture file and
+    // the byte-level assertions below fail. Pin it off.
+    color.setForTest(false, null);
+
     const cap_base = try test_io.uniqueTempPath(allocator, "info_cap", tag);
     defer allocator.free(cap_base);
     const cap_path = try allocator.dupeZ(u8, cap_base);
@@ -286,7 +292,7 @@ test "info --cask --formula shows the installed formula, not 'not installed'" {
     defer testing.allocator.free(out);
 
     try testing.expect(std.mem.indexOf(u8, out, "not installed") == null);
-    try testing.expect(std.mem.startsWith(u8, out, "wget: "));
+    try testing.expectStringStartsWith(out, "wget: ");
 }
 
 test "info --cask --formula --json pins installed:true for an installed package" {
@@ -317,7 +323,7 @@ test "info --formula still narrows to the installed formula" {
     const out = try captureInfo(testing.allocator, &.{ "--formula", "wget" }, "formula_only");
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.startsWith(u8, out, "wget: "));
+    try testing.expectStringStartsWith(out, "wget: ");
 }
 
 test "info --cask --formula resolves an installed cask (formula misses, cask runs)" {
@@ -336,7 +342,7 @@ test "info --cask --formula resolves an installed cask (formula misses, cask run
     defer testing.allocator.free(out);
 
     try testing.expect(std.mem.indexOf(u8, out, "not installed") == null);
-    try testing.expect(std.mem.startsWith(u8, out, "firefox: "));
+    try testing.expectStringStartsWith(out, "firefox: ");
     try testing.expect(std.mem.indexOf(u8, out, "(cask)") != null);
 }
 

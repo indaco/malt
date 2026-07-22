@@ -245,13 +245,63 @@ pub fn lnSf(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     return Value{ .nil = {} };
 }
 
+const fs_test_io = std.Options.debug_io;
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Stands in for std.testing.tmpDir, which builds under .zig-cache - a tree the
+/// build system owns and rewrites underneath concurrent test runs. The base is
+/// process- and call-unique so overlapping runs can't delete each other's
+/// fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+    dir: std.Io.Dir,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const raw = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        std.Io.Dir.cwd().deleteTree(fs_test_io, raw) catch {};
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
+        // code under test returns compare equal to `base`.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
+        errdefer d.close(fs_test_io);
+        const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
+        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        return .{ .arena = arena, .base = base, .dir = d };
+    }
+
+    /// Absolute path to `sub` (leading slash included); valid until deinit.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        self.dir.close(fs_test_io);
+        std.Io.Dir.cwd().deleteTree(fs_test_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "cp refuses to copy through an intermediate-directory symlink out of the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_cp_dirlink_dst");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
@@ -288,10 +338,9 @@ test "cp refuses to copy through an intermediate-directory symlink out of the ke
 test "touch refuses to create through a symlink out of the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_touch_symlink");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
@@ -315,10 +364,9 @@ test "touch refuses to create through a symlink out of the keg" {
 test "chmod refuses to follow a symlink out of the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_chmod_symlink");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
@@ -348,10 +396,9 @@ test "chmod refuses to follow a symlink out of the keg" {
 test "cp_r refuses a symlink planted deep in the dest subtree" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_cpr_dst_deep_symlink");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
@@ -394,10 +441,9 @@ test "cp_r refuses a symlink planted deep in the dest subtree" {
 test "mv refuses to move a source from outside the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_mv_src_outside");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
@@ -427,10 +473,9 @@ test "mv refuses to move a source from outside the keg" {
 test "mv moves a regular file within the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const keg = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_mv_ok");
+    defer s.deinit();
+    const keg = s.base;
 
     const src = try std.fs.path.join(alloc, &.{ keg, "a.txt" });
     defer alloc.free(src);
@@ -455,10 +500,9 @@ test "mv moves a regular file within the keg" {
 test "cp refuses to copy a source from outside the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_cp_src_outside");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
@@ -486,10 +530,9 @@ test "cp refuses to copy a source from outside the keg" {
 test "cp refuses to read through a source symlink out of the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_cp_src_symlink");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
@@ -520,10 +563,9 @@ test "cp refuses to read through a source symlink out of the keg" {
 
 test "cp array branch skips an out-of-keg source but copies an in-keg one" {
     const io = std.Options.debug_io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_cp_array_mixed");
+    defer s.deinit();
+    const base = s.base;
 
     // cp's array branch joins child paths on ctx.allocator; give it an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -565,10 +607,9 @@ test "cp array branch skips an out-of-keg source but copies an in-keg one" {
 test "cp_r refuses to copy a source from outside the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_cpr_src_outside");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
@@ -598,10 +639,9 @@ test "cp_r refuses to copy a source from outside the keg" {
 
 test "cp_r refuses to read a source symlink planted in the source subtree" {
     const io = std.Options.debug_io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_cpr_src_symlink_leaf");
+    defer s.deinit();
+    const base = s.base;
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -631,10 +671,9 @@ test "cp_r refuses to read a source symlink planted in the source subtree" {
 
 test "cp_r copies a directory tree within the keg" {
     const io = std.Options.debug_io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const keg = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_cpr_ok");
+    defer s.deinit();
+    const keg = s.base;
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -664,10 +703,9 @@ test "cp_r copies a directory tree within the keg" {
 test "mv refuses a source under an intermediate-directory symlink out of the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_mv_src_dirlink");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
@@ -704,10 +742,9 @@ test "mv refuses a source under an intermediate-directory symlink out of the keg
 test "mv refuses a destination under an intermediate-directory symlink out of the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_mv_dst_dirlink");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
@@ -744,10 +781,9 @@ test "mv refuses a destination under an intermediate-directory symlink out of th
 test "mv moves an in-keg symlink leaf, relinking it without following" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const keg = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_mv_symlink_leaf");
+    defer s.deinit();
+    const keg = s.base;
 
     // A final-component symlink source is acceptable for mv: rename relinks the
     // link entry itself, it does not read through it. The guard must not reject
@@ -770,10 +806,9 @@ test "mv moves an in-keg symlink leaf, relinking it without following" {
 test "cp refuses a source under an intermediate-directory symlink out of the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_cp_src_dirlink");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
@@ -807,10 +842,9 @@ test "cp refuses a source under an intermediate-directory symlink out of the keg
 
 test "cp_r refuses to follow a symlinked directory in the source subtree" {
     const io = std.Options.debug_io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_cpr_src_dirlink");
+    defer s.deinit();
+    const base = s.base;
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -842,10 +876,9 @@ test "cp_r refuses to follow a symlinked directory in the source subtree" {
 test "cp preserves the source file mode within the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const keg = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_cp_mode");
+    defer s.deinit();
+    const keg = s.base;
 
     // The no-follow read + atomic write must keep the executable bit that
     // copyFileAbsolute used to carry, or poured scripts would lose +x.
@@ -870,10 +903,9 @@ test "cp preserves the source file mode within the keg" {
 test "cp copies a regular file within the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const keg = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_cp_ok");
+    defer s.deinit();
+    const keg = s.base;
 
     const src = try std.fs.path.join(alloc, &.{ keg, "src.txt" });
     defer alloc.free(src);
@@ -897,10 +929,9 @@ test "cp copies a regular file within the keg" {
 test "touch creates a regular file in the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const keg = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_touch_ok");
+    defer s.deinit();
+    const keg = s.base;
 
     const target = try std.fs.path.join(alloc, &.{ keg, "stamp" });
     defer alloc.free(target);
@@ -913,10 +944,9 @@ test "touch creates a regular file in the keg" {
 test "chmod changes the mode of a regular keg file" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const keg = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fileutils_chmod_ok");
+    defer s.deinit();
+    const keg = s.base;
 
     const file = try std.fs.path.join(alloc, &.{ keg, "script" });
     defer alloc.free(file);

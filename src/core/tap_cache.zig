@@ -78,6 +78,53 @@ pub fn bytesUnder(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8) 
     return total;
 }
 
+// ─── inline test scratch ──────────────────────────────────────────────
+
+const dbg_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(dbg_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base. A wall-clock stamp is
+/// not enough: two runs starting in the same millisecond collide and delete
+/// each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 test "cachePath: composes prefix/cache/Tap/<sha>.<ext>" {
     var buf: [256]u8 = undefined;
     const got = try cachePath(&buf, "/opt/h", "ab" ** 32, ".tar.gz");
@@ -111,25 +158,20 @@ test "exists: returns false when cache dir absent" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&buf, "/tmp/malt_tap_cache_exists_absent_{d}", .{ts});
-    try std.testing.expect(!exists(io, prefix, "ab" ** 32, ".tar.gz"));
+    var s = try Scratch.init("tap_cache_exists_absent");
+    defer s.deinit();
+    try std.testing.expect(!exists(io, s.base, "ab" ** 32, ".tar.gz"));
 }
 
 test "exists: returns true when SHA-keyed entry is on disk" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_tap_cache_exists_hit_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("tap_cache_exists_hit");
+    defer s.deinit();
+    const prefix = s.base;
 
-    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
-    try std.Io.Dir.cwd().createDirPath(io, cache_parent);
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/cache"));
     try ensureCacheDir(io, prefix);
 
     var entry_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -146,20 +188,15 @@ test "promoteStagingToCache: renames staging file to SHA-keyed slot" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_tap_cache_promote_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("tap_cache_promote");
+    defer s.deinit();
+    const prefix = s.base;
 
     inline for ([_][]const u8{ "/tmp", "/cache" }) |sub| {
-        var b: [std.fs.max_path_bytes]u8 = undefined;
-        const p = try std.fmt.bufPrint(&b, "{s}{s}", .{ prefix, sub });
-        try std.Io.Dir.cwd().createDirPath(io, p);
+        try std.Io.Dir.cwd().createDirPath(io, s.p(sub));
     }
 
-    var staging_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const staging = try std.fmt.bufPrint(&staging_buf, "{s}/tmp/tap_download.9999.tar.gz", .{prefix});
+    const staging = s.p("/tmp/tap_download.9999.tar.gz");
     {
         const f = try std.Io.Dir.createFileAbsolute(io, staging, .{});
         defer f.close(io);
@@ -182,29 +219,24 @@ test "bytesUnder: returns 0 when cache dir is absent" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_tap_cache_bytes_absent_{d}", .{ts});
+    var s = try Scratch.init("tap_cache_bytes_absent");
+    defer s.deinit();
     // Deliberately do not create <prefix>/cache/Tap.
-    try std.testing.expectEqual(@as(u64, 0), bytesUnder(io, std.testing.allocator, prefix));
+    try std.testing.expectEqual(@as(u64, 0), bytesUnder(io, std.testing.allocator, s.base));
 }
 
 test "bytesUnder: sums regular file sizes under cache/Tap" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_tap_cache_bytes_sum_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("tap_cache_bytes_sum");
+    defer s.deinit();
+    const prefix = s.base;
 
     // Production callers reach `ensureCacheDir` only after the
     // top-level `ensureDirs` has seeded `<prefix>/cache`; mirror
     // that here so the test pins the production invariant.
-    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
-    try std.Io.Dir.cwd().createDirPath(io, cache_parent);
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/cache"));
 
     try ensureCacheDir(io, prefix);
 

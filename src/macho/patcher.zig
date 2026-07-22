@@ -553,6 +553,57 @@ pub fn fileLinksPath(io: std.Io, allocator: std.mem.Allocator, file_path: []cons
 
 const replaceAll = text_replace.replaceAll;
 
+const fs_test_io = std.Options.debug_io;
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Stands in for std.testing.tmpDir, which builds under .zig-cache — a tree the
+/// build system owns and rewrites underneath concurrent test runs. The base is
+/// process- and call-unique so overlapping runs can't delete each other's
+/// fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+    dir: std.Io.Dir,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const raw = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        std.Io.Dir.cwd().deleteTree(fs_test_io, raw) catch {};
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
+        // code under test returns compare equal to `base`.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
+        errdefer d.close(fs_test_io);
+        const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
+        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        return .{ .arena = arena, .base = base, .dir = d };
+    }
+
+    /// Absolute path to `sub` (leading slash included); valid until deinit.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        self.dir.close(fs_test_io);
+        std.Io.Dir.cwd().deleteTree(fs_test_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "fileLinksPath detects a needle in an LC_LOAD_DYLIB and ignores misses" {
     const testing = std.testing;
     const macho = std.macho;
@@ -580,15 +631,12 @@ test "fileLinksPath detects a needle in an LC_LOAD_DYLIB and ignores misses" {
     };
     @memcpy(buf[header_size + lc_size ..][0..path_str.len], path_str);
 
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
+    var s = try Scratch.init("patcher_links");
+    defer s.deinit();
     const io = std.Options.debug_io;
-    try tmp.dir.writeFile(io, .{ .sub_path = "dependent", .data = buf });
+    try s.dir.writeFile(io, .{ .sub_path = "dependent", .data = buf });
 
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_abs = dir_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &dir_buf)];
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs = try std.fmt.bufPrint(&path_buf, "{s}/dependent", .{dir_abs});
+    const abs = s.p("/dependent");
 
     try testing.expect(fileLinksPath(io, testing.allocator, abs, "/opt/oniguruma/"));
     try testing.expect(!fileLinksPath(io, testing.allocator, abs, "/opt/missing/"));

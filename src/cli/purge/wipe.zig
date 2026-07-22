@@ -326,6 +326,50 @@ fn freedBytes(sizes: []const u64, freed: []const bool) u64 {
     return total;
 }
 
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 test "freedBytes credits only successfully-freed targets" {
     const sizes = [_]u64{ 1048576, 4096, 8192 };
     // Middle target's delete failed: its bytes must not be credited even
@@ -357,14 +401,10 @@ test "writeBytesToPath creates a full absolute parent chain with a missing grand
     // a nested absolute path whose grandparent is absent (path_write creates
     // it). Exhaustive edge cases live in `fs/path_write.zig`.
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = std.fmt.bufPrint(&buf, "/tmp/malt_purge_abschain_{d}", .{ts}) catch unreachable;
-    std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    var s = try Scratch.init("purge_abschain");
+    defer s.deinit();
 
-    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/a/b/manifest.txt", .{root}) catch unreachable;
+    const dest = s.p("/a/b/manifest.txt");
 
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
     try writeBytesToPath(&ctx, dest, "formula git\n");
@@ -379,18 +419,13 @@ test "writeBytesToPath maps a path_write failure to OpenFileFailed" {
     // Pins the caller's error mapping: a parent-dir failure (a parent
     // component is a regular file) must surface as OpenFileFailed.
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = std.fmt.bufPrint(&buf, "/tmp/malt_purge_parentfile_{d}", .{ts}) catch unreachable;
-    std.Io.Dir.cwd().createDirPath(io, root) catch unreachable;
-    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    var s = try Scratch.init("purge_parentfile");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(io, s.base);
 
-    var blocker_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const blocker = std.fmt.bufPrint(&blocker_buf, "{s}/afile", .{root}) catch unreachable;
-    (std.Io.Dir.cwd().createFile(io, blocker, .{ .truncate = true }) catch unreachable).close(io);
+    (try std.Io.Dir.cwd().createFile(io, s.p("/afile"), .{ .truncate = true })).close(io);
 
-    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/afile/sub/manifest.txt", .{root}) catch unreachable;
+    const dest = s.p("/afile/sub/manifest.txt");
 
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
     try std.testing.expectError(Error.OpenFileFailed, writeBytesToPath(&ctx, dest, "formula git\n"));

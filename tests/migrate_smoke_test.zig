@@ -29,14 +29,10 @@ fn resetOutput() void {
 }
 
 fn scratchDir(suffix: []const u8) ![:0]u8 {
-    const p = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/mt_mig_{d}_{s}",
-        .{ test_io.nanoTimestamp(
-            std.Options.debug_io,
-        ), suffix },
-        0,
-    );
+    const base = try test_io.uniqueTempPath(testing.allocator, "mig", suffix);
+    defer testing.allocator.free(base);
+    const p = try testing.allocator.dupeZ(u8, base);
+    errdefer testing.allocator.free(p);
     test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, p);
     return p;
@@ -130,9 +126,11 @@ test "empty HOMEBREW_PREFIX falls through to arch default" {
 
 test "missing Homebrew installation yields error.Aborted" {
     resetOutput();
-    const bogus = "/tmp/mt_mig_no_such_brew_dir_12345";
+    // Never created — unique so a concurrent run can't make it exist.
+    const bogus = try test_io.uniqueTempPath(testing.allocator, "mig", "no_such_brew_dir");
+    defer testing.allocator.free(bogus);
     test_io.deleteTreeAbsolute(std.Options.debug_io, bogus) catch {};
-    _ = c.setenv("HOMEBREW_PREFIX", bogus, 1);
+    try setenvZ("HOMEBREW_PREFIX", bogus);
     defer _ = c.unsetenv("HOMEBREW_PREFIX");
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -322,13 +320,14 @@ test "already-installed kegs are skipped without touching the network" {
         testing.allocator.free(brew);
     }
 
-    // MALT_PREFIX must be ≤13 bytes (Mach-O path-patching budget). Using a
-    // short prefix keeps us safely under the cap even though migrate's
-    // skip-installed path doesn't actually patch any binaries.
-    const mt_z: [:0]const u8 = "/tmp/mt_mi";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    // No Mach-O path patching happens on the skip-installed path, so the
+    // scratch prefix is free to carry the pid/seq suffix that keeps
+    // concurrent runs from wiping each other's fixtures.
+    const mt_z = try scratchDir("mt_mi");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{"seeded"});
 
@@ -355,7 +354,9 @@ test "already-installed kegs are skipped without touching the network" {
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
     try stmt.bindText(4, "0" ** 64);
-    try stmt.bindText(5, "/tmp/mt_mi/Cellar/seeded/1.0");
+    const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{mt_z});
+    defer testing.allocator.free(seeded_cellar);
+    try stmt.bindText(5, seeded_cellar);
     _ = try stmt.step();
     stmt.finalize();
     db.close();
@@ -688,10 +689,11 @@ test "--json on an already-installed keg records it under skipped_installed" {
     }
 
     // ≤13-byte MALT_PREFIX — same Mach-O cap rationale as the sister test above.
-    const mt_z: [:0]const u8 = "/tmp/mt_mj";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_mj");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{"seeded"});
 
@@ -716,7 +718,9 @@ test "--json on an already-installed keg records it under skipped_installed" {
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
     try stmt.bindText(4, "0" ** 64);
-    try stmt.bindText(5, "/tmp/mt_mj/Cellar/seeded/1.0");
+    const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{mt_z});
+    defer testing.allocator.free(seeded_cellar);
+    try stmt.bindText(5, seeded_cellar);
     _ = try stmt.step();
     stmt.finalize();
     db.close();
@@ -804,10 +808,11 @@ test "pre-set SIGINT flag short-circuits the per-keg loop before any API call" {
         test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
         testing.allocator.free(brew);
     }
-    const mt_z: [:0]const u8 = "/tmp/mt_si";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_si");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{"willbeskipped"});
 
@@ -986,10 +991,11 @@ test "mixed outcomes: installed keg is skipped and unknown keg fails at API (404
         testing.allocator.free(brew);
     }
 
-    const mt_z: [:0]const u8 = "/tmp/mt_mx";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_mx");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{ "seeded", "unknownpkg" });
 
@@ -1014,7 +1020,9 @@ test "mixed outcomes: installed keg is skipped and unknown keg fails at API (404
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
     try stmt.bindText(4, "0" ** 64);
-    try stmt.bindText(5, "/tmp/mt_mx/Cellar/seeded/1.0");
+    const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{mt_z});
+    defer testing.allocator.free(seeded_cellar);
+    try stmt.bindText(5, seeded_cellar);
     _ = try stmt.step();
     stmt.finalize();
     db.close();
@@ -1068,10 +1076,11 @@ test "lock contention returns error.Aborted when db/malt.lock is already held" {
         testing.allocator.free(brew);
     }
 
-    const mt_z: [:0]const u8 = "/tmp/mt_lk";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_lk");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{"willnotreach"});
 
@@ -1114,10 +1123,11 @@ test "already-installed stderr pins the 'Migration completed.' + 'Skipped (insta
         testing.allocator.free(brew);
     }
 
-    const mt_z: [:0]const u8 = "/tmp/mt_ms";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_ms");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{"seeded"});
 
@@ -1142,7 +1152,9 @@ test "already-installed stderr pins the 'Migration completed.' + 'Skipped (insta
     try stmt.bindText(2, "seeded");
     try stmt.bindText(3, "1.0");
     try stmt.bindText(4, "0" ** 64);
-    try stmt.bindText(5, "/tmp/mt_ms/Cellar/seeded/1.0");
+    const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/seeded/1.0", .{mt_z});
+    defer testing.allocator.free(seeded_cellar);
+    try stmt.bindText(5, seeded_cellar);
     _ = try stmt.step();
     stmt.finalize();
     db.close();
@@ -1181,10 +1193,11 @@ test "skipped_no_bottle: cached formula with no platform bottle is categorized c
     }
 
     // ≤13-byte MALT_PREFIX — same Mach-O budget rationale as sister tests.
-    const mt_z: [:0]const u8 = "/tmp/mt_nb";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_nb");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{"noplatform"});
 
@@ -1372,10 +1385,11 @@ test "resume manifest: pre-seeded keg is skipped before any API call" {
         testing.allocator.free(brew);
     }
 
-    const mt_z: [:0]const u8 = "/tmp/mt_rs";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_rs");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{ "alreadydone", "unknownpkg" });
 
@@ -1436,7 +1450,9 @@ test "resume manifest: pre-seeded keg is skipped before any API call" {
     try seed_stmt.bindText(2, "alreadydone");
     try seed_stmt.bindText(3, "1.0");
     try seed_stmt.bindText(4, "0" ** 64);
-    try seed_stmt.bindText(5, "/tmp/mt_rs/Cellar/alreadydone/1.0");
+    const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/alreadydone/1.0", .{mt_z});
+    defer testing.allocator.free(seeded_cellar);
+    try seed_stmt.bindText(5, seeded_cellar);
     _ = try seed_stmt.step();
     seed_stmt.finalize();
     db_seed.close();
@@ -1532,10 +1548,11 @@ test "--parallel sets the dispatch flag before falling through to skip-only path
         test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
         testing.allocator.free(brew);
     }
-    const mt_z: [:0]const u8 = "/tmp/mt_pd";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_pd");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{"k"});
 
@@ -1606,10 +1623,11 @@ test "--parallel honours the resume manifest the same way serial does" {
         testing.allocator.free(brew);
     }
 
-    const mt_z: [:0]const u8 = "/tmp/mt_pr";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_pr");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{ "k1", "k2", "k3" });
 
@@ -1665,7 +1683,9 @@ test "--parallel honours the resume manifest the same way serial does" {
         try s.bindText(2, name);
         try s.bindText(3, "1.0");
         try s.bindText(4, "0" ** 64);
-        try s.bindText(5, "/tmp/mt_pr/Cellar/" ++ name ++ "/1.0");
+        const cellar_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/" ++ name ++ "/1.0", .{mt_z});
+        defer testing.allocator.free(cellar_path);
+        try s.bindText(5, cellar_path);
         _ = try s.step();
         s.finalize();
     }
@@ -1714,10 +1734,11 @@ test "failed migrate does not write the keg into the resume manifest" {
         test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
         testing.allocator.free(brew);
     }
-    const mt_z: [:0]const u8 = "/tmp/mt_fn";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_fn");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{"failkeg"});
 
@@ -1768,10 +1789,11 @@ test "manifest preserves pre-existing entries across a run with new failures" {
         test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
         testing.allocator.free(brew);
     }
-    const mt_z: [:0]const u8 = "/tmp/mt_pv";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_pv");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     // The Cellar contains the pre-seeded keg + a new one that 404s.
     try seedFakeBrew(brew, &.{ "old", "newfail" });
@@ -1825,10 +1847,11 @@ test "serial: a migrated keg is persisted even when a later keg fails" {
         test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
         testing.allocator.free(brew);
     }
-    const mt_z: [:0]const u8 = "/tmp/mt_persist_timing";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_persist_timing");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try setenvZ("HOMEBREW_PREFIX", brew);
     defer _ = c.unsetenv("HOMEBREW_PREFIX");
@@ -1894,10 +1917,11 @@ test "stale manifest after uninstall falls through to a real migrate" {
         test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
         testing.allocator.free(brew);
     }
-    const mt_z: [:0]const u8 = "/tmp/mt_st";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_st");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{"ghost"});
 
@@ -1965,10 +1989,11 @@ test "manifest self-heals from DB-confirmed skips after a crash recovery" {
         test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
         testing.allocator.free(brew);
     }
-    const mt_z: [:0]const u8 = "/tmp/mt_hl";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_hl");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try seedFakeBrew(brew, &.{"recovered"});
 
@@ -1995,7 +2020,9 @@ test "manifest self-heals from DB-confirmed skips after a crash recovery" {
     try stmt.bindText(2, "recovered");
     try stmt.bindText(3, "1.0");
     try stmt.bindText(4, "0" ** 64);
-    try stmt.bindText(5, "/tmp/mt_hl/Cellar/recovered/1.0");
+    const seeded_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/recovered/1.0", .{mt_z});
+    defer testing.allocator.free(seeded_cellar);
+    try stmt.bindText(5, seeded_cellar);
     _ = try stmt.step();
     stmt.finalize();
     db.close();
@@ -2209,10 +2236,11 @@ test "tap fallback runs the DSL post_install body and reports completion" {
     }
 
     // ≤13 bytes — same Mach-O patching budget the sister tests rely on.
-    const mt_z: [:0]const u8 = "/tmp/mt_tpi";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_tpi");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try setenvZ("HOMEBREW_PREFIX", brew);
     defer _ = c.unsetenv("HOMEBREW_PREFIX");
@@ -2298,10 +2326,11 @@ test "tap fallback partial-DSL emits the --use-system-ruby hint same as install"
         testing.allocator.free(brew);
     }
 
-    const mt_z: [:0]const u8 = "/tmp/mt_tpp";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_tpp");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try setenvZ("HOMEBREW_PREFIX", brew);
     defer _ = c.unsetenv("HOMEBREW_PREFIX");
@@ -2383,10 +2412,11 @@ test "tap fallback stays silent when the tap formula has no post_install" {
         testing.allocator.free(brew);
     }
 
-    const mt_z: [:0]const u8 = "/tmp/mt_tnp";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_tnp");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try setenvZ("HOMEBREW_PREFIX", brew);
     defer _ = c.unsetenv("HOMEBREW_PREFIX");
@@ -2469,10 +2499,11 @@ test "renamed homebrew/core keg migrates from the local Cellar copy" {
         testing.allocator.free(brew);
     }
 
-    const mt_z: [:0]const u8 = "/tmp/mt_core_renamed";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_core_renamed");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try setenvZ("HOMEBREW_PREFIX", brew);
     defer _ = c.unsetenv("HOMEBREW_PREFIX");
@@ -2532,10 +2563,11 @@ test "core keg with a malformed receipt still fails after the core guard is gone
         testing.allocator.free(brew);
     }
 
-    const mt_z: [:0]const u8 = "/tmp/mt_core_badrcpt";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_core_badrcpt");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try setenvZ("HOMEBREW_PREFIX", brew);
     defer _ = c.unsetenv("HOMEBREW_PREFIX");
@@ -2604,10 +2636,11 @@ test "post_install drain fires after every keg's linkOpt has run" {
     }
 
     // Mach-O patching budget: ≤13 bytes for the prefix path.
-    const mt_z: [:0]const u8 = "/tmp/mt_drn";
-    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
-    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    const mt_z = try scratchDir("mt_drn");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
 
     try setenvZ("HOMEBREW_PREFIX", brew);
     defer _ = c.unsetenv("HOMEBREW_PREFIX");

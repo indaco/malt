@@ -13,15 +13,48 @@ const uses = malt.cli_uses;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 
-fn makeDb(tag: []const u8) !sqlite.Database {
-    var path_buf: [256]u8 = undefined;
-    // Scope the path by pid: two concurrent `zig build test` processes would
-    // otherwise share — and corrupt — the same on-disk database.
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt_uses_test_{s}_{d}.db", .{ tag, std.c.getpid() }, 0);
-    test_io.deleteFileAbsolute(std.Options.debug_io, path) catch {};
-    var db = try sqlite.Database.open(path);
-    try schema.initSchema(&db);
-    return db;
+/// Scratch sqlite database that removes its file. The path is unique per
+/// process and call, so concurrent runs cannot share — and corrupt — one
+/// database; owning the path is what lets `deinit` clean up after itself.
+const TempDb = struct {
+    db: sqlite.Database,
+    path: [:0]u8,
+
+    fn init(tag: []const u8) !TempDb {
+        const dir = try test_io.uniqueTempPath(testing.allocator, "uses_test", tag);
+        defer testing.allocator.free(dir);
+        const path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}.db", .{dir}, 0);
+        errdefer testing.allocator.free(path);
+
+        var db = try sqlite.Database.open(path);
+        errdefer db.close();
+        try schema.initSchema(&db);
+        return .{ .db = db, .path = path };
+    }
+
+    fn deinit(self: *TempDb) void {
+        self.db.close();
+        // A WAL database leaves -wal/-shm beside the file; sweep all three.
+        var buf: [512]u8 = undefined;
+        for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
+            const p = std.fmt.bufPrintSentinel(&buf, "{s}{s}", .{ self.path, suffix }, 0) catch continue;
+            test_io.deleteFileAbsolute(std.Options.debug_io, p) catch {};
+        }
+        testing.allocator.free(self.path);
+    }
+};
+
+test "TempDb removes its database file on deinit" {
+    var t = try TempDb.init("cleanup_contract");
+    const path = try testing.allocator.dupeZ(u8, t.path);
+    defer testing.allocator.free(path);
+
+    try std.Io.Dir.cwd().access(std.Options.debug_io, path, .{});
+    t.deinit();
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.cwd().access(std.Options.debug_io, path, .{}),
+    );
 }
 
 /// Insert a keg row and return its id. Minimises boilerplate in the
@@ -49,17 +82,18 @@ fn addDep(db: *sqlite.Database, keg_id: i64, dep_name: []const u8) !void {
 }
 
 test "collectDependents returns direct dependents, sorted" {
-    var db = try makeDb("direct");
-    defer db.close();
+    var tdb = try TempDb.init("direct");
+    defer tdb.deinit();
+    const db = &tdb.db;
 
     // openssl@3 is used by node@20 and wget; icu4c@78 is unrelated.
-    const node_id = try insertKeg(&db, "node@20");
-    const wget_id = try insertKeg(&db, "wget");
-    _ = try insertKeg(&db, "icu4c@78");
-    try addDep(&db, node_id, "openssl@3");
-    try addDep(&db, wget_id, "openssl@3");
+    const node_id = try insertKeg(db, "node@20");
+    const wget_id = try insertKeg(db, "wget");
+    _ = try insertKeg(db, "icu4c@78");
+    try addDep(db, node_id, "openssl@3");
+    try addDep(db, wget_id, "openssl@3");
 
-    const hits = try uses.collectDependents(testing.allocator, &db, "openssl@3", false);
+    const hits = try uses.collectDependents(testing.allocator, db, "openssl@3", false);
     defer uses.freeDependents(testing.allocator, hits);
 
     try testing.expectEqual(@as(usize, 2), hits.len);
@@ -68,35 +102,37 @@ test "collectDependents returns direct dependents, sorted" {
 }
 
 test "collectDependents in non-recursive mode ignores transitive links" {
-    var db = try makeDb("notrans");
-    defer db.close();
+    var tdb = try TempDb.init("notrans");
+    defer tdb.deinit();
+    const db = &tdb.db;
 
     // icu4c <- node <- whisper.  Non-recursive on icu4c should surface
     // only `node`, not `whisper`.
-    const node_id = try insertKeg(&db, "node");
-    const whisper_id = try insertKeg(&db, "whisper");
-    try addDep(&db, node_id, "icu4c");
-    try addDep(&db, whisper_id, "node");
+    const node_id = try insertKeg(db, "node");
+    const whisper_id = try insertKeg(db, "whisper");
+    try addDep(db, node_id, "icu4c");
+    try addDep(db, whisper_id, "node");
 
-    const hits = try uses.collectDependents(testing.allocator, &db, "icu4c", false);
+    const hits = try uses.collectDependents(testing.allocator, db, "icu4c", false);
     defer uses.freeDependents(testing.allocator, hits);
     try testing.expectEqual(@as(usize, 1), hits.len);
     try testing.expectEqualStrings("node", hits[0]);
 }
 
 test "collectDependents --recursive walks the transitive closure" {
-    var db = try makeDb("recursive");
-    defer db.close();
+    var tdb = try TempDb.init("recursive");
+    defer tdb.deinit();
+    const db = &tdb.db;
 
     // Graph: icu4c <- node <- {whisper, tauri}; tauri <- nothing.
-    const node_id = try insertKeg(&db, "node");
-    const whisper_id = try insertKeg(&db, "whisper");
-    const tauri_id = try insertKeg(&db, "tauri");
-    try addDep(&db, node_id, "icu4c");
-    try addDep(&db, whisper_id, "node");
-    try addDep(&db, tauri_id, "node");
+    const node_id = try insertKeg(db, "node");
+    const whisper_id = try insertKeg(db, "whisper");
+    const tauri_id = try insertKeg(db, "tauri");
+    try addDep(db, node_id, "icu4c");
+    try addDep(db, whisper_id, "node");
+    try addDep(db, tauri_id, "node");
 
-    const hits = try uses.collectDependents(testing.allocator, &db, "icu4c", true);
+    const hits = try uses.collectDependents(testing.allocator, db, "icu4c", true);
     defer uses.freeDependents(testing.allocator, hits);
     try testing.expectEqual(@as(usize, 3), hits.len);
     try testing.expectEqualStrings("node", hits[0]);
@@ -105,12 +141,13 @@ test "collectDependents --recursive walks the transitive closure" {
 }
 
 test "collectDependents returns empty slice when nothing depends on target" {
-    var db = try makeDb("empty");
-    defer db.close();
+    var tdb = try TempDb.init("empty");
+    defer tdb.deinit();
+    const db = &tdb.db;
 
-    _ = try insertKeg(&db, "standalone");
+    _ = try insertKeg(db, "standalone");
 
-    const hits = try uses.collectDependents(testing.allocator, &db, "not-a-real-formula", false);
+    const hits = try uses.collectDependents(testing.allocator, db, "not-a-real-formula", false);
     defer uses.freeDependents(testing.allocator, hits);
     try testing.expectEqual(@as(usize, 0), hits.len);
 }
@@ -119,15 +156,16 @@ test "collectDependents tolerates cycles without spinning" {
     // Shouldn't happen in a real malt DB (install refuses cyclic deps)
     // but the BFS must terminate regardless so a corrupt database can
     // never hang the command. `a` depends on `b`, `b` depends on `a`.
-    var db = try makeDb("cycle");
-    defer db.close();
+    var tdb = try TempDb.init("cycle");
+    defer tdb.deinit();
+    const db = &tdb.db;
 
-    const a_id = try insertKeg(&db, "a");
-    const b_id = try insertKeg(&db, "b");
-    try addDep(&db, a_id, "b");
-    try addDep(&db, b_id, "a");
+    const a_id = try insertKeg(db, "a");
+    const b_id = try insertKeg(db, "b");
+    try addDep(db, a_id, "b");
+    try addDep(db, b_id, "a");
 
-    const hits = try uses.collectDependents(testing.allocator, &db, "a", true);
+    const hits = try uses.collectDependents(testing.allocator, db, "a", true);
     defer uses.freeDependents(testing.allocator, hits);
     try testing.expectEqual(@as(usize, 2), hits.len);
     try testing.expectEqualStrings("a", hits[0]);
@@ -144,8 +182,9 @@ test "collectDependents tolerates cycles without spinning" {
 // not asserted because CI jitter would flake it) and any cursor bug
 // that drops or duplicates entries (exact count asserted).
 test "collectDependents recursive walk handles a 1000-node chain" {
-    var db = try makeDb("chain1k");
-    defer db.close();
+    var tdb = try TempDb.init("chain1k");
+    defer tdb.deinit();
+    const db = &tdb.db;
 
     const n: usize = 1000;
 
@@ -159,7 +198,7 @@ test "collectDependents recursive walk handles a 1000-node chain" {
     var i: usize = 0;
     while (i < n) : (i += 1) {
         const name = try std.fmt.bufPrint(&name_buf, "k{d}", .{i});
-        ids[i] = try insertKeg(&db, name);
+        ids[i] = try insertKeg(db, name);
     }
 
     // Wire up the chain: ki depends on k(i-1). Skip i=0 (the root has
@@ -167,12 +206,12 @@ test "collectDependents recursive walk handles a 1000-node chain" {
     i = 1;
     while (i < n) : (i += 1) {
         const dep_name = try std.fmt.bufPrint(&name_buf, "k{d}", .{i - 1});
-        try addDep(&db, ids[i], dep_name);
+        try addDep(db, ids[i], dep_name);
     }
 
     try db.exec("COMMIT;");
 
-    const hits = try uses.collectDependents(testing.allocator, &db, "k0", true);
+    const hits = try uses.collectDependents(testing.allocator, db, "k0", true);
     defer uses.freeDependents(testing.allocator, hits);
 
     // k0 is the target, so it's not in its own dependents set — every
