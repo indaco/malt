@@ -640,12 +640,7 @@ pub fn materializeRubyFormula(
 
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(download_resp.body, &digest, .{});
-        var hex_buf: [64]u8 = undefined;
-        const hex_chars = "0123456789abcdef";
-        for (digest, 0..) |b, i| {
-            hex_buf[i * 2] = hex_chars[b >> 4];
-            hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
-        }
+        const hex_buf = std.fmt.bytesToHex(digest, .lower);
 
         // Tap manifest SHAs are public: constant-time here is for uniformity
         // across malt's SHA paths, not to close a live oracle.
@@ -1085,6 +1080,47 @@ fn finalizeTapCaskInstall(
             if (t.head_etag) |et| tap_mod.updateHead(db, tap_label, t.commit_sha, et) catch {};
         } else |_| {}
     }
+}
+
+test "bytesToHex agrees with the retired nibble table for every byte value" {
+    // Pins the tap-archive digest encode as byte-identical to the hand-rolled
+    // table it replaced: this hex is compared against the tap manifest SHA, so
+    // any drift silently breaks cold-cache tap installs.
+    for (0..256) |v| {
+        const digest: [32]u8 = @splat(@intCast(v));
+
+        var expected: [64]u8 = undefined;
+        const hex_chars = "0123456789abcdef";
+        for (digest, 0..) |b, i| {
+            expected[i * 2] = hex_chars[b >> 4];
+            expected[i * 2 + 1] = hex_chars[b & 0x0f];
+        }
+
+        try std.testing.expectEqualStrings(&expected, &std.fmt.bytesToHex(digest, .lower));
+    }
+}
+
+test "tap-archive digest encodes to 64 lowercase hex characters" {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("malt", &digest, .{});
+    const hex_buf = std.fmt.bytesToHex(digest, .lower);
+
+    try std.testing.expectEqual(@as(usize, 64), hex_buf.len);
+    for (hex_buf) |c| {
+        try std.testing.expect((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'));
+    }
+}
+
+test "digest encode feeds eqlHex256 against a known published hex string" {
+    // Exercises the full chain the cold-cache download runs: hash the body,
+    // encode, compare against the manifest SHA. Vector is SHA256("abc").
+    const known = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("abc", &digest, .{});
+    const hex_buf = std.fmt.bytesToHex(digest, .lower);
+
+    try std.testing.expectEqualStrings(known, &hex_buf);
+    try std.testing.expect(hash.eqlHex256(hex_buf, known));
 }
 
 test "formatTapDownloadName encodes pid + extension into tmp/ path" {
