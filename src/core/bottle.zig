@@ -47,9 +47,9 @@ pub const MismatchInfo = struct {
 /// `MismatchInfo` otherwise. Split out of `download` so tests can exercise the
 /// mismatch surface without spinning up GHCR / an HTTP client.
 pub fn checkStreamedSha(expected: []const u8, computed_hex: [64]u8, body_len: u64) ?MismatchInfo {
-    // Constant-time compare — deny a byte-by-byte timing oracle against
-    // the expected hash.
-    if (hash_mod.constantTimeEql(u8, &computed_hex, expected)) return null;
+    // Bottle SHAs from the API are public: constant-time here is for
+    // uniformity across malt's SHA paths, not to close a live oracle.
+    if (hash_mod.eqlHex256(computed_hex, expected)) return null;
 
     var info: MismatchInfo = .{
         .expected = undefined,
@@ -203,9 +203,9 @@ pub fn verify(io: std.Io, file_path: []const u8, expected_sha256: []const u8) !b
     const raw = hash_mod.hashFileSha256Raw(io, file_path) catch return false;
     const computed_hex = std.fmt.bytesToHex(raw, .lower);
 
-    // Constant-time SHA compare — denies a byte-by-byte timing oracle on
-    // re-verify-on-disk paths reachable with a remote-controllable hash.
-    return hash_mod.constantTimeEql(u8, &computed_hex, expected_sha256);
+    // Bottle SHAs from the API are public: constant-time here is for
+    // uniformity across malt's SHA paths, not to close a live oracle.
+    return hash_mod.eqlHex256(computed_hex, expected_sha256);
 }
 
 test "verify returns true when sha256 matches on-disk content" {

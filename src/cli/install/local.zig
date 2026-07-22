@@ -646,12 +646,10 @@ pub fn materializeRubyFormula(
             hex_buf[i * 2] = hex_chars[b >> 4];
             hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
         }
-        const computed: []const u8 = &hex_buf;
 
-        // Constant-time compare on the SHA256: a stock `mem.eql`
-        // leaks per-byte progress via timing, giving an adaptive
-        // attacker a byte-by-byte oracle against the expected hash.
-        if (!hash.constantTimeEql(u8, computed, resolved.sha256)) {
+        // Tap manifest SHAs are public: constant-time here is for uniformity
+        // across malt's SHA paths, not to close a live oracle.
+        if (!hash.eqlHex256(hex_buf, resolved.sha256)) {
             sink.err("SHA256 mismatch for {s}", .{resolved.name});
             return InstallError.DownloadFailed;
         }

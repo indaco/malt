@@ -1246,9 +1246,9 @@ pub fn verifyFileSha256(io: std.Io, file_path: []const u8, expected: ?[]const u8
     if (std.mem.eql(u8, expected_hash, "no_check")) return;
 
     const got = try hashFileSha256(io, file_path);
-    // Constant-time SHA compare closes the byte-by-byte timing oracle
-    // on the expected hash.
-    if (!hash_mod.constantTimeEql(u8, &got, expected_hash)) return error.Sha256Mismatch;
+    // Cask manifest SHAs are public: constant-time here is for uniformity
+    // across malt's SHA paths, not to close a live oracle.
+    if (!hash_mod.eqlHex256(got, expected_hash)) return error.Sha256Mismatch;
 }
 
 /// ERE metacharacters, which a bundle name may legitimately contain.
