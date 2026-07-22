@@ -65,7 +65,7 @@ pub fn fetchPostInstallFromGitHubTagged(
     // Constant-time compare matches every other SHA check in the install
     // / bottle / verify path; no timing oracle today, but the consistency
     // makes the spawn-audit guard's job easier.
-    if (!hash_mod.constantTimeEql(u8, actual_hex[0..], expected_hash)) return .fetch_failed;
+    if (!hash_mod.eqlHex256(actual_hex, expected_hash)) return .fetch_failed;
 
     if (extractPostInstallFromSource(allocator, resp.body)) |body| {
         return .{ .body = body };

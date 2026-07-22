@@ -41,6 +41,45 @@ pub fn hashFileSha256Hex(io: std.Io, file_path: []const u8) ![64]u8 {
     return std.fmt.bytesToHex(raw, .lower);
 }
 
+/// Compare a computed lowercase-hex SHA256 against an expected one. Only the
+/// length may short-circuit — a hash's length is public; the bytes go through
+/// the stdlib's constant-time compare so every SHA path stays uniform.
+pub fn eqlHex256(computed: [64]u8, expected: []const u8) bool {
+    if (expected.len != computed.len) return false;
+    return std.crypto.timing_safe.eql([64]u8, computed, expected[0..64].*);
+}
+
+test "eqlHex256 matches a digest against its own hex string" {
+    const computed = "d".* ++ ("eadbeef" ** 9).*;
+    try std.testing.expect(eqlHex256(computed, &computed));
+}
+
+test "eqlHex256 rejects a difference in the last byte" {
+    const computed = ("deadbeef" ** 8).*;
+    var expected = computed;
+    expected[expected.len - 1] = '0';
+    try std.testing.expect(!eqlHex256(computed, &expected));
+}
+
+test "eqlHex256 rejects a difference in the first byte" {
+    const computed = ("deadbeef" ** 8).*;
+    var expected = computed;
+    expected[0] = '0';
+    try std.testing.expect(!eqlHex256(computed, &expected));
+}
+
+test "eqlHex256 rejects an expected hash that is not 64 chars" {
+    const computed = ("deadbeef" ** 8).*;
+    try std.testing.expect(!eqlHex256(computed, computed[0..63]));
+    try std.testing.expect(!eqlHex256(computed, computed ++ "0"));
+    try std.testing.expect(!eqlHex256(computed, ""));
+}
+
+test "eqlHex256 is byte-exact, not case-insensitive" {
+    const computed = ("deadbeef" ** 8).*;
+    try std.testing.expect(!eqlHex256(computed, "DEADBEEF" ** 8));
+}
+
 /// Constant-time slice equality. Closes the per-byte timing oracle on
 /// hex-SHA compares: stops only after looking at every byte, so an
 /// adaptive attacker cannot iterate one byte at a time.
