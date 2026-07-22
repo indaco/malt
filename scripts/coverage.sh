@@ -35,6 +35,17 @@ src_dir="$(pwd)/src"
 # affected tests gate on `MALT_SKIP_SUBPROCESS_TESTS` and stay live under
 # `zig build test`; only this loop opts out of them.
 export MALT_SKIP_SUBPROCESS_TESTS=1
+
+# A test that abandons its scratch tree leaks silently: nothing fails, the
+# directory just stays. That went unnoticed until 7066 of them had piled up
+# under .zig-cache/tmp, some left unreadable and so immune to ordinary
+# cleanup. Counting either side of the run turns the next one into a
+# failure instead of a slow accumulation.
+count_scratch() {
+  find .zig-cache/tmp -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' '
+}
+scratch_before=$(count_scratch)
+
 for bin in zig-out/test-bin/*; do
   # Skip .dSYM debug bundles and any non-regular files
   [ -f "$bin" ] || continue
@@ -42,6 +53,18 @@ for bin in zig-out/test-bin/*; do
   echo "→ kcov: $(basename "$bin")"
   kcov --include-path="$src_dir" coverage "$bin" </dev/null >/dev/null
 done
+
+scratch_after=$(count_scratch)
+if [ "$scratch_after" -gt "$scratch_before" ]; then
+  leaked=$((scratch_after - scratch_before))
+  echo "error: $leaked test scratch dir(s) leaked under .zig-cache/tmp" >&2
+  echo "  A test built a scratch tree and never removed it. Tests must use" >&2
+  echo "  the /tmp Scratch helper, not std.testing.tmpDir, which roots under" >&2
+  echo "  the build cache. Newest offenders:" >&2
+  find .zig-cache/tmp -mindepth 1 -maxdepth 1 2>/dev/null |
+    tail -n 5 | sed 's/^/    /' >&2
+  exit 1
+fi
 
 # kcov 43 on macOS doesn't reliably auto-merge, so do it explicitly.
 # The per-binary reports are in hash-suffixed dirs (e.g. cellar_test.a934ecd0).
