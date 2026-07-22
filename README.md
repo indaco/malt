@@ -7,7 +7,7 @@ Installs to its own `/opt/malt` prefix; ~3 ms cold start. Designed by a human an
 ![Version](https://img.shields.io/github/v/tag/indaco/malt?label=version&sort=semver&color=4c1)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![macOS only](https://img.shields.io/badge/platform-macOS-blue)
-![Zig 0.16.x](https://img.shields.io/badge/zig-0.16.x-orange)
+![Zig 0.16.x](https://img.shields.io/badge/zig-0.16.x-orange?logo=zig)
 [![codecov](https://codecov.io/gh/indaco/malt/branch/main/graph/badge.svg)](https://codecov.io/gh/indaco/malt)
 [![Signed by cosign](https://img.shields.io/badge/signed-cosign-brightgreen?logo=sigstore&logoColor=white)](#safety-and-security)
 [![Built with Devbox](https://www.jetify.com/img/devbox/shield_galaxy.svg)](https://www.jetify.com/devbox/docs/contributor-quickstart/)
@@ -616,31 +616,31 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 
 ### Environment variables
 
-| Variable                        | Description                                                                                                                                              | Default                         |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| `MALT_PREFIX`                   | Override install prefix                                                                                                                                  | `/opt/malt`                     |
-| `MALT_CACHE`                    | Override cache directory                                                                                                                                 | `{prefix}/cache`                |
-| `MALT_BREW_PATH`                | Override the real `brew` binary that unknown commands fall back to (custom install prefix)                                                               | probes standard install paths   |
-| `NO_COLOR`                      | Disable colored output                                                                                                                                   | unset                           |
-| `MALT_NO_EMOJI`                 | Disable emoji in output                                                                                                                                  | unset                           |
-| `MALT_NO_VERSION_NOTIFIER`      | Set to `1` to suppress the "newer malt available" notice                                                                                                 | unset                           |
-| `MALT_VERSION_NOTIFIER_ASSUME_TTY` | Testing/automation: set to `1` to bypass the non-TTY suppression so a scripted run can assert the notice without a pty (bypasses only the TTY gate)     | unset                           |
-| `MALT_PROGRESS`                 | Progress reporter for `install`/`upgrade`/`migrate`: `tty`, `plain`, or `none` (`CI=true` or `GITHUB_ACTIONS=true` flip the default to `plain`)          | `tty`                           |
-| `MALT_THEME`                    | Colour theme for all output (CLI and `mt tui`). See [Theming](#theming) for the palette list and fallback rules.                                         | `auto`                          |
-| `MALT_THEMES_FILE`              | Path to a JSON file of custom themes (see "Custom themes"); read once at boot, else `{prefix}/etc/malt/themes.json` is used if present                   | `{prefix}/etc/malt/themes.json` |
-| `HOMEBREW_GITHUB_API_TOKEN`     | GitHub token for higher API rate limits                                                                                                                  | unset                           |
-| `MALT_GITHUB_TOKEN`             | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only                                                                           | unset                           |
-| `MALT_GITLAB_TOKEN`             | GitLab token (PAT) sent as `PRIVATE-TOKEN` on tap commit + raw `.rb` calls for GitLab-hosted taps                                                        | unset                           |
-| `MALT_GITEA_TOKEN`              | Codeberg/Forgejo (Gitea) token sent as `Authorization: token` on tap commit + raw `.rb` calls; covers Codeberg and self-hosted Forgejo/Gitea             | unset                           |
-| `MALT_HTTP_IDLE_TIMEOUT_SECS`   | HTTP idle (no-progress) read timeout in seconds (clamped to `[5, 600]`)                                                                                  | `30`                            |
-| `MALT_API_DOMAIN`               | Override metadata API base URL; HTTPS only; falls back to `HOMEBREW_API_DOMAIN`                                                                          | `https://formulae.brew.sh/api`  |
-| `MALT_BOTTLE_DOMAIN`            | Override bottle registry base URL; HTTPS only; falls back to `HOMEBREW_BOTTLE_DOMAIN`                                                                    | `https://ghcr.io`               |
-| `MALT_OFFLINE`                  | Set to `1`/`true` to route every fetch through the snapshot cache; misses surface `OfflineRequired` instead of stalling on connect (mirrors `--offline`) | unset                           |
-| `MALT_MIGRATE_PARALLEL_WORKERS` | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                                                                                          | `4`                             |
-| `MALT_OUTDATED_MAX_AGE`         | TTL in minutes for the `outdated.json` snapshot                                                                                                          | `5`                             |
-| `MALT_ALLOW_RAW_POST_INSTALL`   | Disable terminal escape filter on ruby `post_install` output                                                                                             | unset                           |
-| `MALT_ALLOW_UNVERIFIED`         | Skip signature + checksum verification - in `install.sh`, and in `mt version update --no-verify` (use only when cosign is unavailable)                   | unset                           |
-| `MALT_ALLOW_UNVERIFIED_SOURCE`  | Allow `install.sh` to clone `main` when no release tag resolves                                                                                          | unset                           |
+| Variable                           | Description                                                                                                                                              | Default                         |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| `MALT_PREFIX`                      | Override install prefix                                                                                                                                  | `/opt/malt`                     |
+| `MALT_CACHE`                       | Override cache directory                                                                                                                                 | `{prefix}/cache`                |
+| `MALT_BREW_PATH`                   | Override the real `brew` binary that unknown commands fall back to (custom install prefix)                                                               | probes standard install paths   |
+| `NO_COLOR`                         | Disable colored output                                                                                                                                   | unset                           |
+| `MALT_NO_EMOJI`                    | Disable emoji in output                                                                                                                                  | unset                           |
+| `MALT_NO_VERSION_NOTIFIER`         | Set to `1` to suppress the "newer malt available" notice                                                                                                 | unset                           |
+| `MALT_VERSION_NOTIFIER_ASSUME_TTY` | Testing/automation: set to `1` to bypass the non-TTY suppression so a scripted run can assert the notice without a pty (bypasses only the TTY gate)      | unset                           |
+| `MALT_PROGRESS`                    | Progress reporter for `install`/`upgrade`/`migrate`: `tty`, `plain`, or `none` (`CI=true` or `GITHUB_ACTIONS=true` flip the default to `plain`)          | `tty`                           |
+| `MALT_THEME`                       | Colour theme for all output (CLI and `mt tui`). See [Theming](#theming) for the palette list and fallback rules.                                         | `auto`                          |
+| `MALT_THEMES_FILE`                 | Path to a JSON file of custom themes (see "Custom themes"); read once at boot, else `{prefix}/etc/malt/themes.json` is used if present                   | `{prefix}/etc/malt/themes.json` |
+| `HOMEBREW_GITHUB_API_TOKEN`        | GitHub token for higher API rate limits                                                                                                                  | unset                           |
+| `MALT_GITHUB_TOKEN`                | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only                                                                           | unset                           |
+| `MALT_GITLAB_TOKEN`                | GitLab token (PAT) sent as `PRIVATE-TOKEN` on tap commit + raw `.rb` calls for GitLab-hosted taps                                                        | unset                           |
+| `MALT_GITEA_TOKEN`                 | Codeberg/Forgejo (Gitea) token sent as `Authorization: token` on tap commit + raw `.rb` calls; covers Codeberg and self-hosted Forgejo/Gitea             | unset                           |
+| `MALT_HTTP_IDLE_TIMEOUT_SECS`      | HTTP idle (no-progress) read timeout in seconds (clamped to `[5, 600]`)                                                                                  | `30`                            |
+| `MALT_API_DOMAIN`                  | Override metadata API base URL; HTTPS only; falls back to `HOMEBREW_API_DOMAIN`                                                                          | `https://formulae.brew.sh/api`  |
+| `MALT_BOTTLE_DOMAIN`               | Override bottle registry base URL; HTTPS only; falls back to `HOMEBREW_BOTTLE_DOMAIN`                                                                    | `https://ghcr.io`               |
+| `MALT_OFFLINE`                     | Set to `1`/`true` to route every fetch through the snapshot cache; misses surface `OfflineRequired` instead of stalling on connect (mirrors `--offline`) | unset                           |
+| `MALT_MIGRATE_PARALLEL_WORKERS`    | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                                                                                          | `4`                             |
+| `MALT_OUTDATED_MAX_AGE`            | TTL in minutes for the `outdated.json` snapshot                                                                                                          | `5`                             |
+| `MALT_ALLOW_RAW_POST_INSTALL`      | Disable terminal escape filter on ruby `post_install` output                                                                                             | unset                           |
+| `MALT_ALLOW_UNVERIFIED`            | Skip signature + checksum verification - in `install.sh`, and in `mt version update --no-verify` (use only when cosign is unavailable)                   | unset                           |
+| `MALT_ALLOW_UNVERIFIED_SOURCE`     | Allow `install.sh` to clone `main` when no release tag resolves                                                                                          | unset                           |
 
 ## Safety and security
 
@@ -829,38 +829,44 @@ For installing malt from a local checkout (the end-user path), see [From source]
 Install times on macOS 14 (Apple Silicon).
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install (median ±σ)
 
-| Package | malt 0.21.0 | nanobrew v0.1.203 | zerobrew v0.3.2 | Homebrew |
-| ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.677±0.169s | ⚠️ n/a | 1.303±0.030s | 1.983±0.202s |
-| **wget** (6 deps) | 4.143±0.229s | ⚠️ n/a | 5.430±0.200s | 2.176±0.363s |
-| **ffmpeg** (11 deps) | 4.474±0.391s | ⚠️ n/a | 6.256±1.942s | 4.214±0.823s |
+| Package              | malt 0.21.0  | nanobrew v0.1.203 | zerobrew v0.3.2 | Homebrew     |
+| -------------------- | ------------ | ----------------- | --------------- | ------------ |
+| **tree** (0 deps)    | 0.677±0.169s | ⚠️ n/a            | 1.303±0.030s    | 1.983±0.202s |
+| **wget** (6 deps)    | 4.143±0.229s | ⚠️ n/a            | 5.430±0.200s    | 2.176±0.363s |
+| **ffmpeg** (11 deps) | 4.474±0.391s | ⚠️ n/a            | 6.256±1.942s    | 4.214±0.823s |
 
 > ⚠️ = cell omitted. That tool's cold install exceeded the sanity
 > ceiling (50 s), which reflects a regression in that tool rather than
 > a comparable install time, so the number is withheld instead of
 > published. malt is never omitted — a real malt slowdown stays visible.
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew |
-| ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.010s | ⚠️ n/a | 0.255s |
-| **wget** (6 deps) | 0.028s | ⚠️ n/a | 0.704s |
-| **ffmpeg** (11 deps) | 0.064s | ⚠️ n/a | 2.206s |
+| Package              | malt   | nanobrew | zerobrew |
+| -------------------- | ------ | -------- | -------- |
+| **tree** (0 deps)    | 0.010s | ⚠️ n/a   | 0.255s   |
+| **wget** (6 deps)    | 0.028s | ⚠️ n/a   | 0.704s   |
+| **ffmpeg** (11 deps) | 0.064s | ⚠️ n/a   | 2.206s   |
+
 <!-- BENCH:WARM:END -->
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size   |
+| -------- | ------ |
 | **malt** | 4.0 MB |
-| nanobrew | n/a |
+| nanobrew | n/a    |
 | zerobrew | 8.7 MB |
+
 <!-- BENCH:SIZE:END -->
 
 Apple Silicon (GitHub Actions macos-14), 2026-07-20. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
