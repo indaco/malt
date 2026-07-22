@@ -118,22 +118,42 @@ fn setupCellar(prefix_dir: []const u8) !void {
     }
 }
 
-/// Create a temp directory and set up the cellar structure.
-/// Returns the absolute path as an owned slice (caller must free).
-fn makeTempPrefix() ![]const u8 {
-    const tmp = std.testing.tmpDir(.{});
-    // Get the real path of the temp directory
-    var buf: [test_io.max_path_bytes]u8 = undefined;
-    const prefix_path = blk: {
-        const n = try std.Io.Dir.realPath(tmp.dir, std.Options.debug_io, &buf);
-        break :blk buf[0..n];
-    };
-    const owned = try testing.allocator.dupe(u8, prefix_path);
+/// Stands in for `std.testing.tmpDir`, which roots its scratch under
+/// `.zig-cache` — a tree the build system rewrites underneath a running
+/// test — and whose handle is easy to drop without ever cleaning up.
+const Scratch = struct {
+    path: []u8,
 
-    // Build the cellar structure inside it
-    try setupCellar(owned);
+    fn init(tag: []const u8) !Scratch {
+        const raw = try test_io.uniqueTempPath(testing.allocator, "dsl_interp", tag);
+        defer testing.allocator.free(raw);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, raw) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, raw);
+        errdefer test_io.deleteTreeAbsolute(std.Options.debug_io, raw) catch {};
 
-    return owned;
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so the
+        // paths the interpreter reports back compare equal to `path`.
+        var dir = try test_io.openDirAbsolute(std.Options.debug_io, raw, .{});
+        defer dir.close(std.Options.debug_io);
+        var buf: [test_io.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.realPath(dir, std.Options.debug_io, &buf);
+        return .{ .path = try testing.allocator.dupe(u8, buf[0..n]) };
+    }
+
+    fn deinit(self: *Scratch) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        testing.allocator.free(self.path);
+    }
+};
+
+/// Scratch prefix with the cellar structure already in place. Returned by
+/// value so the caller owns the cleanup — the old helper handed back only
+/// the path and dropped the directory handle, leaking one dir per test.
+fn makeTempPrefix() !Scratch {
+    var s = try Scratch.init("prefix");
+    errdefer s.deinit();
+    try setupCellar(s.path);
+    return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,8 +164,9 @@ test "interpreter: trivial ohai succeeds" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"Hello from post_install\"", prefix);
     try testing.expect(err == null);
@@ -155,8 +176,9 @@ test "interpreter: pathname mkpath creates directory" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src = "(prefix/\"share\"/\"myapp\").mkpath";
     const err = try runSnippet(&arena, src, prefix);
@@ -177,8 +199,9 @@ test "interpreter: file write creates file with content" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src = "(etc/\"myapp.conf\").write \"key=value\"";
     const err = try runSnippet(&arena, src, prefix);
@@ -202,8 +225,9 @@ test "interpreter: system true succeeds" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "system \"true\"", prefix);
     try testing.expect(err == null);
@@ -213,8 +237,9 @@ test "interpreter: system false returns SystemCommandFailed" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // system "false" should fail (exit code 1).
     // The interpreter logs the failure but continues (non-fatal for bare system).
@@ -230,8 +255,9 @@ test "interpreter: variable assignment and use" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\dir = share/"data"
@@ -255,8 +281,9 @@ test "interpreter: postfix if true executes body" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"yes\" if true", prefix);
     try testing.expect(err == null);
@@ -266,8 +293,9 @@ test "interpreter: postfix if false skips body" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"no\" if false", prefix);
     try testing.expect(err == null);
@@ -277,8 +305,9 @@ test "interpreter: if else block" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\if true
@@ -295,8 +324,9 @@ test "interpreter: unless false executes body" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"yes\" unless false", prefix);
     try testing.expect(err == null);
@@ -306,8 +336,9 @@ test "interpreter: raise causes PostInstallFailed" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "raise \"boom\"", prefix);
     try testing.expect(err != null);
@@ -321,8 +352,9 @@ test "interpreter: raise message is recorded as a note, not written to stderr" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     var flog = dsl.FallbackLog.init(testing.allocator);
     defer flog.deinit();
@@ -340,8 +372,9 @@ test "interpreter: begin rescue handles error" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\begin
@@ -364,8 +397,9 @@ test "interpreter: a rescued raise records a note without a routing entry" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     var flog = dsl.FallbackLog.init(testing.allocator);
     defer flog.deinit();
@@ -392,8 +426,9 @@ test "interpreter: multiple statements execute in order" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\ohai "first"
@@ -408,8 +443,9 @@ test "interpreter: array literal evaluates" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Just ensure arrays parse and evaluate without error
     const src = "x = [1, 2, 3]";
@@ -421,8 +457,9 @@ test "interpreter: nil literal evaluates" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "x = nil", prefix);
     try testing.expect(err == null);
@@ -436,8 +473,9 @@ test "interpreter: gsub replaces substring" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "\"hello world\".gsub(\"world\", \"zig\")", prefix);
     try testing.expect(err == null);
@@ -447,8 +485,9 @@ test "interpreter: strip removes whitespace" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "\"  hello\\n\".strip", prefix);
     try testing.expect(err == null);
@@ -458,8 +497,9 @@ test "interpreter: split produces array" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "\"a,b,c\".split(\",\")", prefix);
     try testing.expect(err == null);
@@ -469,8 +509,9 @@ test "interpreter: include? triggers ohai when true" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"yes\" if \"hello world\".include?(\"world\")", prefix);
     try testing.expect(err == null);
@@ -480,8 +521,9 @@ test "interpreter: empty? triggers ohai for empty string" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"empty\" if \"\".empty?", prefix);
     try testing.expect(err == null);
@@ -495,8 +537,9 @@ test "interpreter: cp children copies files" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create source files under share/data
     const share_data = try std.fs.path.join(
@@ -533,8 +576,9 @@ test "interpreter: rm array inline deletes files" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create tmp dir and files
     const tmp_dir = try std.fs.path.join(
@@ -562,8 +606,9 @@ test "interpreter: chmod array no error" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create bin and sbin dirs
     const bin_dir = try std.fs.path.join(
@@ -579,6 +624,18 @@ test "interpreter: chmod array no error" {
     );
     defer testing.allocator.free(sbin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, sbin_dir);
+
+    // The snippet leaves both dirs at a mode that denies owner read, so the
+    // scratch teardown cannot recurse into them. Restore before deinit runs.
+    const c = struct {
+        extern "c" fn chmod(path: [*:0]const u8, mode: u16) c_int;
+    };
+    const bin_z = try testing.allocator.dupeZ(u8, bin_dir);
+    defer testing.allocator.free(bin_z);
+    const sbin_z = try testing.allocator.dupeZ(u8, sbin_dir);
+    defer testing.allocator.free(sbin_z);
+    defer _ = c.chmod(sbin_z, 0o755);
+    defer _ = c.chmod(bin_z, 0o755);
 
     const src =
         \\chmod 0755, [prefix/"bin", prefix/"sbin"]
@@ -604,8 +661,9 @@ test "interpreter: file? returns true for existing file" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create the test file
     const test_file = try std.fs.path.join(
@@ -627,8 +685,9 @@ test "interpreter: children on directory no error" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create subdir with files
     const subdir = try std.fs.path.join(
@@ -654,8 +713,9 @@ test "interpreter: atomic_write creates file with content" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src = "(prefix/\"config.txt\").atomic_write(\"key=value\\n\")";
     const err = try runSnippet(&arena, src, prefix);
@@ -685,8 +745,9 @@ test "interpreter: inreplace replaces content in file" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create the config file with OLD_VALUE
     const config_path = try std.fs.path.join(
@@ -719,8 +780,9 @@ test "interpreter: inreplace fallback warning is recorded as a note" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const target_dir = try std.fs.path.join(
         testing.allocator,
@@ -776,8 +838,9 @@ test "interpreter: && true evaluates body" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"yes\" if true && true", prefix);
     try testing.expect(err == null);
@@ -787,8 +850,9 @@ test "interpreter: && false skips body" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"no\" if true && false", prefix);
     try testing.expect(err == null);
@@ -798,8 +862,9 @@ test "interpreter: || true evaluates body" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"yes\" if false || true", prefix);
     try testing.expect(err == null);
@@ -809,8 +874,9 @@ test "interpreter: ! prefix negation" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"yes\" if !false", prefix);
     try testing.expect(err == null);
@@ -820,8 +886,9 @@ test "interpreter: combined !false && true" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"yes\" if !false && true", prefix);
     try testing.expect(err == null);
@@ -835,8 +902,9 @@ test "interpreter: %w each loop creates dirs" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\%w[a b c].each do |x|
@@ -863,8 +931,9 @@ test "interpreter: unless with negation executes body" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // prefix exists → (prefix).exist? is true → !true is false → unless false → execute
     const src = "(prefix/\"keep\").mkpath unless !(prefix).exist?";
@@ -889,8 +958,9 @@ test "interpreter: ENV read HOME triggers ohai" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"test\" if ENV[\"HOME\"]", prefix);
     try testing.expect(err == null);
@@ -900,8 +970,9 @@ test "interpreter: ENV write no error" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ENV[\"MY_VAR\"] = \"test\"", prefix);
     try testing.expect(err == null);
@@ -915,8 +986,9 @@ test "interpreter: quiet_system true no error" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "quiet_system \"true\"", prefix);
     try testing.expect(err == null);
@@ -926,8 +998,9 @@ test "interpreter: File.exist? returns true for existing file" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create the file
     const test_file = try std.fs.path.join(
@@ -953,8 +1026,9 @@ test "interpreter: unknown method returns nil no error" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Unknown methods are non-fatal (logged to fallback log, execution continues)
     const err = try runSnippet(&arena, "unknown_method_xyz", prefix);
@@ -965,8 +1039,9 @@ test "interpreter: unknown method is logged in fallback log" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
     const alloc = arena.allocator();
 
     const json = try minimalJson(alloc, "testpkg", "1.0");
@@ -990,8 +1065,9 @@ test "interpreter: sandbox violation on path escape" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src = "(prefix/\"../../etc/evil\").write \"hack\"";
     const err = try runSnippet(&arena, src, prefix);
@@ -1007,8 +1083,9 @@ test "coverage: rm_r removes directory tree" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create prefix/Cellar/testpkg/1.0/tmp/subdir/file.txt
     const subdir = try std.fs.path.join(
@@ -1044,8 +1121,9 @@ test "coverage: cp single file" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create source file
     const src_file = try std.fs.path.join(
@@ -1082,8 +1160,9 @@ test "coverage: cp_r copies directory tree" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create source directory with a file
     const srcdir = try std.fs.path.join(
@@ -1111,8 +1190,9 @@ test "coverage: mv renames file" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create old.txt
     const old_file = try std.fs.path.join(
@@ -1149,8 +1229,9 @@ test "coverage: touch creates file" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src = "touch prefix/\"touched.txt\"";
     const err = try runSnippet(&arena, src, prefix);
@@ -1171,8 +1252,9 @@ test "coverage: ln_s creates symlink" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create target file
     const target_file = try std.fs.path.join(
@@ -1205,8 +1287,9 @@ test "coverage: ln_sf single target overwrites" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create target and an existing file at the link location
     const target_file = try std.fs.path.join(
@@ -1240,8 +1323,9 @@ test "coverage: mkdir_p nested directories" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src = "mkdir_p prefix/\"a\"/\"b\"/\"c\"";
     const err = try runSnippet(&arena, src, prefix);
@@ -1266,8 +1350,9 @@ test "coverage: exist? false for missing path" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src = "ohai \"yes\" if (prefix/\"nonexistent\").exist?";
     const err = try runSnippet(&arena, src, prefix);
@@ -1278,8 +1363,9 @@ test "coverage: directory? returns true for dir" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // prefix/share already exists from setupCellar
     const src = "ohai \"dir\" if (prefix/\"share\").directory?";
@@ -1291,8 +1377,9 @@ test "coverage: symlink? false for regular file" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create a regular file
     const file_path = try std.fs.path.join(
@@ -1314,8 +1401,9 @@ test "coverage: read returns file content" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create a file with content
     const data_file = try std.fs.path.join(
@@ -1338,8 +1426,9 @@ test "coverage: basename extracts filename" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src = "x = (prefix/\"dir\"/\"file.txt\").basename";
     const err = try runSnippet(&arena, src, prefix);
@@ -1350,8 +1439,9 @@ test "coverage: dirname extracts parent" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src = "x = (prefix/\"dir\"/\"file.txt\").dirname";
     const err = try runSnippet(&arena, src, prefix);
@@ -1362,8 +1452,9 @@ test "coverage: glob finds matching files" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create share dir under cellar and add files
     const share_dir = try std.fs.path.join(
@@ -1389,8 +1480,9 @@ test "coverage: install_symlink creates link" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Create source file
     const src_file = try std.fs.path.join(
@@ -1418,8 +1510,9 @@ test "coverage: openssl@3 chain links etc/openssl@3/cert.pem to a sibling formul
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src = "(etc/\"openssl@3\").install_symlink Formula[\"ca-certificates\"].pkgetc/\"cert.pem\"";
     const err = try runSnippet(&arena, src, prefix);
@@ -1444,8 +1537,9 @@ test "coverage: opoo prints warning" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "opoo \"warning message\"", prefix);
     try testing.expect(err == null);
@@ -1455,8 +1549,9 @@ test "coverage: odie causes PostInstallFailed" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "odie \"fatal error\"", prefix);
     try testing.expect(err != null);
@@ -1471,8 +1566,9 @@ test "coverage: sub replaces first occurrence" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "\"aaa\".sub(\"a\", \"b\")", prefix);
     try testing.expect(err == null);
@@ -1482,8 +1578,9 @@ test "coverage: start_with? returns true" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"yes\" if \"hello\".start_with?(\"hel\")", prefix);
     try testing.expect(err == null);
@@ -1493,8 +1590,9 @@ test "coverage: end_with? returns true" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"yes\" if \"hello.txt\".end_with?(\".txt\")", prefix);
     try testing.expect(err == null);
@@ -1504,8 +1602,9 @@ test "coverage: length returns int" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "x = \"hello\".length", prefix);
     try testing.expect(err == null);
@@ -1515,8 +1614,9 @@ test "coverage: split no delimiter splits on whitespace" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "x = \"a b c\".split", prefix);
     try testing.expect(err == null);
@@ -1526,8 +1626,9 @@ test "coverage: string to_s identity" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "x = \"hello\".to_s", prefix);
     try testing.expect(err == null);
@@ -1541,8 +1642,9 @@ test "coverage: integer in string interpolation" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\x = 42
@@ -1556,8 +1658,9 @@ test "coverage: nil is falsy in condition" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const err = try runSnippet(&arena, "ohai \"yes\" if nil", prefix);
     try testing.expect(err == null);
@@ -1571,8 +1674,9 @@ test "coverage: hash literal evaluates" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src = "x = {\"key\" => \"value\"}";
     const err = try runSnippet(&arena, src, prefix);
@@ -1583,8 +1687,9 @@ test "coverage: each loop iterates array" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\["a", "b"].each do |x|
@@ -1599,8 +1704,9 @@ test "coverage: begin rescue with no error completes normally" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\begin
@@ -1617,8 +1723,9 @@ test "coverage: string interpolation with pathname" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\dir = share/"myapp"
@@ -1632,8 +1739,9 @@ test "coverage: each loop with mkpath in body" {
     var arena = testArena();
     defer arena.deinit();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\["x", "y", "z"].each do |d|
@@ -1663,8 +1771,9 @@ test "coverage: each loop with mkpath in body" {
 test "coverage: Formula lookup resolves opt_prefix path" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
     const err = try runSnippet(&arena, "x = Formula[\"glib\"]", prefix);
     try testing.expect(err == null);
 }
@@ -1672,8 +1781,9 @@ test "coverage: Formula lookup resolves opt_prefix path" {
 test "coverage: Formula lookup with opt_bin accessor" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
     const err = try runSnippet(&arena, "x = Formula[\"glib\"].opt_bin", prefix);
     try testing.expect(err == null);
 }
@@ -1681,8 +1791,9 @@ test "coverage: Formula lookup with opt_bin accessor" {
 test "coverage: Formula lookup with pkgetc" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
     const err = try runSnippet(&arena, "x = Formula[\"ca-certificates\"].pkgetc", prefix);
     try testing.expect(err == null);
 }
@@ -1692,8 +1803,9 @@ test "parse_error: malformed source populates fallback log with location" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const json = try minimalJson(alloc, "testpkg", "1.0");
     var f = try formula_mod.parseFormula(alloc, json);
@@ -1736,8 +1848,9 @@ test "depth guard: deeply nested expression degrades through the post_install pa
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const json = try minimalJson(alloc, "testpkg", "1.0");
     var f = try formula_mod.parseFormula(alloc, json);
@@ -1778,8 +1891,9 @@ test "depth guard: self-recursive method degrades through the post_install path"
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
@@ -1805,8 +1919,9 @@ test "depth guard: sequential method calls past the cap do not trip the guard" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
@@ -1837,8 +1952,9 @@ test "depth guard: sequential method calls past the cap do not trip the guard" {
 test "interpreter: def then invoke runs the method body" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\share.mkpath
@@ -1855,8 +1971,9 @@ test "interpreter: def then invoke runs the method body" {
 test "interpreter: def with positional args binds into the call frame" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\share.mkpath
@@ -1875,8 +1992,9 @@ test "interpreter: def with positional args binds into the call frame" {
 test "interpreter: return short-circuits a def and preserves post-def stmts" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\share.mkpath
@@ -1896,8 +2014,9 @@ test "interpreter: return short-circuits a def and preserves post-def stmts" {
 test "interpreter: top-level return exits the post_install body" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\share.mkpath
@@ -1912,8 +2031,9 @@ test "interpreter: top-level return exits the post_install body" {
 test "interpreter: method-local args do not leak into outer scope" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\share.mkpath
@@ -1934,8 +2054,9 @@ test "interpreter: llvm@21 shape — def helpers + return guard" {
     // and writes into `<prefix>/etc/clang/*.cfg`.
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\def write_cfg(cfg_name, content)
@@ -1957,8 +2078,9 @@ test "interpreter: llvm@21 shape — def helpers + return guard" {
 test "interpreter: def implicit return — last expression is the value" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // `mk` returns the path it created; the chain call `.exist?` must
     // see that pathname and report true.
@@ -1977,8 +2099,9 @@ test "interpreter: def implicit return — last expression is the value" {
 test "interpreter: def with explicit return value flows to the caller" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // `pick(x)` returns one of two paths based on the flag; the chain
     // call `.write` on the result must hit the right file.
@@ -2000,8 +2123,9 @@ test "interpreter: def with explicit return value flows to the caller" {
 test "interpreter: def can call another user method" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // `outer` delegates the write to `inner` — exercises nested call
     // frames and method-table lookup from inside a method body.
@@ -2023,8 +2147,9 @@ test "interpreter: def can call another user method" {
 test "interpreter: def redefinition — last def wins" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Only the second `emit` should run; the first's sentinel must not
     // appear on disk. Same policy as Ruby: last def overrides.
@@ -2047,8 +2172,9 @@ test "interpreter: def redefinition — last def wins" {
 test "interpreter: return from inside .each exits the enclosing def" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // `first_two` should only write the first two entries — the
     // `return if` inside the each block must unwind the whole def,
@@ -2080,8 +2206,9 @@ test "interpreter: return from inside .each exits the enclosing def" {
 test "interpreter: .each past a failed `system` keeps iterating" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\share.mkpath
@@ -2108,8 +2235,9 @@ test "interpreter: .each past a failed `system` keeps iterating" {
 test "interpreter: raise inside .each aborts the post_install" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\["a", "b", "c"].each do |x|
@@ -2131,8 +2259,9 @@ test "interpreter: raise inside .each aborts the post_install" {
 test "interpreter: array.all?(&:exist?) is true when every path exists" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Both dirs exist → `all?` is true → `odie unless ...` is skipped.
     const src =
@@ -2149,8 +2278,9 @@ test "interpreter: array.all?(&:exist?) is true when every path exists" {
 test "interpreter: array.all?(&:exist?) is false when any path is missing" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // `b` was never created → `all?` is false → `odie` fires → PostInstallFailed.
     const src =
@@ -2166,8 +2296,9 @@ test "interpreter: array.all?(&:exist?) is false when any path is missing" {
 test "interpreter: array.any?(&:exist?) reflects membership" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Only `a` exists → `any?` is true → `odie` is skipped.
     const src =
@@ -2183,8 +2314,9 @@ test "interpreter: array.any?(&:exist?) reflects membership" {
 test "interpreter: array.map(&:exist?) threads the sym-to-proc block" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Map yields [true, false]; all? over that is false, so odie fires.
     const src =
@@ -2202,8 +2334,9 @@ test "interpreter: llvm@21 post_install shape runs to completion" {
     // parse_error non-fatal, the snippet must no longer explode on line 9.
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\config_files = [share/"a.cfg", share/"b.cfg"]
@@ -2222,8 +2355,9 @@ test "interpreter: llvm@21 post_install shape runs to completion" {
 test "interpreter: MacOS.version.major chains through string receiver builtins" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // odie only fires if .major returns a non-positive value — i.e. the
     // DSL still has the accessor wired. Works on any macOS (major ≥ 10).
@@ -2238,8 +2372,9 @@ test "interpreter: MacOS.version.major chains through string receiver builtins" 
 test "interpreter: chained .major on an OS.kernel_version result stays an integer" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // `.to_i` on a `.major` result is a no-op — but exercises both builtins
     // in sequence and guards against an accidental Value-kind regression.
@@ -2260,8 +2395,9 @@ test "interpreter: chained .major on an OS.kernel_version result stays an intege
 test "interpreter: hash.map yields (key, value) and returns an array" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Map each entry to `share/<key>` and write the value as its body. The
     // .map result is an array of pathnames that .all?(&:exist?) confirms.
@@ -2282,8 +2418,9 @@ test "interpreter: hash.map yields (key, value) and returns an array" {
 test "interpreter: hash.each yields (key, value) and returns nil" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\share.mkpath
@@ -2300,8 +2437,9 @@ test "interpreter: hash.each yields (key, value) and returns nil" {
 test "interpreter: hash.select filters entries by the 2-arg block" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Keep only entries whose value `.exist?` is true. Pre-create one of
     // the two target files so the filter has a real decision to make.
@@ -2323,8 +2461,9 @@ test "interpreter: llvm@21 shape — hash.map + array.all?(&:exist?) chains clea
     // this PR — tracked in the next follow-up.
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\share.mkpath
@@ -2342,8 +2481,9 @@ test "interpreter: llvm@21 shape — hash.map + array.all?(&:exist?) chains clea
 test "interpreter: hash.reject is the dual of select" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Reject entries whose value is already present; we expect the
     // remaining entry's side effect (write) to run.
@@ -2364,8 +2504,9 @@ test "interpreter: hash.reject is the dual of select" {
 test "interpreter: block-less hash.any?/all?/empty?/length" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // `.any?` on non-empty → truthy; `.empty?` → false; `.length` > 0.
     // `.all?` is true unless a value is literally false/nil.
@@ -2386,8 +2527,9 @@ test "interpreter: block-less hash.any?/all?/empty?/length" {
 test "interpreter: hash.each with single-param block destructures the pair" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Ruby allows `hash.each { |kv| ... }` where `kv` is `[key, value]`.
     // The DSL binds the pair as a 2-element array — assert one element
@@ -2408,8 +2550,9 @@ test "interpreter: hash.each with single-param block destructures the pair" {
 test "interpreter: empty hash.map/each returns quickly without side effects" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Guard against a spurious block invocation on an empty hash — would
     // have shown up as the odie firing despite no entries.
@@ -2437,8 +2580,9 @@ test "interpreter: empty hash.map/each returns quickly without side effects" {
 test "interpreter: array << y returns an array with y appended" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Use `.each` on the extended array to verify the new element is
     // present by its write side-effect.
@@ -2459,8 +2603,9 @@ test "interpreter: array << y returns an array with y appended" {
 test "interpreter: string << y returns a concatenated string" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\share.mkpath
@@ -2479,8 +2624,9 @@ test "interpreter: `x << y` on an unknown receiver degrades non-fatally" {
     // def can still be included by the sibling parse-check.
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\arches = Set.new([:arm64])
@@ -2496,8 +2642,9 @@ test "interpreter: llvm@21 `write_config_files` sibling now registers and is cal
     // sibling so bare `write_config_files(...)` was unknown_method.
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\def write_config_files(arches, ver)
@@ -2525,8 +2672,9 @@ test "interpreter: llvm@21 `write_config_files` sibling now registers and is cal
 test "interpreter: integer <, >, <=, >=, ==, != produce the expected bools" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\odie "1<2 failed" unless 1 < 2
@@ -2545,8 +2693,9 @@ test "interpreter: integer <, >, <=, >=, ==, != produce the expected bools" {
 test "interpreter: string equality and lexicographic ordering" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\odie "abc==abc failed" unless "abc" == "abc"
@@ -2563,8 +2712,9 @@ test "interpreter: compare on unknown types degrades non-fatally to false" {
     // so the surrounding `unless` doesn't cascade into UB.
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\odie "nil<1 should not have fired true" if nil < 1
@@ -2580,8 +2730,9 @@ test "interpreter: compare on unknown types degrades non-fatally to false" {
 test "interpreter: .blank? is true for empty string and nil, false otherwise" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\odie "empty.blank? failed" unless "".blank?
@@ -2600,8 +2751,9 @@ test "interpreter: .blank? is true for empty string and nil, false otherwise" {
 test "interpreter: if-else as the RHS of an assignment yields the matching branch" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\share.mkpath
@@ -2620,8 +2772,9 @@ test "interpreter: if-else as the RHS of an assignment yields the matching branc
 test "interpreter: unless-expression picks the else branch when cond is true" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\v = unless true
@@ -2640,8 +2793,9 @@ test "interpreter: llvm@21 sysroot-assignment shape runs without fatal" {
     // logical-or + integer comparison + if-as-rvalue + interpolation.
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\macos_version = "15"
@@ -2666,8 +2820,9 @@ test "interpreter: llvm@21 sysroot-assignment shape runs without fatal" {
 test "interpreter: MacOS::CLT::PKG_PATH resolves to the canonical CLT path" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\p = MacOS::CLT::PKG_PATH
@@ -2681,8 +2836,9 @@ test "interpreter: MacOS::CLT::PKG_PATH resolves to the canonical CLT path" {
 test "interpreter: string interpolation with module constants expands inline" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     // Exact shape from llvm@21: `"#{MacOS::CLT::PKG_PATH}/SDKs/…"`.
     const src =
@@ -2699,8 +2855,9 @@ test "interpreter: unknown module constant stays non-fatal and returns nil" {
     // crash — the whole point of the fallback log.
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\x = Some::Bogus::Const
@@ -2716,8 +2873,9 @@ test "interpreter: Set.new(array) passes the array through so << and .each work"
     // entire chain resolves without unknowns.
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\share.mkpath
@@ -2738,8 +2896,9 @@ test "interpreter: bare `pkgetc` resolves to <prefix>/etc/<formula_name>" {
     // binding resolves it without going through receiver dispatch.
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\odie "pkgetc empty" if pkgetc.blank?
@@ -2751,8 +2910,9 @@ test "interpreter: bare `pkgetc` resolves to <prefix>/etc/<formula_name>" {
 test "interpreter: empty Set.new() returns an array that iterates zero times" {
     var arena = testArena();
     defer arena.deinit();
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const src =
         \\empty = Set.new
@@ -2769,8 +2929,9 @@ test "interpreter: arena-owned path bindings leak-clean under testing.allocator"
     // invariant that every ExecContext path string lives on the arena
     // created inside executePostInstall. Referencing every binding name
     // forces resolveBinding through the full dispatch.
-    const prefix = try makeTempPrefix();
-    defer testing.allocator.free(prefix);
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
 
     const json = try minimalJson(testing.allocator, "testpkg", "1.0");
     defer testing.allocator.free(json);

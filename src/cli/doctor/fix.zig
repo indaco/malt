@@ -548,6 +548,46 @@ pub fn executeFix(ctx: FixCtx, dry_run: bool) FixOutcome {
 
 // ── inline tests ─────────────────────────────────────────────────────
 
+const fs_test_io = std.Options.debug_io;
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Stands in for std.testing.tmpDir, which builds under .zig-cache - a tree the
+/// build system owns and rewrites underneath concurrent test runs. The pid and
+/// sequence keep overlapping runs from deleting each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+    dir: std.Io.Dir,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const raw = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        std.Io.Dir.cwd().deleteTree(fs_test_io, raw) catch {};
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
+        // code under test reports compare equal to `base`.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
+        errdefer d.close(fs_test_io);
+        const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
+        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        return .{ .arena = arena, .base = base, .dir = d };
+    }
+
+    fn deinit(self: *Scratch) void {
+        self.dir.close(fs_test_io);
+        std.Io.Dir.cwd().deleteTree(fs_test_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "planFixes: clean conditions yield empty plan" {
     const plan = planFixes(.{});
     try std.testing.expect(plan.isEmpty());
@@ -824,11 +864,9 @@ test "OrphanProbe: one probe reset-drives orphan / live-ref / no-row shas in seq
     // Driving all three shas through a single probe is the point: it proves
     // reset-then-rebind works across rows — the lifecycle the old per-call
     // prepare/finalize never exercised.
-    const io = std.Options.debug_io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var pb: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix = pb[0..try std.Io.Dir.realPath(tmp.dir, io, &pb)];
+    var s = try Scratch.init("fix_orphan_probe");
+    defer s.deinit();
+    const prefix = s.base;
 
     var db_buf: [std.fs.max_path_bytes]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/malt.db", .{prefix}, 0);
@@ -859,10 +897,9 @@ test "isDanglingLinkError: only a missing target is dangling" {
 
 test "walkBrokenSymlinks: a dangling link is detected and removed" {
     const io = std.Options.debug_io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fix_dangling_link");
+    defer s.deinit();
+    const prefix = s.base;
 
     var pb: [std.fs.max_path_bytes]u8 = undefined;
     const bin = try std.fmt.bufPrint(&pb, "{s}/bin", .{prefix});
@@ -883,10 +920,9 @@ test "walkBrokenSymlinks: an intact link with an inaccessible target is left alo
     if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
 
     const io = std.Options.debug_io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("fix_walled_link");
+    defer s.deinit();
+    const prefix = s.base;
 
     // A real target under a mode-0 dir: stat traversal fails with EACCES.
     var wb: [std.fs.max_path_bytes]u8 = undefined;
@@ -901,7 +937,8 @@ test "walkBrokenSymlinks: an intact link with an inaccessible target is left alo
     var walled_dir = try std.Io.Dir.openDirAbsolute(io, walled, .{});
     defer walled_dir.close(io);
     try walled_dir.setPermissions(io, std.Io.File.Permissions.fromMode(0));
-    // Restore mode so tmp cleanup can recurse into the walled dir.
+    // Restore mode so the scratch teardown can recurse into the walled dir;
+    // this defer must run before `s.deinit()`.
     defer walled_dir.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
 
     var pb: [std.fs.max_path_bytes]u8 = undefined;

@@ -32,6 +32,34 @@ fn minimalJson(alloc: std.mem.Allocator) ![]const u8 {
     , .{});
 }
 
+/// Stands in for `std.testing.tmpDir`, which roots its scratch under
+/// `.zig-cache` — a tree the build system rewrites underneath a running test.
+const Scratch = struct {
+    path: []u8,
+
+    fn init(tag: []const u8) !Scratch {
+        const io = std.Options.debug_io;
+        const raw = try test_io.uniqueTempPath(testing.allocator, "dsl_interp_extra", tag);
+        defer testing.allocator.free(raw);
+        test_io.deleteTreeAbsolute(io, raw) catch {};
+        try test_io.cwd().createDirPath(io, raw);
+        errdefer test_io.deleteTreeAbsolute(io, raw) catch {};
+
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so the
+        // paths the interpreter reports back compare equal to `path`.
+        var dir = try test_io.openDirAbsolute(io, raw, .{});
+        defer dir.close(io);
+        var buf: [test_io.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.realPath(dir, io, &buf);
+        return .{ .path = try testing.allocator.dupe(u8, buf[0..n]) };
+    }
+
+    fn deinit(self: *Scratch) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        testing.allocator.free(self.path);
+    }
+};
+
 fn setupCellar(prefix_dir: []const u8) !void {
     const cellar_path = try std.fs.path.join(testing.allocator, &.{ prefix_dir, "Cellar", "testpkg", "1.0" });
     defer testing.allocator.free(cellar_path);
@@ -43,13 +71,9 @@ fn run(ruby_src: []const u8) !void {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix = blk: {
-        const n = try std.Io.Dir.realPath(tmp.dir, std.Options.debug_io, &path_buf);
-        break :blk path_buf[0..n];
-    };
+    var scratch = try Scratch.init("run");
+    defer scratch.deinit();
+    const prefix = scratch.path;
     try setupCellar(prefix);
 
     const json = try minimalJson(alloc);

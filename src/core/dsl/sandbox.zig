@@ -227,6 +227,57 @@ pub fn openTargetNoFollow(
     return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
+const fs_test_io = std.Options.debug_io;
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Stands in for std.testing.tmpDir, which builds under .zig-cache — a tree the
+/// build system owns and rewrites underneath concurrent test runs. The base is
+/// process- and call-unique so overlapping runs can't delete each other's
+/// fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+    dir: std.Io.Dir,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const raw = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        std.Io.Dir.cwd().deleteTree(fs_test_io, raw) catch {};
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
+        // code under test returns compare equal to `base`.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
+        errdefer d.close(fs_test_io);
+        const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
+        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        return .{ .arena = arena, .base = base, .dir = d };
+    }
+
+    /// Absolute path to `sub` (leading slash included); valid until deinit.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        self.dir.close(fs_test_io);
+        std.Io.Dir.cwd().deleteTree(fs_test_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "validateArgv accepts bare command names" {
     try validateArgv(&.{"make"}, "/opt/malt/Cellar/foo/1.0", "/opt/malt");
     try validateArgv(&.{ "fc-cache", "-f" }, "/opt/malt/Cellar/foo/1.0", "/opt/malt");
@@ -304,12 +355,11 @@ test "fenceArgv maps a profile allocation failure to OutOfMemory" {
 test "openTargetNoFollow writes a normal in-keg file" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
     // Resolved root exercises the /tmp → /private/tmp case: a symlinked prefix
     // must not read as an escape.
-    const keg = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("sandbox_open_inkeg");
+    defer s.deinit();
+    const keg = s.base;
 
     const target = try std.fs.path.join(alloc, &.{ keg, "out.txt" });
     defer alloc.free(target);
@@ -328,10 +378,9 @@ test "openTargetNoFollow writes a normal in-keg file" {
 test "openTargetNoFollow refuses a final-component symlink out of the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("sandbox_open_symlink_escape");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);
@@ -362,10 +411,9 @@ test "openTargetNoFollow refuses a final-component symlink out of the keg" {
 test "validateDirTarget accepts a real in-keg dir and rejects a symlinked one" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("sandbox_dirtarget");
+    defer s.deinit();
+    const base = s.base;
 
     const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
     defer alloc.free(keg);

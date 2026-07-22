@@ -1440,18 +1440,27 @@ var scratch_seq: std.atomic.Value(u32) = .init(0);
 const Scratch = struct {
     arena: std.heap.ArenaAllocator,
     base: [:0]const u8,
+    dir: std.Io.Dir,
 
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
+        const raw = try std.fmt.allocPrintSentinel(
             arena.allocator(),
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
         );
-        rmrf(base);
-        return .{ .arena = arena, .base = base };
+        rmrf(raw);
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
+        // code under test reports compare equal to `base`.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
+        errdefer d.close(fs_test_io);
+        const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
+        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        return .{ .arena = arena, .base = base, .dir = d };
     }
 
     /// Absolute path to `sub` (leading slash included) inside the scratch
@@ -1466,6 +1475,7 @@ const Scratch = struct {
     }
 
     fn deinit(self: *Scratch) void {
+        self.dir.close(fs_test_io);
         rmrf(self.base);
         self.arena.deinit();
     }
@@ -1604,10 +1614,9 @@ test "checkBrokenSymlinks: an intact link with an inaccessible target is not rep
 
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var bb: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+    var s = try Scratch.init("doctor_walled_link");
+    defer s.deinit();
+    const prefix = s.base;
 
     var wb: [std.fs.max_path_bytes]u8 = undefined;
     const walled = try std.fmt.bufPrint(&wb, "{s}/walled", .{prefix});
@@ -1645,10 +1654,9 @@ test "checkOrphanedStore: counts only refcount<=0 rows across store entries" {
     // or the count-vs-remove policy leaking) flips the outcome or the number.
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var pb: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix = pb[0..try std.Io.Dir.realPath(tmp.dir, io, &pb)];
+    var s = try Scratch.init("doctor_orphan_store");
+    defer s.deinit();
+    const prefix = s.base;
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const db_dir = try std.fmt.bufPrint(&buf, "{s}/db", .{prefix});
@@ -1684,10 +1692,9 @@ test "checkOrphanedStore: a store with no refcount<=0 row is ok" {
     // must not warn.
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var pb: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix = pb[0..try std.Io.Dir.realPath(tmp.dir, io, &pb)];
+    var s = try Scratch.init("doctor_store_clean");
+    defer s.deinit();
+    const prefix = s.base;
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const db_dir = try std.fmt.bufPrint(&buf, "{s}/db", .{prefix});

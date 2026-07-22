@@ -9,20 +9,44 @@ const std = @import("std");
 const testing = std.testing;
 
 const malt = @import("malt");
+const test_io = @import("test_io");
 const outdated = malt.tui_tab_outdated;
 const ctx = malt.tui_ctx;
 const outdated_json = malt.tui_json_outdated;
+
+/// Stands in for `std.testing.tmpDir`, which roots its scratch under
+/// `.zig-cache` — a tree the build system rewrites underneath a running test.
+const Scratch = struct {
+    path: []const u8,
+    dir: std.Io.Dir,
+
+    fn init(tag: []const u8) !Scratch {
+        const io = std.Options.debug_io;
+        const raw = try test_io.uniqueTempPath(testing.allocator, "tui_warm_read", tag);
+        errdefer testing.allocator.free(raw);
+        test_io.deleteTreeAbsolute(io, raw) catch {};
+        try test_io.cwd().createDirPath(io, raw);
+        errdefer test_io.deleteTreeAbsolute(io, raw) catch {};
+        return .{ .path = raw, .dir = try test_io.openDirAbsolute(io, raw, .{}) };
+    }
+
+    fn deinit(self: *Scratch) void {
+        const io = std.Options.debug_io;
+        self.dir.close(io);
+        test_io.deleteTreeAbsolute(io, self.path) catch {};
+        testing.allocator.free(self.path);
+    }
+};
 
 test "warmRead seeds the tab and header count from a present snapshot" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
-    var f = try tmp.dir.createFile(io, "outdated.json", .{});
+    var scratch = try Scratch.init("present_snapshot");
+    defer scratch.deinit();
+    const cache_dir = scratch.path;
+    var f = try scratch.dir.createFile(io, "outdated.json", .{});
     try f.writeStreamingAll(io, "{\"version\":2,\"generated_at_ms\":0,\"formulas\":[{\"name\":\"wget\",\"installed\":\"1.24.5\",\"latest\":\"1.25.0\"}],\"casks\":[{\"name\":\"firefox\",\"installed\":\"120\",\"latest\":\"121\"}]}");
     f.close(io);
 

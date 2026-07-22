@@ -838,29 +838,54 @@ test "quietSystem always returns nil regardless of exit code" {
 // stop a destructive write the formula's *arguments* aim outside the keg.
 // ---------------------------------------------------------------------------
 
-/// Realpath of a fresh temp dir, skipping the test when it lands under a
-/// profile-writable root (/tmp, /private/tmp, /private/var/folders) — there
-/// the fence's write rules would pass the write through and the assertion
-/// would prove nothing. A CI tmp relocation surfaces as a skip, not a false
-/// pass.
-fn fenceTmpBase(tmp: *std.testing.TmpDir, buf: []u8) ![]const u8 {
-    const n = try std.Io.Dir.realPath(tmp.dir, std.Options.debug_io, buf);
-    const base = buf[0..n];
-    if (std.mem.startsWith(u8, base, "/tmp/") or
-        std.mem.startsWith(u8, base, "/private/tmp/") or
-        std.mem.startsWith(u8, base, "/private/var/folders/"))
-        return error.SkipZigTest;
-    return base;
-}
+var fence_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch root for the fence tests. Stands in for `std.testing.tmpDir`,
+/// which roots under `.zig-cache` — a tree the build system rewrites
+/// underneath a running test — but deliberately *not* under `/tmp`: the
+/// profile grants blanket writes to /tmp, /private/tmp and
+/// /private/var/folders, so a base there would pass the denied write
+/// through and the assertion would prove nothing. `$HOME/.cache` is
+/// writable by the test process and carries no such grant. A relocated
+/// HOME surfaces as a skip, not a false pass.
+const FenceScratch = struct {
+    path: []const u8,
+
+    fn init(tag: []const u8) !FenceScratch {
+        const io = std.Options.debug_io;
+        const home = test_io.getenv("HOME") orelse return error.SkipZigTest;
+        const raw = try std.fmt.allocPrint(testing.allocator, "{s}/.cache/malt_fence_{s}_{d}_{d}", .{
+            home, tag, std.c.getpid(), fence_seq.fetchAdd(1, .monotonic),
+        });
+        defer testing.allocator.free(raw);
+        test_io.deleteTreeAbsolute(io, raw) catch {};
+        try test_io.cwd().createDirPath(io, raw);
+        errdefer test_io.deleteTreeAbsolute(io, raw) catch {};
+
+        var dir = try test_io.openDirAbsolute(io, raw, .{});
+        defer dir.close(io);
+        var buf: [test_io.max_path_bytes]u8 = undefined;
+        const base = buf[0..try std.Io.Dir.realPath(dir, io, &buf)];
+        if (std.mem.startsWith(u8, base, "/tmp/") or
+            std.mem.startsWith(u8, base, "/private/tmp/") or
+            std.mem.startsWith(u8, base, "/private/var/folders/"))
+            return error.SkipZigTest;
+        return .{ .path = try testing.allocator.dupe(u8, base) };
+    }
+
+    fn deinit(self: *FenceScratch) void {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        testing.allocator.free(self.path);
+    }
+};
 
 test "system: a write outside the keg/prefix is blocked by the fence, not the argv lint" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try test_io.skipIfNoSubprocess();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base = try fenceTmpBase(&tmp, &base_buf);
+    var scratch = try FenceScratch.init("fence_outside");
+    defer scratch.deinit();
+    const base = scratch.path;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -911,10 +936,9 @@ test "system: a write into the keg still succeeds under the fence (no over-confi
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try test_io.skipIfNoSubprocess();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base = try fenceTmpBase(&tmp, &base_buf);
+    var scratch = try FenceScratch.init("fence_inside");
+    defer scratch.deinit();
+    const base = scratch.path;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

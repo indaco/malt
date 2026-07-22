@@ -507,6 +507,56 @@ fn rejectEscapingSymlinks(io: std.Io, dest_dir: []const u8) !void {
 
 // --- pax symlink-target test helpers --------------------------------------
 
+const test_io = std.Options.debug_io;
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Stands in for std.testing.tmpDir, which builds under .zig-cache — a tree the
+/// build system owns and rewrites underneath concurrent test runs. The pid and
+/// sequence keep overlapping runs from deleting each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+    dir: std.Io.Dir,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const raw = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_archive_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        std.Io.Dir.cwd().deleteTree(test_io, raw) catch {};
+        try std.Io.Dir.cwd().createDirPath(test_io, raw);
+        var dir = try std.Io.Dir.openDirAbsolute(test_io, raw, .{});
+        errdefer dir.close(test_io);
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
+        // code under test returns compare equal to `base`.
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.realPath(dir, test_io, &buf);
+        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        return .{ .arena = arena, .base = base, .dir = dir };
+    }
+
+    /// Absolute path to `sub` (leading slash included); valid until deinit.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        self.dir.close(test_io);
+        std.Io.Dir.cwd().deleteTree(test_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 /// Build a minimal 512-byte ustar header with a valid checksum. Only the
 /// fields the pre-scan reads (name, size, typeflag, linkname, magic) are
 /// populated; everything else stays zero.
@@ -602,20 +652,13 @@ const TestTar = struct {
     }
 };
 
-/// gzip `raw`, write it under `tmp`, and run `extractTarGz` into `tmp/dest`,
-/// returning whatever the extract returns. `tmp/dest` must already exist.
-fn testExtract(io: std.Io, tmp: *std.testing.TmpDir, raw: []const u8) !void {
+/// gzip `raw`, write it under `s`, and run `extractTarGz` into `<s>/dest`,
+/// returning whatever the extract returns. `<s>/dest` must already exist.
+fn testExtract(io: std.Io, s: *Scratch, raw: []const u8) !void {
     var gz_buf: [8192]u8 = undefined;
     const gz = testGzip(&gz_buf, raw);
-    try tmp.dir.writeFile(io, .{ .sub_path = "a.tar.gz", .data = gz });
-
-    var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
-    var arc_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const arc = try std.fmt.bufPrint(&arc_buf, "{s}/a.tar.gz", .{base});
-    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dest", .{base});
-    return extractTarGz(io, arc, dst);
+    try s.dir.writeFile(io, .{ .sub_path = "a.tar.gz", .data = gz });
+    return extractTarGz(io, s.p("/a.tar.gz"), s.p("/dest"));
 }
 
 test "extractTarGz rejects a pax linkpath that escapes the destination" {
@@ -623,9 +666,9 @@ test "extractTarGz rejects a pax linkpath that escapes the destination" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest");
+    var s = try Scratch.init("pax_escape");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
 
     // Benign ustar linkname passes the pre-scan, but the pax override climbs
     // out of dest — the extract must refuse it, not materialise it.
@@ -633,7 +676,7 @@ test "extractTarGz rejects a pax linkpath that escapes the destination" {
     var t = TestTar.init(&raw);
     t.pax('x', "linkpath", "../../../../../../tmp/evil");
     t.entry("placeholder", '2', "benign");
-    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &tmp, t.bytes()));
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &s, t.bytes()));
 }
 
 test "extractTarGz accepts a pax linkpath within the destination" {
@@ -641,23 +684,19 @@ test "extractTarGz accepts a pax linkpath within the destination" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest");
+    var s = try Scratch.init("pax_ok");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
 
     var raw: [4096]u8 = undefined;
     var t = TestTar.init(&raw);
     t.pax('x', "linkpath", "legit-target");
     t.entry("link", '2', "benign");
-    try testExtract(io, &tmp, t.bytes());
+    try testExtract(io, &s, t.bytes());
 
     // The pax linkpath, not the ustar linkname, must be what landed on disk —
     // proving the pre-scan validated (and the extractor used) the same bytes.
-    var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
-    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dest", .{base});
-    var dest_dir = try std.Io.Dir.openDirAbsolute(io, dst, .{});
+    var dest_dir = try std.Io.Dir.openDirAbsolute(io, s.p("/dest"), .{});
     defer dest_dir.close(io);
     var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = link_buf[0..try dest_dir.readLink(io, "link", &link_buf)];
@@ -669,9 +708,9 @@ test "extractTarGz tolerates an oversized pax header from a file's xattrs" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest");
+    var s = try Scratch.init("pax_xattr");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
 
     // macOS bsdtar packs a signed binary's extended attributes into a pax 'x'
     // header far larger than any fixed payload buffer (yabai ships ~365 KiB).
@@ -690,13 +729,9 @@ test "extractTarGz tolerates an oversized pax header from a file's xattrs" {
     var t = TestTar.init(tar);
     t.paxRecord('x', rec);
     t.file("payload", "hello");
-    try testExtract(io, &tmp, t.bytes());
+    try testExtract(io, &s, t.bytes());
 
-    var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
-    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dest", .{base});
-    var dest_dir = try std.Io.Dir.openDirAbsolute(io, dst, .{});
+    var dest_dir = try std.Io.Dir.openDirAbsolute(io, s.p("/dest"), .{});
     defer dest_dir.close(io);
     const st = try dest_dir.statFile(io, "payload", .{});
     try std.testing.expectEqual(@as(u64, "hello".len), st.size);
@@ -707,9 +742,9 @@ test "extractTarGz rejects a pax linkpath escape that trails a large xattr recor
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest");
+    var s = try Scratch.init("pax_escape_after_xattr");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
 
     // A malicious linkpath sitting *after* a discarded xattr blob in the same
     // pax header must still be caught — proving the streaming parser stays
@@ -728,7 +763,7 @@ test "extractTarGz rejects a pax linkpath escape that trails a large xattr recor
     var t = TestTar.init(tar);
     t.paxRecord('x', rec_buf[0 .. r1.len + r2.len]);
     t.entry("placeholder", '2', "benign");
-    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &tmp, t.bytes()));
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &s, t.bytes()));
 }
 
 test "extractTarGz applies a pax linkpath that trails a large xattr record" {
@@ -736,9 +771,9 @@ test "extractTarGz applies a pax linkpath that trails a large xattr record" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest");
+    var s = try Scratch.init("pax_ok_after_xattr");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
 
     // The positive mirror: a legitimate linkpath following the discarded blob
     // must still be captured and applied to the entry.
@@ -756,13 +791,9 @@ test "extractTarGz applies a pax linkpath that trails a large xattr record" {
     var t = TestTar.init(tar);
     t.paxRecord('x', rec_buf[0 .. r1.len + r2.len]);
     t.entry("link", '2', "benign");
-    try testExtract(io, &tmp, t.bytes());
+    try testExtract(io, &s, t.bytes());
 
-    var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
-    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dest", .{base});
-    var dest_dir = try std.Io.Dir.openDirAbsolute(io, dst, .{});
+    var dest_dir = try std.Io.Dir.openDirAbsolute(io, s.p("/dest"), .{});
     defer dest_dir.close(io);
     var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = link_buf[0..try dest_dir.readLink(io, "link", &link_buf)];
@@ -774,9 +805,9 @@ test "extractTarGz ignores a global pax linkpath (no leak to the next entry)" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest");
+    var s = try Scratch.init("pax_global");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
 
     // A 'g' global header must not be applied to following entries; the
     // benign ustar target stands, so this extracts cleanly.
@@ -784,7 +815,7 @@ test "extractTarGz ignores a global pax linkpath (no leak to the next entry)" {
     var t = TestTar.init(&raw);
     t.pax('g', "linkpath", "../../../../../../tmp/evil");
     t.entry("link", '2', "benign");
-    try testExtract(io, &tmp, t.bytes());
+    try testExtract(io, &s, t.bytes());
 }
 
 test "extractTarGz applies only the last pax header before an entry" {
@@ -792,9 +823,9 @@ test "extractTarGz applies only the last pax header before an entry" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest");
+    var s = try Scratch.init("pax_last_wins");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
 
     // The first 'x' escapes, but a second 'x' supersedes it with a safe
     // target — matching std.tar's reset. Over-carrying the first would
@@ -804,7 +835,7 @@ test "extractTarGz applies only the last pax header before an entry" {
     t.pax('x', "linkpath", "../../../../../../tmp/evil");
     t.pax('x', "linkpath", "safe-target");
     t.entry("link", '2', "benign");
-    try testExtract(io, &tmp, t.bytes());
+    try testExtract(io, &s, t.bytes());
 }
 
 test "extractTarGz rejects a pax path override that escapes by name" {
@@ -812,9 +843,9 @@ test "extractTarGz rejects a pax path override that escapes by name" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest");
+    var s = try Scratch.init("pax_path_escape");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
 
     // A pax `path=` override re-runs the entry-name guard; a climbing name
     // is rejected even though the ustar name is benign.
@@ -822,7 +853,7 @@ test "extractTarGz rejects a pax path override that escapes by name" {
     var t = TestTar.init(&raw);
     t.pax('x', "path", "../escape-name");
     t.entry("placeholder", '2', "benign");
-    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &tmp, t.bytes()));
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &s, t.bytes()));
 }
 
 test "extractTarGz rejects a pax linkpath that escapes via a hard link" {
@@ -830,9 +861,9 @@ test "extractTarGz rejects a pax linkpath that escapes via a hard link" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest");
+    var s = try Scratch.init("pax_hardlink_escape");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
 
     // std.tar applies pax `linkpath` to hard-link targets too; the pre-scan
     // recovers hard links itself, so the effective target must clear the
@@ -841,7 +872,7 @@ test "extractTarGz rejects a pax linkpath that escapes via a hard link" {
     var t = TestTar.init(&raw);
     t.pax('x', "linkpath", "../escape");
     t.entry("placeholder", '1', "benign");
-    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &tmp, t.bytes()));
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &s, t.bytes()));
 }
 
 test "extractTarGz does not leak a pax override to a later entry" {
@@ -849,9 +880,9 @@ test "extractTarGz does not leak a pax override to a later entry" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest");
+    var s = try Scratch.init("pax_no_leak");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
 
     // The 'x' override applies to entry "a" only; "b" must fall back to its
     // own ustar target, never inherit "a"'s pax linkpath.
@@ -860,13 +891,9 @@ test "extractTarGz does not leak a pax override to a later entry" {
     t.pax('x', "linkpath", "target-a");
     t.entry("a", '2', "ustar-a");
     t.entry("b", '2', "target-b");
-    try testExtract(io, &tmp, t.bytes());
+    try testExtract(io, &s, t.bytes());
 
-    var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
-    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dest", .{base});
-    var dest_dir = try std.Io.Dir.openDirAbsolute(io, dst, .{});
+    var dest_dir = try std.Io.Dir.openDirAbsolute(io, s.p("/dest"), .{});
     defer dest_dir.close(io);
     var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const a = link_buf[0..try dest_dir.readLink(io, "a", &link_buf)];
@@ -878,25 +905,18 @@ test "extractTarGz does not leak a pax override to a later entry" {
 
 // --- subprocess-extractor symlink-target guard (xz/zip) -------------------
 
-fn testDestAbs(tmp: *std.testing.TmpDir, io: std.Io, buf: []u8) ![]const u8 {
-    var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
-    return std.fmt.bufPrint(buf, "{s}/dest", .{base});
-}
-
 test "rejectEscapingSymlinks rejects a climbing target and wipes the tree" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest");
+    var s = try Scratch.init("sym_climb");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
     // A symlink at the root climbing several levels escapes dest.
-    try tmp.dir.symLink(io, "../../../../etc/evil", "dest/escape", .{});
+    try s.dir.symLink(io, "../../../../etc/evil", "dest/escape", .{});
 
-    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dst = try testDestAbs(&tmp, io, &dst_buf);
+    const dst = s.p("/dest");
     try std.testing.expectError(error.ExtractionFailed, rejectEscapingSymlinks(io, dst));
     // Rejection wipes the tree so nothing dangerous is left behind.
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, dst, .{}));
@@ -907,13 +927,12 @@ test "rejectEscapingSymlinks rejects an absolute target" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest");
-    try tmp.dir.symLink(io, "/etc/passwd", "dest/abs", .{});
+    var s = try Scratch.init("sym_abs");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+    try s.dir.symLink(io, "/etc/passwd", "dest/abs", .{});
 
-    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dst = try testDestAbs(&tmp, io, &dst_buf);
+    const dst = s.p("/dest");
     try std.testing.expectError(error.ExtractionFailed, rejectEscapingSymlinks(io, dst));
 }
 
@@ -922,14 +941,13 @@ test "rejectEscapingSymlinks rejects a nested climbing target" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest/sub");
+    var s = try Scratch.init("sym_nested_climb");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest/sub");
     // From dest/sub, three climbs reach above dest.
-    try tmp.dir.symLink(io, "../../../etc/evil", "dest/sub/escape", .{});
+    try s.dir.symLink(io, "../../../etc/evil", "dest/sub/escape", .{});
 
-    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dst = try testDestAbs(&tmp, io, &dst_buf);
+    const dst = s.p("/dest");
     try std.testing.expectError(error.ExtractionFailed, rejectEscapingSymlinks(io, dst));
 }
 
@@ -938,15 +956,14 @@ test "rejectEscapingSymlinks accepts in-tree symlinks" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest/bin");
+    var s = try Scratch.init("sym_in_tree");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest/bin");
     // A sibling-relative link and a one-level climb that stays in-tree.
-    try tmp.dir.symLink(io, "sibling", "dest/ok", .{});
-    try tmp.dir.symLink(io, "../lib/real", "dest/bin/link", .{});
+    try s.dir.symLink(io, "sibling", "dest/ok", .{});
+    try s.dir.symLink(io, "../lib/real", "dest/bin/link", .{});
 
-    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dst = try testDestAbs(&tmp, io, &dst_buf);
+    const dst = s.p("/dest");
     try rejectEscapingSymlinks(io, dst);
     // The tree is left intact when nothing escapes.
     try std.Io.Dir.accessAbsolute(io, dst, .{});
@@ -957,17 +974,15 @@ test "rejectEscapingSymlinks does not follow symlinks while walking" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "dest/realdir");
-    try tmp.dir.writeFile(io, .{ .sub_path = "dest/realdir/f", .data = "x" });
+    var s = try Scratch.init("sym_no_follow");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest/realdir");
+    try s.dir.writeFile(io, .{ .sub_path = "dest/realdir/f", .data = "x" });
     // A symlink to an in-tree dir and a self-referential symlink: if the
     // walker followed either, this would recurse forever instead of
     // terminating. Both targets are in-tree, so the guard must accept them.
-    try tmp.dir.symLink(io, "realdir", "dest/dirlink", .{});
-    try tmp.dir.symLink(io, ".", "dest/self", .{});
+    try s.dir.symLink(io, "realdir", "dest/dirlink", .{});
+    try s.dir.symLink(io, ".", "dest/self", .{});
 
-    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dst = try testDestAbs(&tmp, io, &dst_buf);
-    try rejectEscapingSymlinks(io, dst);
+    try rejectEscapingSymlinks(io, s.p("/dest"));
 }

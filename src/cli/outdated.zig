@@ -377,29 +377,67 @@ test "intersectWithDb keeps a revision-bumped formula" {
     try std.testing.expectEqualStrings("1.2.3_1", out[0].installed);
 }
 
-/// Seed a temp cache dir + in-memory DB for the `pruneSnapshot` tests.
-const PruneEnv = struct {
-    tmp: std.testing.TmpDir,
-    db: sqlite.Database,
-    buf: [std.fs.max_path_bytes]u8 = undefined,
-    len: usize = 0,
+const fs_test_io = std.Options.debug_io;
 
-    fn init() !PruneEnv {
-        var env: PruneEnv = .{ .tmp = std.testing.tmpDir(.{}), .db = try sqlite.Database.open(":memory:") };
-        try schema.initSchema(&env.db);
-        env.len = try std.Io.Dir.realPath(env.tmp.dir, std.Options.debug_io, &env.buf);
-        return env;
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Stands in for std.testing.tmpDir, which builds under .zig-cache - a tree the
+/// build system owns and rewrites underneath concurrent test runs. The pid and
+/// sequence keep overlapping runs from deleting each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+    dir: std.Io.Dir,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const raw = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        std.Io.Dir.cwd().deleteTree(fs_test_io, raw) catch {};
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
+        // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
+        // code under test reports compare equal to `base`.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
+        errdefer d.close(fs_test_io);
+        const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
+        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        return .{ .arena = arena, .base = base, .dir = d };
     }
 
-    /// Derived on call: `init` returns by value, so a stored slice would
-    /// point into the moved-from copy's buffer.
+    fn deinit(self: *Scratch) void {
+        self.dir.close(fs_test_io);
+        std.Io.Dir.cwd().deleteTree(fs_test_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
+/// Seed a temp cache dir + in-memory DB for the `pruneSnapshot` tests.
+const PruneEnv = struct {
+    scratch: Scratch,
+    db: sqlite.Database,
+
+    fn init(comptime tag: []const u8) !PruneEnv {
+        var scratch = try Scratch.init(tag);
+        errdefer scratch.deinit();
+        var db = try sqlite.Database.open(":memory:");
+        errdefer db.close();
+        try schema.initSchema(&db);
+        return .{ .scratch = scratch, .db = db };
+    }
+
     fn dir(self: *const PruneEnv) []const u8 {
-        return self.buf[0..self.len];
+        return self.scratch.base;
     }
 
     fn deinit(self: *PruneEnv) void {
         self.db.close();
-        self.tmp.cleanup();
+        self.scratch.deinit();
     }
 };
 
@@ -409,7 +447,7 @@ test "pruneSnapshot drops an upgraded keg, keeps an untouched one, and preserves
     // wget must survive — a plain delete would cost it a needless audit.
     const a = std.testing.allocator;
     const io = std.Options.debug_io;
-    var env = try PruneEnv.init();
+    var env = try PruneEnv.init("prune_upgraded");
     defer env.deinit();
 
     try env.db.exec(
@@ -441,7 +479,7 @@ test "pruneSnapshot matches each array against its own table" {
     // upgrade drop the other's still-valid entry.
     const a = std.testing.allocator;
     const io = std.Options.debug_io;
-    var env = try PruneEnv.init();
+    var env = try PruneEnv.init("prune_per_table");
     defer env.deinit();
 
     try env.db.exec(
@@ -477,7 +515,7 @@ test "pruneSnapshot keeps a pinned keg an upgrade refused to move" {
     // genuinely outdated — pruning it would silently under-report.
     const a = std.testing.allocator;
     const io = std.Options.debug_io;
-    var env = try PruneEnv.init();
+    var env = try PruneEnv.init("prune_pinned");
     defer env.deinit();
 
     try env.db.exec(
@@ -505,7 +543,7 @@ test "pruneSnapshot never synthesises a snapshot that was not there" {
     // partial view is the under-reporting the plan warm gate exists to veto.
     const a = std.testing.allocator;
     const io = std.Options.debug_io;
-    var env = try PruneEnv.init();
+    var env = try PruneEnv.init("prune_absent");
     defer env.deinit();
 
     pruneSnapshot(io, a, &env.db, env.dir());
@@ -650,10 +688,9 @@ test "warmSnapshotFromRecompute writes the in-hand entries on a full-keg walk" {
     const io = threaded.io();
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+    var s = try Scratch.init("warm_full_walk");
+    defer s.deinit();
+    const cache_dir = s.base;
 
     const formulas = [_]OutdatedEntry{
         .{ .name = @constCast("wget"), .installed = @constCast("1.21.3"), .latest = @constCast("1.21.4") },
@@ -680,10 +717,9 @@ test "warmSnapshotFromRecompute writes no snapshot on a narrowed walk" {
     const io = threaded.io();
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+    var s = try Scratch.init("warm_narrowed_walk");
+    defer s.deinit();
+    const cache_dir = s.base;
 
     const formulas = [_]OutdatedEntry{
         .{ .name = @constCast("wget"), .installed = @constCast("1.21.3"), .latest = @constCast("1.21.4") },
@@ -714,10 +750,9 @@ test "warmSnapshotFromRecompute gate is closed for every narrowed walk, not just
         .{ .filter = .{ .by_tap = "user/repo" }, .scope = .{ .tap = "user/repo" } },
     };
     for (narrowed) |case| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cache_dir = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+        var s = try Scratch.init("warm_gate_closed");
+        defer s.deinit();
+        const cache_dir = s.base;
 
         warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, case.filter, case.scope, &entries, &entries);
         try std.testing.expect(readSnapshot(io, std.testing.allocator, cache_dir) == null);
@@ -730,10 +765,9 @@ test "warmSnapshotFromRecompute writes an empty snapshot when a full walk finds 
     const io = threaded.io();
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+    var s = try Scratch.init("warm_empty_full_walk");
+    defer s.deinit();
+    const cache_dir = s.base;
 
     // The zero-keg full recompute: an empty audit still writes, so a later
     // cached read serves "nothing outdated" instead of a stale snapshot.
@@ -752,16 +786,15 @@ test "warmSnapshotFromRecompute swallows a write failure without crashing" {
     const io = threaded.io();
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+    var s = try Scratch.init("warm_write_failure");
+    defer s.deinit();
+    const base = s.base;
 
     // Point cache_dir at a regular file so writing `<dir>/outdated.json` hits
     // ENOTDIR. The best-effort gate must absorb the failure so a snapshot
     // hiccup never sinks the recompute the user already saw, and leave nothing
     // half-written behind.
-    (try tmp.dir.createFile(io, "not_a_dir", .{})).close(io);
+    (try s.dir.createFile(io, "not_a_dir", .{})).close(io);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const file_as_dir = try std.fmt.bufPrint(&path_buf, "{s}/not_a_dir", .{base});
     warmSnapshotFromRecompute(&ctx, std.testing.allocator, file_as_dir, .all, .{}, &.{}, &.{});

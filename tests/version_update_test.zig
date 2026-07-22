@@ -80,20 +80,15 @@ test "updateAvailable: only a strictly newer release counts" {
 // contract — happy path returns an owned slice, failure path leaves zero
 // allocations behind.
 
-fn tmpDirAbsolute(tmp: *std.testing.TmpDir, buf: []u8) ![]const u8 {
-    const n = try std.Io.Dir.realPath(tmp.dir, std.Options.debug_io, buf);
-    return buf[0..n];
-}
-
 test "writeResponseBody: writes body and returns caller-owned path" {
     output_mod.setQuiet(true);
     defer output_mod.setQuiet(false);
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const dir_abs = try tmpDirAbsolute(&tmp, &buf);
+    const dir_abs = try makeScratch(testing.allocator, "write_body");
+    defer {
+        fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir_abs) catch {};
+        testing.allocator.free(dir_abs);
+    }
 
     const path = try updater.writeResponseBody(std.Options.debug_io, testing.allocator, dir_abs, "payload.bin", "hello-T011");
     defer testing.allocator.free(path);
