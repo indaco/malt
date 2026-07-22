@@ -190,9 +190,11 @@ fn isCorePathRow(row: KegRow) bool {
     return if (row.tap) |t| install_args_mod.isCoreTap(t) else true;
 }
 
-// Outdated policy: malt treats the tap as the source of truth. A keg is
-// "outdated" whenever its revision-qualified installed version is not byte-equal
-// to the current upstream version — NOT when it is strictly older. This never
+// Outdated policy — the single normative statement; every other compare site
+// points here rather than restating it. malt treats the tap as the source of
+// truth. A keg is "outdated" whenever its revision-qualified installed version
+// is not byte-equal to the current upstream version — NOT when it is strictly
+// older (casks have no revision, so theirs is bare). This never
 // misses an upgrade (any difference surfaces); the trade-off is that if upstream
 // moves backward (a yanked release), `outdated` lists it and `upgrade` follows
 // the tap down. That downgrade is by design, surfaced as `old -> new` in
@@ -952,9 +954,16 @@ fn tapVersionFromSubtrees(
                 return null;
             };
             // Qualify with the .rb revision so a tap revision-only bump is
-            // detected, matching the core fetch path.
+            // detected, matching the core fetch path. Casks have no revision to
+            // qualify with, so a qualified string here could never equal an
+            // installed one — see the outdated policy note above.
+            // Keyed on the primary subtree, not the list length, so adding a
+            // root-layout cask fallback the way `.formula_root` was added
+            // cannot silently re-qualify.
+            const is_cask = subtrees.len > 0 and subtrees[0] == .cask;
+            const revision = if (is_cask) 0 else rb_info.revision;
             var ver_buf: [256]u8 = undefined;
-            const qualified = formula_mod.pkgVersion(&ver_buf, rb_info.version, rb_info.revision) catch rb_info.version;
+            const qualified = formula_mod.pkgVersion(&ver_buf, rb_info.version, revision) catch rb_info.version;
             return alloc.dupe(u8, qualified) catch null;
         },
     }
@@ -1618,6 +1627,50 @@ test "tapVersionFromSubtrees qualifies the resolved version with the .rb revisio
     defer if (v) |vv| std.testing.allocator.free(vv);
     try std.testing.expect(v != null);
     try std.testing.expectEqualStrings("1.2.3_2", v.?);
+}
+
+test "tapVersionFromSubtrees discards the revision on the cask leg" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    // A hand-written tap cask carrying a stray `revision`: no Cask DSL stanza
+    // produces one, but the shared Ruby parser picks it up anyway.
+    const cask_rb =
+        \\cask "pkg" do
+        \\  version "1.2"
+        \\  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+        \\  url "https://x/pkg-1.2.dmg"
+        \\  revision 2
+        \\end
+    ;
+    // Primed to 1: the cask leg has no root-layout fallback to spend the
+    // server's opening 404 on.
+    var srv = RbFallbackServer{ .io = io, .listener = &listener, .root_rb = cask_rb, .idx = std.atomic.Value(usize).init(1) };
+    const thread = try std.Thread.spawn(.{}, RbFallbackServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{.cask}, "cask", "user/repo");
+    listener.deinit(io);
+    thread.join();
+
+    defer if (v) |vv| std.testing.allocator.free(vv);
+    try std.testing.expect(v != null);
+    try std.testing.expectEqualStrings("1.2", v.?);
+    // The convergence that actually failed: byte-equal to the bare `version`
+    // upgrade's cask skip decision compares against.
+    const parsed = install_rb_parse_mod.parseRubyFormula(cask_rb).?;
+    try std.testing.expectEqualStrings(parsed.version, v.?);
 }
 
 test "tap rows reuse the caller-supplied client (the tap path constructs no HttpClient)" {

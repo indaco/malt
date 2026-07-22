@@ -1009,13 +1009,10 @@ fn upgradeRoutedTapCask(
     }
 
     if (dry_run) {
-        if (sink) |s| {
-            // Qualify with the .rb revision to match `assembleEntries`'
-            // tap-cask latest (`pkgVersion(version, revision)`).
-            var latest_buf: [256]u8 = undefined;
-            const latest = formula_mod.pkgVersion(&latest_buf, rb_info.version, rb_info.revision) catch rb_info.version;
-            s.collectCask(token, installed_version, latest);
-        }
+        // Bare, like the skip decision above: this warms the snapshot that
+        // `outdated` reads, and a cask's installed version can never carry a
+        // revision to match a qualified one against.
+        if (sink) |s| s.collectCask(token, installed_version, rb_info.version);
         output.info("Dry run: would upgrade cask {s} {s} -> {s}", .{ token, installed_version, rb_info.version });
         output.emitNdjsonEvent(.would_install, token, null);
         return .would_upgrade;
