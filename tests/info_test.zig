@@ -286,7 +286,7 @@ test "info --cask --formula shows the installed formula, not 'not installed'" {
     defer testing.allocator.free(out);
 
     try testing.expect(std.mem.indexOf(u8, out, "not installed") == null);
-    try testing.expect(std.mem.startsWith(u8, out, "wget: "));
+    try testing.expectStringStartsWith(out, "wget: ");
 }
 
 test "info --cask --formula --json pins installed:true for an installed package" {
@@ -317,7 +317,7 @@ test "info --formula still narrows to the installed formula" {
     const out = try captureInfo(testing.allocator, &.{ "--formula", "wget" }, "formula_only");
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.startsWith(u8, out, "wget: "));
+    try testing.expectStringStartsWith(out, "wget: ");
 }
 
 test "info --cask --formula resolves an installed cask (formula misses, cask runs)" {
@@ -336,7 +336,7 @@ test "info --cask --formula resolves an installed cask (formula misses, cask run
     defer testing.allocator.free(out);
 
     try testing.expect(std.mem.indexOf(u8, out, "not installed") == null);
-    try testing.expect(std.mem.startsWith(u8, out, "firefox: "));
+    try testing.expectStringStartsWith(out, "firefox: ");
     try testing.expect(std.mem.indexOf(u8, out, "(cask)") != null);
 }
 
