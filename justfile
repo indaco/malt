@@ -49,6 +49,13 @@ test: regressions-static
 regressions *scripts:
     @./scripts/run-regressions.sh {{ scripts }}
 
+# Run the suite as several simultaneous processes to catch tests that share
+# a fixture path. `just test` runs one process and cannot see those.
+# Also fails if any run leaves a scratch tree behind.
+[group('test')]
+test-concurrent copies="6" rounds="2":
+    ./scripts/test-concurrent.sh {{ copies }} {{ rounds }}
+
 # Run tests under kcov, print line-coverage percentage, and refresh
 # the README badge SVG at .github/badges/coverage.svg.
 # HTML report lands at coverage/merged/kcov-merged/index.html.

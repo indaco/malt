@@ -108,6 +108,17 @@ for pattern in \
   done
 done
 
+# The sandbox fence tests cannot root their scratch under /tmp: the macOS
+# profile grants blanket write there, so the fence would pass without
+# proving anything. They use ~/.cache instead, which the loop above misses.
+if [ -n "${HOME:-}" ]; then
+  echo "▸ Fence scratch under \$HOME/.cache"
+  for path in "$HOME"/.cache/malt_fence_*; do
+    [ -e "$path" ] || continue
+    remove_tree "$path"
+  done
+fi
+
 echo "▸ Bench peer-tool prefixes"
 # Mirror bench.sh defaults; honour env overrides so user-tweaked paths
 # still get cleaned.
