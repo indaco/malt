@@ -1337,6 +1337,14 @@ fn parseIntValue(lexeme: []const u8) i64 {
         if (lexeme[1] == 'b' or lexeme[1] == 'B') {
             return std.fmt.parseInt(i64, lexeme[2..], 2) catch 0;
         }
+        if (lexeme[1] == 'd' or lexeme[1] == 'D') {
+            return std.fmt.parseInt(i64, lexeme[2..], 10) catch 0;
+        }
+    }
+    // Ruby reads a bare leading zero as octal, which is how every formula
+    // spells a file mode: `chmod 0755`.
+    if (lexeme.len > 1 and lexeme[0] == '0' and std.ascii.isDigit(lexeme[1])) {
+        return std.fmt.parseInt(i64, lexeme[1..], 8) catch 0;
     }
     return std.fmt.parseInt(i64, lexeme, 10) catch 0;
 }
@@ -1345,6 +1353,28 @@ fn parseIntValue(lexeme: []const u8) i64 {
 // bounded `ParseError` with a diagnostic — never recurse into a native
 // stack overflow. Balanced parens so that, without the guard, the body
 // would parse cleanly; the guard is what converts it into an error.
+// Formulae are Ruby, where a leading zero means octal. Reading `chmod 0755`
+// as decimal 755 yields mode 0o1363 — owner loses read, and the sticky bit
+// appears — so every mode literal in every formula lands wrong.
+test "parser: a leading-zero integer literal is octal, as in Ruby" {
+    try std.testing.expectEqual(@as(i64, 0o755), parseIntValue("0755"));
+    try std.testing.expectEqual(@as(i64, 0o644), parseIntValue("0644"));
+    try std.testing.expectEqual(@as(i64, 0o600), parseIntValue("0600"));
+    try std.testing.expectEqual(@as(i64, 0o4755), parseIntValue("04755"));
+}
+
+test "parser: integer literals without a leading zero stay decimal" {
+    try std.testing.expectEqual(@as(i64, 0), parseIntValue("0"));
+    try std.testing.expectEqual(@as(i64, 755), parseIntValue("755"));
+    try std.testing.expectEqual(@as(i64, 10), parseIntValue("10"));
+}
+
+test "parser: explicit radix prefixes keep their meaning" {
+    try std.testing.expectEqual(@as(i64, 0x1F), parseIntValue("0x1F"));
+    try std.testing.expectEqual(@as(i64, 0o17), parseIntValue("0o17"));
+    try std.testing.expectEqual(@as(i64, 0b101), parseIntValue("0b101"));
+}
+
 test "parser: expression nesting beyond the depth limit is a bounded ParseError" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

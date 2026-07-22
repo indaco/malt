@@ -585,6 +585,15 @@ test "interpreter: chmod array no error" {
     ;
     const err = try runSnippet(&arena, src, prefix);
     try testing.expect(err == null);
+
+    // The mode has to survive the parser, not just the builtin: a formula
+    // spells it `0755`, and Ruby reads a leading zero as octal. Reading it as
+    // decimal lands 0o1363 here, which also denies owner read and so wedges
+    // the scratch teardown.
+    for ([_][]const u8{ bin_dir, sbin_dir }) |d| {
+        const got = (try test_io.cwd().statFile(std.Options.debug_io, d, .{})).permissions.toMode();
+        try testing.expectEqual(@as(std.posix.mode_t, 0o755), got & 0o777);
+    }
 }
 
 // ---------------------------------------------------------------------------
