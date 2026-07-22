@@ -561,7 +561,9 @@ fn upgradeFormula(
     }
 
     // Reconstruct the revision-aware path label for the old keg so
-    // cellar_mod.remove / linker calls target the actual on-disk dir.
+    // cellar_mod.remove / linker calls target the actual on-disk dir. It is
+    // also what the skip compare and the upgrade lines below must use: both
+    // sides have to be qualified or a revision move renders inverted.
     var old_pkgver_buf: [128]u8 = undefined;
     const old_pkg_version = formula_mod.pkgVersion(&old_pkgver_buf, old.version, old.revision) catch old.version;
 
@@ -589,13 +591,13 @@ fn upgradeFormula(
 
     if (dry_run) {
         if (sink) |s| s.collectFormula(name, old.version, old.revision, formula.pkg_version);
-        output.info("Dry run: would upgrade {s} {s} -> {s}", .{ name, old.version, formula.pkg_version });
+        output.info("Dry run: would upgrade {s} {s} -> {s}", .{ name, old_pkg_version, formula.pkg_version });
         // Same vocabulary across install/upgrade/migrate — one parser fits all.
         output.emitNdjsonEvent(.would_install, name, null);
         return .would_upgrade;
     }
 
-    output.info("Upgrading {s} {s} -> {s}...", .{ name, old.version, formula.pkg_version });
+    output.info("Upgrading {s} {s} -> {s}...", .{ name, old_pkg_version, formula.pkg_version });
     output.emitNdjsonEvent(.resolved, name, null);
 
     // Bottles bake LC_LOAD_DYLIB paths against their own dep set, so a
@@ -760,6 +762,9 @@ fn upgradeFormula(
 /// move the tap `.rb` proves current; `collect` is a genuine would-upgrade row.
 const TapWarmDecision = enum { collect, skip, taint };
 
+/// Equality — not ordering — is the definition of outdated; the normative
+/// statement lives in `src/cli/outdated/refresh.zig` and is not restated here.
+///
 /// null `upstream` (fetch/parse failed) taints rather than skips: without a
 /// version we cannot prove the row current, and skipping it would silently
 /// under-report a genuinely-outdated tap keg — a taint re-audits everything
@@ -1347,6 +1352,10 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     };
     defer parsed_cask.deinit();
 
+    // Bare on both sides, and correct only because a cask carries no revision
+    // anywhere — the formula leg has to qualify both sides to obey the same
+    // policy (see `src/cli/outdated/refresh.zig`). Should a cask ever gain a
+    // revision, this compare and the prints below go wrong together.
     const installed_version = installed.version();
     if (std.mem.eql(u8, installed_version, parsed_cask.version)) {
         if (!bulk) output.skip("{s} is already at latest version {s}", .{ token, parsed_cask.version });

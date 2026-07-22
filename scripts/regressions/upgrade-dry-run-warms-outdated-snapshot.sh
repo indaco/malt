@@ -63,16 +63,16 @@ reset_state() {
 
 # Seed one installed formula keg (core path: tap is NULL).
 seed_keg() {
-  local name="$1" version="$2"
-  sqlite3 "$DB" "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
-    VALUES ('$name', '$name', '$version', 'seedsha', '/tmp/c/$name/$version');"
+  local name="$1" version="$2" revision="${3:-0}"
+  sqlite3 "$DB" "INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+    VALUES ('$name', '$name', '$version', $revision, 'seedsha', '/tmp/c/$name/$version');"
 }
 
 # Fake upstream: a fresh cached formula document at $stable. parseFormula only
 # needs name + versions.stable to derive pkg_version.
 seed_formula_cache() {
-  local name="$1" stable="$2"
-  printf '{"name":"%s","versions":{"stable":"%s"}}' "$name" "$stable" \
+  local name="$1" stable="$2" revision="${3:-0}"
+  printf '{"name":"%s","versions":{"stable":"%s"},"revision":%s}' "$name" "$stable" "$revision" \
     >"$API/formula_$name.json"
 }
 
@@ -126,5 +126,25 @@ seed_bogus_snapshot
 grep -q '"name":"bogus"' "$SNAP" ||
   fail "a real upgrade warmed the snapshot — the pre-upgrade set is stale once kegs mutate"
 pass "real upgrade leaves the snapshot untouched"
+
+# --- 5. Both sides of the would-upgrade line carry the revision ---
+# malt follows the tap down on an upstream yank (see the outdated policy note in
+# src/cli/outdated/refresh.zig), and --dry-run is the only preview of that. A
+# bare installed version against a qualified upstream one renders the yank
+# `1.2.3 -> 1.2.3_1`, i.e. backwards, so the one promised surprise is invisible.
+reset_state
+seed_keg regrev 1.2.3 2
+seed_formula_cache regrev 1.2.3 1
+
+OUT=$("$BIN" upgrade --dry-run 2>&1 || true)
+echo "$OUT" | grep -q "would upgrade regrev 1.2.3_2 -> 1.2.3_1" ||
+  fail "dry-run hid the installed revision (a downgrade rendered as an upgrade); got:\n$OUT"
+pass "would-upgrade line qualifies the installed version with its revision"
+
+# The warmed snapshot is the --json boundary the TUI reads: it was already
+# qualified before this fix and must stay byte-identical.
+grep -q '"name":"regrev","installed":"1.2.3_2","latest":"1.2.3_1"' "$SNAP" ||
+  fail "warmed snapshot entry changed shape; got: $(cat "$SNAP")"
+pass "warmed snapshot entry is unchanged by the display fix"
 
 printf '\n\xe2\x9c\x94 upgrade dry-run warms-outdated-snapshot regression passed\n'
