@@ -101,18 +101,62 @@ test "resolvePath rejects a malformed MALT_PREFIX" {
     try testing.expectEqual(@as(?[]const u8, null), resolvePath(env, &buf));
 }
 
-const tf_base = "/tmp/malt_theme_file_test";
-
-fn cleanBase() void {
-    var tmp = std.Io.Dir.openDirAbsolute(dbg_io, "/tmp", .{}) catch return;
-    defer tmp.close(dbg_io);
-    tmp.deleteTree(dbg_io, "malt_theme_file_test") catch {};
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(dbg_io, path) catch {};
 }
 
-fn freshBase() !void {
-    cleanBase();
-    try std.Io.Dir.createDirAbsolute(dbg_io, tf_base, .default_dir);
-}
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        try std.Io.Dir.createDirAbsolute(dbg_io, base, .default_dir);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
+/// Runtime `MALT_THEMES_FILE=<path>` environment block. The scratch paths are
+/// only known at run time, so `envSlice`'s comptime literals cannot be used.
+/// Storage lives in the caller's frame for as long as the returned block.
+const ThemesEnv = struct {
+    buf: [std.fs.max_path_bytes + 32]u8 = undefined,
+    entries: [1:null]?[*:0]const u8 = undefined,
+
+    fn env(self: *ThemesEnv, path: []const u8) !std.process.Environ {
+        const kv = try std.fmt.bufPrintSentinel(&self.buf, "MALT_THEMES_FILE={s}", .{path}, 0);
+        self.entries = .{kv.ptr};
+        return .{ .block = .{ .slice = &self.entries } };
+    }
+};
 
 fn writeFile(path: []const u8, bytes: []const u8) !void {
     const f = try std.Io.Dir.createFileAbsolute(dbg_io, path, .{});
@@ -121,55 +165,60 @@ fn writeFile(path: []const u8, bytes: []const u8) !void {
 }
 
 test "read returns the bytes of a valid regular themes file" {
-    try freshBase();
-    defer cleanBase();
-    const path = tf_base ++ "/themes.json";
+    var s = try Scratch.init("theme_file_valid");
+    defer s.deinit();
+    const path = s.p("/themes.json");
     try writeFile(path, "{\"version\":1}");
 
-    const env = envSlice(&[_:null]?[*:0]const u8{"MALT_THEMES_FILE=" ++ path});
+    var te: ThemesEnv = .{};
+    const env = try te.env(path);
     var buf: [4096]u8 = undefined;
     try testing.expectEqualStrings("{\"version\":1}", read(dbg_io, env, &buf).?);
 }
 
 test "read returns null for a missing file (not an error)" {
-    try freshBase();
-    defer cleanBase();
-    const env = envSlice(&[_:null]?[*:0]const u8{"MALT_THEMES_FILE=" ++ tf_base ++ "/absent.json"});
+    var s = try Scratch.init("theme_file_absent");
+    defer s.deinit();
+    var te: ThemesEnv = .{};
+    const env = try te.env(s.p("/absent.json"));
     var buf: [4096]u8 = undefined;
     try testing.expectEqual(@as(?[]const u8, null), read(dbg_io, env, &buf));
 }
 
 test "read refuses a symlinked leaf" {
-    try freshBase();
-    defer cleanBase();
-    const target = tf_base ++ "/real.json";
-    const link = tf_base ++ "/themes.json";
+    var s = try Scratch.init("theme_file_symlink");
+    defer s.deinit();
+    const target = s.p("/real.json");
+    const link = s.p("/themes.json");
     try writeFile(target, "{\"version\":1}");
     try std.Io.Dir.symLinkAbsolute(dbg_io, target, link, .{});
 
-    const env = envSlice(&[_:null]?[*:0]const u8{"MALT_THEMES_FILE=" ++ link});
+    var te: ThemesEnv = .{};
+    const env = try te.env(link);
     var buf: [4096]u8 = undefined;
     try testing.expectEqual(@as(?[]const u8, null), read(dbg_io, env, &buf));
 }
 
 test "read refuses a file larger than the caller's cap" {
-    try freshBase();
-    defer cleanBase();
-    const path = tf_base ++ "/themes.json";
+    var s = try Scratch.init("theme_file_oversize");
+    defer s.deinit();
+    const path = s.p("/themes.json");
     try writeFile(path, "x" ** 64); // 64 bytes
 
-    const env = envSlice(&[_:null]?[*:0]const u8{"MALT_THEMES_FILE=" ++ path});
+    var te: ThemesEnv = .{};
+    const env = try te.env(path);
     var small: [16]u8 = undefined; // cap below the file size
     try testing.expectEqual(@as(?[]const u8, null), read(dbg_io, env, &small));
 }
 
 test "read refuses a non-regular file (a directory)" {
-    try freshBase();
-    defer cleanBase();
-    const dir = tf_base ++ "/themes.json";
+    var s = try Scratch.init("theme_file_dir");
+    defer s.deinit();
+    const dir = s.p("/themes.json");
     try std.Io.Dir.createDirAbsolute(dbg_io, dir, .default_dir);
 
-    const env = envSlice(&[_:null]?[*:0]const u8{"MALT_THEMES_FILE=" ++ dir});
+    var te: ThemesEnv = .{};
+    const env = try te.env(dir);
     var buf: [4096]u8 = undefined;
     try testing.expectEqual(@as(?[]const u8, null), read(dbg_io, env, &buf));
 }

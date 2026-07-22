@@ -208,15 +208,54 @@ pub fn verify(io: std.Io, file_path: []const u8, expected_sha256: []const u8) !b
     return hash_mod.eqlHex256(computed_hex, expected_sha256);
 }
 
+const fs_test_io = std.Options.debug_io;
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        std.Io.Dir.cwd().deleteTree(fs_test_io, base) catch {};
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        std.Io.Dir.cwd().deleteTree(fs_test_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "verify returns true when sha256 matches on-disk content" {
     const testing = std.testing;
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_bottle_verify_ok";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("bottle_verify_ok");
+    defer s.deinit();
+    std.Io.Dir.createDirAbsolute(io, s.base, .default_dir) catch {};
 
-    const path = base ++ "/payload.bin";
+    const path = s.p("/payload.bin");
     const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
     try f.writeStreamingAll(io, "hello");
     f.close(io);
@@ -229,12 +268,11 @@ test "verify returns true when sha256 matches on-disk content" {
 test "verify returns false for a mismatching sha256" {
     const testing = std.testing;
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_bottle_verify_mismatch";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("bottle_verify_mismatch");
+    defer s.deinit();
+    std.Io.Dir.createDirAbsolute(io, s.base, .default_dir) catch {};
 
-    const path = base ++ "/payload.bin";
+    const path = s.p("/payload.bin");
     const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
     try f.writeStreamingAll(io, "hello");
     f.close(io);
@@ -244,18 +282,20 @@ test "verify returns false for a mismatching sha256" {
 
 test "verify returns false when the file does not exist" {
     const testing = std.testing;
-    try testing.expect(!try verify(std.Options.debug_io, "/tmp/malt_bottle_verify_missing_xyz", "00" ** 32));
+    // Unique base too: a concurrent run could otherwise create this path.
+    var s = try Scratch.init("bottle_verify_missing_xyz");
+    defer s.deinit();
+    try testing.expect(!try verify(std.Options.debug_io, s.base, "00" ** 32));
 }
 
 test "verify rejects mismatches in any position (constant-time-equivalent)" {
     const testing = std.testing;
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_bottle_verify_positions";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("bottle_verify_positions");
+    defer s.deinit();
+    std.Io.Dir.createDirAbsolute(io, s.base, .default_dir) catch {};
 
-    const path = base ++ "/payload.bin";
+    const path = s.p("/payload.bin");
     const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
     try f.writeStreamingAll(io, "hello");
     f.close(io);
@@ -275,12 +315,11 @@ test "verify rejects mismatches in any position (constant-time-equivalent)" {
 test "verify rejects expected_sha256 of wrong length" {
     const testing = std.testing;
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_bottle_verify_length";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("bottle_verify_length");
+    defer s.deinit();
+    std.Io.Dir.createDirAbsolute(io, s.base, .default_dir) catch {};
 
-    const path = base ++ "/payload.bin";
+    const path = s.p("/payload.bin");
     const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
     try f.writeStreamingAll(io, "hello");
     f.close(io);
@@ -295,17 +334,16 @@ test "verify hashes payloads larger than the streaming chunk without buffering" 
     // (200-400 MB) hit. RSS stays bounded by the chunk size.
     const testing = std.testing;
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_bottle_verify_chunked";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("bottle_verify_chunked");
+    defer s.deinit();
+    std.Io.Dir.createDirAbsolute(io, s.base, .default_dir) catch {};
 
     const size: usize = 192 * 1024;
     const payload = try testing.allocator.alloc(u8, size);
     defer testing.allocator.free(payload);
     for (payload, 0..) |*b, i| b.* = @truncate(i);
 
-    const path = base ++ "/payload.bin";
+    const path = s.p("/payload.bin");
     const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
     try f.writeStreamingAll(io, payload);
     f.close(io);
@@ -329,8 +367,10 @@ test "buildTmpArchivePath returns PathTooLong for an oversized dest_dir" {
 
 test "buildTmpArchivePath joins a normal dest_dir with the archive name" {
     var buf: [512]u8 = undefined;
-    const path = try buildTmpArchivePath(&buf, "/tmp/malt_bottle_buildpath_ok");
-    try std.testing.expectEqualStrings("/tmp/malt_bottle_buildpath_ok/bottle.tar.gz", path);
+    var s = try Scratch.init("bottle_buildpath_ok");
+    defer s.deinit();
+    const path = try buildTmpArchivePath(&buf, s.base);
+    try std.testing.expectEqualStrings(s.p("/bottle.tar.gz"), path);
 }
 
 // ---------------------------------------------------------------------------
@@ -397,12 +437,11 @@ test "checkStreamedSha tolerates empty and oversized expected without crashing" 
 
 test "HashingFileSink tees each chunk to the file and the hasher" {
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_hashing_file_sink";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("hashing_file_sink");
+    defer s.deinit();
+    std.Io.Dir.createDirAbsolute(io, s.base, .default_dir) catch {};
 
-    const path = base ++ "/bottle.tar.gz";
+    const path = s.p("/bottle.tar.gz");
     const file = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
 
     var sink = HashingFileSink.init(io, file);
@@ -437,12 +476,11 @@ test "HashingFileSink drain tolerates empty chunks and a zero splat" {
     // nothing, and a zero splat writes the pattern zero times. Both must leave
     // the file, digest, and len consistent with the bytes actually written.
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_hashing_file_sink_edge";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("hashing_file_sink_edge");
+    defer s.deinit();
+    std.Io.Dir.createDirAbsolute(io, s.base, .default_dir) catch {};
 
-    const path = base ++ "/bottle.tar.gz";
+    const path = s.p("/bottle.tar.gz");
     const file = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
 
     var sink = HashingFileSink.init(io, file);

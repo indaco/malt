@@ -36,6 +36,15 @@ const formula_wget_json =
     \\   }}}}
 ;
 
+/// `setenv` needs a sentinel-terminated prefix; the shared helper hands back a
+/// plain slice. Unique per process and call so overlapping runs can't share a
+/// prefix (and its sqlite lock).
+fn uniquePrefixZ(tag: []const u8) ![:0]const u8 {
+    const p = try test_io.uniqueTempPath(testing.allocator, "mamb", tag);
+    defer testing.allocator.free(p);
+    return testing.allocator.dupeZ(u8, p);
+}
+
 fn seedCacheFile(prefix: []const u8, rel: []const u8, body: []const u8) !void {
     const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
     defer testing.allocator.free(cache_api);
@@ -48,7 +57,8 @@ fn seedCacheFile(prefix: []const u8, rel: []const u8, body: []const u8) !void {
 }
 
 test "ambiguity warning fires when both formula and cask are cached" {
-    const prefix_z: [:0]const u8 = "/tmp/mamb_b";
+    const prefix_z = try uniquePrefixZ("both");
+    defer testing.allocator.free(prefix_z);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
@@ -83,7 +93,8 @@ test "ambiguity warning fires when both formula and cask are cached" {
 }
 
 test "ambiguity warning is silent when no cask cache is present" {
-    const prefix_z: [:0]const u8 = "/tmp/mamb_n";
+    const prefix_z = try uniquePrefixZ("none");
+    defer testing.allocator.free(prefix_z);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);

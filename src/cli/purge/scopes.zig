@@ -858,6 +858,44 @@ fn deleteCaskVersionRow(db: *sqlite.Database, token: []const u8, version: []cons
 const testing = std.testing;
 const fs_test_io = std.Options.debug_io;
 
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test
+/// runs share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        std.Io.Dir.cwd().deleteTree(fs_test_io, base) catch {};
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        std.Io.Dir.cwd().deleteTree(fs_test_io, self.base) catch {};
+        self.arena.deinit();
+    }
+};
+
 test "runStaleCasks surfaces db prepare failure when the casks table shape is wrong" {
     // Pre-existing `casks` table with the wrong shape: `initSchema`'s
     // CREATE IF NOT EXISTS is a no-op, the lookup statement cannot
@@ -865,20 +903,20 @@ test "runStaleCasks surfaces db prepare failure when the casks table shape is wr
     // candidate set and reported a clean no-op. Pin the loud signal.
     const allocator = testing.allocator;
 
-    const prefix = "/tmp/malt_runStaleCasks_prepare_err";
-    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    var s = try Scratch.init("runStaleCasks_prepare_err");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/cache/Cask");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/cache/Cask"));
 
     {
-        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
         defer db.close();
         try db.exec("CREATE TABLE casks (id INTEGER);");
     }
     {
-        const f = try std.Io.Dir.createFileAbsolute(fs_test_io, prefix ++ "/cache/Cask/ghost.dmg", .{ .truncate = true });
+        const f = try std.Io.Dir.createFileAbsolute(fs_test_io, s.p("/cache/Cask/ghost.dmg"), .{ .truncate = true });
         defer f.close(fs_test_io);
         try f.writeStreamingAll(fs_test_io, "x");
     }
@@ -902,14 +940,14 @@ test "runStaleCasks self-heals a schema-less db rather than reporting it as a fa
     // its sibling scopes (`runStoreOrphans`, `runUnusedDeps`).
     const allocator = testing.allocator;
 
-    const prefix = "/tmp/malt_runStaleCasks_self_heal";
-    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    var s = try Scratch.init("runStaleCasks_self_heal");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
 
     {
-        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
         db.close();
     }
 
@@ -929,17 +967,17 @@ test "runStaleCasks self-heals a schema-less db rather than reporting it as a fa
 test "runCache reclaims relocated kegs orphaned by a past logic-version bump" {
     const allocator = testing.allocator;
 
-    const prefix = "/tmp/malt_runCache_reloc_reap";
-    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    var s = try Scratch.init("runCache_reloc_reap");
+    defer s.deinit();
+    const prefix = s.base;
 
-    const cache_dir = prefix ++ "/cache";
+    const cache_dir = s.p("/cache");
     try std.Io.Dir.cwd().createDirPath(fs_test_io, cache_dir);
 
     const sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     // A version segment that is clearly not the current one → stale.
-    const stale_root = prefix ++ "/store-relocated/v999999";
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, stale_root ++ "/" ++ sha);
+    const stale_root = s.p("/store-relocated/v999999");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/store-relocated/v999999/" ++ sha));
     // The live version segment must survive the sweep.
     const current = try std.fmt.allocPrint(allocator, "{s}/store-relocated/v{d}/{s}", .{
         prefix, relocated_store.RELOC_LOGIC_VERSION, sha,
@@ -1018,15 +1056,15 @@ test "runOldVersions sweeps non-current cask per-version cache + caskroom + hist
     // reflect at least the cask removal.
     const allocator = testing.allocator;
 
-    const prefix = "/tmp/malt_runOldVersions_cask_sweep";
-    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    var s = try Scratch.init("runOldVersions_cask_sweep");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/cache/Cask");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/cache/Cask"));
 
     {
-        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
         defer db.close();
         try schema.initSchema(&db);
         try seedCurrentCask(&db, "flux", "2.0");
@@ -1034,10 +1072,10 @@ test "runOldVersions sweeps non-current cask per-version cache + caskroom + hist
         try seedCaskVersionRow(&db, "flux", "1.0", "dmg");
     }
 
-    try touchFile(fs_test_io, prefix ++ "/cache/Cask/flux-2.0.dmg");
-    try touchFile(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg");
-    try touchFile(fs_test_io, prefix ++ "/Caskroom/flux/2.0/.metadata");
-    try touchFile(fs_test_io, prefix ++ "/Caskroom/flux/1.0/.metadata");
+    try touchFile(fs_test_io, s.p("/cache/Cask/flux-2.0.dmg"));
+    try touchFile(fs_test_io, s.p("/cache/Cask/flux-1.0.dmg"));
+    try touchFile(fs_test_io, s.p("/Caskroom/flux/2.0/.metadata"));
+    try touchFile(fs_test_io, s.p("/Caskroom/flux/1.0/.metadata"));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
     const result = try runOldVersions(&ctx, allocator, prefix, false);
@@ -1046,22 +1084,22 @@ test "runOldVersions sweeps non-current cask per-version cache + caskroom + hist
     try testing.expect(result.removed >= 1);
 
     // Current artefacts survive.
-    try std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/cache/Cask/flux-2.0.dmg", .{});
-    try std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/Caskroom/flux/2.0", .{});
+    try std.Io.Dir.accessAbsolute(fs_test_io, s.p("/cache/Cask/flux-2.0.dmg"), .{});
+    try std.Io.Dir.accessAbsolute(fs_test_io, s.p("/Caskroom/flux/2.0"), .{});
 
     // Stale artefacts gone.
     try testing.expectError(
         error.FileNotFound,
-        std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg", .{}),
+        std.Io.Dir.accessAbsolute(fs_test_io, s.p("/cache/Cask/flux-1.0.dmg"), .{}),
     );
     try testing.expectError(
         error.FileNotFound,
-        std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/Caskroom/flux/1.0", .{}),
+        std.Io.Dir.accessAbsolute(fs_test_io, s.p("/Caskroom/flux/1.0"), .{}),
     );
 
     // History row deleted; current row preserved.
     {
-        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
         defer db.close();
         try testing.expectEqual(@as(i64, 1), try rowCount(&db, "flux"));
     }
@@ -1070,15 +1108,15 @@ test "runOldVersions sweeps non-current cask per-version cache + caskroom + hist
 test "runOldVersions --dry-run reports cask candidates without touching disk or db" {
     const allocator = testing.allocator;
 
-    const prefix = "/tmp/malt_runOldVersions_cask_dry_run";
-    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    var s = try Scratch.init("runOldVersions_cask_dry_run");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/cache/Cask");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/cache/Cask"));
 
     {
-        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
         defer db.close();
         try schema.initSchema(&db);
         try seedCurrentCask(&db, "flux", "2.0");
@@ -1086,8 +1124,8 @@ test "runOldVersions --dry-run reports cask candidates without touching disk or 
         try seedCaskVersionRow(&db, "flux", "1.0", "dmg");
     }
 
-    try touchFile(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg");
-    try touchFile(fs_test_io, prefix ++ "/Caskroom/flux/1.0/.metadata");
+    try touchFile(fs_test_io, s.p("/cache/Cask/flux-1.0.dmg"));
+    try touchFile(fs_test_io, s.p("/Caskroom/flux/1.0/.metadata"));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
     const result = try runOldVersions(&ctx, allocator, prefix, true);
@@ -1096,10 +1134,10 @@ test "runOldVersions --dry-run reports cask candidates without touching disk or 
     try testing.expect(result.removed >= 1);
 
     // Dry-run preserves everything.
-    try std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg", .{});
-    try std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/Caskroom/flux/1.0", .{});
+    try std.Io.Dir.accessAbsolute(fs_test_io, s.p("/cache/Cask/flux-1.0.dmg"), .{});
+    try std.Io.Dir.accessAbsolute(fs_test_io, s.p("/Caskroom/flux/1.0"), .{});
 
-    var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+    var db = try sqlite.Database.open(s.p("/db/malt.db"));
     defer db.close();
     try testing.expectEqual(@as(i64, 2), try rowCount(&db, "flux"));
 }
@@ -1110,23 +1148,23 @@ test "runOldVersions on already-swept cask state is a clean no-op" {
     // the idempotence acceptance criterion.
     const allocator = testing.allocator;
 
-    const prefix = "/tmp/malt_runOldVersions_cask_noop";
-    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    var s = try Scratch.init("runOldVersions_cask_noop");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/cache/Cask");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/cache/Cask"));
 
     {
-        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
         defer db.close();
         try schema.initSchema(&db);
         try seedCurrentCask(&db, "flux", "2.0");
         try seedCaskVersionRow(&db, "flux", "2.0", "dmg");
         try seedCaskVersionRow(&db, "flux", "1.0", "dmg");
     }
-    try touchFile(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg");
-    try touchFile(fs_test_io, prefix ++ "/Caskroom/flux/1.0/.metadata");
+    try touchFile(fs_test_io, s.p("/cache/Cask/flux-1.0.dmg"));
+    try touchFile(fs_test_io, s.p("/Caskroom/flux/1.0/.metadata"));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
     _ = try runOldVersions(&ctx, allocator, prefix, false);
@@ -1142,15 +1180,15 @@ test "runOldVersions ignores pin status when sweeping old cask versions" {
     // removal, matching the Cellar-side policy.
     const allocator = testing.allocator;
 
-    const prefix = "/tmp/malt_runOldVersions_cask_pinned";
-    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    var s = try Scratch.init("runOldVersions_cask_pinned");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/cache/Cask");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/cache/Cask"));
 
     {
-        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
         defer db.close();
         try schema.initSchema(&db);
         // Insert with auto_updates=1 to simulate a held cask; the cask
@@ -1165,8 +1203,8 @@ test "runOldVersions ignores pin status when sweeping old cask versions" {
         try seedCaskVersionRow(&db, "flux", "2.0", "dmg");
         try seedCaskVersionRow(&db, "flux", "1.0", "dmg");
     }
-    try touchFile(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg");
-    try touchFile(fs_test_io, prefix ++ "/Caskroom/flux/1.0/.metadata");
+    try touchFile(fs_test_io, s.p("/cache/Cask/flux-1.0.dmg"));
+    try touchFile(fs_test_io, s.p("/Caskroom/flux/1.0/.metadata"));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
     const result = try runOldVersions(&ctx, allocator, prefix, false);
@@ -1175,7 +1213,7 @@ test "runOldVersions ignores pin status when sweeping old cask versions" {
     try testing.expect(result.removed >= 1);
     try testing.expectError(
         error.FileNotFound,
-        std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg", .{}),
+        std.Io.Dir.accessAbsolute(fs_test_io, s.p("/cache/Cask/flux-1.0.dmg"), .{}),
     );
 }
 
@@ -1436,27 +1474,32 @@ fn writeFakeDylibLinker(io: std.Io, path: []const u8, dylib: [:0]const u8) !void
 test "runUnusedDeps keeps a dependency a still-installed keg's Mach-O links despite a missing edge" {
     const allocator = testing.allocator;
 
-    const prefix = "/tmp/malt_unuseddeps_linkguard";
-    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
-    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/Cellar/jq/1.0/bin");
+    var s = try Scratch.init("unuseddeps_linkguard");
+    defer s.deinit();
+    const prefix = s.base;
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/Cellar/jq/1.0/bin"));
 
     // jq (direct) + oniguruma (dependency) installed, but NO dependency
     // edge — the corrupted-table state a pre-fix upgrade left behind.
     {
-        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
         defer db.close();
         try schema.initSchema(&db);
-        try db.exec(
-            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason)
-            \\VALUES ('jq', 'jq', '1.0', 'sha-jq', '/tmp/malt_unuseddeps_linkguard/Cellar/jq/1.0', 'direct'),
-            \\       ('oniguruma', 'oniguruma', '6.9', 'sha-onig', '/tmp/malt_unuseddeps_linkguard/Cellar/oniguruma/6.9', 'dependency');
+        const insert = try std.fmt.allocPrintSentinel(
+            allocator,
+            "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason) " ++
+                "VALUES ('jq', 'jq', '1.0', 'sha-jq', '{s}/Cellar/jq/1.0', 'direct'), " ++
+                "('oniguruma', 'oniguruma', '6.9', 'sha-onig', '{s}/Cellar/oniguruma/6.9', 'dependency');",
+            .{ prefix, prefix },
+            0,
         );
+        defer allocator.free(insert);
+        try db.exec(insert);
     }
 
     // jq's binary hard-links opt/oniguruma — the linkage the DB table lost.
-    try writeFakeDylibLinker(fs_test_io, prefix ++ "/Cellar/jq/1.0/bin/jq", "/opt/oniguruma/lib/libonig.5.dylib");
+    try writeFakeDylibLinker(fs_test_io, s.p("/Cellar/jq/1.0/bin/jq"), "/opt/oniguruma/lib/libonig.5.dylib");
 
     var stderr_buf: std.ArrayList(u8) = .empty;
     defer stderr_buf.deinit(allocator);
@@ -1470,7 +1513,7 @@ test "runUnusedDeps keeps a dependency a still-installed keg's Mach-O links desp
     // Nothing reaped: the only orphan is still linked by jq's binary.
     try testing.expectEqual(@as(u32, 0), result.removed);
 
-    var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+    var db = try sqlite.Database.open(s.p("/db/malt.db"));
     defer db.close();
     var stmt = try db.prepare("SELECT COUNT(*) FROM kegs WHERE name = 'oniguruma';");
     defer stmt.finalize();
