@@ -625,18 +625,6 @@ test "interpreter: chmod array no error" {
     defer testing.allocator.free(sbin_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, sbin_dir);
 
-    // The snippet leaves both dirs at a mode that denies owner read, so the
-    // scratch teardown cannot recurse into them. Restore before deinit runs.
-    const c = struct {
-        extern "c" fn chmod(path: [*:0]const u8, mode: u16) c_int;
-    };
-    const bin_z = try testing.allocator.dupeZ(u8, bin_dir);
-    defer testing.allocator.free(bin_z);
-    const sbin_z = try testing.allocator.dupeZ(u8, sbin_dir);
-    defer testing.allocator.free(sbin_z);
-    defer _ = c.chmod(sbin_z, 0o755);
-    defer _ = c.chmod(bin_z, 0o755);
-
     const src =
         \\chmod 0755, [prefix/"bin", prefix/"sbin"]
     ;
