@@ -126,6 +126,7 @@ pub fn build(b: *std.Build) void {
         "tests/progress_e2e_test.zig",
         "tests/completions_test.zig",
         "tests/flag_drift_test.zig",
+        "tests/cask_revision_invariant_test.zig",
         "tests/backup_test.zig",
         "tests/purge_test.zig",
         "tests/purge_output_test.zig",

@@ -79,6 +79,8 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
 
         // Extract `revision N` (global, unquoted integer). Ignored by the
         // install path; the outdated audit uses it to spot revision bumps.
+        // Layout-blind and formula-oriented: it matches at any indentation, in
+        // any block, so the cask caller discards what it finds.
         if (revision == 0 and std.mem.startsWith(u8, line, "revision ")) {
             const rest = std.mem.trim(u8, line["revision ".len..], " \t");
             revision = std.fmt.parseInt(i64, rest, 10) catch 0;
