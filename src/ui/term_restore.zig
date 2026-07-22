@@ -115,6 +115,11 @@ fn raiseAndDie(sig: std.posix.SIG) noreturn {
 // the process *by that signal* (the parent must see a signaled wait status,
 // not an exit).
 test "a handled termination signal is fatal and preserves death-by-signal" {
+    // A tracer (kcov) intercepts the child's signal-stop instead of letting
+    // it die, so death-by-signal is unobservable and the wait below times
+    // out. Same opt-out the subprocess tests use; live under `zig build test`.
+    if (std.c.getenv("MALT_SKIP_SUBPROCESS_TESTS") != null) return error.SkipZigTest;
+
     for (crash_signals) |sig| {
         const pid = std.c.fork();
         try std.testing.expect(pid >= 0);
