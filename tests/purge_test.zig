@@ -291,12 +291,7 @@ test "applying the plan removes every pre-populated directory under a temp prefi
     // Unique temp prefix — std.crypto random bytes keep parallel runs safe.
     var rand_bytes: [8]u8 = undefined;
     test_io.randomBytes(std.Options.debug_io, &rand_bytes);
-    var hex_buf: [16]u8 = undefined;
-    const hex_chars = "0123456789abcdef";
-    for (rand_bytes, 0..) |b, i| {
-        hex_buf[i * 2] = hex_chars[b >> 4];
-        hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
-    }
+    const hex_buf = std.fmt.bytesToHex(rand_bytes, .lower);
 
     var prefix_buf: [128]u8 = undefined;
     const prefix = try std.fmt.bufPrint(&prefix_buf, "/tmp/malt-purge-test-{s}", .{&hex_buf});
@@ -353,12 +348,7 @@ test "applying the plan with --keep-cache leaves the cache directory intact" {
 
     var rand_bytes: [8]u8 = undefined;
     test_io.randomBytes(std.Options.debug_io, &rand_bytes);
-    var hex_buf: [16]u8 = undefined;
-    const hex_chars = "0123456789abcdef";
-    for (rand_bytes, 0..) |b, i| {
-        hex_buf[i * 2] = hex_chars[b >> 4];
-        hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
-    }
+    const hex_buf = std.fmt.bytesToHex(rand_bytes, .lower);
 
     var prefix_buf: [128]u8 = undefined;
     const prefix = try std.fmt.bufPrint(&prefix_buf, "/tmp/malt-purge-keepcache-{s}", .{&hex_buf});
