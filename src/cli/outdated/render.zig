@@ -8,6 +8,7 @@
 const std = @import("std");
 
 const color = @import("../../ui/color.zig");
+const formula_mod = @import("../../core/formula.zig");
 const output = @import("../../ui/output.zig");
 const snap_mod = @import("snapshot.zig");
 const OutdatedEntry = snap_mod.OutdatedEntry;
@@ -72,6 +73,9 @@ pub fn writeJsonArray(
         try w.writeAll(if (r.pinned) "true" else "false");
         try w.writeAll(",\"tap\":");
         try output.jsonStr(w, r.tap);
+        // Additive and only when proven, so every other row stays
+        // byte-identical and `schema_version` need not move.
+        if (isDowngrade(r.installed, r.latest)) try w.writeAll(",\"downgrade\":true");
         try w.writeAll("}");
     }
     try w.writeAll("]}\n");
@@ -95,7 +99,16 @@ fn writeEntry(stdout: *std.Io.Writer, e: OutdatedEntry, kind_tag: ?[]const u8) v
     // `≠`, not `<`: outdated is decided by inequality with the tap.
     writeStyledSpan(stdout, color.SemanticStyle.warn.code(), " \xe2\x89\xa0 ", e.latest, "");
     if (kind_tag) |t| writeStyledSpan(stdout, color.SemanticStyle.detail.code(), " [", t, "]");
+    // A word, not a glyph: it has to survive `NO_COLOR`.
+    if (isDowngrade(e.installed, e.latest))
+        writeStyledSpan(stdout, color.SemanticStyle.warn.code(), " [", "downgrade", "]");
     stdout.writeAll("\n") catch return;
+}
+
+/// True only when the tap is *provably* behind. An unrankable pair
+/// renders unmarked, which is what keeps this safe for odd taps.
+fn isDowngrade(installed: []const u8, latest: []const u8) bool {
+    return formula_mod.relate(installed, latest) == .older;
 }
 
 fn writeBullet(stdout: *std.Io.Writer) void {
@@ -124,17 +137,37 @@ fn writeStyledSpan(
 }
 
 test "writeJsonArray wraps formulae and casks in a versioned root with all six fields" {
+    // Also the byte pin for the marker: the two forward rows must stay
+    // exactly as they were, and only the backward row gains `downgrade`.
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
     const rows = [_]Row{
         .{ .name = "alpha", .installed = "1.0", .latest = "2.0", .kind = .formula, .pinned = false, .tap = "" },
         .{ .name = "beta-cask", .installed = "3.0", .latest = "4.0", .kind = .cask, .pinned = true, .tap = "user/repo" },
+        .{ .name = "yanked", .installed = "2.4.15", .latest = "2.4.14", .kind = .formula, .pinned = false, .tap = "" },
     };
     try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
 
     const want =
-        \\{"schema_version":1,"outdated":[{"name":"alpha","installed":"1.0","latest":"2.0","type":"formula","pinned":false,"tap":""},{"name":"beta-cask","installed":"3.0","latest":"4.0","type":"cask","pinned":true,"tap":"user/repo"}]}
+        \\{"schema_version":1,"outdated":[{"name":"alpha","installed":"1.0","latest":"2.0","type":"formula","pinned":false,"tap":""},{"name":"beta-cask","installed":"3.0","latest":"4.0","type":"cask","pinned":true,"tap":"user/repo"},{"name":"yanked","installed":"2.4.15","latest":"2.4.14","type":"formula","pinned":false,"tap":"","downgrade":true}]}
+    ++ "\n";
+    try std.testing.expectEqualStrings(want, aw.written());
+}
+
+test "writeJsonArray leaves an incomparable pair unmarked" {
+    // The give-up arm is what makes the marker safe for casks and unusual
+    // taps: uncertainty must render as a plain row, never as an alarm.
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const rows = [_]Row{
+        .{ .name = "odd", .installed = "1.0rc2", .latest = "1.0", .kind = .formula, .pinned = false, .tap = "" },
+    };
+    try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
+
+    const want =
+        \\{"schema_version":1,"outdated":[{"name":"odd","installed":"1.0rc2","latest":"1.0","type":"formula","pinned":false,"tap":""}]}
     ++ "\n";
     try std.testing.expectEqualStrings(want, aw.written());
 }
@@ -274,4 +307,56 @@ test "the plain-text row contains no directional comparison glyph" {
 
     try std.testing.expectEqualStrings("  \xe2\x96\xb8 alpha (1.0) ≠ 2.0\n", aw.written());
     try std.testing.expect(std.mem.indexOfAny(u8, aw.written(), "<>") == null);
+}
+
+test "a backward cask row keeps both tags, kind first" {
+    color.setForTest(false, null);
+    output.setQuiet(false);
+    defer color.setForTest(null, null);
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const entries = [_]OutdatedEntry{
+        .{ .name = @constCast("font"), .installed = @constCast("3.0,55"), .latest = @constCast("2.0,40") },
+    };
+    writeCaskEntries(&aw.writer, &entries);
+
+    try std.testing.expectEqualStrings("  \xe2\x96\xb8 font (3.0,55) ≠ 2.0,40 [cask] [downgrade]\n", aw.written());
+}
+
+test "quiet mode stays name-only for a backward row" {
+    // `--quiet` feeds shell pipelines; a marker there would corrupt them.
+    color.setForTest(false, null);
+    output.setQuiet(true);
+    defer color.setForTest(null, null);
+    defer output.setQuiet(false);
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const entries = [_]OutdatedEntry{
+        .{ .name = @constCast("yanked"), .installed = @constCast("2.4.15"), .latest = @constCast("2.4.14") },
+    };
+    writeFormulaEntries(&aw.writer, &entries);
+
+    try std.testing.expectEqualStrings("yanked\n", aw.written());
+}
+
+test "the plain-text row names a backward move in words" {
+    // The ordering claim is earned here, not glyphed: a checked marker that
+    // survives NO_COLOR and reads as English, unlike the arrow it replaces.
+    color.setForTest(false, null);
+    output.setQuiet(false);
+    defer color.setForTest(null, null);
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const entries = [_]OutdatedEntry{
+        .{ .name = @constCast("yanked"), .installed = @constCast("2.4.15"), .latest = @constCast("2.4.14") },
+    };
+    writeFormulaEntries(&aw.writer, &entries);
+
+    try std.testing.expectEqualStrings("  \xe2\x96\xb8 yanked (2.4.15) ≠ 2.4.14 [downgrade]\n", aw.written());
 }
