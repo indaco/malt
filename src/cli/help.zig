@@ -149,6 +149,10 @@ const upgrade_help =
     \\override. malt follows the tap: if the tap version differs from the
     \\installed one it is applied, even if that moves the version down
     \\(e.g. an upstream revert) — preview with --dry-run.
+    \\Formulas from a third-party tap are the exception: they upgrade when
+    \\the tap content changes, not when the version changes, so a reinstall
+    \\with no version movement is expected. Core formulas and casks follow
+    \\the version rule above.
     \\
     \\Flags:
     \\  --cask         Upgrade casks only
