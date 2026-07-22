@@ -284,6 +284,51 @@ const SyncCounters = struct {
 
 var test_sync_counters: SyncCounters = .{};
 
+const dbg_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(dbg_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        try std.Io.Dir.createDirAbsolute(dbg_io, base, .default_dir);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 const TestSyncOps = struct {
     fail_file: bool = false,
     fail_dir: bool = false,
@@ -300,36 +345,31 @@ const TestSyncOps = struct {
 
 test "atomicWriteFileImpl fsyncs the tempfile via the injected sync ops" {
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_atomic_inline_sync_file";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    try std.Io.Dir.createDirAbsolute(io, base, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("atomic_inline_sync_file");
+    defer s.deinit();
 
     test_sync_counters = .{};
-    try atomicWriteFileImpl(io, base ++ "/data.bin", "abc", TestSyncOps{}, .default_file);
+    try atomicWriteFileImpl(io, s.p("/data.bin"), "abc", TestSyncOps{}, .default_file);
     try std.testing.expectEqual(@as(usize, 1), test_sync_counters.file);
 }
 
 test "atomicWriteFileImpl fsyncs the parent directory via the injected sync ops" {
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_atomic_inline_sync_dir";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    try std.Io.Dir.createDirAbsolute(io, base, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("atomic_inline_sync_dir");
+    defer s.deinit();
 
     test_sync_counters = .{};
-    try atomicWriteFileImpl(io, base ++ "/data.bin", "abc", TestSyncOps{}, .default_file);
+    try atomicWriteFileImpl(io, s.p("/data.bin"), "abc", TestSyncOps{}, .default_file);
     try std.testing.expectEqual(@as(usize, 1), test_sync_counters.dir);
 }
 
 test "atomicWriteFileImpl propagates syncFile errors and removes the tempfile" {
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_atomic_inline_sync_file_err";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    try std.Io.Dir.createDirAbsolute(io, base, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("atomic_inline_sync_file_err");
+    defer s.deinit();
+    const base = s.base;
 
-    const dst = base ++ "/data.bin";
+    const dst = s.p("/data.bin");
     try std.testing.expectError(
         error.AccessDenied,
         atomicWriteFileImpl(io, dst, "abc", TestSyncOps{ .fail_file = true }, .default_file),
@@ -345,12 +385,10 @@ test "atomicWriteFileImpl propagates syncFile errors and removes the tempfile" {
 
 test "atomicWriteFileImpl propagates syncDir errors but leaves the renamed file in place" {
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_atomic_inline_sync_dir_err";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    try std.Io.Dir.createDirAbsolute(io, base, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("atomic_inline_sync_dir_err");
+    defer s.deinit();
 
-    const dst = base ++ "/data.bin";
+    const dst = s.p("/data.bin");
     try std.testing.expectError(
         error.AccessDenied,
         atomicWriteFileImpl(io, dst, "abc", TestSyncOps{ .fail_dir = true }, .default_file),

@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const ruby = @import("malt").ruby_subprocess;
 
@@ -213,11 +214,13 @@ test "ca-certificates-shape: dispatcher with unparseable siblings leaves flog cl
     var flog = malt.dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
+    const cacerts_prefix = try test_io.uniqueTempPath(alloc, "cacerts_test", "prefix");
+
     try malt.dsl.executePostInstall(std.Options.debug_io, malt.app_ctx.processEnviron(), alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,
-    }, body, "/tmp/malt_cacerts_test", &flog);
+    }, body, cacerts_prefix, &flog);
 
     try testing.expect(!flog.hasFatal());
     try testing.expectEqual(@as(usize, 0), flog.entries().len);

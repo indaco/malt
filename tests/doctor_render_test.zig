@@ -387,7 +387,10 @@ test "countMissingLocalSources flags kegs whose .rb no longer exists" {
     defer db.close();
     try schema.initSchema(&db);
 
-    try seedKeg(&db, "ghost", "local", "/tmp/mt_doctor_vanished_formula_xyz.rb");
+    // Never created — unique so a concurrent run can't make it exist.
+    const ghost_path = try test_io.uniqueTempPath(testing.allocator, "doctor", "vanished_formula.rb");
+    defer testing.allocator.free(ghost_path);
+    try seedKeg(&db, "ghost", "local", ghost_path);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -405,7 +408,8 @@ test "countMissingLocalSources does not flag kegs whose .rb still exists" {
 
     // Use the running test binary as the "file exists" witness — it
     // is guaranteed to be readable from the test process.
-    const self_path = "/tmp/mt_doctor_present_formula.rb";
+    const self_path = try test_io.uniqueTempPath(testing.allocator, "doctor", "present_formula.rb");
+    defer testing.allocator.free(self_path);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, self_path, .{});
     defer test_io.cwd().deleteFile(std.Options.debug_io, self_path) catch {};
     try f.writeStreamingAll(std.Options.debug_io, "class X end\n");
@@ -427,15 +431,22 @@ test "countMissingLocalSources mixes stale and present rows correctly" {
     defer db.close();
     try schema.initSchema(&db);
 
-    const present_path = "/tmp/mt_doctor_mixed_present.rb";
+    const present_path = try test_io.uniqueTempPath(testing.allocator, "doctor", "mixed_present.rb");
+    defer testing.allocator.free(present_path);
     const f = try test_io.createFileAbsolute(std.Options.debug_io, present_path, .{});
     defer test_io.cwd().deleteFile(std.Options.debug_io, present_path) catch {};
     try f.writeStreamingAll(std.Options.debug_io, "x");
     f.close(std.Options.debug_io);
 
     try seedKeg(&db, "p1", "local", present_path);
-    try seedKeg(&db, "g1", "local", "/tmp/mt_doctor_mixed_missing_1.rb");
-    try seedKeg(&db, "g2", "local", "/tmp/mt_doctor_mixed_missing_2.rb");
+    // Never created — only seeded into the DB, so uniqueness just keeps a
+    // concurrent run from accidentally satisfying the existence check.
+    const missing_1 = try test_io.uniqueTempPath(testing.allocator, "doctor", "mixed_missing_1.rb");
+    defer testing.allocator.free(missing_1);
+    const missing_2 = try test_io.uniqueTempPath(testing.allocator, "doctor", "mixed_missing_2.rb");
+    defer testing.allocator.free(missing_2);
+    try seedKeg(&db, "g1", "local", missing_1);
+    try seedKeg(&db, "g2", "local", missing_2);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

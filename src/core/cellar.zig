@@ -677,20 +677,62 @@ test "describeError: action-hint tags keep prose, trivial tags fall back to @err
     }
 }
 
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 /// Test helper: write a receipt with the given tap/version into a unique temp
 /// dir, read it back, clean up, and return the owned bytes. `tag` keeps
 /// concurrent test binaries from colliding on the same path.
-fn writeReceiptAndRead(io: std.Io, alloc: std.mem.Allocator, tag: []const u8, tap: []const u8, version: []const u8) ![]u8 {
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var dir_buf: [128]u8 = undefined;
-    const dir = std.fmt.bufPrint(&dir_buf, "/tmp/malt_receipt_{s}_{d}", .{ tag, ts }) catch unreachable;
+fn writeReceiptAndRead(io: std.Io, alloc: std.mem.Allocator, comptime tag: []const u8, tap: []const u8, version: []const u8) ![]u8 {
+    var s = try Scratch.init("receipt_" ++ tag);
+    defer s.deinit();
+    const dir = s.base;
     std.Io.Dir.cwd().createDirPath(io, dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
 
     writeInstallReceiptFull(io, dir, "pkg", version, "abc123", tap, true);
 
-    var path_buf: [160]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/INSTALL_RECEIPT.json", .{dir}) catch unreachable;
+    const path = s.p("/INSTALL_RECEIPT.json");
     const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
     defer f.close(io);
     const st = try f.stat(io);

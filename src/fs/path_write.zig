@@ -41,16 +41,56 @@ pub fn writeFile(io: std.Io, path: []const u8, bytes: []const u8) WriteError!voi
 
 // ── tests ──────────────────────────────────────────────────────────────
 
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 test "writeFile creates a full absolute parent chain with a missing grandparent" {
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = std.fmt.bufPrint(&buf, "/tmp/malt_pathwrite_abschain_{d}", .{ts}) catch unreachable;
-    std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    var s = try Scratch.init("pathwrite_abschain");
+    defer s.deinit();
 
-    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/a/b/out.txt", .{root}) catch unreachable;
+    const dest = s.p("/a/b/out.txt");
 
     try writeFile(io, dest, "data\n");
 
@@ -60,14 +100,20 @@ test "writeFile creates a full absolute parent chain with a missing grandparent"
 }
 
 test "writeFile creates a relative nested parent chain" {
+    // Stays relative on purpose — that is what this test covers — so it gets
+    // the pid+seq uniqueness by hand instead of the /tmp-rooted Scratch.
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
     var rel_buf: [64]u8 = undefined;
-    const rel_root = std.fmt.bufPrint(&rel_buf, "zz_malt_pathwrite_rel_{d}", .{ts}) catch unreachable;
+    const rel_root = try std.fmt.bufPrint(
+        &rel_buf,
+        "zz_malt_pathwrite_rel_{d}_{d}",
+        .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+    );
+    std.Io.Dir.cwd().deleteTree(io, rel_root) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, rel_root) catch {};
 
     var dest_buf: [128]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/sub/out.txt", .{rel_root}) catch unreachable;
+    const dest = try std.fmt.bufPrint(&dest_buf, "{s}/sub/out.txt", .{rel_root});
 
     try writeFile(io, dest, "data\n");
 
@@ -80,10 +126,11 @@ test "writeFile accepts a symlink-to-directory parent (e.g. /tmp)" {
     // createDirPath's nofollow kind check rejects an existing symlink-to-dir
     // as NotDir; the writer must still succeed (macOS /tmp → /private/tmp).
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "/tmp/malt_pathwrite_symlink_{d}.txt", .{ts}) catch unreachable;
-    defer std.Io.Dir.cwd().deleteTree(io, dest) catch {};
+    var s = try Scratch.init("pathwrite_symlink");
+    defer s.deinit();
+    // The scratch base itself is the destination file — its parent is /tmp,
+    // which is the symlink-to-dir under test.
+    const dest = s.base;
 
     try writeFile(io, dest, "data\n");
 
@@ -94,32 +141,25 @@ test "writeFile accepts a symlink-to-directory parent (e.g. /tmp)" {
 
 test "writeFile surfaces MakeParentDirFailed when a parent component is a file" {
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = std.fmt.bufPrint(&buf, "/tmp/malt_pathwrite_parentfile_{d}", .{ts}) catch unreachable;
-    std.Io.Dir.cwd().createDirPath(io, root) catch unreachable;
-    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    var s = try Scratch.init("pathwrite_parentfile");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(io, s.base);
 
-    var blocker_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const blocker = std.fmt.bufPrint(&blocker_buf, "{s}/afile", .{root}) catch unreachable;
-    (std.Io.Dir.cwd().createFile(io, blocker, .{ .truncate = true }) catch unreachable).close(io);
+    const blocker = s.p("/afile");
+    (try std.Io.Dir.cwd().createFile(io, blocker, .{ .truncate = true })).close(io);
 
-    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/afile/sub/out.txt", .{root}) catch unreachable;
+    const dest = s.p("/afile/sub/out.txt");
 
     try std.testing.expectError(error.MakeParentDirFailed, writeFile(io, dest, "data\n"));
 }
 
 test "writeFile surfaces OpenFileFailed when the destination is a directory" {
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = std.fmt.bufPrint(&buf, "/tmp/malt_pathwrite_destdir_{d}", .{ts}) catch unreachable;
-    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    var s = try Scratch.init("pathwrite_destdir");
+    defer s.deinit();
 
-    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/target", .{root}) catch unreachable;
-    std.Io.Dir.cwd().createDirPath(io, dest) catch unreachable; // dest is a dir
+    const dest = s.p("/target");
+    try std.Io.Dir.cwd().createDirPath(io, dest); // dest is a dir
 
     try std.testing.expectError(error.OpenFileFailed, writeFile(io, dest, "data\n"));
 }
@@ -131,19 +171,12 @@ test "ensureParentDir is a no-op for a bare filename (no directory component)" {
 
 test "ensureParentDir creates a missing directory chain" {
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = std.fmt.bufPrint(&buf, "/tmp/malt_pathwrite_ensure_{d}", .{ts}) catch unreachable;
-    std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    var s = try Scratch.init("pathwrite_ensure");
+    defer s.deinit();
 
-    var child_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const child = std.fmt.bufPrint(&child_buf, "{s}/x/y/out.txt", .{root}) catch unreachable;
-    try ensureParentDir(io, child);
+    try ensureParentDir(io, s.p("/x/y/out.txt"));
 
-    var parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const parent = std.fmt.bufPrint(&parent_buf, "{s}/x/y", .{root}) catch unreachable;
-    const st = try std.Io.Dir.cwd().statFile(io, parent, .{});
+    const st = try std.Io.Dir.cwd().statFile(io, s.p("/x/y"), .{});
     try std.testing.expect(st.kind == .directory);
 }
 
@@ -151,10 +184,9 @@ test "writeFile truncates an existing file and reuses its existing parent" {
     // A second write to the same path: parent already exists (skip create),
     // and a shorter payload must leave no stale tail.
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&buf, "/tmp/malt_pathwrite_trunc_{d}.txt", .{ts}) catch unreachable;
-    defer std.Io.Dir.cwd().deleteTree(io, dest) catch {};
+    var s = try Scratch.init("pathwrite_trunc");
+    defer s.deinit();
+    const dest = s.base;
 
     try writeFile(io, dest, "a long first payload");
     try writeFile(io, dest, "x");
@@ -166,10 +198,9 @@ test "writeFile truncates an existing file and reuses its existing parent" {
 
 test "writeFile writes a zero-length file for empty bytes" {
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&buf, "/tmp/malt_pathwrite_empty_{d}.txt", .{ts}) catch unreachable;
-    defer std.Io.Dir.cwd().deleteTree(io, dest) catch {};
+    var s = try Scratch.init("pathwrite_empty");
+    defer s.deinit();
+    const dest = s.base;
 
     try writeFile(io, dest, "");
 

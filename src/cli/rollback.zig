@@ -686,6 +686,49 @@ pub fn writeEntriesJsonArray(w: *std.Io.Writer, entries: []const Entry) !void {
 }
 
 const testing = std.testing;
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
 
 // --- parseArgs ----------------------------------------------------------
 
@@ -924,14 +967,9 @@ test "currentCaskVersion returns null when the token is unknown" {
 
 test "collectEntries returns an empty list when the store has no matching package" {
     const io = std.Options.debug_io;
-    var prefix_buf: [128]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(
-        &prefix_buf,
-        "/tmp/malt_rb_collect_none_{d}",
-        .{std.Io.Clock.real.now(io).toNanoseconds()},
-    );
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("rb_collect_none");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(io, prefix);
 
     // Seed only `jq` so a search for `wget` returns no rows.
@@ -944,14 +982,9 @@ test "collectEntries returns an empty list when the store has no matching packag
 
 test "collectEntries surfaces StoreUnreadable when {prefix}/store does not exist" {
     const io = std.Options.debug_io;
-    var prefix_buf: [128]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(
-        &prefix_buf,
-        "/tmp/malt_rb_collect_missing_{d}",
-        .{std.Io.Clock.real.now(io).toNanoseconds()},
-    );
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("rb_collect_missing");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(io, prefix);
 
     // Deliberately do NOT create `<prefix>/store`. The error must be the
@@ -965,14 +998,9 @@ test "collectEntries surfaces StoreUnreadable when {prefix}/store does not exist
 
 test "collectEntries does not leak when allocator runs out mid-collection" {
     const io = std.Options.debug_io;
-    var prefix_buf: [128]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(
-        &prefix_buf,
-        "/tmp/malt_rb_collect_oom_{d}",
-        .{std.Io.Clock.real.now(io).toNanoseconds()},
-    );
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("rb_collect_oom");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(io, prefix);
 
     try seedStoreEntry(io, prefix, "sha_a", "wget", "1.20", 0);
@@ -995,14 +1023,9 @@ test "collectEntries does not leak when allocator runs out mid-collection" {
 
 test "collectEntries returns store entries sorted newest-first by mtime" {
     const io = std.Options.debug_io;
-    var prefix_buf: [128]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(
-        &prefix_buf,
-        "/tmp/malt_rb_collect_{d}",
-        .{std.Io.Clock.real.now(io).toNanoseconds()},
-    );
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("rb_collect");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(io, prefix);
 
     // Seed three versions with monotonically increasing mtimes. APFS rounds
@@ -1023,14 +1046,9 @@ test "collectEntries returns store entries sorted newest-first by mtime" {
 
 test "collectEntries skips the entry that matches skip_pkg_version" {
     const io = std.Options.debug_io;
-    var prefix_buf: [128]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(
-        &prefix_buf,
-        "/tmp/malt_rb_collect_skip_{d}",
-        .{std.Io.Clock.real.now(io).toNanoseconds()},
-    );
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("rb_collect_skip");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(io, prefix);
 
     try seedStoreEntry(io, prefix, "sha_a", "wget", "1.20", 1100);
@@ -1047,14 +1065,9 @@ test "collectEntries skips the entry that matches skip_pkg_version" {
 
 test "collectEntries ignores store entries that don't contain the named package" {
     const io = std.Options.debug_io;
-    var prefix_buf: [128]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(
-        &prefix_buf,
-        "/tmp/malt_rb_collect_other_{d}",
-        .{std.Io.Clock.real.now(io).toNanoseconds()},
-    );
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("rb_collect_other");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(io, prefix);
 
     // Two `wget` entries plus an unrelated `jq` entry that must be filtered out.
@@ -1227,15 +1240,10 @@ test "replaceKegRow recovers a non-zero revision from pkg_version" {
 test "removeCurrentCellarDir wipes the revision-bumped on-disk dir" {
     const io = std.Options.debug_io;
 
-    const prefix = try std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_rollback_cellar_{d}",
-        .{std.Io.Clock.real.now(io).toNanoseconds()},
-    );
-    defer testing.allocator.free(prefix);
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("rollback_cellar");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
 
     // Cellar dirs are named after pkg_version, e.g. "1.9.2_2", not the
     // bare upstream "1.9.2" — passing the latter at rollback time orphans
@@ -1244,16 +1252,10 @@ test "removeCurrentCellarDir wipes the revision-bumped on-disk dir" {
     const version = "1.9.2";
     const revision: i64 = 2;
 
-    const keg_dir = try std.fmt.allocPrint(
-        testing.allocator,
-        "{s}/Cellar/{s}/{s}_{d}",
-        .{ prefix, name, version, revision },
-    );
-    defer testing.allocator.free(keg_dir);
+    const keg_dir = s.p("/Cellar/libgit2/1.9.2_2");
     try std.Io.Dir.cwd().createDirPath(io, keg_dir);
 
-    const sentinel = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
-    defer testing.allocator.free(sentinel);
+    const sentinel = s.p("/Cellar/libgit2/1.9.2_2/INSTALL_RECEIPT.json");
     {
         const f = try std.Io.Dir.createFileAbsolute(io, sentinel, .{});
         defer f.close(io);
@@ -1268,21 +1270,15 @@ test "removeCurrentCellarDir wipes the revision-bumped on-disk dir" {
 test "removeCurrentCellarDir wipes a plain version dir when revision is zero" {
     const io = std.Options.debug_io;
 
-    const prefix = try std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_rollback_cellar_norev_{d}",
-        .{std.Io.Clock.real.now(io).toNanoseconds()},
-    );
-    defer testing.allocator.free(prefix);
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("rollback_cellar_norev");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
 
     const name = "tree";
     const version = "2.2.1";
 
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
-    defer testing.allocator.free(keg_dir);
+    const keg_dir = s.p("/Cellar/tree/2.2.1");
     try std.Io.Dir.cwd().createDirPath(io, keg_dir);
 
     try removeCurrentCellarDir(io, prefix, name, version, 0);

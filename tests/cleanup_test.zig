@@ -7,8 +7,8 @@ const test_io = @import("test_io");
 const cleanup = malt.update_cleanup;
 const fs_compat = test_io;
 
-fn resetScratch(allocator: std.mem.Allocator, tag: []const u8) ![]u8 {
-    const dir = try std.fmt.allocPrint(allocator, "/tmp/malt_cleanup_test_{s}", .{tag});
+fn resetScratch(allocator: std.mem.Allocator, tag: []const u8) ![]const u8 {
+    const dir = try test_io.uniqueTempPath(allocator, "cleanup_test", tag);
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     return dir;

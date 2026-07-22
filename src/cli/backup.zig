@@ -474,6 +474,50 @@ pub fn defaultBackupPath(ctx: *const AppCtx, allocator: std.mem.Allocator) ![]u8
 // the pure-helper coverage for the .service variant sits next to the
 // code it pins.
 
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 test "writeEntry emits `service <name>` with no version suffix" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
@@ -509,14 +553,10 @@ test "writeToPath creates a full absolute parent chain with a missing grandparen
     // Delegation smoke: a nested destination whose grandparent is absent is
     // still written (parent creation happens in path_write.writeFile).
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = std.fmt.bufPrint(&buf, "/tmp/malt_backup_abschain_{d}", .{ts}) catch unreachable;
-    std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    var s = try Scratch.init("backup_abschain");
+    defer s.deinit();
 
-    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/a/b/backup.txt", .{root}) catch unreachable;
+    const dest = s.p("/a/b/backup.txt");
 
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
     try writeToPath(&ctx, dest, "formula git\n");
@@ -531,19 +571,14 @@ test "writeToPath propagates a real parent-dir failure as OpenFileFailed" {
     // Pins the other mapping arm: a parent-dir failure (a parent component is
     // a regular file → MakeParentDirFailed) must surface as OpenFileFailed.
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = std.fmt.bufPrint(&buf, "/tmp/malt_backup_parentfile_{d}", .{ts}) catch unreachable;
-    std.Io.Dir.cwd().createDirPath(io, root) catch unreachable;
-    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    var s = try Scratch.init("backup_parentfile");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(io, s.base);
 
     // A file where a directory component is expected blocks mkdir -p.
-    var blocker_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const blocker = std.fmt.bufPrint(&blocker_buf, "{s}/afile", .{root}) catch unreachable;
-    (std.Io.Dir.cwd().createFile(io, blocker, .{ .truncate = true }) catch unreachable).close(io);
+    (try std.Io.Dir.cwd().createFile(io, s.p("/afile"), .{ .truncate = true })).close(io);
 
-    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/afile/sub/backup.txt", .{root}) catch unreachable;
+    const dest = s.p("/afile/sub/backup.txt");
 
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
     try std.testing.expectError(Error.OpenFileFailed, writeToPath(&ctx, dest, "formula git\n"));
@@ -554,14 +589,11 @@ test "writeToPath maps a failing leaf createFile to OpenFileFailed" {
     // only pin the caller's error mapping. Destination is a directory, so the
     // leaf createFile fails and the catch must surface OpenFileFailed.
     const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = std.fmt.bufPrint(&buf, "/tmp/malt_backup_leafdir_{d}", .{ts}) catch unreachable;
-    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    var s = try Scratch.init("backup_leafdir");
+    defer s.deinit();
 
-    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/target", .{root}) catch unreachable;
-    std.Io.Dir.cwd().createDirPath(io, dest) catch unreachable; // dest is a dir
+    const dest = s.p("/target");
+    try std.Io.Dir.cwd().createDirPath(io, dest); // dest is a dir
 
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
     try std.testing.expectError(Error.OpenFileFailed, writeToPath(&ctx, dest, "formula git\n"));

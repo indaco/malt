@@ -135,8 +135,8 @@ fn writeFile(path: []const u8, content: []const u8) !void {
     try f.writeStreamingAll(std.Options.debug_io, content);
 }
 
-fn makeScratch(allocator: std.mem.Allocator, tag: []const u8) ![]u8 {
-    const dir = try std.fmt.allocPrint(allocator, "/tmp/malt_twin_test_{s}", .{tag});
+fn makeScratch(allocator: std.mem.Allocator, tag: []const u8) ![]const u8 {
+    const dir = try test_io.uniqueTempPath(allocator, "twin_test", tag);
     fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
     try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     return dir;

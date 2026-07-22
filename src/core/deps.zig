@@ -368,6 +368,49 @@ fn dupeDepNames(allocator: std.mem.Allocator, deps: []const []const u8) ![][]con
 // --- FormulaCache unit tests (no DB / no network) -------------------------
 
 const testing = std.testing;
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
 
 /// Minimal formula fixture for the cache wrapper tests.
 fn testFormulaJson(comptime name: []const u8) []const u8 {
@@ -451,16 +494,10 @@ test "isInstalled returns false when opt symlink is missing" {
     const schema_mod = @import("../db/schema.zig");
     const io = std.Options.debug_io;
 
-    const prefix = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/malt_deps_isinstalled_{d}",
-        .{std.Io.Clock.real.now(io).toNanoseconds()},
-        0,
-    );
-    defer testing.allocator.free(prefix);
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("deps_isinstalled");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
 
     _ = c_set.setenv("MALT_PREFIX", prefix.ptr, 1);
     defer _ = c_set.unsetenv("MALT_PREFIX");
@@ -482,16 +519,10 @@ test "isInstalled returns true when both cellar and opt link resolve" {
     const schema_mod = @import("../db/schema.zig");
     const io = std.Options.debug_io;
 
-    const prefix = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "/tmp/malt_deps_isinstalled_ok_{d}",
-        .{std.Io.Clock.real.now(io).toNanoseconds()},
-        0,
-    );
-    defer testing.allocator.free(prefix);
-    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    var s = try Scratch.init("deps_isinstalled_ok");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(io, prefix);
-    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
 
     _ = c_set.setenv("MALT_PREFIX", prefix.ptr, 1);
     defer _ = c_set.unsetenv("MALT_PREFIX");

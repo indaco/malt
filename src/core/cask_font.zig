@@ -184,6 +184,49 @@ pub fn readManifest(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![]u
 }
 
 const testing = std.testing;
+const dbg_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(dbg_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
 
 fn putFile(io: std.Io, path: []const u8, body: []const u8) !void {
     if (std.fs.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(io, dir);
@@ -200,14 +243,13 @@ fn expectFile(io: std.Io, path: []const u8, body: []const u8) !void {
 
 test "placeFonts copies nested and bare sources and manifests their dest paths" {
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_cask_font_place";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("cask_font_place");
+    defer s.deinit();
 
-    const root = base ++ "/extract";
-    const fonts = base ++ "/fonts";
-    try putFile(io, root ++ "/ttf/FiraCode-Bold.ttf", "BOLD");
-    try putFile(io, root ++ "/HackNerdFont-Regular.ttf", "HACK");
+    const root = s.p("/extract");
+    const fonts = s.p("/fonts");
+    try putFile(io, s.p("/extract/ttf/FiraCode-Bold.ttf"), "BOLD");
+    try putFile(io, s.p("/extract/HackNerdFont-Regular.ttf"), "HACK");
 
     const entries = [_]FontEntry{
         .{ .source = "ttf/FiraCode-Bold.ttf", .target = "/$HOME/Library/Fonts/FiraCode-Bold.ttf" },
@@ -216,21 +258,25 @@ test "placeFonts copies nested and bare sources and manifests their dest paths" 
     const manifest = try placeFonts(io, testing.allocator, root, fonts, &entries);
     defer testing.allocator.free(manifest);
 
-    const expected = fonts ++ "/FiraCode-Bold.ttf\n" ++ fonts ++ "/HackNerdFont-Regular.ttf";
+    const expected = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/FiraCode-Bold.ttf\n{s}/HackNerdFont-Regular.ttf",
+        .{ fonts, fonts },
+    );
+    defer testing.allocator.free(expected);
     try testing.expectEqualStrings(expected, manifest);
-    try expectFile(io, fonts ++ "/FiraCode-Bold.ttf", "BOLD");
-    try expectFile(io, fonts ++ "/HackNerdFont-Regular.ttf", "HACK");
+    try expectFile(io, s.p("/fonts/FiraCode-Bold.ttf"), "BOLD");
+    try expectFile(io, s.p("/fonts/HackNerdFont-Regular.ttf"), "HACK");
 }
 
 test "placeFonts skips unsafe entries and omits them from the manifest" {
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_cask_font_place_unsafe";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("cask_font_place_unsafe");
+    defer s.deinit();
 
-    const root = base ++ "/extract";
-    const fonts = base ++ "/fonts";
-    try putFile(io, root ++ "/Good.ttf", "GOOD");
+    const root = s.p("/extract");
+    const fonts = s.p("/fonts");
+    try putFile(io, s.p("/extract/Good.ttf"), "GOOD");
 
     const entries = [_]FontEntry{
         .{ .source = "../../evil", .target = null },
@@ -239,38 +285,36 @@ test "placeFonts skips unsafe entries and omits them from the manifest" {
     const manifest = try placeFonts(io, testing.allocator, root, fonts, &entries);
     defer testing.allocator.free(manifest);
 
-    try testing.expectEqualStrings(fonts ++ "/Good.ttf", manifest);
-    try expectFile(io, fonts ++ "/Good.ttf", "GOOD");
+    const expected = s.p("/fonts/Good.ttf");
+    try testing.expectEqualStrings(expected, manifest);
+    try expectFile(io, expected, "GOOD");
 }
 
 test "placeFonts on an empty entry list yields an empty manifest" {
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_cask_font_place_empty";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("cask_font_place_empty");
+    defer s.deinit();
 
-    const manifest = try placeFonts(io, testing.allocator, base ++ "/extract", base ++ "/fonts", &.{});
+    const manifest = try placeFonts(io, testing.allocator, s.p("/extract"), s.p("/fonts"), &.{});
     defer testing.allocator.free(manifest);
     try testing.expectEqual(@as(usize, 0), manifest.len);
 }
 
 test "placeFonts fails loud when a sanitized source is missing on disk" {
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_cask_font_place_missing";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("cask_font_place_missing");
+    defer s.deinit();
 
     const entries = [_]FontEntry{.{ .source = "Absent.ttf", .target = null }};
-    try testing.expectError(error.FileNotFound, placeFonts(io, testing.allocator, base ++ "/extract", base ++ "/fonts", &entries));
+    try testing.expectError(error.FileNotFound, placeFonts(io, testing.allocator, s.p("/extract"), s.p("/fonts"), &entries));
 }
 
 test "manifest round-trips the placed-path list" {
     const io = std.Options.debug_io;
-    const base = "/tmp/malt_cask_font_manifest";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var s = try Scratch.init("cask_font_manifest");
+    defer s.deinit();
 
-    const path = base ++ "/Caskroom/font-x/1.0/" ++ MANIFEST_NAME;
+    const path = s.p("/Caskroom/font-x/1.0/" ++ MANIFEST_NAME);
     const body = "/Users/x/Library/Fonts/A.ttf\n/Users/x/Library/Fonts/B.ttf";
     try writeManifest(io, path, body);
 
@@ -280,7 +324,10 @@ test "manifest round-trips the placed-path list" {
 }
 
 test "readManifest returns empty for a missing manifest" {
-    const got = try readManifest(std.Options.debug_io, testing.allocator, "/tmp/malt_cask_font_absent_xyz/" ++ MANIFEST_NAME);
+    // The scratch base is deliberately never created: the path must be absent.
+    var s = try Scratch.init("cask_font_absent_xyz");
+    defer s.deinit();
+    const got = try readManifest(std.Options.debug_io, testing.allocator, s.p("/" ++ MANIFEST_NAME));
     defer testing.allocator.free(got);
     try testing.expectEqual(@as(usize, 0), got.len);
 }

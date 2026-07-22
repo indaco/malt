@@ -497,16 +497,59 @@ fn testIoDeinit() void {
     test_threaded.deinit();
 }
 
+const dbg_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(dbg_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        try std.Io.Dir.createDirAbsolute(dbg_io, base, .default_dir);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
+
 test "followLog prints initial tail and exits when interrupt is set before first poll" {
     testIoInit();
     defer testIoDeinit();
 
-    const dir = "/tmp/malt_supervisor_follow_interrupt";
-    std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(test_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+    var s = try Scratch.init("supervisor_follow_interrupt");
+    defer s.deinit();
 
-    const log_path = dir ++ "/sample.log";
+    const log_path = s.p("/sample.log");
     {
         const f = try std.Io.Dir.createFileAbsolute(test_io, log_path, .{ .truncate = true });
         defer f.close(test_io);
@@ -528,12 +571,10 @@ test "followLog flushes appended bytes between polls" {
     testIoInit();
     defer testIoDeinit();
 
-    const dir = "/tmp/malt_supervisor_follow_poll";
-    std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(test_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+    var s = try Scratch.init("supervisor_follow_poll");
+    defer s.deinit();
 
-    const log_path = dir ++ "/sample.log";
+    const log_path = s.p("/sample.log");
     {
         const f = try std.Io.Dir.createFileAbsolute(test_io, log_path, .{ .truncate = true });
         defer f.close(test_io);
@@ -581,12 +622,10 @@ test "followLog breaks when sleep reports cancellation on the first poll" {
     testIoInit();
     defer testIoDeinit();
 
-    const dir = "/tmp/malt_supervisor_follow_cancel";
-    std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(test_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+    var s = try Scratch.init("supervisor_follow_cancel");
+    defer s.deinit();
 
-    const log_path = dir ++ "/sample.log";
+    const log_path = s.p("/sample.log");
     {
         const f = try std.Io.Dir.createFileAbsolute(test_io, log_path, .{ .truncate = true });
         defer f.close(test_io);
@@ -613,12 +652,10 @@ test "followLog breaks when sleep reports cancellation after several idle polls"
     testIoInit();
     defer testIoDeinit();
 
-    const dir = "/tmp/malt_supervisor_follow_cancel_late";
-    std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(test_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+    var s = try Scratch.init("supervisor_follow_cancel_late");
+    defer s.deinit();
 
-    const log_path = dir ++ "/sample.log";
+    const log_path = s.p("/sample.log");
     {
         const f = try std.Io.Dir.createFileAbsolute(test_io, log_path, .{ .truncate = true });
         defer f.close(test_io);
@@ -646,12 +683,10 @@ test "followLog flushes data appended before sleep cancellation lands" {
     testIoInit();
     defer testIoDeinit();
 
-    const dir = "/tmp/malt_supervisor_follow_cancel_flush";
-    std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
-    try std.Io.Dir.createDirAbsolute(test_io, dir, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+    var s = try Scratch.init("supervisor_follow_cancel_flush");
+    defer s.deinit();
 
-    const log_path = dir ++ "/sample.log";
+    const log_path = s.p("/sample.log");
     {
         const f = try std.Io.Dir.createFileAbsolute(test_io, log_path, .{ .truncate = true });
         defer f.close(test_io);

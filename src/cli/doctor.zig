@@ -1427,6 +1427,49 @@ pub fn countMissingLocalSources(
 // the gating contract of the emit helper.
 
 const testing = std.testing;
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+var scratch_seq: std.atomic.Value(u32) = .init(0);
+
+/// Scratch tree under a process- and call-unique base: overlapping test runs
+/// share /tmp and would otherwise delete each other's fixtures.
+const Scratch = struct {
+    arena: std.heap.ArenaAllocator,
+    base: [:0]const u8,
+
+    fn init(comptime tag: []const u8) !Scratch {
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        errdefer arena.deinit();
+        const base = try std.fmt.allocPrintSentinel(
+            arena.allocator(),
+            "/tmp/malt_" ++ tag ++ "_{d}_{d}",
+            .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
+            0,
+        );
+        rmrf(base);
+        return .{ .arena = arena, .base = base };
+    }
+
+    /// Absolute path to `sub` (leading slash included) inside the scratch
+    /// tree; valid until `deinit`.
+    fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
+        return std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "{s}{s}",
+            .{ self.base, sub },
+            0,
+        ) catch @panic("OOM");
+    }
+
+    fn deinit(self: *Scratch) void {
+        rmrf(self.base);
+        self.arena.deinit();
+    }
+};
 
 fn fixHintEmitted(buf: []const u8) bool {
     return std.mem.indexOf(u8, buf, "safe-class fixes") != null;
@@ -1512,11 +1555,9 @@ test "emitTapCacheReport: silent on stderr when cache is empty" {
     // A change that surfaced an "always-on" zero line would noise up
     // every clean run, so pin the silent shape.
     const allocator = testing.allocator;
-    const ts = std.Io.Clock.real.now(std.Options.debug_io).toNanoseconds();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_doctor_tap_empty_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    var s = try Scratch.init("doctor_tap_empty");
+    defer s.deinit();
+    const prefix = s.base;
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, prefix);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -1530,18 +1571,14 @@ test "emitTapCacheReport: silent on stderr when cache is empty" {
 
 test "emitTapCacheReport: human one-liner when cache holds bytes" {
     const allocator = testing.allocator;
-    const ts = std.Io.Clock.real.now(std.Options.debug_io).toNanoseconds();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_doctor_tap_full_{d}", .{ts});
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    var s = try Scratch.init("doctor_tap_full");
+    defer s.deinit();
+    const prefix = s.base;
 
-    var cache_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache/Tap", .{prefix});
+    const cache_dir = s.p("/cache/Tap");
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, cache_dir);
 
-    var entry_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const entry = try std.fmt.bufPrint(&entry_buf, "{s}/{s}.tar.gz", .{ cache_dir, "ab" ** 32 });
+    const entry = s.p("/cache/Tap/" ++ "ab" ** 32 ++ ".tar.gz");
     {
         const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, entry, .{});
         defer f.close(std.Options.debug_io);
