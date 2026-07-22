@@ -181,7 +181,7 @@ const update_help =
 const outdated_help =
     \\Usage: malt outdated [flags]
     \\
-    \\List packages with newer versions available.
+    \\List packages whose installed version differs from the tap.
     \\
     \\Flags:
     \\  --json         Output as JSON

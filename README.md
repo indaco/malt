@@ -259,7 +259,7 @@ Commands:
   uninstall     Remove installed packages
   upgrade       Upgrade installed packages
   update        Refresh metadata cache
-  outdated      List packages with newer versions available
+  outdated      List packages whose installed version differs from the tap
   list          List installed packages
   info          Show detailed package information
   search        Search formulas and casks
@@ -334,7 +334,7 @@ Three commands form the upgrade loop:
 mt update                                # refresh API cache + drop outdated snapshot
 mt update --check                        # write a fresh outdated snapshot only
 
-mt outdated                              # list packages with newer versions
+mt outdated                              # installed version differs from the tap
 mt outdated --pinned-only                # CVE watch on held-back versions
 mt outdated --refresh                    # bypass the cached snapshot
 

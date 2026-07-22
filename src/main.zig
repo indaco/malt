@@ -779,7 +779,7 @@ fn printUsage(ctx: *const AppCtx) void {
         \\  uninstall     Remove installed packages
         \\  upgrade       Upgrade installed packages
         \\  update        Refresh metadata cache
-        \\  outdated      List packages with newer versions available
+        \\  outdated      List packages whose installed version differs from the tap
         \\  list          List installed packages
         \\  info          Show detailed package information
         \\  search        Search formulas and casks
