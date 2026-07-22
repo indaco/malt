@@ -79,7 +79,7 @@ pub fn writeJsonArray(
 }
 
 /// Match the `mt list` / `mt search` row shape: cyan bullet, plain
-/// name, dimmed `(installed)`, warn-coloured `< latest`, and an
+/// name, dimmed `(installed)`, warn-coloured `≠ latest`, and an
 /// optional dim `[kind]` tag for casks. Honours `NO_COLOR` / pipes
 /// automatically via `color.isColorEnabled()`.
 fn writeEntry(stdout: *std.Io.Writer, e: OutdatedEntry, kind_tag: ?[]const u8) void {
@@ -92,7 +92,8 @@ fn writeEntry(stdout: *std.Io.Writer, e: OutdatedEntry, kind_tag: ?[]const u8) v
     writeBullet(stdout);
     stdout.writeAll(e.name) catch return;
     writeStyledSpan(stdout, color.SemanticStyle.detail.code(), " (", e.installed, ")");
-    writeStyledSpan(stdout, color.SemanticStyle.warn.code(), " < ", e.latest, "");
+    // `≠`, not `<`: outdated is decided by inequality with the tap.
+    writeStyledSpan(stdout, color.SemanticStyle.warn.code(), " \xe2\x89\xa0 ", e.latest, "");
     if (kind_tag) |t| writeStyledSpan(stdout, color.SemanticStyle.detail.code(), " [", t, "]");
     stdout.writeAll("\n") catch return;
 }
@@ -249,8 +250,28 @@ test "writeCaskEntries human mode no-color path adds the [cask] kind tag" {
 
     try std.testing.expect(std.mem.indexOf(u8, aw.written(), "alpha-cask") != null);
     try std.testing.expect(std.mem.indexOf(u8, aw.written(), " (1.0)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, aw.written(), " < 2.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), " ≠ 2.0") != null);
     try std.testing.expect(std.mem.indexOf(u8, aw.written(), " [cask]") != null);
     // No ANSI escape leaked into the no-color path.
     try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\x1b[") == null);
+}
+
+test "the plain-text row contains no directional comparison glyph" {
+    // malt calls a package outdated when its version differs from the tap,
+    // never when it is older; the row must not re-assert an ordering the
+    // code does not compute. Pins the whole row so a future arrow fails here.
+    color.setForTest(false, null);
+    output.setQuiet(false);
+    defer color.setForTest(null, null);
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const entries = [_]OutdatedEntry{
+        .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+    };
+    writeFormulaEntries(&aw.writer, &entries);
+
+    try std.testing.expectEqualStrings("  \xe2\x96\xb8 alpha (1.0) ≠ 2.0\n", aw.written());
+    try std.testing.expect(std.mem.indexOfAny(u8, aw.written(), "<>") == null);
 }
