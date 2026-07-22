@@ -881,6 +881,10 @@ fn upgradeTapFormula(
         });
     const same_commit = if (cached_sha_opt) |c| std.mem.eql(u8, c, fresh_sha) else false;
 
+    // Third policy, deliberately not the version policy: a tap formula upgrades
+    // on tap content, so a `.rb` edit with no version bump still reinstalls.
+    // Stated to users in `upgrade_help` (`src/cli/help.zig`); the version rule it
+    // differs from is the note in `src/cli/outdated/refresh.zig`.
     if (!force and same_commit) {
         if (!bulk) output.skip("{s} is already at latest tap commit", .{name});
         output.emitNdjsonEvent(.up_to_date, name, null);
