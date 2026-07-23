@@ -85,6 +85,7 @@ pub const atomic = @import("fs/atomic.zig");
 pub const clonefile = @import("fs/clonefile.zig");
 pub const dirsize = @import("fs/dirsize.zig");
 pub const path_write = @import("fs/path_write.zig");
+pub const prefix_path = @import("fs/prefix_path.zig");
 pub const read = @import("fs/read.zig");
 pub const theme_file = @import("fs/theme_file.zig");
 pub const codesign = @import("macho/codesign.zig");
