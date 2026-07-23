@@ -195,10 +195,13 @@ fn isCorePathRow(row: KegRow) bool {
 // truth. A keg is "outdated" whenever its revision-qualified installed version
 // is not byte-equal to the current upstream version — NOT when it is strictly
 // older (casks have no revision, so theirs is bare). This never
-// misses an upgrade (any difference surfaces); the trade-off is that if upstream
-// moves backward (a yanked release), `outdated` lists it and `upgrade` follows
-// the tap down. That downgrade is by design, surfaced as `old -> new` in
-// `--dry-run`. Matching Homebrew's `PkgVersion` ordering instead would risk a
+// misses an upgrade (any difference surfaces); the trade-off is that the tap is
+// followed in both directions, so if upstream moves backward (a yanked release)
+// `outdated` lists it and `upgrade` follows the tap down. That downgrade is by
+// design and no longer silent: `outdated` marks the row and `upgrade` warns
+// before proceeding - reported, never blocked. Which way a move points is the
+// comparator's call, not restated here. Matching Homebrew's `PkgVersion`
+// ordering instead would risk a
 // divergent comparator silently skipping a real upgrade — a worse failure mode.
 
 /// What the audit could prove about one row. `proven_current` is the only

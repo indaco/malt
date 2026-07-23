@@ -148,7 +148,9 @@ const upgrade_help =
     \\casks are skipped with a "pinned, skipped" line; pass --force to
     \\override. malt follows the tap: if the tap version differs from the
     \\installed one it is applied, even if that moves the version down
-    \\(e.g. an upstream revert) — preview with --dry-run.
+    \\(e.g. an upstream revert). A backward move is announced with a warning
+    \\that names both versions and points at `mt rollback`; it never blocks
+    \\the upgrade, and stays quiet when the versions cannot be ranked.
     \\Formulas from a third-party tap are the exception: they upgrade when
     \\the tap content changes, not when the version changes, so a reinstall
     \\with no version movement is expected. Core formulas and casks follow
@@ -204,7 +206,9 @@ const outdated_help =
     \\
     \\A package is "outdated" when its installed version differs from the
     \\current tap version (revision bumps included), not only when it is
-    \\older: malt follows the tap as source of truth.
+    \\older: malt follows the tap as source of truth. A row the tap has
+    \\moved behind is tagged [downgrade]; the tag only reports the direction
+    \\and filters nothing - a pair malt cannot rank is listed without it.
     \\
 ;
 
