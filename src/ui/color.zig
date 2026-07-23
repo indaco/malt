@@ -87,11 +87,34 @@ pub const Rgb = struct {
 pub const Role = themes.Role;
 pub const Theme = themes.Theme;
 
-var color_enabled: ?bool = null;
-var emoji_enabled: ?bool = null;
-var background_cached: ?Background = null;
-var truecolor_cached: ?bool = null;
-var theme_cached: ?Theme = null;
+/// Atomic-friendly `?bool`: `@atomicLoad`/`@atomicStore` can't touch an
+/// optional, so "unresolved" rides its own variant.
+const Tri = enum(u8) { unresolved, no, yes };
+
+/// `?bool` → `Tri` for the test setters.
+fn triFromOpt(v: ?bool) Tri {
+    return if (v) |b| (if (b) .yes else .no) else .unresolved;
+}
+
+/// Atomic-friendly `?Background`; `unresolved` keeps `Background` a clean enum.
+const BgCache = enum(u8) { unresolved, dark, light, unknown };
+
+fn bgToCache(bg: Background) BgCache {
+    return switch (bg) {
+        .dark => .dark,
+        .light => .light,
+        .unknown => .unknown,
+    };
+}
+
+var color_enabled: Tri = .unresolved;
+var emoji_enabled: Tri = .unresolved;
+var background_cached: BgCache = .unresolved;
+var truecolor_cached: Tri = .unresolved;
+// Clean `Theme` plus a sibling resolved-latch, so `Theme` needs no `unresolved`.
+// The value is published before the latch, so a resolved read never sees stale.
+var theme_cached: Theme = .default;
+var theme_resolved: bool = false;
 
 var pkg_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } };
 
@@ -104,8 +127,12 @@ var pkg_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]co
 // lazily and `setRuntime` drops it, mirroring `theme_cached`.
 var custom_storage: theme_registry.Storage = undefined;
 var custom_count: usize = 0;
-var active_custom_index: ?usize = null;
-var active_custom_resolved: bool = false;
+
+// Folds resolved-flag + index into one word (two top `usize` reserved) so a
+// resolved index is never read torn from its flag.
+const AC_UNRESOLVED: usize = std.math.maxInt(usize);
+const AC_NONE: usize = std.math.maxInt(usize) - 1;
+var active_custom: usize = AC_UNRESOLVED;
 
 /// Seed the io/environ used by env reads and TTY probes. Called by
 /// `main` after `AppCtx` is built. Inverse of relying on globals.
@@ -116,14 +143,16 @@ var active_custom_resolved: bool = false;
 pub fn setRuntime(io: std.Io, environ: std.process.Environ) void {
     pkg_io = io;
     pkg_environ = environ;
-    color_enabled = null;
-    emoji_enabled = null;
-    background_cached = null;
-    truecolor_cached = null;
-    theme_cached = null;
+    @atomicStore(Tri, &color_enabled, .unresolved, .release);
+    @atomicStore(Tri, &emoji_enabled, .unresolved, .release);
+    @atomicStore(BgCache, &background_cached, .unresolved, .release);
+    bg_probing.store(false, .release); // release the probe latch so the re-seed re-probes
+    @atomicStore(Tri, &truecolor_cached, .unresolved, .release);
+    // Dropping the latch invalidates the value; the value store itself is moot.
+    @atomicStore(bool, &theme_resolved, false, .release);
     // Selection depends on MALT_THEME; the loaded registry itself is file-derived
     // and survives a re-seed, so only the resolved choice is dropped.
-    active_custom_resolved = false;
+    @atomicStore(usize, &active_custom, AC_UNRESOLVED, .release);
 }
 
 test "setRuntime re-seeds the theme cache so a pre-seed warm cannot freeze it" {
@@ -154,58 +183,337 @@ fn isTty(fd: std.posix.fd_t) bool {
 }
 
 pub fn isColorEnabled() bool {
-    if (color_enabled) |v| return v;
+    switch (@atomicLoad(Tri, &color_enabled, .acquire)) {
+        .yes => return true,
+        .no => return false,
+        .unresolved => {},
+    }
     // Check NO_COLOR env var AND whether stderr is a tty
     const no_color = lookupEnv("NO_COLOR");
-    const result = no_color == null and isTty(std.posix.STDERR_FILENO);
-    color_enabled = result;
-    return result;
+    const result: Tri = if (no_color == null and isTty(std.posix.STDERR_FILENO)) .yes else .no;
+    // Benign double-compute under a race: the value is env-deterministic, so
+    // last-writer-wins on identical data — no CAS needed.
+    @atomicStore(Tri, &color_enabled, result, .release);
+    return result == .yes;
 }
 
 pub fn isEmojiEnabled() bool {
-    if (emoji_enabled) |v| return v;
+    switch (@atomicLoad(Tri, &emoji_enabled, .acquire)) {
+        .yes => return true,
+        .no => return false,
+        .unresolved => {},
+    }
     const no_emoji = lookupEnv("MALT_NO_EMOJI");
-    const result = no_emoji == null;
-    emoji_enabled = result;
-    return result;
+    const result: Tri = if (no_emoji == null) .yes else .no;
+    @atomicStore(Tri, &emoji_enabled, result, .release);
+    return result == .yes;
 }
 
 /// Test-only override for the color/emoji caches. Pass `null` to let
 /// the next `is*Enabled` call recompute from env.
 pub fn setForTest(c: ?bool, e: ?bool) void {
     if (!builtin.is_test) return;
-    color_enabled = c;
-    emoji_enabled = e;
+    @atomicStore(Tri, &color_enabled, triFromOpt(c), .release);
+    @atomicStore(Tri, &emoji_enabled, triFromOpt(e), .release);
 }
 
 /// Test-only override for the background cache.
 pub fn setBackgroundForTest(bg: ?Background) void {
     if (!builtin.is_test) return;
-    background_cached = bg;
+    @atomicStore(BgCache, &background_cached, if (bg) |v| bgToCache(v) else .unresolved, .release);
+    bg_probing.store(false, .release); // clear the latch so a forced/null value never wedges a recompute
 }
 
 /// Test-only override for the truecolor cache.
 pub fn setTruecolorForTest(v: ?bool) void {
     if (!builtin.is_test) return;
-    truecolor_cached = v;
+    @atomicStore(Tri, &truecolor_cached, triFromOpt(v), .release);
 }
 
 /// Test-only override for the theme cache.
 pub fn setThemeForTest(t: ?Theme) void {
     if (!builtin.is_test) return;
-    theme_cached = t;
+    if (t) |v| {
+        @atomicStore(Theme, &theme_cached, v, .release);
+        @atomicStore(bool, &theme_resolved, true, .release);
+    } else {
+        @atomicStore(bool, &theme_resolved, false, .release);
+    }
 }
+
+// ─── atomic sentinel cache guards ────────────────────────────────────
+//
+// The env/TTY caches are read on first touch from worker threads (a migrate
+// worker reaches `isColorEnabled`/`isEmojiEnabled` via `output.warn`), so their
+// storage must be atomic-friendly sentinel enums — never `?T`, whose layout is
+// not guaranteed atomic. These structural guards fail to build the moment a
+// cache reverts to an optional.
+
+fn typeIsEnum(comptime T: type) bool {
+    return std.meta.activeTag(@typeInfo(T)) == .@"enum";
+}
+
+test "storage: color/emoji caches are atomic sentinel enums, not optionals" {
+    try std.testing.expect(typeIsEnum(@TypeOf(color_enabled)));
+    try std.testing.expect(typeIsEnum(@TypeOf(emoji_enabled)));
+}
+
+// Encodes WHY the atomic rewrite matters: workers reach these accessors through
+// `output.warn`, so concurrent first-touch must agree and leave the cache
+// resolved. It cannot *prove* race-freedom (TSan is unavailable here) — the
+// sentinel storage provides that, pinned by the structural guard above.
+test "concurrent first-touch on the enabled caches agrees and resolves" {
+    setRuntime(std.Options.debug_io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"NO_COLOR=1"} } });
+    defer {
+        setForTest(null, null);
+        setRuntime(std.Options.debug_io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+
+    const Runner = struct {
+        color: bool = false,
+        emoji: bool = false,
+        fn run(self: *@This()) void {
+            self.color = isColorEnabled();
+            self.emoji = isEmojiEnabled();
+        }
+    };
+    var runners: [8]Runner = @splat(.{});
+    var threads: [8]std.Thread = undefined;
+    for (&threads, &runners) |*t, *r| t.* = try std.Thread.spawn(.{}, Runner.run, .{r});
+    for (&threads) |t| t.join();
+
+    for (runners) |r| {
+        try std.testing.expectEqual(runners[0].color, r.color);
+        try std.testing.expectEqual(runners[0].emoji, r.emoji);
+    }
+    try std.testing.expect(@atomicLoad(Tri, &color_enabled, .acquire) != .unresolved);
+    try std.testing.expect(@atomicLoad(Tri, &emoji_enabled, .acquire) != .unresolved);
+}
+
+test "storage: the active-custom cache is a single atomic word" {
+    // Folded from a `?usize` index + `bool` resolved flag into one word so a
+    // resolved index is never observed torn from its resolved state.
+    try std.testing.expect(std.meta.activeTag(@typeInfo(@TypeOf(active_custom))) == .int);
+}
+
+test "storage: background/truecolor/theme caches are atomic; Theme stays clean" {
+    try std.testing.expect(typeIsEnum(@TypeOf(background_cached))); // BgCache, not ?Background
+    try std.testing.expect(typeIsEnum(@TypeOf(truecolor_cached))); // Tri, not ?bool
+    // Theme stays a clean public enum the TUI switches over exhaustively; the
+    // unresolved state rides a sibling latch, never a Theme variant.
+    try std.testing.expect(@TypeOf(theme_cached) == Theme);
+    try std.testing.expect(!@hasField(Theme, "unresolved"));
+    try std.testing.expect(@TypeOf(theme_resolved) == bool);
+}
+
+test "setRuntime drops the enabled/truecolor/background caches so a new environ recomputes" {
+    const io = std.Options.debug_io;
+    // MALT_THEME as a bg keyword forces the background without an OSC 11 TTY probe.
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{ "MALT_THEME=light", "COLORTERM=truecolor" } } });
+    defer {
+        setForTest(null, null);
+        setTruecolorForTest(null);
+        setBackgroundForTest(null);
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+
+    _ = isColorEnabled(); // prime the color cache (its env recompute is TTY-gated, unobservable here)
+    try std.testing.expect(isEmojiEnabled());
+    try std.testing.expect(truecolorSupported());
+    try std.testing.expectEqual(Background.light, background());
+    try std.testing.expect(@atomicLoad(Tri, &color_enabled, .acquire) != .unresolved);
+
+    // New environ flips each derived value; a frozen cache would keep the old one.
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{ "MALT_THEME=dark", "MALT_NO_EMOJI=1" } } });
+    try std.testing.expect(@atomicLoad(Tri, &color_enabled, .acquire) == .unresolved); // the cache was dropped
+    try std.testing.expect(!isEmojiEnabled()); // MALT_NO_EMOJI now set
+    try std.testing.expect(!truecolorSupported()); // COLORTERM now gone
+    try std.testing.expectEqual(Background.dark, background()); // MALT_THEME flipped
+}
+
+test "background/truecolor/theme resolve cold — the deleted boot warm is not needed" {
+    const io = std.Options.debug_io;
+    // Exactly the state main.zig used to warm, now resolved lazily on first touch.
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{ "MALT_THEME=light", "COLORTERM=truecolor" } } });
+    defer setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    try std.testing.expectEqual(Background.light, background());
+    try std.testing.expect(truecolorSupported());
+    try std.testing.expectEqual(Theme.default, theme());
+}
+
+test "test setters round-trip; null recomputes from env" {
+    const io = std.Options.debug_io;
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{ "MALT_THEME=light", "COLORTERM=truecolor" } } });
+    defer {
+        setForTest(null, null);
+        setBackgroundForTest(null);
+        setTruecolorForTest(null);
+        setThemeForTest(null);
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+
+    // Forced values are observed verbatim.
+    setForTest(true, false);
+    try std.testing.expect(isColorEnabled());
+    try std.testing.expect(!isEmojiEnabled());
+    setBackgroundForTest(.dark);
+    try std.testing.expectEqual(Background.dark, background());
+    setTruecolorForTest(false);
+    try std.testing.expect(!truecolorSupported());
+    setThemeForTest(.nord);
+    try std.testing.expectEqual(Theme.nord, theme());
+
+    // `null` restores the recompute sentinel; the next call reads env again.
+    setForTest(null, null);
+    try std.testing.expect(isEmojiEnabled()); // MALT_NO_EMOJI unset ⇒ flips back on
+    setBackgroundForTest(null);
+    try std.testing.expectEqual(Background.light, background()); // MALT_THEME=light
+    setTruecolorForTest(null);
+    try std.testing.expect(truecolorSupported()); // COLORTERM=truecolor
+    setThemeForTest(null);
+    try std.testing.expectEqual(Theme.default, theme()); // "light" is a bg keyword ⇒ default theme
+}
+
+test "background() runs the OSC 11 probe at most once under concurrent first-touch" {
+    // The probe toggles raw mode on the shared stdin and consumes the terminal's
+    // single OSC 11 response — concurrent probes corrupt each other. Pin the
+    // by-construction guarantee: exactly one thread runs the detector even when N
+    // race in cold. Non-TTY here, so a counting detector stands in for the probe.
+    const io = std.Options.debug_io;
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    const Probe = struct {
+        var runs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+        fn detect() Background {
+            _ = runs.fetchAdd(1, .monotonic);
+            // Hold the resolve open so every racing thread reliably observes an
+            // unresolved cache first — without serialisation all N enter here.
+            var ts: std.c.timespec = .{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
+            _ = std.c.nanosleep(&ts, null);
+            return .dark;
+        }
+        fn touch() void {
+            _ = background();
+        }
+    };
+    Probe.runs.store(0, .monotonic);
+    setDetectBackgroundForTest(&Probe.detect);
+    defer {
+        setDetectBackgroundForTest(null);
+        setBackgroundForTest(null);
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+
+    var threads: [8]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Probe.touch, .{});
+    for (&threads) |t| t.join();
+
+    try std.testing.expectEqual(Background.dark, background());
+    try std.testing.expectEqual(@as(u32, 1), Probe.runs.load(.monotonic));
+}
+
+test "setBackgroundForTest(null) clears the probe latch so a resolve can recompute" {
+    const io = std.Options.debug_io;
+    // MALT_THEME as a bg keyword resolves without a TTY probe, so it claims the latch.
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"MALT_THEME=light"} } });
+    defer {
+        setBackgroundForTest(null);
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+    try std.testing.expectEqual(Background.light, background());
+    try std.testing.expect(bg_probing.load(.acquire)); // latch claimed
+    // Dropping the cache must drop the latch too, or the next resolve would wedge.
+    setBackgroundForTest(null);
+    try std.testing.expect(!bg_probing.load(.acquire));
+    try std.testing.expectEqual(Background.light, background()); // recomputes, no wedge
+}
+
+test "concurrent roleCode first-touch agrees (fold + theme latch on a cold cache)" {
+    // The realistic worker path — coloured output → roleCode → activeCustomIndex
+    // (the fold) and theme(). seedCustom leaves both unresolved, so N threads race.
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, custom_ocean_src));
+    defer resetCustom();
+
+    const Runner = struct {
+        code: []const u8 = "",
+        fn run(self: *@This()) void {
+            self.code = roleCode(.accent);
+        }
+    };
+    var runners: [8]Runner = @splat(.{});
+    var threads: [8]std.Thread = undefined;
+    for (&threads, &runners) |*t, *r| t.* = try std.Thread.spawn(.{}, Runner.run, .{r});
+    for (&threads) |t| t.join();
+
+    for (runners) |r| try std.testing.expectEqualStrings(runners[0].code, r.code);
+    try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", runners[0].code); // ocean accent
+    try std.testing.expect(@atomicLoad(usize, &active_custom, .acquire) != AC_UNRESOLVED);
+}
+
+test "the active-custom fold resolves, drops on re-seed, and drops on clear" {
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, custom_ocean_src));
+    defer resetCustom();
+
+    // Resolved ⇒ a real registry index is visible in the one word (never torn).
+    try std.testing.expect(activeCustomIndex() != null);
+    try std.testing.expect(@atomicLoad(usize, &active_custom, .acquire) < AC_NONE);
+
+    // Re-seed drops the resolution back to the unresolved sentinel.
+    setRuntime(std.Options.debug_io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    try std.testing.expectEqual(AC_UNRESOLVED, @atomicLoad(usize, &active_custom, .acquire));
+    // Registry survives the re-seed, so an unset selector recomputes the file default.
+    try std.testing.expect(activeCustomIndex() != null);
+
+    // Clearing the registry drops it; the accessor then resolves to the "none" sentinel.
+    clearCustomForTest();
+    try std.testing.expectEqual(AC_UNRESOLVED, @atomicLoad(usize, &active_custom, .acquire));
+    try std.testing.expectEqual(@as(?usize, null), activeCustomIndex());
+    try std.testing.expectEqual(AC_NONE, @atomicLoad(usize, &active_custom, .acquire));
+}
+
+/// Serialises the one-shot OSC 11 probe: it drives the shared stdin into raw mode
+/// and reads the terminal's single response, so concurrent probes corrupt each
+/// other — unlike the benign integer caches. One thread probes; racers wait.
+var bg_probing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 /// Cached background accessor. Detection runs at most once per process.
 pub fn background() Background {
-    if (background_cached) |v| return v;
-    const resolved = detectBackground();
-    background_cached = resolved;
-    return resolved;
+    switch (@atomicLoad(BgCache, &background_cached, .acquire)) {
+        .dark => return .dark,
+        .light => return .light,
+        .unknown => return .unknown,
+        .unresolved => {},
+    }
+    // Only the latch winner runs the probe; losers spin-yield for its store.
+    if (bg_probing.cmpxchgStrong(false, true, .acquire, .monotonic) == null) {
+        const resolved = detectBackground();
+        @atomicStore(BgCache, &background_cached, bgToCache(resolved), .release);
+        return resolved;
+    }
+    while (true) {
+        switch (@atomicLoad(BgCache, &background_cached, .acquire)) {
+            .dark => return .dark,
+            .light => return .light,
+            .unknown => return .unknown,
+            .unresolved => std.Thread.yield() catch {}, // transient; re-poll for the winner
+        }
+    }
+}
+
+/// Test-only detector swap so a concurrency test can count resolve-path entries
+/// (the real probe needs a TTY). Comptime-gated — free in release.
+var detect_override: ?*const fn () Background = null;
+
+/// Test-only: swap the background detector. Pass `null` to restore the real chain.
+pub fn setDetectBackgroundForTest(f: ?*const fn () Background) void {
+    if (!builtin.is_test) return;
+    detect_override = f;
 }
 
 /// Chain: MALT_THEME env → OSC 11 query → COLORFGBG env → .unknown.
 fn detectBackground() Background {
+    if (builtin.is_test) {
+        if (detect_override) |f| return f();
+    }
     if (themeFromEnv(lookupEnv("MALT_THEME"))) |forced| return forced;
     if (queryOsc11Background()) |bg| return bg;
     if (lookupEnv("COLORFGBG")) |v| {
@@ -319,8 +627,10 @@ fn queryOsc11Background() ?Background {
     defer std.posix.tcsetattr(stdin_fd, .FLUSH, saved) catch {};
 
     const query = "\x1b]11;?\x1b\\";
-    const written = std.c.write(stderr_fd, query.ptr, query.len);
-    if (written < 0 or @as(usize, @intCast(written)) != query.len) return null;
+    // Route the query through pkg_io like the response read below, so both sides
+    // share one io path instead of a stray raw libc write.
+    const stderr_file: std.Io.File = .{ .handle = stderr_fd, .flags = .{ .nonblocking = false } };
+    stderr_file.writeStreamingAll(pkg_io, query) catch return null;
 
     var pfd = [_]std.posix.pollfd{.{ .fd = stdin_fd, .events = std.posix.POLL.IN, .revents = 0 }};
     const ready = std.posix.poll(&pfd, 100) catch return null;
@@ -425,10 +735,14 @@ pub fn truecolorFromEnv(value: ?[]const u8) bool {
 
 /// Cached truecolor-support accessor. Reads $COLORTERM once.
 pub fn truecolorSupported() bool {
-    if (truecolor_cached) |v| return v;
-    const result = truecolorFromEnv(lookupEnv("COLORTERM"));
-    truecolor_cached = result;
-    return result;
+    switch (@atomicLoad(Tri, &truecolor_cached, .acquire)) {
+        .yes => return true,
+        .no => return false,
+        .unresolved => {},
+    }
+    const result: Tri = if (truecolorFromEnv(lookupEnv("COLORTERM"))) .yes else .no;
+    @atomicStore(Tri, &truecolor_cached, result, .release);
+    return result == .yes;
 }
 
 // Pin every notice cell across the (bg, truecolor) matrix. Sister tests for
@@ -471,11 +785,13 @@ test "paletteCode: notice — light + basic uses cyan, distinct from warn-magent
 // the background-aware tiers above; named themes carry their own truecolor RGB
 // and degrade to the `.default` basic cell on terminals without truecolor.
 
-/// Cached theme accessor. Reads `MALT_THEME` once at boot (pre-warmed in main).
+/// Cached theme accessor. Resolves `MALT_THEME` on first touch, then serves the
+/// atomic cache — race-free by construction, independent of boot ordering.
 pub fn theme() Theme {
-    if (theme_cached) |v| return v;
+    if (@atomicLoad(bool, &theme_resolved, .acquire)) return @atomicLoad(Theme, &theme_cached, .acquire);
     const resolved = resolveThemeFromEnv(lookupEnv("MALT_THEME"));
-    theme_cached = resolved;
+    @atomicStore(Theme, &theme_cached, resolved, .release);
+    @atomicStore(bool, &theme_resolved, true, .release);
     return resolved;
 }
 
@@ -499,7 +815,7 @@ pub const InstallResult = enum { absent, loaded, rejected };
 /// rejected whole and the built-ins are kept. Read-only after this returns.
 pub fn installCustomThemes(allocator: std.mem.Allocator, bytes: ?[]const u8) InstallResult {
     custom_count = 0;
-    active_custom_resolved = false; // re-resolve selection against the new registry
+    @atomicStore(usize, &active_custom, AC_UNRESOLVED, .release); // re-resolve against the new registry
     const b = bytes orelse return .absent;
     theme_registry.populate(allocator, b, &custom_storage) catch return .rejected;
     custom_count = custom_storage.registry.count;
@@ -509,11 +825,13 @@ pub fn installCustomThemes(allocator: std.mem.Allocator, bytes: ?[]const u8) Ins
 /// Lazily-resolved index of the active custom theme, or null when none applies.
 /// Cached like `theme()`; recomputed after a `setRuntime`/`installCustomThemes`.
 fn activeCustomIndex() ?usize {
-    if (!active_custom_resolved) {
-        active_custom_index = if (custom_count == 0) null else resolveActiveCustom(lookupEnv("MALT_THEME"));
-        active_custom_resolved = true;
-    }
-    return active_custom_index;
+    const cached = @atomicLoad(usize, &active_custom, .acquire);
+    if (cached != AC_UNRESOLVED) return if (cached == AC_NONE) null else cached;
+    const resolved: usize = if (custom_count == 0)
+        AC_NONE
+    else if (resolveActiveCustom(lookupEnv("MALT_THEME"))) |i| i else AC_NONE;
+    @atomicStore(usize, &active_custom, resolved, .release);
+    return if (resolved == AC_NONE) null else resolved;
 }
 
 /// Precedence: a built-in named via `MALT_THEME` always wins (a custom theme can
@@ -555,8 +873,7 @@ fn activeCustomPalette(bg: Background, truecolor: bool) ?*const themes.NamedPale
 pub fn clearCustomForTest() void {
     if (!builtin.is_test) return;
     custom_count = 0;
-    active_custom_index = null;
-    active_custom_resolved = false;
+    @atomicStore(usize, &active_custom, AC_UNRESOLVED, .release);
 }
 
 /// The escape for a role under the active (theme, background, tier). A selected

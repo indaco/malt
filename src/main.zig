@@ -581,14 +581,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
             output_mod.notice("ignoring malformed themes file; using built-in themes", .{});
     }
 
-    // Resolve the env-derived colour state once, now that the real environ is
-    // seeded — before any output (or TUI frame) reads it. Doing the OSC 11
-    // background probe up front keeps the query write out of a progress frame;
-    // resolving MALT_THEME / COLORTERM here is what lets the TUI theme apply.
-    _ = color_mod.background();
-    _ = color_mod.truecolorSupported();
-    _ = color_mod.theme();
-
     var args_it = try init.args.iterateAllocator(allocator);
     defer args_it.deinit();
     _ = args_it.skip(); // skip argv0
