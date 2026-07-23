@@ -627,8 +627,10 @@ fn queryOsc11Background() ?Background {
     defer std.posix.tcsetattr(stdin_fd, .FLUSH, saved) catch {};
 
     const query = "\x1b]11;?\x1b\\";
-    const written = std.c.write(stderr_fd, query.ptr, query.len);
-    if (written < 0 or @as(usize, @intCast(written)) != query.len) return null;
+    // Route the query through pkg_io like the response read below, so both sides
+    // share one io path instead of a stray raw libc write.
+    const stderr_file: std.Io.File = .{ .handle = stderr_fd, .flags = .{ .nonblocking = false } };
+    stderr_file.writeStreamingAll(pkg_io, query) catch return null;
 
     var pfd = [_]std.posix.pollfd{.{ .fd = stdin_fd, .events = std.posix.POLL.IN, .revents = 0 }};
     const ready = std.posix.poll(&pfd, 100) catch return null;
