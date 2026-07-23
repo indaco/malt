@@ -1,9 +1,10 @@
 const std = @import("std");
 const clonefile = @import("clonefile.zig");
+const prefix_path = @import("prefix_path.zig");
 
-/// 512 bytes: ~4× real Homebrew prefix length, still small enough that
-/// anything past it is either a bug or overflow bait.
-pub const max_prefix_len: usize = 512;
+/// Re-exported from `fs/prefix_path.zig`, which owns the bound alongside the
+/// path-join buffer size so the two stay in lockstep.
+pub const max_prefix_len = prefix_path.max_prefix_len;
 
 pub const PrefixError = error{
     Empty,
