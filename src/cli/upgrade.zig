@@ -146,6 +146,27 @@ fn printSummary(tally: Tally, dry_run: bool) void {
     output.notice("{s}", .{tally.summaryLine(&buf, dry_run)});
 }
 
+/// The one-line heads-up `upgrade` prints on a backward move, else null.
+/// Advisory, not a consent gate: it takes no `force`, so a reader cannot
+/// turn it into a refusal. `incomparable` stays silent — a guessed
+/// direction would cry wolf on every unusual version string.
+fn downgradeWarning(buf: []u8, name: []const u8, installed: []const u8, upstream: []const u8) ?[]const u8 {
+    if (formula_mod.relate(installed, upstream) != .older) return null;
+    // Bounded inputs (a keg name and two version labels); on the impossible
+    // overflow, drop the advisory rather than fail an upgrade over a heads-up.
+    return std.fmt.bufPrint(buf, "{s} is moving backward: {s} -> {s} (undo with `mt rollback {s}`)", .{ name, installed, upstream, name }) catch null;
+}
+
+/// Print the backward-move heads-up at a compare site when the move is
+/// backward. Not gated on `bulk`: the rare backward move is the exception
+/// bulk quieting should not swallow. Advisory — the caller upgrades anyway.
+fn warnIfBackward(name: []const u8, installed: []const u8, upstream: []const u8) void {
+    // ponytail: may fire on a date-scheme forward move (both sides open with
+    // digits); accepted, not fixed here — see relate's pinned limitation.
+    var buf: [256]u8 = undefined;
+    if (downgradeWarning(&buf, name, installed, upstream)) |w| output.warn("{s}", .{w});
+}
+
 /// Side-channel collector for a full `mt upgrade --dry-run`. `Tally` is
 /// counters only, so the would-upgrade *rows* are gathered here as
 /// snapshot-shaped `OutdatedEntry`s to warm the shared `outdated.json`.
@@ -589,6 +610,8 @@ fn upgradeFormula(
         return .up_to_date;
     }
 
+    warnIfBackward(name, old_pkg_version, formula.pkg_version);
+
     if (dry_run) {
         if (sink) |s| s.collectFormula(name, old.version, old.revision, formula.pkg_version);
         output.info("Dry run: would upgrade {s} {s} -> {s}", .{ name, old_pkg_version, formula.pkg_version });
@@ -1017,6 +1040,8 @@ fn upgradeRoutedTapCask(
         return .up_to_date;
     }
 
+    warnIfBackward(token, installed_version, rb_info.version);
+
     if (dry_run) {
         // Bare, like the skip decision above: this warms the snapshot that
         // `outdated` reads, and a cask's installed version can never carry a
@@ -1367,6 +1392,8 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return .up_to_date;
     }
 
+    warnIfBackward(token, installed_version, parsed_cask.version);
+
     if (dry_run) {
         if (sink) |s| s.collectCask(token, installed_version, parsed_cask.version);
         output.info("Dry run: would upgrade cask {s} {s} -> {s}", .{ token, installed_version, parsed_cask.version });
@@ -1698,6 +1725,32 @@ test "summaryLine renders a real run with no failures" {
         "47 checked · 1 upgraded · 45 up to date · 1 pinned",
         t.summaryLine(&buf, false),
     );
+}
+
+test "downgradeWarning speaks up on a backward move and stays silent otherwise" {
+    var buf: [256]u8 = undefined;
+
+    // A backward move: the whole point of the warning. Must name both
+    // versions and point at the undo so the line stands on its own.
+    const w = downgradeWarning(&buf, "tree", "2.2.1", "2.2.0") orelse
+        return error.ExpectedWarning;
+    try std.testing.expect(std.mem.indexOf(u8, w, "2.2.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w, "2.2.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w, "rollback") != null);
+
+    // The ordinary forward path runs on every upgrade of every package;
+    // one stray line here is a daily regression for everyone.
+    try std.testing.expect(downgradeWarning(&buf, "tree", "2.2.0", "2.2.1") == null);
+    // Equal versions never reach here in practice, but must not warn.
+    try std.testing.expect(downgradeWarning(&buf, "tree", "2.2.1", "2.2.1") == null);
+    // The give-up arm is what makes this safe for casks and odd taps.
+    try std.testing.expect(downgradeWarning(&buf, "tree", "1.0rc2", "1.0") == null);
+    // A revision-only rewind is still a backward move: the qualified label
+    // matches what upgrade compares, so it must warn and name that label.
+    const rev = downgradeWarning(&buf, "tree", "1.2.3_2", "1.2.3_1") orelse
+        return error.ExpectedWarning;
+    try std.testing.expect(std.mem.indexOf(u8, rev, "1.2.3_2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rev, "1.2.3_1") != null);
 }
 
 test "summaryLine swaps in 'would upgrade' under dry-run" {
