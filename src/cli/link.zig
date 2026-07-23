@@ -7,6 +7,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const linker_mod = @import("../core/linker.zig");
 const atomic = @import("../fs/atomic.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
@@ -42,8 +43,11 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
 
     const prefix = atomic.maltPrefixOrAbort();
 
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const db_path = prefix_path.joinZ(&db_path_buf, prefix, "/db/malt.db") catch {
+        output.err("Failed to open database", .{});
+        return error.Aborted;
+    };
     var db = sqlite.Database.open(db_path) catch {
         output.err("Failed to open database", .{});
         return error.Aborted;
@@ -58,7 +62,10 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
         return error.Aborted;
     };
     defer stmt.finalize();
-    stmt.bindText(1, target_name) catch return;
+    stmt.bindText(1, target_name) catch {
+        output.err("Database query failed", .{});
+        return error.Aborted;
+    };
 
     const has_row = stmt.step() catch false;
     if (!has_row) {
@@ -141,8 +148,11 @@ fn executeLinkIsolate(ctx: *const AppCtx, allocator: std.mem.Allocator, name: ?[
 
     const prefix = atomic.maltPrefixOrAbort();
 
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const db_path = prefix_path.joinZ(&db_path_buf, prefix, "/db/malt.db") catch {
+        output.err("Failed to open database", .{});
+        return error.Aborted;
+    };
     var db = sqlite.Database.open(db_path) catch {
         output.err("Failed to open database", .{});
         return error.Aborted;
@@ -259,8 +269,11 @@ pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []c
     const name = args[0];
     const prefix = atomic.maltPrefixOrAbort();
 
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const db_path = prefix_path.joinZ(&db_path_buf, prefix, "/db/malt.db") catch {
+        output.err("Failed to open database", .{});
+        return error.Aborted;
+    };
     var db = sqlite.Database.open(db_path) catch {
         output.err("Failed to open database", .{});
         return error.Aborted;
@@ -275,7 +288,10 @@ pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []c
         return error.Aborted;
     };
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return;
+    stmt.bindText(1, name) catch {
+        output.err("Database query failed", .{});
+        return error.Aborted;
+    };
 
     const has_row = stmt.step() catch false;
     if (!has_row) {
@@ -293,8 +309,11 @@ pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []c
     };
 
     // Also remove opt/ symlink
-    var opt_buf: [512]u8 = undefined;
-    const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch return;
+    var opt_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch {
+        output.err("Failed to remove symlinks for {s}", .{name});
+        return error.Aborted;
+    };
     std.Io.Dir.cwd().deleteFile(ctx.io, opt_path) catch {}; // opt/ link absent on never-linked kegs
 
     output.success("{s} unlinked (keg remains installed)", .{name});

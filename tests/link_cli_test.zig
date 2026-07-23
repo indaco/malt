@@ -219,6 +219,34 @@ test "executeUnlink on a non-installed package returns Aborted" {
     );
 }
 
+// --- long-but-valid prefix must fail loud, not silently succeed ---------
+
+test "executeLink on a long-but-valid prefix fails loud instead of exiting 0" {
+    // A ~505-byte MALT_PREFIX passes validatePrefix (<=512) but overflowed
+    // the old 512-byte "{s}/db/malt.db" buffer, so the command hit
+    // `catch return` and exited 0 having done nothing. With the buffer grown
+    // to prefix_path.path_buf_len the format fits; the prefix dir does not
+    // exist, so db.open fails and the command must surface Aborted.
+    const allocator = testing.allocator;
+    var prefix_buf: [505]u8 = undefined;
+    prefix_buf[0] = '/';
+    @memset(prefix_buf[1..256], 'a'); // component 1: 255 bytes (<= NAME_MAX)
+    prefix_buf[256] = '/';
+    @memset(prefix_buf[257..505], 'b'); // component 2: 248 bytes
+    const prefixz = try allocator.dupeZ(u8, &prefix_buf);
+    defer allocator.free(prefixz);
+
+    _ = c.setenv("MALT_PREFIX", prefixz.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    quiet();
+    defer unquiet();
+    try testing.expectError(
+        error.Aborted,
+        link_mod.executeLink(&malt.app_ctx.debug_ctx, allocator, &.{"somepkg"}),
+    );
+}
+
 // --- executeLink --isolate ----------------------------------------------
 
 // Seed a keg row and tag it dependency so the --isolate gate accepts.
