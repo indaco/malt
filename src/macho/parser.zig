@@ -23,6 +23,10 @@ pub const LoadCommandPath = struct {
     max_path_len: usize,
     /// The current path string
     path: []const u8,
+    /// File offset of the owning arch slice (0 for a thin Mach-O). Lets the
+    /// patcher scope LC_RPATH dedup per slice — a fat binary carries the same
+    /// rpath in each slice, and only within-slice duplicates matter to dyld.
+    slice_offset: usize,
 };
 
 /// A `__TEXT,__cstring` (or any S_CSTRING_LITERALS) section located in
@@ -219,6 +223,7 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
                     .path_offset = base_offset + path_start,
                     .max_path_len = cmdsize - name_offset,
                     .path = path,
+                    .slice_offset = base_offset,
                 }) catch return ParseError.OutOfMemory;
             },
             .RPATH => {
@@ -251,6 +256,7 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
                     .path_offset = base_offset + path_start,
                     .max_path_len = cmdsize - path_offset,
                     .path = path,
+                    .slice_offset = base_offset,
                 }) catch return ParseError.OutOfMemory;
             },
             .SEGMENT_64 => {
