@@ -22,6 +22,10 @@ pub const OutdatedRow = struct {
     kind: Kind,
     pinned: bool,
     tap: []const u8,
+    /// The CLI already decided the upstream moved backward and tagged the row;
+    /// the tab renders this boolean, it never recomputes direction. Defaults
+    /// false so every forward row — nearly all of them — is untouched.
+    downgrade: bool = false,
 };
 
 /// Owns the parsed rows; `items` borrow from the arena. Free with `deinit`.
@@ -44,6 +48,7 @@ const Row = struct {
     type: Kind,
     pinned: bool,
     tap: []const u8 = "",
+    downgrade: bool = false,
 };
 
 const Doc = struct {
@@ -76,6 +81,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) Error!Parsed {
         .kind = row.type,
         .pinned = row.pinned,
         .tap = row.tap,
+        .downgrade = row.downgrade,
     };
     return .{ .doc = doc, .items = items };
 }
@@ -115,6 +121,22 @@ test "parse ignores unknown fields and schema_version" {
     defer p.deinit();
     try testing.expectEqual(@as(usize, 1), p.items.len);
     try testing.expectEqualStrings("a", p.items[0].name);
+}
+
+test "parse carries the downgrade marker the CLI emitted, defaulting false" {
+    // The CLI decides direction and tags only backward rows with `"downgrade":true`;
+    // the TUI reads that boolean, it never recomputes it. An absent field is a
+    // normal forward row, so it must default false — the 99.95% case.
+    const bytes =
+        \\{"outdated":[
+        \\{"name":"yanked","installed":"2.4.15","latest":"2.4.14","type":"formula","pinned":false,"tap":"","downgrade":true},
+        \\{"name":"wget","installed":"1.24.5","latest":"1.25.0","type":"formula","pinned":false,"tap":""}
+        \\]}
+    ;
+    var p = try parse(testing.allocator, bytes);
+    defer p.deinit();
+    try testing.expect(p.items[0].downgrade); // the tagged backward row
+    try testing.expect(!p.items[1].downgrade); // absent field → forward row
 }
 
 test "parse tolerates an absent tap (defaults to empty)" {

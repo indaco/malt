@@ -243,6 +243,9 @@ fn formatRow(buf: []u8, p: Row) []const u8 {
     append(buf, &len, " ");
     appendPad(buf, &len, kindLabel(p.kind), 8);
     if (p.pinned) append(buf, &len, "pinned");
+    // Trailing tags: the CLI already decided direction, so the tab just renders
+    // its word. Appended last, it truncates before any column on a narrow width.
+    if (p.downgrade) append(buf, &len, if (p.pinned) " downgrade" else "downgrade");
     return buf[0..len];
 }
 
@@ -706,6 +709,68 @@ test "render lists checkboxes with the current and latest versions and the type 
     try testing.expect(std.mem.indexOf(u8, out, "1.24.5") != null); // current version
     try testing.expect(std.mem.indexOf(u8, out, "1.25.0") != null); // latest version
     try testing.expect(std.mem.indexOf(u8, out, "cask") != null); // type column
+}
+
+test "render marks only the rows the CLI tagged as a backward move" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    // One row carries the CLI's `downgrade` tag, one does not. The tab renders the
+    // decision the CLI already made — the tagged row is marked, the plain row is not.
+    const json =
+        \\{"outdated":[
+        \\{"name":"yanked","installed":"2.4.15","latest":"2.4.14","type":"formula","pinned":false,"tap":"","downgrade":true},
+        \\{"name":"wget","installed":"1.24.5","latest":"1.25.0","type":"formula","pinned":false,"tap":""}
+        \\]}
+    ;
+    try loadOutdated(&st, &storage, &shared, json);
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    render(&st, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    // Exactly one marker: the tagged row gets it, the untagged row stays plain.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, f.slice(), "downgrade"));
+}
+
+test "the backward marker is a trailing tag — it steals no column at a narrow width" {
+    // Same row, marker off vs on: the boolean is the only difference, since the tab
+    // reads it and never recomputes direction from the (here identical) versions.
+    const fwd = [_]Row{.{ .name = "yanked", .installed = "2.4.15", .latest = "2.4.14", .kind = .formula, .pinned = false, .tap = "" }};
+    const back = [_]Row{.{ .name = "yanked", .installed = "2.4.15", .latest = "2.4.14", .kind = .formula, .pinned = false, .tap = "", .downgrade = true }};
+    var checked = [_]bool{false};
+    const sf: State = .{ .items = &fwd, .checked = &checked };
+    const sb: State = .{ .items = &back, .checked = &checked };
+
+    // Narrow: the marker sits past every column, so it truncates first and a backward
+    // row paints byte-identically to a forward one — it never pushes a column off.
+    var a: [8192]u8 = undefined;
+    var b: [8192]u8 = undefined;
+    var fa: tab.Frame = .{ .buf = &a };
+    var fb: tab.Frame = .{ .buf = &b };
+    render(&sf, &fa, .{ .row = 1, .col = 1, .width = 30, .height = 6 });
+    render(&sb, &fb, .{ .row = 1, .col = 1, .width = 30, .height = 6 });
+    try testing.expectEqualStrings(fa.slice(), fb.slice());
+
+    // Wide: with room to spare, the marker shows.
+    var c: [8192]u8 = undefined;
+    var fc: tab.Frame = .{ .buf = &c };
+    render(&sb, &fc, .{ .row = 1, .col = 1, .width = 80, .height = 6 });
+    try testing.expect(std.mem.indexOf(u8, fc.slice(), "downgrade") != null);
+}
+
+test "a pinned row that also moved backward carries both tags, space-separated" {
+    // Both trailing tags coexist: the space between them matters, or they read as
+    // one garbled word. A pinned backward row is rare but real (a held package the
+    // tap reverted).
+    const rows = [_]Row{.{ .name = "curl", .installed = "8.1.0", .latest = "8.0.0", .kind = .formula, .pinned = true, .tap = "", .downgrade = true }};
+    var checked = [_]bool{false};
+    const s: State = .{ .items = &rows, .checked = &checked };
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 6 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "pinned downgrade") != null); // both, spaced
+    try testing.expect(std.mem.indexOf(u8, out, "pinneddowngrade") == null); // never run together
 }
 
 test "render greys a pinned row, shows the blocked box, and marks it pinned" {
