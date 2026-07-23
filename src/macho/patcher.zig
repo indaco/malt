@@ -27,10 +27,15 @@ pub const OverflowEntry = struct {
     /// Drives the `-change` vs `-rpath` vs `-id` argv shape downstream.
     cmd: u32,
     /// Original path embedded in the slot (the `install_name_tool -change`
-    /// "old" argument).
+    /// "old" argument). For a delete entry, the rpath to strip.
     old_path: []const u8,
-    /// Replacement path the in-place patcher could not fit.
+    /// Replacement path the in-place patcher could not fit. Empty for a
+    /// delete entry (`-delete_rpath` takes no new path).
     new_path: []const u8,
+    /// True when relocation folded this LC_RPATH onto an already-kept one:
+    /// the slot keeps its original bytes and the fallback strips it via
+    /// `-delete_rpath old_path` so dyld never sees a duplicate LC_RPATH.
+    delete: bool = false,
 };
 
 pub const PatchOutcome = struct {
@@ -102,11 +107,54 @@ pub fn patchPathsCollecting(
         overflow.deinit(allocator);
     }
 
+    // Final (post-relocation) value of every LC_RPATH kept so far, tagged
+    // with its arch slice so a fat binary's per-slice rpaths don't collide.
+    // Scratch only — never returned; freed unconditionally below.
+    const SeenRpath = struct { slice: usize, value: []const u8 };
+    var seen_rpaths: std.ArrayList(SeenRpath) = .empty;
+    defer {
+        for (seen_rpaths.items) |v| allocator.free(v.value);
+        seen_rpaths.deinit(allocator);
+    }
+
     var patched: u32 = 0;
     var skipped: u32 = 0;
 
     for (macho.paths) |lcp| {
-        const r = pickReplacement(lcp.path, replacements) orelse {
+        const r_opt = pickReplacement(lcp.path, replacements);
+
+        // dyld aborts on a duplicate LC_RPATH, and relocation can fold two
+        // distinct prefixes onto one target. Keep the first occurrence of
+        // each final value; queue any later collider for `-delete_rpath`.
+        // Scoped to LC_RPATH — duplicate LC_LOAD_DYLIB is legal.
+        if (lcp.cmd == @intFromEnum(std.macho.LC.RPATH)) {
+            var final_buf: [1024]u8 = undefined;
+            if (rpathFinalValue(&final_buf, lcp.path, r_opt)) |final| {
+                var seen = false;
+                for (seen_rpaths.items) |e| {
+                    if (e.slice == lcp.slice_offset and std.mem.eql(u8, e.value, final)) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (seen) {
+                    // `-delete_rpath` is fat-wide by path, so a universal
+                    // binary's per-slice colliders share one deletion.
+                    if (!deleteQueued(overflow.items, lcp.path))
+                        try recordDelete(allocator, &overflow, lcp);
+                    continue;
+                }
+                const dup = allocator.dupe(u8, final) catch return PatchError.OutOfMemory;
+                seen_rpaths.append(allocator, .{ .slice = lcp.slice_offset, .value = dup }) catch {
+                    allocator.free(dup);
+                    return PatchError.OutOfMemory;
+                };
+            }
+            // A value past the scratch buffer can't fit any slot anyway;
+            // fall through so normal handling drops it.
+        }
+
+        const r = r_opt orelse {
             skipped += 1;
             continue;
         };
@@ -296,6 +344,43 @@ fn recordOverflow(
     }) catch return PatchError.OutOfMemory;
 }
 
+/// Post-relocation value of one rpath: the matched replacement applied, or
+/// the original path when nothing matched. Returns null when the result
+/// exceeds `buf` — such a path can't fit any slot, so the caller skips
+/// dedup and lets normal handling drop it.
+fn rpathFinalValue(buf: []u8, path: []const u8, r_opt: ?Replacement) ?[]const u8 {
+    const r = r_opt orelse return path;
+    const suffix = path[r.old.len..];
+    const total = r.new.len + suffix.len;
+    if (total > buf.len) return null;
+    @memcpy(buf[0..r.new.len], r.new);
+    @memcpy(buf[r.new.len..total], suffix);
+    return buf[0..total];
+}
+
+fn deleteQueued(entries: []const OverflowEntry, old_path: []const u8) bool {
+    for (entries) |e| if (e.delete and std.mem.eql(u8, e.old_path, old_path)) return true;
+    return false;
+}
+
+/// Queue a collapsed LC_RPATH for removal. Deletes by the *original* path:
+/// the kept duplicate was already rewritten to the shared target, so the two
+/// stay distinct at flush time and `-delete_rpath` strips exactly this slot.
+fn recordDelete(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(OverflowEntry),
+    lcp: parser.LoadCommandPath,
+) PatchError!void {
+    const old_dup = allocator.dupe(u8, lcp.path) catch return PatchError.OutOfMemory;
+    errdefer allocator.free(old_dup);
+    list.append(allocator, .{
+        .cmd = lcp.cmd,
+        .old_path = old_dup,
+        .new_path = "",
+        .delete = true,
+    }) catch return PatchError.OutOfMemory;
+}
+
 /// A single (needle → replacement) pair for `patchTextFiles`.
 pub const Replacement = struct {
     old: []const u8,
@@ -333,24 +418,32 @@ pub fn buildInstallNameToolArgv(
     errdefer argv.deinit(allocator);
 
     argv.appendAssumeCapacity(external_tool_name);
-    for (entries) |e| switch (installNameToolForm(e.cmd)) {
-        .change => {
-            argv.appendAssumeCapacity("-change");
+    for (entries) |e| {
+        if (e.delete) {
+            // -delete_rpath <old> <file>: strip the collapsed duplicate.
+            argv.appendAssumeCapacity("-delete_rpath");
             argv.appendAssumeCapacity(e.old_path);
-            argv.appendAssumeCapacity(e.new_path);
-        },
-        .rpath => {
-            argv.appendAssumeCapacity("-rpath");
-            argv.appendAssumeCapacity(e.old_path);
-            argv.appendAssumeCapacity(e.new_path);
-        },
-        .id => {
-            // -id takes only the new install name; the old one is
-            // implicit (LC_ID_DYLIB carries a single name).
-            argv.appendAssumeCapacity("-id");
-            argv.appendAssumeCapacity(e.new_path);
-        },
-    };
+            continue;
+        }
+        switch (installNameToolForm(e.cmd)) {
+            .change => {
+                argv.appendAssumeCapacity("-change");
+                argv.appendAssumeCapacity(e.old_path);
+                argv.appendAssumeCapacity(e.new_path);
+            },
+            .rpath => {
+                argv.appendAssumeCapacity("-rpath");
+                argv.appendAssumeCapacity(e.old_path);
+                argv.appendAssumeCapacity(e.new_path);
+            },
+            .id => {
+                // -id takes only the new install name; the old one is
+                // implicit (LC_ID_DYLIB carries a single name).
+                argv.appendAssumeCapacity("-id");
+                argv.appendAssumeCapacity(e.new_path);
+            },
+        }
+    }
     argv.appendAssumeCapacity(file_path);
     return argv.toOwnedSlice(allocator);
 }
@@ -603,6 +696,182 @@ const Scratch = struct {
         self.arena.deinit();
     }
 };
+
+/// Minimal Mach-O 64 carrying two LC_RPATH load commands, each in its own
+/// `cmdsize` slot. Mirrors the two-prefix rpath shape a fastfetch-style
+/// bottle ships so the dedup walk can be exercised without a real binary.
+fn buildTwoRpathMachO(
+    allocator: std.mem.Allocator,
+    path1: []const u8,
+    cmdsize1: u32,
+    path2: []const u8,
+    cmdsize2: u32,
+) ![]u8 {
+    const macho = std.macho;
+    const header_size = @sizeOf(macho.mach_header_64);
+    const path_off: u32 = @sizeOf(macho.rpath_command);
+    const buf = try allocator.alloc(u8, header_size + cmdsize1 + cmdsize2);
+    @memset(buf, 0);
+
+    const hdr = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    hdr.* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 2, .sizeofcmds = cmdsize1 + cmdsize2 };
+
+    const off1 = header_size;
+    const rp1 = std.mem.bytesAsValue(macho.rpath_command, buf[off1..][0..path_off]);
+    rp1.* = .{ .cmd = .RPATH, .cmdsize = cmdsize1, .path = path_off };
+    std.debug.assert(path1.len + 1 <= cmdsize1 - path_off);
+    @memcpy(buf[off1 + path_off ..][0..path1.len], path1);
+
+    const off2 = header_size + cmdsize1;
+    const rp2 = std.mem.bytesAsValue(macho.rpath_command, buf[off2..][0..path_off]);
+    rp2.* = .{ .cmd = .RPATH, .cmdsize = cmdsize2, .path = path_off };
+    std.debug.assert(path2.len + 1 <= cmdsize2 - path_off);
+    @memcpy(buf[off2 + path_off ..][0..path2.len], path2);
+
+    return buf;
+}
+
+test "patchPathsCollecting dedups an LC_RPATH that relocation collapses onto a kept one" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // Both rpaths shrink to "/opt/malt/lib" — the fast in-place path fires.
+    const bytes = try buildTwoRpathMachO(
+        testing.allocator,
+        "@@HOMEBREW_PREFIX@@/lib",
+        40,
+        "/usr/local/lib",
+        32,
+    );
+    defer testing.allocator.free(bytes);
+
+    var s = try Scratch.init("patcher_dedup");
+    defer s.deinit();
+    try s.dir.writeFile(io, .{ .sub_path = "bin", .data = bytes });
+    const abs = s.p("/bin");
+
+    // The four replacements relocateKegTree applies to a concrete-cellar bottle.
+    const reps = [_]Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" },
+        .{ .old = "@@HOMEBREW_CELLAR@@", .new = "/opt/malt/Cellar" },
+        .{ .old = "/opt/homebrew", .new = "/opt/malt" },
+        .{ .old = "/usr/local", .new = "/opt/malt" },
+    };
+    var outcome = try patchPathsCollecting(io, testing.allocator, abs, &reps);
+    defer outcome.deinit(testing.allocator);
+
+    // First rpath kept + rewritten in place; the colliding second is queued
+    // for `-delete_rpath` by its original (pre-relocation) path.
+    try testing.expectEqual(@as(u32, 1), outcome.patched_count);
+    try testing.expectEqual(@as(usize, 1), outcome.overflow.len);
+    try testing.expect(outcome.overflow[0].delete);
+    try testing.expectEqual(@intFromEnum(std.macho.LC.RPATH), outcome.overflow[0].cmd);
+    try testing.expectEqualStrings("/usr/local/lib", outcome.overflow[0].old_path);
+}
+
+test "patchPathsCollecting deletes a collider when the kept rpath needs no relocation" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // First rpath is already the target (no replacement matches it); the
+    // second relocates onto it. Nothing is rewritten in place — the only
+    // change is the deletion, which must still be reported.
+    const bytes = try buildTwoRpathMachO(
+        testing.allocator,
+        "/opt/malt/lib",
+        32,
+        "/usr/local/lib",
+        32,
+    );
+    defer testing.allocator.free(bytes);
+
+    var s = try Scratch.init("patcher_delete_only");
+    defer s.deinit();
+    try s.dir.writeFile(io, .{ .sub_path = "bin", .data = bytes });
+    const abs = s.p("/bin");
+
+    const reps = [_]Replacement{.{ .old = "/usr/local", .new = "/opt/malt" }};
+    var outcome = try patchPathsCollecting(io, testing.allocator, abs, &reps);
+    defer outcome.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 0), outcome.patched_count);
+    try testing.expectEqual(@as(usize, 1), outcome.overflow.len);
+    try testing.expect(outcome.overflow[0].delete);
+    try testing.expectEqualStrings("/usr/local/lib", outcome.overflow[0].old_path);
+}
+
+test "patchPathsCollecting keeps distinct rpaths when relocation does not collapse them" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // `:any` bottle: only placeholders are rewritten, so `/usr/local/lib`
+    // stays distinct from the relocated `@@HOMEBREW_PREFIX@@/lib`.
+    const bytes = try buildTwoRpathMachO(
+        testing.allocator,
+        "@@HOMEBREW_PREFIX@@/lib",
+        40,
+        "/usr/local/lib",
+        32,
+    );
+    defer testing.allocator.free(bytes);
+
+    var s = try Scratch.init("patcher_no_collide");
+    defer s.deinit();
+    try s.dir.writeFile(io, .{ .sub_path = "bin", .data = bytes });
+    const abs = s.p("/bin");
+
+    const reps = [_]Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" },
+        .{ .old = "@@HOMEBREW_CELLAR@@", .new = "/opt/malt/Cellar" },
+    };
+    var outcome = try patchPathsCollecting(io, testing.allocator, abs, &reps);
+    defer outcome.deinit(testing.allocator);
+
+    // One rewrite, no deletion: the two rpaths remain byte-distinct.
+    try testing.expectEqual(@as(u32, 1), outcome.patched_count);
+    try testing.expectEqual(@as(usize, 0), outcome.overflow.len);
+}
+
+test "patchPathsCollecting never dedups duplicate LC_LOAD_DYLIB commands" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    const macho = std.macho;
+
+    // Two LC_LOAD_DYLIB slots that relocate to the same target. Duplicate
+    // load-dylib commands are legal — dyld only aborts on duplicate rpaths,
+    // so the dedup must leave these alone.
+    const header_size = @sizeOf(macho.mach_header_64);
+    const name_off: u32 = @sizeOf(macho.dylib_command);
+    const cmdsize: u32 = 40;
+    const buf = try testing.allocator.alloc(u8, header_size + cmdsize * 2);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+
+    const hdr = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    hdr.* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 2, .sizeofcmds = cmdsize * 2 };
+    inline for (.{ header_size, header_size + cmdsize }) |off| {
+        const dy = std.mem.bytesAsValue(macho.dylib_command, buf[off..][0..name_off]);
+        dy.* = .{
+            .cmd = .LOAD_DYLIB,
+            .cmdsize = cmdsize,
+            .dylib = .{ .name = name_off, .timestamp = 0, .current_version = 0, .compatibility_version = 0 },
+        };
+        @memcpy(buf[off + name_off ..][0.."/usr/local/x".len], "/usr/local/x");
+    }
+
+    var s = try Scratch.init("patcher_dylib_dup");
+    defer s.deinit();
+    try s.dir.writeFile(io, .{ .sub_path = "bin", .data = buf });
+    const abs = s.p("/bin");
+
+    const reps = [_]Replacement{.{ .old = "/usr/local", .new = "/opt/malt" }};
+    var outcome = try patchPathsCollecting(io, testing.allocator, abs, &reps);
+    defer outcome.deinit(testing.allocator);
+
+    // Both rewritten in place, nothing queued for deletion.
+    try testing.expectEqual(@as(u32, 2), outcome.patched_count);
+    try testing.expectEqual(@as(usize, 0), outcome.overflow.len);
+}
 
 test "fileLinksPath detects a needle in an LC_LOAD_DYLIB and ignores misses" {
     const testing = std.testing;

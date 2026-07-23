@@ -190,6 +190,45 @@ test "parse a Mach-O 64 with an LC_RPATH command extracts the path" {
     defer m.deinit();
     try testing.expectEqual(@as(usize, 1), m.paths.len);
     try testing.expectEqualStrings("@executable_path/../lib", m.paths[0].path);
+    // Thin binary: the sole slice starts at offset 0.
+    try testing.expectEqual(@as(usize, 0), m.paths[0].slice_offset);
+}
+
+test "parse tags each fat-slice path with its own slice offset" {
+    // The rpath-dedup relies on this to scope collisions per arch slice: a
+    // universal binary carries the same rpath in each slice, and those must
+    // not read as duplicates of each other.
+    const header_size = @sizeOf(macho.mach_header_64);
+    const cmdsize: u32 = 40;
+    const slice_bytes: u32 = header_size + cmdsize;
+    const slice0: u32 = 8 + 2 * 20;
+    const slice1: u32 = slice0 + slice_bytes;
+    const path_off: u32 = @sizeOf(macho.rpath_command);
+
+    const buf = try testing.allocator.alloc(u8, slice1 + slice_bytes);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+
+    std.mem.writeInt(u32, buf[0..4], macho.FAT_MAGIC, .big);
+    std.mem.writeInt(u32, buf[4..8], 2, .big);
+    inline for (.{ .{ 8, 0x0100000C, slice0 }, .{ 28, 0x01000007, slice1 } }) |a| {
+        std.mem.writeInt(u32, buf[a[0]..][0..4], a[1], .big); // cputype
+        std.mem.writeInt(u32, buf[a[0] + 8 ..][0..4], a[2], .big); // offset
+        std.mem.writeInt(u32, buf[a[0] + 12 ..][0..4], slice_bytes, .big); // size
+    }
+    for ([_]u32{ slice0, slice1 }) |sl| {
+        const hdr = std.mem.bytesAsValue(macho.mach_header_64, buf[sl..][0..header_size]);
+        hdr.* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 1, .sizeofcmds = cmdsize };
+        const rp = std.mem.bytesAsValue(macho.rpath_command, buf[sl + header_size ..][0..path_off]);
+        rp.* = .{ .cmd = .RPATH, .cmdsize = cmdsize, .path = path_off };
+        @memcpy(buf[sl + header_size + path_off ..][0..@as(usize, "@rpath\x00".len)], "@rpath\x00");
+    }
+
+    var m = try parser.parse(testing.allocator, buf);
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 2), m.paths.len);
+    try testing.expectEqual(@as(usize, slice0), m.paths[0].slice_offset);
+    try testing.expectEqual(@as(usize, slice1), m.paths[1].slice_offset);
 }
 
 test "parse rejects a truncated fat header" {

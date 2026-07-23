@@ -270,6 +270,263 @@ test "patchPathsCollecting persists in-place rewrites to disk" {
     try testing.expectEqualStrings("/O/x", re.paths[1].path);
 }
 
+/// Build a Mach-O 64 binary with two LC_RPATH load commands, mirroring a
+/// bottle that names two Homebrew prefixes in its rpaths.
+fn buildTwoRpathFixture(
+    allocator: std.mem.Allocator,
+    path1: []const u8,
+    cmdsize1: u32,
+    path2: []const u8,
+    cmdsize2: u32,
+) ![]u8 {
+    const header_size = @sizeOf(macho.mach_header_64);
+    const path_off: u32 = @sizeOf(macho.rpath_command);
+    const buf = try allocator.alloc(u8, header_size + cmdsize1 + cmdsize2);
+    @memset(buf, 0);
+
+    const hdr = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    hdr.* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 2, .sizeofcmds = cmdsize1 + cmdsize2 };
+
+    const off1 = header_size;
+    const rp1 = std.mem.bytesAsValue(macho.rpath_command, buf[off1..][0..path_off]);
+    rp1.* = .{ .cmd = .RPATH, .cmdsize = cmdsize1, .path = path_off };
+    std.debug.assert(path1.len + 1 <= cmdsize1 - path_off);
+    @memcpy(buf[off1 + path_off ..][0..path1.len], path1);
+
+    const off2 = header_size + cmdsize1;
+    const rp2 = std.mem.bytesAsValue(macho.rpath_command, buf[off2..][0..path_off]);
+    rp2.* = .{ .cmd = .RPATH, .cmdsize = cmdsize2, .path = path_off };
+    std.debug.assert(path2.len + 1 <= cmdsize2 - path_off);
+    @memcpy(buf[off2 + path_off ..][0..path2.len], path2);
+
+    return buf;
+}
+
+/// Minimal fat Mach-O with two arch slices (arm64 + x86_64), each carrying
+/// one identical LC_RPATH — the shape every universal bottle ships.
+fn buildFatTwoSliceRpath(allocator: std.mem.Allocator, rpath: []const u8, cmdsize: u32) ![]u8 {
+    const header_size = @sizeOf(macho.mach_header_64);
+    const path_off: u32 = @sizeOf(macho.rpath_command);
+    const slice_bytes: u32 = header_size + cmdsize;
+    const slice0: u32 = 8 + 2 * 20;
+    const slice1: u32 = slice0 + slice_bytes;
+    const buf = try allocator.alloc(u8, slice1 + slice_bytes);
+    @memset(buf, 0);
+
+    std.mem.writeInt(u32, buf[0..4], macho.FAT_MAGIC, .big);
+    std.mem.writeInt(u32, buf[4..8], 2, .big);
+    inline for (.{ .{ 8, 0x0100000C, slice0 }, .{ 28, 0x01000007, slice1 } }) |a| {
+        std.mem.writeInt(u32, buf[a[0]..][0..4], a[1], .big); // cputype
+        std.mem.writeInt(u32, buf[a[0] + 8 ..][0..4], a[2], .big); // offset
+        std.mem.writeInt(u32, buf[a[0] + 12 ..][0..4], slice_bytes, .big); // size
+    }
+    for ([_]u32{ slice0, slice1 }) |sl| {
+        const hdr = std.mem.bytesAsValue(macho.mach_header_64, buf[sl..][0..header_size]);
+        hdr.* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 1, .sizeofcmds = cmdsize };
+        const rp = std.mem.bytesAsValue(macho.rpath_command, buf[sl + header_size ..][0..path_off]);
+        rp.* = .{ .cmd = .RPATH, .cmdsize = cmdsize, .path = path_off };
+        @memcpy(buf[sl + header_size + path_off ..][0..rpath.len], rpath);
+    }
+    return buf;
+}
+
+/// Fat Mach-O whose two arch slices each carry the same two colliding
+/// rpaths (`@@HOMEBREW_PREFIX@@/lib` + `/usr/local/lib`).
+fn buildFatTwoSliceCollidingRpaths(allocator: std.mem.Allocator) ![]u8 {
+    const header_size = @sizeOf(macho.mach_header_64);
+    const path_off: u32 = @sizeOf(macho.rpath_command);
+    const cmdsize: u32 = 40;
+    const slice_bytes: u32 = header_size + cmdsize * 2;
+    const slice0: u32 = 8 + 2 * 20;
+    const slice1: u32 = slice0 + slice_bytes;
+    const buf = try allocator.alloc(u8, slice1 + slice_bytes);
+    @memset(buf, 0);
+
+    std.mem.writeInt(u32, buf[0..4], macho.FAT_MAGIC, .big);
+    std.mem.writeInt(u32, buf[4..8], 2, .big);
+    inline for (.{ .{ 8, 0x0100000C, slice0 }, .{ 28, 0x01000007, slice1 } }) |a| {
+        std.mem.writeInt(u32, buf[a[0]..][0..4], a[1], .big);
+        std.mem.writeInt(u32, buf[a[0] + 8 ..][0..4], a[2], .big);
+        std.mem.writeInt(u32, buf[a[0] + 12 ..][0..4], slice_bytes, .big);
+    }
+    for ([_]u32{ slice0, slice1 }) |sl| {
+        const hdr = std.mem.bytesAsValue(macho.mach_header_64, buf[sl..][0..header_size]);
+        hdr.* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 2, .sizeofcmds = cmdsize * 2 };
+        inline for (.{ .{ header_size, "@@HOMEBREW_PREFIX@@/lib" }, .{ header_size + cmdsize, "/usr/local/lib" } }) |rp| {
+            const lc = std.mem.bytesAsValue(macho.rpath_command, buf[sl + rp[0] ..][0..path_off]);
+            lc.* = .{ .cmd = .RPATH, .cmdsize = cmdsize, .path = path_off };
+            @memcpy(buf[sl + rp[0] + path_off ..][0..rp[1].len], rp[1]);
+        }
+    }
+    return buf;
+}
+
+test "patchPathsCollecting emits one deletion for a universal binary's per-slice colliders" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // Each slice keeps one rpath and collapses the other. `-delete_rpath` is
+    // fat-wide by path, so the two per-slice colliders must share a single
+    // deletion — a second identical one would make install_name_tool fail.
+    const bytes = try buildFatTwoSliceCollidingRpaths(testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    const dir = try tmpSubdir(io, "rpath_fat_collide");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", bytes);
+    defer testing.allocator.free(path);
+
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" },
+        .{ .old = "/usr/local", .new = "/opt/malt" },
+    };
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
+    defer outcome.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 2), outcome.patched_count);
+    try testing.expectEqual(@as(usize, 1), outcome.overflow.len);
+    try testing.expect(outcome.overflow[0].delete);
+    try testing.expectEqualStrings("/usr/local/lib", outcome.overflow[0].old_path);
+}
+
+test "patchPathsCollecting keeps a fat binary's per-slice identical rpaths" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // Same rpath in each arch slice is normal, not a duplicate — dyld only
+    // aborts on a within-slice collision, so neither slice may be deleted.
+    const bytes = try buildFatTwoSliceRpath(testing.allocator, "@@HOMEBREW_PREFIX@@/lib", 40);
+    defer testing.allocator.free(bytes);
+
+    const dir = try tmpSubdir(io, "rpath_fat");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", bytes);
+    defer testing.allocator.free(path);
+
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" },
+    };
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
+    defer outcome.deinit(testing.allocator);
+
+    // Both slices rewritten in place; nothing queued for deletion.
+    try testing.expectEqual(@as(u32, 2), outcome.patched_count);
+    try testing.expectEqual(@as(usize, 0), outcome.overflow.len);
+}
+
+test "patchPathsCollecting collapses two rpaths onto one target with a single kept slot" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // fastfetch-shaped: two rpaths naming different prefixes that both
+    // relocate to "<prefix>/lib". The kept slot is rewritten in place; the
+    // colliding one is left byte-identical and queued for -delete_rpath.
+    const bytes = try buildTwoRpathFixture(
+        testing.allocator,
+        "@@HOMEBREW_PREFIX@@/lib",
+        40,
+        "/usr/local/lib",
+        32,
+    );
+    defer testing.allocator.free(bytes);
+
+    const dir = try tmpSubdir(io, "rpath_dedup");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", bytes);
+    defer testing.allocator.free(path);
+
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" },
+        .{ .old = "@@HOMEBREW_CELLAR@@", .new = "/opt/malt/Cellar" },
+        .{ .old = "/opt/homebrew", .new = "/opt/malt" },
+        .{ .old = "/usr/local", .new = "/opt/malt" },
+    };
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
+    defer outcome.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 1), outcome.patched_count);
+    try testing.expectEqual(@as(usize, 1), outcome.overflow.len);
+    try testing.expect(outcome.overflow[0].delete);
+    try testing.expectEqualStrings("/usr/local/lib", outcome.overflow[0].old_path);
+
+    // On disk: first slot relocated, second slot left as-is for the
+    // fallback's -delete_rpath to strip.
+    const opened = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer opened.close(io);
+    const stat_after = try opened.stat(io);
+    const data = try testing.allocator.alloc(u8, @intCast(stat_after.size));
+    defer testing.allocator.free(data);
+    _ = try opened.readPositionalAll(io, data, 0);
+
+    var re = try parser.parse(testing.allocator, data);
+    defer re.deinit();
+    try testing.expectEqual(@as(usize, 2), re.paths.len);
+    try testing.expectEqualStrings("/opt/malt/lib", re.paths[0].path);
+    try testing.expectEqualStrings("/usr/local/lib", re.paths[1].path);
+}
+
+test "patchPathsCollecting deletes a collider even when the kept rpath overflows" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // The kept rpath relocates to a value too long for its slot (→ overflow
+    // `-rpath`), while the collider still collapses onto it (→ delete). Both
+    // must ride the same batch: one rewrite entry plus one deletion.
+    const bytes = try buildTwoRpathFixture(
+        testing.allocator,
+        "@@HOMEBREW_PREFIX@@/lib",
+        40,
+        "/usr/local/lib",
+        32,
+    );
+    defer testing.allocator.free(bytes);
+
+    const dir = try tmpSubdir(io, "rpath_overflow_delete");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", bytes);
+    defer testing.allocator.free(path);
+
+    const long = "/opt/very-long-relocation-target";
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = long },
+        .{ .old = "/usr/local", .new = long },
+    };
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
+    defer outcome.deinit(testing.allocator);
+
+    // Nothing fit in place; the batch carries the kept rewrite then the delete.
+    try testing.expectEqual(@as(u32, 0), outcome.patched_count);
+    try testing.expectEqual(@as(usize, 2), outcome.overflow.len);
+    try testing.expect(!outcome.overflow[0].delete);
+    try testing.expectEqualStrings("@@HOMEBREW_PREFIX@@/lib", outcome.overflow[0].old_path);
+    try testing.expectEqualStrings(long ++ "/lib", outcome.overflow[0].new_path);
+    try testing.expect(outcome.overflow[1].delete);
+    try testing.expectEqualStrings("/usr/local/lib", outcome.overflow[1].old_path);
+
+    // And that mixed batch builds one valid install_name_tool invocation.
+    const argv = try patcher.buildInstallNameToolArgv(testing.allocator, path, outcome.overflow);
+    defer testing.allocator.free(argv);
+    try testing.expectEqualStrings("-rpath", argv[1]);
+    try testing.expectEqualStrings("-delete_rpath", argv[4]);
+    try testing.expectEqualStrings("/usr/local/lib", argv[5]);
+}
+
 // ---------------------------------------------------------------------------
 // flushOverflow / install_name_tool driver
 // ---------------------------------------------------------------------------
@@ -319,6 +576,25 @@ test "buildInstallNameToolArgv routes LC_RPATH through -rpath" {
     try testing.expectEqualStrings("-rpath", argv[1]);
     try testing.expectEqualStrings(entries[0].old_path, argv[2]);
     try testing.expectEqualStrings(entries[0].new_path, argv[3]);
+}
+
+test "buildInstallNameToolArgv routes a delete entry through -delete_rpath" {
+    const entries = [_]patcher.OverflowEntry{
+        .{
+            .cmd = @intFromEnum(macho.LC.RPATH),
+            .old_path = "/usr/local/lib",
+            .new_path = "",
+            .delete = true,
+        },
+    };
+    const argv = try patcher.buildInstallNameToolArgv(testing.allocator, "/tmp/binary", &entries);
+    defer testing.allocator.free(argv);
+
+    // -delete_rpath <old> <binary>: no new path — the command is removed.
+    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqualStrings("-delete_rpath", argv[1]);
+    try testing.expectEqualStrings("/usr/local/lib", argv[2]);
+    try testing.expectEqualStrings("/tmp/binary", argv[3]);
 }
 
 test "buildInstallNameToolArgv routes LC_ID_DYLIB through -id (no old arg)" {
