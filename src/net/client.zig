@@ -447,20 +447,25 @@ pub const HttpClient = struct {
     /// hosts. Caller owns the returned `Response`.
     pub fn get(self: *HttpClient, url: []const u8) !Response {
         if (self.offline) return error.OfflineRequired;
-        if (githubApiToken(self.environ)) |token| {
-            // Host-component match, not substring: a look-alike host or a
-            // path containing "github.com" must never receive the token.
-            if (githubTokenApplies(url)) {
-                var auth_buf: [256]u8 = undefined;
-                const auth_value = std.fmt.bufPrint(&auth_buf, "token {s}", .{token}) catch
-                    return self.doGet(url, &.{});
-                const headers = [_]std.http.Header{
-                    .{ .name = "Authorization", .value = auth_value },
-                };
-                return self.doGet(url, &headers);
-            }
+        if (try self.authHeaderValue(url)) |auth_value| {
+            defer self.allocator.free(auth_value);
+            const headers = [_]std.http.Header{
+                .{ .name = "Authorization", .value = auth_value },
+            };
+            return self.doGet(url, &headers);
         }
         return self.doGet(url, &.{});
+    }
+
+    /// Owned `Authorization` value (`token <t>`) for a gate-eligible URL, or
+    /// null when no token applies. Sized exactly to the token so a long
+    /// fine-grained / GitHub-App / GHCR token is never dropped. Caller frees
+    /// the returned slice. Host-component match, not substring: a look-alike
+    /// host or a path containing "github.com" never receives the token.
+    fn authHeaderValue(self: *HttpClient, url: []const u8) !?[]u8 {
+        const token = githubApiToken(self.environ) orelse return null;
+        if (!githubTokenApplies(url)) return null;
+        return try std.fmt.allocPrint(self.allocator, "token {s}", .{token});
     }
 
     /// GET with extra headers under `max_blob_bytes`. Caller owns `Response`.
@@ -1443,6 +1448,64 @@ test "githubApiToken: a non-empty value is taken verbatim, not trimmed (matches 
         "HOMEBREW_GITHUB_API_TOKEN=brew-tok".ptr,
     };
     try std.testing.expectEqualStrings("  ", HttpClient.githubApiToken(environFrom(&entries)).?);
+}
+
+// ── authHeaderValue: exact-sized header, no length-triggered drop ───
+// The bug: `get` formatted the header into a fixed 256-byte stack buffer
+// and, on overflow, silently issued an *unauthenticated* request — a long
+// fine-grained / GitHub-App / GHCR token was dropped with no error. The
+// decision lives in this helper so the produced value is observable
+// without a live socket (stdlib exposes no resolver seam to point a
+// gate-eligible host at loopback).
+
+test "authHeaderValue: a >256-byte token still yields a full, untruncated header" {
+    // "token " + 400 chars overflows the old 256-byte buffer — the exact
+    // input that used to drop the token to an anonymous request.
+    const token = "a" ** 400;
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ token};
+    var http = HttpClient.init(std.Options.debug_io, environFrom(&entries), std.testing.allocator);
+    defer http.deinit();
+
+    const value = try http.authHeaderValue("https://github.com/Homebrew/x") orelse
+        return error.TestUnexpectedNull;
+    defer std.testing.allocator.free(value);
+    try std.testing.expectEqualStrings("token " ++ token, value);
+}
+
+test "authHeaderValue: a short token yields the correct full value (happy path)" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=ghp_shorttoken"};
+    var http = HttpClient.init(std.Options.debug_io, environFrom(&entries), std.testing.allocator);
+    defer http.deinit();
+
+    const value = try http.authHeaderValue("https://github.com/x") orelse
+        return error.TestUnexpectedNull;
+    defer std.testing.allocator.free(value);
+    try std.testing.expectEqualStrings("token ghp_shorttoken", value);
+}
+
+test "authHeaderValue: a non-gate host returns null (gate unchanged)" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=ghp_shorttoken"};
+    var http = HttpClient.init(std.Options.debug_io, environFrom(&entries), std.testing.allocator);
+    defer http.deinit();
+    try std.testing.expect(try http.authHeaderValue("https://example.com/x") == null);
+}
+
+test "authHeaderValue: no token returns null even for a gate host" {
+    var http = HttpClient.init(std.Options.debug_io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    try std.testing.expect(try http.authHeaderValue("https://github.com/x") == null);
+}
+
+test "authHeaderValue: surfaces OutOfMemory instead of silently dropping the token" {
+    // The pre-fix bug was a *silent* fall-through to an anonymous request on
+    // format failure. Allocation failure must fail loud — OOM propagates, it
+    // must never revert to null/anonymous.
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=ghp_shorttoken"};
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = std.Options.debug_io };
+    var http = HttpClient.initWith(&inner, std.Options.debug_io, environFrom(&entries), failing.allocator());
+    defer http.deinit();
+    try std.testing.expectError(error.OutOfMemory, http.authHeaderValue("https://github.com/x"));
 }
 
 test "HttpClient.get returns OfflineRequired when offline is set" {
