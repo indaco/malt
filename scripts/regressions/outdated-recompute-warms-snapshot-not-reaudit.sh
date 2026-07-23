@@ -63,7 +63,9 @@ seed_snapshot() {
 # own audit, overwriting the bogus marker.
 seed_snapshot 600
 "$BIN" outdated >/dev/null 2>&1 || true
-if grep -q '9.9' "$SNAP"; then
+# -F: match the literal marker. A bare `9.9` regex also matches `9<any>9`,
+# e.g. the `9094` in a freshly warmed snapshot's ms timestamp — a false hit.
+if grep -qF '9.9' "$SNAP"; then
   fail "full recompute did not warm the snapshot — the bogus marker survived (warm dropped)"
 fi
 pass "full recompute warms the snapshot (bogus marker overwritten)"
@@ -72,7 +74,7 @@ pass "full recompute warms the snapshot (bogus marker overwritten)"
 # partial audit would persist a snapshot the next reader trusts as complete.
 seed_snapshot 600
 "$BIN" outdated --pinned-only >/dev/null 2>&1 || true
-if ! grep -q '9.9' "$SNAP"; then
+if ! grep -qF '9.9' "$SNAP"; then
   fail "narrowed recompute overwrote the snapshot — a partial audit was persisted (gate lost)"
 fi
 pass "narrowed recompute leaves the snapshot untouched (no partial warm)"
