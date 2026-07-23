@@ -62,6 +62,21 @@ fn pathExists(path: []const u8) bool {
     return true;
 }
 
+// Build a valid absolute prefix of exactly `total` bytes rooted at `base`,
+// padding with '/'-separated ≤255-byte components so it still passes
+// validatePrefix. Used to exercise the long-but-valid MALT_PREFIX band.
+fn buildLongPrefix(allocator: std.mem.Allocator, base: []const u8, total: usize) ![]u8 {
+    std.debug.assert(base.len + 2 <= total);
+    const buf = try allocator.alloc(u8, total);
+    @memcpy(buf[0..base.len], base);
+    @memset(buf[base.len..], 'a');
+    // Separators every 201 bytes keep components under NAME_MAX and the
+    // trailing component non-empty.
+    var sep = base.len;
+    while (sep < total - 1) : (sep += 201) buf[sep] = '/';
+    return buf;
+}
+
 // ── Flag parsing / input validation ─────────────────────────────────────
 
 test "migrate --help short-circuits before touching the filesystem" {
@@ -142,6 +157,84 @@ test "missing Homebrew installation yields error.Aborted" {
         error.Aborted,
         migrate.execute(&ctx, arena.allocator(), &.{"--dry-run"}),
     );
+}
+
+// ── Fail-loud on path-construction overflow ─────────────────────────────
+
+test "over-long HOMEBREW_PREFIX fails loud instead of exiting 0" {
+    resetOutput();
+    // detectBrewPrefix returns HOMEBREW_PREFIX unvalidated. A ~600-byte value
+    // overflows the Cellar path buffer; the old [256]u8 + `catch return`
+    // reported success. The overflow fires before any filesystem access, so
+    // no Cellar dir needs to exist.
+    var brew_buf: [600]u8 = undefined;
+    brew_buf[0] = '/';
+    @memset(brew_buf[1..], 'a');
+    try setenvZ("HOMEBREW_PREFIX", &brew_buf);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+
+    // Capturing stderr pins the "loud" half: a non-zero exit alone would also
+    // pass if the diagnostic were dropped, but silence is the bug being fixed.
+    var errbuf: std.ArrayList(u8) = .empty;
+    defer errbuf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &errbuf);
+    defer io_mod.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    try testing.expectError(
+        error.Aborted,
+        migrate.execute(&ctx, arena.allocator(), &.{"--dry-run"}),
+    );
+    try testing.expect(containsLine(errbuf.items, "Homebrew prefix path too long"));
+}
+
+test "long-but-valid MALT_PREFIX reaches the real db failure instead of exiting 0" {
+    resetOutput();
+    const brew = try scratchDir("brew_longpfx");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const base = try scratchDir("mt_longpfx");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+        testing.allocator.free(base);
+    }
+    try seedFakeBrew(brew, &.{"tree"});
+
+    // A 512-byte MALT_PREFIX passes validatePrefix (≤ 512) but overflowed the
+    // old 512-byte "{s}/db/malt.db" buffer at the db-open site, so migrate hit
+    // `catch return` and exited 0 having done nothing. Grown to 576 the format
+    // fits, so it reaches db.open — which fails here because db/malt.db is a
+    // directory — and must surface Aborted.
+    const prefix = try buildLongPrefix(testing.allocator, base, 512);
+    defer testing.allocator.free(prefix);
+    try malt.atomic.validatePrefix(prefix); // precondition: this prefix is valid
+    const db_as_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
+    defer testing.allocator.free(db_as_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_as_dir);
+
+    const prefixz = try testing.allocator.dupeZ(u8, prefix);
+    defer testing.allocator.free(prefixz);
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", prefixz.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    try testing.expectError(
+        error.Aborted,
+        migrate.execute(&ctx, arena.allocator(), &.{"--quiet"}),
+    );
+    resetOutput();
 }
 
 test "empty Cellar exits cleanly with no malt state created" {

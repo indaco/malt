@@ -15,6 +15,7 @@ const lock_report = @import("lock_report.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const codesign = @import("../macho/codesign.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
@@ -130,8 +131,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // ── Step 1: Detect Homebrew prefix ──────────────────────────────
     const brew_prefix = detectBrewPrefix(ctx);
-    var cellar_buf: [256]u8 = undefined;
-    const brew_cellar = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{brew_prefix}) catch return;
+    var cellar_buf: [prefix_path.path_buf_len]u8 = undefined;
+    // brew_prefix is unvalidated HOMEBREW_PREFIX — a too-long value must fail
+    // loud, not no-op.
+    const brew_cellar = prefix_path.join(&cellar_buf, brew_prefix, "/Cellar") catch {
+        output.err("Homebrew prefix path too long", .{});
+        return error.Aborted;
+    };
 
     std.Io.Dir.accessAbsolute(ctx.io, brew_cellar, .{}) catch {
         output.err("No Homebrew installation found at {s}", .{brew_prefix});
@@ -209,8 +215,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     ensureDirs(ctx, prefix) catch return error.Aborted;
 
     // Open database
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const db_path = prefix_path.joinZ(&db_path_buf, prefix, "/db/malt.db") catch {
+        output.err("Failed to open database", .{});
+        return error.Aborted;
+    };
     var db = sqlite.Database.open(db_path) catch {
         output.err("Failed to open database at {s}", .{db_path});
         return error.Aborted;
@@ -223,8 +232,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
 
     // Acquire lock; `MALT_LOCK_TIMEOUT_MS` tunes the 30 s default.
-    var lock_path_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
+    var lock_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const lock_path = prefix_path.join(&lock_path_buf, prefix, "/db/malt.lock") catch {
+        output.err("Failed to acquire lock", .{});
+        return error.Aborted;
+    };
     var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, lockTimeoutMs(ctx)) catch |e| switch (e) {
         // The DB is already open here, so db/ exists — DirMissing can't occur.
         error.DirMissing => return error.Aborted,
@@ -244,8 +256,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer http.deinit();
     http.offline = ctx.offline;
 
-    var cache_dir_buf: [512]u8 = undefined;
-    const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
+    var cache_dir_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const cache_dir = prefix_path.join(&cache_dir_buf, prefix, "/cache") catch {
+        output.err("Failed to resolve cache directory", .{});
+        return error.Aborted;
+    };
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
     api.offline = ctx.offline;
@@ -259,12 +274,15 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Resume manifest: a crashed/^C run resumes from where it stopped
     // instead of redoing every keg.
-    var manifest_path_buf: [512]u8 = undefined;
-    const manifest_path = std.fmt.bufPrint(
+    var manifest_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const manifest_path = prefix_path.join(
         &manifest_path_buf,
-        "{s}/cache/migrate.progress.json",
-        .{prefix},
-    ) catch return;
+        prefix,
+        "/cache/migrate.progress.json",
+    ) catch {
+        output.err("Failed to resolve resume manifest path", .{});
+        return error.Aborted;
+    };
     var manifest = manifest_mod.loadFromPath(ctx, allocator, manifest_path) catch |e| blk: {
         output.warn("Could not read resume manifest ({s}); starting fresh", .{@errorName(e)});
         break :blk manifest_mod.Manifest.init(allocator);
