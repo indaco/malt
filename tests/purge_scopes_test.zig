@@ -47,6 +47,58 @@ const ScratchPrefix = struct {
     }
 };
 
+var long_prefix_seq: std.atomic.Value(u32) = .init(0);
+
+// A ~505-byte MALT_PREFIX: valid (<=512, passes validatePrefix) yet long
+// enough to overflow the old 512-byte "{s}/db/malt.lock" buffer in
+// purge.execute. Built from <=255-byte components under /tmp so it is a
+// real, creatable tree.
+const LongScratchPrefix = struct {
+    path: [:0]u8, // full ~505-byte prefix (setenv'd as MALT_PREFIX)
+    root: []u8, // /tmp/malt_lp_<pid>_<seq> — the tree deleted on deinit
+
+    fn init(allocator: std.mem.Allocator) !LongScratchPrefix {
+        const pid = std.c.getpid();
+        const seq = long_prefix_seq.fetchAdd(1, .monotonic);
+        var buf: [512]u8 = undefined;
+        const head = try std.fmt.bufPrint(&buf, "/tmp/malt_lp_{d}_{d}/", .{ pid, seq });
+
+        const total: usize = 505;
+        std.debug.assert(head.len + 3 <= total); // room for padA ++ "/" ++ padB
+        const body = total - head.len; // padA ++ "/" ++ padB
+        const pad_b = (body - 1) / 2;
+        const pad_a = (body - 1) - pad_b;
+        std.debug.assert(pad_a <= 255 and pad_b <= 255); // NAME_MAX per component
+        @memset(buf[head.len .. head.len + pad_a], 'a');
+        buf[head.len + pad_a] = '/';
+        @memset(buf[head.len + pad_a + 1 .. total], 'b');
+
+        const path = try allocator.dupeZ(u8, buf[0..total]);
+        errdefer allocator.free(path);
+        const root = try allocator.dupe(u8, buf[0..std.mem.indexOfScalarPos(u8, buf[0..total], "/tmp/".len, '/').?]);
+        errdefer allocator.free(root);
+
+        test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, path);
+        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        defer allocator.free(db_dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+        const cache_dir = try std.fmt.allocPrint(allocator, "{s}/cache", .{path});
+        defer allocator.free(cache_dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, cache_dir);
+
+        _ = c.setenv("MALT_PREFIX", path.ptr, 1);
+        return .{ .path = path, .root = root };
+    }
+
+    fn deinit(self: *LongScratchPrefix, allocator: std.mem.Allocator) void {
+        _ = c.unsetenv("MALT_PREFIX");
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.root) catch {};
+        allocator.free(self.root);
+        allocator.free(self.path);
+    }
+};
+
 const OutputState = struct {
     prior_mode: output.OutputMode,
     prior_ndjson: bool,
@@ -375,6 +427,43 @@ test "--downloads --yes (non-dry-run) actually deletes the cache files" {
         error.FileNotFound,
         test_io.accessAbsolute(std.Options.debug_io, alpha, .{}),
     );
+}
+
+// --- long-but-valid prefix must not silently no-op ----------------------
+
+test "long-but-valid MALT_PREFIX runs to completion instead of silently exiting 0" {
+    // A ~505-byte MALT_PREFIX passes validatePrefix (<=512) but overflowed
+    // the old 512-byte "{s}/db/malt.lock" buffer, so execute() hit
+    // `catch return` and exited 0 *before* registering the summary-emitting
+    // defers — a silent success with no output at all. With the buffer grown
+    // to prefix_path.path_buf_len the lock-path format fits, so execute()
+    // runs to completion and emits the v1 JSON summary. Presence of that
+    // summary on stdout is the observable that isolates the lock-path site
+    // from every downstream best-effort path helper.
+    const allocator = testing.allocator;
+    var prefix = try LongScratchPrefix.init(allocator);
+    defer prefix.deinit(allocator);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.json);
+    output.setDryRun(true);
+    output.setNdjson(false);
+    output.setQuiet(false);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    output.beginStdoutCapture(allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try purge.execute(&ctx, allocator, &.{"--housekeeping"});
+
+    const trimmed = std.mem.trim(u8, stdout_buf.items, " \r\n\t");
+    try testing.expect(trimmed.len > 0);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("version") != null);
 }
 
 // --- non-dry-run wipe ---------------------------------------------------

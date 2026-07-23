@@ -4,6 +4,7 @@
 const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const atomic = @import("../fs/atomic.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const output = @import("../ui/output.zig");
 const lock_mod = @import("../db/lock.zig");
 const help = @import("help.zig");
@@ -150,8 +151,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // One shared lock for all non-wipe scopes.  Lock path may not exist
     // (fresh install with no DB) — that's fine, we proceed without.
-    var lock_path_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
+    var lock_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const lock_path = prefix_path.join(&lock_path_buf, prefix, "/db/malt.lock") catch {
+        output.err("lock path too long", .{});
+        return error.Aborted;
+    };
     var lk_maybe: ?lock_mod.LockFile = lock_mod.LockFile.acquire(ctx.io, lock_path, 30_000) catch null;
     defer if (lk_maybe) |*lk| lk.release(ctx.io);
 
