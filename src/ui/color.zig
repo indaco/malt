@@ -146,6 +146,7 @@ pub fn setRuntime(io: std.Io, environ: std.process.Environ) void {
     @atomicStore(Tri, &color_enabled, .unresolved, .release);
     @atomicStore(Tri, &emoji_enabled, .unresolved, .release);
     @atomicStore(BgCache, &background_cached, .unresolved, .release);
+    bg_probing.store(false, .release); // release the probe latch so the re-seed re-probes
     @atomicStore(Tri, &truecolor_cached, .unresolved, .release);
     // Dropping the latch invalidates the value; the value store itself is moot.
     @atomicStore(bool, &theme_resolved, false, .release);
@@ -220,6 +221,7 @@ pub fn setForTest(c: ?bool, e: ?bool) void {
 pub fn setBackgroundForTest(bg: ?Background) void {
     if (!builtin.is_test) return;
     @atomicStore(BgCache, &background_cached, if (bg) |v| bgToCache(v) else .unresolved, .release);
+    bg_probing.store(false, .release); // clear the latch so a forced/null value never wedges a recompute
 }
 
 /// Test-only override for the truecolor cache.
@@ -372,6 +374,81 @@ test "test setters round-trip; null recomputes from env" {
     try std.testing.expectEqual(Theme.default, theme()); // "light" is a bg keyword ⇒ default theme
 }
 
+test "background() runs the OSC 11 probe at most once under concurrent first-touch" {
+    // The probe toggles raw mode on the shared stdin and consumes the terminal's
+    // single OSC 11 response — concurrent probes corrupt each other. Pin the
+    // by-construction guarantee: exactly one thread runs the detector even when N
+    // race in cold. Non-TTY here, so a counting detector stands in for the probe.
+    const io = std.Options.debug_io;
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    const Probe = struct {
+        var runs: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+        fn detect() Background {
+            _ = runs.fetchAdd(1, .monotonic);
+            // Hold the resolve open so every racing thread reliably observes an
+            // unresolved cache first — without serialisation all N enter here.
+            var ts: std.c.timespec = .{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
+            _ = std.c.nanosleep(&ts, null);
+            return .dark;
+        }
+        fn touch() void {
+            _ = background();
+        }
+    };
+    Probe.runs.store(0, .monotonic);
+    setDetectBackgroundForTest(&Probe.detect);
+    defer {
+        setDetectBackgroundForTest(null);
+        setBackgroundForTest(null);
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+
+    var threads: [8]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Probe.touch, .{});
+    for (&threads) |t| t.join();
+
+    try std.testing.expectEqual(Background.dark, background());
+    try std.testing.expectEqual(@as(u32, 1), Probe.runs.load(.monotonic));
+}
+
+test "setBackgroundForTest(null) clears the probe latch so a resolve can recompute" {
+    const io = std.Options.debug_io;
+    // MALT_THEME as a bg keyword resolves without a TTY probe, so it claims the latch.
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"MALT_THEME=light"} } });
+    defer {
+        setBackgroundForTest(null);
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+    try std.testing.expectEqual(Background.light, background());
+    try std.testing.expect(bg_probing.load(.acquire)); // latch claimed
+    // Dropping the cache must drop the latch too, or the next resolve would wedge.
+    setBackgroundForTest(null);
+    try std.testing.expect(!bg_probing.load(.acquire));
+    try std.testing.expectEqual(Background.light, background()); // recomputes, no wedge
+}
+
+test "concurrent roleCode first-touch agrees (fold + theme latch on a cold cache)" {
+    // The realistic worker path — coloured output → roleCode → activeCustomIndex
+    // (the fold) and theme(). seedCustom leaves both unresolved, so N threads race.
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, custom_ocean_src));
+    defer resetCustom();
+
+    const Runner = struct {
+        code: []const u8 = "",
+        fn run(self: *@This()) void {
+            self.code = roleCode(.accent);
+        }
+    };
+    var runners: [8]Runner = @splat(.{});
+    var threads: [8]std.Thread = undefined;
+    for (&threads, &runners) |*t, *r| t.* = try std.Thread.spawn(.{}, Runner.run, .{r});
+    for (&threads) |t| t.join();
+
+    for (runners) |r| try std.testing.expectEqualStrings(runners[0].code, r.code);
+    try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", runners[0].code); // ocean accent
+    try std.testing.expect(@atomicLoad(usize, &active_custom, .acquire) != AC_UNRESOLVED);
+}
+
 test "the active-custom fold resolves, drops on re-seed, and drops on clear" {
     try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, custom_ocean_src));
     defer resetCustom();
@@ -393,6 +470,11 @@ test "the active-custom fold resolves, drops on re-seed, and drops on clear" {
     try std.testing.expectEqual(AC_NONE, @atomicLoad(usize, &active_custom, .acquire));
 }
 
+/// Serialises the one-shot OSC 11 probe: it drives the shared stdin into raw mode
+/// and reads the terminal's single response, so concurrent probes corrupt each
+/// other — unlike the benign integer caches. One thread probes; racers wait.
+var bg_probing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
 /// Cached background accessor. Detection runs at most once per process.
 pub fn background() Background {
     switch (@atomicLoad(BgCache, &background_cached, .acquire)) {
@@ -401,13 +483,37 @@ pub fn background() Background {
         .unknown => return .unknown,
         .unresolved => {},
     }
-    const resolved = detectBackground();
-    @atomicStore(BgCache, &background_cached, bgToCache(resolved), .release);
-    return resolved;
+    // Only the latch winner runs the probe; losers spin-yield for its store.
+    if (bg_probing.cmpxchgStrong(false, true, .acquire, .monotonic) == null) {
+        const resolved = detectBackground();
+        @atomicStore(BgCache, &background_cached, bgToCache(resolved), .release);
+        return resolved;
+    }
+    while (true) {
+        switch (@atomicLoad(BgCache, &background_cached, .acquire)) {
+            .dark => return .dark,
+            .light => return .light,
+            .unknown => return .unknown,
+            .unresolved => std.Thread.yield() catch {}, // transient; re-poll for the winner
+        }
+    }
+}
+
+/// Test-only detector swap so a concurrency test can count resolve-path entries
+/// (the real probe needs a TTY). Comptime-gated — free in release.
+var detect_override: ?*const fn () Background = null;
+
+/// Test-only: swap the background detector. Pass `null` to restore the real chain.
+pub fn setDetectBackgroundForTest(f: ?*const fn () Background) void {
+    if (!builtin.is_test) return;
+    detect_override = f;
 }
 
 /// Chain: MALT_THEME env → OSC 11 query → COLORFGBG env → .unknown.
 fn detectBackground() Background {
+    if (builtin.is_test) {
+        if (detect_override) |f| return f();
+    }
     if (themeFromEnv(lookupEnv("MALT_THEME"))) |forced| return forced;
     if (queryOsc11Background()) |bg| return bg;
     if (lookupEnv("COLORFGBG")) |v| {
