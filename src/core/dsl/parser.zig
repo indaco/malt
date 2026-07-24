@@ -592,14 +592,26 @@ pub const Parser = struct {
         self.advanceToken();
         const body = if (self.current.kind == .heredoc_body) self.current.lexeme else "";
         if (self.current.kind == .heredoc_body) self.advanceToken();
-        return self.allocNode(.{ .loc = loc, .kind = .{ .heredoc_literal = body } });
+        return self.heredocNode(body, loc);
     }
 
     fn parseHeredocBody(self: *Parser) DslError!*const Node {
         const loc = self.currentLoc();
         const body = self.current.lexeme;
         self.advanceToken();
-        return self.allocNode(.{ .loc = loc, .kind = .{ .heredoc_literal = body } });
+        return self.heredocNode(body, loc);
+    }
+
+    /// Lower a heredoc body onto the shared `string_literal` path so `#{...}`
+    /// interpolates exactly like a double-quoted string, inheriting its
+    /// hardened dangling / parse-failure fallbacks. A future non-interpolating
+    /// `<<~'EOS'` would bypass this and emit a single literal part instead.
+    fn heredocNode(self: *Parser, body: []const u8, loc: SourceLoc) DslError!*const Node {
+        const parts = try self.parseStringInterpolation(body, loc);
+        return self.allocNode(.{
+            .loc = loc,
+            .kind = .{ .string_literal = .{ .parts = parts } },
+        });
     }
 
     fn parseIntegerLit(self: *Parser) DslError!*const Node {

@@ -113,7 +113,6 @@ pub const Interpreter = struct {
             .bool_literal => |b| Value{ .bool = b },
             .nil_literal => Value{ .nil = {} },
             .symbol_literal => |s| Value{ .symbol = s },
-            .heredoc_literal => |h| Value{ .string = h },
             .identifier => |name| self.evalIdentifier(name, node.loc),
             .assignment => |a| self.evalAssignment(&a),
             .method_call => |mc| self.evalMethodCall(&mc, node.loc),
