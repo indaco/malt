@@ -39,6 +39,8 @@ devbox shell --pure                              # enter the isolated shell
 
 `devbox.json` pins `zig@0.16`, `just`, `git`, `curl`, `shellcheck`, `shfmt`, and `sqlite` - enough to build, test, lint, and run every script under `scripts/`.
 
+Run `just --list` to see every build/test/lint/bench target.
+
 ### Manual setup
 
 If you'd rather not use Devbox, install these yourself:

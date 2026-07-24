@@ -198,6 +198,16 @@ hooks-uninstall:
 bench *args:
     ./scripts/bench.sh {{ args }}
 
+# Bench malt alone - no nanobrew/zerobrew/brew builds or comparison.
+[group('bench')]
+bench-solo *args:
+    SKIP_OTHERS=1 SKIP_BREW=1 ./scripts/bench.sh {{ args }}
+
+# Bench malt against every peer (nanobrew, zerobrew, brew).
+[group('bench')]
+bench-full *args:
+    ./scripts/bench.sh {{ args }}
+
 # Microbench for the outdated-snapshot read path. Asserts a hard
 # per-phase budget so a regression on render/parse/intersect breaks
 
