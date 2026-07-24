@@ -321,7 +321,7 @@ pub const AuthError = error{AuthTokenTooLong};
 /// unset/empty. The token contract is one env var per forge, keyed by
 /// forge rather than by host, so a self-hosted instance reuses its
 /// forge's var:
-///   - github:   `MALT_GITHUB_TOKEN`   → `Authorization: Bearer <t>`
+///   - github:   `MALT_GITHUB_TOKEN`   → `Authorization: token <t>`
 ///   - gitlab:   `MALT_GITLAB_TOKEN`   → `PRIVATE-TOKEN: <t>`
 ///   - gitea: `MALT_GITEA_TOKEN`    → `Authorization: token <t>`
 /// The reach is deliberately narrow — only the tap-resolution callers
@@ -331,7 +331,7 @@ pub fn authHeader(forge: Forge, environ: std.process.Environ, buf: []u8) AuthErr
         .github => {
             const raw = std.process.Environ.getPosix(environ, "MALT_GITHUB_TOKEN") orelse return null;
             if (raw.len == 0) return null;
-            const value = std.fmt.bufPrint(buf, "Bearer {s}", .{raw}) catch return error.AuthTokenTooLong;
+            const value = std.fmt.bufPrint(buf, "token {s}", .{raw}) catch return error.AuthTokenTooLong;
             return .{ .name = "Authorization", .value = value };
         },
         .gitlab => return gitlabPrivateToken(environ, buf),
@@ -346,7 +346,7 @@ pub fn authHeader(forge: Forge, environ: std.process.Environ, buf: []u8) AuthErr
 fn gitlabPrivateToken(environ: std.process.Environ, buf: []u8) AuthError!?std.http.Header {
     const raw = std.process.Environ.getPosix(environ, "MALT_GITLAB_TOKEN") orelse return null;
     if (raw.len == 0) return null;
-    // Bare PAT — no scheme prefix, unlike github's Bearer.
+    // Bare PAT — no scheme prefix, unlike github's/gitea's `token`.
     const value = std.fmt.bufPrint(buf, "{s}", .{raw}) catch return error.AuthTokenTooLong;
     return .{ .name = "PRIVATE-TOKEN", .value = value };
 }
@@ -356,7 +356,7 @@ fn gitlabPrivateToken(environ: std.process.Environ, buf: []u8) AuthError!?std.ht
 /// Gitea API family it serves (Codeberg, Forgejo, self-hosted Gitea), not
 /// the codeberg.org instance. Shared by the API and the instance-host raw
 /// fetch — both authenticate the same way, against the same host. The
-/// `token` scheme is Gitea's, not github's `Bearer`.
+/// `token` scheme is Gitea's own; github now spells it the same way.
 fn giteaToken(environ: std.process.Environ, buf: []u8) AuthError!?std.http.Header {
     const raw = std.process.Environ.getPosix(environ, "MALT_GITEA_TOKEN") orelse return null;
     if (raw.len == 0) return null;
@@ -562,8 +562,8 @@ test "parseHeadSha gitlab: empty body yields null" {
 }
 
 // ── authHeader (github) ────────────────────────────────────────────
-// Only the `/commits/HEAD` call picks up MALT_GITHUB_TOKEN. The Bearer
-// format must match GitHub's contract. Environs are constructed inline
+// Only the `/commits/HEAD` call picks up MALT_GITHUB_TOKEN. The `token`
+// scheme must match GitHub's contract. Environs are constructed inline
 // so the test never mutates real process state.
 
 fn envWith(comptime entries: anytype) std.process.Environ {
@@ -576,12 +576,12 @@ test "authHeader github: null when MALT_GITHUB_TOKEN unset" {
     try std.testing.expect(try authHeader(.github, .empty, &buf) == null);
 }
 
-test "authHeader github: Bearer header when MALT_GITHUB_TOKEN set" {
+test "authHeader github: token header when MALT_GITHUB_TOKEN set" {
     const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=ghp_testtoken"};
     var buf: [256]u8 = undefined;
     const h = try authHeader(.github, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("Authorization", h.name);
-    try std.testing.expectEqualStrings("Bearer ghp_testtoken", h.value);
+    try std.testing.expectEqualStrings("token ghp_testtoken", h.value);
 }
 
 test "authHeader github: empty-string token behaves as unset" {
@@ -601,7 +601,7 @@ test "rawAuthHeader github: null even when MALT_GITHUB_TOKEN is set" {
 
 // ── authHeader (gitlab) ────────────────────────────────────────────
 // GitLab authenticates with a bare PAT under the PRIVATE-TOKEN header —
-// no `Bearer` prefix. MALT_GITLAB_TOKEN keys it (one var per forge), so
+// no scheme prefix. MALT_GITLAB_TOKEN keys it (one var per forge), so
 // a self-hosted instance reuses its forge's var.
 
 test "authHeader gitlab: null when MALT_GITLAB_TOKEN unset" {
@@ -676,7 +676,7 @@ test "authHeader github: a realistic long token fits the widened buffer" {
     var buf: [8 * 1024]u8 = undefined;
     const h = try authHeader(.github, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("Authorization", h.name);
-    try std.testing.expectEqualStrings("Bearer " ++ "t" ** 600, h.value);
+    try std.testing.expectEqualStrings("token " ++ "t" ** 600, h.value);
 }
 
 test "authHeader gitlab: a realistic long bare PAT fits the widened buffer" {
@@ -689,15 +689,15 @@ test "authHeader gitlab: a realistic long bare PAT fits the widened buffer" {
 
 test "authHeader github: a value that exactly fills the buffer authenticates" {
     // Boundary: value length == buf.len is a fit, not an overflow.
-    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ "t" ** 57};
-    var buf: [64]u8 = undefined; // "Bearer " (7) + 57 == 64
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ "t" ** 58};
+    var buf: [64]u8 = undefined; // "token " (6) + 58 == 64
     const h = try authHeader(.github, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
-    try std.testing.expectEqualStrings("Bearer " ++ "t" ** 57, h.value);
+    try std.testing.expectEqualStrings("token " ++ "t" ** 58, h.value);
 }
 
 test "authHeader github: one byte past the buffer is a loud error" {
-    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ "t" ** 58};
-    var buf: [64]u8 = undefined; // "Bearer " (7) + 58 == 65 > 64
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ "t" ** 59};
+    var buf: [64]u8 = undefined; // "token " (6) + 59 == 65 > 64
     try std.testing.expectError(error.AuthTokenTooLong, authHeader(.github, envWith(entries), &buf));
 }
 
@@ -1084,7 +1084,7 @@ test "rawFileUrl gitea: formula_root kind builds the /raw root tail" {
 
 // ── authHeader (gitea) ──────────────────────────────────────────
 // Gitea/Forgejo authenticate with `Authorization: token <PAT>` — the
-// `token` scheme, not github's `Bearer`. MALT_GITEA_TOKEN keys it, named
+// `token` scheme, matching github's. MALT_GITEA_TOKEN keys it, named
 // for the Gitea API family (Codeberg, Forgejo, self-hosted Gitea) rather
 // than the codeberg.org instance.
 
