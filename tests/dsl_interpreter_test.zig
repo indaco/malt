@@ -230,7 +230,8 @@ test "interpreter: heredoc body interpolates via evalStringLiteral" {
     const prefix = scratch.path;
 
     // A `#{x}` inside a heredoc body must resolve the bound local, matching
-    // the double-quoted path. Indent is preserved (de-indent is a follow-up).
+    // the double-quoted path, and the squiggly indent is stripped before the
+    // file is written — so config templates come out correctly de-indented.
     const src =
         "x = \"world\"\n" ++
         "greeting = <<~EOS\n  hello #{x}\nEOS\n" ++
@@ -248,7 +249,9 @@ test "interpreter: heredoc body interpolates via evalStringLiteral" {
     defer file.close(std.Options.debug_io);
     var buf: [64]u8 = undefined;
     const n = try file.readPositionalAll(std.Options.debug_io, &buf, 0);
-    try testing.expectEqualStrings("  hello world\n", buf[0..n]);
+    // The old "  hello world\n" expectation encoded the de-indent bug — do
+    // not restore it.
+    try testing.expectEqualStrings("hello world\n", buf[0..n]);
 }
 
 test "interpreter: system true succeeds" {
@@ -3172,4 +3175,94 @@ test "executePostInstall: all-unhandled body leaves dslDidWork false" {
     try testing.expectEqual(@as(usize, 2), flog.total_top_level);
     try testing.expectEqual(@as(usize, 0), flog.handled_top_level);
     try testing.expect(!flog.dslDidWork());
+}
+
+// ---------------------------------------------------------------------------
+// Native vs system-Ruby byte-parity
+//
+// De-indenting `<<~` bodies exists to match Ruby's own output. This drives the
+// native interpreter and real `ruby` over the same heredoc source and asserts
+// the written files are byte-identical. The corpus is space-indented formula
+// shapes where the two must agree; the deliberate task-vs-Ruby divergences
+// (tab counting, over-indented blank lines) are pinned by unit tests, not here.
+// Skips rather than fails when `ruby` is not on PATH (e.g. a minimal CI image).
+// ---------------------------------------------------------------------------
+
+fn readSmallFile(path: []const u8) ![]u8 {
+    var file = try test_io.openFileAbsolute(std.Options.debug_io, path, .{});
+    defer file.close(std.Options.debug_io);
+    var buf: [4096]u8 = undefined;
+    const n = try file.readPositionalAll(std.Options.debug_io, &buf, 0);
+    return testing.allocator.dupe(u8, buf[0..n]);
+}
+
+/// Run `ruby -e prog` (the program writes its own output file). Returns
+/// `error.SkipZigTest` when `ruby` is absent, `error.RubyFailed` on non-zero.
+fn runRuby(alloc: std.mem.Allocator, prog: []const u8) !void {
+    const environ = malt.app_ctx.processEnviron();
+    var threaded: std.Io.Threaded = .init(alloc, .{ .environ = environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const argv = [_][]const u8{ "ruby", "-e", prog };
+    var child = std.process.spawn(io, .{ .argv = &argv }) catch return error.SkipZigTest;
+    const term = child.wait(io) catch return error.RubyFailed;
+    switch (term) {
+        .exited => |code| if (code != 0) return error.RubyFailed,
+        else => return error.RubyFailed,
+    }
+}
+
+test "interpreter: <<~ output is byte-identical to system Ruby" {
+    // Probe once so a ruby-less environment skips before doing any work.
+    {
+        var probe = testArena();
+        defer probe.deinit();
+        try runRuby(probe.allocator(), "");
+    }
+
+    const cases = [_]struct { name: []const u8, body: []const u8 }{
+        .{ .name = "uniform indent + interpolation", .body = "  hello #{x}\n" },
+        .{ .name = "nested structure preserved", .body = "  server:\n    host: localhost\n  port: 8080\n" },
+        .{ .name = "blank line stays empty", .body = "  first\n\n  second\n" },
+        .{ .name = "interpolation on multiple lines", .body = "  key = #{x}\n  n = 42\n" },
+    };
+
+    for (cases) |c| {
+        var arena = testArena();
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var scratch = try makeTempPrefix();
+        defer scratch.deinit();
+        const prefix = scratch.path;
+
+        // Native: evaluate the heredoc and write it under the prefix.
+        const native_src = try std.fmt.allocPrint(
+            a,
+            "x = \"world\"\ngreeting = <<~EOS\n{s}EOS\n(etc/\"out.conf\").write greeting\n",
+            .{c.body},
+        );
+        try testing.expect((try runSnippet(&arena, native_src, prefix)) == null);
+        const native_path = try std.fs.path.join(a, &.{ prefix, "etc", "out.conf" });
+
+        // Reference: real Ruby writes the same heredoc source to a sibling file.
+        const ruby_path = try std.fs.path.join(a, &.{ prefix, "out.ruby" });
+        const ruby_prog = try std.fmt.allocPrint(
+            a,
+            "x = \"world\"\nFile.write(\"{s}\", <<~EOS)\n{s}EOS\n",
+            .{ ruby_path, c.body },
+        );
+        try runRuby(a, ruby_prog);
+
+        const native_out = try readSmallFile(native_path);
+        defer testing.allocator.free(native_out);
+        const ruby_out = try readSmallFile(ruby_path);
+        defer testing.allocator.free(ruby_out);
+
+        testing.expectEqualStrings(ruby_out, native_out) catch |e| {
+            std.debug.print("byte-parity mismatch in case '{s}'\n", .{c.name});
+            return e;
+        };
+    }
 }

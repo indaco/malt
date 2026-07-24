@@ -743,10 +743,11 @@ test "parser: Dir peek preserves heredoc lexer state" {
     try testing.expectEqual(@as(usize, 2), nodes.len);
     try testing.expectEqualStrings("Dir", nodes[0].kind.identifier);
 
-    // Non-interpolating body lowers to a single literal part (indent kept).
+    // Body lowers to one literal part with the squiggly indent stripped. The
+    // old "  body\n" expectation encoded the de-indent bug — do not restore it.
     const body = nodes[1].kind.string_literal.parts[0].literal;
     try testing.expect(std.mem.indexOf(u8, body, "<<~") == null);
-    try testing.expectEqualStrings("  body\n", body);
+    try testing.expectEqualStrings("body\n", body);
 }
 
 test "parser: Formula peek preserves heredoc lexer state" {
@@ -760,10 +761,11 @@ test "parser: Formula peek preserves heredoc lexer state" {
     try testing.expectEqual(@as(usize, 2), nodes.len);
     try testing.expectEqualStrings("Formula", nodes[0].kind.identifier);
 
-    // Non-interpolating body lowers to a single literal part (indent kept).
+    // Body lowers to one literal part with the squiggly indent stripped. The
+    // old "  body\n" expectation encoded the de-indent bug — do not restore it.
     const body = nodes[1].kind.string_literal.parts[0].literal;
     try testing.expect(std.mem.indexOf(u8, body, "<<~") == null);
-    try testing.expectEqualStrings("  body\n", body);
+    try testing.expectEqualStrings("body\n", body);
 }
 
 test "parser: ENV peek preserves heredoc lexer state" {
@@ -777,10 +779,11 @@ test "parser: ENV peek preserves heredoc lexer state" {
     try testing.expectEqual(@as(usize, 2), nodes.len);
     try testing.expectEqualStrings("ENV", nodes[0].kind.identifier);
 
-    // Non-interpolating body lowers to a single literal part (indent kept).
+    // Body lowers to one literal part with the squiggly indent stripped. The
+    // old "  body\n" expectation encoded the de-indent bug — do not restore it.
     const body = nodes[1].kind.string_literal.parts[0].literal;
     try testing.expect(std.mem.indexOf(u8, body, "<<~") == null);
-    try testing.expectEqualStrings("  body\n", body);
+    try testing.expectEqualStrings("body\n", body);
 }
 
 test "parser: ENV read" {
@@ -1156,12 +1159,13 @@ test "parser: heredoc body without interpolation is one literal part" {
     var arena = testArena();
     defer arena.deinit();
 
-    // Body value stays raw here (indent preserved); T-002 de-indents it.
+    // Squiggly de-indent strips the common indent. The old "  body\n"
+    // expectation encoded the de-indent bug — do not restore it.
     const nodes = try parseSource(&arena, "<<~EOS\n  body\nEOS\n");
     try testing.expectEqual(@as(usize, 1), nodes.len);
     const sl = nodes[0].kind.string_literal;
     try testing.expectEqual(@as(usize, 1), sl.parts.len);
-    try testing.expectEqualStrings("  body\n", sl.parts[0].literal);
+    try testing.expectEqualStrings("body\n", sl.parts[0].literal);
 }
 
 test "parser: heredoc body lowers #{...} to string_literal parts" {
@@ -1169,12 +1173,14 @@ test "parser: heredoc body lowers #{...} to string_literal parts" {
     defer arena.deinit();
 
     // Heredoc bodies interpolate through the same string_literal path as
-    // double-quoted strings. Indent is preserved here — de-indent is a follow-up.
+    // double-quoted strings. De-indent runs first, so the leading "  " is
+    // stripped from the literal line start while the `#{x}` span is untouched.
+    // The old "  pre " expectation encoded the de-indent bug — do not restore it.
     const nodes = try parseSource(&arena, "<<~EOS\n  pre #{x} post\nEOS\n");
     try testing.expectEqual(@as(usize, 1), nodes.len);
     const sl = nodes[0].kind.string_literal;
     try testing.expectEqual(@as(usize, 3), sl.parts.len);
-    try testing.expectEqualStrings("  pre ", sl.parts[0].literal);
+    try testing.expectEqualStrings("pre ", sl.parts[0].literal);
     try testing.expectEqualStrings("x", sl.parts[1].interpolation.kind.identifier);
     try testing.expectEqualStrings(" post\n", sl.parts[2].literal);
 }
@@ -1193,6 +1199,36 @@ test "parser: heredoc interpolation splits across body lines" {
     try testing.expectEqualStrings("first\n", sl.parts[0].literal);
     try testing.expectEqualStrings("x", sl.parts[1].interpolation.kind.identifier);
     try testing.expectEqualStrings(" mid\nlast\n", sl.parts[2].literal);
+}
+
+test "parser: de-indent strips the line start but never the interpolation span" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // Both lines share a two-space indent, and one opens with `#{cfg}` right
+    // after that indent. De-indent runs before interpolation, so it removes the
+    // two literal columns at the line start but leaves the `#{cfg}` expression
+    // byte-for-byte — the interpolation is the first part, not a "  " literal.
+    const nodes = try parseSource(&arena, "<<~EOS\n  #{cfg} = 1\n  key = 2\nEOS\n");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    const sl = nodes[0].kind.string_literal;
+    try testing.expectEqual(@as(usize, 2), sl.parts.len);
+    try testing.expectEqualStrings("cfg", sl.parts[0].interpolation.kind.identifier);
+    try testing.expectEqualStrings(" = 1\nkey = 2\n", sl.parts[1].literal);
+}
+
+test "parser: an indented <<~ terminator terminates and its indent never leaks" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // Ruby lets the `<<~` terminator be indented to match surrounding code.
+    // The terminator line is excluded from the body, so its indentation cannot
+    // leak into the value, and the body keeps only its own de-indented content.
+    const nodes = try parseSource(&arena, "<<~EOS\n    key = value\n  EOS\n");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    const sl = nodes[0].kind.string_literal;
+    try testing.expectEqual(@as(usize, 1), sl.parts.len);
+    try testing.expectEqualStrings("key = value\n", sl.parts[0].literal);
 }
 
 test "parser: empty heredoc body is one empty literal part" {
