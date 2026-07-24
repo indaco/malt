@@ -1043,7 +1043,10 @@ fn writeJsonString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []c
 fn mapTapResolveError(e: tap_mod.TapError) InstallError {
     return switch (e) {
         error.RateLimited => InstallError.RateLimited,
-        error.NetworkError => InstallError.NetworkError,
+        error.NetworkError,
+        // A too-long token can't reach the network either; same exit path.
+        error.AuthTokenTooLong,
+        => InstallError.NetworkError,
         error.NotFound,
         error.MalformedJson,
         error.InvalidSha,
@@ -1151,6 +1154,8 @@ test "mapTapResolveError surfaces rate limit and network failure as their own ta
     // story when the real cause was a 60/hr rate-limit or a flaky DNS.
     try std.testing.expectEqual(InstallError.RateLimited, mapTapResolveError(error.RateLimited));
     try std.testing.expectEqual(InstallError.NetworkError, mapTapResolveError(error.NetworkError));
+    // A too-long token shares the network exit path, not FormulaNotFound.
+    try std.testing.expectEqual(InstallError.NetworkError, mapTapResolveError(error.AuthTokenTooLong));
 }
 
 test "mapTapResolveError keeps non-classified causes on FormulaNotFound" {
