@@ -12,6 +12,9 @@
     "imagemagick@latest"
   ],
   "shell": {
+    "init_hook": [
+      "command -v kcov >/dev/null || echo '⚠ kcov not found - coverage needs: brew install kcov (run outside --pure)'"
+    ],
     "scripts": {
       "dev": ["just build"],
       "build": ["just build-release"],
