@@ -31,10 +31,14 @@ pub const RelocatedStoreError = error{
 /// the bottle sha. Bump this whenever `relocateKegTree` / `patchTextFiles` /
 /// the `@@HOMEBREW_*@@` replacement set / codesign behaviour changes: the bump
 /// turns every prior `v<N-1>/` entry into a cache miss, forcing correct
-/// re-relocation. Prior `v<N-1>/` trees are orphaned on disk — there is no
-/// automatic sweeper for `store-relocated` yet — so a bump trades a one-time
-/// disk cost for correctness; bumps are rare (only on relocation-logic change).
-pub const RELOC_LOGIC_VERSION: u32 = 1;
+/// re-relocation. Prior `v<N-1>/` trees are reclaimed by `reapStaleVersions`
+/// on the next fresh `save`, so a bump trades one cold reinstall per cached
+/// bottle for correctness; bumps are rare (only on relocation-logic change).
+///
+/// v2: the Mach-O patcher learned to drop LC_RPATHs that relocation collapses
+/// onto one prefix; v1 entries were snapshotted before that and ship the
+/// duplicate that makes dyld abort at launch.
+pub const RELOC_LOGIC_VERSION: u32 = 2;
 
 /// Reject anything that is not exactly 64 lowercase hex characters.
 /// Run this before forming any path so traversal sequences (`..`, `/`) and
