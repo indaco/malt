@@ -36,6 +36,7 @@ install:
 [group('test')]
 regressions-static:
     @./scripts/regressions/tap-resolution-contract.sh
+    @./scripts/regressions/relocated-store-logic-version-pin.sh
     @./scripts/test/bench_release_resolution_test.sh
 
 # Run unit tests + cheap static regression guards.
