@@ -19,18 +19,25 @@ fn childStdoutMode(suppress: bool) std.process.SpawnOptions.StdIo {
     return if (suppress) .ignore else .inherit;
 }
 
+/// Coerce every argument to a string and collect them into an owned argv.
+/// A coercion/allocation failure aborts the whole call rather than silently
+/// dropping an element and shifting the command line — the DSL runs untrusted
+/// formula code, so a mutated argv is a worse failure than a loud abort.
+fn buildArgv(ctx: ExecCtx, args: []const Value) BuiltinError![]const []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    errdefer argv.deinit(ctx.allocator);
+    for (args) |arg| {
+        const s = try arg.asString(ctx.allocator);
+        try argv.append(ctx.allocator, s);
+    }
+    return argv.toOwnedSlice(ctx.allocator);
+}
+
 /// system — execute a command
 pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return Value{ .nil = {} };
 
-    // Build argv from args
-    var argv: std.ArrayList([]const u8) = .empty;
-    for (args) |arg| {
-        const s = arg.asString(ctx.allocator) catch continue;
-        argv.append(ctx.allocator, s) catch continue;
-    }
-    const argv_slice = argv.toOwnedSlice(ctx.allocator) catch return BuiltinError.OutOfMemory;
-
+    const argv_slice = try buildArgv(ctx, args);
     if (argv_slice.len == 0) return Value{ .nil = {} };
 
     // Same sandbox seam as pathname/inreplace/fileutils — gate the spawn
@@ -230,13 +237,7 @@ pub fn envSet(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
 pub fn safePopenRead(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return Value{ .string = "" };
 
-    var argv: std.ArrayList([]const u8) = .empty;
-    for (args) |arg| {
-        const s = arg.asString(ctx.allocator) catch continue;
-        argv.append(ctx.allocator, s) catch continue;
-    }
-    const argv_slice = argv.toOwnedSlice(ctx.allocator) catch return BuiltinError.OutOfMemory;
-
+    const argv_slice = try buildArgv(ctx, args);
     if (argv_slice.len == 0) return Value{ .string = "" };
 
     var child = std.process.spawn(ctx.io, .{
@@ -402,6 +403,92 @@ test "quiet_system suppresses the failure entry for may-fail probes" {
     _ = try quietSystem(ctx, null, &.{.{ .string = "/usr/bin/false" }});
 
     try std.testing.expect(!flog.hasErrors());
+}
+
+// Untrusted formula input: an argv element that fails to build must abort
+// the whole call, not silently vanish and shift the command line left. The
+// .int tag is the only one that allocates, so a failing allocator on that
+// coercion reproduces the drop the pre-fix `catch continue` loop hid.
+test "system fails loud when building an argv element runs out of memory" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const ctx = ExecCtx{
+        .allocator = failing.allocator(),
+        .io = undefined,
+        .environ = undefined,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+    };
+
+    try std.testing.expectError(
+        BuiltinError.OutOfMemory,
+        system(ctx, null, &.{.{ .int = 42 }}),
+    );
+}
+
+// Same shared builder, so the loud-abort contract must hold for the other
+// caller too: an argv element that can't be built propagates OOM instead of
+// the pre-fix silent "" that hid the drop.
+test "safe_popen_read fails loud when building an argv element runs out of memory" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const ctx = ExecCtx{
+        .allocator = failing.allocator(),
+        .io = undefined,
+        .environ = undefined,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+    };
+
+    try std.testing.expectError(
+        BuiltinError.OutOfMemory,
+        safePopenRead(ctx, null, &.{.{ .int = 42 }}),
+    );
+}
+
+// The extraction must preserve the full, in-order argv on the success
+// path: `/bin/test hello = hello` exits 0 only if all three arguments
+// reach the child unshifted — a dropped or reordered element flips it
+// non-zero and this assertion fails.
+test "system spawns with the full in-order argv for a multi-argument command" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lio: std.Io.Threaded = .init(arena.allocator(), .{});
+    defer lio.deinit();
+    const ctx = ExecCtx{
+        .allocator = arena.allocator(),
+        .io = lio.io(),
+        .environ = .empty,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+    };
+
+    const result = try system(ctx, null, &.{
+        .{ .string = "/bin/test" },
+        .{ .string = "hello" },
+        .{ .string = "=" },
+        .{ .string = "hello" },
+    });
+
+    try std.testing.expect(result == .bool and result.bool);
+}
+
+// The empty-args early returns stay at each call site after the build
+// extraction: `system` yields nil, `safe_popen_read` yields "".
+test "system and safe_popen_read keep their distinct empty-args returns" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lio: std.Io.Threaded = .init(arena.allocator(), .{});
+    defer lio.deinit();
+    const ctx = ExecCtx{
+        .allocator = arena.allocator(),
+        .io = lio.io(),
+        .environ = .empty,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+    };
+
+    try std.testing.expect((try system(ctx, null, &.{})) == .nil);
+    const popen = try safePopenRead(ctx, null, &.{});
+    try std.testing.expect(popen == .string and popen.string.len == 0);
 }
 
 test "system rejects an argv0 outside the sandbox roots before spawning" {
