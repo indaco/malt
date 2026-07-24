@@ -4,6 +4,113 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.22.0 - 2026-07-24
+
+### Highlights
+
+v0.22.0 shows you when a package slips backward, makes installs fail loud instead of going quiet, and widens the range of formulae that install cleanly.
+
+- **See when a package moves backward.** When an upstream version goes down, `mt outdated` and `mt upgrade` now flag it - and the `mt tui` Outdated tab marks it too - so a downgrade never slips past looking like a routine update.
+- **Operations that speak up instead of going quiet.** Purge, migrate, and link path failures now surface instead of reporting a silent success, oversized auth tokens are sized to fit rather than dropped, and orphan-enumeration errors are reported instead of truncated - fewer operations that look fine but weren't.
+- **More Homebrew formulae just install.** The native interpreter now interpolates and de-indents squiggly heredoc bodies, so formulae that build files from heredocs work as written.
+- **Remove a bundle and its packages in one go.** `mt bundle remove --purge` now uninstalls the members it drops, instead of leaving them installed behind the bundle.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🚀 Enhancements
+
+- **dsl:** de-indent squiggly heredoc bodies ([01b4c561](https://github.com/indaco/malt/commit/01b4c561)) ([#770](https://github.com/indaco/malt/pull/770))
+- **dsl:** interpolate heredoc bodies in the native interpreter ([d4d6baa2](https://github.com/indaco/malt/commit/d4d6baa2)) ([#769](https://github.com/indaco/malt/pull/769))
+- **tui:** mark backward moves in the Outdated tab ([9d8e0571](https://github.com/indaco/malt/commit/9d8e0571)) ([#757](https://github.com/indaco/malt/pull/757))
+- **upgrade:** announce when a package moves backward ([b78433a7](https://github.com/indaco/malt/commit/b78433a7)) ([#755](https://github.com/indaco/malt/pull/755))
+- **outdated:** mark rows whose upstream moved backward ([aa123a55](https://github.com/indaco/malt/commit/aa123a55)) ([#753](https://github.com/indaco/malt/pull/753))
+- **bundle:** uninstall members with bundle remove --purge ([617883ae](https://github.com/indaco/malt/commit/617883ae)) ([#730](https://github.com/indaco/malt/pull/730))
+
+### 🩹 Fixes
+
+- **dsl:** fail loud when building system/popen argv instead of dropping args ([ff59bfee](https://github.com/indaco/malt/commit/ff59bfee)) ([#768](https://github.com/indaco/malt/pull/768))
+- **core:** fail loud when a forge auth token overflows its buffer ([69993353](https://github.com/indaco/malt/commit/69993353)) ([#766](https://github.com/indaco/malt/pull/766))
+- **net:** size the auth header exactly so long tokens are never dropped ([fa90d94f](https://github.com/indaco/malt/commit/fa90d94f)) ([#765](https://github.com/indaco/malt/pull/765))
+- **cli:** surface purge lock-path failure instead of silent success ([0a61a4f4](https://github.com/indaco/malt/commit/0a61a4f4)) ([#764](https://github.com/indaco/malt/pull/764))
+- **cli:** surface migrate path failures instead of silent success ([3c3bbed3](https://github.com/indaco/malt/commit/3c3bbed3)) ([#763](https://github.com/indaco/malt/pull/763))
+- **cli:** surface link path and bind failures instead of silent success ([d9780e87](https://github.com/indaco/malt/commit/d9780e87)) ([#762](https://github.com/indaco/malt/pull/762))
+- **ui/color:** make lazy env/TTY caches race-free with atomic sentinels ([f47b7260](https://github.com/indaco/malt/commit/f47b7260)) ([#760](https://github.com/indaco/malt/pull/760))
+- **install:** drop rpaths that relocation collapses onto one prefix ([5c0128c2](https://github.com/indaco/malt/commit/5c0128c2)) ([#758](https://github.com/indaco/malt/pull/758))
+- **outdated:** stop rendering an ordering claim malt never checks ([8aa1f60f](https://github.com/indaco/malt/commit/8aa1f60f)) ([#749](https://github.com/indaco/malt/pull/749))
+- **upgrade:** print the revision-qualified installed version ([4e862ee2](https://github.com/indaco/malt/commit/4e862ee2)) ([#748](https://github.com/indaco/malt/pull/748))
+- **outdated:** stop qualifying tap cask versions with a stray revision ([249d8604](https://github.com/indaco/malt/commit/249d8604)) ([#747](https://github.com/indaco/malt/pull/747))
+- **dsl:** read a leading-zero formula literal as octal ([39f3441b](https://github.com/indaco/malt/commit/39f3441b)) ([#745](https://github.com/indaco/malt/pull/745))
+- **doctor:** stop misjudging which process holds the database lock ([8d8648dd](https://github.com/indaco/malt/commit/8d8648dd)) ([#740](https://github.com/indaco/malt/pull/740))
+- **db:** stop fresh databases rebuilding an empty kegs table ([09e95772](https://github.com/indaco/malt/commit/09e95772)) ([#739](https://github.com/indaco/malt/pull/739))
+- **deps:** make the declared resolve error set the real one ([0d732106](https://github.com/indaco/malt/commit/0d732106)) ([#736](https://github.com/indaco/malt/pull/736))
+- **cli:** drop no-op flags and complete the Homebrew plural aliases ([c9a52e18](https://github.com/indaco/malt/commit/c9a52e18)) ([#735](https://github.com/indaco/malt/pull/735))
+- **help:** give bundle and services real help topics ([60d36465](https://github.com/indaco/malt/commit/60d36465)) ([#733](https://github.com/indaco/malt/pull/733))
+- **completions:** stop advertising flags the CLI does not accept ([5f6825fa](https://github.com/indaco/malt/commit/5f6825fa)) ([#731](https://github.com/indaco/malt/pull/731))
+- **store:** surface orphan-enumeration errors instead of silently truncating ([a3d48523](https://github.com/indaco/malt/commit/a3d48523)) ([#718](https://github.com/indaco/malt/pull/718))
+
+### 💅 Refactors
+
+- **outdated:** follow the fetch for the dry-run snapshot and unify the currency compare ([6f897d97](https://github.com/indaco/malt/commit/6f897d97)) ([#771](https://github.com/indaco/malt/pull/771))
+- **auth:** use one GitHub Authorization scheme across net and core ([ae9d4387](https://github.com/indaco/malt/commit/ae9d4387)) ([#767](https://github.com/indaco/malt/pull/767))
+- **fs:** add prefix_path leaf for overflow-safe path joins ([c7cd98a9](https://github.com/indaco/malt/commit/c7cd98a9)) ([#761](https://github.com/indaco/malt/pull/761))
+- **install:** encode the tap-archive digest with the standard library ([8e7d9186](https://github.com/indaco/malt/commit/8e7d9186)) ([#743](https://github.com/indaco/malt/pull/743))
+- **core:** retire the hand-rolled constant-time SHA compare ([565d9ad3](https://github.com/indaco/malt/commit/565d9ad3)) ([#742](https://github.com/indaco/malt/pull/742))
+- **cli, ui:** remove three pieces of code that never did what they claimed ([45f28d66](https://github.com/indaco/malt/commit/45f28d66)) ([#738](https://github.com/indaco/malt/pull/738))
+- **doctor:** prepare the orphan classifier once per sweep ([f284a19b](https://github.com/indaco/malt/commit/f284a19b)) ([#729](https://github.com/indaco/malt/pull/729))
+- **outdated:** reuse the pooled client for tap .rb fetches ([7be2d400](https://github.com/indaco/malt/commit/7be2d400)) ([#728](https://github.com/indaco/malt/pull/728))
+- **migrate:** dedup outcome drain and extract parallel runner ([57be182d](https://github.com/indaco/malt/commit/57be182d)) ([#727](https://github.com/indaco/malt/pull/727))
+- **install:** iterate rb_parse lines with std.mem.splitScalar ([bf0aec42](https://github.com/indaco/malt/commit/bf0aec42)) ([#726](https://github.com/indaco/malt/pull/726))
+- **fs:** consolidate readFileAllAbsolute into one shared helper ([346a791c](https://github.com/indaco/malt/commit/346a791c)) ([#722](https://github.com/indaco/malt/pull/722))
+- **linker:** derive conflict-check dirs from the canonical list ([ecf3b2e6](https://github.com/indaco/malt/commit/ecf3b2e6)) ([#719](https://github.com/indaco/malt/pull/719))
+
+### 📖 Documentation
+
+- **README:** update the zig badge ([ea15e54a](https://github.com/indaco/malt/commit/ea15e54a)) ([#750](https://github.com/indaco/malt/pull/750))
+- **benchmark:** update results 2026-07-20 ([e57931c4](https://github.com/indaco/malt/commit/e57931c4)) ([#725](https://github.com/indaco/malt/pull/725))
+
+### ✅ Tests
+
+- **regression:** skip etag 304 check when rate-limit window resets ([8e79de84](https://github.com/indaco/malt/commit/8e79de84)) ([#772](https://github.com/indaco/malt/pull/772))
+- **outdated:** de-flake the recompute-warm regression against timestamp digits ([ab34db89](https://github.com/indaco/malt/commit/ab34db89)) ([#759](https://github.com/indaco/malt/pull/759))
+- give every test fixture a scratch path of its own ([423ad32c](https://github.com/indaco/malt/commit/423ad32c)) ([#746](https://github.com/indaco/malt/pull/746))
+- guard against shared fixture paths and leaked scratch ([74405277](https://github.com/indaco/malt/commit/74405277)) ([#744](https://github.com/indaco/malt/pull/744))
+- make every scratch fixture path unique per process and call ([6467a642](https://github.com/indaco/malt/commit/6467a642)) ([#741](https://github.com/indaco/malt/pull/741))
+- **regressions:** stop the outdated TTL guard reporting a false bug ([a28ed6ba](https://github.com/indaco/malt/commit/a28ed6ba)) ([#737](https://github.com/indaco/malt/pull/737))
+- fix give parse-cache tests process-unique temp dirs ([ce1fdd08](https://github.com/indaco/malt/commit/ce1fdd08)) ([#734](https://github.com/indaco/malt/pull/734))
+- fail the build when completions drift from the CLI ([4f116e52](https://github.com/indaco/malt/commit/4f116e52)) ([#732](https://github.com/indaco/malt/pull/732))
+- harden the regression suite against TTY, token, and timeout flakes ([dbbbb609](https://github.com/indaco/malt/commit/dbbbb609)) ([#720](https://github.com/indaco/malt/pull/720))
+
+### 🏡 Chores
+
+- **dev:** add bench-solo/bench-full recipes, just --list pointer, kcov shell hint ([5bc2ce64](https://github.com/indaco/malt/commit/5bc2ce64)) ([#773](https://github.com/indaco/malt/pull/773))
+- update codecov.json ([177b26b9](https://github.com/indaco/malt/commit/177b26b9))
+- **help:** document that malt announces backward moves ([5f5725a4](https://github.com/indaco/malt/commit/5f5725a4)) ([#756](https://github.com/indaco/malt/pull/756))
+- **help:** document that tap formulas upgrade on tap changes ([c29c166b](https://github.com/indaco/malt/commit/c29c166b)) ([#752](https://github.com/indaco/malt/pull/752))
+- **help:** describe outdated by what it compares, not by ordering ([ce0efade](https://github.com/indaco/malt/commit/ce0efade)) ([#751](https://github.com/indaco/malt/pull/751))
+
+### 🤖 CI
+
+- **bench:** stamp skipped peer tools in benchmark tables instead of blanking ([295b3196](https://github.com/indaco/malt/commit/295b3196)) ([#724](https://github.com/indaco/malt/pull/724))
+- **release:** auto-cut release/<minor> branch on minor releases ([9cd46f54](https://github.com/indaco/malt/commit/9cd46f54)) ([#723](https://github.com/indaco/malt/pull/723))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+
 ## v0.21.0 - 2026-07-18
 
 ### Highlights
