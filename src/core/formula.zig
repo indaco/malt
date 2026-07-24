@@ -533,6 +533,25 @@ fn compareDigitRun(a: []const u8, b: []const u8) std.math.Order {
     return std.mem.order(u8, x, y);
 }
 
+/// Three-state currency verdict, installed vs upstream.
+pub const Currency = enum { current, differs, unprovable };
+
+/// The single policy behind "is this installed keg current?": qualify the
+/// installed (version, revision) pair and byte-compare it to the already
+/// revision-qualified `upstream`. malt mirrors the tap as the source of truth,
+/// so it follows a move in BOTH directions; any inequality is `differs`, never
+/// a silent "upstream is newer so we are fine". `unprovable` means the installed
+/// version overflowed pkgVersion's buffer: a caller must treat it as not-current
+/// (never skip a real upgrade), never as `current`.
+///
+/// The one anchor for the compare that used to be copy-pasted across the
+/// outdated audit, the per-package fetch fallbacks, and the upgrade walks.
+pub fn isCurrent(installed_version: []const u8, installed_revision: i64, upstream: []const u8) Currency {
+    var buf: [256]u8 = undefined;
+    const installed = pkgVersion(&buf, installed_version, installed_revision) catch return .unprovable;
+    return if (std.mem.eql(u8, installed, upstream)) .current else .differs;
+}
+
 const testing = std.testing;
 
 test "relate reads an ordinary forward move as newer" {
@@ -553,6 +572,27 @@ test "relate lets the revision decide when the versions match" {
 test "relate reads a yanked release as older" {
     // A real pip-audit transition: the event this whole signal exists for.
     try testing.expectEqual(Rel.older, relate("2.4.15", "2.4.14"));
+}
+
+test "isCurrent qualifies the installed revision before comparing" {
+    // A revision-only bump must read as `differs`, not a bare match, or a
+    // 1.2.3 -> 1.2.3_1 upgrade would be silently skipped.
+    try testing.expectEqual(Currency.current, isCurrent("1.2.3", 0, "1.2.3"));
+    try testing.expectEqual(Currency.current, isCurrent("1.2.3", 1, "1.2.3_1"));
+    try testing.expectEqual(Currency.differs, isCurrent("1.2.3", 0, "1.2.3_1"));
+}
+
+test "isCurrent follows the tap in both directions" {
+    // A yank (upstream moves backward) is still `differs`: malt mirrors the tap,
+    // so it never reads "we are newer" as up to date.
+    try testing.expectEqual(Currency.differs, isCurrent("2.4.15", 0, "2.4.14"));
+}
+
+test "isCurrent declines to prove currency on an overflowing version" {
+    // pkgVersion overflows past 256 bytes; the safe answer is `unprovable`, which
+    // callers route to a re-check, never to `current`.
+    const long = "1." ** 200;
+    try testing.expectEqual(Currency.unprovable, isCurrent(long, 3, "whatever"));
 }
 
 test "relate catches a mistyped bump" {

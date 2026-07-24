@@ -190,19 +190,20 @@ fn isCorePathRow(row: KegRow) bool {
     return if (row.tap) |t| install_args_mod.isCoreTap(t) else true;
 }
 
-// Outdated policy — the single normative statement; every other compare site
-// points here rather than restating it. malt treats the tap as the source of
-// truth. A keg is "outdated" whenever its revision-qualified installed version
-// is not byte-equal to the current upstream version — NOT when it is strictly
-// older (casks have no revision, so theirs is bare). This never
-// misses an upgrade (any difference surfaces); the trade-off is that the tap is
+// Outdated policy — the normative statement. malt treats the tap as the source
+// of truth. A keg is "outdated" whenever its revision-qualified installed
+// version is not byte-equal to the current upstream version — NOT when it is
+// strictly older (casks have no revision, so theirs is bare). This never misses
+// an upgrade (any difference surfaces); the trade-off is that the tap is
 // followed in both directions, so if upstream moves backward (a yanked release)
 // `outdated` lists it and `upgrade` follows the tap down. That downgrade is by
 // design and no longer silent: `outdated` marks the row and `upgrade` warns
-// before proceeding - reported, never blocked. Which way a move points is the
-// comparator's call, not restated here. Matching Homebrew's `PkgVersion`
-// ordering instead would risk a
-// divergent comparator silently skipping a real upgrade — a worse failure mode.
+// before proceeding - reported, never blocked. Matching Homebrew's `PkgVersion`
+// ordering instead would risk a divergent comparator silently skipping a real
+// upgrade — a worse failure mode.
+//
+// The compare itself lives in one place, `core/formula.isCurrent`; every site
+// here and in `cli/upgrade` calls it rather than restating the byte-compare.
 
 /// What the audit could prove about one row. `proven_current` is the only
 /// answer that lets a caller skip work, so it is mintable on exactly one
@@ -249,13 +250,14 @@ fn mapDisposition(
     const entry = map.get(row.name) orelse return .unknown;
 
     var latest_buf: [256]u8 = undefined;
-    var installed_buf: [256]u8 = undefined;
-    // pkgVersion only fails on buffer overflow. Unproven, so `unknown`:
+    // pkgVersion only fails on buffer overflow. Unproven maps to `unknown`:
     // reading it as current would skip a real upgrade.
     const latest = formula_mod.pkgVersion(&latest_buf, entry.stable, entry.revision) catch return .unknown;
-    const installed = formula_mod.pkgVersion(&installed_buf, row.version, row.revision) catch return .unknown;
-    if (std.mem.eql(u8, installed, latest)) return .proven_current;
-    return .{ .needs_upgrade = try allocator.dupe(u8, latest) };
+    return switch (formula_mod.isCurrent(row.version, row.revision, latest)) {
+        .unprovable => .unknown,
+        .current => .proven_current,
+        .differs => .{ .needs_upgrade = try allocator.dupe(u8, latest) },
+    };
 }
 
 /// Warn that the bulk version map matched none of the installed core
@@ -1013,13 +1015,11 @@ fn fetchLatest(
     row: KegRow,
 ) std.mem.Allocator.Error!?[]u8 {
     const v = upstreamLatest(allocator, head_cache, db, api, io, environ, kind, row) orelse return null;
-    // Compare the revision-qualified installed string against the (now also
-    // revision-qualified) upstream so a revision-only bump isn't read as bare.
-    // `!eql` is deliberate: malt mirrors the tap as source of truth — see the
-    // outdated-policy note above `Disposition`.
-    var installed_buf: [256]u8 = undefined;
-    const installed = formula_mod.pkgVersion(&installed_buf, row.version, row.revision) catch row.version;
-    if (std.mem.eql(u8, installed, v)) {
+    // The shared currency policy qualifies the installed side and compares it to
+    // the (already revision-qualified) upstream. Anything but a proven match is
+    // outdated: malt mirrors the tap as source of truth — see the outdated-policy
+    // note above `Disposition`.
+    if (formula_mod.isCurrent(row.version, row.revision, v) == .current) {
         allocator.free(v);
         return null;
     }
@@ -1117,11 +1117,9 @@ fn runOne(out_alloc: std.mem.Allocator, wctx: *WorkerCtx) void {
     local_api.base_url = wctx.api_base;
     local_api.offline = wctx.offline;
     const latest = upstreamLatest(arena_alloc, wctx.head_cache, wctx.db, &local_api, wctx.io, wctx.environ, wctx.kind, wctx.row) orelse return;
-    // Qualify the installed side so a revision-only bump isn't read as bare
-    // (same fix as the serial `fetchLatest` path).
-    var installed_buf: [256]u8 = undefined;
-    const installed = formula_mod.pkgVersion(&installed_buf, wctx.row.version, wctx.row.revision) catch wctx.row.version;
-    if (std.mem.eql(u8, installed, latest)) return;
+    // Same shared currency policy as the serial `fetchLatest` path: qualify the
+    // installed side so a revision-only bump isn't read as bare.
+    if (formula_mod.isCurrent(wctx.row.version, wctx.row.revision, latest) == .current) return;
 
     // Move into the caller's allocator so the result outlives `arena.deinit()`.
     wctx.out = out_alloc.dupe(u8, latest) catch |e| blk: {

@@ -601,10 +601,10 @@ fn upgradeFormula(
     };
     defer formula.deinit();
 
-    // Compare versions. On the bulk path the "already
-    // current" line is suppressed — the footer tallies it instead — but the
-    // NDJSON event is always emitted so the machine stream is unchanged.
-    if (std.mem.eql(u8, old_pkg_version, formula.pkg_version)) {
+    // Compare versions through the shared currency policy. On the bulk path the
+    // "already current" line is suppressed — the footer tallies it instead — but
+    // the NDJSON event is always emitted so the machine stream is unchanged.
+    if (formula_mod.isCurrent(old.version, old.revision, formula.pkg_version) == .current) {
         if (!bulk) output.skip("{s} is already at latest version {s}", .{ name, formula.pkg_version });
         output.emitNdjsonEvent(.up_to_date, name, null);
         return .up_to_date;
@@ -1385,7 +1385,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // policy (see `src/cli/outdated/refresh.zig`). Should a cask ever gain a
     // revision, this compare and the prints below go wrong together.
     const installed_version = installed.version();
-    if (std.mem.eql(u8, installed_version, parsed_cask.version)) {
+    if (formula_mod.isCurrent(installed_version, 0, parsed_cask.version) == .current) {
         if (!bulk) output.skip("{s} is already at latest version {s}", .{ token, parsed_cask.version });
         output.emitNdjsonEvent(.up_to_date, token, null);
         return .up_to_date;
