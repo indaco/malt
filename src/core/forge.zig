@@ -310,6 +310,12 @@ pub fn commitUrl(
     }
 }
 
+/// A token that does not fit its caller-owned buffer is a loud error, not
+/// a silent drop: `null` means the token is unset/empty (anonymous is
+/// intended), so overflow needs its own signal or an oversized token would
+/// be indistinguishable from "no token" and go out unauthenticated.
+pub const AuthError = error{AuthTokenTooLong};
+
 /// Auth header for the forge's **API** request (the `commits/HEAD`
 /// call), built into `buf` from the forge's token env var, or null when
 /// unset/empty. The token contract is one env var per forge, keyed by
@@ -320,12 +326,12 @@ pub fn commitUrl(
 ///   - gitea: `MALT_GITEA_TOKEN`    → `Authorization: token <t>`
 /// The reach is deliberately narrow — only the tap-resolution callers
 /// pass this header — so the token never leaks onto unrelated requests.
-pub fn authHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std.http.Header {
+pub fn authHeader(forge: Forge, environ: std.process.Environ, buf: []u8) AuthError!?std.http.Header {
     switch (forge) {
         .github => {
             const raw = std.process.Environ.getPosix(environ, "MALT_GITHUB_TOKEN") orelse return null;
             if (raw.len == 0) return null;
-            const value = std.fmt.bufPrint(buf, "Bearer {s}", .{raw}) catch return null;
+            const value = std.fmt.bufPrint(buf, "Bearer {s}", .{raw}) catch return error.AuthTokenTooLong;
             return .{ .name = "Authorization", .value = value };
         },
         .gitlab => return gitlabPrivateToken(environ, buf),
@@ -337,11 +343,11 @@ pub fn authHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std.ht
 /// GitLab's `PRIVATE-TOKEN` header from `MALT_GITLAB_TOKEN`, or null when
 /// unset/empty. Shared by the API and the instance-host raw fetch — both
 /// authenticate the same way, against the same host.
-fn gitlabPrivateToken(environ: std.process.Environ, buf: []u8) ?std.http.Header {
+fn gitlabPrivateToken(environ: std.process.Environ, buf: []u8) AuthError!?std.http.Header {
     const raw = std.process.Environ.getPosix(environ, "MALT_GITLAB_TOKEN") orelse return null;
     if (raw.len == 0) return null;
     // Bare PAT — no scheme prefix, unlike github's Bearer.
-    const value = std.fmt.bufPrint(buf, "{s}", .{raw}) catch return null;
+    const value = std.fmt.bufPrint(buf, "{s}", .{raw}) catch return error.AuthTokenTooLong;
     return .{ .name = "PRIVATE-TOKEN", .value = value };
 }
 
@@ -351,10 +357,10 @@ fn gitlabPrivateToken(environ: std.process.Environ, buf: []u8) ?std.http.Header 
 /// the codeberg.org instance. Shared by the API and the instance-host raw
 /// fetch — both authenticate the same way, against the same host. The
 /// `token` scheme is Gitea's, not github's `Bearer`.
-fn giteaToken(environ: std.process.Environ, buf: []u8) ?std.http.Header {
+fn giteaToken(environ: std.process.Environ, buf: []u8) AuthError!?std.http.Header {
     const raw = std.process.Environ.getPosix(environ, "MALT_GITEA_TOKEN") orelse return null;
     if (raw.len == 0) return null;
-    const value = std.fmt.bufPrint(buf, "token {s}", .{raw}) catch return null;
+    const value = std.fmt.bufPrint(buf, "token {s}", .{raw}) catch return error.AuthTokenTooLong;
     return .{ .name = "Authorization", .value = value };
 }
 
@@ -364,12 +370,12 @@ fn giteaToken(environ: std.process.Environ, buf: []u8) ?std.http.Header {
 /// attaching it there would only widen the token's reach, so the github
 /// raw fetch stays unauthenticated, exactly as before. Forges whose raw
 /// path lives on the authenticated instance host attach their token here.
-pub fn rawAuthHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std.http.Header {
+pub fn rawAuthHeader(forge: Forge, environ: std.process.Environ, buf: []u8) AuthError!?std.http.Header {
     return switch (forge) {
         .github => null,
-        .gitlab => gitlabPrivateToken(environ, buf),
+        .gitlab => try gitlabPrivateToken(environ, buf),
         // Gitea/Gogs serve `/raw` from the authenticated instance host, like gitlab.
-        .gitea, .gogs => giteaToken(environ, buf),
+        .gitea, .gogs => try giteaToken(environ, buf),
     };
 }
 
@@ -567,13 +573,13 @@ fn envWith(comptime entries: anytype) std.process.Environ {
 
 test "authHeader github: null when MALT_GITHUB_TOKEN unset" {
     var buf: [256]u8 = undefined;
-    try std.testing.expect(authHeader(.github, .empty, &buf) == null);
+    try std.testing.expect(try authHeader(.github, .empty, &buf) == null);
 }
 
 test "authHeader github: Bearer header when MALT_GITHUB_TOKEN set" {
     const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=ghp_testtoken"};
     var buf: [256]u8 = undefined;
-    const h = authHeader(.github, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    const h = try authHeader(.github, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("Authorization", h.name);
     try std.testing.expectEqualStrings("Bearer ghp_testtoken", h.value);
 }
@@ -581,7 +587,7 @@ test "authHeader github: Bearer header when MALT_GITHUB_TOKEN set" {
 test "authHeader github: empty-string token behaves as unset" {
     const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN="};
     var buf: [256]u8 = undefined;
-    try std.testing.expect(authHeader(.github, envWith(entries), &buf) == null);
+    try std.testing.expect(try authHeader(.github, envWith(entries), &buf) == null);
 }
 
 test "rawAuthHeader github: null even when MALT_GITHUB_TOKEN is set" {
@@ -589,8 +595,8 @@ test "rawAuthHeader github: null even when MALT_GITHUB_TOKEN is set" {
     // fetch stays unauthenticated so the token's reach never widens.
     const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=ghp_testtoken"};
     var buf: [256]u8 = undefined;
-    try std.testing.expect(rawAuthHeader(.github, envWith(entries), &buf) == null);
-    try std.testing.expect(rawAuthHeader(.github, .empty, &buf) == null);
+    try std.testing.expect(try rawAuthHeader(.github, envWith(entries), &buf) == null);
+    try std.testing.expect(try rawAuthHeader(.github, .empty, &buf) == null);
 }
 
 // ── authHeader (gitlab) ────────────────────────────────────────────
@@ -600,13 +606,13 @@ test "rawAuthHeader github: null even when MALT_GITHUB_TOKEN is set" {
 
 test "authHeader gitlab: null when MALT_GITLAB_TOKEN unset" {
     var buf: [256]u8 = undefined;
-    try std.testing.expect(authHeader(.gitlab, .empty, &buf) == null);
+    try std.testing.expect(try authHeader(.gitlab, .empty, &buf) == null);
 }
 
 test "authHeader gitlab: PRIVATE-TOKEN header when MALT_GITLAB_TOKEN set" {
     const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=glpat-xyz"};
     var buf: [256]u8 = undefined;
-    const h = authHeader(.gitlab, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    const h = try authHeader(.gitlab, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("PRIVATE-TOKEN", h.name);
     try std.testing.expectEqualStrings("glpat-xyz", h.value);
 }
@@ -614,7 +620,7 @@ test "authHeader gitlab: PRIVATE-TOKEN header when MALT_GITLAB_TOKEN set" {
 test "authHeader gitlab: empty-string token behaves as unset" {
     const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN="};
     var buf: [256]u8 = undefined;
-    try std.testing.expect(authHeader(.gitlab, envWith(entries), &buf) == null);
+    try std.testing.expect(try authHeader(.gitlab, envWith(entries), &buf) == null);
 }
 
 test "rawAuthHeader gitlab: PRIVATE-TOKEN attached — raw lives on the instance host" {
@@ -623,14 +629,76 @@ test "rawAuthHeader gitlab: PRIVATE-TOKEN attached — raw lives on the instance
     // the token. Same var, same header as the API call.
     const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=glpat-xyz"};
     var buf: [256]u8 = undefined;
-    const h = rawAuthHeader(.gitlab, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    const h = try rawAuthHeader(.gitlab, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("PRIVATE-TOKEN", h.name);
     try std.testing.expectEqualStrings("glpat-xyz", h.value);
 }
 
 test "rawAuthHeader gitlab: null when MALT_GITLAB_TOKEN unset" {
     var buf: [256]u8 = undefined;
-    try std.testing.expect(rawAuthHeader(.gitlab, .empty, &buf) == null);
+    try std.testing.expect(try rawAuthHeader(.gitlab, .empty, &buf) == null);
+}
+
+// ── auth header overflow (all forges) ──────────────────────────────
+// The regression: a token too long for its caller-owned buffer must be a
+// loud `error.AuthTokenTooLong`, never a silent `null` - `null` would be
+// indistinguishable from "unset" and send the request out unauthenticated.
+// `null` stays reserved for the unset/empty path (covered by the tests above).
+
+test "authHeader github: overflow is a loud error, not a silent anonymous drop" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ "x" ** 300};
+    var small_buf: [64]u8 = undefined;
+    try std.testing.expectError(error.AuthTokenTooLong, authHeader(.github, envWith(entries), &small_buf));
+}
+
+test "authHeader gitlab: overflow is a loud error" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ "x" ** 300};
+    var small_buf: [64]u8 = undefined;
+    try std.testing.expectError(error.AuthTokenTooLong, authHeader(.gitlab, envWith(entries), &small_buf));
+}
+
+test "authHeader gitea: overflow is a loud error" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITEA_TOKEN=" ++ "x" ** 300};
+    var small_buf: [64]u8 = undefined;
+    try std.testing.expectError(error.AuthTokenTooLong, authHeader(.gitea, envWith(entries), &small_buf));
+}
+
+test "rawAuthHeader gitlab: overflow is a loud error via the raw path too" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ "x" ** 300};
+    var small_buf: [64]u8 = undefined;
+    try std.testing.expectError(error.AuthTokenTooLong, rawAuthHeader(.gitlab, envWith(entries), &small_buf));
+}
+
+test "authHeader github: a realistic long token fits the widened buffer" {
+    // A 600-byte token (GitHub-App / fine-grained PAT scale) must
+    // authenticate in full, not error, against a buffer sized like tap.zig's.
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ "t" ** 600};
+    var buf: [8 * 1024]u8 = undefined;
+    const h = try authHeader(.github, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("Authorization", h.name);
+    try std.testing.expectEqualStrings("Bearer " ++ "t" ** 600, h.value);
+}
+
+test "authHeader gitlab: a realistic long bare PAT fits the widened buffer" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ "t" ** 600};
+    var buf: [8 * 1024]u8 = undefined;
+    const h = try authHeader(.gitlab, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("PRIVATE-TOKEN", h.name);
+    try std.testing.expectEqualStrings("t" ** 600, h.value);
+}
+
+test "authHeader github: a value that exactly fills the buffer authenticates" {
+    // Boundary: value length == buf.len is a fit, not an overflow.
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ "t" ** 57};
+    var buf: [64]u8 = undefined; // "Bearer " (7) + 57 == 64
+    const h = try authHeader(.github, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("Bearer " ++ "t" ** 57, h.value);
+}
+
+test "authHeader github: one byte past the buffer is a loud error" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=" ++ "t" ** 58};
+    var buf: [64]u8 = undefined; // "Bearer " (7) + 58 == 65 > 64
+    try std.testing.expectError(error.AuthTokenTooLong, authHeader(.github, envWith(entries), &buf));
 }
 
 // ── buildBaseUrls (github) ─────────────────────────────────────────
@@ -1022,13 +1090,13 @@ test "rawFileUrl gitea: formula_root kind builds the /raw root tail" {
 
 test "authHeader gitea: null when MALT_GITEA_TOKEN unset" {
     var buf: [256]u8 = undefined;
-    try std.testing.expect(authHeader(.gitea, .empty, &buf) == null);
+    try std.testing.expect(try authHeader(.gitea, .empty, &buf) == null);
 }
 
 test "authHeader gitea: token header when MALT_GITEA_TOKEN set" {
     const entries = [_:null]?[*:0]const u8{"MALT_GITEA_TOKEN=gitea_tok"};
     var buf: [256]u8 = undefined;
-    const h = authHeader(.gitea, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    const h = try authHeader(.gitea, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("Authorization", h.name);
     try std.testing.expectEqualStrings("token gitea_tok", h.value);
 }
@@ -1036,7 +1104,7 @@ test "authHeader gitea: token header when MALT_GITEA_TOKEN set" {
 test "authHeader gitea: empty-string token behaves as unset" {
     const entries = [_:null]?[*:0]const u8{"MALT_GITEA_TOKEN="};
     var buf: [256]u8 = undefined;
-    try std.testing.expect(authHeader(.gitea, envWith(entries), &buf) == null);
+    try std.testing.expect(try authHeader(.gitea, envWith(entries), &buf) == null);
 }
 
 test "rawAuthHeader gitea: token attached — raw lives on the instance host" {
@@ -1044,14 +1112,14 @@ test "rawAuthHeader gitea: token attached — raw lives on the instance host" {
     // unlike github's public CDN), so a private tap's raw fetch carries it.
     const entries = [_:null]?[*:0]const u8{"MALT_GITEA_TOKEN=gitea_tok"};
     var buf: [256]u8 = undefined;
-    const h = rawAuthHeader(.gitea, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    const h = try rawAuthHeader(.gitea, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("Authorization", h.name);
     try std.testing.expectEqualStrings("token gitea_tok", h.value);
 }
 
 test "rawAuthHeader gitea: null when MALT_GITEA_TOKEN unset" {
     var buf: [256]u8 = undefined;
-    try std.testing.expect(rawAuthHeader(.gitea, .empty, &buf) == null);
+    try std.testing.expect(try rawAuthHeader(.gitea, .empty, &buf) == null);
 }
 
 // ── commitUrl ──────────────────────────────────────────────────────
@@ -1208,20 +1276,20 @@ test "repoBrowseUrl gogs: the instance host drives the browse URL" {
 test "authHeader gogs: token header from MALT_GITEA_TOKEN (shared family token)" {
     const entries = [_:null]?[*:0]const u8{"MALT_GITEA_TOKEN=gitea_tok"};
     var buf: [256]u8 = undefined;
-    const h = authHeader(.gogs, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    const h = try authHeader(.gogs, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("Authorization", h.name);
     try std.testing.expectEqualStrings("token gitea_tok", h.value);
 }
 
 test "authHeader gogs: null when MALT_GITEA_TOKEN unset" {
     var buf: [256]u8 = undefined;
-    try std.testing.expect(authHeader(.gogs, .empty, &buf) == null);
+    try std.testing.expect(try authHeader(.gogs, .empty, &buf) == null);
 }
 
 test "rawAuthHeader gogs: token attached — raw lives on the instance host" {
     const entries = [_:null]?[*:0]const u8{"MALT_GITEA_TOKEN=gitea_tok"};
     var buf: [256]u8 = undefined;
-    const h = rawAuthHeader(.gogs, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    const h = try rawAuthHeader(.gogs, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("token gitea_tok", h.value);
 }
 

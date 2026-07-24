@@ -29,6 +29,10 @@ pub const TapError = error{
     MalformedJson,
     /// Network layer failure before a status could be read.
     NetworkError,
+    /// The forge token overflowed the auth-header buffer. A loud config
+    /// error, kept distinct from NetworkError so the user is told to check
+    /// the token, not their connection.
+    AuthTokenTooLong,
     OutOfMemory,
 };
 
@@ -65,6 +69,7 @@ fn githubResolveError(err: TapError) []const u8 {
         error.RateLimited => "GitHub API rate limit reached. Set MALT_GITHUB_TOKEN to an authorized GitHub token to lift the 60/hr anonymous cap.",
         error.NotFound => "GitHub returned 404 for the tap repo. If the repo lives at github.com/<user>/<exact-name> instead of github.com/<user>/homebrew-<repo>, rerun with --repo <user>/<exact-name>.",
         error.NetworkError => "Network failure while reaching api.github.com — check connectivity and retry.",
+        error.AuthTokenTooLong => "MALT_GITHUB_TOKEN is too long to fit the auth request buffer — verify the token value.",
         error.MalformedJson => "Unexpected response shape from GitHub — rerun with --debug and attach the log when filing an issue.",
         error.InvalidSha => "GitHub returned a commit SHA that failed validation (not 40-char lowercase hex).",
         error.ResolveFailed => "GitHub returned an unexpected status while resolving HEAD — retry, or set MALT_GITHUB_TOKEN if this persists.",
@@ -90,6 +95,7 @@ fn forgeResolveError(
         // No homebrew-/--repo hint: that synthesis is github-only.
         error.NotFound => std.fmt.bufPrint(buf, "{s} returned 404 for the tap repo at {s}. Verify the owner/repo, or set {s} if the repo is private.", .{ name, host, token_var }) catch unreachable,
         error.NetworkError => std.fmt.bufPrint(buf, "Network failure while reaching {s} — check connectivity and retry.", .{host}) catch unreachable,
+        error.AuthTokenTooLong => std.fmt.bufPrint(buf, "The {s} token in {s} is too long to fit the auth request buffer.", .{ name, token_var }) catch unreachable,
         error.MalformedJson => std.fmt.bufPrint(buf, "Unexpected response shape from {s} ({s}) — rerun with --debug and attach the log when filing an issue.", .{ name, host }) catch unreachable,
         error.InvalidSha => std.fmt.bufPrint(buf, "{s} ({s}) returned a commit SHA that failed validation (not 40-char lowercase hex).", .{ name, host }) catch unreachable,
         error.ResolveFailed => std.fmt.bufPrint(buf, "{s} ({s}) returned an unexpected status while resolving HEAD — retry, or set {s} if this persists.", .{ name, host, token_var }) catch unreachable,
@@ -152,6 +158,23 @@ test "describeResolveError gitea: a self-hosted Forgejo host is named" {
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.MalformedJson, .gitea, "git.example.org");
     try std.testing.expect(std.mem.indexOf(u8, msg, "git.example.org") != null);
+}
+
+test "describeResolveError github: AuthTokenTooLong names the token, not the network" {
+    var buf: [512]u8 = undefined;
+    const msg = describeResolveError(&buf, error.AuthTokenTooLong, .github, "github.com");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "too long") != null);
+    // Must not be misreported as a connectivity failure.
+    try std.testing.expect(std.mem.indexOf(u8, msg, "Network failure") == null);
+}
+
+test "describeResolveError gitlab: AuthTokenTooLong names the forge's own token var" {
+    var buf: [512]u8 = undefined;
+    const msg = describeResolveError(&buf, error.AuthTokenTooLong, .gitlab, "gitlab.com");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITLAB_TOKEN") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "too long") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") == null);
 }
 
 test "describeResolveError gogs: names the instance host and the shared MALT_GITEA_TOKEN" {
@@ -1378,8 +1401,11 @@ pub fn resolveHeadCommit(
     // request; falling through to `extra=&.{}` lets net/client's
     // HOMEBREW_GITHUB_API_TOKEN auto-inject still apply for github hosts.
     // 304s don't spend the rate-limit quota either way.
-    var auth_buf: [256]u8 = undefined;
-    var resp = if (forge.authHeader(forge_kind, environ, &auth_buf)) |header| blk: {
+    // Generous fixed cap so realistic long tokens (fine-grained / GitHub-App
+    // PATs) fit; overflow is a loud, token-specific error, never a silent
+    // anonymous request.
+    var auth_buf: [8 * 1024]u8 = undefined;
+    var resp = if (forge.authHeader(forge_kind, environ, &auth_buf) catch return TapError.AuthTokenTooLong) |header| blk: {
         const headers = [_]std.http.Header{header};
         break :blk http.getConditional(api_head_url, cached_etag, &headers) catch return TapError.NetworkError;
     } else http.getConditional(api_head_url, cached_etag, &.{}) catch return TapError.NetworkError;
@@ -1400,8 +1426,10 @@ pub fn getRawFile(
     forge_kind: forge.Forge,
     rb_url: []const u8,
 ) !client_mod.Response {
-    var auth_buf: [256]u8 = undefined;
-    if (forge.rawAuthHeader(forge_kind, environ, &auth_buf)) |header| {
+    // Generous fixed cap so realistic long tokens fit; overflow propagates
+    // as a loud error rather than a silent anonymous fetch.
+    var auth_buf: [8 * 1024]u8 = undefined;
+    if (try forge.rawAuthHeader(forge_kind, environ, &auth_buf)) |header| {
         const headers = [_]std.http.Header{header};
         return http.getWithHeaders(rb_url, &headers, null);
     }

@@ -45,6 +45,71 @@ fn envWithToken() std.process.Environ {
     return .{ .block = .{ .slice = entries[0..1 :null] } };
 }
 
+// Records the value of the PRIVATE-TOKEN header the request carried, so a
+// test can prove a long token arrives intact rather than truncated/dropped.
+const TokenFixture = struct {
+    io: std.Io,
+    listener: *net.Server,
+    token_buf: [1024]u8 = undefined,
+    token_len: usize = 0,
+};
+
+fn serveCapturingToken(fx: *TokenFixture) void {
+    const stream = fx.listener.accept(fx.io) catch return;
+    defer stream.close(fx.io);
+    var rbuf: [16 * 1024]u8 = undefined;
+    var wbuf: [16 * 1024]u8 = undefined;
+    var reader = stream.reader(fx.io, &rbuf);
+    var writer = stream.writer(fx.io, &wbuf);
+    var srv = std.http.Server.init(&reader.interface, &writer.interface);
+    var req = srv.receiveHead() catch return;
+    var it = req.iterateHeaders();
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "private-token")) {
+            const n = @min(h.value.len, fx.token_buf.len);
+            @memcpy(fx.token_buf[0..n], h.value[0..n]);
+            fx.token_len = h.value.len;
+        }
+    }
+    req.respond(body_rb, .{}) catch return;
+}
+
+fn envWithLongGitlabToken() std.process.Environ {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ "t" ** 600};
+    return .{ .block = .{ .slice = entries[0..1 :null] } };
+}
+
+test "getRawFile: gitlab raw fetch carries a 600-byte token in full through the widened buffer" {
+    // End-to-end guard for tap.zig's widened auth buffer: a realistic long
+    // token must reach the instance host intact. On the pre-fix 256-byte
+    // buffer this token overflowed to `null` and no header was sent.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const port = listener.socket.address.getPort();
+
+    var fx = TokenFixture{ .io = io, .listener = &listener };
+    const server_thread = try std.Thread.spawn(.{}, serveCapturingToken, .{&fx});
+    defer server_thread.join();
+
+    var url_buf: [80]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/-/raw/glow.rb", .{port});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, envWithLongGitlabToken(), std.testing.allocator);
+    defer http.deinit();
+
+    var resp = try tap.getRawFile(&http, envWithLongGitlabToken(), .gitlab, url);
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expectEqual(@as(usize, 600), fx.token_len);
+    try std.testing.expectEqualStrings("t" ** 600, fx.token_buf[0..fx.token_len]);
+}
+
 test "getRawFile: github raw fetch carries no auth header even with MALT_GITHUB_TOKEN set" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
