@@ -67,6 +67,19 @@ probe_remaining() {
   awk 'BEGIN{IGNORECASE=1} /^x-ratelimit-remaining:/{gsub(/[\r\n ]/, "", $2); print $2; exit}' <<<"$hdr"
 }
 
+# A rising X-RateLimit-Remaining between two probes is physically impossible
+# from our own calls — it means GitHub's hourly window reset (bucket refilled)
+# mid-run. Any token-delta measured across that boundary is noise, so skip-loud
+# and let the caller re-run rather than emit a bogus negative "cost".
+skip_if_reset() {
+  local before="$1" after="$2" where="$3"
+  if ((after > before)); then
+    printf 'SKIP: rate-limit window reset during %s (%d -> %d) — re-run.\n' \
+      "$where" "$before" "$after" >&2
+    exit 0
+  fi
+}
+
 # ---- Probe A: baseline before any mt call ----
 a=$(probe_remaining)
 
@@ -75,6 +88,7 @@ MALT_PREFIX="$PREFIX" "$MALT_BIN" tap "$TAP" >/dev/null
 
 # ---- Probe B: shows post-cold state (b = a - mt_cold_cost - 1) ----
 b=$(probe_remaining)
+skip_if_reset "$a" "$b" "cold resolve"
 cold_cost=$((a - b - 1))
 if ((cold_cost < 1)); then
   printf 'FAIL: cold tap resolve did not spend a token (a=%d b=%d cold=%d).\n' \
@@ -88,6 +102,7 @@ MALT_PREFIX="$PREFIX" "$MALT_BIN" tap "$TAP" >/dev/null
 
 # ---- Probe C: shows post-hot state (c = b - mt_hot_cost - 1) ----
 c=$(probe_remaining)
+skip_if_reset "$b" "$c" "hot resolve"
 hot_cost=$((b - c - 1))
 if ((hot_cost != 0)); then
   printf 'FAIL: hot tap re-resolve spent %d token(s) (expected 0 — 304 is free).\n' \
@@ -150,6 +165,7 @@ d=$(probe_remaining)
 # on a partial prefix) — we only care about the rate-limit delta.
 MALT_PREFIX="$PREFIX" "$MALT_BIN" outdated --json >/dev/null 2>&1 || true
 e=$(probe_remaining)
+skip_if_reset "$d" "$e" "dedup walk"
 dedup_cost=$((d - e - 1))
 
 # With dedup: 1 HEAD (200, stale etag) = 1 token. Without: 10.
