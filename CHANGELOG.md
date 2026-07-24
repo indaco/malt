@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.22.1 - 2026-07-25
+
+### 🩹 Fixes
+
+- **store:** re-relocate kegs cached before the rpath dedup landed ([743127d7](https://github.com/indaco/malt/commit/743127d7)) ([#775](https://github.com/indaco/malt/pull/775))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.22.0 - 2026-07-24
 
 ### Highlights
