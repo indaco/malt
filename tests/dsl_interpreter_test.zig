@@ -221,6 +221,36 @@ test "interpreter: file write creates file with content" {
     try testing.expectEqualStrings("key=value", buf[0..n]);
 }
 
+test "interpreter: heredoc body interpolates via evalStringLiteral" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
+
+    // A `#{x}` inside a heredoc body must resolve the bound local, matching
+    // the double-quoted path. Indent is preserved (de-indent is a follow-up).
+    const src =
+        "x = \"world\"\n" ++
+        "greeting = <<~EOS\n  hello #{x}\nEOS\n" ++
+        "(etc/\"greet.conf\").write greeting\n";
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+
+    const expected_path = try std.fs.path.join(
+        testing.allocator,
+        &.{ prefix, "etc", "greet.conf" },
+    );
+    defer testing.allocator.free(expected_path);
+
+    const file = try test_io.openFileAbsolute(std.Options.debug_io, expected_path, .{});
+    defer file.close(std.Options.debug_io);
+    var buf: [64]u8 = undefined;
+    const n = try file.readPositionalAll(std.Options.debug_io, &buf, 0);
+    try testing.expectEqualStrings("  hello world\n", buf[0..n]);
+}
+
 test "interpreter: system true succeeds" {
     var arena = testArena();
     defer arena.deinit();

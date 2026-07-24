@@ -31,7 +31,6 @@ pub const Node = struct {
         begin_rescue: BeginRescue,
         array_literal: []const *const Node,
         hash_literal: []const HashEntry,
-        heredoc_literal: []const u8,
         raise_statement: RaiseStatement,
         logical_and: LogicalBinary,
         logical_or: LogicalBinary,

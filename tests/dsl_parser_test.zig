@@ -743,7 +743,8 @@ test "parser: Dir peek preserves heredoc lexer state" {
     try testing.expectEqual(@as(usize, 2), nodes.len);
     try testing.expectEqualStrings("Dir", nodes[0].kind.identifier);
 
-    const body = nodes[1].kind.heredoc_literal;
+    // Non-interpolating body lowers to a single literal part (indent kept).
+    const body = nodes[1].kind.string_literal.parts[0].literal;
     try testing.expect(std.mem.indexOf(u8, body, "<<~") == null);
     try testing.expectEqualStrings("  body\n", body);
 }
@@ -759,7 +760,8 @@ test "parser: Formula peek preserves heredoc lexer state" {
     try testing.expectEqual(@as(usize, 2), nodes.len);
     try testing.expectEqualStrings("Formula", nodes[0].kind.identifier);
 
-    const body = nodes[1].kind.heredoc_literal;
+    // Non-interpolating body lowers to a single literal part (indent kept).
+    const body = nodes[1].kind.string_literal.parts[0].literal;
     try testing.expect(std.mem.indexOf(u8, body, "<<~") == null);
     try testing.expectEqualStrings("  body\n", body);
 }
@@ -775,7 +777,8 @@ test "parser: ENV peek preserves heredoc lexer state" {
     try testing.expectEqual(@as(usize, 2), nodes.len);
     try testing.expectEqualStrings("ENV", nodes[0].kind.identifier);
 
-    const body = nodes[1].kind.heredoc_literal;
+    // Non-interpolating body lowers to a single literal part (indent kept).
+    const body = nodes[1].kind.string_literal.parts[0].literal;
     try testing.expect(std.mem.indexOf(u8, body, "<<~") == null);
     try testing.expectEqualStrings("  body\n", body);
 }
@@ -1149,13 +1152,71 @@ test "parser: single-quoted string has no interpolation" {
     try testing.expectEqualStrings("hello #{name}", sl.parts[0].literal);
 }
 
-test "parser: heredoc body lowers to heredoc_literal" {
+test "parser: heredoc body without interpolation is one literal part" {
     var arena = testArena();
     defer arena.deinit();
 
+    // Body value stays raw here (indent preserved); T-002 de-indents it.
     const nodes = try parseSource(&arena, "<<~EOS\n  body\nEOS\n");
     try testing.expectEqual(@as(usize, 1), nodes.len);
-    try testing.expectEqualStrings("  body\n", nodes[0].kind.heredoc_literal);
+    const sl = nodes[0].kind.string_literal;
+    try testing.expectEqual(@as(usize, 1), sl.parts.len);
+    try testing.expectEqualStrings("  body\n", sl.parts[0].literal);
+}
+
+test "parser: heredoc body lowers #{...} to string_literal parts" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // Heredoc bodies interpolate through the same string_literal path as
+    // double-quoted strings. Indent is preserved here — de-indent is a follow-up.
+    const nodes = try parseSource(&arena, "<<~EOS\n  pre #{x} post\nEOS\n");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    const sl = nodes[0].kind.string_literal;
+    try testing.expectEqual(@as(usize, 3), sl.parts.len);
+    try testing.expectEqualStrings("  pre ", sl.parts[0].literal);
+    try testing.expectEqualStrings("x", sl.parts[1].interpolation.kind.identifier);
+    try testing.expectEqualStrings(" post\n", sl.parts[2].literal);
+}
+
+test "parser: heredoc interpolation splits across body lines" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // Heredoc bodies span lines (unlike double-quoted strings), so a `#{}`
+    // sitting among other lines must split literals around it with the
+    // newlines preserved on both sides.
+    const nodes = try parseSource(&arena, "<<~EOS\nfirst\n#{x} mid\nlast\nEOS\n");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    const sl = nodes[0].kind.string_literal;
+    try testing.expectEqual(@as(usize, 3), sl.parts.len);
+    try testing.expectEqualStrings("first\n", sl.parts[0].literal);
+    try testing.expectEqualStrings("x", sl.parts[1].interpolation.kind.identifier);
+    try testing.expectEqualStrings(" mid\nlast\n", sl.parts[2].literal);
+}
+
+test "parser: empty heredoc body is one empty literal part" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "<<~EOS\nEOS\n");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    const sl = nodes[0].kind.string_literal;
+    try testing.expectEqual(@as(usize, 1), sl.parts.len);
+    try testing.expectEqualStrings("", sl.parts[0].literal);
+}
+
+test "parser: heredoc body with dangling #{ stays a literal, no panic" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // Mirrors the double-quoted dangling-#{ fallback: an unmatched `#{`
+    // survives as literal text rather than a truncated slice or a panic.
+    const nodes = try parseSource(&arena, "<<~EOS\n#{x post\nEOS\n");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    const sl = nodes[0].kind.string_literal;
+    try testing.expectEqual(@as(usize, 1), sl.parts.len);
+    try testing.expectEqualStrings("#{x post\n", sl.parts[0].literal);
 }
 
 test "parser: paren expression returns inner node verbatim" {
@@ -1219,7 +1280,6 @@ fn dumpNode(w: *std.Io.Writer, node: *const Node) !void {
         .nil_literal => {},
         .symbol_literal => |name| try w.print(" :{s}", .{name}),
         .identifier => |name| try w.print(" {s}", .{name}),
-        .heredoc_literal => |body| try w.print(" {d}b", .{body.len}),
         .string_literal => |sl| {
             try w.writeByte(' ');
             for (sl.parts) |p| switch (p) {
