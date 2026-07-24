@@ -37,6 +37,16 @@ pub const loadCaskRows = rows_mod.loadCaskRows;
 pub const freeKegRows = rows_mod.freeKegRows;
 pub const tapExists = rows_mod.tapExists;
 const snap_mod = @import("outdated/snapshot.zig");
+
+// The dry-run snapshot is written from the per-package fetch, whose TTL matches
+// the bulk versions index. If the index could outlive the snapshot's freshness
+// window, `mt outdated` could serve a target the always-live `mt upgrade` has
+// already moved past. This module sees both constants, so enforce it here rather
+// than forcing a `net -> cli` import inversion from api.zig.
+comptime {
+    std.debug.assert(api_mod.versions_ttl_secs <= @as(i64, @intCast(snap_mod.snapshot_default_max_age_minutes)) * 60);
+}
+
 pub const snapshot_default_max_age_minutes = snap_mod.snapshot_default_max_age_minutes;
 pub const snapshot_max_age_env = snap_mod.snapshot_max_age_env;
 pub const snapshot_version = snap_mod.snapshot_version;
