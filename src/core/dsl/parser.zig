@@ -607,7 +607,11 @@ pub const Parser = struct {
     /// hardened dangling / parse-failure fallbacks. A future non-interpolating
     /// `<<~'EOS'` would bypass this and emit a single literal part instead.
     fn heredocNode(self: *Parser, body: []const u8, loc: SourceLoc) DslError!*const Node {
-        const parts = try self.parseStringInterpolation(body, loc);
+        // Every heredoc malt lexes is squiggly (`<<~`), so strip the common
+        // indent before interpolation — only literal line starts are touched,
+        // never a `#{...}` span, which never opens a line's whitespace.
+        const deindented = try deindentSquiggly(self.allocator, body);
+        const parts = try self.parseStringInterpolation(deindented, loc);
         return self.allocNode(.{
             .loc = loc,
             .kind = .{ .string_literal = .{ .parts = parts } },
@@ -1361,6 +1365,47 @@ fn parseIntValue(lexeme: []const u8) i64 {
     return std.fmt.parseInt(i64, lexeme, 10) catch 0;
 }
 
+/// Ruby `<<~` de-indent: remove the least common leading-whitespace column
+/// count — measured over non-blank lines, tabs and spaces each one column,
+/// no tab expansion — from the start of every physical line. Runs before
+/// `#{...}` lowering, so a single-line `#{...}` (opening on a non-whitespace
+/// `#`) is never touched. Scans physical lines: a multi-line `#{...}` could
+/// skew the min, but interpolation bodies are whitespace-insensitive Ruby, so
+/// the value is unaffected — track brace depth only if a formula ever needs it.
+fn deindentSquiggly(allocator: std.mem.Allocator, body: []const u8) std.mem.Allocator.Error![]const u8 {
+    // Least leading-whitespace width across non-blank lines; blank lines are
+    // excluded so they never force the indent to zero. No non-blank line → 0,
+    // so the min never underflows on empty or all-whitespace bodies.
+    var min_indent: usize = std.math.maxInt(usize);
+    var scan = std.mem.splitScalar(u8, body, '\n');
+    while (scan.next()) |line| {
+        const ws = leadingWs(line);
+        if (ws < line.len and ws < min_indent) min_indent = ws;
+    }
+    if (min_indent == std.math.maxInt(usize)) min_indent = 0;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        const ws = leadingWs(line);
+        // A blank line drops all its whitespace; others lose the common indent.
+        const strip = if (ws == line.len) line.len else @min(min_indent, ws);
+        try out.appendSlice(allocator, line[strip..]);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Leading `' '`/`'\t'` count — each one column, no tab expansion (Ruby `<<~`).
+fn leadingWs(line: []const u8) usize {
+    var i: usize = 0;
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    return i;
+}
+
 // Adversarial deeply-nested input must hit the depth cap and surface a
 // bounded `ParseError` with a diagnostic — never recurse into a native
 // stack overflow. Balanced parens so that, without the guard, the body
@@ -1385,6 +1430,63 @@ test "parser: explicit radix prefixes keep their meaning" {
     try std.testing.expectEqual(@as(i64, 0x1F), parseIntValue("0x1F"));
     try std.testing.expectEqual(@as(i64, 0o17), parseIntValue("0o17"));
     try std.testing.expectEqual(@as(i64, 0b101), parseIntValue("0b101"));
+}
+
+test "deindent: uniform indent is fully stripped" {
+    const out = try deindentSquiggly(std.testing.allocator, "  a\n  b\n");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("a\nb\n", out);
+}
+
+test "deindent: least-indented line wins" {
+    const out = try deindentSquiggly(std.testing.allocator, "    a\n  b\n");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("  a\nb\n", out);
+}
+
+test "deindent: an empty line is ignored in the minimum and stays empty" {
+    const out = try deindentSquiggly(std.testing.allocator, "  a\n\n  b\n");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("a\n\nb\n", out);
+}
+
+test "deindent: an all-whitespace line does not pull the minimum to zero" {
+    // The 4-space line is excluded from the minimum (min stays 2) and, even
+    // though it has MORE whitespace than the minimum, all of it is dropped so
+    // the line is emitted empty — the task contract, not Ruby's keep-the-excess.
+    const out = try deindentSquiggly(std.testing.allocator, "  a\n    \n  b\n");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("a\n\nb\n", out);
+}
+
+test "deindent: relative indentation of nested lines is preserved" {
+    // The whole point for whitespace-significant formats: only the common
+    // indent is removed, so a nested line keeps its extra columns and the
+    // written YAML / Makefile stays structurally valid.
+    const out = try deindentSquiggly(std.testing.allocator, "  server:\n    host: localhost\n  port: 8080\n");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("server:\n  host: localhost\nport: 8080\n", out);
+}
+
+test "deindent: a tab and a space each count as one column" {
+    // Ruby does not expand tabs — the `\t` line has indent width 1, so the
+    // minimum is 1 and exactly one leading column is removed from every line.
+    const out = try deindentSquiggly(std.testing.allocator, "\ta\n  b\n");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("a\n b\n", out);
+}
+
+test "deindent: adversarial bodies never panic" {
+    inline for (.{
+        .{ "", "" },
+        .{ "\n", "\n" },
+        .{ "   ", "" }, // single all-whitespace line, no newline
+        .{ "  a", "a" }, // no trailing newline
+    }) |case| {
+        const out = try deindentSquiggly(std.testing.allocator, case[0]);
+        defer std.testing.allocator.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
 }
 
 test "parser: expression nesting beyond the depth limit is a bounded ParseError" {
