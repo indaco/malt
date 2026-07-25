@@ -505,6 +505,214 @@ test "materializeWithCellar populates the relocated cache after a cold install" 
     try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
 }
 
+// ---------------------------------------------------------------------------
+// Post-relocation keg verification
+// ---------------------------------------------------------------------------
+
+/// Minimal Mach-O 64 with two LC_RPATH slots. Enough for the keg walk to
+/// parse; the fixtures below vary the two paths to break one invariant each.
+fn buildRpathMachO(
+    allocator: std.mem.Allocator,
+    path1: []const u8,
+    cmdsize1: u32,
+    path2: []const u8,
+    cmdsize2: u32,
+) ![]u8 {
+    const macho = std.macho;
+    const header_size = @sizeOf(macho.mach_header_64);
+    const path_off: u32 = @sizeOf(macho.rpath_command);
+    const buf = try allocator.alloc(u8, header_size + cmdsize1 + cmdsize2);
+    @memset(buf, 0);
+
+    const hdr = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    hdr.* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 2, .sizeofcmds = cmdsize1 + cmdsize2 };
+
+    const off1 = header_size;
+    const rp1 = std.mem.bytesAsValue(macho.rpath_command, buf[off1..][0..path_off]);
+    rp1.* = .{ .cmd = .RPATH, .cmdsize = cmdsize1, .path = path_off };
+    @memcpy(buf[off1 + path_off ..][0..path1.len], path1);
+
+    const off2 = header_size + cmdsize1;
+    const rp2 = std.mem.bytesAsValue(macho.rpath_command, buf[off2..][0..path_off]);
+    rp2.* = .{ .cmd = .RPATH, .cmdsize = cmdsize2, .path = path_off };
+    @memcpy(buf[off2 + path_off ..][0..path2.len], path2);
+
+    return buf;
+}
+
+fn writeBinary(path: []const u8, bytes: []const u8) !void {
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, bytes);
+}
+
+fn fileExists(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !bool {
+    const p = try std.fmt.allocPrint(allocator, fmt, args);
+    defer allocator.free(p);
+    test_io.accessAbsolute(std.Options.debug_io, p, .{}) catch return false;
+    return true;
+}
+
+test "materializeWithCellar rebuilds a cached keg whose binary would abort dyld" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "poisoned", "1.0");
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    // Cold install populates the relocated cache.
+    const first = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "poisoned",
+        "1.0",
+        ":any",
+    );
+    testing.allocator.free(first.path);
+    try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+
+    // Poison the snapshot the way a pre-fix relocation did: a binary carrying
+    // the same LC_RPATH twice. The cache key is untouched, so without
+    // verification this keg is served verbatim forever.
+    const bad = try buildRpathMachO(testing.allocator, "/opt/malt/lib", 32, "/opt/malt/lib", 32);
+    defer testing.allocator.free(bad);
+    const cached_bin = try std.fmt.allocPrint(testing.allocator, "{s}/store-relocated/v{d}/{s}/bin/bad", .{ prefix, relocated_mod.RELOC_LOGIC_VERSION, valid_test_sha });
+    defer testing.allocator.free(cached_bin);
+    try writeBinary(cached_bin, bad);
+
+    // Drop the mark so the entry looks like one a pre-verification malt wrote
+    // — the only shape that can carry an unchecked keg.
+    const mark = try std.fmt.allocPrint(testing.allocator, "{s}/store-relocated/v{d}/{s}.verified", .{ prefix, relocated_mod.RELOC_LOGIC_VERSION, valid_test_sha });
+    defer testing.allocator.free(mark);
+    try test_io.deleteFileAbsolute(std.Options.debug_io, mark);
+
+    // Force the warm path: no Cellar keg, cache entry present.
+    const cellar_keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/poisoned/1.0", .{prefix});
+    defer testing.allocator.free(cellar_keg);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, cellar_keg);
+
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "poisoned",
+        "1.0",
+        ":any",
+    );
+    defer testing.allocator.free(keg.path);
+
+    // Self-healed: the install succeeded from the store, not the cache, so the
+    // duplicate-rpath binary is absent from the keg the user actually gets.
+    try testing.expect(!try fileExists(testing.allocator, "{s}/bin/bad", .{keg.path}));
+    // ...and the poisoned entry was evicted, so the re-saved snapshot is clean.
+    try testing.expect(!try fileExists(testing.allocator, "{s}/store-relocated/v{d}/{s}/bin/bad", .{ prefix, relocated_mod.RELOC_LOGIC_VERSION, valid_test_sha }));
+}
+
+test "materializeWithCellar trusts a snapshot it already verified" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "trusted", "1.0");
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const first = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "trusted",
+        "1.0",
+        ":any",
+    );
+    testing.allocator.free(first.path);
+    try testing.expect(relocated_mod.isVerified(std.Options.debug_io, prefix, valid_test_sha));
+
+    // Deliberate boundary: a marked snapshot is restored without re-walking it,
+    // which is what keeps warm reinstalls free. Tampering after the fact is out
+    // of scope — this pins the skip so it cannot be dropped by accident.
+    const bad = try buildRpathMachO(testing.allocator, "/opt/malt/lib", 32, "/opt/malt/lib", 32);
+    defer testing.allocator.free(bad);
+    const cached_bin = try std.fmt.allocPrint(testing.allocator, "{s}/store-relocated/v{d}/{s}/bin/bad", .{ prefix, relocated_mod.RELOC_LOGIC_VERSION, valid_test_sha });
+    defer testing.allocator.free(cached_bin);
+    try writeBinary(cached_bin, bad);
+
+    const cellar_keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/trusted/1.0", .{prefix});
+    defer testing.allocator.free(cellar_keg);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, cellar_keg);
+
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "trusted",
+        "1.0",
+        ":any",
+    );
+    defer testing.allocator.free(keg.path);
+
+    try testing.expect(try fileExists(testing.allocator, "{s}/bin/bad", .{keg.path}));
+    try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
+test "materializeWithCellar refuses a keg whose binary kept an unsubstituted placeholder" {
+    // Root bypasses POSIX mode bits, so the read-only file below would be
+    // patched normally and the skip this test relies on could not fire.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "unpatched", "2.0");
+
+    // A read-only binary makes the patch walk fail its write and skip the file,
+    // which is exactly how a placeholder survives relocation today. The slot is
+    // wide enough that substitution would otherwise fit in place.
+    const bytes = try buildRpathMachO(testing.allocator, "@@HOMEBREW_PREFIX@@/lib", 96, "/opt/malt/opt/x/lib", 40);
+    defer testing.allocator.free(bytes);
+    const store_bin = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/unpatched/2.0/bin/stuck", .{ prefix, valid_test_sha });
+    defer testing.allocator.free(store_bin);
+    try writeBinary(store_bin, bytes);
+    {
+        const f = try test_io.openFileAbsolute(std.Options.debug_io, store_bin, .{});
+        defer f.close(std.Options.debug_io);
+        try f.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(0o444));
+    }
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    try testing.expectError(cellar_mod.CellarError.VerifyFailed, cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "unpatched",
+        "2.0",
+        ":any",
+    ));
+
+    // A keg that cannot load is not left installed, and never gets cached.
+    try testing.expect(!try fileExists(testing.allocator, "{s}/Cellar/unpatched/2.0", .{prefix}));
+    try testing.expect(!relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
 test "describeError returns a non-empty, distinct message for every CellarError" {
     const cases = [_]cellar_mod.CellarError{
         cellar_mod.CellarError.CloneFailed,
@@ -513,6 +721,7 @@ test "describeError returns a non-empty, distinct message for every CellarError"
         cellar_mod.CellarError.InsufficientHeaderPad,
         cellar_mod.CellarError.InstallNameToolMissing,
         cellar_mod.CellarError.CodesignFailed,
+        cellar_mod.CellarError.VerifyFailed,
         cellar_mod.CellarError.RemoveFailed,
         cellar_mod.CellarError.OutOfMemory,
     };

@@ -1112,3 +1112,115 @@ test "patchPathsCollecting skips a whole slot when one replacement shrinks and a
         std.mem.sliceTo(got[fix.cstring_offset..][0..blob.len], 0),
     );
 }
+
+test "verifyFile accepts a fat binary repeating one rpath per arch slice" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // The shape every universal bottle ships. dyld only aborts on duplicates
+    // *within* a slice, so an unscoped check would reject them all.
+    const bytes = try buildFatTwoSliceRpath(testing.allocator, "/opt/malt/lib", 32);
+    defer testing.allocator.free(bytes);
+
+    const dir = try tmpSubdir(io, "verify_fat");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", bytes);
+    defer testing.allocator.free(path);
+
+    try patcher.verifyFile(io, testing.allocator, path);
+}
+
+test "verifyFile accepts duplicate LC_LOAD_DYLIB commands" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // Only LC_RPATH duplicates are fatal; the same dylib named twice is legal.
+    const bytes = try buildTwoDylibFixture(testing.allocator, "/opt/malt/lib/libz.dylib", 56, "/opt/malt/lib/libz.dylib", 56);
+    defer testing.allocator.free(bytes);
+
+    const dir = try tmpSubdir(io, "verify_dylib");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", bytes);
+    defer testing.allocator.free(path);
+
+    try patcher.verifyFile(io, testing.allocator, path);
+}
+
+/// Fat Mach-O whose two slices carry two rpaths each, chosen per slice.
+fn buildFatSlicesWithRpaths(
+    allocator: std.mem.Allocator,
+    s0a: []const u8,
+    s0b: []const u8,
+    s1a: []const u8,
+    s1b: []const u8,
+) ![]u8 {
+    const header_size = @sizeOf(macho.mach_header_64);
+    const path_off: u32 = @sizeOf(macho.rpath_command);
+    const cmdsize: u32 = 40;
+    const slice_bytes: u32 = header_size + cmdsize * 2;
+    const slice0: u32 = 8 + 2 * 20;
+    const slice1: u32 = slice0 + slice_bytes;
+    const buf = try allocator.alloc(u8, slice1 + slice_bytes);
+    @memset(buf, 0);
+
+    std.mem.writeInt(u32, buf[0..4], macho.FAT_MAGIC, .big);
+    std.mem.writeInt(u32, buf[4..8], 2, .big);
+    inline for (.{ .{ 8, 0x0100000C, slice0 }, .{ 28, 0x01000007, slice1 } }) |a| {
+        std.mem.writeInt(u32, buf[a[0]..][0..4], a[1], .big);
+        std.mem.writeInt(u32, buf[a[0] + 8 ..][0..4], a[2], .big);
+        std.mem.writeInt(u32, buf[a[0] + 12 ..][0..4], slice_bytes, .big);
+    }
+
+    for ([_]struct { off: u32, a: []const u8, b: []const u8 }{
+        .{ .off = slice0, .a = s0a, .b = s0b },
+        .{ .off = slice1, .a = s1a, .b = s1b },
+    }) |sl| {
+        const hdr = std.mem.bytesAsValue(macho.mach_header_64, buf[sl.off..][0..header_size]);
+        hdr.* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 2, .sizeofcmds = cmdsize * 2 };
+        for ([_][]const u8{ sl.a, sl.b }, 0..) |p, i| {
+            const at = sl.off + header_size + cmdsize * @as(u32, @intCast(i));
+            const rp = std.mem.bytesAsValue(macho.rpath_command, buf[at..][0..path_off]);
+            rp.* = .{ .cmd = .RPATH, .cmdsize = cmdsize, .path = path_off };
+            @memcpy(buf[at + path_off ..][0..p.len], p);
+        }
+    }
+    return buf;
+}
+
+test "verifyFile checks every arch slice, not just the first" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // Slice 0 is clean and shares no path with slice 1, so only a walk that
+    // reaches slice 1 *and* compares within it can find this duplicate.
+    const bytes = try buildFatSlicesWithRpaths(
+        testing.allocator,
+        "/opt/malt/lib",
+        "/opt/malt/opt/x/lib",
+        "/opt/malt/opt/y/lib",
+        "/opt/malt/opt/y/lib",
+    );
+    defer testing.allocator.free(bytes);
+
+    const dir = try tmpSubdir(io, "verify_fat_slice1");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", bytes);
+    defer testing.allocator.free(path);
+
+    try testing.expectError(
+        patcher.VerifyError.DuplicateRpath,
+        patcher.verifyFile(io, testing.allocator, path),
+    );
+}
