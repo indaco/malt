@@ -20,6 +20,26 @@ if [[ -z "${MALT_GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
   [[ -n "$token" ]] && export MALT_GITHUB_TOKEN="$token"
 fi
 
+# Two concurrent runs share everything that matters: one GitHub token whose
+# rate-limit deltas the etag guards measure, one /tmp/malt-reg-<script>.log
+# per script, and one zig-out/bin/malt they may both rebuild. The overlap
+# reads as a guard failure in whichever run loses the race, so refuse the
+# second run instead of producing a confusing red.
+LOCK_DIR="${TMPDIR:-/tmp}/malt-regressions.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  holder=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "unknown")
+  if [[ "$holder" != "unknown" ]] && ! kill -0 "$holder" 2>/dev/null; then
+    # Previous run died without cleaning up; take over.
+    rm -rf "$LOCK_DIR" && mkdir "$LOCK_DIR" 2>/dev/null
+  else
+    printf 'refusing to start: another regression run is active (pid %s).\n' "$holder" >&2
+    printf 'They would share the GitHub rate limit and the per-script logs.\n' >&2
+    exit 2
+  fi
+fi
+echo $$ >"$LOCK_DIR/pid"
+trap 'rm -rf "$LOCK_DIR"' EXIT
+
 [[ -x zig-out/bin/malt ]] || zig build
 
 # Portable timeout prefix (coreutils `timeout` or brew `gtimeout`); empty
