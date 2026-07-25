@@ -58,13 +58,39 @@ trap 'rm -rf "$PREFIX"' EXIT
 # extract `X-RateLimit-Remaining` from the response header. The header
 # reflects post-call state (i.e. includes this very call), which is
 # exactly what we want.
-probe_remaining() {
+probe_all() {
   local hdr
   hdr=$(curl -fsSL -o /dev/null -D - \
     -H "Authorization: Bearer $MALT_GITHUB_TOKEN" \
     -H "Accept: application/vnd.github+json" \
     "$PROBE_URL")
   awk 'BEGIN{IGNORECASE=1} /^x-ratelimit-remaining:/{gsub(/[\r\n ]/, "", $2); print $2; exit}' <<<"$hdr"
+  # Second line: the ETag, so the caller can tell "upstream moved" apart from
+  # "malt did not benefit from its cache".
+  awk 'BEGIN{IGNORECASE=1} /^etag:/{gsub(/[\r\n ]/, "", $2); print $2; exit}' <<<"$hdr"
+}
+
+probe_field() { sed -n "${2}p" <<<"$1"; }
+probe_remaining() { probe_field "$(probe_all)" 1; }
+
+# Does GitHub honour a conditional request for this URL *right now*? Fetch a
+# fresh ETag and immediately replay it. 304 means the server is behaving, so a
+# token spent by malt is malt's bug; 200 means the edge is not honouring
+# conditional requests at all and any hot-cost measurement is meaningless.
+server_honours_304() {
+  local etag code
+  etag=$(curl -fsSL -o /dev/null -D - \
+    -H "Authorization: Bearer $MALT_GITHUB_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    "$PROBE_URL" |
+    awk 'BEGIN{IGNORECASE=1} /^etag:/{gsub(/[\r\n ]/, "", $2); print $2; exit}')
+  [ -n "$etag" ] || return 1
+  code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $MALT_GITHUB_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    -H "If-None-Match: $etag" \
+    "$PROBE_URL")
+  [ "$code" = "304" ]
 }
 
 # A rising X-RateLimit-Remaining between two probes is physically impossible
@@ -81,7 +107,9 @@ skip_if_reset() {
 }
 
 # ---- Probe A: baseline before any mt call ----
-a=$(probe_remaining)
+a_raw=$(probe_all)
+a=$(probe_field "$a_raw" 1)
+a_etag=$(probe_field "$a_raw" 2)
 
 # ---- Cold start: tap against a fresh prefix ----
 MALT_PREFIX="$PREFIX" "$MALT_BIN" tap "$TAP" >/dev/null
@@ -101,15 +129,29 @@ fi
 MALT_PREFIX="$PREFIX" "$MALT_BIN" tap "$TAP" >/dev/null
 
 # ---- Probe C: shows post-hot state (c = b - mt_hot_cost - 1) ----
-c=$(probe_remaining)
+c_raw=$(probe_all)
+c=$(probe_field "$c_raw" 1)
+c_etag=$(probe_field "$c_raw" 2)
 skip_if_reset "$b" "$c" "hot resolve"
 hot_cost=$((b - c - 1))
 if ((hot_cost != 0)); then
+  # Two environmental causes produce the same number as a real regression, so
+  # name which one happened instead of failing (or skipping) blind.
+  if [ -n "$a_etag" ] && [ -n "$c_etag" ] && [ "$a_etag" != "$c_etag" ]; then
+    printf 'SKIP: upstream %s moved during the run (etag %s -> %s) — a 200 was correct here. Re-run.\n' \
+      "$TAP" "$a_etag" "$c_etag" >&2
+    exit 0
+  fi
+  if ! server_honours_304; then
+    printf 'SKIP: GitHub returned 200 to our own conditional request, so it is not\n' >&2
+    printf '      honouring ETags right now — the hot-cost measurement is meaningless. Re-run.\n' >&2
+    exit 0
+  fi
   printf 'FAIL: hot tap re-resolve spent %d token(s) (expected 0 — 304 is free).\n' \
     "$hot_cost" >&2
-  printf '       a=%d b=%d c=%d. The cached ETag was not sent or the server\n' \
+  printf '       a=%d b=%d c=%d, upstream unchanged, and GitHub honoured a control\n' \
     "$a" "$b" "$c" >&2
-  printf '       returned 200 instead of 304.\n' >&2
+  printf '       conditional request — so malt did not send its cached ETag.\n' >&2
   exit 1
 fi
 
