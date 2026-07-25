@@ -36,20 +36,59 @@ test "showIfRequested returns true for long --help" {
     try testing.expect(help.showIfRequested(&ctx, &args, "purge"));
 }
 
-test "showIfRequested covers every documented command (exercises every branch of the static map)" {
-    const ctx = quietCtx();
-    const commands = [_][]const u8{
-        "install",  "uninstall",          "upgrade", "update",
-        "outdated", "list",               "info",    "search",
-        "doctor",   "tap",                "migrate", "rollback",
-        "run",      "link",               "unlink",  "pin",
-        "unpin",    "completions",        "backup",  "restore",
-        "purge",    "tui",                "version", "bundle",
-        "services", "not-a-real-command",
-    };
-    const args = [_][]const u8{"--help"};
-    for (commands) |cmd| {
-        try testing.expect(help.showIfRequested(&ctx, &args, cmd));
+/// `--version` prints the version and never reaches a topic lookup, so it is
+/// the one name in the block that is not expected to resolve. `-h`/`--help` do
+/// reach it, because `malt help -h` passes the spelling through verbatim.
+const not_topics = [_][]const u8{"--version"};
+
+/// Extract every argv spelling from `main.zig`'s `command_names` block. The old
+/// guard hand-listed command strings and asserted `showIfRequested` returned
+/// true, which it does even when the lookup falls through to the stub, so it
+/// could never catch a missing map entry. Deriving the list from the dispatcher
+/// means a command added tomorrow is covered the day it lands.
+fn commandNames(allocator: std.mem.Allocator, src: []const u8) !std.ArrayList([]const u8) {
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer names.deinit(allocator);
+
+    const block_start = std.mem.indexOf(u8, src, "const command_names = [_]struct {") orelse
+        return error.MissingCommandNames;
+    var rest = src[block_start..];
+    const block_end = std.mem.indexOf(u8, rest, "\n};") orelse return error.MissingCommandNames;
+    rest = rest[0..block_end];
+
+    var lines = std.mem.splitScalar(u8, rest, '\n');
+    while (lines.next()) |line| {
+        const list_start = std.mem.indexOf(u8, line, ".names = &.{") orelse continue;
+        var tail = line[list_start..];
+        while (std.mem.indexOfScalar(u8, tail, '"')) |open| {
+            tail = tail[open + 1 ..];
+            const close = std.mem.indexOfScalar(u8, tail, '"') orelse break;
+            try names.append(allocator, tail[0..close]);
+            tail = tail[close + 1 ..];
+        }
+    }
+    return names;
+}
+
+test "every command name the dispatcher accepts has a real help topic" {
+    const allocator = testing.allocator;
+
+    const f = try test_io.cwd().openFile(std.Options.debug_io, "src/main.zig", .{});
+    defer f.close(std.Options.debug_io);
+    const src = try test_io.readFileToEndAlloc(f, allocator, 4 * 1024 * 1024);
+    defer allocator.free(src);
+
+    var names = try commandNames(allocator, src);
+    defer names.deinit(allocator);
+
+    // A vanished or renamed block must fail loudly, not pass vacuously.
+    try testing.expect(names.items.len > 25);
+
+    for (names.items) |name| {
+        var skip = false;
+        for (not_topics) |n| skip = skip or std.mem.eql(u8, n, name);
+        if (skip) continue;
+        try testing.expect(!std.mem.eql(u8, help.helpFor(name), "No help available.\n"));
     }
 }
 
