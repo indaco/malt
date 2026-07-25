@@ -230,6 +230,96 @@ test "fixBrokenSymlinks: dangling links are unlinked, valid links survive" {
     try testing.expectEqual(@as(u32, 0), fix.probeBrokenSymlinks(io, prefix));
 }
 
+test "fixBrokenSymlinks: nested dangling links are found, not just top-level ones" {
+    // The linker mirrors keg trees, so most links live below the top level:
+    // share/man/man1, lib/pkgconfig, share/locale/<lang>/LC_MESSAGES. A walk
+    // that only iterates `<prefix>/<subdir>` reports a clean prefix while
+    // leaving those broken links in place.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "nestedsymlinks");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var anchor_buf: [256]u8 = undefined;
+    const anchor = try std.fmt.bufPrint(&anchor_buf, "{s}/anchor", .{prefix});
+    try writeFile(anchor, "x");
+
+    // One dangling link per nesting depth, plus a live nested link that must
+    // survive, and a deep chain matching share/locale's real shape.
+    const nested_dirs = [_][]const u8{
+        "share/man/man1",
+        "lib/pkgconfig",
+        "share/locale/en_US/LC_MESSAGES",
+    };
+    for (nested_dirs) |sub| {
+        var d_buf: [256]u8 = undefined;
+        const d = try std.fmt.bufPrint(&d_buf, "{s}/{s}", .{ prefix, sub });
+        try fs_compat.cwd().createDirPath(std.Options.debug_io, d);
+
+        var dir = try fs_compat.openDirAbsolute(std.Options.debug_io, d, .{ .iterate = true });
+        defer dir.close(std.Options.debug_io);
+        try dir.symLink(std.Options.debug_io, "/tmp/malt-doctor-nested-vanished", "dead", .{});
+        try dir.symLink(std.Options.debug_io, anchor, "alive", .{});
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try testing.expectEqual(@as(u32, nested_dirs.len), fix.probeBrokenSymlinks(io, prefix));
+    try testing.expectEqual(@as(u32, nested_dirs.len), fix.fixBrokenSymlinks(io, prefix));
+
+    for (nested_dirs) |sub| {
+        var dead_buf: [256]u8 = undefined;
+        const dead = try std.fmt.bufPrint(&dead_buf, "{s}/{s}/dead", .{ prefix, sub });
+        try testing.expect(!pathExists(dead));
+        var alive_buf: [256]u8 = undefined;
+        const alive = try std.fmt.bufPrint(&alive_buf, "{s}/{s}/alive", .{ prefix, sub });
+        try testing.expect(pathExists(alive));
+    }
+
+    try testing.expectEqual(@as(u32, 0), fix.probeBrokenSymlinks(io, prefix));
+}
+
+test "fixBrokenSymlinks: a symlinked directory is not descended into" {
+    // Directory symlinks report as `.sym_link`, so the walk treats them as
+    // leaves. Descending one would let the sweep escape the prefix.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "symlinkeddir");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var outside_buf: [256]u8 = undefined;
+    const outside = try std.fmt.bufPrint(&outside_buf, "{s}/outside", .{prefix});
+    try fs_compat.cwd().createDirPath(std.Options.debug_io, outside);
+    var outside_dir = try fs_compat.openDirAbsolute(std.Options.debug_io, outside, .{ .iterate = true });
+    defer outside_dir.close(std.Options.debug_io);
+    try outside_dir.symLink(std.Options.debug_io, "/tmp/malt-doctor-offlimits", "dead", .{});
+
+    var share_buf: [256]u8 = undefined;
+    const share = try std.fmt.bufPrint(&share_buf, "{s}/share", .{prefix});
+    try fs_compat.cwd().createDirPath(std.Options.debug_io, share);
+    var share_dir = try fs_compat.openDirAbsolute(std.Options.debug_io, share, .{ .iterate = true });
+    defer share_dir.close(std.Options.debug_io);
+    try share_dir.symLink(std.Options.debug_io, outside, "linked", .{});
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // `share/linked` resolves, so it is not dangling; the dead link inside the
+    // directory it points at is out of scope and must be left alone.
+    try testing.expectEqual(@as(u32, 0), fix.probeBrokenSymlinks(io, prefix));
+    try testing.expectEqual(@as(u32, 0), fix.fixBrokenSymlinks(io, prefix));
+
+    // The dangling link is still there as a directory entry. `pathExists`
+    // follows the link and would report absent, so check the entry itself.
+    var found = false;
+    var it = outside_dir.iterate();
+    while (try it.next(std.Options.debug_io)) |entry| {
+        if (std.mem.eql(u8, entry.name, "dead")) found = true;
+    }
+    try testing.expect(found);
+}
+
 test "fixBrokenSymlinks: prefix without link dirs reports zero" {
     var prefix_buf: [128]u8 = undefined;
     const prefix = try makePrefix(&prefix_buf, "emptylinks");
