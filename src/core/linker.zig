@@ -194,20 +194,38 @@ pub const Linker = struct {
     /// `LC_LOAD_DYLIB` paths continue to resolve via `lib`, so compiled
     /// formulae are unaffected; only the global PATH entries disappear.
     pub fn link(self: *Linker, keg_path: []const u8, name: []const u8, keg_id: i64, bin_isolated: bool) !void {
+        _ = name;
         // bin-isolated drops the leading `bin`/`sbin`; full keeps them.
         const dirs_to_link: []const []const u8 = if (bin_isolated) linkable_dirs[2..] else &linkable_dirs;
+
+        // One statement and one transaction per keg, not per leaf: in
+        // autocommit every row cost its own WAL commit and fsync.
+        var insert = try self.db.prepare(
+            "INSERT OR REPLACE INTO links (keg_id, link_path, target) VALUES (?1, ?2, ?3);",
+        );
+        defer insert.finalize();
+
+        // `rollback` and `upgrade` link inside their own transaction, and
+        // SQLite has no nested BEGIN.
+        const own_txn = !self.db.inTransaction();
+        if (own_txn) try self.db.beginTransaction();
+        // Rows are a ledger of symlinks already on disk, so a partial run keeps
+        // what it wrote; rolling back would strand those symlinks untracked.
+        errdefer if (own_txn) {
+            self.db.commit() catch self.db.rollback();
+        };
 
         for (dirs_to_link) |subdir| {
             // linkSubdir swallows per-leaf filesystem hiccups but propagates a
             // DB write failure; surface it so install can roll the keg back
             // rather than leave it silently half-linked.
-            try self.linkSubdir(keg_path, subdir, name, keg_id);
+            try self.linkSubdir(keg_path, subdir, keg_id, &insert);
         }
+
+        if (own_txn) try self.db.commit();
     }
 
-    fn linkSubdir(self: *Linker, keg_path: []const u8, subdir: []const u8, name: []const u8, keg_id: i64) !void {
-        _ = name;
-
+    fn linkSubdir(self: *Linker, keg_path: []const u8, subdir: []const u8, keg_id: i64, insert: *sqlite.Statement) !void {
         // Mirror the keg's tree as real dirs under the prefix and symlink
         // each leaf — the same traversal `checkConflicts` uses, so a nested
         // conflict the pre-check flags is exactly what link would create.
@@ -234,34 +252,32 @@ pub const Linker = struct {
         var parent_dir = std.Io.Dir.openDirAbsolute(self.io, parent, .{}) catch return;
         defer parent_dir.close(self.io);
 
+        // Leaves arrive clustered by directory, so caching the last parent
+        // skips nearly every createDirPath. A miss just costs the usual call.
+        var last_parent: ?[]const u8 = null;
+
         for (leaves.items) |rel| {
             // `rel` is relative and may nest (e.g. "pkgconfig/foo.pc").
             // Create the leaf's prefix-side parent before linking.
             const rel_parent = std.fs.path.dirname(rel);
-            if (rel_parent) |rp| parent_dir.createDirPath(self.io, rp) catch continue;
+            if (rel_parent) |rp| {
+                if (last_parent == null or !std.mem.eql(u8, last_parent.?, rp)) {
+                    parent_dir.createDirPath(self.io, rp) catch continue;
+                    last_parent = rp;
+                }
+            }
 
             // Path buffers sized to the OS path max so a real keg leaf never
             // truncates (see collectLeafPaths).
             var target_buf: [std.fs.max_path_bytes]u8 = undefined;
             const target = std.fmt.bufPrint(&target_buf, "{s}/{s}/{s}", .{ keg_path, subdir, rel }) catch continue;
 
-            // Atomic symlink: create at a temp name, then rename into place.
-            // This avoids a window where the link is absent after deleteFile.
-            // The temp sits in the leaf's own parent so the rename stays
-            // within one directory.
-            var tmp_name_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const tmp_name = if (rel_parent) |rp|
-                std.fmt.bufPrint(&tmp_name_buf, "{s}/.malt_tmp_{s}", .{ rp, std.fs.path.basename(rel) }) catch continue
-            else
-                std.fmt.bufPrint(&tmp_name_buf, ".malt_tmp_{s}", .{rel}) catch continue;
-            // Stale tmp from a prior aborted link; symLink would otherwise EEXIST.
-            parent_dir.deleteFile(self.io, tmp_name) catch {};
-            parent_dir.symLink(self.io, target, tmp_name, .{}) catch continue;
-            parent_dir.rename(tmp_name, parent_dir, rel, self.io) catch {
-                // Rename failed — fall back to direct replacement (non-atomic).
-                parent_dir.deleteFile(self.io, tmp_name) catch {};
-                parent_dir.deleteFile(self.io, rel) catch {};
-                parent_dir.symLink(self.io, target, rel, .{}) catch continue;
+            // An empty slot needs one syscall, not the three temp+rename cost.
+            // Only an occupied slot needs atomic replacement; `replaceLink`
+            // still gives it that, so the link is never momentarily absent.
+            parent_dir.symLink(self.io, target, rel, .{}) catch |e| switch (e) {
+                error.PathAlreadyExists => self.replaceLink(parent_dir, target, rel) catch continue,
+                else => continue,
             };
 
             // Build the full link path for DB recording
@@ -272,22 +288,45 @@ pub const Linker = struct {
             // made — a DB-less symlink is an orphan `unlink` can't find — and
             // propagate so the caller (install) rolls the keg back instead of
             // reporting a half-linked keg as success.
-            self.recordLink(keg_id, link_path, target) catch |e| {
+            recordLink(insert, keg_id, link_path, target) catch |e| {
                 parent_dir.deleteFile(self.io, rel) catch {};
                 return e;
             };
         }
     }
 
-    fn recordLink(self: *Linker, keg_id: i64, link_path: []const u8, target: []const u8) !void {
-        var stmt = try self.db.prepare(
-            "INSERT OR REPLACE INTO links (keg_id, link_path, target) VALUES (?1, ?2, ?3);",
-        );
-        defer stmt.finalize();
+    /// Replace an occupied leaf slot without ever emptying it: symlink at a
+    /// temp name in the same directory, then rename over the old entry.
+    fn replaceLink(self: *Linker, dir: std.Io.Dir, target: []const u8, rel: []const u8) !void {
+        var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const tmp = if (std.fs.path.dirname(rel)) |rp|
+            try std.fmt.bufPrint(&tmp_buf, "{s}/.malt_tmp_{s}", .{ rp, std.fs.path.basename(rel) })
+        else
+            try std.fmt.bufPrint(&tmp_buf, ".malt_tmp_{s}", .{rel});
+
+        // Stale tmp from a prior aborted link; symLink would otherwise EEXIST.
+        dir.deleteFile(self.io, tmp) catch {};
+        try dir.symLink(self.io, target, tmp, .{});
+        dir.rename(tmp, dir, rel, self.io) catch {
+            // Rename failed — fall back to direct replacement (non-atomic).
+            dir.deleteFile(self.io, tmp) catch {};
+            dir.deleteFile(self.io, rel) catch {};
+            try dir.symLink(self.io, target, rel, .{});
+        };
+    }
+
+    /// Bind and run one row on the statement `link` prepared for this keg.
+    fn recordLink(stmt: *sqlite.Statement, keg_id: i64, link_path: []const u8, target: []const u8) !void {
+        try stmt.reset();
         try stmt.bindInt(1, keg_id);
         try stmt.bindText(2, link_path);
         try stmt.bindText(3, target);
-        _ = try stmt.step();
+        _ = stmt.step() catch |e| {
+            // `link` commits on the way out, and SQLite can refuse a COMMIT
+            // while a statement is still active. Reset only re-reports `e`.
+            stmt.reset() catch {};
+            return e;
+        };
     }
 
     /// Create `opt/{name} -> Cellar/{name}/{version}` symlink.

@@ -177,6 +177,12 @@ pub const Database = struct {
         return Statement{ ._stmt = stmt.? };
     }
 
+    /// Whether an explicit transaction is already open. SQLite has no nested
+    /// `BEGIN`, so a callee that batches writes must ask before opening one.
+    pub fn inTransaction(self: *Database) bool {
+        return c.sqlite3_get_autocommit(self._handle) == 0;
+    }
+
     /// Begin an immediate transaction.
     pub fn beginTransaction(self: *Database) SqliteError!void {
         return self.exec("BEGIN IMMEDIATE;");
@@ -202,6 +208,23 @@ pub fn threadsafeMode() c_int {
 }
 
 const testing = std.testing;
+
+test "inTransaction reports an explicit BEGIN, not autocommit" {
+    var db = try Database.open(":memory:");
+    defer db.close();
+
+    // Callers batching writes ask this before opening one of their own, so it
+    // has to clear on both exits, not just commit.
+    try testing.expect(!db.inTransaction());
+    try db.beginTransaction();
+    try testing.expect(db.inTransaction());
+    try db.commit();
+    try testing.expect(!db.inTransaction());
+
+    try db.beginTransaction();
+    db.rollback();
+    try testing.expect(!db.inTransaction());
+}
 
 test "threadsafeMode returns one of the three documented values" {
     const m = threadsafeMode();
