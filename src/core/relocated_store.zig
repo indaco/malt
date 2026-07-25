@@ -197,7 +197,43 @@ pub fn remove(io: std.Io, prefix: []const u8, sha: []const u8) RelocatedStoreErr
     if (!isValidSha256(sha)) return RelocatedStoreError.InvalidSha256;
     var buf: [512]u8 = undefined;
     const dir = try cacheDir(&buf, prefix, RELOC_LOGIC_VERSION, sha);
+
+    // Un-trust before deleting. If the tree delete fails, an entry that kept
+    // its mark would be served unchecked forever; without the mark the next
+    // install re-checks it and retries the eviction.
+    var mark_buf: [512]u8 = undefined;
+    if (verifiedMark(&mark_buf, prefix, sha)) |mark| {
+        std.Io.Dir.cwd().deleteFile(io, mark) catch {};
+    } else |_| {}
+
     std.Io.Dir.cwd().deleteTree(io, dir) catch return;
+}
+
+/// `<sha>.verified`, a sibling of the snapshot dir rather than a file inside
+/// it — anything inside would be cloned into the user's keg.
+fn verifiedMark(buf: []u8, prefix: []const u8, sha: []const u8) RelocatedStoreError![]u8 {
+    return std.fmt.bufPrint(buf, "{s}/store-relocated/v{d}/{s}.verified", .{ prefix, RELOC_LOGIC_VERSION, sha }) catch
+        return RelocatedStoreError.PathTooLong;
+}
+
+/// True when this snapshot was checked after the malt that wrote it relocated
+/// it. Entries from a malt that never verified carry no mark, so they are the
+/// ones re-checked on restore.
+pub fn isVerified(io: std.Io, prefix: []const u8, sha: []const u8) bool {
+    if (!isValidSha256(sha)) return false;
+    var buf: [512]u8 = undefined;
+    const mark = verifiedMark(&buf, prefix, sha) catch return false;
+    std.Io.Dir.accessAbsolute(io, mark, .{}) catch return false;
+    return true;
+}
+
+/// Best-effort: a lost mark costs one re-check, never correctness.
+pub fn markVerified(io: std.Io, prefix: []const u8, sha: []const u8) void {
+    if (!isValidSha256(sha)) return;
+    var buf: [512]u8 = undefined;
+    const mark = verifiedMark(&buf, prefix, sha) catch return;
+    const f = std.Io.Dir.createFileAbsolute(io, mark, .{}) catch return;
+    f.close(io);
 }
 
 pub const Reaped = struct { removed: u32 = 0, bytes: u64 = 0 };
@@ -656,4 +692,63 @@ test "save self-heals a prior-version entry" {
     try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "heal", "1.0");
     try testing.expect(has(testIo(), prefix, valid_sha_for_tests));
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), old, .{}));
+}
+
+test "markVerified round-trips and only answers for the marked sha" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "verified_mark");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+
+    try buildKegForTests(testing.allocator, prefix, "marked", "1.0");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "marked", "1.0");
+
+    // A snapshot is unverified until something says otherwise, so a keg
+    // written by a malt that never checked is re-checked on restore.
+    try testing.expect(!isVerified(testIo(), prefix, valid_sha_for_tests));
+    markVerified(testIo(), prefix, valid_sha_for_tests);
+    try testing.expect(isVerified(testIo(), prefix, valid_sha_for_tests));
+
+    const other = "f" ** 64;
+    try testing.expect(!isVerified(testIo(), prefix, other));
+    try testing.expect(!isVerified(testIo(), prefix, valid_sha_for_tests[0..63]));
+    try testing.expect(!isVerified(testIo(), prefix, "../../etc/passwd"));
+}
+
+test "remove clears the verified mark with the entry" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "verified_remove");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+
+    try buildKegForTests(testing.allocator, prefix, "gone", "1.0");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "gone", "1.0");
+    markVerified(testIo(), prefix, valid_sha_for_tests);
+
+    try remove(testIo(), prefix, valid_sha_for_tests);
+    // A surviving mark would make the next entry for this sha trusted unseen.
+    try testing.expect(!isVerified(testIo(), prefix, valid_sha_for_tests));
+    try testing.expect(!has(testIo(), prefix, valid_sha_for_tests));
+}
+
+test "markVerified ignores an invalid sha instead of writing a path" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "verified_invalid");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+
+    markVerified(testIo(), prefix, "../escape");
+    markVerified(testIo(), prefix, "");
+    try testing.expect(!isVerified(testIo(), prefix, "../escape"));
+}
+
+test "verified mark refuses a prefix that would overflow the path buffer" {
+    // A prefix long enough to blow the 512-byte buffer must not silently
+    // produce a truncated path to create or probe.
+    const long_prefix = "/tmp/" ++ ("p" ** 520);
+    markVerified(testIo(), long_prefix, valid_sha_for_tests);
+    try testing.expect(!isVerified(testIo(), long_prefix, valid_sha_for_tests));
 }

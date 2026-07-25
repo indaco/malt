@@ -644,6 +644,72 @@ pub fn fileLinksPath(io: std.Io, allocator: std.mem.Allocator, file_path: []cons
     return false;
 }
 
+/// Post-relocation invariants malt itself is responsible for. Violating
+/// either means the keg on disk cannot be loaded, so an install that hits
+/// one must fail instead of being recorded as a success.
+pub const VerifyError = error{
+    /// Two LC_RPATHs in one arch slice carry the same value. dyld aborts the
+    /// process before `main` on this, so it must never reach the Cellar.
+    DuplicateRpath,
+    /// A load-command path still carries a token relocation was supposed to
+    /// substitute — the reference cannot resolve at runtime.
+    UnsubstitutedPlaceholder,
+};
+
+/// The tokens `cellar.relocateKegTree` substitutes in load-command paths.
+/// Deliberately not a generic `@@HOMEBREW_` match: Homebrew defines tokens
+/// malt never claimed to handle, and failing an install over one of those
+/// would be a false positive.
+const relocation_placeholders = [_][]const u8{ "@@HOMEBREW_PREFIX@@", "@@HOMEBREW_CELLAR@@" };
+
+/// Check one file's load commands against the post-relocation invariants.
+/// Read-only. Anything that is not a readable, parseable Mach-O passes: a keg
+/// is mostly scripts and data, and an unparseable binary is not an invariant
+/// this owns.
+pub fn verifyFile(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8) VerifyError!void {
+    const file = std.Io.Dir.cwd().openFile(io, file_path, .{}) catch return;
+    defer file.close(io);
+
+    const stat = file.stat(io) catch return;
+    if (stat.size == 0) return;
+
+    // Only the head is ever touched, so mapping beats reading a keg's worth of
+    // dylibs. Safe while the install lock keeps other writers out.
+    const data = std.posix.mmap(
+        null,
+        stat.size,
+        .{ .READ = true },
+        .{ .TYPE = .PRIVATE },
+        file.handle,
+        0,
+    ) catch return;
+    defer std.posix.munmap(data);
+
+    if (!parser.isMachO(data)) return;
+    var macho = parser.parse(allocator, data) catch return;
+    defer macho.deinit();
+
+    const rpath_cmd = @intFromEnum(std.macho.LC.RPATH);
+    for (macho.paths, 0..) |p, i| {
+        for (relocation_placeholders) |token| {
+            if (std.mem.indexOf(u8, p.path, token) != null)
+                return VerifyError.UnsubstitutedPlaceholder;
+        }
+
+        if (p.cmd != rpath_cmd) continue;
+        // O(n²) over one binary's rpaths — a handful even on the fattest
+        // bottle, so a hash set would cost more than the scan it replaces.
+        for (macho.paths[0..i]) |seen| {
+            if (seen.cmd != rpath_cmd) continue;
+            // Per arch slice: a universal binary carries the same rpath once
+            // per slice, and only within-slice duplicates abort dyld. Dropping
+            // this scoping rejects every fat bottle.
+            if (seen.slice_offset != p.slice_offset) continue;
+            if (std.mem.eql(u8, seen.path, p.path)) return VerifyError.DuplicateRpath;
+        }
+    }
+}
+
 const replaceAll = text_replace.replaceAll;
 
 const fs_test_io = std.Options.debug_io;
@@ -909,4 +975,80 @@ test "fileLinksPath detects a needle in an LC_LOAD_DYLIB and ignores misses" {
 
     try testing.expect(fileLinksPath(io, testing.allocator, abs, "/opt/oniguruma/"));
     try testing.expect(!fileLinksPath(io, testing.allocator, abs, "/opt/missing/"));
+}
+
+/// Write `bytes` into a fresh scratch dir and return the absolute path, so a
+/// verify case reads a real file the way the keg walk does.
+fn fixtureFile(s: *Scratch, bytes: []const u8) ![:0]const u8 {
+    try s.dir.writeFile(std.Options.debug_io, .{ .sub_path = "bin", .data = bytes });
+    return s.p("/bin");
+}
+
+test "verifyFile rejects two LC_RPATHs that collapsed onto the same value" {
+    const testing = std.testing;
+
+    // The exact shape that made dyld abort: relocation folded two prefixes
+    // onto one, and both slots shipped.
+    const bytes = try buildTwoRpathMachO(testing.allocator, "/opt/malt/lib", 32, "/opt/malt/lib", 32);
+    defer testing.allocator.free(bytes);
+
+    var s = try Scratch.init("verify_dup");
+    defer s.deinit();
+
+    try testing.expectError(
+        VerifyError.DuplicateRpath,
+        verifyFile(std.Options.debug_io, testing.allocator, try fixtureFile(&s, bytes)),
+    );
+}
+
+test "verifyFile accepts distinct LC_RPATHs" {
+    const testing = std.testing;
+
+    const bytes = try buildTwoRpathMachO(testing.allocator, "/opt/malt/lib", 32, "/opt/malt/opt/x/lib", 40);
+    defer testing.allocator.free(bytes);
+
+    var s = try Scratch.init("verify_ok");
+    defer s.deinit();
+
+    try verifyFile(std.Options.debug_io, testing.allocator, try fixtureFile(&s, bytes));
+}
+
+test "verifyFile rejects a load-command path relocation failed to substitute" {
+    const testing = std.testing;
+
+    // A surviving placeholder is an unresolvable reference at load time.
+    const bytes = try buildTwoRpathMachO(testing.allocator, "@@HOMEBREW_PREFIX@@/lib", 40, "/opt/malt/opt/x/lib", 40);
+    defer testing.allocator.free(bytes);
+
+    var s = try Scratch.init("verify_placeholder");
+    defer s.deinit();
+
+    try testing.expectError(
+        VerifyError.UnsubstitutedPlaceholder,
+        verifyFile(std.Options.debug_io, testing.allocator, try fixtureFile(&s, bytes)),
+    );
+}
+
+test "verifyFile passes over a file that is not a Mach-O" {
+    const testing = std.testing;
+
+    var s = try Scratch.init("verify_script");
+    defer s.deinit();
+
+    // Most of a keg is scripts and data; they carry none of these invariants.
+    try verifyFile(std.Options.debug_io, testing.allocator, try fixtureFile(&s, "prefix=/opt/malt\n"));
+}
+
+test "verifyFile passes over a Mach-O it cannot parse" {
+    const testing = std.testing;
+
+    // Valid magic, truncated load commands. An unparseable binary is not an
+    // invariant this owns — failing here would block installs over odd files.
+    var bytes: [8]u8 = @splat(0);
+    std.mem.writeInt(u32, bytes[0..4], std.macho.MH_MAGIC_64, .little);
+
+    var s = try Scratch.init("verify_corrupt");
+    defer s.deinit();
+
+    try verifyFile(std.Options.debug_io, testing.allocator, try fixtureFile(&s, &bytes));
 }

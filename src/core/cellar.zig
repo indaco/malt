@@ -25,6 +25,11 @@ pub const CellarError = error{
     /// Tools as the remediation.
     InstallNameToolMissing,
     CodesignFailed,
+    /// The keg on disk violates an invariant malt is responsible for (a
+    /// duplicate LC_RPATH, a placeholder relocation failed to substitute).
+    /// The offending file is named in the log; the keg is wiped rather than
+    /// recorded, because dyld would refuse to load it.
+    VerifyFailed,
     RemoveFailed,
     OutOfMemory,
 };
@@ -37,6 +42,7 @@ pub fn describeError(err: CellarError) []const u8 {
     return switch (err) {
         CellarError.InsufficientHeaderPad => "install_name_tool: bottle built without -headerpad_max_install_names",
         CellarError.InstallNameToolMissing => "install_name_tool not found on PATH (install Xcode Command Line Tools)",
+        CellarError.VerifyFailed => "relocated keg ships a binary the loader would reject (re-run with --debug to name it)",
         else => @errorName(err),
     };
 }
@@ -100,6 +106,20 @@ pub fn materializeWithCellar(
             std.log.debug("relocated cache miss for {s}: {s}", .{ store_sha256, @errorName(e) });
             break :cache_hit;
         };
+        // A snapshot taken by an older, buggier relocation outlives the fix
+        // that would repair it, because this path never re-patches. Check an
+        // unverified entry once and evict it if it fails: the cold path wipes
+        // `cellar_path` before cloning, so a bad entry cannot survive a second
+        // install even if its cache key was never invalidated. Entries this
+        // malt verified are trusted, which keeps warm reinstalls free.
+        if (!relocated_store.isVerified(io, prefix, store_sha256)) {
+            walkMachOAndVerify(io, allocator, cellar_path) catch |e| {
+                std.log.debug("cached keg {s} failed verification ({s}); re-relocating", .{ store_sha256, @errorName(e) });
+                relocated_store.remove(io, prefix, store_sha256) catch {};
+                break :cache_hit;
+            };
+            relocated_store.markVerified(io, prefix, store_sha256);
+        }
         writeInstallReceipt(io, cellar_path, name, version, store_sha256);
         // Homebrew re-pours etc/var on every install; the cached keg
         // carries `.bottle`, so a wiped or drifted live config is
@@ -188,9 +208,12 @@ pub fn materializeWithCellar(
     // bottle sha takes the cache short-circuit at the top of this
     // function. Snapshot failure is non-fatal — the user-visible install
     // already succeeded.
-    relocated_store.save(io, allocator, prefix, store_sha256, name, version) catch |e| {
+    if (relocated_store.save(io, allocator, prefix, store_sha256, name, version)) {
+        // `relocateKegTree` already checked this keg, so restores can skip it.
+        relocated_store.markVerified(io, prefix, store_sha256);
+    } else |e| {
         std.log.debug("relocated cache save failed for {s}: {s}", .{ store_sha256, @errorName(e) });
-    };
+    }
 
     // Allocate the path so it survives beyond this function's stack
     const owned_path = allocator.dupe(u8, cellar_path) catch return CellarError.OutOfMemory;
@@ -280,6 +303,45 @@ fn walkMachOAndPatch(
             modified_out.append(allocator, full_path) catch continue;
             keep_path = true;
         }
+    }
+}
+
+/// Check every Mach-O under `dir_path` against the post-relocation
+/// invariants. The first violation fails the keg: malt would otherwise
+/// report a successful install for a binary the loader refuses to start.
+/// Mirrors `walkMachOAndPatch`'s magic pre-filter so the scan costs four
+/// bytes per non-binary file rather than a full read.
+fn walkMachOAndVerify(io: std.Io, allocator: std.mem.Allocator, dir_path: []const u8) CellarError!void {
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    var walker = dir.walk(allocator) catch return;
+    defer walker.deinit();
+
+    const parser_mod = @import("../macho/parser.zig");
+
+    while (walker.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+
+        const full_path = std.fs.path.join(allocator, &.{ dir_path, entry.path }) catch continue;
+        defer allocator.free(full_path);
+
+        const file = std.Io.Dir.openFileAbsolute(io, full_path, .{}) catch continue;
+        var magic_buf: [4]u8 = undefined;
+        const n = file.readPositionalAll(io, &magic_buf, 0) catch {
+            file.close(io);
+            continue;
+        };
+        file.close(io);
+        if (n < 4 or !parser_mod.isMachO(&magic_buf)) continue;
+
+        patch.verifyFile(io, allocator, full_path) catch |e| {
+            // Debug level, like every other per-file detail in this module:
+            // the user-facing failure is the non-zero exit plus
+            // `describeError`, which points at `--debug` for the file name.
+            std.log.debug("keg verification failed for {s}: {s}", .{ full_path, @errorName(e) });
+            return CellarError.VerifyFailed;
+        };
     }
 }
 
@@ -382,6 +444,10 @@ fn relocateKegTree(
             else => std.log.warn("codesigning failed for {s}: {s}", .{ cellar_path, @errorName(e) }),
         };
     }
+
+    // Before the etc/var pour, which writes outside the keg: a failure here
+    // must leave nothing behind but the caller's `errdefer` wipe.
+    try walkMachOAndVerify(io, allocator, cellar_path);
 
     // After text patching, so the poured configs already carry the malt
     // prefix instead of the bottled `/opt/homebrew` paths.
