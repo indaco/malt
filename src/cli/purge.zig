@@ -28,6 +28,10 @@ pub const freePlan = wipe_mod.freePlan;
 
 pub const formatBytes = util.formatBytes;
 
+/// Exposed so the scope can be exercised directly: it mutates the prefix but
+/// needs no database, so a test does not have to drive the whole command.
+pub const runBrokenSymlinks = scopes_mod.runBrokenSymlinks;
+
 const TierResult = util.TierResult;
 
 /// Closed enum of non-wipe scopes. Field names match `Scope` so
@@ -40,6 +44,7 @@ const ScopeKey = enum {
     downloads,
     stale_casks,
     old_versions,
+    broken_symlinks,
 
     fn label(k: ScopeKey) []const u8 {
         return switch (k) {
@@ -49,13 +54,15 @@ const ScopeKey = enum {
             .downloads => "downloads",
             .stale_casks => "stale-casks",
             .old_versions => "old-versions",
+            .broken_symlinks => "broken-symlinks",
         };
     }
 };
 
 /// Run order matters: unused-deps must precede store-orphans because
 /// removing a keg decrements its store ref to 0, and those fresh
-/// orphans only get swept on the second pass.
+/// orphans only get swept on the second pass. broken-symlinks runs last
+/// so it also catches links the earlier scopes left dangling.
 const scope_run_order = [_]ScopeKey{
     .unused_deps,
     .store_orphans,
@@ -63,6 +70,7 @@ const scope_run_order = [_]ScopeKey{
     .downloads,
     .stale_casks,
     .old_versions,
+    .broken_symlinks,
 };
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -206,6 +214,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 .downloads => scopes_mod.runDownloads(ctx, cache_dir, dry_run),
                 .stale_casks => scopes_mod.runStaleCasks(ctx, allocator, prefix, dry_run),
                 .old_versions => scopes_mod.runOldVersions(ctx, allocator, prefix, dry_run),
+                .broken_symlinks => scopes_mod.runBrokenSymlinks(ctx, prefix, dry_run),
             };
             try summary.add(allocator, .{
                 .name = name,

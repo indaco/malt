@@ -154,7 +154,7 @@ pub const bash_script =
     \\        reinstall)        cmd_flags="--cask --dry-run --isolate-deps --isolate-dependencies --quiet -q --json" ;;
     \\        backup)           cmd_flags="--output -o --versions --services --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
-    \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
+    \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --broken-symlinks --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
     \\        uninstall|remove) cmd_flags="--cask --force --dry-run" ;;
     \\        upgrade)          cmd_flags="--cask --formula --dry-run --pinned --force -f --isolate-deps --isolate-dependencies --use-system-ruby=" ;;
     \\        outdated)         cmd_flags="--json --formula --formulae --cask --casks --pinned-only --tap --refresh --quiet -q" ;;
@@ -441,6 +441,7 @@ pub const zsh_script =
     \\                        '--downloads[Wipe the downloads cache]' \
     \\                        '--stale-casks[Remove cache + Caskroom for uninstalled casks]' \
     \\                        '--old-versions[Remove non-latest Cellar versions + retained cask history]' \
+    \\                        '--broken-symlinks[Remove prefix symlinks whose target no longer exists]' \
     \\                        '--housekeeping[All safe scopes at once]' \
     \\                        '--wipe[Nuclear: remove every malt artefact]' \
     \\                        '(--backup -b)'{--backup,-b}'[Write a restorable manifest before deleting]:path:_files' \
@@ -764,6 +765,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l downloads        -d 'Wipe the downloads cache (typed confirm)'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l stale-casks      -d 'Cask cache + Caskroom for uninstalled casks'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l old-versions     -d 'Non-latest Cellar versions + retained cask history (typed confirm)'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l broken-symlinks  -d 'Prefix symlinks whose target no longer exists'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l housekeeping     -d 'All safe scopes at once'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l wipe             -d 'Nuclear: every malt artefact (typed confirm)'
     \\    # purge — shared / wipe-only flags
