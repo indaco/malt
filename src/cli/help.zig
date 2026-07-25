@@ -32,6 +32,7 @@ pub fn helpFor(command: []const u8) []const u8 {
         .{ "search", search_help },
         .{ "doctor", doctor_help },
         .{ "tap", tap_help },
+        .{ "untap", untap_help },
         .{ "migrate", migrate_help },
         .{ "rollback", rollback_help },
         .{ "run", run_help },
@@ -52,6 +53,16 @@ pub fn helpFor(command: []const u8) []const u8 {
         .{ "services", services_help },
         .{ "tui", tui_help },
         .{ "version", version_help },
+        .{ "help", help_help },
+        // `malt help -h` hands the spelling straight to the lookup, so the
+        // argv forms of `help` resolve to the same topic as the word.
+        .{ "-h", help_help },
+        .{ "--help", help_help },
+        // Aliases point at the canonical text; `main.zig`'s `command_names` is
+        // the source of truth for them, but importing it here would invert the
+        // main -> cli dependency edge.
+        .{ "remove", uninstall_help },
+        .{ "ls", list_help },
     });
     return map.get(command) orelse "No help available.\n";
 }
@@ -365,6 +376,16 @@ const tap_help =
     \\
     \\Taps are auto-resolved during install, so explicit `tap` is
     \\usually unnecessary — the auto-tap also pins the SHA on first use.
+    \\
+;
+
+const untap_help =
+    \\Usage: malt untap <user>/<repo>
+    \\
+    \\Drop a tap from the registry, along with the commit SHA it was
+    \\pinned to. Packages already installed from that tap stay installed
+    \\and keep working (`malt outdated --tap` still recognises them), but
+    \\nothing new resolves against the tap until it is re-added.
     \\
 ;
 
@@ -755,6 +776,21 @@ const which_help =
     \\  malt which jq
     \\  malt which /opt/malt/bin/jq
     \\  malt --json which jq
+    \\
+;
+
+const help_help =
+    \\Usage: malt help [<command>]
+    \\
+    \\Show help. Without a command, prints the general usage and the
+    \\command table; with one, prints that command's topic.
+    \\
+    \\  malt help              general usage
+    \\  malt help install      the `install` topic
+    \\  malt install --help    same topic, from the command itself
+    \\
+    \\Every subcommand accepts -h / --help, and both doors print the same
+    \\text to stdout, so `malt install --help | less` works.
     \\
 ;
 
