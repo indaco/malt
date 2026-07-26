@@ -986,7 +986,7 @@ test "loadInstalledKind returns every installed name for the kind, sorted" {
 
 /// Write a single search result with the same ▸ prefix style used by `list`.
 fn writeResult(stdout: *std.Io.Writer, name: []const u8, kind: []const u8) void {
-    const use_color = color.isColorEnabled();
+    const use_color = color.isColorEnabledFor(.stdout);
     if (use_color) stdout.writeAll(color.SemanticStyle.info.code()) catch return;
     stdout.writeAll("  \xe2\x96\xb8 ") catch return;
     if (use_color) stdout.writeAll(color.Style.reset.code()) catch return;

@@ -87,7 +87,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};
 
-    const colorize = !json_mode and color.isColorEnabled();
+    const colorize = !json_mode and color.isColorEnabledFor(.stdout);
 
     // `--cask`/`--formula` are inclusive selectors, like `search`: each
     // flag opts its kind in, and "both set" reads the same as "neither set"

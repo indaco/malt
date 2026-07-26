@@ -129,7 +129,7 @@ pub fn execute(ctx: *const AppCtx, _: std.mem.Allocator, args: []const []const u
     if (output.isJson()) {
         try encodeJson(stdout, res);
     } else {
-        try encodeHuman(stdout, res, color.isColorEnabled());
+        try encodeHuman(stdout, res, color.isColorEnabledFor(.stdout));
     }
 }
 

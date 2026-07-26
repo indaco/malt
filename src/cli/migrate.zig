@@ -501,7 +501,7 @@ fn emitBrewUninstallHint(
     var line: std.ArrayList(u8) = .empty;
     defer line.deinit(allocator);
 
-    const use_color = color.isColorEnabled();
+    const use_color = color.isColorEnabledForStderr();
     const prefix: []const u8 = if (color.isEmojiEnabled()) "  ▸ " else "  > ";
     if (use_color) try line.appendSlice(allocator, color.SemanticStyle.detail.code());
     try line.appendSlice(allocator, prefix);
