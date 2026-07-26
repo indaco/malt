@@ -203,7 +203,7 @@ Define your own palettes in a JSON file at `MALT_THEMES_FILE` (else `{prefix}/et
 
 Each theme needs a `polarity` (`dark`/`light`) and all six roles. A colour is a hex string (`"#rgb"`/`"#rrggbb"`), an `[r, g, b]` array (0–255), or a single 0–255 integer (a 256-colour index).
 
-The file is validated all-or-nothing: any malformed value rejects the whole file and malt keeps the built-in themes (a one-line notice, never a crash). A theme is gated like a built-in - it applies only when its polarity matches the detected background; one built from hex/`[r,g,b]` colours additionally needs a truecolor terminal, while a theme written entirely with 256-colour indexes also paints on a 256-colour terminal.
+The file is validated all-or-nothing: any malformed value rejects the whole file and malt keeps the built-in themes (a one-line notice, never a crash). A theme is gated like a built-in - it applies only when its polarity matches the detected background, and only when the terminal can render its deepest colour: hex/`[r,g,b]` needs truecolor (`COLORTERM=truecolor`/`24bit`), a 256-colour index needs at least a 256-colour terminal (`COLORTERM`, or a `TERM` naming `256color`). A theme the terminal cannot render degrades wholesale to the default palette.
 
 ## Interactive dashboard
 
