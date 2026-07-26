@@ -392,6 +392,86 @@ pub const Linker = struct {
     }
 };
 
+/// A broken symlink is one whose target genuinely does not exist. Any other
+/// `statFile` failure (AccessDenied, …) means "can't tell", so the link is
+/// left intact.
+pub fn isDanglingLinkError(err: anyerror) bool {
+    return err == error.FileNotFound;
+}
+
+/// Deepest nesting `forEachBrokenLink` descends. Prefix trees are shallow
+/// (`share/locale/<lang>/LC_MESSAGES` is about the worst case); the cap only
+/// bounds stack use if something pathological shows up.
+const max_link_depth: u8 = 16;
+
+/// Visit every *dangling* symlink under the prefix's linkable dirs, recursing
+/// into nested directories the way `link` creates them. Keyed off
+/// `linkable_dirs`, so what the sweep inspects cannot drift from what the
+/// linker writes. `visit` receives the open containing dir, that dir's
+/// prefix-relative path, and the entry name, so `<subdir>/<name>` is the full
+/// path while `dir.deleteFile(name)` still resolves.
+pub fn forEachBrokenLink(
+    io: std.Io,
+    prefix: []const u8,
+    context: anytype,
+    comptime visit: fn (@TypeOf(context), dir: std.Io.Dir, subdir: []const u8, name: []const u8) void,
+) void {
+    for (Linker.linkable_dirs) |subdir| {
+        walkLinkDir(io, prefix, subdir, 0, context, visit);
+    }
+}
+
+fn walkLinkDir(
+    io: std.Io,
+    prefix: []const u8,
+    rel: []const u8,
+    depth: u8,
+    context: anytype,
+    comptime visit: fn (@TypeOf(context), dir: std.Io.Dir, subdir: []const u8, name: []const u8) void,
+) void {
+    if (depth >= max_link_depth) return;
+
+    var dir_buf: [512]u8 = undefined;
+    const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ prefix, rel }) catch return;
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    var iter = dir.iterate();
+    while (iter.next(io) catch null) |entry| {
+        // A symlinked directory reports as `.sym_link`, so descending here
+        // never leaves the prefix or loops.
+        if (entry.kind == .directory) {
+            var child_buf: [512]u8 = undefined;
+            const child = std.fmt.bufPrint(&child_buf, "{s}/{s}", .{ rel, entry.name }) catch continue;
+            walkLinkDir(io, prefix, child, depth + 1, context, visit);
+            continue;
+        }
+        if (entry.kind != .sym_link) continue;
+        _ = dir.statFile(io, entry.name, .{}) catch |err| {
+            if (isDanglingLinkError(err)) visit(context, dir, rel, entry.name);
+            continue;
+        };
+    }
+}
+
+test "the broken-link sweep covers every dir the linker writes into" {
+    // The sweep used to keep its own copy of this list, which silently lost
+    // `etc`. Deriving it here is what stops that happening again.
+    const swept: []const []const u8 = &Linker.linkable_dirs;
+    var has_etc = false;
+    for (swept) |d| {
+        if (std.mem.eql(u8, d, "etc")) has_etc = true;
+    }
+    try testing.expect(has_etc);
+    try testing.expectEqual(@as(usize, 6), swept.len);
+}
+
+test "isDanglingLinkError: only a missing target counts" {
+    try testing.expect(isDanglingLinkError(error.FileNotFound));
+    try testing.expect(!isDanglingLinkError(error.AccessDenied));
+    try testing.expect(!isDanglingLinkError(error.SymLinkLoop));
+}
+
 /// Read-only link status for a keg: true iff any symlink is recorded for
 /// it in `links`. Counterpart to `link`/`unlink`; `mt list --json
 /// --linked` uses it to report whether a keg is active in the prefix.

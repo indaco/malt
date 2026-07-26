@@ -617,7 +617,9 @@ Scopes (one or more required):
   --downloads          Wipe {cache}/downloads entirely        (typed confirm)
   --stale-casks        Cask cache + Caskroom for uninstalled casks
   --old-versions       Non-latest Cellar versions + retained cask history (typed confirm)
+  --broken-symlinks    Prefix symlinks whose target no longer exists
   --housekeeping       = --store-orphans --unused-deps --cache --stale-casks
+                         --broken-symlinks
   --wipe               Nuclear: every malt artefact on disk    (typed confirm)
 
 Shared flags:
@@ -651,8 +653,9 @@ For per-package removal use `mt uninstall <name>`.
 Usage: malt cleanup [flags]
 
 Shorthand for `malt purge --housekeeping` — the safe daily-driver
-scope (store-orphans + unused-deps + cache + stale-casks). For the
-full menu (downloads scrub, old-versions, wipe) use `mt purge`.
+scope (store-orphans + unused-deps + cache + stale-casks +
+broken-symlinks). For the full menu (downloads scrub, old-versions,
+wipe) use `mt purge`.
 
 Flags pass through to `purge`; the common ones:
   --dry-run, -n        Preview only

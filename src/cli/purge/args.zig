@@ -24,16 +24,19 @@ pub const Scope = struct {
     downloads: bool = false,
     stale_casks: bool = false,
     old_versions: bool = false,
+    broken_symlinks: bool = false,
     wipe: bool = false,
 
     pub fn isEmpty(self: Scope) bool {
         return !(self.store_orphans or self.unused_deps or self.cache or
-            self.downloads or self.stale_casks or self.old_versions or self.wipe);
+            self.downloads or self.stale_casks or self.old_versions or
+            self.broken_symlinks or self.wipe);
     }
 
     pub fn anyNonWipe(self: Scope) bool {
         return self.store_orphans or self.unused_deps or self.cache or
-            self.downloads or self.stale_casks or self.old_versions;
+            self.downloads or self.stale_casks or self.old_versions or
+            self.broken_symlinks;
     }
 };
 
@@ -85,6 +88,7 @@ const Flag = enum {
     downloads,
     stale_casks,
     old_versions,
+    broken_symlinks,
     housekeeping,
     wipe,
     yes,
@@ -100,6 +104,7 @@ const flag_map = std.StaticStringMap(Flag).initComptime(.{
     .{ "--downloads", .downloads },
     .{ "--stale-casks", .stale_casks },
     .{ "--old-versions", .old_versions },
+    .{ "--broken-symlinks", .broken_symlinks },
     .{ "--housekeeping", .housekeeping },
     .{ "--wipe", .wipe },
     .{ "--yes", .yes },
@@ -137,11 +142,13 @@ pub fn parseArgs(args: []const []const u8) Error!Options {
             .downloads => opts.scope.downloads = true,
             .stale_casks => opts.scope.stale_casks = true,
             .old_versions => opts.scope.old_versions = true,
+            .broken_symlinks => opts.scope.broken_symlinks = true,
             .housekeeping => {
                 opts.scope.store_orphans = true;
                 opts.scope.unused_deps = true;
                 opts.scope.cache = true;
                 opts.scope.stale_casks = true;
+                opts.scope.broken_symlinks = true;
             },
             .wipe => opts.scope.wipe = true,
             .yes => opts.yes = true,
