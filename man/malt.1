@@ -768,7 +768,10 @@ Environment:
   MALT_CACHE        Override cache directory (default: {prefix}/cache)
   MALT_BREW_PATH    Override the real brew binary unknown commands fall
                     back to (default: probes standard install paths)
-  NO_COLOR          Disable colored output
+  NO_COLOR          Disable colored output; overrides CLICOLOR_FORCE
+  CLICOLOR=0        Disable colored output
+  CLICOLOR_FORCE=1  Emit colored output even when stderr is not a
+                    terminal (NO_COLOR still wins)
   MALT_NO_EMOJI     Disable emoji in output
   MALT_NO_VERSION_NOTIFIER=1
                     Suppress the "newer malt available" stderr notice
