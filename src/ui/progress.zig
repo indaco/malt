@@ -443,7 +443,7 @@ pub const ProgressBar = struct {
 
         // Glyph: animated spinner while in progress, green ✓ when done.
         const done = self.total > 0 and self.cur() >= self.total;
-        const use_color = color.isColorEnabled();
+        const use_color = color.isColorEnabledForStderr();
         const g = self.glyph();
 
         if (use_color) {
@@ -480,7 +480,7 @@ pub const ProgressBar = struct {
     /// fallback over a corrupt frame.
     fn writeCounterLine(self: *const ProgressBar, w: *std.Io.Writer, cols: u16, value: []const u8) std.Io.Writer.Error!void {
         const done = self.total > 0 and self.cur() >= self.total;
-        const use_color = color.isColorEnabled();
+        const use_color = color.isColorEnabledForStderr();
 
         try w.writeAll("  ");
 
@@ -563,7 +563,7 @@ pub const ProgressBar = struct {
                     // Bar
                     const filled: u64 = if (self.total > 0) @min((self.cur() * bw) / self.total, bw) else 0;
                     const empty = bw - filled;
-                    if (color.isColorEnabled()) {
+                    if (color.isColorEnabledForStderr()) {
                         w.writeAll(color.SemanticStyle.info.code()) catch break :body;
                         var i: u64 = 0;
                         while (i < filled) : (i += 1) w.writeAll("\xe2\x94\x81") catch break :body; // ━
@@ -596,7 +596,7 @@ pub const ProgressBar = struct {
     /// overflow — so the verbose readout gives way before the bar does. `bw` is
     /// the bar width already drawn; the budget is measured against it.
     fn writeDetail(self: *const ProgressBar, w: *std.Io.Writer, cols: ?u16, bw: u64) std.Io.Writer.Error!void {
-        const use_color = color.isColorEnabled();
+        const use_color = color.isColorEnabledForStderr();
         const dim_code = if (use_color) color.SemanticStyle.detail.code() else "";
         const reset_code = if (use_color) color.Style.reset.code() else "";
 
@@ -679,7 +679,7 @@ pub const ProgressBar = struct {
                 // writeLabel already renders the animated spinner as the line glyph.
                 self.writeLabel(&w) catch break :body;
 
-                const use_color = color.isColorEnabled();
+                const use_color = color.isColorEnabledForStderr();
                 const dim_code = if (use_color) color.SemanticStyle.detail.code() else "";
                 const reset_code = if (use_color) color.Style.reset.code() else "";
 

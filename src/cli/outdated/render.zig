@@ -85,7 +85,7 @@ pub fn writeJsonArray(
 /// Match the `mt list` / `mt search` row shape: cyan bullet, plain
 /// name, dimmed `(installed)`, warn-coloured `≠ latest`, and an
 /// optional dim `[kind]` tag for casks. Honours `NO_COLOR` / pipes
-/// automatically via `color.isColorEnabled()`.
+/// automatically via `color.isColorEnabledFor(.stdout)`.
 fn writeEntry(stdout: *std.Io.Writer, e: OutdatedEntry, kind_tag: ?[]const u8) void {
     if (output.isQuiet()) {
         stdout.writeAll(e.name) catch return;
@@ -112,7 +112,7 @@ fn isDowngrade(installed: []const u8, latest: []const u8) bool {
 }
 
 fn writeBullet(stdout: *std.Io.Writer) void {
-    if (color.isColorEnabled()) {
+    if (color.isColorEnabledFor(.stdout)) {
         stdout.writeAll(color.SemanticStyle.info.code()) catch return;
         stdout.writeAll("  \xe2\x96\xb8 ") catch return;
         stdout.writeAll(color.Style.reset.code()) catch return;
@@ -128,7 +128,7 @@ fn writeStyledSpan(
     body: []const u8,
     close: []const u8,
 ) void {
-    const use_color = color.isColorEnabled();
+    const use_color = color.isColorEnabledFor(.stdout);
     if (use_color) stdout.writeAll(style_code) catch return;
     stdout.writeAll(open) catch return;
     stdout.writeAll(body) catch return;

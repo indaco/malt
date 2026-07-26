@@ -189,7 +189,7 @@ pub fn printCheck(name: []const u8, status: CheckStatus, detail: ?[]const u8) vo
     var w: std.Io.Writer = .fixed(&buf);
     // Truncation of an oversized row is acceptable - `buffered()` still emits what fit.
     renderCheckRow(&w, status, name, detail, .{
-        .color = color.isColorEnabled(),
+        .color = color.isColorEnabledForStderr(),
         .emoji = color.isEmojiEnabled(),
     }) catch {};
     output.writeStderrAll(w.buffered());

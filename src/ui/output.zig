@@ -282,7 +282,7 @@ fn writePrefixLine(
     msg: []const u8,
 ) void {
     const prefix: []const u8 = if (color.isEmojiEnabled()) emoji_prefix else plain_prefix;
-    const colorize = color.isColorEnabled();
+    const colorize = color.isColorEnabledForStderr();
     lockStderr();
     defer unlockStderr();
     switch (shape) {
@@ -357,7 +357,7 @@ pub fn question(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const prefix: []const u8 = "  ? ";
-    const colorize = color.isColorEnabled();
+    const colorize = color.isColorEnabledForStderr();
     lockStderr();
     defer unlockStderr();
     if (colorize) {
@@ -379,7 +379,7 @@ fn lineStyled(style_code: ?[]const u8, comptime fmt: []const u8, args: anytype) 
     if (quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    const colorize = color.isColorEnabled();
+    const colorize = color.isColorEnabledForStderr();
     lockStderr();
     defer unlockStderr();
     if (style_code) |code| {
