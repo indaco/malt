@@ -129,7 +129,7 @@ pub const Reporter = struct {
 fn writeItem(text: []const u8) void {
     if (output.isQuiet()) return; // raw stderr writes don't honour --quiet on their own
     const bullet: []const u8 = if (color.isEmojiEnabled()) "    • " else "    - ";
-    if (color.isColorEnabled()) {
+    if (color.isColorEnabledForStderr()) {
         output.writeStderrAll(color.SemanticStyle.detail.code());
         output.writeStderrAll(bullet);
         output.writeStderrAll(color.Style.reset.code());
@@ -148,7 +148,7 @@ fn writeMore(remaining: usize) void {
         "    … {d} more (use --verbose to show all)",
         .{remaining},
     ) catch return;
-    if (color.isColorEnabled()) {
+    if (color.isColorEnabledForStderr()) {
         output.writeStderrAll(color.SemanticStyle.detail.code());
         output.writeStderrAll(msg);
         output.writeStderrAll(color.Style.reset.code());
@@ -190,10 +190,10 @@ fn writeRule() void {
     if (output.isQuiet()) return;
     var buf: [rule_width]u8 = undefined;
     @memset(buf[0..], '-');
-    if (color.isColorEnabled()) output.writeStderrAll(color.SemanticStyle.detail.code());
+    if (color.isColorEnabledForStderr()) output.writeStderrAll(color.SemanticStyle.detail.code());
     output.writeStderrAll("  ");
     output.writeStderrAll(buf[0..rule_width]);
-    if (color.isColorEnabled()) output.writeStderrAll(color.Style.reset.code());
+    if (color.isColorEnabledForStderr()) output.writeStderrAll(color.Style.reset.code());
     output.writeStderrAll("\n");
 }
 

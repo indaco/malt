@@ -326,7 +326,8 @@ fn enabledCache(stream: Stream) *Tri {
 }
 
 /// The colour question, asked about the stream the caller actually writes to.
-/// Writes to stdout must ask `.stdout`; `isColorEnabled()` answers for stderr.
+/// There is no default: every caller names its stream, or uses the named
+/// `isColorEnabledForStderr()` helper.
 pub fn isColorEnabledFor(stream: Stream) bool {
     const cache = enabledCache(stream);
     switch (@atomicLoad(Tri, cache, .acquire)) {
@@ -387,9 +388,9 @@ test "a forced or vetoed policy answers the same for both streams" {
     try std.testing.expect(!isColorEnabledFor(.stderr));
 }
 
-test "isColorEnabled is the stderr answer, not a copy that can drift" {
-    // The shim keeps ~20 stderr call sites unchanged; if it ever stops tracking
-    // `.stderr` exactly, those callers silently follow the wrong stream.
+test "isColorEnabledForStderr is the stderr answer, not a copy that can drift" {
+    // The named helper keeps the many stderr call sites short; if it ever stops
+    // tracking `.stderr` exactly, those callers silently follow the wrong stream.
     const io = std.Options.debug_io;
     defer {
         setTtyForTest(null);
@@ -401,14 +402,14 @@ test "isColorEnabled is the stderr answer, not a copy that can drift" {
         setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
         setStreamTtyForTest(.stdout, !stderr_is_tty); // opposite, so a stdout-derived shim shows up
         setStreamTtyForTest(.stderr, stderr_is_tty);
-        try std.testing.expectEqual(isColorEnabledFor(.stderr), isColorEnabled());
-        try std.testing.expectEqual(stderr_is_tty, isColorEnabled());
+        try std.testing.expectEqual(isColorEnabledFor(.stderr), isColorEnabledForStderr());
+        try std.testing.expectEqual(stderr_is_tty, isColorEnabledForStderr());
     }
 }
 
-/// Stderr shim, kept so the many stderr writers read unchanged. Review
-/// convention: a code path that writes stdout must call `isColorEnabledFor`.
-pub fn isColorEnabled() bool {
+/// Convenience for the many stderr writers. Named for its stream so a stdout
+/// writer cannot reach for it by habit and silently ask the wrong question.
+pub fn isColorEnabledForStderr() bool {
     return isColorEnabledFor(.stderr);
 }
 
@@ -423,7 +424,7 @@ test "CLICOLOR_FORCE=1 emits colour even when stderr is not a terminal" {
         setForTest(null, null);
         setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
     }
-    try std.testing.expect(isColorEnabled());
+    try std.testing.expect(isColorEnabledForStderr());
 }
 
 test "CLICOLOR=0 suppresses colour even when stderr is a terminal" {
@@ -435,7 +436,7 @@ test "CLICOLOR=0 suppresses colour even when stderr is a terminal" {
         setForTest(null, null);
         setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
     }
-    try std.testing.expect(!isColorEnabled());
+    try std.testing.expect(!isColorEnabledForStderr());
 }
 
 test "with none of the three set, colour still follows the stderr TTY probe" {
@@ -449,11 +450,11 @@ test "with none of the three set, colour still follows the stderr TTY probe" {
 
     setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
     setTtyForTest(true);
-    try std.testing.expect(isColorEnabled());
+    try std.testing.expect(isColorEnabledForStderr());
 
     setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
     setTtyForTest(false);
-    try std.testing.expect(!isColorEnabled());
+    try std.testing.expect(!isColorEnabledForStderr());
 }
 
 pub fn isEmojiEnabled() bool {
@@ -504,7 +505,7 @@ pub fn setThemeForTest(t: ?Theme) void {
 // ─── atomic sentinel cache guards ────────────────────────────────────
 //
 // The env/TTY caches are read on first touch from worker threads (a migrate
-// worker reaches `isColorEnabled`/`isEmojiEnabled` via `output.warn`), so their
+// worker reaches `isColorEnabledFor`/`isEmojiEnabled` via `output.warn`), so their
 // storage must be atomic-friendly sentinel enums — never `?T`, whose layout is
 // not guaranteed atomic. These structural guards fail to build the moment a
 // cache reverts to an optional.
@@ -605,7 +606,7 @@ test "setRuntime drops the enabled/policy/truecolor/background caches so a new e
 
     // Both streams touched, so the re-seed has two enablement caches to drop.
     try std.testing.expect(!isColorEnabledFor(.stdout)); // CLICOLOR=0 beats the terminal
-    try std.testing.expect(!isColorEnabled());
+    try std.testing.expect(!isColorEnabledForStderr());
     try std.testing.expect(isEmojiEnabled());
     try std.testing.expect(truecolorSupported());
     try std.testing.expectEqual(Background.light, background());
@@ -618,7 +619,7 @@ test "setRuntime drops the enabled/policy/truecolor/background caches so a new e
     try std.testing.expect(@atomicLoad(Tri, &stderr_enabled, .acquire) == .unresolved);
     try std.testing.expect(@atomicLoad(PolicyCache, &color_policy_cached, .acquire) == .unresolved);
     try std.testing.expect(isColorEnabledFor(.stdout)); // CLICOLOR gone ⇒ back to the probe, which says terminal
-    try std.testing.expect(isColorEnabled());
+    try std.testing.expect(isColorEnabledForStderr());
     try std.testing.expect(!isEmojiEnabled()); // MALT_NO_EMOJI now set
     try std.testing.expect(!truecolorSupported()); // COLORTERM now gone
     try std.testing.expectEqual(Background.dark, background()); // MALT_THEME flipped
@@ -647,7 +648,7 @@ test "test setters round-trip; null recomputes from env" {
 
     // Forced values are observed verbatim.
     setForTest(true, false);
-    try std.testing.expect(isColorEnabled());
+    try std.testing.expect(isColorEnabledForStderr());
     try std.testing.expect(!isEmojiEnabled());
     setBackgroundForTest(.dark);
     try std.testing.expectEqual(Background.dark, background());

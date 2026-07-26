@@ -107,7 +107,7 @@ fn printNotice(latest_tag: []const u8, current_version: []const u8) void {
     ) catch return;
     const dim_msg = "Run 'mt version update' to upgrade, or set MALT_NO_VERSION_NOTIFIER=1 to silence this.";
 
-    const colorize = color.isColorEnabled();
+    const colorize = color.isColorEnabledForStderr();
     const emoji = color.isEmojiEnabled();
     const notice_prefix: []const u8 = if (emoji) "ⓘ " else "i ";
     const dim_prefix: []const u8 = if (emoji) "▸ " else "> ";

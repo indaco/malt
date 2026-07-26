@@ -586,7 +586,7 @@ pub fn emitFixHintIfNeeded(fix_requested: bool) void {
 fn writeStyledDetail(text: []const u8) void {
     var line_buf: [1024]u8 = undefined;
     const line = std.fmt.bufPrint(&line_buf, "    - {s}\n", .{text}) catch return;
-    if (color.isColorEnabled()) {
+    if (color.isColorEnabledForStderr()) {
         output.writeStderrAll(color.SemanticStyle.detail.code());
         output.writeStderrAll(line);
         output.writeStderrAll(color.Style.reset.code());
