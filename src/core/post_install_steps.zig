@@ -49,6 +49,7 @@ const StepTag = enum {
     symlink,
     link_dir,
     link_children,
+    remove,
     compile_gsettings_schemas,
     gio_querymodules,
     gdk_pixbuf_query_loaders,
@@ -67,6 +68,7 @@ const step_map = std.StaticStringMap(StepTag).initComptime(.{
     .{ "symlink", .symlink },
     .{ "link_dir", .link_dir },
     .{ "link_children", .link_children },
+    .{ "remove", .remove },
     .{ "compile_gsettings_schemas", .compile_gsettings_schemas },
     .{ "gio_querymodules", .gio_querymodules },
     .{ "gdk_pixbuf_query_loaders", .gdk_pixbuf_query_loaders },
@@ -159,6 +161,7 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         .symlink => stepSymlink(ctx, obj),
         .link_dir => stepLinkDir(ctx, obj),
         .link_children => stepLinkChildren(ctx, obj),
+        .remove => stepRemove(ctx, obj),
         .compile_gsettings_schemas => runPathTool(ctx, obj, "glib", "glib-compile-schemas", &.{}),
         .gio_querymodules => runPathTool(ctx, obj, "glib", "gio-querymodules", &.{}),
         .update_mime_database => runPathTool(ctx, obj, "shared-mime-info", "update-mime-database", &.{}),
@@ -192,21 +195,49 @@ pub fn expandTemplates(ctx: StepsCtx, s: []const u8) ![]const u8 {
     return out.toOwnedSlice(ctx.allocator);
 }
 
-const template_map = std.StaticStringMap(enum { name, version, version_major, version_major_minor, homebrew_prefix }).initComptime(.{
+/// Note the deliberate split from `base_map` below: a `{{bin}}` **template**
+/// is the formula's own `bin` — i.e. inside the keg — whereas a `bin` **base**
+/// is `<prefix>/bin`. Upstream uses the template form to name a source in the
+/// keg and the base form to name a target in the prefix; a keg-only formula
+/// publishing its launcher uses both in the same step.
+const template_map = std.StaticStringMap(enum {
+    name,
+    version,
+    version_major,
+    version_major_minor,
+    homebrew_prefix,
+    keg_bin,
+    bash_completion,
+    zsh_completion,
+    fish_completion,
+    pwsh_completion,
+}).initComptime(.{
     .{ "name", .name },
     .{ "version", .version },
     .{ "version.major", .version_major },
     .{ "version.major_minor", .version_major_minor },
     .{ "HOMEBREW_PREFIX", .homebrew_prefix },
+    .{ "bin", .keg_bin },
+    .{ "bash_completion", .bash_completion },
+    .{ "zsh_completion", .zsh_completion },
+    .{ "fish_completion", .fish_completion },
+    .{ "pwsh_completion", .pwsh_completion },
 });
 
 fn templateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
+    const a = ctx.allocator;
     return switch (template_map.get(token) orelse return null) {
         .name => ctx.name,
         .version => ctx.version,
         .version_major => versionComponents(ctx.version, 1),
         .version_major_minor => versionComponents(ctx.version, 2),
         .homebrew_prefix => ctx.prefix,
+        // Keg-relative; the layouts are Homebrew's standard completion dirs.
+        .keg_bin => std.fmt.allocPrint(a, "{s}/bin", .{ctx.keg_path}) catch null,
+        .bash_completion => std.fmt.allocPrint(a, "{s}/etc/bash_completion.d", .{ctx.keg_path}) catch null,
+        .zsh_completion => std.fmt.allocPrint(a, "{s}/share/zsh/site-functions", .{ctx.keg_path}) catch null,
+        .fish_completion => std.fmt.allocPrint(a, "{s}/share/fish/vendor_completions.d", .{ctx.keg_path}) catch null,
+        .pwsh_completion => std.fmt.allocPrint(a, "{s}/share/pwsh/completions", .{ctx.keg_path}) catch null,
     };
 }
 
@@ -288,6 +319,12 @@ fn resolvePathSpec(ctx: StepsCtx, obj: std.json.ObjectMap, key: []const u8) ?[]c
         logUnsupported(ctx, key);
         return null;
     };
+    return resolveSpec(ctx, spec, key);
+}
+
+/// Resolve one `{base, path, formula}` spec. Split out of `resolvePathSpec` so
+/// steps carrying an array of specs can reuse the same base/template handling.
+fn resolveSpec(ctx: StepsCtx, spec: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const raw = getString(spec, "path") orelse {
         logUnsupported(ctx, key);
         return null;
@@ -373,14 +410,52 @@ fn stepSymlink(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     if (!confined(ctx, target)) return false;
     const source = resolvePathSpec(ctx, obj, "source") orelse return false;
     if (source.len == 0 or source[0] != '/') {
-        // ponytail: relative symlink sources are unused upstream; extend
-        // when a formula ships one.
+        // Still refused, but now only for a genuinely relative source. A
+        // `{{bin}}`-style token used to land here because it survived
+        // expansion unresolved, which read as relative.
         logUnsupported(ctx, "symlink with a relative source");
         return false;
     }
     mkParent(ctx, target);
     if (getFlag(obj, "force")) std.Io.Dir.cwd().deleteFile(ctx.io, target) catch {};
     std.Io.Dir.symLinkAbsolute(ctx.io, source, target, .{}) catch {};
+    return true;
+}
+
+/// Retire a symlink this formula planted in an earlier version.
+///
+/// Guarded delete, never an unconditional one: the step identifies its own link
+/// by a substring of the link's target, so anything else living at that path —
+/// a real file, or a link pointing somewhere unrelated — belongs to something
+/// else and must survive. `readLinkAbsolute` doubles as the type check; it
+/// fails on a regular file, which is exactly the skip we want. The link itself
+/// is unlinked, never followed.
+fn stepRemove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const needle = getString(obj, "symlink_target_contains") orelse {
+        // Without the guard this would be an unconditional recursive delete
+        // driven by formula data — not something to infer.
+        logUnsupported(ctx, "remove without symlink_target_contains");
+        return false;
+    };
+    const paths_val = obj.get("paths") orelse {
+        logUnsupported(ctx, "remove");
+        return false;
+    };
+    if (paths_val != .array) {
+        logUnsupported(ctx, "remove");
+        return false;
+    }
+
+    for (paths_val.array.items) |item| {
+        if (item != .object) continue;
+        const path = resolveSpec(ctx, item.object, "paths") orelse continue;
+        if (!confined(ctx, path)) continue;
+
+        var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const len = std.Io.Dir.readLinkAbsolute(ctx.io, path, &target_buf) catch continue;
+        if (std.mem.indexOf(u8, target_buf[0..len], needle) == null) continue;
+        std.Io.Dir.cwd().deleteFile(ctx.io, path) catch {};
+    }
     return true;
 }
 
@@ -901,6 +976,109 @@ test "execute returns false when the formula carries no steps" {
     try testing.expect(!h.flog.hasErrors());
 }
 
+test "execute links keg-relative template paths into the prefix" {
+    // A keg-only formula can still publish its launcher and completions from
+    // post_install. Those steps name the source with a `{{bin}}`-style token
+    // rather than a `base`, so the token has to resolve to a keg path — an
+    // unexpanded one is not absolute and used to be refused as "relative".
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const io = h.io;
+    const a = h.arena.allocator();
+
+    const seeds = [_][]const u8{ "bin", "etc/bash_completion.d", "share/zsh/site-functions", "share/fish/vendor_completions.d", "share/pwsh/completions" };
+    const leaves = [_][]const u8{ "glow", "glow", "_glow", "glow.fish", "_glow.ps1" };
+    for (seeds, leaves) |dir, leaf| {
+        const d = try std.fmt.allocPrint(a, "{s}/{s}", .{ h.keg, dir });
+        try std.Io.Dir.cwd().createDirPath(io, d);
+        const f = try std.Io.Dir.createFileAbsolute(io, try std.fmt.allocPrint(a, "{s}/{s}", .{ d, leaf }), .{});
+        f.close(io);
+    }
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"symlink","force":true,"source":{"path":"{{bin}}/glow"},"target":{"path":"{{HOMEBREW_PREFIX}}/bin/glow"}},
+        \\ {"type":"symlink","force":true,"source":{"path":"{{bash_completion}}/glow"},"target":{"path":"{{HOMEBREW_PREFIX}}/etc/bash_completion.d/glow"}},
+        \\ {"type":"symlink","force":true,"source":{"path":"{{zsh_completion}}/_glow"},"target":{"path":"{{HOMEBREW_PREFIX}}/share/zsh/site-functions/_glow"}},
+        \\ {"type":"symlink","force":true,"source":{"path":"{{fish_completion}}/glow.fish"},"target":{"path":"{{HOMEBREW_PREFIX}}/share/fish/vendor_completions.d/glow.fish"}},
+        \\ {"type":"symlink","force":true,"source":{"path":"{{pwsh_completion}}/_glow.ps1"},"target":{"path":"{{HOMEBREW_PREFIX}}/share/pwsh/completions/_glow.ps1"}}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 5), h.flog.handled_top_level);
+
+    const links = [_][]const u8{
+        try std.fmt.allocPrint(a, "{s}/bin/glow", .{h.prefix}),
+        try std.fmt.allocPrint(a, "{s}/etc/bash_completion.d/glow", .{h.prefix}),
+        try std.fmt.allocPrint(a, "{s}/share/zsh/site-functions/_glow", .{h.prefix}),
+        try std.fmt.allocPrint(a, "{s}/share/fish/vendor_completions.d/glow.fish", .{h.prefix}),
+        try std.fmt.allocPrint(a, "{s}/share/pwsh/completions/_glow.ps1", .{h.prefix}),
+    };
+    for (links) |p| try std.Io.Dir.accessAbsolute(io, p, .{});
+}
+
+test "execute removes a symlink whose target matches the guard" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const io = h.io;
+    const a = h.arena.allocator();
+
+    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    const stale = try std.fmt.allocPrint(a, "{s}/glow-init", .{bin});
+    const dest = try std.fmt.allocPrint(a, "{s}/bin/glow", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/bin", .{h.keg}));
+    (try std.Io.Dir.createFileAbsolute(io, dest, .{})).close(io);
+    try std.Io.Dir.symLinkAbsolute(io, dest, stale, .{});
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"remove","symlink_target_contains":"Cellar/glow/","paths":[{"path":"{{HOMEBREW_PREFIX}}/bin/glow-init"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, stale, .{}));
+}
+
+test "execute leaves a regular file alone on remove" {
+    // The guard names a symlink target, so a real file at that path is not the
+    // thing the step meant to delete. Removing it would destroy user data.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const io = h.io;
+    const a = h.arena.allocator();
+
+    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    const real = try std.fmt.allocPrint(a, "{s}/glow-init", .{bin});
+    (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"remove","symlink_target_contains":"Cellar/glow/","paths":[{"path":"{{HOMEBREW_PREFIX}}/bin/glow-init"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try std.Io.Dir.accessAbsolute(io, real, .{});
+}
+
+test "execute keeps a symlink whose target does not match the guard" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const io = h.io;
+    const a = h.arena.allocator();
+
+    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    const link = try std.fmt.allocPrint(a, "{s}/glow-init", .{bin});
+    const dest = try std.fmt.allocPrint(a, "{s}/etc/elsewhere", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix}));
+    (try std.Io.Dir.createFileAbsolute(io, dest, .{})).close(io);
+    try std.Io.Dir.symLinkAbsolute(io, dest, link, .{});
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"remove","symlink_target_contains":"Cellar/glow/","paths":[{"path":"{{HOMEBREW_PREFIX}}/bin/glow-init"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try std.Io.Dir.accessAbsolute(io, link, .{});
+}
+
 test "execute runs the filesystem tier natively and leaves the log clean" {
     var h = try TestHarness.init();
     defer h.deinit();
@@ -1313,7 +1491,7 @@ test "supportedStepType matches the executable tier and rejects the rest" {
         "mkdir_p",                  "touch",                 "write",                     "symlink",
         "link_dir",                 "link_children",         "compile_gsettings_schemas", "gio_querymodules",
         "gdk_pixbuf_query_loaders", "gtk_update_icon_cache", "update_mime_database",      "update_desktop_database",
-        "init_data_dir",
+        "init_data_dir",            "remove",
     };
     for (native) |t| try testing.expect(supportedStepType(t));
     const routed = [_][]const u8{ "mkdir", "move", "move_children", "frobnicate" };
