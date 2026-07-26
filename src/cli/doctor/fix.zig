@@ -7,6 +7,7 @@
 const std = @import("std");
 const lock_mod = @import("../../db/lock.zig");
 const sqlite = @import("../../db/sqlite.zig");
+const linker_mod = @import("../../core/linker.zig");
 
 /// Auto-fix classes that are reversible and never touch user data.
 pub const FixKind = enum { stale_lock, orphaned_store, broken_symlinks };
@@ -116,73 +117,13 @@ pub fn fixBrokenSymlinks(io: std.Io, prefix: []const u8) u32 {
     return walkBrokenSymlinks(io, prefix, true);
 }
 
-/// A broken symlink is one whose target genuinely does not exist. Any other
-/// `statFile` failure (AccessDenied, …) means "can't tell" — the link is live,
-/// so it must be left intact. Shared by the fix walk and the doctor check so
-/// the two cannot drift into report-vs-remove disagreement.
-pub fn isDanglingLinkError(err: anyerror) bool {
-    return err == error.FileNotFound;
-}
+/// Re-exported so doctor's own callers keep one name for the predicate.
+pub const isDanglingLinkError = linker_mod.isDanglingLinkError;
 
-const link_dirs = [_][]const u8{ "bin", "lib", "include", "share", "sbin" };
-
-/// Deepest nesting the walk descends. Prefix trees are shallow in practice
-/// (`share/locale/<lang>/LC_MESSAGES` is about the worst case); the cap only
-/// bounds stack use if something pathological shows up.
-const max_link_depth: u8 = 16;
-
-/// Visit every *dangling* symlink under the prefix's link dirs, recursing into
-/// nested directories: the linker mirrors keg trees, so a broken link can sit
-/// at `share/man/man1/foo.1` as easily as at `bin/foo`. One target is resolved
-/// per entry and only `FileNotFound` counts, so an inaccessible-but-intact link
-/// is skipped. `visit` receives the open containing dir, that dir's
-/// prefix-relative path, and the entry name — so `<subdir>/<name>` is the full
-/// path and `dir.deleteFile(name)` still resolves. The single traversal behind
-/// both the fix walk and the doctor check, so the two cannot report different
-/// link sets.
-pub fn forEachBrokenSymlink(
-    io: std.Io,
-    prefix: []const u8,
-    context: anytype,
-    comptime visit: fn (@TypeOf(context), dir: std.Io.Dir, subdir: []const u8, name: []const u8) void,
-) void {
-    for (link_dirs) |subdir| {
-        walkLinkDir(io, prefix, subdir, 0, context, visit);
-    }
-}
-
-fn walkLinkDir(
-    io: std.Io,
-    prefix: []const u8,
-    rel: []const u8,
-    depth: u8,
-    context: anytype,
-    comptime visit: fn (@TypeOf(context), dir: std.Io.Dir, subdir: []const u8, name: []const u8) void,
-) void {
-    if (depth >= max_link_depth) return;
-
-    var dir_buf: [512]u8 = undefined;
-    const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ prefix, rel }) catch return;
-    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
-    defer dir.close(io);
-
-    var iter = dir.iterate();
-    while (iter.next(io) catch null) |entry| {
-        // A symlinked directory reports as `.sym_link`, so descending here
-        // never leaves the prefix or loops.
-        if (entry.kind == .directory) {
-            var child_buf: [512]u8 = undefined;
-            const child = std.fmt.bufPrint(&child_buf, "{s}/{s}", .{ rel, entry.name }) catch continue;
-            walkLinkDir(io, prefix, child, depth + 1, context, visit);
-            continue;
-        }
-        if (entry.kind != .sym_link) continue;
-        _ = dir.statFile(io, entry.name, .{}) catch |err| {
-            if (isDanglingLinkError(err)) visit(context, dir, rel, entry.name);
-            continue;
-        };
-    }
-}
+/// The prefix walk lives in `core/linker` next to the code that creates the
+/// links, so the set of directories swept is derived from the set written
+/// rather than kept in a second list that can drift.
+pub const forEachBrokenSymlink = linker_mod.forEachBrokenLink;
 
 fn walkBrokenSymlinks(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
     const Sweep = struct {

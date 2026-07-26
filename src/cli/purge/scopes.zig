@@ -301,6 +301,53 @@ fn pruneCacheRecursive(io: std.Io, cache_dir: []const u8, max_age_days: i64, dry
 
 // ── Tier: --downloads (was `cleanup -s`) ────────────────────────────────────
 
+// ── Tier: --broken-symlinks ────────────────────────────────────────────────
+
+/// Unlink prefix symlinks whose target is gone. `doctor` names `mt cleanup` as
+/// the repair for these, so the sweep has to live here and not only behind
+/// `doctor --fix`.
+pub fn runBrokenSymlinks(ctx: *const AppCtx, prefix: []const u8, dry_run: bool) !TierResult {
+    var result: TierResult = .{};
+    var rep = report.Reporter.init("broken-symlinks", dry_run);
+
+    // Two-pass so the header count is accurate before any item prints,
+    // matching the other scopes. The walk is the same both times.
+    const Counter = struct {
+        n: usize = 0,
+        fn visit(self: *@This(), _: std.Io.Dir, _: []const u8, _: []const u8) void {
+            self.n += 1;
+        }
+    };
+    var counter = Counter{};
+    linker_mod.forEachBrokenLink(ctx.io, prefix, &counter, Counter.visit);
+
+    if (counter.n == 0) {
+        rep.empty("no broken symlinks");
+        return result;
+    }
+    rep.header(counter.n, "broken symlink", "broken symlinks");
+
+    const Sweep = struct {
+        io: std.Io,
+        rep: *report.Reporter,
+        dry_run: bool,
+        removed: u32 = 0,
+        fn visit(self: *@This(), dir: std.Io.Dir, subdir: []const u8, name: []const u8) void {
+            // A link we cannot unlink was not removed, so don't count it.
+            if (!self.dry_run) dir.deleteFile(self.io, name) catch return;
+            var buf: [512]u8 = undefined;
+            self.rep.item(std.fmt.bufPrint(&buf, "{s}/{s}", .{ subdir, name }) catch name);
+            self.removed += 1;
+        }
+    };
+    var sweep = Sweep{ .io = ctx.io, .rep = &rep, .dry_run = dry_run };
+    linker_mod.forEachBrokenLink(ctx.io, prefix, &sweep, Sweep.visit);
+
+    result.removed = sweep.removed;
+    rep.done(counter.n);
+    return result;
+}
+
 pub fn runDownloads(ctx: *const AppCtx, cache_dir: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
     const io = ctx.io;

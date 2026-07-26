@@ -65,16 +65,26 @@ test "parseArgs sets each scope flag independently" {
     }
 }
 
-test "--housekeeping expands to the four safe scopes" {
+test "--housekeeping expands to the safe scopes and no destructive one" {
     const opts = try purge.parseArgs(&[_][]const u8{"--housekeeping"});
     try testing.expect(opts.scope.store_orphans);
     try testing.expect(opts.scope.unused_deps);
     try testing.expect(opts.scope.cache);
     try testing.expect(opts.scope.stale_casks);
+    // doctor names `mt cleanup` as the repair for broken symlinks, so the
+    // safe set has to contain them or that advice goes nowhere.
+    try testing.expect(opts.scope.broken_symlinks);
     // Destructive scopes stay opt-in.
     try testing.expect(!opts.scope.downloads);
     try testing.expect(!opts.scope.old_versions);
     try testing.expect(!opts.scope.wipe);
+
+    // Every field above is asserted one way or the other. A new scope must be
+    // classified here as safe or opt-in rather than silently inheriting its
+    // default: this test previously said "four" while five were set.
+    comptime {
+        std.debug.assert(@typeInfo(purge.Scope).@"struct".fields.len == 8);
+    }
 }
 
 test "--cache=<bad-int> is rejected" {
@@ -382,4 +392,62 @@ test "applying the plan with --keep-cache leaves the cache directory intact" {
     try testing.expect(pathExists(marker));
     // Cellar must be gone.
     try testing.expect(!pathExists(cellar_dir));
+}
+
+// ── --broken-symlinks scope ─────────────────────────────────────────────────
+
+fn plantLinks(prefix: []const u8, sub: []const u8, anchor: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, sub });
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir_path);
+    var dir = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, dir_path, .{ .iterate = true });
+    defer dir.close(std.Options.debug_io);
+    try dir.symLink(std.Options.debug_io, "/malt-test-target-that-does-not-exist", "dead", .{});
+    try dir.symLink(std.Options.debug_io, anchor, "alive", .{});
+}
+
+fn linkExists(prefix: []const u8, rel: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, rel }) catch return false;
+    _ = std.Io.Dir.cwd().statFile(std.Options.debug_io, p, .{ .follow_symlinks = false }) catch return false;
+    return true;
+}
+
+test "--broken-symlinks removes dangling prefix links and keeps live ones" {
+    const allocator = testing.allocator;
+    const prefix = try test_io.uniqueTempPath(allocator, "purge_brokenlinks", "run");
+    defer allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    var anchor_buf: [512]u8 = undefined;
+    const anchor = try std.fmt.bufPrint(&anchor_buf, "{s}/anchor", .{prefix});
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, anchor, .{});
+    f.close(std.Options.debug_io);
+
+    // One top-level, one nested, and one under `etc`, the dir the sweep's
+    // old private list omitted entirely.
+    try plantLinks(prefix, "bin", anchor);
+    try plantLinks(prefix, "share/man/man1", anchor);
+    try plantLinks(prefix, "etc", anchor);
+
+    const ctx = malt.app_ctx.AppCtx{ .io = std.Options.debug_io, .environ = .empty };
+    const dry = try malt.purge.runBrokenSymlinks(&ctx, prefix, true);
+    try testing.expectEqual(@as(u32, 3), dry.removed);
+    // Dry run reports without touching anything.
+    try testing.expect(linkExists(prefix, "bin/dead"));
+    try testing.expect(linkExists(prefix, "etc/dead"));
+
+    const applied = try malt.purge.runBrokenSymlinks(&ctx, prefix, false);
+    try testing.expectEqual(@as(u32, 3), applied.removed);
+    for ([_][]const u8{ "bin/dead", "share/man/man1/dead", "etc/dead" }) |gone| {
+        try testing.expect(!linkExists(prefix, gone));
+    }
+    for ([_][]const u8{ "bin/alive", "share/man/man1/alive", "etc/alive" }) |kept| {
+        try testing.expect(linkExists(prefix, kept));
+    }
+
+    // Nothing left to do on a clean prefix.
+    const again = try malt.purge.runBrokenSymlinks(&ctx, prefix, false);
+    try testing.expectEqual(@as(u32, 0), again.removed);
 }
