@@ -761,6 +761,10 @@ const tui_help =
     \\               on a light terminal).
     \\  MALT_THEMES_FILE  JSON file of custom themes (see the README); read once
     \\               at boot, else {prefix}/etc/malt/themes.json if present.
+    \\               A custom theme is gated on the depth it needs: hex/[r,g,b]
+    \\               colours need truecolor, 256-colour indexes need COLORTERM
+    \\               or a TERM naming 256color. Anything deeper than the
+    \\               terminal degrades to the default palette.
     \\
 ;
 

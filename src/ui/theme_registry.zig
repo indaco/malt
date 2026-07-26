@@ -45,9 +45,12 @@ pub const Storage = struct {
     /// Owns the bytes every `registry.themes[i].palette.*` slice points into.
     pool: [ct.max_themes][role_keys.len]ct.Sgr,
     /// `requires_truecolor[i]`: theme `i` used at least one `#hex`/`[r,g,b]`
-    /// colour, so it degrades wholesale on a non-truecolor terminal. A
-    /// 256-index-only theme is `false` and paints on any 256-colour terminal.
+    /// colour, so it degrades wholesale on a non-truecolor terminal.
     requires_truecolor: [ct.max_themes]bool,
+    /// `requires_at_least_256[i]`: theme `i` used at least one bare-integer
+    /// colour, which always lowers to a `\x1b[38;5;N` escape — meaningless on a
+    /// 16-colour terminal, so the theme degrades wholesale there too.
+    requires_at_least_256: [ct.max_themes]bool,
 };
 
 /// Parse and strictly validate `bytes`, writing the lowered registry into
@@ -112,6 +115,7 @@ pub fn populate(allocator: std.mem.Allocator, bytes: []const u8, out: *Storage) 
         t.polarity = polarity;
 
         var requires_tc = false;
+        var requires_256 = false;
         // `key` is the JSON key, the NamedPalette field name, and (via `k`) the
         // pool slot — all the same ordering by construction, so `@field` wires
         // the slice straight into the matching role with no lookup table.
@@ -122,10 +126,12 @@ pub fn populate(allocator: std.mem.Allocator, bytes: []const u8, out: *Storage) 
             // Hex string / rgb array ⇒ truecolor; a bare integer is 256-index.
             switch (cval) {
                 .string, .array => requires_tc = true,
+                .integer => requires_256 = true,
                 else => {},
             }
         }
         out.requires_truecolor[idx] = requires_tc;
+        out.requires_at_least_256[idx] = requires_256;
     }
     out.registry.count = n;
 
@@ -186,13 +192,26 @@ test "valid v1 file with two themes and a default populates the registry" {
     try std.testing.expectEqualStrings("\x1b[38;2;139;233;253m", ocean.palette.get(.secondary));
     // ocean used hex/array colours → must degrade wholesale without truecolor.
     try std.testing.expect(storage.requires_truecolor[0]);
+    try std.testing.expect(storage.requires_at_least_256[0]); // and `muted: 102` is an index
 
     const sand = &storage.registry.themes[1];
     try std.testing.expectEqualStrings("sand", sand.nameSlice());
     try std.testing.expectEqual(themes.Polarity.light, sand.polarity);
     try std.testing.expectEqualStrings("\x1b[38;5;33m", sand.palette.get(.accent));
-    // sand is entirely 256-index → paints on any 256-colour terminal.
+    // sand is entirely 256-index → paints on a 256-colour terminal, but not on
+    // a 16-colour one: the escapes it emits are `\x1b[38;5;N` either way.
     try std.testing.expect(!storage.requires_truecolor[1]);
+    try std.testing.expect(storage.requires_at_least_256[1]);
+}
+
+test "an all-hex theme needs truecolor and nothing from the 256 tier" {
+    // The two flags are independent, not a ladder read off one value: a theme
+    // with no integer role has no 256-index escape to gate.
+    const src = "{\"version\":1,\"themes\":{\"a\":{\"polarity\":\"dark\",\"accent\":\"#ff0000\",\"secondary\":\"#00ff00\",\"success\":[1,2,3],\"warning\":\"#ffffff\",\"danger\":\"#000000\",\"muted\":\"#123456\"}},\"default\":\"a\"}";
+    var storage: Storage = undefined;
+    try populate(std.testing.allocator, src, &storage);
+    try std.testing.expect(storage.requires_truecolor[0]);
+    try std.testing.expect(!storage.requires_at_least_256[0]);
 }
 
 /// A theme object body with all six roles as 256-index colours, parameterised by
@@ -281,4 +300,5 @@ test "a mixed theme with any hex/array role requires truecolor wholesale" {
     var storage: Storage = undefined;
     try populate(std.testing.allocator, src, &storage);
     try std.testing.expect(storage.requires_truecolor[0]);
+    try std.testing.expect(storage.requires_at_least_256[0]); // the five index roles still count
 }

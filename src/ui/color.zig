@@ -68,8 +68,9 @@ pub const SemanticStyle = enum {
     pub fn code(self: SemanticStyle) []const u8 {
         const t = theme();
         const bg = background();
-        const tc = truecolorSupported();
-        if (activeCustomPalette(bg, tc)) |p| return p.get(semanticToRole(self));
+        const depth = colorDepth();
+        const tc = depth == .truecolor;
+        if (activeCustomPalette(bg, depth)) |p| return p.get(semanticToRole(self));
         if (namedThemeApplies(t, bg, tc)) return themes.named(t).?.get(semanticToRole(self));
         return paletteCode(self, bg, tc);
     }
@@ -102,6 +103,17 @@ const BgCache = enum(u8) { unresolved, dark, light, unknown };
 /// Atomic-friendly `?ColorPolicy`; `unresolved` keeps `ColorPolicy` a clean enum.
 const PolicyCache = enum(u8) { unresolved, auto, always, never };
 
+/// Atomic-friendly `?ColorDepth`; `unresolved` keeps `ColorDepth` a clean enum.
+const DepthCache = enum(u8) { unresolved, ansi16, ansi256, truecolor };
+
+fn depthToCache(d: ColorDepth) DepthCache {
+    return switch (d) {
+        .ansi16 => .ansi16,
+        .ansi256 => .ansi256,
+        .truecolor => .truecolor,
+    };
+}
+
 fn policyToCache(p: ColorPolicy) PolicyCache {
     return switch (p) {
         .auto => .auto,
@@ -125,7 +137,7 @@ var stderr_enabled: Tri = .unresolved;
 var color_policy_cached: PolicyCache = .unresolved;
 var emoji_enabled: Tri = .unresolved;
 var background_cached: BgCache = .unresolved;
-var truecolor_cached: Tri = .unresolved;
+var color_depth_cached: DepthCache = .unresolved;
 // Clean `Theme` plus a sibling resolved-latch, so `Theme` needs no `unresolved`.
 // The value is published before the latch, so a resolved read never sees stale.
 var theme_cached: Theme = .default;
@@ -164,7 +176,7 @@ pub fn setRuntime(io: std.Io, environ: std.process.Environ) void {
     @atomicStore(Tri, &emoji_enabled, .unresolved, .release);
     @atomicStore(BgCache, &background_cached, .unresolved, .release);
     bg_probing.store(false, .release); // release the probe latch so the re-seed re-probes
-    @atomicStore(Tri, &truecolor_cached, .unresolved, .release);
+    @atomicStore(DepthCache, &color_depth_cached, .unresolved, .release);
     // Dropping the latch invalidates the value; the value store itself is moot.
     @atomicStore(bool, &theme_resolved, false, .release);
     // Selection depends on MALT_THEME; the loaded registry itself is file-derived
@@ -485,10 +497,18 @@ pub fn setBackgroundForTest(bg: ?Background) void {
     bg_probing.store(false, .release); // clear the latch so a forced/null value never wedges a recompute
 }
 
-/// Test-only override for the truecolor cache.
+/// Test-only override for the depth cache, in the two-state shape its many
+/// callers already speak: truecolor, or the bottom rung. Seeding the middle rung
+/// is `setColorDepthForTest`.
 pub fn setTruecolorForTest(v: ?bool) void {
     if (!builtin.is_test) return;
-    @atomicStore(Tri, &truecolor_cached, triFromOpt(v), .release);
+    setColorDepthForTest(if (v) |b| (if (b) ColorDepth.truecolor else .ansi16) else null);
+}
+
+/// Test-only override for the depth cache. Pass `null` to recompute from env.
+pub fn setColorDepthForTest(d: ?ColorDepth) void {
+    if (!builtin.is_test) return;
+    @atomicStore(DepthCache, &color_depth_cached, if (d) |v| depthToCache(v) else .unresolved, .release);
 }
 
 /// Test-only override for the theme cache.
@@ -581,9 +601,12 @@ test "storage: the active-custom cache is a single atomic word" {
     try std.testing.expect(std.meta.activeTag(@typeInfo(@TypeOf(active_custom))) == .int);
 }
 
-test "storage: background/truecolor/theme caches are atomic; Theme stays clean" {
+test "storage: background/depth/theme caches are atomic; Theme stays clean" {
     try std.testing.expect(typeIsEnum(@TypeOf(background_cached))); // BgCache, not ?Background
-    try std.testing.expect(typeIsEnum(@TypeOf(truecolor_cached))); // Tri, not ?bool
+    try std.testing.expect(typeIsEnum(@TypeOf(color_depth_cached))); // DepthCache, not ?ColorDepth
+    // ColorDepth stays a clean ladder callers switch over exhaustively; the
+    // unresolved state lives only in the cache enum.
+    try std.testing.expect(!@hasField(ColorDepth, "unresolved"));
     // Theme stays a clean public enum the TUI switches over exhaustively; the
     // unresolved state rides a sibling latch, never a Theme variant.
     try std.testing.expect(@TypeOf(theme_cached) == Theme);
@@ -591,7 +614,7 @@ test "storage: background/truecolor/theme caches are atomic; Theme stays clean" 
     try std.testing.expect(@TypeOf(theme_resolved) == bool);
 }
 
-test "setRuntime drops the enabled/policy/truecolor/background caches so a new environ recomputes" {
+test "setRuntime drops the enabled/policy/depth/background caches so a new environ recomputes" {
     const io = std.Options.debug_io;
     // MALT_THEME as a bg keyword forces the background without an OSC 11 TTY probe.
     setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{ "MALT_THEME=light", "COLORTERM=truecolor", "CLICOLOR=0" } } });
@@ -618,6 +641,7 @@ test "setRuntime drops the enabled/policy/truecolor/background caches so a new e
     try std.testing.expect(@atomicLoad(Tri, &stdout_enabled, .acquire) == .unresolved); // both caches dropped
     try std.testing.expect(@atomicLoad(Tri, &stderr_enabled, .acquire) == .unresolved);
     try std.testing.expect(@atomicLoad(PolicyCache, &color_policy_cached, .acquire) == .unresolved);
+    try std.testing.expect(@atomicLoad(DepthCache, &color_depth_cached, .acquire) == .unresolved);
     try std.testing.expect(isColorEnabledFor(.stdout)); // CLICOLOR gone ⇒ back to the probe, which says terminal
     try std.testing.expect(isColorEnabledForStderr());
     try std.testing.expect(!isEmojiEnabled()); // MALT_NO_EMOJI now set
@@ -724,7 +748,7 @@ test "setBackgroundForTest(null) clears the probe latch so a resolve can recompu
 test "concurrent roleCode first-touch agrees (fold + theme latch on a cold cache)" {
     // The realistic worker path — coloured output → roleCode → activeCustomIndex
     // (the fold) and theme(). seedCustom leaves both unresolved, so N threads race.
-    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, custom_ocean_src));
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", .truecolor, .unknown, custom_ocean_src));
     defer resetCustom();
 
     const Runner = struct {
@@ -744,7 +768,7 @@ test "concurrent roleCode first-touch agrees (fold + theme latch on a cold cache
 }
 
 test "the active-custom fold resolves, drops on re-seed, and drops on clear" {
-    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, custom_ocean_src));
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", .truecolor, .unknown, custom_ocean_src));
     defer resetCustom();
 
     // Resolved ⇒ a real registry index is visible in the one word (never torn).
@@ -1027,16 +1051,83 @@ pub fn truecolorFromEnv(value: ?[]const u8) bool {
     return std.mem.eql(u8, v, "truecolor") or std.mem.eql(u8, v, "24bit");
 }
 
-/// Cached truecolor-support accessor. Reads $COLORTERM once.
-pub fn truecolorSupported() bool {
-    switch (@atomicLoad(Tri, &truecolor_cached, .acquire)) {
-        .yes => return true,
-        .no => return false,
+/// How many colours the terminal can actually render. A sibling axis to
+/// `ColorPolicy`, not a fourth variant of it: policy answers "colour at all",
+/// depth answers "which palette", and is consulted only once policy said yes.
+/// Ordered ascending so `atLeast` is a plain ordinal compare.
+pub const ColorDepth = enum(u8) {
+    ansi16,
+    ansi256,
+    truecolor,
+
+    /// True when this terminal can render everything `min` needs.
+    pub fn atLeast(self: ColorDepth, min: ColorDepth) bool {
+        return @intFromEnum(self) >= @intFromEnum(min);
+    }
+};
+
+/// Pure so every combination is testable: no env read, no alloc, no terminfo.
+/// `COLORTERM` is the explicit advertisement and outranks `TERM`, whose
+/// `256color` substring is the same imprecise-by-construction heuristic the
+/// wider ecosystem uses — a 256-colour terminal advertising neither is missed.
+fn depthFromEnv(colorterm: ?[]const u8, term: ?[]const u8) ColorDepth {
+    if (truecolorFromEnv(colorterm)) return .truecolor;
+    const t = term orelse return .ansi16;
+    return if (std.mem.indexOf(u8, t, "256color") != null) .ansi256 else .ansi16;
+}
+
+test "depthFromEnv: COLORTERM wins, then a 256color TERM, else 16" {
+    // The ladder used to jump truecolor → 16, so a 256-index theme painted on a
+    // terminal that could not render it. COLORTERM outranks TERM because it is
+    // the explicit advertisement; TERM is a substring heuristic standing in for
+    // a terminfo lookup malt deliberately does not do.
+    try std.testing.expectEqual(ColorDepth.truecolor, depthFromEnv("truecolor", null));
+    try std.testing.expectEqual(ColorDepth.truecolor, depthFromEnv("24bit", null));
+    try std.testing.expectEqual(ColorDepth.truecolor, depthFromEnv("truecolor", "xterm"));
+    try std.testing.expectEqual(ColorDepth.ansi256, depthFromEnv(null, "xterm-256color"));
+    try std.testing.expectEqual(ColorDepth.ansi256, depthFromEnv(null, "screen-256color"));
+    try std.testing.expectEqual(ColorDepth.ansi256, depthFromEnv(null, "tmux-256color"));
+    try std.testing.expectEqual(ColorDepth.ansi256, depthFromEnv("256", "tmux-256color"));
+    try std.testing.expectEqual(ColorDepth.ansi16, depthFromEnv(null, "xterm"));
+    try std.testing.expectEqual(ColorDepth.ansi16, depthFromEnv(null, null));
+    try std.testing.expectEqual(ColorDepth.ansi16, depthFromEnv("", ""));
+}
+
+/// Cached depth accessor. Reads $COLORTERM and $TERM once.
+fn colorDepth() ColorDepth {
+    switch (@atomicLoad(DepthCache, &color_depth_cached, .acquire)) {
+        .ansi16 => return .ansi16,
+        .ansi256 => return .ansi256,
+        .truecolor => return .truecolor,
         .unresolved => {},
     }
-    const result: Tri = if (truecolorFromEnv(lookupEnv("COLORTERM"))) .yes else .no;
-    @atomicStore(Tri, &truecolor_cached, result, .release);
-    return result == .yes;
+    const d = depthFromEnv(lookupEnv("COLORTERM"), lookupEnv("TERM"));
+    // Benign double-compute under a race, as with the caches above.
+    @atomicStore(DepthCache, &color_depth_cached, depthToCache(d), .release);
+    return d;
+}
+
+test "colorDepth resolves from env and a re-seed drops the cache" {
+    // Same R-075 shape as every other env-derived cache here: resolved lazily
+    // (workers reach it through `output.warn`) and dropped by `setRuntime`, or a
+    // pre-seed warm against the empty environ would freeze the depth at 16.
+    const io = std.Options.debug_io;
+    const empty: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } };
+    defer setRuntime(io, empty);
+
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"TERM=xterm-256color"} } });
+    try std.testing.expectEqual(ColorDepth.ansi256, colorDepth());
+    try std.testing.expect(!truecolorSupported()); // 256 colours is not truecolor
+
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"COLORTERM=truecolor"} } });
+    try std.testing.expectEqual(ColorDepth.truecolor, colorDepth());
+    try std.testing.expect(truecolorSupported());
+}
+
+/// Cached truecolor-support accessor — the top rung of the depth ladder, kept
+/// under its old name so its callers stay untouched.
+pub fn truecolorSupported() bool {
+    return colorDepth() == .truecolor;
 }
 
 // Pin every notice cell across the (bg, truecolor) matrix. Sister tests for
@@ -1151,16 +1242,28 @@ fn isBuiltinSelector(raw: []const u8) bool {
 }
 
 /// The active custom theme's palette when one is selected *and* applies under
-/// the current tier — truecolor gate (wholesale, but a 256-index-only theme
-/// needs no truecolor) and the polarity gate. Null ⇒ fall back to the built-in
+/// the current tier — the depth gate (wholesale: a theme is only as portable as
+/// its deepest colour) and the polarity gate. Null ⇒ fall back to the built-in
 /// resolver. Shared by the CLI (`SemanticStyle.code`) and TUI (`roleCode`) so
 /// the two surfaces never disagree about when a custom theme is in effect.
-fn activeCustomPalette(bg: Background, truecolor: bool) ?*const themes.NamedPalette {
+fn activeCustomPalette(bg: Background, depth: ColorDepth) ?*const themes.NamedPalette {
     const i = activeCustomIndex() orelse return null;
-    if (!truecolor and custom_storage.requires_truecolor[i]) return null;
+    if (!depth.atLeast(requiredDepth(i))) return null;
     const t = &custom_storage.registry.themes[i];
     if (customPolarityConflicts(t.polarity, bg)) return null;
     return &t.palette;
+}
+
+/// The deepest rung custom theme `i` needs — a mixed theme takes the deeper of
+/// its two flags, because a palette is only as portable as its least portable
+/// colour and it degrades wholesale rather than per-role.
+fn requiredDepth(i: usize) ColorDepth {
+    if (custom_storage.requires_truecolor[i]) return .truecolor;
+    if (custom_storage.requires_at_least_256[i]) return .ansi256;
+    // Unreachable via `populate`: every role is mandatory and each value is one
+    // shape or the other. Falling through to "applies anywhere" keeps a future
+    // colour form benign rather than silently hiding the theme.
+    return .ansi16;
 }
 
 /// Test-only reset of the custom registry between unit tests.
@@ -1174,9 +1277,9 @@ pub fn clearCustomForTest() void {
 /// custom theme wins when it applies; otherwise the built-in resolver decides.
 pub fn roleCode(role: Role) []const u8 {
     const bg = background();
-    const tc = truecolorSupported();
-    if (activeCustomPalette(bg, tc)) |p| return p.get(role);
-    return resolveRole(theme(), role, bg, tc);
+    const depth = colorDepth();
+    if (activeCustomPalette(bg, depth)) |p| return p.get(role);
+    return resolveRole(theme(), role, bg, depth == .truecolor);
 }
 
 /// The `accent` the TUI emits immediately before `Style.reverse`, so reverse-video
@@ -1316,18 +1419,18 @@ const custom_ocean_src =
     \\}}
 ;
 
-/// Seed environ + force the (truecolor, background) tier, install a custom
+/// Seed environ + force the (depth, background) tier, install a custom
 /// registry, and return to a clean slate via `defer` in the caller. `theme()`
 /// is left to resolve from `MALT_THEME` so the no-shadow path is exercised
 /// realistically.
-fn seedCustom(comptime malt_theme: ?[]const u8, tc: bool, bg: Background, src: ?[]const u8) InstallResult {
+fn seedCustom(comptime malt_theme: ?[]const u8, depth: ColorDepth, bg: Background, src: ?[]const u8) InstallResult {
     const io = std.Options.debug_io;
     const slice = if (malt_theme) |v|
         &[_:null]?[*:0]const u8{"MALT_THEME=" ++ v}
     else
         &[_:null]?[*:0]const u8{};
     setRuntime(io, .{ .block = .{ .slice = slice } });
-    setTruecolorForTest(tc);
+    setColorDepthForTest(depth);
     setBackgroundForTest(bg);
     return installCustomThemes(std.testing.allocator, src);
 }
@@ -1336,18 +1439,18 @@ fn resetCustom() void {
     clearCustomForTest();
     setRuntime(std.Options.debug_io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
     setThemeForTest(null);
-    setTruecolorForTest(null);
+    setColorDepthForTest(null);
     setBackgroundForTest(null);
 }
 
 test "a selected custom theme paints the TUI role via the resolver" {
-    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, custom_ocean_src));
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", .truecolor, .unknown, custom_ocean_src));
     defer resetCustom();
     try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", roleCode(.accent));
 }
 
 test "the CLI semantic seam carries the custom palette too" {
-    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, custom_ocean_src));
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", .truecolor, .unknown, custom_ocean_src));
     defer resetCustom();
     // semanticToRole(.info) == .accent; ocean accent is #bd93f9.
     try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", SemanticStyle.info.code());
@@ -1359,7 +1462,7 @@ test "a custom theme named like a built-in never shadows it" {
         \\  "dracula":{"polarity":"dark","accent":"#000000","secondary":2,"success":3,"warning":4,"danger":5,"muted":6}
         \\}}
     ;
-    try std.testing.expectEqual(InstallResult.loaded, seedCustom("dracula", true, .unknown, src));
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("dracula", .truecolor, .unknown, src));
     defer resetCustom();
     // The built-in dracula accent wins; the custom "#000000" is unreachable by name.
     try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", roleCode(.accent));
@@ -1372,22 +1475,35 @@ test "MALT_THEME selects a custom theme over the file default; unset uses the fi
         \\  "sand":{"polarity":"dark","accent":"#50fa7b","secondary":2,"success":3,"warning":4,"danger":5,"muted":6}
         \\}}
     ;
-    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, src));
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", .truecolor, .unknown, src));
     try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", roleCode(.accent)); // explicit ocean wins
     resetCustom();
 
-    try std.testing.expectEqual(InstallResult.loaded, seedCustom(null, true, .unknown, src));
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom(null, .truecolor, .unknown, src));
     defer resetCustom();
     try std.testing.expectEqualStrings("\x1b[38;2;80;250;123m", roleCode(.accent)); // unset ⇒ file default sand
 }
 
-test "a 256-index custom theme paints without truecolor; a hex one degrades whole" {
+test "a custom theme applies only where the terminal can render its colours" {
     const c256 =
         \\{"version":1,"default":"x","themes":{
         \\  "x":{"polarity":"dark","accent":40,"secondary":2,"success":3,"warning":4,"danger":5,"muted":6}
         \\}}
     ;
-    try std.testing.expectEqual(InstallResult.loaded, seedCustom("x", false, .unknown, c256)); // truecolor off
+    // A 256-index theme used to paint here, because nothing read TERM and only
+    // hex/rgb was gated. `\x1b[38;5;40m` on a 16-colour terminal is garbled or
+    // invisible, and the theme reported itself applied — so the user never knew.
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("x", .ansi16, .unknown, c256));
+    try std.testing.expectEqualStrings(resolveRole(.default, .accent, .unknown, false), roleCode(.accent));
+    resetCustom();
+
+    // One rung up it paints — the fix is a gate, not a ban on 256-index themes.
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("x", .ansi256, .unknown, c256));
+    try std.testing.expectEqualStrings("\x1b[38;5;40m", roleCode(.accent));
+    resetCustom();
+
+    // And on every rung above it: the gate is a floor, not an equality match.
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("x", .truecolor, .unknown, c256));
     try std.testing.expectEqualStrings("\x1b[38;5;40m", roleCode(.accent));
     resetCustom();
 
@@ -1396,9 +1512,10 @@ test "a 256-index custom theme paints without truecolor; a hex one degrades whol
         \\  "x":{"polarity":"dark","accent":"#bd93f9","secondary":2,"success":3,"warning":4,"danger":5,"muted":6}
         \\}}
     ;
-    try std.testing.expectEqual(InstallResult.loaded, seedCustom("x", false, .unknown, chex)); // truecolor off
+    // Unchanged: hex still needs the top rung, and 256 is not enough. Proves the
+    // two requirements are independent rather than one ladder read off a value.
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("x", .ansi256, .unknown, chex));
     defer resetCustom();
-    // requires truecolor ⇒ wholesale fall back to the default tier.
     try std.testing.expectEqualStrings(resolveRole(.default, .accent, .unknown, false), roleCode(.accent));
 }
 
@@ -1408,20 +1525,20 @@ test "a light custom theme degrades to default on a detected dark terminal" {
         \\  "day":{"polarity":"light","accent":"#bd93f9","secondary":2,"success":3,"warning":4,"danger":5,"muted":6}
         \\}}
     ;
-    try std.testing.expectEqual(InstallResult.loaded, seedCustom("day", true, .dark, src));
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("day", .truecolor, .dark, src));
     defer resetCustom();
     // light polarity vs detected dark ⇒ conflict ⇒ default tier.
     try std.testing.expectEqualStrings(resolveRole(.default, .accent, .dark, true), roleCode(.accent));
 }
 
 test "a rejected file keeps the built-in default output" {
-    try std.testing.expectEqual(InstallResult.rejected, seedCustom("whatever", true, .unknown, "{\"version\":9}"));
+    try std.testing.expectEqual(InstallResult.rejected, seedCustom("whatever", .truecolor, .unknown, "{\"version\":9}"));
     defer resetCustom();
     try std.testing.expectEqualStrings(resolveRole(.default, .accent, .unknown, true), roleCode(.accent));
 }
 
 test "no themes file leaves the resolver untouched" {
-    try std.testing.expectEqual(InstallResult.absent, seedCustom(null, true, .unknown, null));
+    try std.testing.expectEqual(InstallResult.absent, seedCustom(null, .truecolor, .unknown, null));
     defer resetCustom();
     try std.testing.expectEqualStrings(resolveRole(.default, .accent, .unknown, true), roleCode(.accent));
 }
@@ -1479,7 +1596,7 @@ test "selectionAccent falls back to the default accent on a basic terminal" {
 }
 
 test "selectionAccent carries an active custom theme's accent" {
-    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, custom_ocean_src));
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", .truecolor, .unknown, custom_ocean_src));
     defer resetCustom();
     try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", selectionAccent());
 }
