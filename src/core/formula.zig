@@ -60,6 +60,79 @@ pub fn pkgVersion(buf: []u8, version: []const u8, revision: i64) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}_{d}", .{ version, revision });
 }
 
+/// A bottle placeholder whose value is a path inside one of the formula's
+/// *dependencies*, resolved against the live prefix.
+pub const Placeholder = struct {
+    token: []const u8,
+    value: []const u8,
+};
+
+/// Tokens whose value lives in a dependency's keg. A table because the token
+/// set is upstream's: adding one is a data change.
+const dependency_placeholders = [_]struct {
+    token: []const u8,
+    dep: []const u8,
+    subpath: []const u8,
+}{
+    .{
+        .token = "@@HOMEBREW_JAVA@@",
+        .dep = "openjdk",
+        .subpath = "libexec/openjdk.jdk/Contents/Home",
+    },
+};
+
+/// Runtime dependency names from a keg's own `.brew/<name>.rb`, filled into
+/// `out`. Callers holding a parsed `Formula` should use its `dependencies`;
+/// this is for paths without one, where the DB rows describe a different
+/// version than the keg on disk.
+pub fn declaredDependencies(out: [][]const u8, rb_source: []const u8) []const []const u8 {
+    const decl = "depends_on ";
+    var n: usize = 0;
+    var lines = std.mem.tokenizeScalar(u8, rb_source, '\n');
+    while (lines.next()) |line| {
+        if (n == out.len) break;
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (!std.mem.startsWith(u8, trimmed, decl)) continue;
+
+        // Only the quoted form names a formula; `depends_on :xcode` and
+        // friends are platform predicates, not kegs.
+        const rest = trimmed[decl.len..];
+        if (rest.len == 0 or rest[0] != '"') continue;
+        const close = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse continue;
+        if (std.mem.indexOf(u8, rest[close..], ":build") != null) continue;
+
+        out[n] = rest[1..close];
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// Resolve this formula's dependency-scoped placeholder into `buf`.
+/// Null when it declares no matching dependency: guessing would bake a path
+/// to a keg the formula never asked for.
+pub fn dependencyPlaceholder(
+    buf: []u8,
+    prefix: []const u8,
+    dependencies: []const []const u8,
+) ?Placeholder {
+    for (dependency_placeholders) |entry| {
+        for (dependencies) |dep| {
+            const pinned = dep.len > entry.dep.len and
+                std.mem.startsWith(u8, dep, entry.dep) and
+                dep[entry.dep.len] == '@';
+            if (!std.mem.eql(u8, dep, entry.dep) and !pinned) continue;
+
+            const value = std.fmt.bufPrint(
+                buf,
+                "{s}/opt/{s}/{s}",
+                .{ prefix, dep, entry.subpath },
+            ) catch return null;
+            return .{ .token = entry.token, .value = value };
+        }
+    }
+    return null;
+}
+
 /// Parsed Homebrew formula. Every `[]const u8` and `[]const []const u8`
 /// field is owned by `_parsed` (either borrowed from the JSON source
 /// buffer or allocated through the parse arena); valid only until
@@ -794,4 +867,123 @@ test "parseFormula releases every auxiliary allocation through deinit" {
     try testing.expectEqual(@as(usize, 1), formula.oldnames.len);
     try testing.expect(formula.service != null);
     try testing.expect(formula.bottle_files != null);
+}
+
+test "dependencyPlaceholder resolves a token against its declared dependency" {
+    // Wrappers that carry the token are unrunnable until it is substituted,
+    // and the value is a path into the dependency's keg, not the prefix.
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{ "openjdk", "ca-certificates" };
+    const got = dependencyPlaceholder(&buf, "/opt/malt", &deps).?;
+    try testing.expectEqualStrings("@@HOMEBREW_JAVA@@", got.token);
+    try testing.expectEqualStrings(
+        "/opt/malt/opt/openjdk/libexec/openjdk.jdk/Contents/Home",
+        got.value,
+    );
+}
+
+test "dependencyPlaceholder keeps the version suffix of a pinned dependency" {
+    // A pinned variant installs under its own opt/ name; folding it onto the
+    // unpinned one would point the wrapper at a keg the formula didn't ask for.
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{"openjdk@21"};
+    const got = dependencyPlaceholder(&buf, "/opt/malt", &deps).?;
+    try testing.expectEqualStrings(
+        "/opt/malt/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+        got.value,
+    );
+}
+
+test "dependencyPlaceholder declines a formula with no matching dependency" {
+    // Most bottles carry no such token; substituting a guessed value would
+    // be worse than leaving them alone.
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{ "pcre2", "zstd" };
+    try testing.expect(dependencyPlaceholder(&buf, "/opt/malt", &deps) == null);
+}
+
+test "declaredDependencies reads the names a keg's own formula source declares" {
+    var out: [8][]const u8 = undefined;
+    const src =
+        \\class Benerator < Formula
+        \\  desc "x"
+        \\  depends_on "openjdk@11"
+        \\  depends_on "zstd"
+        \\end
+    ;
+    const got = declaredDependencies(&out, src);
+    try testing.expectEqual(@as(usize, 2), got.len);
+    try testing.expectEqualStrings("openjdk@11", got[0]);
+    try testing.expectEqualStrings("zstd", got[1]);
+}
+
+test "declaredDependencies skips build-only dependencies" {
+    // Parity with the API `dependencies` field the install path uses: a
+    // build-only jdk is not present at runtime, so resolving a token against
+    // it would point at a keg that need not exist.
+    var out: [8][]const u8 = undefined;
+    const got = declaredDependencies(&out,
+        \\  depends_on "cmake" => :build
+        \\  depends_on "openjdk"
+    );
+    try testing.expectEqual(@as(usize, 1), got.len);
+    try testing.expectEqualStrings("openjdk", got[0]);
+}
+
+test "declaredDependencies ignores commented and symbol forms" {
+    var out: [8][]const u8 = undefined;
+    const got = declaredDependencies(&out,
+        \\  # depends_on "ghost"
+        \\  depends_on :xcode
+        \\  depends_on "real"
+    );
+    try testing.expectEqual(@as(usize, 1), got.len);
+    try testing.expectEqualStrings("real", got[0]);
+}
+
+test "declaredDependencies stops at the caller's capacity" {
+    var out: [1][]const u8 = undefined;
+    const got = declaredDependencies(&out,
+        \\  depends_on "a"
+        \\  depends_on "b"
+    );
+    try testing.expectEqual(@as(usize, 1), got.len);
+}
+
+test "declaredDependencies ignores an unterminated quote" {
+    // A truncated or hand-edited .rb must yield nothing rather than a slice
+    // running past the closing quote that isn't there.
+    var out: [4][]const u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), declaredDependencies(&out, "  depends_on \"openjdk\n").len);
+}
+
+test "declaredDependencies handles a source with no dependencies" {
+    var out: [4][]const u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), declaredDependencies(&out, "class X < Formula\nend\n").len);
+}
+
+test "declaredDependencies tolerates a zero-capacity buffer" {
+    var out: [0][]const u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), declaredDependencies(&out, "  depends_on \"openjdk\"\n").len);
+}
+
+test "dependencyPlaceholder declines an empty dependency list" {
+    var buf: [256]u8 = undefined;
+    try testing.expect(dependencyPlaceholder(&buf, "/opt/malt", &.{}) == null);
+}
+
+test "dependencyPlaceholder declines rather than truncate a too-small buffer" {
+    // A truncated path would point somewhere real but wrong; refusing leaves
+    // the token visible instead, which doctor then reports.
+    var buf: [8]u8 = undefined;
+    const deps = [_][]const u8{"openjdk"};
+    try testing.expect(dependencyPlaceholder(&buf, "/opt/malt", &deps) == null);
+}
+
+test "dependencyPlaceholder does not mistake a lookalike dependency name" {
+    // Only the exact name or an `@`-qualified variant counts — a longer name
+    // that merely starts with it is a different formula.
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{"openjdk-doc"};
+    try testing.expect(dependencyPlaceholder(&buf, "/opt/malt", &deps) == null);
 }

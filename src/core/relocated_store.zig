@@ -38,7 +38,11 @@ pub const RelocatedStoreError = error{
 /// v2: the Mach-O patcher learned to drop LC_RPATHs that relocation collapses
 /// onto one prefix; v1 entries were snapshotted before that and ship the
 /// duplicate that makes dyld abort at launch.
-pub const RELOC_LOGIC_VERSION: u32 = 2;
+///
+/// v3: relocation gained dependency-scoped placeholder substitution. v2 entries
+/// cached the literal token, so an affected wrapper restored from one stays
+/// broken however many times it is reinstalled.
+pub const RELOC_LOGIC_VERSION: u32 = 3;
 
 /// Reject anything that is not exactly 64 lowercase hex characters.
 /// Run this before forming any path so traversal sequences (`..`, `/`) and
