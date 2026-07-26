@@ -118,7 +118,10 @@ fn bgToCache(bg: Background) BgCache {
     };
 }
 
-var color_enabled: Tri = .unresolved;
+// One cache per stream, because `.auto` folds the policy against a per-fd TTY
+// probe and `isTty` is a syscall the per-line writers must not repeat.
+var stdout_enabled: Tri = .unresolved;
+var stderr_enabled: Tri = .unresolved;
 var color_policy_cached: PolicyCache = .unresolved;
 var emoji_enabled: Tri = .unresolved;
 var background_cached: BgCache = .unresolved;
@@ -155,7 +158,8 @@ var active_custom: usize = AC_UNRESOLVED;
 pub fn setRuntime(io: std.Io, environ: std.process.Environ) void {
     pkg_io = io;
     pkg_environ = environ;
-    @atomicStore(Tri, &color_enabled, .unresolved, .release);
+    @atomicStore(Tri, &stdout_enabled, .unresolved, .release);
+    @atomicStore(Tri, &stderr_enabled, .unresolved, .release);
     @atomicStore(PolicyCache, &color_policy_cached, .unresolved, .release);
     @atomicStore(Tri, &emoji_enabled, .unresolved, .release);
     @atomicStore(BgCache, &background_cached, .unresolved, .release);
@@ -191,17 +195,30 @@ fn lookupEnv(name: []const u8) ?[:0]const u8 {
 }
 
 /// Test-only override for the TTY probe so the policy → colour fold can be
-/// exercised in both terminal states without a pty. Pass `null` to release.
-var tty_override: ?bool = null;
+/// exercised in both terminal states without a pty. Indexed by fd so stdout and
+/// stderr can disagree, which is the whole point of a per-stream decision.
+/// Pass `null` to release.
+var tty_override: [3]?bool = @splat(null);
 
+/// Overrides every standard fd at once — the common case, and what the probes
+/// that read stdin (OSC 11) need.
 pub fn setTtyForTest(v: ?bool) void {
     if (!builtin.is_test) return;
-    tty_override = v;
+    tty_override = @splat(v);
+}
+
+/// Overrides one stream, leaving the others alone: seeds a redirected stdout
+/// under a terminal stderr without touching the stdin probe.
+pub fn setStreamTtyForTest(stream: Stream, v: ?bool) void {
+    if (!builtin.is_test) return;
+    tty_override[@intCast(fdFor(stream))] = v;
 }
 
 fn isTty(fd: std.posix.fd_t) bool {
     if (builtin.is_test) {
-        if (tty_override) |v| return v;
+        if (fd >= 0 and fd < tty_override.len) {
+            if (tty_override[@intCast(fd)]) |v| return v;
+        }
     }
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
     return file.isTty(pkg_io) catch false;
@@ -290,8 +307,29 @@ test "resolveColorPolicy: NO_COLOR disables on presence alone, whatever its valu
     try std.testing.expectEqual(ColorPolicy.never, resolveColorPolicy("0", null, null));
 }
 
-pub fn isColorEnabled() bool {
-    switch (@atomicLoad(Tri, &color_enabled, .acquire)) {
+/// Which stream a colour question is about. A decision made for stderr is the
+/// wrong answer for a writer that targets stdout, and vice versa.
+pub const Stream = enum { stdout, stderr };
+
+fn fdFor(stream: Stream) std.posix.fd_t {
+    return switch (stream) {
+        .stdout => std.posix.STDOUT_FILENO,
+        .stderr => std.posix.STDERR_FILENO,
+    };
+}
+
+fn enabledCache(stream: Stream) *Tri {
+    return switch (stream) {
+        .stdout => &stdout_enabled,
+        .stderr => &stderr_enabled,
+    };
+}
+
+/// The colour question, asked about the stream the caller actually writes to.
+/// Writes to stdout must ask `.stdout`; `isColorEnabled()` answers for stderr.
+pub fn isColorEnabledFor(stream: Stream) bool {
+    const cache = enabledCache(stream);
+    switch (@atomicLoad(Tri, cache, .acquire)) {
         .yes => return true,
         .no => return false,
         .unresolved => {},
@@ -299,13 +337,79 @@ pub fn isColorEnabled() bool {
     const result: Tri = switch (colorPolicy()) {
         .always => .yes,
         .never => .no,
-        // Unchanged pre-CLICOLOR behaviour; also the only arm that costs a syscall.
-        .auto => if (isTty(std.posix.STDERR_FILENO)) .yes else .no,
+        // Unchanged pre-CLICOLOR behaviour; the only arm that costs a syscall,
+        // and the only one whose answer can differ between the two streams.
+        .auto => if (isTty(fdFor(stream))) .yes else .no,
     };
     // Benign double-compute under a race: the value is env-deterministic, so
-    // last-writer-wins on identical data — no CAS needed.
-    @atomicStore(Tri, &color_enabled, result, .release);
+    // last-writer-wins on identical data — no CAS needed. Each stream stores
+    // only its own cache: folding a stream-independent policy into both here
+    // would let one stream's first touch publish a cache it does not own.
+    @atomicStore(Tri, cache, result, .release);
     return result == .yes;
+}
+
+test "under .auto each stream answers from its own fd" {
+    // The regression this exists for: `mt info tree > out.txt` from a terminal.
+    // A stderr-derived answer writes raw ANSI into the file.
+    const io = std.Options.debug_io;
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    defer {
+        setTtyForTest(null);
+        setForTest(null, null);
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+    setStreamTtyForTest(.stdout, false); // redirected to a file
+    setStreamTtyForTest(.stderr, true); // still attached to the terminal
+
+    try std.testing.expect(!isColorEnabledFor(.stdout));
+    try std.testing.expect(isColorEnabledFor(.stderr));
+}
+
+test "a forced or vetoed policy answers the same for both streams" {
+    // `.always`/`.never` are stream-independent by construction — that is what
+    // keeps per-stream evaluation an addition rather than a second decision path.
+    const io = std.Options.debug_io;
+    defer {
+        setTtyForTest(null);
+        setForTest(null, null);
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"CLICOLOR_FORCE=1"} } });
+    setTtyForTest(false); // no terminal anywhere, and it must not matter
+    try std.testing.expect(isColorEnabledFor(.stdout));
+    try std.testing.expect(isColorEnabledFor(.stderr));
+
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"NO_COLOR=1"} } });
+    setTtyForTest(true); // terminals everywhere, and it must not matter
+    try std.testing.expect(!isColorEnabledFor(.stdout));
+    try std.testing.expect(!isColorEnabledFor(.stderr));
+}
+
+test "isColorEnabled is the stderr answer, not a copy that can drift" {
+    // The shim keeps ~20 stderr call sites unchanged; if it ever stops tracking
+    // `.stderr` exactly, those callers silently follow the wrong stream.
+    const io = std.Options.debug_io;
+    defer {
+        setTtyForTest(null);
+        setForTest(null, null);
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+
+    for ([_]bool{ true, false }) |stderr_is_tty| {
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+        setStreamTtyForTest(.stdout, !stderr_is_tty); // opposite, so a stdout-derived shim shows up
+        setStreamTtyForTest(.stderr, stderr_is_tty);
+        try std.testing.expectEqual(isColorEnabledFor(.stderr), isColorEnabled());
+        try std.testing.expectEqual(stderr_is_tty, isColorEnabled());
+    }
+}
+
+/// Stderr shim, kept so the many stderr writers read unchanged. Review
+/// convention: a code path that writes stdout must call `isColorEnabledFor`.
+pub fn isColorEnabled() bool {
+    return isColorEnabledFor(.stderr);
 }
 
 test "CLICOLOR_FORCE=1 emits colour even when stderr is not a terminal" {
@@ -368,7 +472,8 @@ pub fn isEmojiEnabled() bool {
 /// the next `is*Enabled` call recompute from env.
 pub fn setForTest(c: ?bool, e: ?bool) void {
     if (!builtin.is_test) return;
-    @atomicStore(Tri, &color_enabled, triFromOpt(c), .release);
+    @atomicStore(Tri, &stdout_enabled, triFromOpt(c), .release);
+    @atomicStore(Tri, &stderr_enabled, triFromOpt(c), .release);
     @atomicStore(Tri, &emoji_enabled, triFromOpt(e), .release);
 }
 
@@ -409,12 +514,17 @@ fn typeIsEnum(comptime T: type) bool {
 }
 
 test "storage: color/policy/emoji caches are atomic sentinel enums, not optionals" {
-    try std.testing.expect(typeIsEnum(@TypeOf(color_enabled)));
+    // Both stream caches, not just one: splitting the enablement cache in two
+    // doubled the storage this guard has to cover.
+    try std.testing.expect(typeIsEnum(@TypeOf(stdout_enabled)));
+    try std.testing.expect(typeIsEnum(@TypeOf(stderr_enabled)));
     try std.testing.expect(typeIsEnum(@TypeOf(color_policy_cached))); // PolicyCache, not ?ColorPolicy
     try std.testing.expect(typeIsEnum(@TypeOf(emoji_enabled)));
     // ColorPolicy stays a clean tri-state the fold switches over exhaustively;
     // the unresolved state lives only in the cache enum.
     try std.testing.expect(!@hasField(ColorPolicy, "unresolved"));
+    // Stream is a plain selector, never a cache: no unresolved variant to leak.
+    try std.testing.expect(!@hasField(Stream, "unresolved"));
 }
 
 // Encodes WHY the atomic rewrite matters: workers reach these accessors through
@@ -422,18 +532,27 @@ test "storage: color/policy/emoji caches are atomic sentinel enums, not optional
 // resolved. It cannot *prove* race-freedom (TSan is unavailable here) — the
 // sentinel storage provides that, pinned by the structural guard above.
 test "concurrent first-touch on the enabled caches agrees and resolves" {
-    setRuntime(std.Options.debug_io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"NO_COLOR=1"} } });
+    // Seeded divergent on purpose: racers touch BOTH streams cold, so a fold
+    // that published a stream-independent answer into both caches would let one
+    // stream's first touch decide the other's — the exact cross-cache write the
+    // three-cache split exists to keep out.
+    setRuntime(std.Options.debug_io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
     defer {
+        setTtyForTest(null);
         setForTest(null, null);
         setRuntime(std.Options.debug_io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
     }
+    setStreamTtyForTest(.stdout, false);
+    setStreamTtyForTest(.stderr, true);
 
     const Runner = struct {
-        color: bool = false,
+        out: bool = false,
+        err: bool = false,
         emoji: bool = false,
-        policy: ColorPolicy = .auto,
+        policy: ColorPolicy = .never,
         fn run(self: *@This()) void {
-            self.color = isColorEnabled();
+            self.out = isColorEnabledFor(.stdout);
+            self.err = isColorEnabledFor(.stderr);
             self.emoji = isEmojiEnabled();
             self.policy = colorPolicy();
         }
@@ -444,11 +563,13 @@ test "concurrent first-touch on the enabled caches agrees and resolves" {
     for (&threads) |t| t.join();
 
     for (runners) |r| {
-        try std.testing.expectEqual(runners[0].color, r.color);
+        try std.testing.expect(!r.out); // every racer sees the redirected stdout
+        try std.testing.expect(r.err); // and the terminal stderr
         try std.testing.expectEqual(runners[0].emoji, r.emoji);
-        try std.testing.expectEqual(ColorPolicy.never, r.policy); // NO_COLOR vetoes for every racer
+        try std.testing.expectEqual(ColorPolicy.auto, r.policy); // one policy, shared by both streams
     }
-    try std.testing.expect(@atomicLoad(Tri, &color_enabled, .acquire) != .unresolved);
+    try std.testing.expect(@atomicLoad(Tri, &stdout_enabled, .acquire) != .unresolved);
+    try std.testing.expect(@atomicLoad(Tri, &stderr_enabled, .acquire) != .unresolved);
     try std.testing.expect(@atomicLoad(PolicyCache, &color_policy_cached, .acquire) != .unresolved);
     try std.testing.expect(@atomicLoad(Tri, &emoji_enabled, .acquire) != .unresolved);
 }
@@ -482,16 +603,22 @@ test "setRuntime drops the enabled/policy/truecolor/background caches so a new e
         setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
     }
 
-    try std.testing.expect(!isColorEnabled()); // CLICOLOR=0 beats the terminal
+    // Both streams touched, so the re-seed has two enablement caches to drop.
+    try std.testing.expect(!isColorEnabledFor(.stdout)); // CLICOLOR=0 beats the terminal
+    try std.testing.expect(!isColorEnabled());
     try std.testing.expect(isEmojiEnabled());
     try std.testing.expect(truecolorSupported());
     try std.testing.expectEqual(Background.light, background());
-    try std.testing.expect(@atomicLoad(Tri, &color_enabled, .acquire) != .unresolved);
+    try std.testing.expect(@atomicLoad(Tri, &stdout_enabled, .acquire) != .unresolved);
+    try std.testing.expect(@atomicLoad(Tri, &stderr_enabled, .acquire) != .unresolved);
 
     // New environ flips each derived value; a frozen cache would keep the old one.
     setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{ "MALT_THEME=dark", "MALT_NO_EMOJI=1" } } });
-    try std.testing.expect(@atomicLoad(Tri, &color_enabled, .acquire) == .unresolved); // the cache was dropped
-    try std.testing.expect(isColorEnabled()); // CLICOLOR gone ⇒ back to the probe, which says terminal
+    try std.testing.expect(@atomicLoad(Tri, &stdout_enabled, .acquire) == .unresolved); // both caches dropped
+    try std.testing.expect(@atomicLoad(Tri, &stderr_enabled, .acquire) == .unresolved);
+    try std.testing.expect(@atomicLoad(PolicyCache, &color_policy_cached, .acquire) == .unresolved);
+    try std.testing.expect(isColorEnabledFor(.stdout)); // CLICOLOR gone ⇒ back to the probe, which says terminal
+    try std.testing.expect(isColorEnabled());
     try std.testing.expect(!isEmojiEnabled()); // MALT_NO_EMOJI now set
     try std.testing.expect(!truecolorSupported()); // COLORTERM now gone
     try std.testing.expectEqual(Background.dark, background()); // MALT_THEME flipped

@@ -153,7 +153,7 @@ pub fn writeHuman(stdout: *std.Io.Writer, target: []const u8, dependents: [][]co
         stdout.writeAll(line) catch return;
         return;
     }
-    const use_color = color.isColorEnabled();
+    const use_color = color.isColorEnabledFor(.stdout);
     for (dependents) |d| {
         if (use_color) stdout.writeAll(color.SemanticStyle.info.code()) catch return;
         stdout.writeAll("  \xe2\x96\xb8 ") catch return;

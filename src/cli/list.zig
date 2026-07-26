@@ -295,7 +295,7 @@ fn pinnedUnionSql(show_formula: bool, show_cask: bool, tap_filter: bool) ?[:0]co
 
 /// Emit the leading cyan bullet + space, honouring `NO_COLOR`.
 fn writeBulletPrefix(stdout: *std.Io.Writer) void {
-    if (color.isColorEnabled()) {
+    if (color.isColorEnabledFor(.stdout)) {
         stdout.writeAll(color.SemanticStyle.info.code()) catch return;
         stdout.writeAll("  ▸ ") catch return;
         stdout.writeAll(color.Style.reset.code()) catch return;
@@ -313,7 +313,7 @@ fn writeStyledSpan(
     body: []const u8,
     close: []const u8,
 ) void {
-    const use_color = color.isColorEnabled();
+    const use_color = color.isColorEnabledFor(.stdout);
     if (use_color) stdout.writeAll(style_code) catch return;
     stdout.writeAll(open) catch return;
     stdout.writeAll(body) catch return;

@@ -557,7 +557,7 @@ fn printListing(
     if (output.isJson()) {
         try writeListJson(&aw.writer, name, entries);
     } else {
-        try writeListHuman(&aw.writer, name, entries, color.isColorEnabled());
+        try writeListHuman(&aw.writer, name, entries, color.isColorEnabledFor(.stdout));
     }
     output.writeStdoutAll(aw.written());
 }
