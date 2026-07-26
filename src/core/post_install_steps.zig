@@ -13,6 +13,8 @@ const std = @import("std");
 const sandbox = @import("dsl/sandbox.zig");
 const sandbox_macos = @import("sandbox/macos.zig");
 const fallback_log = @import("dsl/fallback_log.zig");
+const atomic = @import("../fs/atomic.zig");
+const text_replace = @import("../text_replace.zig");
 
 pub const FallbackLog = fallback_log.FallbackLog;
 
@@ -50,6 +52,7 @@ const StepTag = enum {
     link_dir,
     link_children,
     remove,
+    inreplace,
     compile_gsettings_schemas,
     gio_querymodules,
     gdk_pixbuf_query_loaders,
@@ -69,6 +72,7 @@ const step_map = std.StaticStringMap(StepTag).initComptime(.{
     .{ "link_dir", .link_dir },
     .{ "link_children", .link_children },
     .{ "remove", .remove },
+    .{ "inreplace", .inreplace },
     .{ "compile_gsettings_schemas", .compile_gsettings_schemas },
     .{ "gio_querymodules", .gio_querymodules },
     .{ "gdk_pixbuf_query_loaders", .gdk_pixbuf_query_loaders },
@@ -162,6 +166,7 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         .link_dir => stepLinkDir(ctx, obj),
         .link_children => stepLinkChildren(ctx, obj),
         .remove => stepRemove(ctx, obj),
+        .inreplace => stepInreplace(ctx, obj),
         .compile_gsettings_schemas => runPathTool(ctx, obj, "glib", "glib-compile-schemas", &.{}),
         .gio_querymodules => runPathTool(ctx, obj, "glib", "gio-querymodules", &.{}),
         .update_mime_database => runPathTool(ctx, obj, "shared-mime-info", "update-mime-database", &.{}),
@@ -195,17 +200,17 @@ pub fn expandTemplates(ctx: StepsCtx, s: []const u8) ![]const u8 {
     return out.toOwnedSlice(ctx.allocator);
 }
 
-/// Note the deliberate split from `base_map` below: a `{{bin}}` **template**
-/// is the formula's own `bin` — i.e. inside the keg — whereas a `bin` **base**
-/// is `<prefix>/bin`. Upstream uses the template form to name a source in the
-/// keg and the base form to name a target in the prefix; a keg-only formula
-/// publishing its launcher uses both in the same step.
+/// Note the split from `base_map` below: the `{{bin}}` *template* is the
+/// keg's bin, while the `bin` *base* is `<prefix>/bin`. A keg-only formula
+/// publishing its launcher uses both in one step.
 const template_map = std.StaticStringMap(enum {
     name,
     version,
     version_major,
     version_major_minor,
     homebrew_prefix,
+    prefix_etc,
+    user,
     keg_bin,
     bash_completion,
     zsh_completion,
@@ -217,6 +222,8 @@ const template_map = std.StaticStringMap(enum {
     .{ "version.major", .version_major },
     .{ "version.major_minor", .version_major_minor },
     .{ "HOMEBREW_PREFIX", .homebrew_prefix },
+    .{ "etc", .prefix_etc },
+    .{ "user", .user },
     .{ "bin", .keg_bin },
     .{ "bash_completion", .bash_completion },
     .{ "zsh_completion", .zsh_completion },
@@ -232,6 +239,10 @@ fn templateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
         .version_major => versionComponents(ctx.version, 1),
         .version_major_minor => versionComponents(ctx.version, 2),
         .homebrew_prefix => ctx.prefix,
+        .prefix_etc => std.fmt.allocPrint(a, "{s}/etc", .{ctx.prefix}) catch null,
+        // Null when the environment has no USER: the caller must refuse
+        // rather than write an unresolved token into a live config.
+        .user => std.process.Environ.getPosix(ctx.environ, "USER"),
         // Keg-relative; the layouts are Homebrew's standard completion dirs.
         .keg_bin => std.fmt.allocPrint(a, "{s}/bin", .{ctx.keg_path}) catch null,
         .bash_completion => std.fmt.allocPrint(a, "{s}/etc/bash_completion.d", .{ctx.keg_path}) catch null,
@@ -422,14 +433,117 @@ fn stepSymlink(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     return true;
 }
 
-/// Retire a symlink this formula planted in an earlier version.
-///
-/// Guarded delete, never an unconditional one: the step identifies its own link
-/// by a substring of the link's target, so anything else living at that path —
-/// a real file, or a link pointing somewhere unrelated — belongs to something
-/// else and must survive. `readLinkAbsolute` doubles as the type check; it
-/// fails on a regular file, which is exactly the skip we want. The link itself
-/// is unlinked, never followed.
+/// `guards` gate a step on the target's state. Only `if_exists` appears
+/// upstream; an unknown condition counts as unmet, so the step is skipped
+/// rather than run against an assumption that was never checked.
+fn guardsSatisfied(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const guards = obj.get("guards") orelse return true;
+    if (guards != .array) return true;
+    for (guards.array.items) |item| {
+        if (item != .object) continue;
+        const raw = getString(item.object, "path") orelse return false;
+        const path = expandTemplates(ctx, raw) catch return false;
+        if (!std.mem.eql(u8, getString(item.object, "condition") orelse "", "if_exists")) return false;
+        std.Io.Dir.accessAbsolute(ctx.io, path, .{}) catch return false;
+    }
+    return true;
+}
+
+/// Replace every line beginning with `literal` wholesale. Caller must have
+/// verified the pattern fits via `anchoredLineLiteral`.
+fn replaceAnchoredLines(ctx: StepsCtx, content: []const u8, literal: []const u8, after: []const u8) ?[]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) out.append(ctx.allocator, '\n') catch return null;
+        first = false;
+        const repl = if (std.mem.startsWith(u8, line, literal)) after else line;
+        out.appendSlice(ctx.allocator, repl) catch return null;
+    }
+    return out.toOwnedSlice(ctx.allocator) catch null;
+}
+
+/// The literal prefix of a `^<literal>.*` pattern — the one regexp shape
+/// upstream uses — or null for anything else. There is no regex engine here,
+/// so a pattern this cannot fully account for must reach the fallback rather
+/// than be approximated against a live config.
+fn anchoredLineLiteral(pattern: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, pattern, "^") or !std.mem.endsWith(u8, pattern, ".*")) return null;
+    if (pattern.len < 4) return null;
+    const literal = pattern[1 .. pattern.len - 2];
+    for (literal) |c| switch (c) {
+        '.', '[', ']', '(', ')', '{', '}', '*', '+', '?', '|', '\\', '^', '$' => return null,
+        else => {},
+    };
+    return literal;
+}
+
+/// Substitute inside a config file the formula shipped earlier. The target is
+/// live user configuration, so the write is atomic and anything uncertain —
+/// unresolved template, empty needle, unsupported regexp — refuses instead.
+fn stepInreplace(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    // An unmet guard is the step declining to run, not a failure to report.
+    if (!guardsSatisfied(ctx, obj)) return true;
+
+    const path = resolvePathSpec(ctx, obj, "path") orelse return false;
+    if (!confined(ctx, path)) return false;
+
+    const before = getString(obj, "before") orelse {
+        logUnsupported(ctx, "inreplace");
+        return false;
+    };
+    const after_raw = getString(obj, "after") orelse {
+        logUnsupported(ctx, "inreplace");
+        return false;
+    };
+    if (before.len == 0) {
+        logUnsupported(ctx, "inreplace");
+        return false;
+    }
+    const after = expandTemplates(ctx, after_raw) catch return false;
+    if (std.mem.indexOf(u8, after, "{{") != null) {
+        // Writing a literal `{{user}}` into a config is worse than not running.
+        logUnsupported(ctx, "inreplace with an unresolved template");
+        return false;
+    }
+
+    const file = std.Io.Dir.openFileAbsolute(ctx.io, path, .{}) catch return false;
+    const stat = file.stat(ctx.io) catch {
+        file.close(ctx.io);
+        return false;
+    };
+    if (stat.size > 4 * 1024 * 1024) {
+        file.close(ctx.io);
+        return false;
+    }
+    const content = ctx.allocator.alloc(u8, stat.size) catch {
+        file.close(ctx.io);
+        return false;
+    };
+    const read = file.readPositionalAll(ctx.io, content, 0) catch {
+        file.close(ctx.io);
+        return false;
+    };
+    file.close(ctx.io);
+    if (read < content.len) return false;
+
+    const updated = if (getFlag(obj, "regexp")) blk: {
+        const literal = anchoredLineLiteral(before) orelse {
+            logUnsupported(ctx, "inreplace with an unsupported regexp");
+            return false;
+        };
+        break :blk replaceAnchoredLines(ctx, content, literal, after) orelse return false;
+    } else text_replace.replaceAll(ctx.allocator, content, before, after) catch return false;
+
+    atomic.atomicReplaceFile(ctx.io, path, updated) catch return false;
+    return true;
+}
+
+/// Retire a symlink this formula planted earlier, identified by a substring of
+/// its target. Guarded, never unconditional: a real file or a link pointing
+/// elsewhere belongs to something else and must survive. `readLinkAbsolute`
+/// doubles as the type check, and the link is unlinked rather than followed.
 fn stepRemove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const needle = getString(obj, "symlink_target_contains") orelse {
         // Without the guard this would be an unconditional recursive delete
@@ -848,12 +962,16 @@ fn uniquePrefix(io: std.Io) ![]u8 {
     return p;
 }
 
+/// Environment carrying a known `USER`, for steps that template it.
+const test_user_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"USER=ada"} } };
+
 const TestHarness = struct {
     arena: std.heap.ArenaAllocator,
     flog: FallbackLog,
     prefix: []u8,
     keg: []const u8,
     io: std.Io,
+    environ: std.process.Environ = .empty,
 
     fn init() !TestHarness {
         const io = testIo();
@@ -881,6 +999,7 @@ const TestHarness = struct {
             .prefix = self.prefix,
             .keg_path = self.keg,
             .flog = &self.flog,
+            .environ = self.environ,
         };
     }
 
@@ -974,6 +1093,218 @@ test "execute returns false when the formula carries no steps" {
         \\{"name":"glow","versions":{"stable":"1.2.3"}}
     ));
     try testing.expect(!h.flog.hasErrors());
+}
+
+/// Seed `<prefix>/etc/<rel>` with `body` and return its absolute path.
+fn seedEtc(h: *TestHarness, rel: []const u8, body: []const u8) ![]const u8 {
+    const a = h.arena.allocator();
+    const path = try std.fmt.allocPrint(a, "{s}/etc/{s}", .{ h.prefix, rel });
+    if (std.fs.path.dirname(path)) |d| try std.Io.Dir.cwd().createDirPath(h.io, d);
+    const f = try std.Io.Dir.createFileAbsolute(h.io, path, .{});
+    try f.writeStreamingAll(h.io, body);
+    f.close(h.io);
+    return path;
+}
+
+fn readBack(h: *TestHarness, path: []const u8) ![]const u8 {
+    const f = try std.Io.Dir.openFileAbsolute(h.io, path, .{});
+    defer f.close(h.io);
+    const st = try f.stat(h.io);
+    const buf = try h.arena.allocator().alloc(u8, st.size);
+    _ = try f.readPositionalAll(h.io, buf, 0);
+    return buf;
+}
+
+test "execute substitutes a literal inreplace and resolves the invoking user" {
+    // Config templating is the whole point of these steps: the shipped file
+    // carries a placeholder that only the installing machine can fill in.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.environ = test_user_environ;
+    const path = try seedEtc(&h, "glow.conf", "username: \"@@PLACEHOLDER@@\"\n");
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"inreplace","path":{"base":"etc","path":"glow.conf"},
+        \\  "before":"@@PLACEHOLDER@@","after":"{{user}}",
+        \\  "guards":[{"path":"{{etc}}/glow.conf","condition":"if_exists","id":"1"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqualStrings("username: \"ada\"\n", try readBack(&h, path));
+}
+
+test "execute skips an inreplace whose if_exists guard is unmet" {
+    // The guard exists because the target is a user config that may never
+    // have been poured; creating it here would invent configuration.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.environ = test_user_environ;
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"inreplace","path":{"base":"etc","path":"absent.conf"},
+        \\  "before":"x","after":"{{user}}",
+        \\  "guards":[{"path":"{{etc}}/absent.conf","condition":"if_exists","id":"1"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+    const missing = try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/absent.conf", .{h.prefix});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, missing, .{}));
+}
+
+test "execute rewrites a whole line for the anchored regexp form" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.environ = test_user_environ;
+    const path = try seedEtc(&h, "glow.cfg", "keep=1\nglow_user=nobody\nkeep=2\n");
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"inreplace","path":{"base":"etc","path":"glow.cfg"},"regexp":true,
+        \\  "before":"^glow_user=.*","after":"glow_user={{user}}",
+        \\  "guards":[{"path":"{{etc}}/glow.cfg","condition":"if_exists","id":"1"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqualStrings("keep=1\nglow_user=ada\nkeep=2\n", try readBack(&h, path));
+}
+
+test "execute refuses a regexp outside the anchored-line subset" {
+    // There is no regex engine here. Anything richer must reach the fallback
+    // rather than be approximated — a near-miss silently corrupts a config.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.environ = test_user_environ;
+    const body = "a=1\nb=2\n";
+    const path = try seedEtc(&h, "rich.cfg", body);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"inreplace","path":{"base":"etc","path":"rich.cfg"},"regexp":true,
+        \\  "before":"^(a|b)=[0-9]+$","after":"z={{user}}"}]
+    );
+    _ = execute(h.ctx(), json);
+    try testing.expectEqualStrings(body, try readBack(&h, path));
+    // Assert the refusal itself, not just an unchanged file: a widened
+    // allowlist would also leave this content alone, so only the step's own
+    // outcome distinguishes "declined" from "ran and matched nothing".
+    try testing.expectEqual(@as(usize, 0), h.flog.handled_top_level);
+    try testing.expect(h.flog.entries().len > 0);
+    try testing.expectEqual(fallback_log.FallbackReason.unknown_method, h.flog.entries()[0].reason);
+}
+
+test "execute refuses an anchored regexp whose literal hides metacharacters" {
+    // `^…​.*` shaped but not literal: the middle is a character class, so the
+    // prefix match this executor would do is not what the pattern means. Only
+    // the metacharacter allowlist can catch this — the anchor checks pass.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.environ = test_user_environ;
+    const body = "user1=x\nuserA=y\n";
+    const path = try seedEtc(&h, "class.cfg", body);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"inreplace","path":{"base":"etc","path":"class.cfg"},"regexp":true,
+        \\  "before":"^user[0-9].*","after":"user={{user}}"}]
+    );
+    _ = execute(h.ctx(), json);
+    try testing.expectEqualStrings(body, try readBack(&h, path));
+    // Assert the refusal itself, not just an unchanged file: a widened
+    // allowlist would also leave this content alone, so only the step's own
+    // outcome distinguishes "declined" from "ran and matched nothing".
+    try testing.expectEqual(@as(usize, 0), h.flog.handled_top_level);
+    try testing.expect(h.flog.entries().len > 0);
+    try testing.expectEqual(fallback_log.FallbackReason.unknown_method, h.flog.entries()[0].reason);
+}
+
+test "execute refuses an inreplace whose user token cannot be resolved" {
+    // With no USER in the environment the replacement would write the literal
+    // token into a live config, which is worse than not running at all.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const body = "username: \"@@PLACEHOLDER@@\"\n";
+    const path = try seedEtc(&h, "nouser.conf", body);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"inreplace","path":{"base":"etc","path":"nouser.conf"},
+        \\  "before":"@@PLACEHOLDER@@","after":"{{user}}"}]
+    );
+    _ = execute(h.ctx(), json);
+    try testing.expectEqualStrings(body, try readBack(&h, path));
+}
+
+test "anchoredLineLiteral rejects patterns with nothing to anchor on" {
+    // `^.*` matches every line; treating its empty literal as a prefix would
+    // rewrite the whole file.
+    try testing.expect(anchoredLineLiteral("^.*") == null);
+    try testing.expect(anchoredLineLiteral("user=.*") == null); // unanchored
+    try testing.expect(anchoredLineLiteral("^user=") == null); // no trailing .*
+    try testing.expect(anchoredLineLiteral("") == null);
+    try testing.expectEqualStrings("user=", anchoredLineLiteral("^user=.*").?);
+}
+
+test "replaceAnchoredLines preserves a file with no trailing newline" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const got = replaceAnchoredLines(h.ctx(), "a=1\nb=2", "b=", "b=9").?;
+    try testing.expectEqualStrings("a=1\nb=9", got);
+}
+
+test "execute refuses an inreplace with an empty needle" {
+    // An empty `before` would match everywhere; there is no sane rewrite.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.environ = test_user_environ;
+    const body = "keep=1\n";
+    const path = try seedEtc(&h, "empty.conf", body);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"inreplace","path":{"base":"etc","path":"empty.conf"},"before":"","after":"x"}]
+    );
+    _ = execute(h.ctx(), json);
+    try testing.expectEqualStrings(body, try readBack(&h, path));
+    try testing.expectEqual(@as(usize, 0), h.flog.handled_top_level);
+}
+
+test "execute refuses a remove that carries no target guard" {
+    // Without the guard this is an unconditional delete driven by formula data.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, bin);
+    const victim = try std.fmt.allocPrint(a, "{s}/keepme", .{bin});
+    (try std.Io.Dir.createFileAbsolute(h.io, victim, .{})).close(h.io);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"remove","paths":[{"path":"{{HOMEBREW_PREFIX}}/bin/keepme"}]}]
+    );
+    _ = execute(h.ctx(), json);
+    try std.Io.Dir.accessAbsolute(h.io, victim, .{});
+    try testing.expectEqual(@as(usize, 0), h.flog.handled_top_level);
+}
+
+test "execute refuses to remove a path outside the prefix" {
+    // Confinement, not the target guard, is what stops a crafted path here.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const outside = try std.fmt.allocPrint(a, "{s}-escape", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, outside);
+    defer std.Io.Dir.cwd().deleteTree(h.io, outside) catch {};
+    const dest = try std.fmt.allocPrint(a, "{s}/Cellar/glow/x", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(dest).?);
+    (try std.Io.Dir.createFileAbsolute(h.io, dest, .{})).close(h.io);
+    const link = try std.fmt.allocPrint(a, "{s}/victim", .{outside});
+    try std.Io.Dir.symLinkAbsolute(h.io, dest, link, .{});
+
+    const json = try std.fmt.allocPrint(a,
+        \\{{"name":"glow","versions":{{"stable":"1.2.3"}},"post_install_steps":[
+        \\ {{"type":"remove","symlink_target_contains":"Cellar/glow/","paths":[{{"base":"absolute","path":"{s}"}}]}}]}}
+    , .{link});
+    _ = execute(h.ctx(), json);
+    try std.Io.Dir.accessAbsolute(h.io, link, .{});
+    // Assert the guard fired rather than the step quietly not resolving: a
+    // surviving link proves nothing on its own.
+    try testing.expect(h.flog.entries().len > 0);
+    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, h.flog.entries()[0].reason);
 }
 
 test "execute links keg-relative template paths into the prefix" {
@@ -1491,7 +1822,7 @@ test "supportedStepType matches the executable tier and rejects the rest" {
         "mkdir_p",                  "touch",                 "write",                     "symlink",
         "link_dir",                 "link_children",         "compile_gsettings_schemas", "gio_querymodules",
         "gdk_pixbuf_query_loaders", "gtk_update_icon_cache", "update_mime_database",      "update_desktop_database",
-        "init_data_dir",            "remove",
+        "init_data_dir",            "remove",                "inreplace",
     };
     for (native) |t| try testing.expect(supportedStepType(t));
     const routed = [_][]const u8{ "mkdir", "move", "move_children", "frobnicate" };
