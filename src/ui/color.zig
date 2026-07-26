@@ -99,6 +99,17 @@ fn triFromOpt(v: ?bool) Tri {
 /// Atomic-friendly `?Background`; `unresolved` keeps `Background` a clean enum.
 const BgCache = enum(u8) { unresolved, dark, light, unknown };
 
+/// Atomic-friendly `?ColorPolicy`; `unresolved` keeps `ColorPolicy` a clean enum.
+const PolicyCache = enum(u8) { unresolved, auto, always, never };
+
+fn policyToCache(p: ColorPolicy) PolicyCache {
+    return switch (p) {
+        .auto => .auto,
+        .always => .always,
+        .never => .never,
+    };
+}
+
 fn bgToCache(bg: Background) BgCache {
     return switch (bg) {
         .dark => .dark,
@@ -108,6 +119,7 @@ fn bgToCache(bg: Background) BgCache {
 }
 
 var color_enabled: Tri = .unresolved;
+var color_policy_cached: PolicyCache = .unresolved;
 var emoji_enabled: Tri = .unresolved;
 var background_cached: BgCache = .unresolved;
 var truecolor_cached: Tri = .unresolved;
@@ -144,6 +156,7 @@ pub fn setRuntime(io: std.Io, environ: std.process.Environ) void {
     pkg_io = io;
     pkg_environ = environ;
     @atomicStore(Tri, &color_enabled, .unresolved, .release);
+    @atomicStore(PolicyCache, &color_policy_cached, .unresolved, .release);
     @atomicStore(Tri, &emoji_enabled, .unresolved, .release);
     @atomicStore(BgCache, &background_cached, .unresolved, .release);
     bg_probing.store(false, .release); // release the probe latch so the re-seed re-probes
@@ -177,9 +190,104 @@ fn lookupEnv(name: []const u8) ?[:0]const u8 {
     return std.process.Environ.getPosix(pkg_environ, name);
 }
 
+/// Test-only override for the TTY probe so the policy → colour fold can be
+/// exercised in both terminal states without a pty. Pass `null` to release.
+var tty_override: ?bool = null;
+
+pub fn setTtyForTest(v: ?bool) void {
+    if (!builtin.is_test) return;
+    tty_override = v;
+}
+
 fn isTty(fd: std.posix.fd_t) bool {
+    if (builtin.is_test) {
+        if (tty_override) |v| return v;
+    }
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
     return file.isTty(pkg_io) catch false;
+}
+
+/// The colour question is not a bool: `CLICOLOR_FORCE` means "colour regardless
+/// of TTY", which no terminal probe can express. Only `.auto` probes.
+pub const ColorPolicy = enum { auto, always, never };
+
+/// Pure so every combination is testable: no env read, no TTY probe, no alloc.
+/// The order is a contract, not an accident: `NO_COLOR` vetoes unconditionally
+/// (matching the TUI's refusal path) and `CLICOLOR_FORCE` outranks `CLICOLOR`
+/// because forcing is the more specific request. `NO_COLOR` disables on presence
+/// alone, so `NO_COLOR=` and `NO_COLOR=0` disable too - kept bug-compatible with
+/// the pre-CLICOLOR behaviour rather than matching no-color.org's "non-empty".
+fn resolveColorPolicy(no_color: ?[]const u8, clicolor: ?[]const u8, clicolor_force: ?[]const u8) ColorPolicy {
+    if (no_color != null) return .never;
+    if (clicolorForceSet(clicolor_force)) return .always;
+    if (clicolor) |v| if (std.mem.eql(u8, v, "0")) return .never;
+    return .auto;
+}
+
+/// A flag, not a value: empty reads as unset (the `[ -n "$VAR" ]` convention
+/// `progress.zig` uses for `CI`) and `0` is the ecosystem's opt-out.
+fn clicolorForceSet(v: ?[]const u8) bool {
+    const s = v orelse return false;
+    return s.len > 0 and !std.mem.eql(u8, s, "0");
+}
+
+/// Resolves lazily against the re-seedable `pkg_environ`, not once in `main`:
+/// worker threads reach this through `output.warn`.
+fn colorPolicy() ColorPolicy {
+    switch (@atomicLoad(PolicyCache, &color_policy_cached, .acquire)) {
+        .auto => return .auto,
+        .always => return .always,
+        .never => return .never,
+        .unresolved => {},
+    }
+    const p = resolveColorPolicy(
+        lookupEnv("NO_COLOR"),
+        lookupEnv("CLICOLOR"),
+        lookupEnv("CLICOLOR_FORCE"),
+    );
+    // Benign double-compute under a race, as with the caches above.
+    @atomicStore(PolicyCache, &color_policy_cached, policyToCache(p), .release);
+    return p;
+}
+
+test "resolveColorPolicy: nothing set stays on the TTY probe" {
+    try std.testing.expectEqual(ColorPolicy.auto, resolveColorPolicy(null, null, null));
+}
+
+test "resolveColorPolicy: NO_COLOR is an unconditional veto, even over CLICOLOR_FORCE" {
+    // The precedence is deliberate, not incidental: NO_COLOR already vetoes
+    // unconditionally on the TUI's refusal path, so the CLI must agree. A future
+    // reader flipping this order is changing a decision, not fixing an oversight.
+    try std.testing.expectEqual(ColorPolicy.never, resolveColorPolicy("1", null, null));
+    try std.testing.expectEqual(ColorPolicy.never, resolveColorPolicy("1", null, "1"));
+    try std.testing.expectEqual(ColorPolicy.never, resolveColorPolicy("1", "1", "1"));
+}
+
+test "resolveColorPolicy: CLICOLOR_FORCE forces colour and outranks CLICOLOR" {
+    try std.testing.expectEqual(ColorPolicy.always, resolveColorPolicy(null, null, "1"));
+    try std.testing.expectEqual(ColorPolicy.always, resolveColorPolicy(null, "0", "1"));
+    // Documented as "any non-empty value other than 0", so narrowing to =="1" is a break.
+    try std.testing.expectEqual(ColorPolicy.always, resolveColorPolicy(null, null, "true"));
+}
+
+test "resolveColorPolicy: an unset-shaped CLICOLOR_FORCE forces nothing" {
+    try std.testing.expectEqual(ColorPolicy.auto, resolveColorPolicy(null, null, "0"));
+    try std.testing.expectEqual(ColorPolicy.auto, resolveColorPolicy(null, null, ""));
+}
+
+test "resolveColorPolicy: CLICOLOR=0 disables, any other value defers to the probe" {
+    try std.testing.expectEqual(ColorPolicy.never, resolveColorPolicy(null, "0", null));
+    try std.testing.expectEqual(ColorPolicy.auto, resolveColorPolicy(null, "1", null));
+    try std.testing.expectEqual(ColorPolicy.auto, resolveColorPolicy(null, "", null));
+}
+
+test "resolveColorPolicy: NO_COLOR disables on presence alone, whatever its value" {
+    // Divergence from no-color.org's "non-empty" wording, kept on purpose so the
+    // pre-CLICOLOR behaviour does not regress. Flipping it is a user-visible
+    // change that needs its own pass, not a silent side effect of this table.
+    // `NO_COLOR=0` is the footgun this pins: it disables colour, not enables it.
+    try std.testing.expectEqual(ColorPolicy.never, resolveColorPolicy("", null, null));
+    try std.testing.expectEqual(ColorPolicy.never, resolveColorPolicy("0", null, null));
 }
 
 pub fn isColorEnabled() bool {
@@ -188,13 +296,60 @@ pub fn isColorEnabled() bool {
         .no => return false,
         .unresolved => {},
     }
-    // Check NO_COLOR env var AND whether stderr is a tty
-    const no_color = lookupEnv("NO_COLOR");
-    const result: Tri = if (no_color == null and isTty(std.posix.STDERR_FILENO)) .yes else .no;
+    const result: Tri = switch (colorPolicy()) {
+        .always => .yes,
+        .never => .no,
+        // Unchanged pre-CLICOLOR behaviour; also the only arm that costs a syscall.
+        .auto => if (isTty(std.posix.STDERR_FILENO)) .yes else .no,
+    };
     // Benign double-compute under a race: the value is env-deterministic, so
     // last-writer-wins on identical data — no CAS needed.
     @atomicStore(Tri, &color_enabled, result, .release);
     return result == .yes;
+}
+
+test "CLICOLOR_FORCE=1 emits colour even when stderr is not a terminal" {
+    // The behaviour that is impossible without a tri-state: piping into `less -R`
+    // or asking a CI job for ANSI. `.always` must never reach the TTY probe.
+    const io = std.Options.debug_io;
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"CLICOLOR_FORCE=1"} } });
+    setTtyForTest(false);
+    defer {
+        setTtyForTest(null);
+        setForTest(null, null);
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+    try std.testing.expect(isColorEnabled());
+}
+
+test "CLICOLOR=0 suppresses colour even when stderr is a terminal" {
+    const io = std.Options.debug_io;
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"CLICOLOR=0"} } });
+    setTtyForTest(true);
+    defer {
+        setTtyForTest(null);
+        setForTest(null, null);
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+    try std.testing.expect(!isColorEnabled());
+}
+
+test "with none of the three set, colour still follows the stderr TTY probe" {
+    // Pins the no-regression promise: the pre-CLICOLOR decision is `.auto`.
+    const io = std.Options.debug_io;
+    defer {
+        setTtyForTest(null);
+        setForTest(null, null);
+        setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    }
+
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    setTtyForTest(true);
+    try std.testing.expect(isColorEnabled());
+
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    setTtyForTest(false);
+    try std.testing.expect(!isColorEnabled());
 }
 
 pub fn isEmojiEnabled() bool {
@@ -253,9 +408,13 @@ fn typeIsEnum(comptime T: type) bool {
     return std.meta.activeTag(@typeInfo(T)) == .@"enum";
 }
 
-test "storage: color/emoji caches are atomic sentinel enums, not optionals" {
+test "storage: color/policy/emoji caches are atomic sentinel enums, not optionals" {
     try std.testing.expect(typeIsEnum(@TypeOf(color_enabled)));
+    try std.testing.expect(typeIsEnum(@TypeOf(color_policy_cached))); // PolicyCache, not ?ColorPolicy
     try std.testing.expect(typeIsEnum(@TypeOf(emoji_enabled)));
+    // ColorPolicy stays a clean tri-state the fold switches over exhaustively;
+    // the unresolved state lives only in the cache enum.
+    try std.testing.expect(!@hasField(ColorPolicy, "unresolved"));
 }
 
 // Encodes WHY the atomic rewrite matters: workers reach these accessors through
@@ -272,9 +431,11 @@ test "concurrent first-touch on the enabled caches agrees and resolves" {
     const Runner = struct {
         color: bool = false,
         emoji: bool = false,
+        policy: ColorPolicy = .auto,
         fn run(self: *@This()) void {
             self.color = isColorEnabled();
             self.emoji = isEmojiEnabled();
+            self.policy = colorPolicy();
         }
     };
     var runners: [8]Runner = @splat(.{});
@@ -285,8 +446,10 @@ test "concurrent first-touch on the enabled caches agrees and resolves" {
     for (runners) |r| {
         try std.testing.expectEqual(runners[0].color, r.color);
         try std.testing.expectEqual(runners[0].emoji, r.emoji);
+        try std.testing.expectEqual(ColorPolicy.never, r.policy); // NO_COLOR vetoes for every racer
     }
     try std.testing.expect(@atomicLoad(Tri, &color_enabled, .acquire) != .unresolved);
+    try std.testing.expect(@atomicLoad(PolicyCache, &color_policy_cached, .acquire) != .unresolved);
     try std.testing.expect(@atomicLoad(Tri, &emoji_enabled, .acquire) != .unresolved);
 }
 
@@ -306,18 +469,20 @@ test "storage: background/truecolor/theme caches are atomic; Theme stays clean" 
     try std.testing.expect(@TypeOf(theme_resolved) == bool);
 }
 
-test "setRuntime drops the enabled/truecolor/background caches so a new environ recomputes" {
+test "setRuntime drops the enabled/policy/truecolor/background caches so a new environ recomputes" {
     const io = std.Options.debug_io;
     // MALT_THEME as a bg keyword forces the background without an OSC 11 TTY probe.
-    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{ "MALT_THEME=light", "COLORTERM=truecolor" } } });
+    setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{ "MALT_THEME=light", "COLORTERM=truecolor", "CLICOLOR=0" } } });
+    setTtyForTest(true); // hold the probe steady so only the policy can move the answer
     defer {
+        setTtyForTest(null);
         setForTest(null, null);
         setTruecolorForTest(null);
         setBackgroundForTest(null);
         setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
     }
 
-    _ = isColorEnabled(); // prime the color cache (its env recompute is TTY-gated, unobservable here)
+    try std.testing.expect(!isColorEnabled()); // CLICOLOR=0 beats the terminal
     try std.testing.expect(isEmojiEnabled());
     try std.testing.expect(truecolorSupported());
     try std.testing.expectEqual(Background.light, background());
@@ -326,6 +491,7 @@ test "setRuntime drops the enabled/truecolor/background caches so a new environ 
     // New environ flips each derived value; a frozen cache would keep the old one.
     setRuntime(io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{ "MALT_THEME=dark", "MALT_NO_EMOJI=1" } } });
     try std.testing.expect(@atomicLoad(Tri, &color_enabled, .acquire) == .unresolved); // the cache was dropped
+    try std.testing.expect(isColorEnabled()); // CLICOLOR gone ⇒ back to the probe, which says terminal
     try std.testing.expect(!isEmojiEnabled()); // MALT_NO_EMOJI now set
     try std.testing.expect(!truecolorSupported()); // COLORTERM now gone
     try std.testing.expectEqual(Background.dark, background()); // MALT_THEME flipped
