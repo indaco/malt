@@ -73,6 +73,28 @@ fn createBottleFixture(allocator: std.mem.Allocator, prefix: []const u8, sha: []
     }
 }
 
+/// A keg with one `bin/` wrapper carrying a dependency-scoped placeholder —
+/// a token whose value is a path inside another keg, so relocation cannot
+/// derive it from the prefix alone.
+fn createPlaceholderBottleFixture(allocator: std.mem.Allocator, prefix: []const u8, sha: []const u8, name: []const u8, ver_dir: []const u8) !void {
+    const keg = try std.fmt.allocPrint(allocator, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, ver_dir });
+    defer allocator.free(keg);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg);
+
+    const bin_dir = try std.fmt.allocPrint(allocator, "{s}/bin", .{keg});
+    defer allocator.free(bin_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, bin_dir);
+
+    const script_path = try std.fmt.allocPrint(allocator, "{s}/bin/wrapper", .{keg});
+    defer allocator.free(script_path);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, script_path, .{});
+    try f.writeStreamingAll(
+        std.Options.debug_io,
+        "#!/bin/bash\nDEP_HOME=\"${DEP_HOME:-@@HOMEBREW_JAVA@@}\" exec @@HOMEBREW_CELLAR@@/pkg/1.0/libexec/bin/wrapper \"$@\"\n",
+    );
+    f.close(std.Options.debug_io);
+}
+
 fn setupMaltDirs(allocator: std.mem.Allocator, prefix: []const u8) !void {
     const dirs = [_][]const u8{ "store", "Cellar", "opt", "bin", "lib" };
     for (dirs) |d| {
@@ -116,6 +138,7 @@ test "materialize handles version with revision suffix" {
         "pcre2",
         "10.47",
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -177,6 +200,7 @@ test "materialize replaces a pre-existing Cellar/{name}/{version} directory (gh#
         "lld@21",
         "21.1.8_1",
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -210,6 +234,7 @@ test "materialize handles exact version match (no revision)" {
         "jq",
         "1.7.1",
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -242,7 +267,8 @@ test "placeholder substitution runs for relocatable bottles" {
         "rel123",
         "stow",
         "2.4.1",
-        ":any", // relocatable — the bug scenario
+        ":any", // relocatable — the bug scenario,
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -257,6 +283,86 @@ test "placeholder substitution runs for relocatable bottles" {
 
     // Must contain the actual malt prefix
     try testing.expect(std.mem.indexOf(u8, content, prefix) != null);
+}
+
+test "relocation substitutes the caller-resolved dependency placeholder" {
+    // Without this the token survives into the installed wrapper, which then
+    // resolves to a path that does not exist and fails at launch.
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+
+    try setupMaltDirs(testing.allocator, prefix);
+    try createPlaceholderBottleFixture(testing.allocator, prefix, "dep123", "pkg", "1.0");
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    var value_buf: [512]u8 = undefined;
+    const value = try std.fmt.bufPrint(
+        &value_buf,
+        "{s}/opt/openjdk/libexec/openjdk.jdk/Contents/Home",
+        .{prefix},
+    );
+
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        "dep123",
+        "pkg",
+        "1.0",
+        ":any",
+        .{ .old = "@@HOMEBREW_JAVA@@", .new = value },
+    );
+    defer testing.allocator.free(keg.path);
+
+    var script_buf: [512]u8 = undefined;
+    const script_path = try std.fmt.bufPrint(&script_buf, "{s}/bin/wrapper", .{keg.path});
+    const content = try readFile(testing.allocator, script_path);
+    defer testing.allocator.free(content);
+
+    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_JAVA@@") == null);
+    try testing.expect(std.mem.indexOf(u8, content, value) != null);
+}
+
+test "relocation leaves an unresolved dependency placeholder in place" {
+    // Substituting a guessed value would point the wrapper at a keg the
+    // formula never asked for — worse than leaving the token visible.
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+
+    try setupMaltDirs(testing.allocator, prefix);
+    try createPlaceholderBottleFixture(testing.allocator, prefix, "dep456", "pkg", "1.0");
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        "dep456",
+        "pkg",
+        "1.0",
+        ":any",
+        null,
+    );
+    defer testing.allocator.free(keg.path);
+
+    var script_buf: [512]u8 = undefined;
+    const script_path = try std.fmt.bufPrint(&script_buf, "{s}/bin/wrapper", .{keg.path});
+    const content = try readFile(testing.allocator, script_path);
+    defer testing.allocator.free(content);
+
+    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_JAVA@@") != null);
+    // The prefix-derived tokens still relocate — only the extra one is withheld.
+    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_CELLAR@@") == null);
 }
 
 test "placeholder substitution replaces multiple tokens in single file" {
@@ -280,6 +386,7 @@ test "placeholder substitution replaces multiple tokens in single file" {
         "pkg",
         "1.0",
         "",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -332,6 +439,7 @@ test "files with no placeholders are left unchanged" {
         "noop",
         "1.0",
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -379,6 +487,7 @@ test "binary files are skipped by text patching without error" {
         "binpkg",
         "1.0",
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -446,6 +555,7 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
         "cached",
         "1.0",
         ":any",
+        null,
     );
     testing.allocator.free(keg_pre.path);
     try relocated_mod.save(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "cached", "1.0");
@@ -464,6 +574,7 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
         "cached",
         "1.0",
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -498,6 +609,7 @@ test "materializeWithCellar populates the relocated cache after a cold install" 
         "snap",
         "0.1",
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -574,6 +686,7 @@ test "materializeWithCellar rebuilds a cached keg whose binary would abort dyld"
         "poisoned",
         "1.0",
         ":any",
+        null,
     );
     testing.allocator.free(first.path);
     try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
@@ -606,6 +719,7 @@ test "materializeWithCellar rebuilds a cached keg whose binary would abort dyld"
         "poisoned",
         "1.0",
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -636,6 +750,7 @@ test "materializeWithCellar trusts a snapshot it already verified" {
         "trusted",
         "1.0",
         ":any",
+        null,
     );
     testing.allocator.free(first.path);
     try testing.expect(relocated_mod.isVerified(std.Options.debug_io, prefix, valid_test_sha));
@@ -661,6 +776,7 @@ test "materializeWithCellar trusts a snapshot it already verified" {
         "trusted",
         "1.0",
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -706,6 +822,7 @@ test "materializeWithCellar refuses a keg whose binary kept an unsubstituted pla
         "unpatched",
         "2.0",
         ":any",
+        null,
     ));
 
     // A keg that cannot load is not left installed, and never gets cached.
@@ -763,6 +880,7 @@ test "failed materialize cleans up empty Cellar/{name}/ parent dir" {
         "ghost",
         "0.0.1",
         ":any",
+        null,
     );
     try testing.expectError(cellar_mod.CellarError.CloneFailed, result);
 
@@ -802,6 +920,7 @@ test "failed materialize leaves sibling versions untouched" {
         "keeper",
         "2.0",
         ":any",
+        null,
     );
     try testing.expectError(cellar_mod.CellarError.CloneFailed, result);
 
@@ -964,6 +1083,7 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
         name,
         version,
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -1147,6 +1267,7 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
         name,
         version,
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -1238,6 +1359,7 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
         name,
         version,
         ":any_skip_relocation",
+        null,
     );
     defer testing.allocator.free(keg.path);
 
@@ -1430,6 +1552,7 @@ test "warm cache-hit reinstall re-pours a wiped overlay config" {
         "fc",
         "1.0",
         ":any",
+        null,
     );
     testing.allocator.free(keg_cold.path);
     try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
@@ -1457,6 +1580,7 @@ test "warm cache-hit reinstall re-pours a wiped overlay config" {
         "fc",
         "1.0",
         ":any",
+        null,
     );
     testing.allocator.free(keg_warm.path);
 

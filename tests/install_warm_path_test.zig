@@ -111,6 +111,7 @@ test "install → uninstall → reinstall takes the relocated cache short-circui
             "warmpkg",
             "1.0",
             ":any",
+            null,
         );
         defer testing.allocator.free(keg.path);
     }
@@ -138,6 +139,7 @@ test "install → uninstall → reinstall takes the relocated cache short-circui
         "warmpkg",
         "1.0",
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
     try testing.expect(pathExists(keg.path));
@@ -173,6 +175,7 @@ test "non-APFS-style cache miss still allows a successful pipeline reinstall" {
             "nocache",
             "0.1",
             ":any",
+            null,
         );
         defer testing.allocator.free(keg.path);
     }
@@ -195,6 +198,7 @@ test "non-APFS-style cache miss still allows a successful pipeline reinstall" {
         "nocache",
         "0.1",
         ":any",
+        null,
     );
     defer testing.allocator.free(keg.path);
     // Pipeline rebuilt the keg AND restored the cache — warm reinstalls

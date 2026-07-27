@@ -9,6 +9,7 @@ const bottle_mod = @import("../../core/bottle.zig");
 const cellar_mod = @import("../../core/cellar.zig");
 const deps_mod = @import("../../core/deps.zig");
 const formula_mod = @import("../../core/formula.zig");
+const patch_mod = @import("../../core/patch.zig");
 const signals = @import("../../core/signals.zig");
 const store_mod = @import("../../core/store.zig");
 const sqlite = @import("../../db/sqlite.zig");
@@ -577,6 +578,18 @@ pub fn installKegFromBottle(
         };
     }
 
+    // Some bottles carry placeholder tokens whose value is a path inside a
+    // *declared dependency's* keg rather than the prefix. Only here is the
+    // formula in scope to resolve them, so the value is passed down.
+    var placeholder_buf: [512]u8 = undefined;
+    const placeholder = formula_mod.dependencyPlaceholder(
+        &placeholder_buf,
+        target_prefix,
+        formula.dependencies,
+    );
+    const extra_replacement: ?patch_mod.Replacement =
+        if (placeholder) |p| .{ .old = p.token, .new = p.value } else null;
+
     const keg = cellar_mod.materializeWithCellar(
         ctx.io,
         allocator,
@@ -585,6 +598,7 @@ pub fn installKegFromBottle(
         formula.name,
         formula.pkg_version,
         bottle.cellar,
+        extra_replacement,
     ) catch |err| {
         if (deps.cellar_diag) |out| out.* = err;
         return InstallError.CellarFailed;

@@ -114,7 +114,7 @@ if echo "$DOCTOR_OUT" | grep -qE "keg\(s\) in DB but missing on disk"; then
   echo "$DOCTOR_OUT" >&2
   fail "doctor reports Missing kegs after tap-path force-sweep"
 fi
-if echo "$DOCTOR_OUT" | grep -qE "package\(s\) ship Mach-O"; then
+if echo "$DOCTOR_OUT" | grep -qE "package\(s\) ship file\(s\) with unpatched @@HOMEBREW"; then
   echo "$DOCTOR_OUT" >&2
   fail "doctor reports Mach-O placeholders after tap-path force-sweep"
 fi

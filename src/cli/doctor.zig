@@ -1110,9 +1110,9 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
             // would just duplicate the first row of that list.
             break :blk std.fmt.bufPrint(
                 &msg_buf,
-                "{d} package(s) ship Mach-O file(s) with unpatched @@HOMEBREW_* placeholders. Reinstall the affected packages.",
+                "{d} package(s) ship file(s) with unpatched @@HOMEBREW_* placeholders. Reinstall the affected packages.",
                 .{groups.count()},
-            ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
+            ) catch "Files with unpatched @@HOMEBREW_* placeholders found.";
         }
         const first_key = first_key: {
             var it = groups.iterator();
@@ -1120,9 +1120,9 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
         };
         break :blk std.fmt.bufPrint(
             &msg_buf,
-            "{d} package(s) ship Mach-O file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Reinstall the affected packages.",
+            "{d} package(s) ship file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Reinstall the affected packages.",
             .{ groups.count(), first_key },
-        ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
+        ) catch "Files with unpatched @@HOMEBREW_* placeholders found.";
     };
     printCheck(name, .err_status, msg);
     armVerboseHint();
@@ -1310,10 +1310,19 @@ fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {
     return .warn_status;
 }
 
-/// True if `rel_path` inside `base_dir` is a Mach-O binary with at least one
-/// load command that still contains `@@HOMEBREW_PREFIX@@` or
-/// `@@HOMEBREW_CELLAR@@`. Any I/O or parser error is treated as "not bad" —
-/// doctor's placeholder check is best-effort.
+/// True when `content` is patchable text still carrying a relocation token.
+/// Matches `@@HOMEBREW_` generically: doctor only warns, so an unknown token
+/// is worth surfacing rather than ignoring. The NUL sniff mirrors
+/// `patchTextFiles` so doctor never flags a file the patcher would skip.
+fn textCarriesPlaceholder(content: []const u8) bool {
+    const check_len = @min(content.len, 8192);
+    if (std.mem.findScalar(u8, content[0..check_len], 0) != null) return false;
+    return std.mem.indexOf(u8, content, "@@HOMEBREW_") != null;
+}
+
+/// True if `rel_path` still carries a relocation token, in a Mach-O load
+/// command or in text. I/O and parser errors count as "not bad": doctor's
+/// placeholder check is best-effort.
 fn hasUnpatchedPlaceholder(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1326,10 +1335,22 @@ fn hasUnpatchedPlaceholder(
     var magic: [4]u8 = undefined;
     const n = file.readPositionalAll(io, &magic, 0) catch return false;
     if (n < 4) return false;
-    if (!parser.isMachO(&magic)) return false;
+    const is_macho = parser.isMachO(&magic);
+
+    const stat = file.stat(io) catch return false;
+
+    // A wrapper script that kept a token is as broken as a dylib that did.
+    // The 10MB cap matches `patchTextFiles`: larger files were never patched.
+    if (!is_macho) {
+        if (stat.size == 0 or stat.size > 10 * 1024 * 1024) return false;
+        const text = allocator.alloc(u8, stat.size) catch return false;
+        defer allocator.free(text);
+        const got = file.readPositionalAll(io, text, 0) catch return false;
+        if (got < text.len) return false;
+        return textCarriesPlaceholder(text);
+    }
 
     // Re-read the full file — parser needs the whole buffer.
-    const stat = file.stat(io) catch return false;
     if (stat.size > 512 * 1024 * 1024) return false; // skip pathologically large files
     const data = allocator.alloc(u8, stat.size) catch return false;
     defer allocator.free(data);
@@ -1831,4 +1852,30 @@ test "runChecks: an info_status finding counts as neither warning nor error" {
     }, &table);
     try testing.expectEqual(@as(u32, 0), tally.warnings);
     try testing.expectEqual(@as(u32, 0), tally.errors);
+}
+
+test "textCarriesPlaceholder flags a wrapper script that kept a token" {
+    // The failure this check exists to catch is a launcher that still points
+    // at a placeholder, which no Mach-O scan can see.
+    // No shebang in the fixture: the spawn-invariant guard rejects shell
+    // literals anywhere under src/, and the token is what's under test.
+    try testing.expect(textCarriesPlaceholder(
+        "DEP=\"${DEP:-@@HOMEBREW_JAVA@@}\" exec real \"$@\"\n",
+    ));
+}
+
+test "textCarriesPlaceholder flags a token this malt does not resolve" {
+    // Deliberately not restricted to the tokens malt substitutes: an
+    // unknown one is exactly the case worth surfacing, and doctor only warns.
+    try testing.expect(textCarriesPlaceholder("prefix=@@HOMEBREW_SOMETHING_NEW@@\n"));
+}
+
+test "textCarriesPlaceholder ignores a relocated script" {
+    try testing.expect(!textCarriesPlaceholder("exec /opt/malt/bin/real\n"));
+}
+
+test "textCarriesPlaceholder ignores binary content" {
+    // patchTextFiles skips anything with a NUL in the first 8KB, so flagging
+    // one would report a defect malt has no way to repair.
+    try testing.expect(!textCarriesPlaceholder("\x7fELF\x00\x00@@HOMEBREW_PREFIX@@"));
 }

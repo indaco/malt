@@ -71,13 +71,16 @@ pub fn materialize(
     name: []const u8,
     version: []const u8,
 ) CellarError!Keg {
-    return materializeWithCellar(io, allocator, prefix, store_sha256, name, version, "");
+    return materializeWithCellar(io, allocator, prefix, store_sha256, name, version, "", null);
 }
 
 /// Materialize with an explicit cellar type from the bottle metadata.
 /// When cellar_type is ":any" or ":any_skip_relocation", Mach-O binary
 /// patching is skipped (relocatable bottle). Text placeholder substitution
 /// (@@HOMEBREW_PREFIX@@, @@HOMEBREW_CELLAR@@) always runs.
+///
+/// `extra_replacement` carries a substitution the caller resolved from the
+/// formula (see `formula.dependencyPlaceholder`); null for most bottles.
 pub fn materializeWithCellar(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -86,6 +89,7 @@ pub fn materializeWithCellar(
     name: []const u8,
     version: []const u8,
     cellar_type: []const u8,
+    extra_replacement: ?patch.Replacement,
 ) CellarError!Keg {
     // Build paths
     var store_buf: [512]u8 = undefined;
@@ -199,7 +203,7 @@ pub fn materializeWithCellar(
         return CellarError.CloneFailed;
     };
 
-    try relocateKegTree(io, allocator, cellar_path, cellar_type);
+    try relocateKegTree(io, allocator, cellar_path, cellar_type, extra_replacement);
 
     // Write INSTALL_RECEIPT.json for brew compatibility
     writeInstallReceipt(io, cellar_path, name, version, store_sha256);
@@ -376,11 +380,14 @@ pub fn cellarLinksPath(io: std.Io, allocator: std.mem.Allocator, cellar_path: []
 /// the local-Cellar copy fallback (`materializeFromLocalCellar`) so
 /// every keg lands on disk with byte-identical relocation regardless
 /// of whether it came from the store or a sibling brew install.
+/// `extra_replacement` is one caller-resolved substitution applied after the
+/// prefix-derived ones, for tokens this module cannot derive on its own.
 fn relocateKegTree(
     io: std.Io,
     allocator: std.mem.Allocator,
     cellar_path: []const u8,
     cellar_type: []const u8,
+    extra_replacement: ?patch.Replacement,
 ) CellarError!void {
     const new_prefix = atomic.maltPrefixOrAbort();
 
@@ -428,13 +435,19 @@ fn relocateKegTree(
         else => return CellarError.PatchFailed,
     };
 
-    const text_replacements = [_]patch.Replacement{
-        .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix },
-        .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar },
-        .{ .old = "/opt/homebrew", .new = new_prefix },
-        .{ .old = "/usr/local", .new = new_prefix },
-    };
-    _ = patch.patchTextFiles(io, allocator, cellar_path, &text_replacements) catch |e| {
+    // Last on purpose: `patchTextFiles` runs sequential passes, so appending
+    // keeps the substituted path out of the prefix rewrites above.
+    var text_reps_buf: [5]patch.Replacement = undefined;
+    text_reps_buf[0] = .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix };
+    text_reps_buf[1] = .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar };
+    text_reps_buf[2] = .{ .old = "/opt/homebrew", .new = new_prefix };
+    text_reps_buf[3] = .{ .old = "/usr/local", .new = new_prefix };
+    var text_reps_len: usize = 4;
+    if (extra_replacement) |r| {
+        text_reps_buf[4] = r;
+        text_reps_len = 5;
+    }
+    _ = patch.patchTextFiles(io, allocator, cellar_path, text_reps_buf[0..text_reps_len]) catch |e| {
         std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
     };
 
@@ -597,7 +610,10 @@ pub fn materializeFromLocalCellar(
         return CellarError.CloneFailed;
     };
 
-    try relocateKegTree(io, allocator, cellar_path, cellar_type);
+    // No extra replacement: this keg is copied from a sibling brew install,
+    // which already resolved every dependency-scoped token at its own
+    // install time.
+    try relocateKegTree(io, allocator, cellar_path, cellar_type, null);
 
     // Tap-aware receipt: the source-of-truth tap is the sibling
     // brew install's, not "homebrew/core". `mt list` and friends use

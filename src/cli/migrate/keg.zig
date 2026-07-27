@@ -154,13 +154,27 @@ pub fn migrateKeg(
     // before materialise (the expensive step stays parallel, lock-free).
     incrementRefLocked(ctx.io, deps.store, deps.db_mu, bottle.sha256, keg_name);
 
-    const keg = cellar_mod.materialize(
+    // Same bottle path as a fresh install, so it needs the same
+    // dependency-scoped placeholder resolution.
+    var placeholder_buf: [512]u8 = undefined;
+    const placeholder = formula_mod.dependencyPlaceholder(
+        &placeholder_buf,
+        deps.prefix,
+        formula.dependencies,
+    );
+
+    const keg = cellar_mod.materializeWithCellar(
         ctx.io,
         allocator,
         deps.prefix,
         bottle.sha256,
         formula.name,
         formula.pkg_version,
+        // Unchanged from the `materialize` wrapper this replaced: migrate has
+        // always relocated these kegs unconditionally, and the cellar type is
+        // a separate question from the placeholder.
+        "",
+        if (placeholder) |p| .{ .old = p.token, .new = p.value } else null,
     ) catch {
         output.err("    {s}: failed to materialize", .{keg_name});
         output.emitNdjsonEvent(.materialized, keg_name, "failed");
