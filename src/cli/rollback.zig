@@ -185,8 +185,31 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.warn("Could not remove cellar entry for {s} {s}", .{ name, current_pkg_version });
     };
 
+    // No parsed formula here, and the DB rows describe the version being
+    // rolled away from — so read the target's own shipped formula source.
+    var ph_buf: [512]u8 = undefined;
+    const placeholder = storeKegPlaceholder(
+        ctx.io,
+        allocator,
+        &ph_buf,
+        prefix,
+        target.sha256,
+        name,
+        target.pkg_version,
+    );
+
     // Materialize the old version from store
-    const keg = cellar.materialize(ctx.io, allocator, prefix, target.sha256, name, target.pkg_version) catch {
+    const keg = cellar.materializeWithCellar(
+        ctx.io,
+        allocator,
+        prefix,
+        target.sha256,
+        name,
+        target.pkg_version,
+        // Unchanged from the `materialize` wrapper this replaced.
+        "",
+        if (placeholder) |p| .{ .old = p.token, .new = p.value } else null,
+    ) catch {
         output.err("Failed to materialize {s} {s} from store", .{ name, target.pkg_version });
         return error.Aborted;
     };
@@ -861,6 +884,40 @@ test "writeEntriesJsonArray emits [] when empty" {
     defer aw.deinit();
     try writeEntriesJsonArray(&aw.writer, &.{});
     try testing.expectEqualStrings("[]", aw.written());
+}
+
+/// Resolve a store keg's placeholder from the formula source its bottle ships
+/// at `.brew/<name>.rb`. Best-effort: null leaves the token in place, which
+/// doctor's placeholder check then reports.
+fn storeKegPlaceholder(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    buf: []u8,
+    prefix: []const u8,
+    sha256: []const u8,
+    name: []const u8,
+    pkg_version: []const u8,
+) ?formula_mod.Placeholder {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rb_path = std.fmt.bufPrint(
+        &path_buf,
+        "{s}/store/{s}/{s}/{s}/.brew/{s}.rb",
+        .{ prefix, sha256, name, pkg_version, name },
+    ) catch return null;
+
+    const file = std.Io.Dir.openFileAbsolute(io, rb_path, .{}) catch return null;
+    defer file.close(io);
+
+    const stat = file.stat(io) catch return null;
+    if (stat.size == 0 or stat.size > 1024 * 1024) return null;
+    const src = allocator.alloc(u8, stat.size) catch return null;
+    defer allocator.free(src);
+    const read = file.readPositionalAll(io, src, 0) catch return null;
+    if (read < src.len) return null;
+
+    var dep_buf: [64][]const u8 = undefined;
+    const deps = formula_mod.declaredDependencies(&dep_buf, src);
+    return formula_mod.dependencyPlaceholder(buf, prefix, deps);
 }
 
 /// Seed a `<prefix>/store/<sha>/<name>/<pkg_version>/INSTALL_RECEIPT.json`
