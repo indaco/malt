@@ -16,6 +16,44 @@ pub fn isPathComponent(s: []const u8) bool {
     return true;
 }
 
+/// True when `s` is a usable *relative subpath* — one or more components that
+/// stay inside the directory it is resolved against. Unlike `isPathComponent`
+/// it tolerates `/`, because some tap-controlled strings legitimately nest
+/// (`binary "bin/tool"`, `app "Sub/My App.app"`). It still bars what hops out:
+/// empty, absolute, a `..` component, an empty component (`a//b`), or a NUL.
+///
+/// `..` is rejected component-wise, not as a substring — a name like
+/// `foo..bar` is a real filename and must survive.
+pub fn isRelativeSubpath(s: []const u8) bool {
+    if (s.len == 0) return false;
+    if (s[0] == '/') return false;
+    if (std.mem.indexOfScalar(u8, s, 0) != null) return false;
+    var it = std.mem.splitScalar(u8, s, '/');
+    while (it.next()) |comp| {
+        if (comp.len == 0) return false; // leading, trailing, or doubled '/'
+        if (std.mem.eql(u8, comp, "..")) return false;
+    }
+    return true;
+}
+
+test "isRelativeSubpath rejects shapes that leave the base directory" {
+    const bad = [_][]const u8{
+        "",              "/abs/path",  "..",         "../x",
+        "a/../../b",     "a/b/..",     "a//b",       "a/",
+        "/",             "a\x00b",     "../",        "sub/../../../etc",
+    };
+    for (bad) |s| try std.testing.expect(!isRelativeSubpath(s));
+}
+
+test "isRelativeSubpath accepts the nested names real casks ship" {
+    const ok = [_][]const u8{
+        "Firefox.app",   "Sub Dir/My App.app", "bin/tool",
+        "a..b",          "foo..bar/baz",       "codex-aarch64-apple-darwin",
+        "share/man/man1/x.1",
+    };
+    for (ok) |s| try std.testing.expect(isRelativeSubpath(s));
+}
+
 test "isPathComponent rejects component-hopping shapes" {
     const bad = [_][]const u8{ "", ".", "..", "a/b", "../evil", "foo/", "a..b", "1..0", "a\x00b" };
     for (bad) |s| try std.testing.expect(!isPathComponent(s));

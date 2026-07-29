@@ -240,8 +240,17 @@ pub fn safePopenRead(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!
     const argv_slice = try buildArgv(ctx, args);
     if (argv_slice.len == 0) return Value{ .string = "" };
 
+    // Same two gates as `system`: this is the identical DSL surface, so
+    // capturing stdout must not be a way to spawn unconfined.
+    sandbox.validateArgv(argv_slice, ctx.cellar_path, ctx.malt_prefix) catch
+        return BuiltinError.PathSandboxViolation;
+    const spawn_argv = sandbox.fenceArgv(ctx.allocator, argv_slice, ctx.cellar_path, ctx.malt_prefix, .{}) catch |e| switch (e) {
+        error.OutOfMemory => return BuiltinError.OutOfMemory,
+        error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
+    };
+
     var child = std.process.spawn(ctx.io, .{
-        .argv = argv_slice,
+        .argv = spawn_argv,
         .stdout = .pipe,
         .stderr = .ignore,
     }) catch return Value{ .string = "" };
@@ -489,6 +498,66 @@ test "system and safe_popen_read keep their distinct empty-args returns" {
     try std.testing.expect((try system(ctx, null, &.{})) == .nil);
     const popen = try safePopenRead(ctx, null, &.{});
     try std.testing.expect(popen == .string and popen.string.len == 0);
+}
+
+// `safe_popen_read` is the same DSL surface as `system` — reachable from any
+// formula's post_install — so it must clear the same argv0 gate. Without it the
+// builtin is an unfenced-exec hole straight through the sandbox.
+test "safe_popen_read rejects an argv0 outside the sandbox roots before spawning" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lio: std.Io.Threaded = .init(arena.allocator(), .{});
+    defer lio.deinit();
+    const ctx = ExecCtx{
+        .allocator = arena.allocator(),
+        .io = lio.io(),
+        .environ = undefined,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+    };
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        safePopenRead(ctx, null, &.{.{ .string = "/Users/me/evil" }}),
+    );
+}
+
+// The argv0 lint waves bare/system-dir commands through, so the sandbox-exec
+// fence is what actually contains a write the *arguments* aim outside the keg.
+// `system` is fenced; `safe_popen_read` must be too, or a formula can reach any
+// path the user can write by picking the capturing builtin instead.
+test "safe_popen_read runs under the sandbox-exec write fence" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var lio: std.Io.Threaded = .init(alloc, .{});
+    defer lio.deinit();
+
+    const base = try std.fmt.allocPrint(alloc, "/tmp/malt_popen_fence_{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(lio.io(), base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(lio.io(), base) catch {};
+    const keg = try std.fmt.allocPrint(alloc, "{s}/Cellar/foo/1.0", .{base});
+    try std.Io.Dir.cwd().createDirPath(lio.io(), keg);
+
+    const ctx = ExecCtx{
+        .allocator = alloc,
+        .io = lio.io(),
+        .environ = .empty,
+        .cellar_path = keg,
+        .malt_prefix = keg,
+    };
+
+    // `/usr/bin/touch` clears the argv0 lint (system dir), so only the fence
+    // can stop the write landing outside the keg.
+    const outside = try std.fmt.allocPrint(alloc, "{s}/ESCAPED", .{base});
+    _ = try safePopenRead(ctx, null, &.{
+        .{ .string = "/usr/bin/touch" },
+        .{ .string = outside },
+    });
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(lio.io(), outside, .{}),
+    );
 }
 
 test "system rejects an argv0 outside the sandbox roots before spawning" {

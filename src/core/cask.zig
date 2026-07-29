@@ -67,6 +67,11 @@ pub fn parseCask(allocator: std.mem.Allocator, json_bytes: []const u8) !Cask {
     // component must be rejected here — the one ingestion choke point —
     // before any sink sees it. A compromised tap is the threat.
     if (!path_component.isPathComponent(token) or !path_component.isPathComponent(version)) return CaskError.ParseFailed;
+    // Artifact strings are the *other* half of the tap-controlled path surface:
+    // `app` lands in `<app_dir>/<name>` ahead of a `deleteTree`, and `binary`
+    // resolves under the keg and symlinks into `<prefix>/bin`. Screen them at
+    // the same choke point rather than at each sink.
+    try validateArtifactPaths(obj);
 
     return .{
         .token = token,
@@ -451,6 +456,61 @@ pub fn parseBinaryTarget(obj: std.json.ObjectMap) ?[]const u8 {
         }
     }
     return null;
+}
+
+/// Homebrew lets a `binary` source name the prefix explicitly; the remainder is
+/// still a subpath and is screened as one.
+const homebrew_prefix_var = "$HOMEBREW_PREFIX/";
+
+/// Reject any `app` or `binary` artifact string that would escape the directory
+/// it is resolved against. Only the artifact kinds malt actually turns into
+/// paths are screened: `font` has its own sanitizer in `cask_font.zig`, and
+/// `pkg` reaches the installer as the cached download path, not as a name.
+fn validateArtifactPaths(obj: std.json.ObjectMap) CaskError!void {
+    const artifacts = switch (obj.get("artifacts") orelse return) {
+        .array => |a| a,
+        else => return,
+    };
+
+    for (artifacts.items) |item| {
+        const art = switch (item) {
+            .object => |o| o,
+            else => continue,
+        };
+
+        // `app` — every string entry becomes `<app_dir>/<name>`.
+        if (art.get("app")) |val| if (val == .array) {
+            for (val.array.items) |entry| switch (entry) {
+                .string => |s| if (!path_component.isRelativeSubpath(s)) return CaskError.ParseFailed,
+                else => {},
+            };
+        };
+
+        // `binary` — items[0] is the source under the keg; any trailing object
+        // may carry a `target` rename hint that becomes `<prefix>/bin/<target>`.
+        if (art.get("binary")) |val| if (val == .array) {
+            for (val.array.items, 0..) |entry, i| switch (entry) {
+                .string => |s| {
+                    const rel = if (std.mem.startsWith(u8, s, homebrew_prefix_var))
+                        s[homebrew_prefix_var.len..]
+                    else
+                        s;
+                    if (!path_component.isRelativeSubpath(rel)) return CaskError.ParseFailed;
+                },
+                .object => |o| {
+                    // Only the first element is the source; later objects are
+                    // option hashes, and `target` is the one malt honours.
+                    if (i == 0) continue;
+                    if (o.get("target")) |tv| switch (tv) {
+                        // The link name is a single entry in `<prefix>/bin`.
+                        .string => |t| if (!path_component.isPathComponent(t)) return CaskError.ParseFailed,
+                        else => {},
+                    };
+                },
+                else => {},
+            };
+        };
+    }
 }
 
 fn firstArtifactArray(obj: std.json.ObjectMap, key: []const u8) ?std.json.Array {
@@ -1112,13 +1172,19 @@ pub const CaskInstaller = struct {
     fn resolveCaskBinaryPath(self: *CaskInstaller, root: []const u8, src: []const u8) ![]u8 {
         const env_prefix = "$HOMEBREW_PREFIX/";
         if (std.mem.startsWith(u8, src, env_prefix)) {
+            const rel = src[env_prefix.len..];
+            // Second line of defence: `parseCask` already screened this, but the
+            // resolved path is opened read-write and chmod 0755'd, so the sink
+            // does not lean on an upstream guard.
+            if (!path_component.isRelativeSubpath(rel)) return error.InstallFailed;
             return try std.fmt.allocPrint(
                 self.allocator,
                 "{s}/{s}",
-                .{ self.prefix, src[env_prefix.len..] },
+                .{ self.prefix, rel },
             );
         }
         if (std.mem.indexOfScalar(u8, src, '/') != null) {
+            if (!path_component.isRelativeSubpath(src)) return error.InstallFailed;
             return try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ root, src });
         }
         return (findFileInTree(self.io, self.allocator, root, src) catch null) orelse
@@ -1145,6 +1211,10 @@ pub const CaskInstaller = struct {
         // chmod may fail on FUSE/NFS mounts; symlink still works if bit was set.
         exec_file.setPermissions(self.io, std.Io.File.Permissions.fromMode(0o755)) catch {};
         exec_file.close(self.io);
+
+        // The link name is one entry in `<prefix>/bin`; a `target` carrying a
+        // separator would delete and re-create somewhere else entirely.
+        if (!path_component.isPathComponent(link_name)) return error.InstallFailed;
 
         var bin_parent_buf: [512]u8 = undefined;
         const bin_parent = std.fmt.bufPrint(&bin_parent_buf, "{s}/bin", .{self.prefix}) catch
@@ -1237,12 +1307,16 @@ pub fn hashFileSha256(io: std.Io, file_path: []const u8) ![64]u8 {
     return hash_mod.hashFileSha256Hex(io, file_path);
 }
 
-/// Verify `file_path` hashes to `expected` (lowercase hex). A null
-/// `expected` or the literal `"no_check"` skips verification —
-/// mirrors Homebrew's `sha256 :no_check` escape hatch for casks that
+/// Verify `file_path` hashes to `expected` (lowercase hex). The literal
+/// `"no_check"` skips verification — Homebrew's escape hatch for casks that
 /// cannot be pinned (auto-updating installers).
+///
+/// An *absent* hash is not that escape hatch. Homebrew always emits `sha256`
+/// for a cask, so a null here means a malformed or hostile manifest; treating
+/// it as "verified" would silently drop every cask to transport-only integrity,
+/// and `installPkg` hands the result to `sudo installer -target /`.
 pub fn verifyFileSha256(io: std.Io, file_path: []const u8, expected: ?[]const u8) !void {
-    const expected_hash = expected orelse return;
+    const expected_hash = expected orelse return error.Sha256Missing;
     if (std.mem.eql(u8, expected_hash, "no_check")) return;
 
     const got = try hashFileSha256(io, file_path);
@@ -1550,6 +1624,104 @@ test "parseCask rejects path-traversal in token or version" {
     for (bad) |json| {
         try std.testing.expectError(error.ParseFailed, parseCask(a, json));
     }
+}
+
+test "parseCask rejects path-traversal in an app artifact" {
+    const a = std.testing.allocator;
+    // `app` names are interpolated into `<app_dir>/<name>` and handed to
+    // `deleteTree` before the copy runs, so a climbing name is a destructive
+    // primitive for a hostile tap — reject it at the same choke point that
+    // already screens token/version.
+    const bad = [_][]const u8{
+        \\{"token":"ok","version":"1.0","url":"https://e/x.zip","artifacts":[{"app":["../Evil.app"]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.zip","artifacts":[{"app":["../../../../Users/x/Documents"]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.zip","artifacts":[{"app":["/Applications/Evil.app"]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.zip","artifacts":[{"app":["Sub/../../Evil.app"]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.zip","artifacts":[{"app":[""]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.zip","artifacts":[{"app":["Evil\u0000.app"]}]}
+        ,
+    };
+    for (bad) |json| {
+        try std.testing.expectError(error.ParseFailed, parseCask(a, json));
+    }
+}
+
+test "parseCask rejects path-traversal in a binary artifact" {
+    const a = std.testing.allocator;
+    // The `binary` source resolves under the keg and the `target` rename hint
+    // becomes `<prefix>/bin/<target>` for a deleteFile + symlink pair. Both
+    // escape their root if a `..` survives ingestion.
+    const bad = [_][]const u8{
+        \\{"token":"ok","version":"1.0","url":"https://e/x.tar.gz","artifacts":[{"binary":["../../../etc/evil"]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.tar.gz","artifacts":[{"binary":["/etc/passwd"]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.tar.gz","artifacts":[{"binary":["tool",{"target":"../../../../Users/x/.zshenv"}]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.tar.gz","artifacts":[{"binary":["tool",{"target":"sub/tool"}]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.tar.gz","artifacts":[{"binary":["$HOMEBREW_PREFIX/../../etc/evil"]}]}
+        ,
+    };
+    for (bad) |json| {
+        try std.testing.expectError(error.ParseFailed, parseCask(a, json));
+    }
+}
+
+test "parseCask accepts the artifact shapes real casks use" {
+    const a = std.testing.allocator;
+    // The guard must not narrow what already installs: nested app bundles,
+    // a binary nested under the extracted tree, the `$HOMEBREW_PREFIX/` form,
+    // and a plain rename target all stay valid.
+    const ok = [_][]const u8{
+        \\{"token":"ok","version":"1.0","url":"https://e/x.zip","artifacts":[{"app":["Firefox.app"]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.zip","artifacts":[{"app":["Sub Dir/My App.app"]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.tar.gz","artifacts":[{"binary":["bin/tool"]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.tar.gz","artifacts":[{"binary":["$HOMEBREW_PREFIX/bin/tool"]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.tar.gz","artifacts":[{"binary":["codex-aarch64-apple-darwin",{"target":"codex"}]}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.zip","artifacts":[{"font":["Some.ttf"],"target":"whatever/ignored"}]}
+        ,
+        \\{"token":"ok","version":"1.0","url":"https://e/x.pkg","artifacts":[{"pkg":["Thing.pkg"]}]}
+        ,
+    };
+    for (ok) |json| {
+        var cask = try parseCask(a, json);
+        cask.deinit();
+    }
+}
+
+test "verifyFileSha256 refuses an artifact with no declared hash" {
+    // Homebrew always emits `sha256` for a cask — a real digest or the literal
+    // `no_check`. Treating an *absent* field as "verified" silently downgrades
+    // every such cask to transport-only integrity, and `installPkg` hands the
+    // result to `sudo installer`.
+    const io = std.Options.debug_io;
+    const a = std.testing.allocator;
+    // Process-unique so overlapping test runs can't share the fixture.
+    const f = try std.fmt.allocPrint(a, "/tmp/malt_cask_nosha_{d}", .{std.c.getpid()});
+    defer a.free(f);
+    defer std.Io.Dir.cwd().deleteFile(io, f) catch {};
+    {
+        const fh = try std.Io.Dir.createFileAbsolute(io, f, .{ .truncate = true });
+        defer fh.close(io);
+        try fh.writeStreamingAll(io, "TAMPERED");
+    }
+
+    try std.testing.expectError(error.Sha256Missing, verifyFileSha256(io, f, null));
+    // The explicit opt-out still works, and a real digest still verifies.
+    try verifyFileSha256(io, f, "no_check");
+    const good = try hashFileSha256(io, f);
+    try verifyFileSha256(io, f, &good);
 }
 
 test "parseCask accepts legitimate token and version" {
