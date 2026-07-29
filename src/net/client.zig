@@ -28,6 +28,8 @@ pub const GetError = error{
     OfflineRequired,
     RequestFailed,
     TlsDowngradeRefused,
+    /// A manifest handed us a cleartext (non-loopback) origin.
+    InsecureUrlScheme,
     TooManyHttpRedirects,
     HttpRedirectInvalid,
     ResponseTooLarge,
@@ -442,11 +444,39 @@ pub const HttpClient = struct {
         return hostIsSameOrSubdomain(fh, th);
     }
 
+    /// True for the loopback names a local fixture server binds. Cleartext to
+    /// one of these never leaves the machine, so the https requirement below
+    /// does not apply — and the test suites that stand up a throwaway HTTP
+    /// server keep working without an escape hatch a real deployment could
+    /// trip over.
+    fn isLoopbackHost(host: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(host, "127.0.0.1") or
+            std.ascii.eqlIgnoreCase(host, "localhost") or
+            std.ascii.eqlIgnoreCase(host, "::1") or
+            std.ascii.eqlIgnoreCase(host, "[::1]");
+    }
+
+    /// Refuse a cleartext origin. The redirect loop already declines an
+    /// https→http downgrade mid-chain, but the *initial* scheme came straight
+    /// from a manifest: a tap that writes `http://` for a formula or cask URL
+    /// got a plaintext fetch, and a cask may legitimately carry no `sha256`
+    /// digest, leaving nothing but the transport to substitute against.
+    ///
+    /// `cli/tap.zig` already refuses `http://` when registering a tap; this
+    /// applies the same rule to the URLs those taps hand back.
+    pub fn requireSecureOrigin(url: []const u8) !void {
+        if (std.mem.startsWith(u8, url, "https://")) return;
+        const host = urlHost(url) orelse return error.InsecureUrlScheme;
+        if (isLoopbackHost(host)) return;
+        return error.InsecureUrlScheme;
+    }
+
     /// GET request; auto-injects the GitHub API token (`MALT_GITHUB_TOKEN`,
     /// then `HOMEBREW_GITHUB_API_TOKEN`) as Authorization for GitHub/Homebrew
     /// hosts. Caller owns the returned `Response`.
     pub fn get(self: *HttpClient, url: []const u8) !Response {
         if (self.offline) return error.OfflineRequired;
+        try requireSecureOrigin(url);
         if (try self.authHeaderValue(url)) |auth_value| {
             defer self.allocator.free(auth_value);
             const headers = [_]std.http.Header{
@@ -476,6 +506,7 @@ pub const HttpClient = struct {
         progress: ?ProgressCallback,
     ) !Response {
         if (self.offline) return error.OfflineRequired;
+        try requireSecureOrigin(url);
         return self.doGetWithRetry(url, extra_headers, max_blob_bytes, progress);
     }
 
@@ -493,12 +524,14 @@ pub const HttpClient = struct {
         progress: ?ProgressCallback,
     ) GetError!u16 {
         if (self.offline) return error.OfflineRequired;
+        requireSecureOrigin(url) catch return error.InsecureUrlScheme;
         return self.doGetToWriterWithRetry(url, extra_headers, sink, progress);
     }
 
     /// Perform a HEAD request and return only the HTTP status code.
     pub fn head(self: *HttpClient, url: []const u8) !u16 {
         if (self.offline) return error.OfflineRequired;
+        try requireSecureOrigin(url);
         const uri = try std.Uri.parse(url);
 
         var req = try self.client.request(.HEAD, uri, .{
@@ -1395,6 +1428,40 @@ test "githubTokenApplies: tolerates the FQDN trailing-dot root form" {
 
 fn environFrom(entries: [:null]const ?[*:0]const u8) std.process.Environ {
     return .{ .block = .{ .slice = entries } };
+}
+
+test "requireSecureOrigin: refuses a cleartext manifest origin" {
+    // A tap controls the `url` field of a formula or cask. Cask hashes are
+    // optional upstream, so on the cleartext path there can be nothing but the
+    // transport standing between the manifest and an installed artifact.
+    const bad = [_][]const u8{
+        "http://example.com/pkg.tar.gz",
+        "http://github.com/x/y",
+        "http://192.168.1.10/pkg.dmg",
+        "http://evil.tld/127.0.0.1/pkg.zip", // loopback in the *path*, not the host
+        "http://127.0.0.1.evil.tld/pkg.zip", // and not as a prefix of the host
+        "ftp://example.com/pkg.tar.gz",
+        "file:///etc/passwd",
+        "not-a-url",
+        "",
+    };
+    for (bad) |u| try std.testing.expectError(
+        error.InsecureUrlScheme,
+        HttpClient.requireSecureOrigin(u),
+    );
+}
+
+test "requireSecureOrigin: allows https anywhere and cleartext only to loopback" {
+    // The loopback carve-out is what keeps the fixture-server tests honest
+    // without giving a real deployment a way to opt out.
+    const ok = [_][]const u8{
+        "https://formulae.brew.sh/api/formula/jq.json",
+        "https://ghcr.io/v2/x/blobs/sha256:ab",
+        "http://127.0.0.1:8080/blob",
+        "http://localhost:1234/start",
+        "http://LOCALHOST:1/x",
+    };
+    for (ok) |u| try HttpClient.requireSecureOrigin(u);
 }
 
 test "githubApiToken: MALT_GITHUB_TOKEN is preferred over HOMEBREW_GITHUB_API_TOKEN" {

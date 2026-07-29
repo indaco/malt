@@ -251,7 +251,12 @@ else
   To bypass (not recommended): MALT_ALLOW_UNVERIFIED=1 curl … | bash"
   fi
 
-  EXPECTED=$(grep "$ARCHIVE_NAME" "$TMPDIR/checksums.txt" | awk '{print $1}')
+  # Fixed-string, whole-field match on the two-space GoReleaser separator.
+  # An unanchored `grep "$ARCHIVE_NAME"` treats the name as a regex and matches
+  # anywhere on the line, so a longer filename containing this one would also
+  # hit and make EXPECTED multi-line. checksums.txt is cosign-verified above,
+  # so this was not exploitable — it just should not depend on that ordering.
+  EXPECTED=$(awk -v want="  ${ARCHIVE_NAME}" 'index($0, want) == 65 {print $1; exit}' "$TMPDIR/checksums.txt")
   [ -n "$EXPECTED" ] || error "Checksum for ${ARCHIVE_NAME} not listed in checksums.txt."
   ACTUAL=$(shasum -a 256 "$TMPDIR/$ARCHIVE_NAME" | awk '{print $1}')
   if [ "$EXPECTED" != "$ACTUAL" ]; then
