@@ -120,3 +120,72 @@ test "tailLog returns last N lines of a small file" {
 
     try testing.expectEqualStrings("delta\nepsilon\n", aw.written());
 }
+
+test "resolveLabel accepts the keg name a user would actually type" {
+    // Services are registered under their launchd label while `keg_name` holds
+    // the formula, so `services start mosquitto` used to fail with
+    // ServiceNotFound on a service that `services list` was showing. Every
+    // other verb takes the formula name.
+    var t = try TempDb.init("resolve_keg");
+    defer t.deinit();
+
+    try t.db.exec(
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start, last_status)
+        \\VALUES ('com.malt.mosquitto', 'mosquitto', '/tmp/m.plist', 0, 'registered');
+    );
+
+    const by_keg = try supervisor.resolveLabel(testing.allocator, &t.db, "mosquitto");
+    defer testing.allocator.free(by_keg);
+    try testing.expectEqualStrings("com.malt.mosquitto", by_keg);
+
+    // The label itself keeps working, and still wins outright.
+    const by_label = try supervisor.resolveLabel(testing.allocator, &t.db, "com.malt.mosquitto");
+    defer testing.allocator.free(by_label);
+    try testing.expectEqualStrings("com.malt.mosquitto", by_label);
+
+    // `status` and `start` must agree on what exists.
+    try testing.expect(supervisor.hasService(&t.db, "mosquitto"));
+    try testing.expect(supervisor.hasService(&t.db, "com.malt.mosquitto"));
+
+    try testing.expectError(
+        error.ServiceNotFound,
+        supervisor.resolveLabel(testing.allocator, &t.db, "nope"),
+    );
+}
+
+test "resolveLabel prefers an exact label over a keg name that collides with it" {
+    // Pathological but cheap to be correct about: if one service's label is
+    // another's keg name, an exact request must not be reinterpreted.
+    var t = try TempDb.init("resolve_collide");
+    defer t.deinit();
+
+    try t.db.exec(
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start, last_status)
+        \\VALUES ('alpha', 'beta', '/tmp/a.plist', 0, 'registered'),
+        \\       ('gamma', 'alpha', '/tmp/g.plist', 0, 'registered');
+    );
+
+    const got = try supervisor.resolveLabel(testing.allocator, &t.db, "alpha");
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("alpha", got);
+}
+
+test "resolveLabel refuses to guess when one formula registers two services" {
+    var t = try TempDb.init("resolve_ambiguous");
+    defer t.deinit();
+
+    try t.db.exec(
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start, last_status)
+        \\VALUES ('com.malt.pg.main', 'postgresql@16', '/tmp/1.plist', 0, 'registered'),
+        \\       ('com.malt.pg.repl', 'postgresql@16', '/tmp/2.plist', 0, 'registered');
+    );
+
+    try testing.expectError(
+        error.AmbiguousService,
+        supervisor.resolveLabel(testing.allocator, &t.db, "postgresql@16"),
+    );
+    // Naming one of them exactly still works.
+    const exact = try supervisor.resolveLabel(testing.allocator, &t.db, "com.malt.pg.repl");
+    defer testing.allocator.free(exact);
+    try testing.expectEqualStrings("com.malt.pg.repl", exact);
+}

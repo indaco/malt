@@ -36,6 +36,8 @@ const atomic = @import("../../fs/atomic.zig");
 pub const SupervisorError = error{
     OsNotSupported,
     ServiceNotFound,
+    /// The keg name matches more than one registered service.
+    AmbiguousService,
     LaunchctlFailed,
     IoFailed,
     DatabaseError,
@@ -50,6 +52,7 @@ pub fn describeError(err: SupervisorError) []const u8 {
     return switch (err) {
         SupervisorError.OsNotSupported => "services are only supported on macOS for now",
         SupervisorError.ServiceNotFound => "service not registered",
+        SupervisorError.AmbiguousService => "that formula registers more than one service; name the one you mean (see `services list`)",
         SupervisorError.LaunchctlFailed => "launchctl command failed",
         SupervisorError.IoFailed => "filesystem error while managing service",
         SupervisorError.DatabaseError => "database error while managing service",
@@ -203,6 +206,16 @@ pub fn register(
         else => return SupervisorError.IoFailed,
     };
 
+    // launchd fails the spawn with EX_CONFIG (78) when WorkingDirectory does
+    // not exist — before exec, so StandardErrorPath is never created and the
+    // user gets a bare "errored" with no log to read. `install.zig` already
+    // pre-creates the log directory for the same reason; the working dir was
+    // the half that got missed. `plist_mod.validate` above has already
+    // confined it to the keg or the prefix, so creating it is in-bounds.
+    if (spec.working_dir) |wd| {
+        std.Io.Dir.cwd().createDirPath(ctx.io, wd) catch {};
+    }
+
     const plist_path = std.fmt.allocPrint(allocator, "{s}/service.plist", .{dir}) catch
         return SupervisorError.OutOfMemory;
     defer allocator.free(plist_path);
@@ -255,11 +268,51 @@ fn userDomain(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "gui/{d}", .{uid});
 }
 
+/// Resolve what the user typed to a registered service label.
+///
+/// Services are stored under their launchd label (`com.malt.mosquitto`) while
+/// `keg_name` holds the formula (`mosquitto`). Every other malt verb takes the
+/// formula name — `install mosquitto`, `uninstall mosquitto` — so requiring the
+/// label here made `services start mosquitto` fail with `ServiceNotFound` on a
+/// service that is registered and visible in `services list`.
+///
+/// The label still wins when both could match, so an exact request is never
+/// reinterpreted. A formula that registers more than one service is ambiguous
+/// by keg name and says so rather than picking one.
+/// Caller owns the returned slice.
+pub fn resolveLabel(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) SupervisorError![]const u8 {
+    {
+        var exact = db.prepare("SELECT name FROM services WHERE name = ?;") catch
+            return SupervisorError.DatabaseError;
+        defer exact.finalize();
+        exact.bindText(1, name) catch return SupervisorError.DatabaseError;
+        if (exact.step() catch return SupervisorError.DatabaseError) {
+            const p = exact.columnText(0) orelse return SupervisorError.ServiceNotFound;
+            return allocator.dupe(u8, std.mem.sliceTo(p, 0)) catch return SupervisorError.OutOfMemory;
+        }
+    }
+
+    var by_keg = db.prepare("SELECT name FROM services WHERE keg_name = ? ORDER BY name;") catch
+        return SupervisorError.DatabaseError;
+    defer by_keg.finalize();
+    by_keg.bindText(1, name) catch return SupervisorError.DatabaseError;
+    if (!(by_keg.step() catch return SupervisorError.DatabaseError)) return SupervisorError.ServiceNotFound;
+    const first = by_keg.columnText(0) orelse return SupervisorError.ServiceNotFound;
+    const owned = allocator.dupe(u8, std.mem.sliceTo(first, 0)) catch return SupervisorError.OutOfMemory;
+    errdefer allocator.free(owned);
+    // A second row means the keg name does not identify one service.
+    if (by_keg.step() catch return SupervisorError.DatabaseError) return SupervisorError.AmbiguousService;
+    return owned;
+}
+
 fn lookupPlistPath(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) SupervisorError![]const u8 {
+    const label = try resolveLabel(allocator, db, name);
+    defer allocator.free(label);
+
     var stmt = db.prepare("SELECT plist_path FROM services WHERE name = ?;") catch
         return SupervisorError.DatabaseError;
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return SupervisorError.DatabaseError;
+    stmt.bindText(1, label) catch return SupervisorError.DatabaseError;
     if (!(stmt.step() catch return SupervisorError.DatabaseError)) return SupervisorError.ServiceNotFound;
     const p = stmt.columnText(0) orelse return SupervisorError.ServiceNotFound;
     return allocator.dupe(u8, std.mem.sliceTo(p, 0)) catch return SupervisorError.OutOfMemory;
@@ -377,9 +430,12 @@ pub fn queryRuntime(io: std.Io, allocator: std.mem.Allocator, label: []const u8)
 }
 
 pub fn hasService(db: *sqlite.Database, name: []const u8) bool {
-    var stmt = db.prepare("SELECT 1 FROM services WHERE name = ?;") catch return false;
+    // Accepts a label or a keg name, matching `resolveLabel`, so `status` and
+    // `start` agree on what exists.
+    var stmt = db.prepare("SELECT 1 FROM services WHERE name = ? OR keg_name = ?;") catch return false;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return false;
+    stmt.bindText(2, name) catch return false;
     return stmt.step() catch false;
 }
 
