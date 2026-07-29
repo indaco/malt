@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const malt = @import("malt");
 const client_mod = @import("malt").client;
 const progress_mod = @import("malt").progress;
 
@@ -25,7 +26,16 @@ const TestTracker = struct {
     }
 };
 
+/// Live-network tests are opt-in — see `tests/progress_test.zig`. Set
+/// `MALT_TEST_NETWORK=1` to run them.
+fn liveNetworkAllowed() bool {
+    const v = std.process.Environ.getPosix(malt.app_ctx.processEnviron(), "MALT_TEST_NETWORK") orelse
+        return false;
+    return std.mem.eql(u8, v, "1");
+}
+
 test "HTTP GET with progress callback fires correctly" {
+    if (!liveNetworkAllowed()) return error.SkipZigTest;
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
 
@@ -60,6 +70,7 @@ test "HTTP GET with progress callback fires correctly" {
 }
 
 test "HTTP GET without progress (null) still works" {
+    if (!liveNetworkAllowed()) return error.SkipZigTest;
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
 

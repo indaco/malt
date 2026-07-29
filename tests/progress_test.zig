@@ -426,7 +426,17 @@ test "Response.deinit frees the owned body buffer" {
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern fn unsetenv(name: [*:0]const u8) c_int;
 
+/// Live-network tests are opt-in. They reach third-party hosts, which makes the
+/// suite non-hermetic, dependent on someone else's uptime, and noisy on a
+/// firewalled or sandboxed machine. Set `MALT_TEST_NETWORK=1` to run them.
+fn liveNetworkAllowed() bool {
+    const v = std.process.Environ.getPosix(malt.app_ctx.processEnviron(), "MALT_TEST_NETWORK") orelse
+        return false;
+    return std.mem.eql(u8, v, "1");
+}
+
 test "HttpClient.get retries on a 503 response status" {
+    if (!liveNetworkAllowed()) return error.SkipZigTest;
     // httpbin.org/status/503 returns a deterministic 503 which is one of
     // the retry-eligible codes (429/503/504). We don't care about the
     // final result — we just need kcov to see the retry branch execute.
@@ -461,22 +471,22 @@ test "HttpClient.get retries on connection failure before giving up" {
     } else |_| {}
 }
 
-test "HttpClient.get injects auth header when HOMEBREW_GITHUB_API_TOKEN is set" {
-    // Force the env var to a sentinel for the duration of this test —
-    // both formulae.brew.sh and ghcr.io URLs pick up the token branch,
-    // which is the 4-line block (lines 54-61) in client.zig.
-    _ = setenv("HOMEBREW_GITHUB_API_TOKEN", "fake-testing-token", 1);
-    defer _ = unsetenv("HOMEBREW_GITHUB_API_TOKEN");
+test "HttpClient auth header: token resolution and host gate, without a request" {
+    // This used to build the client from the *process* environment and issue a
+    // real GET to formulae.brew.sh. `githubApiToken` prefers MALT_GITHUB_TOKEN
+    // over the HOMEBREW_ var this test sets, so on a machine with the former
+    // exported the suite mailed a live credential to a third-party host.
+    //
+    // Both halves of the injection decision are pure, so assert them directly
+    // against a synthetic environ and never open a socket.
+    const entries = [_:null]?[*:0]const u8{"HOMEBREW_GITHUB_API_TOKEN=fake-testing-token".ptr};
+    const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
 
-    var http = client_mod.HttpClient.init(std.Options.debug_io, malt.app_ctx.processEnviron(), testing.allocator);
-    defer http.deinit();
-
-    // The URL matches the formulae.brew.sh guard so the header path runs.
-    // We then hit an invalid subpath; any non-2xx response is fine — we
-    // only care that the token-branch code compiled and executed.
-    var resp = http.get("https://formulae.brew.sh/api/formula/jq.json") catch |err| {
-        std.debug.print("Skipping token header test (network error: {s})\n", .{@errorName(err)});
-        return;
-    };
-    defer resp.deinit();
+    try testing.expectEqualStrings(
+        "fake-testing-token",
+        client_mod.HttpClient.githubApiToken(environ).?,
+    );
+    // …and it is only ever offered to the hosts the gate names.
+    try testing.expect(client_mod.HttpClient.githubTokenApplies("https://formulae.brew.sh/api/formula/jq.json"));
+    try testing.expect(!client_mod.HttpClient.githubTokenApplies("https://example.com/formulae.brew.sh"));
 }

@@ -376,7 +376,11 @@ pub const HttpClient = struct {
     /// `https://evil.tld/github.com` never receives the token. Hosts are
     /// compared case-insensitively (DNS is case-insensitive), so a legit
     /// host never loses the token to capitalisation.
-    fn githubTokenApplies(url: []const u8) bool {
+    /// Public so the host gate can be pinned without a live request — the
+    /// credential-injection branch used to be covered by actually calling
+    /// `formulae.brew.sh`, which sent whatever token the developer had
+    /// exported to a third party.
+    pub fn githubTokenApplies(url: []const u8) bool {
         const host = urlHost(url) orelse return false;
         if (std.ascii.eqlIgnoreCase(host, "github.com")) return true;
         if (std.ascii.endsWithIgnoreCase(host, ".github.com")) return true;
@@ -1395,6 +1399,41 @@ test "githubTokenApplies: tolerates the FQDN trailing-dot root form" {
 
 fn environFrom(entries: [:null]const ?[*:0]const u8) std.process.Environ {
     return .{ .block = .{ .slice = entries } };
+}
+
+test "githubTokenApplies: only the four credential-bearing hosts match" {
+    const yes = [_][]const u8{
+        "https://github.com/indaco/malt",
+        "https://api.github.com/repos/x/y",
+        "https://formulae.brew.sh/api/formula/jq.json",
+        "https://ghcr.io/v2/homebrew/core/jq/blobs/sha256:ab",
+        "https://GitHub.com/x", // the host comparison is case-insensitive
+        "https://github.com./x", // FQDN root form of the same host
+        "https://user@github.com/x", // userinfo is stripped before matching
+        "https://github.com:443/x", // as is the port
+    };
+    for (yes) |u| try std.testing.expect(HttpClient.githubTokenApplies(u));
+}
+
+test "githubTokenApplies: a look-alike host or a path lookalike never gets the token" {
+    // The gate is a host-component match precisely so these cannot collect a
+    // credential; pin that rather than trusting the comment.
+    const no = [_][]const u8{
+        "https://github.com.evil.tld/x",
+        "https://evil.tld/github.com",
+        "https://notgithub.com/x",
+        "https://formulae.brew.sh.evil.tld/x",
+        "https://ghcr.io.evil.tld/x",
+        "https://evil.tld/?u=https://ghcr.io/",
+        "https://xghcr.io/x",
+        "not-a-url",
+        "",
+        // The scheme is matched case-sensitively, so this yields no host at
+        // all. That is fail-closed (no credential leaves), so it is pinned
+        // here as the current, safe behaviour rather than treated as a match.
+        "HTTPS://github.com/x",
+    };
+    for (no) |u| try std.testing.expect(!HttpClient.githubTokenApplies(u));
 }
 
 test "githubApiToken: MALT_GITHUB_TOKEN is preferred over HOMEBREW_GITHUB_API_TOKEN" {
