@@ -14,6 +14,7 @@ const sandbox = @import("dsl/sandbox.zig");
 const sandbox_macos = @import("sandbox/macos.zig");
 const fallback_log = @import("dsl/fallback_log.zig");
 const atomic = @import("../fs/atomic.zig");
+const clonefile = @import("../fs/clonefile.zig");
 const text_replace = @import("../text_replace.zig");
 
 pub const FallbackLog = fallback_log.FallbackLog;
@@ -49,6 +50,7 @@ const StepTag = enum {
     touch,
     write,
     symlink,
+    copy,
     link_dir,
     link_children,
     remove,
@@ -69,6 +71,7 @@ const step_map = std.StaticStringMap(StepTag).initComptime(.{
     .{ "touch", .touch },
     .{ "write", .write },
     .{ "symlink", .symlink },
+    .{ "copy", .copy },
     .{ "link_dir", .link_dir },
     .{ "link_children", .link_children },
     .{ "remove", .remove },
@@ -163,6 +166,7 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         .touch => stepTouch(ctx, obj),
         .write => stepWrite(ctx, obj),
         .symlink => stepSymlink(ctx, obj),
+        .copy => stepCopy(ctx, obj),
         .link_dir => stepLinkDir(ctx, obj),
         .link_children => stepLinkChildren(ctx, obj),
         .remove => stepRemove(ctx, obj),
@@ -212,6 +216,10 @@ const template_map = std.StaticStringMap(enum {
     prefix_etc,
     user,
     keg_bin,
+    keg_libexec,
+    pkgetc,
+    pkgshare,
+    opt_pkgshare,
     bash_completion,
     zsh_completion,
     fish_completion,
@@ -225,6 +233,18 @@ const template_map = std.StaticStringMap(enum {
     .{ "etc", .prefix_etc },
     .{ "user", .user },
     .{ "bin", .keg_bin },
+    // These four resolve as *bases* already, but a step may also embed them
+    // inline in a path — `{{libexec}}/lib/node_modules/npm`,
+    // `{{pkgetc}}/cert.pem`. Without an entry here `expandTemplates` leaves
+    // the token verbatim (its documented behaviour for unknown tokens), the
+    // literal `{{...}}` reaches the sandbox as a relative path, and the step
+    // dies as a path violation. Deliberately NOT a merge of `base_map`: the
+    // `bin`/`etc` tokens mean different things on each side, and folding them
+    // together would silently repoint every existing `{{bin}}` step.
+    .{ "libexec", .keg_libexec },
+    .{ "pkgetc", .pkgetc },
+    .{ "pkgshare", .pkgshare },
+    .{ "opt_pkgshare", .opt_pkgshare },
     .{ "bash_completion", .bash_completion },
     .{ "zsh_completion", .zsh_completion },
     .{ "fish_completion", .fish_completion },
@@ -245,6 +265,12 @@ fn templateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
         .user => std.process.Environ.getPosix(ctx.environ, "USER"),
         // Keg-relative; the layouts are Homebrew's standard completion dirs.
         .keg_bin => std.fmt.allocPrint(a, "{s}/bin", .{ctx.keg_path}) catch null,
+        // Keg-relative, matching Homebrew's `libexec` in a formula body.
+        .keg_libexec => std.fmt.allocPrint(a, "{s}/libexec", .{ctx.keg_path}) catch null,
+        // Prefix-relative, matching `resolveBase` for the same names.
+        .pkgetc => std.fmt.allocPrint(a, "{s}/etc/{s}", .{ ctx.prefix, ctx.name }) catch null,
+        .pkgshare => std.fmt.allocPrint(a, "{s}/share/{s}", .{ ctx.prefix, ctx.name }) catch null,
+        .opt_pkgshare => std.fmt.allocPrint(a, "{s}/opt/{s}/share/{s}", .{ ctx.prefix, ctx.name, ctx.name }) catch null,
         .bash_completion => std.fmt.allocPrint(a, "{s}/etc/bash_completion.d", .{ctx.keg_path}) catch null,
         .zsh_completion => std.fmt.allocPrint(a, "{s}/share/zsh/site-functions", .{ctx.keg_path}) catch null,
         .fish_completion => std.fmt.allocPrint(a, "{s}/share/fish/vendor_completions.d", .{ctx.keg_path}) catch null,
@@ -413,6 +439,57 @@ fn stepWrite(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     };
     defer file.close(ctx.io);
     file.writeStreamingAll(ctx.io, content) catch {};
+    return true;
+}
+
+/// `copy`: materialise `source` at `target`, the way Homebrew's `cp_r` does.
+///
+/// The semantic that matters is the one `cp -R src dst` uses: when `dst` is an
+/// existing directory the source lands *inside* it as `dst/basename(src)`,
+/// not as its contents splattered across `dst`. node depends on exactly this —
+/// `copy {{libexec}}/lib/node_modules/npm` → `{{HOMEBREW_PREFIX}}/lib/node_modules`
+/// has to produce `lib/node_modules/npm/`, because the symlink steps that
+/// follow point `bin/npm` at `lib/node_modules/npm/bin/npm-cli.js`. Getting
+/// this wrong leaves that symlink dangling and npm simply absent.
+fn stepCopy(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const target = resolvePathSpec(ctx, obj, "target") orelse return false;
+    if (!confined(ctx, target)) return false;
+    const source = resolvePathSpec(ctx, obj, "source") orelse return false;
+    if (source.len == 0 or source[0] != '/') {
+        logUnsupported(ctx, "copy with a relative source");
+        return false;
+    }
+
+    // An existing directory target receives the source as a child; anything
+    // else is the destination path itself.
+    var dest = target;
+    if (isDir(ctx, target)) {
+        dest = std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ target, std.fs.path.basename(source) }) catch
+            return false;
+        if (!confined(ctx, dest)) return false;
+    } else {
+        mkParent(ctx, target);
+    }
+
+    // Always replace. Homebrew's `cp_r` overwrites, and formulae lean on that
+    // rather than on a flag: node's copy step carries no `force`, pairing
+    // instead with a preceding `remove` of the same path. Skipping an existing
+    // destination looks conservative but silently preserves a stale payload —
+    // an upgrade left npm 11.17.0 in the prefix while the new keg carried
+    // 11.19.0, which is exactly the class of bug this step is meant to fix.
+    std.Io.Dir.cwd().deleteTree(ctx.io, dest) catch {};
+
+    // APFS clone: same bytes, no double disk cost, mtimes preserved.
+    clonefile.cloneTree(ctx.io, ctx.allocator, source, dest) catch {
+        logUnsupported(ctx, "copy (clone failed)");
+        return false;
+    };
+    return true;
+}
+
+fn isDir(ctx: StepsCtx, path: []const u8) bool {
+    var d = std.Io.Dir.openDirAbsolute(ctx.io, path, .{}) catch return false;
+    d.close(ctx.io);
     return true;
 }
 
@@ -1827,4 +1904,140 @@ test "supportedStepType matches the executable tier and rejects the rest" {
     for (native) |t| try testing.expect(supportedStepType(t));
     const routed = [_][]const u8{ "mkdir", "move", "move_children", "frobnicate" };
     for (routed) |t| try testing.expect(!supportedStepType(t));
+}
+
+test "expandTemplates resolves the keg/prefix tokens that only existed as bases" {
+    // `{{libexec}}` and `{{pkgetc}}` resolve as *bases* but were absent from
+    // the template map, so a step embedding one inline kept the literal
+    // `{{...}}`, which then read as a relative path and died in the sandbox.
+    // node (`{{libexec}}/lib/node_modules/npm`) and gnutls
+    // (`{{pkgetc}}/cert.pem`) both hit this.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const c = h.ctx();
+
+    const libexec = try expandTemplates(c, "{{libexec}}/lib/node_modules/npm");
+    try testing.expectEqualStrings(
+        try std.fmt.allocPrint(h.arena.allocator(), "{s}/libexec/lib/node_modules/npm", .{h.keg}),
+        libexec,
+    );
+    const pkgetc = try expandTemplates(c, "{{pkgetc}}/cert.pem");
+    try testing.expectEqualStrings(
+        try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/glow/cert.pem", .{h.prefix}),
+        pkgetc,
+    );
+    try testing.expectEqualStrings(
+        try std.fmt.allocPrint(h.arena.allocator(), "{s}/share/glow", .{h.prefix}),
+        try expandTemplates(c, "{{pkgshare}}"),
+    );
+    // `{{bin}}` must keep meaning the *keg's* bin: the template and base maps
+    // disagree on that name on purpose, and merging them would repoint every
+    // existing step.
+    try testing.expectEqualStrings(
+        try std.fmt.allocPrint(h.arena.allocator(), "{s}/bin", .{h.keg}),
+        try expandTemplates(c, "{{bin}}"),
+    );
+}
+
+test "copy places the source inside an existing directory target, not its contents" {
+    // node's shape exactly: copy <keg>/libexec/lib/node_modules/npm into
+    // <prefix>/lib/node_modules, which must yield .../node_modules/npm/... so
+    // the symlink steps that follow can find bin/npm-cli.js. Copying the
+    // *contents* instead leaves that symlink dangling and npm missing.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    const src = try std.fmt.allocPrint(a, "{s}/libexec/lib/node_modules/npm/bin", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, src);
+    const cli = try std.fmt.allocPrint(a, "{s}/npm-cli.js", .{src});
+    {
+        const f = try std.Io.Dir.createFileAbsolute(h.io, cli, .{ .truncate = true });
+        defer f.close(h.io);
+        try f.writeStreamingAll(h.io, "#cli\n");
+    }
+    const dstdir = try std.fmt.allocPrint(a, "{s}/lib/node_modules", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, dstdir);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"copy","force":true,
+        \\  "source":{"path":"{{libexec}}/lib/node_modules/npm"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/node_modules"}}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+
+    // Landed as node_modules/npm/bin/npm-cli.js …
+    const want = try std.fmt.allocPrint(a, "{s}/npm/bin/npm-cli.js", .{dstdir});
+    try std.Io.Dir.accessAbsolute(h.io, want, .{});
+    // … and not flattened one level up.
+    const flat = try std.fmt.allocPrint(a, "{s}/bin/npm-cli.js", .{dstdir});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, flat, .{}));
+}
+
+test "copy refuses a target outside the keg and prefix" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    const src = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, src);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"copy","force":true,
+        \\  "source":{"path":"{{libexec}}"},
+        \\  "target":{"path":"/tmp/malt_copy_escape_target"}}]
+    );
+    _ = execute(h.ctx(), json);
+    try testing.expect(h.flog.hasErrors());
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(h.io, "/tmp/malt_copy_escape_target", .{}),
+    );
+}
+
+test "copy replaces a stale destination even without a force flag" {
+    // Regression for a real upgrade failure: node's copy step carries no
+    // `force`, so an implementation that skips an existing destination leaves
+    // the previous npm in place. The keg moved to 11.19.0 while the prefix
+    // stayed on 11.17.0 — the copy has to overwrite, as `cp_r` does.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    const src = try std.fmt.allocPrint(a, "{s}/libexec/lib/node_modules/npm", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, src);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(
+            h.io,
+            try std.fmt.allocPrint(a, "{s}/version.txt", .{src}),
+            .{ .truncate = true },
+        );
+        defer f.close(h.io);
+        try f.writeStreamingAll(h.io, "new\n");
+    }
+
+    // A stale copy already sitting at the destination.
+    const dstdir = try std.fmt.allocPrint(a, "{s}/lib/node_modules", .{h.prefix});
+    const stale = try std.fmt.allocPrint(a, "{s}/npm", .{dstdir});
+    try std.Io.Dir.cwd().createDirPath(h.io, stale);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(
+            h.io,
+            try std.fmt.allocPrint(a, "{s}/version.txt", .{stale}),
+            .{ .truncate = true },
+        );
+        defer f.close(h.io);
+        try f.writeStreamingAll(h.io, "old\n");
+    }
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"copy",
+        \\  "source":{"path":"{{libexec}}/lib/node_modules/npm"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/node_modules"}}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+
+    const got = try readBack(&h, try std.fmt.allocPrint(a, "{s}/version.txt", .{stale}));
+    try testing.expectEqualStrings("new\n", got);
 }
