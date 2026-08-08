@@ -426,32 +426,63 @@ test "Response.deinit frees the owned body buffer" {
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern fn unsetenv(name: [*:0]const u8) c_int;
 
-/// Live-network tests are opt-in. They reach third-party hosts, which makes the
-/// suite non-hermetic, dependent on someone else's uptime, and noisy on a
-/// firewalled or sandboxed machine. Set `MALT_TEST_NETWORK=1` to run them.
-fn liveNetworkAllowed() bool {
-    const v = std.process.Environ.getPosix(malt.app_ctx.processEnviron(), "MALT_TEST_NETWORK") orelse
-        return false;
-    return std.mem.eql(u8, v, "1");
+const RetryStub = struct {
+    io: std.Io,
+    listener: *std.Io.net.Server,
+    hits: std.atomic.Value(u32) = .init(0),
+};
+
+/// Answers the first request 503, every later one 200 — so a client that
+/// retries a retry-eligible status ends up with the body, and one that does
+/// not ends up with the 503.
+fn serveFlaky(s: *RetryStub) void {
+    while (true) {
+        const stream = s.listener.accept(s.io) catch return;
+        defer stream.close(s.io);
+        var rbuf: [8 * 1024]u8 = undefined;
+        var wbuf: [8 * 1024]u8 = undefined;
+        var reader = stream.reader(s.io, &rbuf);
+        var writer = stream.writer(s.io, &wbuf);
+        var srv = std.http.Server.init(&reader.interface, &writer.interface);
+        while (true) {
+            var req = srv.receiveHead() catch break;
+            const n = s.hits.fetchAdd(1, .monotonic);
+            if (n == 0) {
+                req.respond("", .{ .status = .service_unavailable }) catch break;
+            } else {
+                req.respond("recovered", .{}) catch break;
+            }
+        }
+    }
 }
 
-test "HttpClient.get retries on a 503 response status" {
-    if (!liveNetworkAllowed()) return error.SkipZigTest;
-    // httpbin.org/status/503 returns a deterministic 503 which is one of
-    // the retry-eligible codes (429/503/504). We don't care about the
-    // final result — we just need kcov to see the retry branch execute.
-    //
-    // Network-dependent: if the DNS lookup or TCP connect fails we skip.
-    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+test "HttpClient.get retries a 503 and returns the body from the next attempt" {
+    // 503 is one of the retry-eligible statuses (429/503/504). Asserting the
+    // recovered body *and* the second request is what distinguishes a real
+    // retry from a client that simply surfaced the first response.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var stub = RetryStub{ .io = io, .listener = &listener };
+    const t = try std.Thread.spawn(.{}, serveFlaky, .{&stub});
+    defer t.join();
+    defer listener.deinit(io);
+
+    var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
 
-    const result = http.get("https://httpbin.org/status/503");
-    if (result) |r| {
-        var rr = r;
-        rr.deinit();
-    } else |_| {
-        // Silent skip — the test is a coverage tripwire only.
-    }
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/flaky", .{port});
+    var resp = try http.get(url);
+    defer resp.deinit();
+
+    try testing.expectEqual(@as(u16, 200), resp.status);
+    try testing.expectEqualStrings("recovered", resp.body);
+    try testing.expect(stub.hits.load(.monotonic) >= 2);
 }
 
 test "HttpClient.get retries on connection failure before giving up" {
