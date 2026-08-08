@@ -28,12 +28,8 @@ fn childStdioMode(suppress: bool, raw: bool) std.process.SpawnOptions.StdIo {
     return if (raw) .inherit else .pipe;
 }
 
-/// Pump `child`'s piped stdout/stderr through the sanitizer, then reap it.
-/// Threads (rather than draining inline) so a chatty child cannot deadlock by
-/// filling one pipe while we block on the other. `wait` owns the pipe fds, so
-/// the pumps use the non-closing `filterInto`.
-/// Test seam, mirroring `sandbox/macos.zig`'s `SpawnHooks`: forces the Nth pump
-/// spawn to fail so the undrained-pipe path is reachable without exhausting
+/// Test seam mirroring `sandbox/macos.zig`'s `SpawnHooks`: forces the Nth pump
+/// spawn to fail, so the undrained-pipe path is reachable without exhausting
 /// threads for real.
 const PumpHooks = struct { fail_spawn_on: ?u32 = null };
 
@@ -42,6 +38,9 @@ fn spawnPump(hooks: PumpHooks, idx: u32, fd: c_int, out_fd: c_int) std.Thread.Sp
     return std.Thread.spawn(.{}, macos_sandbox.filterInto, .{ fd, out_fd });
 }
 
+/// Pump `child`'s piped stdout/stderr through the sanitizer, then reap it.
+/// One thread each, so a chatty child cannot wedge one pipe while we block on
+/// the other. `wait` owns the pipe fds, hence the non-closing `filterInto`.
 fn waitSanitized(ctx: ExecCtx, child: *std.process.Child, hooks: PumpHooks) !std.process.Child.Term {
     var out_thread: ?std.Thread = null;
     var err_thread: ?std.Thread = null;
@@ -714,4 +713,126 @@ test "waitSanitized fails loudly when a sanitizer pump cannot start" {
         error.SystemResources,
         waitSanitized(ctx, &child, .{ .fail_spawn_on = 0 }),
     );
+}
+
+/// Swap `fd` for a temp file so a test can assert on what actually reaches the
+/// user's terminal. Process-unique path: overlapping runs must not share it.
+const FdCapture = struct {
+    fd: c_int,
+    saved: c_int,
+    path: [:0]const u8,
+    io: std.Io,
+
+    fn start(alloc: std.mem.Allocator, io: std.Io, fd: c_int, tag: []const u8) !FdCapture {
+        const path = try std.fmt.allocPrintSentinel(alloc, "/tmp/malt_cap_{s}_{d}", .{ tag, std.c.getpid() }, 0);
+        const saved = std.c.dup(fd);
+        const cap = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+        if (saved < 0 or cap < 0) return error.CaptureFailed;
+        _ = std.c.dup2(cap, fd);
+        _ = std.c.close(cap);
+        return .{ .fd = fd, .saved = saved, .path = path, .io = io };
+    }
+
+    fn finish(self: *FdCapture, alloc: std.mem.Allocator) ![]const u8 {
+        _ = std.c.dup2(self.saved, self.fd);
+        _ = std.c.close(self.saved);
+        defer std.Io.Dir.cwd().deleteFile(self.io, self.path) catch {};
+        const f = try std.Io.Dir.openFileAbsolute(self.io, self.path, .{});
+        defer f.close(self.io);
+        const st = try f.stat(self.io);
+        const buf = try alloc.alloc(u8, @intCast(st.size));
+        _ = try f.readPositionalAll(self.io, buf, 0);
+        return buf;
+    }
+};
+
+fn sanitizeTestCtx(alloc: std.mem.Allocator, io: std.Io) ExecCtx {
+    return .{
+        .allocator = alloc,
+        .io = io,
+        .environ = .empty,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+    };
+}
+
+// stderr is half the surface the filter now covers, and a formula controls what
+// lands there just as much as on stdout.
+test "system sanitizes what a formula puts on stderr" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var lio: std.Io.Threaded = .init(alloc, .{});
+    defer lio.deinit();
+
+    var cap = try FdCapture.start(alloc, lio.io(), std.c.STDERR_FILENO, "err");
+    // `ls` echoes the missing operand back on stderr, so the escape is the
+    // formula's to choose without routing through a shell.
+    _ = system(sanitizeTestCtx(alloc, lio.io()), null, &.{
+        .{ .string = "/bin/ls" },
+        .{ .string = "\x1b]52;c;ZXZpbA==\x07VISIBLE" },
+    }) catch {};
+    const got = try cap.finish(alloc);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "VISIBLE") != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
+}
+
+// Concurrent pumps exist so neither pipe can wedge the other. Anything past the
+// buffer would deadlock a sequential drain, so this test hangs if that breaks.
+test "system drains child output larger than a pipe buffer" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var lio: std.Io.Threaded = .init(alloc, .{});
+    defer lio.deinit();
+
+    const fixture = try std.fmt.allocPrint(alloc, "/tmp/malt_bigout_{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteFile(lio.io(), fixture) catch {};
+    {
+        const f = try std.Io.Dir.createFileAbsolute(lio.io(), fixture, .{ .truncate = true });
+        defer f.close(lio.io());
+        var i: usize = 0;
+        while (i < 6000) : (i += 1) {
+            try f.writeStreamingAll(lio.io(), "\x1b]52;c;ZXZpbA==\x07padding-line-payload-keeps-this-well-past-a-pipe-buffer\n");
+        }
+        try f.writeStreamingAll(lio.io(), "TAIL-MARKER\n");
+    }
+
+    var cap = try FdCapture.start(alloc, lio.io(), std.c.STDOUT_FILENO, "big");
+    _ = system(sanitizeTestCtx(alloc, lio.io()), null, &.{
+        .{ .string = "/bin/cat" },
+        .{ .string = fixture },
+    }) catch {};
+    const got = try cap.finish(alloc);
+
+    try std.testing.expect(got.len > 64 * 1024);
+    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
+    // The tail proves nothing was truncated when the pipe filled.
+    try std.testing.expect(std.mem.indexOf(u8, got, "TAIL-MARKER") != null);
+}
+
+// Under --json/--ndjson the child's stdout must not reach the document, even
+// though stderr still goes through the filter.
+test "suppressed child stdout stays off the json document" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var lio: std.Io.Threaded = .init(alloc, .{});
+    defer lio.deinit();
+
+    var ctx = sanitizeTestCtx(alloc, lio.io());
+    ctx.suppress_child_stdout = true;
+
+    var cap = try FdCapture.start(alloc, lio.io(), std.c.STDOUT_FILENO, "json");
+    _ = system(ctx, null, &.{
+        .{ .string = "/bin/echo" },
+        .{ .string = "SHOULD-NOT-APPEAR" },
+    }) catch {};
+    const got = try cap.finish(alloc);
+
+    try std.testing.expectEqual(@as(usize, 0), got.len);
 }
