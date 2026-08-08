@@ -1,0 +1,180 @@
+//! malt — single-binary aggregate of every integration test.
+//!
+//! `zig build test` compiles one executable per file under `tests/`, which is
+//! ~160 fresh binaries and ~160 fresh processes per run. That is slow to link
+//! and, on a machine with a per-binary firewall or endpoint agent, produces a
+//! prompt storm that has nothing to do with what the tests are checking.
+//!
+//! This root pulls the same files into one module so `zig build test-one`
+//! links and runs exactly one binary. Zig collects `test` blocks from every
+//! file reachable from the root, so the referenced imports below are enough.
+//!
+//! Trade-off: one process means process-global state is shared. Tests that
+//! `setenv`/`unsetenv` already restore in `defer`, and the runner is
+//! sequential, so this holds today — but `zig build test` remains the
+//! authoritative target, and it stays one-process-per-file.
+
+comptime {
+    _ = @import("formula_test.zig");
+    _ = @import("deps_test.zig");
+    _ = @import("macho_test.zig");
+    _ = @import("store_test.zig");
+    _ = @import("linker_test.zig");
+    _ = @import("rollback_test.zig");
+    _ = @import("run_test.zig");
+    _ = @import("version_update_test.zig");
+    _ = @import("version_notify_test.zig");
+    _ = @import("origin_test.zig");
+    _ = @import("release_test.zig");
+    _ = @import("verify_test.zig");
+    _ = @import("swap_test.zig");
+    _ = @import("cleanup_test.zig");
+    _ = @import("cask_test.zig");
+    _ = @import("cellar_test.zig");
+    _ = @import("progress_test.zig");
+    _ = @import("progress_e2e_test.zig");
+    _ = @import("completions_test.zig");
+    _ = @import("flag_drift_test.zig");
+    _ = @import("cask_revision_invariant_test.zig");
+    _ = @import("backup_test.zig");
+    _ = @import("purge_test.zig");
+    _ = @import("purge_output_test.zig");
+    _ = @import("purge_json_test.zig");
+    _ = @import("install_test.zig");
+    _ = @import("install_parse_cache_test.zig");
+    _ = @import("archive_extract_symlink_test.zig");
+    _ = @import("deps_leak_test.zig");
+    _ = @import("api_test.zig");
+    _ = @import("offline_mode_test.zig");
+    _ = @import("clonefile_test.zig");
+    _ = @import("dsl_lexer_test.zig");
+    _ = @import("dsl_parser_test.zig");
+    _ = @import("dsl_sandbox_test.zig");
+    _ = @import("dsl_interpreter_test.zig");
+    _ = @import("dsl_install_symlink_test.zig");
+    _ = @import("doctor_ssl_test.zig");
+    _ = @import("db_schema_v2_test.zig");
+    _ = @import("bundle_brewfile_test.zig");
+    _ = @import("services_plist_test.zig");
+    _ = @import("services_test.zig");
+    _ = @import("bundle_test.zig");
+    _ = @import("bundle_cleanup_test.zig");
+    _ = @import("atomic_test.zig");
+    _ = @import("lock_test.zig");
+    _ = @import("install_warm_path_test.zig");
+    _ = @import("tap_test.zig");
+    _ = @import("fallback_log_test.zig");
+    _ = @import("help_test.zig");
+    _ = @import("archive_test.zig");
+    _ = @import("ghcr_test.zig");
+    _ = @import("ghcr_401_retry_test.zig");
+    _ = @import("net_get_to_writer_test.zig");
+    _ = @import("bottle_download_test.zig");
+    _ = @import("linker_core_test.zig");
+    _ = @import("supervisor_pure_test.zig");
+    _ = @import("install_pure_test.zig");
+    _ = @import("dsl_builtins_test.zig");
+    _ = @import("ruby_subprocess_test.zig");
+    _ = @import("ruby_module_boundaries_test.zig");
+    _ = @import("pins_test.zig");
+    _ = @import("sandbox_macos_test.zig");
+    _ = @import("services_validate_test.zig");
+    _ = @import("spawn_invariant_test.zig");
+    _ = @import("child_test.zig");
+    _ = @import("net_client_test.zig");
+    _ = @import("net_client_pool_test.zig");
+    _ = @import("net_redirect_auth_test.zig");
+    _ = @import("http_inject_test.zig");
+    _ = @import("term_sanitize_test.zig");
+    _ = @import("perms_test.zig");
+    _ = @import("doctor_render_test.zig");
+    _ = @import("doctor_fix_test.zig");
+    _ = @import("cli_tap_test.zig");
+    _ = @import("cli_services_test.zig");
+    _ = @import("install_execute_test.zig");
+    _ = @import("install_sink_test.zig");
+    _ = @import("install_ambiguity_test.zig");
+    _ = @import("install_download_only_test.zig");
+    _ = @import("install_idempotent_test.zig");
+    _ = @import("reinstall_test.zig");
+    _ = @import("no_readall_in_loop_test.zig");
+    _ = @import("test_io_primitives_test.zig");
+    _ = @import("no_io_mod_in_src_test.zig");
+    _ = @import("no_cli_in_core_test.zig");
+    _ = @import("forge_purity_test.zig");
+    _ = @import("no_main_reach_in_cli_test.zig");
+    _ = @import("ui_color_theme_test.zig");
+    _ = @import("custom_theme_test.zig");
+    _ = @import("install_local_test.zig");
+    _ = @import("cask_extra_test.zig");
+    _ = @import("cask_font_install_test.zig");
+    _ = @import("cask_font_uninstall_test.zig");
+    _ = @import("cask_font_rollback_test.zig");
+    _ = @import("cask_resolve_test.zig");
+    _ = @import("dsl_interpreter_extra_test.zig");
+    _ = @import("list_test.zig");
+    _ = @import("search_test.zig");
+    _ = @import("info_test.zig");
+    _ = @import("uses_test.zig");
+    _ = @import("which_test.zig");
+    _ = @import("output_test.zig");
+    _ = @import("ndjson_test.zig");
+    _ = @import("worker_arena_test.zig");
+    _ = @import("migrate_smoke_test.zig");
+    _ = @import("migrate_manifest_test.zig");
+    _ = @import("upgrade_test.zig");
+    _ = @import("hash_test.zig");
+    _ = @import("patcher_test.zig");
+    _ = @import("pin_test.zig");
+    _ = @import("shellenv_test.zig");
+    _ = @import("outdated_test.zig");
+    _ = @import("uninstall_test.zig");
+    _ = @import("purge_scopes_test.zig");
+    _ = @import("link_cli_test.zig");
+    _ = @import("restore_cli_test.zig");
+    _ = @import("search_cli_test.zig");
+    _ = @import("doctor_dispatch_test.zig");
+    _ = @import("doctor_cask_history_test.zig");
+    _ = @import("doctor_tap_forge_test.zig");
+    _ = @import("doctor_json_test.zig");
+    _ = @import("info_cli_test.zig");
+    _ = @import("backup_cli_test.zig");
+    _ = @import("run_cli_test.zig");
+    _ = @import("bundle_cli_test.zig");
+    _ = @import("version_update_cli_test.zig");
+    _ = @import("upgrade_cli_test.zig");
+    _ = @import("list_cli_test.zig");
+    _ = @import("tap_cli_test.zig");
+    _ = @import("uses_cli_test.zig");
+    _ = @import("deps_cli_exec_test.zig");
+    _ = @import("text_replace_test.zig");
+    _ = @import("bottle_test.zig");
+    _ = @import("cleanup_cli_test.zig");
+    _ = @import("install_keg_from_bottle_test.zig");
+    _ = @import("install_pool_test.zig");
+    _ = @import("tap_head_etag_integration_test.zig");
+    _ = @import("tap_raw_rb_auth_test.zig");
+    _ = @import("tap_gitlab_resolution_test.zig");
+    _ = @import("tap_gitea_resolution_test.zig");
+    _ = @import("tap_gogs_resolution_test.zig");
+    _ = @import("tap_root_layout_resolution_test.zig");
+    _ = @import("tap_pin_forge_test.zig");
+    _ = @import("tap_resolve_error_test.zig");
+    _ = @import("linker_isolation_test.zig");
+    _ = @import("install_isolation_test.zig");
+    _ = @import("doctor_isolation_test.zig");
+    _ = @import("tui_term_test.zig");
+    _ = @import("tui_keys_test.zig");
+    _ = @import("tui_layout_test.zig");
+    _ = @import("tui_scroll_list_test.zig");
+    _ = @import("tui_app_test.zig");
+    _ = @import("tui_spawn_test.zig");
+    _ = @import("tui_installed_tab_test.zig");
+    _ = @import("tui_outdated_test.zig");
+    _ = @import("tui_services_test.zig");
+    _ = @import("tui_doctor_test.zig");
+    _ = @import("tui_search_test.zig");
+    _ = @import("tui_purity_test.zig");
+    _ = @import("tui_selection_theme_test.zig");
+    _ = @import("tui_outdated_warm_read_test.zig");
+}

@@ -81,6 +81,11 @@ fn boot(fx: *Fixture) color.InstallResult {
     color.setForTest(true, false); // colour on so CLI output emits SGR
     color.setTruecolorForTest(true);
     color.setBackgroundForTest(.unknown);
+    // `emitPrefixLine` early-returns while the module-global quiet flag is set,
+    // so a preceding test that leaves `setQuiet(true)` behind makes the CLI
+    // assertion below compare against an empty capture. Pin it for the same
+    // reason the colour state is pinned: this test is about what gets emitted.
+    output.setQuiet(false);
 
     var buf: [malt.custom_theme.max_file_bytes]u8 = undefined;
     const bytes = theme_file.read(dbg_io, environ, &buf);

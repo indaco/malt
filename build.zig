@@ -361,6 +361,23 @@ pub fn build(b: *std.Build) void {
     });
     test_bin_step.dependOn(&install_lib_tests.step);
 
+    // Single-binary aggregate of every `tests/` file. `zig build test` links
+    // ~160 executables and spawns ~160 processes; this links and runs one.
+    // Useful for a fast local loop, and on hosts where a per-binary firewall
+    // or endpoint agent prompts once per new executable. `test` stays the
+    // authoritative target — it keeps one process per file, which is what
+    // isolates process-global state (see `tests/all.zig`).
+    const all_tests_module = b.createModule(.{
+        .root_source_file = b.path("tests/all.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    all_tests_module.addIncludePath(b.path("vendor/"));
+    all_tests_module.addIncludePath(b.path("c/"));
+    all_tests_module.addOptions("version_string", version_options);
+    all_tests_module.addImport("malt", malt_lib);
+
     // Shared test-only helpers — single module imported by every integration test.
     const test_io_mod = b.createModule(.{
         .root_source_file = b.path("tests/test_io.zig"),
@@ -369,6 +386,15 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     test_io_mod.addImport("malt", malt_lib);
+
+    all_tests_module.addImport("test_io", test_io_mod);
+    const all_tests = b.addTest(.{ .name = "all_tests", .root_module = all_tests_module });
+    const run_all_tests = b.addRunArtifact(all_tests);
+    // Throwaway prefix: `atomic.maltPrefixOrAbort()` otherwise falls back to
+    // the literal /opt/malt, i.e. the developer's real install.
+    run_all_tests.setEnvironmentVariable("MALT_PREFIX", "/tmp/malt-test-prefix");
+    b.step("test-one", "Run every test in a single binary (one process)")
+        .dependOn(&run_all_tests.step);
 
     @setEvalBranchQuota(30000);
     inline for (test_modules) |test_file| {
