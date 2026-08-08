@@ -29,7 +29,10 @@ fn validateLinkTarget(ctx: ExecCtx, target: []const u8, link_path: []const u8) B
         return BuiltinError.OutOfMemory;
     // Scratch only — the check consumes it, nothing downstream holds it.
     defer ctx.allocator.free(resolved);
-    sandbox.validatePath(resolved, ctx.cellar_path, ctx.malt_prefix) catch
+    // Resolve the target's own parent chain, not just its spelling: a bottle
+    // can ship a directory symlink that a lexically in-keg target walks
+    // through. Same guard `rm_r`/`mkdir_p` use.
+    sandbox.validateWriteDir(ctx.io, resolved, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
 }
 
@@ -409,6 +412,37 @@ test "ln_s still links to a target inside the keg" {
     const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
     _ = try lnS(ctx, null, &.{ Value{ .string = target }, Value{ .string = link } });
     try std.Io.Dir.cwd().access(io, link, .{});
+}
+
+test "ln_s refuses a target that reaches out through a planted directory symlink" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("fileutils_lns_dirlink");
+    defer s.deinit();
+    const base = s.base;
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    defer alloc.free(keg);
+    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    defer alloc.free(outside);
+    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" });
+    defer alloc.free(dirlink);
+    // Lexically inside the keg, but `d` is a doorway the bottle shipped.
+    const target = try std.fs.path.join(alloc, &.{ dirlink, "secret" });
+    defer alloc.free(target);
+    const link = try std.fs.path.join(alloc, &.{ keg, "alias" });
+    defer alloc.free(link);
+
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    try std.Io.Dir.cwd().createDirPath(io, outside);
+    try std.Io.Dir.symLinkAbsolute(io, outside, dirlink, .{});
+
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        lnS(ctx, null, &.{ Value{ .string = target }, Value{ .string = link } }),
+    );
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, link, .{}));
 }
 
 test "rm_r refuses to delete through an intermediate-directory symlink out of the keg" {

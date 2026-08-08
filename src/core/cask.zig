@@ -19,6 +19,10 @@ pub const CaskError = error{
     // Distinct from UninstallFailed so callers can say *why*: the app is live.
     AppRunning,
     Sha256Mismatch,
+    // Distinct from Sha256Mismatch: the manifest declared no digest at all.
+    // Callers retry a mismatch as transient corruption; this one never
+    // succeeds on a retry, so it must not wear the same name.
+    Sha256Missing,
     OutOfMemory,
 };
 
@@ -581,8 +585,12 @@ pub const CaskInstaller = struct {
             self.allocator.free(cache_path);
         }
 
-        self.verifySha256(cache_path, cask.sha256) catch
-            return CaskError.Sha256Mismatch;
+        self.verifySha256(cache_path, cask.sha256) catch |e| switch (e) {
+            // A retry re-downloads and fails identically, so it must not
+            // reach the caller wearing the transient error's name.
+            error.Sha256Missing => return CaskError.Sha256Missing,
+            else => return CaskError.Sha256Mismatch,
+        };
 
         return cache_path;
     }
@@ -1671,6 +1679,20 @@ test "parseCask rejects path-traversal in a binary artifact" {
     for (bad) |json| {
         try std.testing.expectError(error.ParseFailed, parseCask(a, json));
     }
+}
+
+test "an app artifact's target hint is ignored, so it never becomes a path" {
+    const a = std.testing.allocator;
+    // `binary` targets are screened because malt turns them into
+    // `<prefix>/bin/<target>`. `app` targets are not screened because nothing
+    // reads them — `parseAppName` takes the first string and stops. Pin that,
+    // so the asymmetry stays a decision rather than looking like an oversight.
+    const json =
+        \\{"token":"ok","version":"1.0","url":"https://e/x.zip","artifacts":[{"app":["Real.app",{"target":"../../../Evil.app"}]}]}
+    ;
+    var cask = try parseCask(a, json);
+    defer cask.deinit();
+    try std.testing.expectEqualStrings("Real.app", parseAppName(cask.parsed.value.object).?);
 }
 
 test "parseCask accepts the artifact shapes real casks use" {

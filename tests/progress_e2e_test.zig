@@ -1,5 +1,6 @@
 //! malt — progress integration test
-//! End-to-end test: fetch a real HTTP resource and verify the ProgressCallback fires.
+//! Drives a real HTTP fetch against a loopback `std.http.Server` and verifies
+//! the ProgressCallback fires with the byte counts the transfer actually saw.
 
 const std = @import("std");
 const testing = std.testing;
@@ -26,63 +27,85 @@ const TestTracker = struct {
     }
 };
 
-/// Live-network tests are opt-in — see `tests/progress_test.zig`. Set
-/// `MALT_TEST_NETWORK=1` to run them.
-fn liveNetworkAllowed() bool {
-    const v = std.process.Environ.getPosix(malt.app_ctx.processEnviron(), "MALT_TEST_NETWORK") orelse
-        return false;
-    return std.mem.eql(u8, v, "1");
+/// Body big enough that the transfer is worth reporting on, small enough to
+/// keep the fixture in the binary.
+const payload = "malt-progress-fixture-" ** 256;
+
+const Stub = struct { io: std.Io, listener: *std.Io.net.Server };
+
+fn serve(s: *Stub) void {
+    const stream = s.listener.accept(s.io) catch return;
+    defer stream.close(s.io);
+    var rbuf: [8 * 1024]u8 = undefined;
+    var wbuf: [8 * 1024]u8 = undefined;
+    var reader = stream.reader(s.io, &rbuf);
+    var writer = stream.writer(s.io, &wbuf);
+    var srv = std.http.Server.init(&reader.interface, &writer.interface);
+    var req = srv.receiveHead() catch return;
+    req.respond(payload, .{}) catch return;
 }
 
-test "HTTP GET with progress callback fires correctly" {
-    if (!liveNetworkAllowed()) return error.SkipZigTest;
-    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+test "HTTP GET with progress callback reports every byte of the body" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var stub = Stub{ .io = io, .listener = &listener };
+    const t = try std.Thread.spawn(.{}, serve, .{&stub});
+    // Declared first so it runs last: closing the listener first lets a
+    // pending `accept` fail and the thread exit even if an assertion trips.
+    defer t.join();
+    defer listener.deinit(io);
+
+    var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
 
-    var tracker = TestTracker{
-        .bar = progress_mod.ProgressBar.init("e2e-test", 0),
-    };
+    var tracker = TestTracker{ .bar = progress_mod.ProgressBar.init("e2e-test", 0) };
     const cb = client_mod.ProgressCallback{
         .context = @ptrCast(&tracker),
         .func = &TestTracker.callback,
     };
 
-    // Fetch a small, stable public URL (Homebrew API formula JSON for jq — ~3 KB)
-    var resp = http.getWithHeaders(
-        "https://formulae.brew.sh/api/formula/jq.json",
-        &.{},
-        cb,
-    ) catch |err| {
-        // Network may be unavailable in CI — skip rather than fail
-        std.debug.print("Skipping e2e test (network error: {s})\n", .{@errorName(err)});
-        return;
-    };
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/payload", .{port});
+    var resp = try http.getWithHeaders(url, &.{}, cb);
     defer resp.deinit();
 
     tracker.bar.finish();
 
-    // The callback should have been called at least once
-    try testing.expect(tracker.call_count > 0);
-    // Last bytes should match the response body length
-    try testing.expectEqual(@as(u64, resp.body.len), tracker.last_bytes);
-    // HTTP 200
     try testing.expectEqual(@as(u16, 200), resp.status);
+    try testing.expectEqualStrings(payload, resp.body);
+    try testing.expect(tracker.call_count > 0);
+    // The final tick accounts for the whole body, and the declared length
+    // reached the callback so a determinate bar was possible.
+    try testing.expectEqual(@as(u64, resp.body.len), tracker.last_bytes);
+    try testing.expectEqual(@as(?u64, payload.len), tracker.last_total);
 }
 
-test "HTTP GET without progress (null) still works" {
-    if (!liveNetworkAllowed()) return error.SkipZigTest;
-    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+test "HTTP GET without a progress callback still returns the whole body" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var stub = Stub{ .io = io, .listener = &listener };
+    const t = try std.Thread.spawn(.{}, serve, .{&stub});
+    defer t.join();
+    defer listener.deinit(io);
+
+    var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
 
-    // Use get() which goes through the standard metadata path (no progress)
-    var resp = http.get(
-        "https://formulae.brew.sh/api/formula/jq.json",
-    ) catch |err| {
-        std.debug.print("Skipping e2e test (network error: {s})\n", .{@errorName(err)});
-        return;
-    };
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/payload", .{port});
+    var resp = try http.get(url);
     defer resp.deinit();
 
     try testing.expectEqual(@as(u16, 200), resp.status);
-    try testing.expect(resp.body.len > 100);
+    try testing.expectEqualStrings(payload, resp.body);
 }
