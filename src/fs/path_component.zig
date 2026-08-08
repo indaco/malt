@@ -38,17 +38,17 @@ pub fn isRelativeSubpath(s: []const u8) bool {
 
 test "isRelativeSubpath rejects shapes that leave the base directory" {
     const bad = [_][]const u8{
-        "",              "/abs/path",  "..",         "../x",
-        "a/../../b",     "a/b/..",     "a//b",       "a/",
-        "/",             "a\x00b",     "../",        "sub/../../../etc",
+        "",          "/abs/path", "..",   "../x",
+        "a/../../b", "a/b/..",    "a//b", "a/",
+        "/",         "a\x00b",    "../",  "sub/../../../etc",
     };
     for (bad) |s| try std.testing.expect(!isRelativeSubpath(s));
 }
 
 test "isRelativeSubpath accepts the nested names real casks ship" {
     const ok = [_][]const u8{
-        "Firefox.app",   "Sub Dir/My App.app", "bin/tool",
-        "a..b",          "foo..bar/baz",       "codex-aarch64-apple-darwin",
+        "Firefox.app",        "Sub Dir/My App.app", "bin/tool",
+        "a..b",               "foo..bar/baz",       "codex-aarch64-apple-darwin",
         "share/man/man1/x.1",
     };
     for (ok) |s| try std.testing.expect(isRelativeSubpath(s));
