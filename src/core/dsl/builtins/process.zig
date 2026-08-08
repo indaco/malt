@@ -6,17 +6,46 @@ const values = @import("../values.zig");
 const pathname = @import("pathname.zig");
 const sandbox = @import("../sandbox.zig");
 const fallback_log = @import("../fallback_log.zig");
+const macos_sandbox = @import("../../sandbox/macos.zig");
 
 const Value = values.Value;
 const BuiltinError = pathname.BuiltinError;
 const ExecCtx = pathname.ExecCtx;
 
-/// Subprocess stdout shares the FD with malt's `--json` / `--ndjson`
-/// document, so verbose tools like fc-cache would corrupt it. The caller
-/// decides via `ExecCtx.suppress_child_stdout`; stderr stays inherited so
-/// warnings still surface for the user.
-fn childStdoutMode(suppress: bool) std.process.SpawnOptions.StdIo {
-    return if (suppress) .ignore else .inherit;
+/// Post_install output is attacker-influenced: a formula's `system` call can
+/// emit whatever the child writes, and a terminal will act on it. The
+/// `--use-system-ruby` path already pumps the child through
+/// `ui/term_sanitize.zig`, which drops OSC (including OSC 52 clipboard
+/// writes), DCS, absolute cursor positioning, and scrollback erase. The
+/// native interpreter — the default path, and the one the README leads with —
+/// inherited the terminal directly, so none of that applied to it.
+///
+/// Piping means the child no longer sees a TTY, so colour-on-TTY heuristics
+/// turn themselves off. That is the same trade the ruby path already makes,
+/// and `MALT_ALLOW_RAW_POST_INSTALL=1` opts out of both.
+fn childStdioMode(suppress: bool, raw: bool) std.process.SpawnOptions.StdIo {
+    if (suppress) return .ignore;
+    return if (raw) .inherit else .pipe;
+}
+
+/// Pump `child`'s piped stdout/stderr through the sanitizer, then reap it.
+/// Threads (rather than draining inline) so a chatty child cannot deadlock by
+/// filling one pipe while we block on the other. `wait` owns the pipe fds, so
+/// the pumps use the non-closing `filterInto`.
+fn waitSanitized(ctx: ExecCtx, child: *std.process.Child) !std.process.Child.Term {
+    var out_thread: ?std.Thread = null;
+    var err_thread: ?std.Thread = null;
+    if (child.stdout) |f| {
+        out_thread = std.Thread.spawn(.{}, macos_sandbox.filterInto, .{ f.handle, std.c.STDOUT_FILENO }) catch null;
+    }
+    if (child.stderr) |f| {
+        err_thread = std.Thread.spawn(.{}, macos_sandbox.filterInto, .{ f.handle, std.c.STDERR_FILENO }) catch null;
+    }
+    // The pumps see EOF when the child's write ends close, i.e. when it exits,
+    // so joining before `wait` cannot hang on a live child.
+    if (out_thread) |t| t.join();
+    if (err_thread) |t| t.join();
+    return child.wait(ctx.io);
 }
 
 /// Coerce every argument to a string and collect them into an owned argv.
@@ -53,12 +82,13 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
         error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
     };
 
-    const child_stdout = childStdoutMode(ctx.suppress_child_stdout);
+    const raw = macos_sandbox.rawPassthroughEnabled(ctx.environ);
     var child = std.process.spawn(ctx.io, .{
         .argv = spawn_argv,
-        .stdout = child_stdout,
+        .stdout = childStdioMode(ctx.suppress_child_stdout, raw),
+        .stderr = childStdioMode(false, raw),
     }) catch return BuiltinError.SystemCommandFailed;
-    const term = child.wait(ctx.io) catch return BuiltinError.SystemCommandFailed;
+    const term = waitSanitized(ctx, &child) catch return BuiltinError.SystemCommandFailed;
 
     switch (term) {
         .exited => |code| if (code == 0) return Value{ .bool = true } else recordFailure(ctx, argv_slice[0], code),
@@ -277,11 +307,15 @@ fn readPipeAll(file: std.Io.File, allocator: std.mem.Allocator, max_bytes: usize
     return r.interface.allocRemaining(allocator, std.Io.Limit.limited(max_bytes));
 }
 
-test "childStdoutMode ignores subprocess stdout only when suppression is requested" {
+test "childStdioMode: suppression wins, then raw passthrough, else sanitized pipe" {
     // Under --json/--ndjson the caller suppresses the child's stdout so it
-    // can't corrupt the document; otherwise it inherits malt's fd.
-    try std.testing.expect(std.meta.activeTag(childStdoutMode(true)) == .ignore);
-    try std.testing.expect(std.meta.activeTag(childStdoutMode(false)) == .inherit);
+    // can't corrupt the document — that still takes precedence.
+    try std.testing.expect(std.meta.activeTag(childStdioMode(true, false)) == .ignore);
+    try std.testing.expect(std.meta.activeTag(childStdioMode(true, true)) == .ignore);
+    // MALT_ALLOW_RAW_POST_INSTALL=1 hands the terminal straight to the child.
+    try std.testing.expect(std.meta.activeTag(childStdioMode(false, true)) == .inherit);
+    // Default: pipe, so the bytes can be run through the sanitizer first.
+    try std.testing.expect(std.meta.activeTag(childStdioMode(false, false)) == .pipe);
 }
 
 // Homebrew's formula-context `system` raises on failure, so a child
@@ -576,4 +610,59 @@ test "system rejects an argv0 outside the sandbox roots before spawning" {
         BuiltinError.PathSandboxViolation,
         system(ctx, null, &.{.{ .string = "/Users/me/evil" }}),
     );
+}
+
+// The sanitizer only matters if it is actually in the path, so capture this
+// process's real stdout and check what a hostile post_install would land on
+// the user's terminal.
+test "system strips terminal escapes a formula emits, keeping the text" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var lio: std.Io.Threaded = .init(alloc, .{});
+    defer lio.deinit();
+
+    const cap_path = try std.fmt.allocPrintSentinel(
+        alloc,
+        "/tmp/malt_sanitize_capture_{d}",
+        .{std.c.getpid()},
+        0,
+    );
+    defer std.Io.Dir.cwd().deleteFile(lio.io(), cap_path) catch {};
+
+    // Swap fd 1 for a file, run the builtin, then put the real one back.
+    const saved = std.c.dup(std.c.STDOUT_FILENO);
+    try std.testing.expect(saved >= 0);
+    const cap_fd = std.c.open(cap_path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    try std.testing.expect(cap_fd >= 0);
+    _ = std.c.dup2(cap_fd, std.c.STDOUT_FILENO);
+    _ = std.c.close(cap_fd);
+
+    const ctx = ExecCtx{
+        .allocator = alloc,
+        .io = lio.io(),
+        .environ = .empty,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+    };
+    // OSC 52 is the clipboard write; the trailing text must survive.
+    const payload = "\x1b]52;c;ZXZpbA==\x07VISIBLE";
+    _ = system(ctx, null, &.{
+        .{ .string = "/bin/echo" },
+        .{ .string = payload },
+    }) catch {};
+
+    _ = std.c.dup2(saved, std.c.STDOUT_FILENO);
+    _ = std.c.close(saved);
+
+    const f = try std.Io.Dir.openFileAbsolute(lio.io(), cap_path, .{});
+    defer f.close(lio.io());
+    var buf: [512]u8 = undefined;
+    const n = try f.readPositionalAll(lio.io(), &buf, 0);
+    const got = buf[0..n];
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "VISIBLE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "\x1b]52") == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
 }

@@ -282,7 +282,7 @@ pub fn runRubySandboxed(
     return spawnFiltered(argv_z, envp, limits, stdio);
 }
 
-fn rawPassthroughEnabled(environ: std.process.Environ) bool {
+pub fn rawPassthroughEnabled(environ: std.process.Environ) bool {
     const v = std.process.Environ.getPosix(environ, "MALT_ALLOW_RAW_POST_INSTALL") orelse return false;
     return std.mem.eql(u8, v, "1");
 }
@@ -460,9 +460,17 @@ fn fdSinkWrite(ctx: *anyopaque, bytes: []const u8) term_sanitize.SinkError!void 
 
 /// Reader thread: pull from the pipe, run through the sanitizer,
 /// push the surviving bytes to the parent's real fd. Exits on EOF
-/// or write error.
+/// or write error. Owns `pipe_fd` and closes it.
 fn filterLoop(pipe_fd: c_int, out_fd: c_int) void {
     defer _ = std.c.close(pipe_fd);
+    filterInto(pipe_fd, out_fd);
+}
+
+/// Same pump, but the caller retains ownership of `pipe_fd`. The DSL's
+/// `system`/`safe_popen_read` spawn through `std.process.spawn`, whose own
+/// `wait` closes the pipes it handed out — closing here as well would free an
+/// fd number a later `open` could already have reused.
+pub fn filterInto(pipe_fd: c_int, out_fd: c_int) void {
     var sanitizer = term_sanitize.Sanitizer.init();
     var ctx = FdSinkCtx{ .fd = out_fd };
     const sink = term_sanitize.Sink{ .ctx = &ctx, .write_fn = fdSinkWrite };
