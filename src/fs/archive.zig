@@ -142,6 +142,33 @@ const HardLink = struct {
     target: []const u8,
 };
 
+/// Canonical form of a tar entry name: `.` and empty components dropped,
+/// single `/` separators. Tar routinely emits `./name` for the same path that
+/// a later entry spells `name`, so the symlink bookkeeping below has to
+/// compare canonical forms or the two spellings look like different files.
+/// The returned slice lives in `arena`.
+fn canonicalEntryName(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var it = std.mem.splitScalar(u8, name, '/');
+    while (it.next()) |comp| {
+        if (comp.len == 0 or std.mem.eql(u8, comp, ".")) continue;
+        if (out.items.len > 0) try out.append(arena, '/');
+        try out.appendSlice(arena, comp);
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// True when any proper directory prefix of `canon` names a symlink the same
+/// archive declared earlier.
+fn traversesSymlink(set: *const std.StringHashMapUnmanaged(void), canon: []const u8) bool {
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, canon, i, '/')) |slash| {
+        if (set.contains(canon[0..slash])) return true;
+        i = slash + 1;
+    }
+    return false;
+}
+
 /// Recreate each `target -> name` hard link inside `dir`. `follow_symlinks`
 /// stays false (the default): macOS `link(2)` follows, which would let an
 /// archive craft a hardlink that escapes via a symlink hop. Paths stay relative
@@ -177,6 +204,16 @@ fn preScanTarGz(
     const r: *std.Io.Reader = &decompress.reader;
 
     var hardlinks: std.ArrayList(HardLink) = .empty;
+
+    // Every symlink this archive declares, in canonical form. An entry may
+    // legitimately *be* a symlink that points out of the tree — a bottle links
+    // to a sibling formula via `../../../../opt/<name>`, which only resolves
+    // once the keg reaches its install location — but nothing may be written
+    // *through* one. `isSafeSymlinkTarget`'s depth arithmetic treats every
+    // component of an entry name as a real directory, so once `a` exists as a
+    // symlink the budget no longer describes the filesystem and repeated
+    // "one level up" hops compose into an unbounded escape.
+    var symlink_names: std.StringHashMapUnmanaged(void) = .empty;
 
     // Pax overrides apply to the single entry that follows the 'x' header,
     // mirroring std.tar: `path=` replaces the name, `linkpath=` the target.
@@ -234,15 +271,30 @@ fn preScanTarGz(
 
         const ustar_link = nullSlice(header[157..257]);
         const link_name = pax_link orelse ustar_link;
+
+        // No entry may be reached through a symlink this archive created —
+        // that is the step that turns a bounded, dangling link into a write
+        // outside the extraction root.
+        const canon = try canonicalEntryName(arena, name);
+        if (traversesSymlink(&symlink_names, canon)) return error.ExtractionFailed;
+
         switch (kind_byte) {
             // Symbolic link: link target is interpreted relative to the
             // entry's parent directory (POSIX). Reuse the existing
             // bottle-aware target check against the effective target.
-            '2' => if (!isSafeSymlinkTarget(name, link_name)) return error.ExtractionFailed,
+            '2' => {
+                if (!isSafeSymlinkTarget(name, link_name)) return error.ExtractionFailed;
+                if (canon.len > 0) try symlink_names.put(arena, canon, {});
+            },
             // Hard link: target is a tar-relative path identical in
-            // shape to a regular entry name.
+            // shape to a regular entry name. `hardLink`'s follow_symlinks=false
+            // only protects the final component — the kernel still resolves
+            // every directory on the way there — so the target gets the same
+            // traversal check as an entry name.
             '1' => {
                 if (!isSafeEntryPath(link_name)) return error.ExtractionFailed;
+                const canon_target = try canonicalEntryName(arena, link_name);
+                if (traversesSymlink(&symlink_names, canon_target)) return error.ExtractionFailed;
                 try hardlinks.append(arena, .{
                     .name = try arena.dupe(u8, name),
                     .target = try arena.dupe(u8, link_name),
@@ -901,6 +953,162 @@ test "extractTarGz does not leak a pax override to a later entry" {
     var link_buf2: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const b = link_buf2[0..try dest_dir.readLink(io, "b", &link_buf2)];
     try std.testing.expectEqualStrings("target-b", b);
+}
+
+// --- writing through an archive-created symlink ---------------------------
+
+test "extractTarGz rejects a file written through a symlink the archive created" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("sym_write_through");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    // `up` is a legal symlink on its own (one level up is the allowed
+    // prefix-parent shape). The escape is the *next* entry, whose name walks
+    // through it — the depth arithmetic counts `up` as a directory, so
+    // `up/ESCAPED` reads as depth 1 while it actually lands in dest's parent.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.entry("up", '2', "..");
+    t.file("up/ESCAPED", "pwned\n");
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &s, t.bytes()));
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/ESCAPED"), .{}),
+    );
+}
+
+test "extractTarGz rejects chained symlinks that walk arbitrarily far out" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("sym_chain");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+    try s.dir.createDirPath(io, "bin");
+
+    // Each hop is individually within the one-level budget, but the budget was
+    // never meant to compose: `a` is a symlink, so `a/b` is not at the depth
+    // its name implies, and by the third entry the write lands in a sibling of
+    // dest — `<prefix>/bin` in the real layout, which is on the user's PATH.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.entry("a", '2', "..");
+    t.entry("a/b", '2', "..");
+    t.file("a/b/bin/EVIL", "payload\n");
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &s, t.bytes()));
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/bin/EVIL"), .{}),
+    );
+}
+
+test "extractTarGz rejects a hard link resolved through a symlink the archive created" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("hardlink_escape");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+    try s.dir.writeFile(io, .{ .sub_path = "secret.txt", .data = "TOP SECRET\n" });
+
+    // `follow_symlinks = false` only governs the final component; the kernel
+    // still resolves `up`. A hard link is a second name for the inode, so this
+    // would import a file the archive never shipped into the keg — where the
+    // linker can expose it and a later chmod can widen it.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.entry("up", '2', "..");
+    t.entry("stolen", '1', "up/secret.txt");
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &s, t.bytes()));
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/dest/stolen"), .{}),
+    );
+}
+
+test "extractTarGz sees through a ./-spelled symlink name" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("sym_dotslash");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    // tar emits `./name` and `name` interchangeably; the guard compares
+    // canonical forms so the two spellings cannot be used to smuggle a
+    // traversal past it.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.entry("./up", '2', "..");
+    t.file("up/ESCAPED", "pwned\n");
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &s, t.bytes()));
+}
+
+test "extractTarGz still accepts the out-of-tree leaf symlinks real bottles ship" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("sym_bottle_ok");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    // Compatibility guard. Bottles are built for their *installed* location,
+    // so a formula that references a sibling reaches it by climbing out of the
+    // tarball root — the rust bottle's `opt/llvm` link is the canonical case.
+    // Those links dangle at extraction time and resolve once the keg is in
+    // place; nothing is written through them, so they stay legal.
+    var raw: [8192]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.file("rust/1.95.0/lib/rustlib/aarch64-apple-darwin/bin/real", "x\n");
+    t.entry(
+        "rust/1.95.0/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy",
+        '2',
+        "../../../../../../../opt/llvm/bin/llvm-objcopy",
+    );
+    t.entry("rust/1.95.0/bin/sibling", '2', "real");
+    t.entry("rust/1.95.0/bin/up-and-over", '2', "../lib/rustlib");
+    t.file("rust/1.95.0/bin/real", "y\n");
+    try testExtract(io, &s, t.bytes());
+
+    var dest_dir = try std.Io.Dir.openDirAbsolute(io, s.p("/dest"), .{});
+    defer dest_dir.close(io);
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "../../../../../../../opt/llvm/bin/llvm-objcopy",
+        buf[0..try dest_dir.readLink(io, "rust/1.95.0/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy", &buf)],
+    );
+}
+
+test "extractTarGz still applies a hard link that does not cross a symlink" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("hardlink_ok");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.file("pkg/bin/tool", "payload\n");
+    t.entry("pkg/bin/tool-alias", '1', "pkg/bin/tool");
+    try testExtract(io, &s, t.bytes());
+
+    var dest_dir = try std.Io.Dir.openDirAbsolute(io, s.p("/dest"), .{});
+    defer dest_dir.close(io);
+    const st = try dest_dir.statFile(io, "pkg/bin/tool-alias", .{});
+    try std.testing.expectEqual(@as(u64, "payload\n".len), st.size);
 }
 
 // --- subprocess-extractor symlink-target guard (xz/zip) -------------------
