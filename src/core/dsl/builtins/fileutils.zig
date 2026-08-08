@@ -18,6 +18,21 @@ const Value = values.Value;
 const BuiltinError = pathname.BuiltinError;
 const ExecCtx = pathname.ExecCtx;
 
+/// Hold a symlink target to the same keg/prefix boundary a write gets.
+/// An absolute target is checked as-is; a relative one is resolved against the
+/// link's parent directory (POSIX semantics) before checking, so `../lib/x`
+/// from `<keg>/bin/y` is judged as `<keg>/lib/x` rather than rejected outright
+/// for containing a `..`.
+fn validateLinkTarget(ctx: ExecCtx, target: []const u8, link_path: []const u8) BuiltinError!void {
+    const parent = std.fs.path.dirname(link_path) orelse "/";
+    const resolved = std.fs.path.resolve(ctx.allocator, &.{ parent, target }) catch
+        return BuiltinError.OutOfMemory;
+    // Scratch only — the check consumes it, nothing downstream holds it.
+    defer ctx.allocator.free(resolved);
+    sandbox.validatePath(resolved, ctx.cellar_path, ctx.malt_prefix) catch
+        return BuiltinError.PathSandboxViolation;
+}
+
 /// rm — remove a file or array of files
 pub fn rm(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return Value{ .nil = {} };
@@ -45,7 +60,12 @@ pub fn rm(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
 pub fn rmR(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return Value{ .nil = {} };
     const path = try args[0].asString(ctx.allocator);
-    sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch
+    // Resolve the parent, not the leaf: `deleteTree` unlinks a symlinked leaf
+    // without following it (so an in-keg alias stays removable), but it *does*
+    // traverse intermediate components — which is how a planted directory
+    // symlink turned this into an out-of-keg recursive delete. Same guard
+    // `cp`/`cp_r` already use for their destination.
+    sandbox.validateWriteDir(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
     std.Io.Dir.cwd().deleteTree(ctx.io, path) catch {};
     return Value{ .nil = {} };
@@ -60,7 +80,9 @@ pub fn rmRf(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
 pub fn mkdirP(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return Value{ .nil = {} };
     const path = try args[0].asString(ctx.allocator);
-    sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch
+    // `createDirPath` follows intermediate symlinks, so the lexical check alone
+    // let a planted directory link materialise the tree outside the keg.
+    sandbox.validateWriteDir(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
     std.Io.Dir.cwd().createDirPath(ctx.io, path) catch {};
     return Value{ .nil = {} };
@@ -199,8 +221,13 @@ pub fn lnS(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     const target = try args[0].asString(ctx.allocator);
     const link_path = try args[1].asString(ctx.allocator);
     if (target.len == 0 or link_path.len == 0) return Value{ .nil = {} };
-    sandbox.validatePath(link_path, ctx.cellar_path, ctx.malt_prefix) catch
+    sandbox.validateWriteDir(ctx.io, link_path, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
+    // The target was previously unchecked, which let a formula mint a doorway
+    // out of the keg for any later builtin (or the linker) to walk through.
+    // POSIX resolves a relative target against the link's own directory, so
+    // resolve it the same way and hold it to the same boundary as a write.
+    try validateLinkTarget(ctx, target, link_path);
 
     if (std.fs.path.dirname(link_path)) |parent| {
         std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch {};
@@ -332,6 +359,135 @@ test "cp refuses to copy through an intermediate-directory symlink out of the ke
         cp(ctx, null, &.{ Value{ .string = src }, Value{ .string = dst } }),
     );
     // Nothing landed outside the keg.
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, escaped, .{}));
+}
+
+test "ln_s refuses a target that points out of the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("fileutils_lns_target");
+    defer s.deinit();
+    const base = s.base;
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    defer alloc.free(keg);
+    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    defer alloc.free(outside);
+    const link = try std.fs.path.join(alloc, &.{ keg, "d" });
+    defer alloc.free(link);
+
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    try std.Io.Dir.cwd().createDirPath(io, outside);
+
+    // Only the link path was screened before; an unscreened target turns the
+    // keg into a doorway that later builtins traverse.
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        lnS(ctx, null, &.{ Value{ .string = outside }, Value{ .string = link } }),
+    );
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, link, .{}));
+}
+
+test "ln_s still links to a target inside the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("fileutils_lns_ok");
+    defer s.deinit();
+    const keg = s.base;
+
+    const target = try std.fs.path.join(alloc, &.{ keg, "real.txt" });
+    defer alloc.free(target);
+    const link = try std.fs.path.join(alloc, &.{ keg, "alias" });
+    defer alloc.free(link);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, target, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "x");
+    }
+
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    _ = try lnS(ctx, null, &.{ Value{ .string = target }, Value{ .string = link } });
+    try std.Io.Dir.cwd().access(io, link, .{});
+}
+
+test "rm_r refuses to delete through an intermediate-directory symlink out of the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("fileutils_rmr_dirlink");
+    defer s.deinit();
+    const base = s.base;
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    defer alloc.free(keg);
+    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    defer alloc.free(outside);
+    const victim = try std.fs.path.join(alloc, &.{ outside, "precious" });
+    defer alloc.free(victim);
+    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" });
+    defer alloc.free(dirlink);
+    const through = try std.fs.path.join(alloc, &.{ dirlink, "precious" });
+    defer alloc.free(through);
+
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    try std.Io.Dir.cwd().createDirPath(io, victim);
+    // Planted directly: `ln_s` now refuses this, but a symlink can also arrive
+    // inside the bottle itself, so the delete path must stand on its own.
+    try std.Io.Dir.symLinkAbsolute(io, outside, dirlink, .{});
+
+    // `cp`/`cp_r` already resolve intermediate symlinks; `rm_r` was still
+    // lexical, so the same planted link reached outside the boundary.
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        rmR(ctx, null, &.{Value{ .string = through }}),
+    );
+    try std.Io.Dir.cwd().access(io, victim, .{});
+}
+
+test "rm_r still deletes a tree inside the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("fileutils_rmr_ok");
+    defer s.deinit();
+    const keg = s.base;
+
+    const doomed = try std.fs.path.join(alloc, &.{ keg, "build" });
+    defer alloc.free(doomed);
+    try std.Io.Dir.cwd().createDirPath(io, doomed);
+
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    _ = try rmR(ctx, null, &.{Value{ .string = doomed }});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, doomed, .{}));
+}
+
+test "mkdir_p refuses to create through an intermediate-directory symlink out of the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("fileutils_mkdirp_dirlink");
+    defer s.deinit();
+    const base = s.base;
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    defer alloc.free(keg);
+    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    defer alloc.free(outside);
+    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" });
+    defer alloc.free(dirlink);
+    const through = try std.fs.path.join(alloc, &.{ dirlink, "made" });
+    defer alloc.free(through);
+    const escaped = try std.fs.path.join(alloc, &.{ outside, "made" });
+    defer alloc.free(escaped);
+
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    try std.Io.Dir.cwd().createDirPath(io, outside);
+    try std.Io.Dir.symLinkAbsolute(io, outside, dirlink, .{});
+
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        mkdirP(ctx, null, &.{Value{ .string = through }}),
+    );
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, escaped, .{}));
 }
 

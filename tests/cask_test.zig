@@ -644,17 +644,23 @@ test "verifyFileSha256 rejects a truncated or over-length digest" {
     );
 }
 
-test "verifyFileSha256 skips verification on null or :no_check" {
+test "verifyFileSha256 skips verification only on an explicit :no_check" {
     // `sha256 :no_check` is Homebrew's opt-out for self-updating
     // installers. Honouring the skip prevents spurious failures on
     // perfectly valid casks.
+    //
+    // An *absent* hash is not that opt-out and no longer shares its path.
+    // Homebrew always emits `sha256` for a cask, so null means a malformed or
+    // hostile manifest; accepting it silently downgraded those casks to
+    // transport-only integrity, and a `pkg` artifact is then handed to
+    // `sudo installer -target /`.
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("skip", &path_buf);
     try writeFile(p, "anything");
     defer malt_fs.cwd().deleteFile(std.Options.debug_io, p) catch {};
 
-    try cask.verifyFileSha256(testIo(), p, null);
     try cask.verifyFileSha256(testIo(), p, "no_check");
+    try testing.expectError(error.Sha256Missing, cask.verifyFileSha256(testIo(), p, null));
 }
 
 test "verifyFileSha256 accepts a correct digest on a >1 MiB file" {
