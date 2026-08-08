@@ -436,7 +436,10 @@ const RetryStub = struct {
 /// retries a retry-eligible status ends up with the body, and one that does
 /// not ends up with the 503.
 fn serveFlaky(s: *RetryStub) void {
-    while (true) {
+    // Stops once the retry has been answered, so the caller can join before
+    // closing the listener. Closing a socket another thread is blocked in
+    // `accept` on is a use-after-close, and Zig panics on the resulting BADF.
+    while (s.hits.load(.monotonic) < 2) {
         const stream = s.listener.accept(s.io) catch return;
         defer stream.close(s.io);
         var rbuf: [8 * 1024]u8 = undefined;
@@ -444,7 +447,7 @@ fn serveFlaky(s: *RetryStub) void {
         var reader = stream.reader(s.io, &rbuf);
         var writer = stream.writer(s.io, &wbuf);
         var srv = std.http.Server.init(&reader.interface, &writer.interface);
-        while (true) {
+        while (s.hits.load(.monotonic) < 2) {
             var req = srv.receiveHead() catch break;
             const n = s.hits.fetchAdd(1, .monotonic);
             if (n == 0) {
@@ -469,7 +472,6 @@ test "HttpClient.get retries a 503 and returns the body from the next attempt" {
     const port = listener.socket.address.getPort();
     var stub = RetryStub{ .io = io, .listener = &listener };
     const t = try std.Thread.spawn(.{}, serveFlaky, .{&stub});
-    defer t.join();
     defer listener.deinit(io);
 
     var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
@@ -479,6 +481,8 @@ test "HttpClient.get retries a 503 and returns the body from the next attempt" {
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/flaky", .{port});
     var resp = try http.get(url);
     defer resp.deinit();
+    // Join before the listener's deferred close, not after.
+    t.join();
 
     try testing.expectEqual(@as(u16, 200), resp.status);
     try testing.expectEqualStrings("recovered", resp.body);

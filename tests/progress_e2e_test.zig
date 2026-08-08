@@ -55,9 +55,6 @@ test "HTTP GET with progress callback reports every byte of the body" {
     const port = listener.socket.address.getPort();
     var stub = Stub{ .io = io, .listener = &listener };
     const t = try std.Thread.spawn(.{}, serve, .{&stub});
-    // Declared first so it runs last: closing the listener first lets a
-    // pending `accept` fail and the thread exit even if an assertion trips.
-    defer t.join();
     defer listener.deinit(io);
 
     var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
@@ -73,6 +70,9 @@ test "HTTP GET with progress callback reports every byte of the body" {
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/payload", .{port});
     var resp = try http.getWithHeaders(url, &.{}, cb);
     defer resp.deinit();
+    // Join before the listener's deferred close: closing a socket a thread is
+    // blocked in `accept` on is a use-after-close.
+    t.join();
 
     tracker.bar.finish();
 
@@ -95,7 +95,6 @@ test "HTTP GET without a progress callback still returns the whole body" {
     const port = listener.socket.address.getPort();
     var stub = Stub{ .io = io, .listener = &listener };
     const t = try std.Thread.spawn(.{}, serve, .{&stub});
-    defer t.join();
     defer listener.deinit(io);
 
     var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
@@ -105,6 +104,7 @@ test "HTTP GET without a progress callback still returns the whole body" {
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/payload", .{port});
     var resp = try http.get(url);
     defer resp.deinit();
+    t.join();
 
     try testing.expectEqual(@as(u16, 200), resp.status);
     try testing.expectEqualStrings(payload, resp.body);

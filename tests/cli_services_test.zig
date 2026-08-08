@@ -409,3 +409,90 @@ test "writeServicesJson: an errored row serialises as state \"errored\" without 
         aw.written(),
     );
 }
+
+test "execute status by keg name emits the row registered under its launchd label" {
+    // Every other verb takes the formula name, so `services status mosquitto`
+    // must find `com.malt.mosquitto`. `hasService` already accepted the keg
+    // name, so this used to pass that gate and then filter the row back out.
+    const prefix = try setupPrefix("status_by_keg");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedService(prefix, "com.malt.mosquitto", "mosquitto", false);
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.json);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer malt.output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try services_cli.execute(&ctx, testing.allocator, &.{ "status", "mosquitto" });
+
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"com.malt.mosquitto\"") != null);
+    try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "}]}\n"));
+}
+
+test "execute logs by keg name reads the log under the launchd label" {
+    // Log dirs are named by the label, so an unresolved keg name pointed at a
+    // path nothing ever creates.
+    const prefix = try setupPrefix("logs_by_keg");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedService(prefix, "com.malt.mosquitto", "mosquitto", false);
+
+    var dir_buf: [512]u8 = undefined;
+    const log_dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}/var/malt/services/com.malt.mosquitto", .{prefix}, 0);
+    try test_io.cwd().createDirPath(std.Options.debug_io, log_dir);
+    var log_buf: [512]u8 = undefined;
+    const log_path = try std.fmt.bufPrintSentinel(&log_buf, "{s}/stdout.log", .{log_dir}, 0);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, log_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "MOSQUITTO-LOG-LINE\n");
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // `cmdLogs` writes straight to `ctx.stdout`, which defaults to a closed
+    // handle so a test cannot reach the runner's fd 1.
+    var out_buf: [512]u8 = undefined;
+    const out_path = try std.fmt.bufPrintSentinel(&out_buf, "{s}/captured.out", .{prefix}, 0);
+    const out_file = try std.Io.Dir.createFileAbsolute(io, out_path, .{ .truncate = true });
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty, .stdout = out_file };
+    try services_cli.execute(&ctx, testing.allocator, &.{ "logs", "mosquitto" });
+    out_file.close(io);
+
+    const f = try std.Io.Dir.openFileAbsolute(io, out_path, .{});
+    defer f.close(io);
+    var read_buf: [512]u8 = undefined;
+    const n = try f.readPositionalAll(io, &read_buf, 0);
+    try testing.expect(std.mem.indexOf(u8, read_buf[0..n], "MOSQUITTO-LOG-LINE") != null);
+}
+
+test "execute status refuses to guess when one formula registers two services" {
+    // Resolution happens after `hasService`, so the ambiguity has to surface
+    // rather than the first row winning silently.
+    const prefix = try setupPrefix("status_ambiguous");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedService(prefix, "com.malt.pg.main", "postgresql@16", false);
+    try seedService(prefix, "com.malt.pg.repl", "postgresql@16", false);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        error.AmbiguousService,
+        services_cli.execute(&ctx, testing.allocator, &.{ "status", "postgresql@16" }),
+    );
+}

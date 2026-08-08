@@ -733,6 +733,9 @@ const services_help =
     \\                    Print the last N lines of the service log.
     \\                    --follow / -f tails appended bytes until SIGINT.
     \\
+    \\<name> accepts the formula name (mosquitto) or the launchd label
+    \\(com.malt.mosquitto). Both are shown by `list`.
+    \\
 ;
 
 const tui_help =
