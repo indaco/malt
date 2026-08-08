@@ -318,3 +318,45 @@ test "tailLog reports IoFailed for a missing file" {
         supervisor.tailLog(std.Options.debug_io, testing.allocator, "/tmp/malt_sup_tail_missing_xyz", 1, &aw.writer),
     );
 }
+
+test "register creates the working directory launchd needs before it will spawn" {
+    // launchd rejects a job whose WorkingDirectory is missing with EX_CONFIG
+    // (78) *before* exec, so StandardErrorPath is never created and the user
+    // sees a bare "errored" with no log to read. `cli/install.zig` already
+    // pre-creates the log directory for exactly this reason; the working dir
+    // was the half that got missed, and nothing else in the install path
+    // creates it — a formula like mosquitto declares `working_dir var/mosquitto`
+    // that its own install step never makes.
+    var fx = try Fixture.init("register_workdir");
+    defer fx.deinit();
+    const prefix = fx.base;
+    const cellar = fx.p("Cellar/testkeg/1.0");
+    _ = c.setenv("MALT_PREFIX", prefix, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const workdir = fx.p("var/testkeg");
+    // Nothing has created it yet — this is the state a fresh install leaves.
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(std.Options.debug_io, workdir, .{}),
+    );
+
+    const spec = plist_mod.ServiceSpec{
+        .label = "com.malt.test.workdir",
+        .program_args = &.{fx.p("Cellar/testkeg/1.0/bin/echo")},
+        .working_dir = workdir,
+        .env = &.{},
+        .keep_alive = false,
+        .stdout_path = fx.p("out.log"),
+        .stderr_path = fx.p("err.log"),
+    };
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
+    try supervisor.register(ctx, spec, "testkeg", false, cellar, prefix);
+
+    // Present after registration, so the later bootstrap can actually spawn.
+    try std.Io.Dir.accessAbsolute(std.Options.debug_io, workdir, .{});
+}
