@@ -1054,6 +1054,31 @@ test "extractTarGz sees through a ./-spelled symlink name" {
     try std.testing.expectError(error.ExtractionFailed, testExtract(io, &s, t.bytes()));
 }
 
+test "extractTarGz records a symlink under its pax-overridden name" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("sym_pax_name");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    // The symlink bookkeeping has to key off the *effective* name, or a pax
+    // `path=` override renames the link out from under the guard and the next
+    // entry walks through it unnoticed.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.pax('x', "path", "up");
+    t.entry("ustar-name-ignored", '2', "..");
+    t.file("up/ESCAPED", "pwned\n");
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &s, t.bytes()));
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/ESCAPED"), .{}),
+    );
+}
+
 test "extractTarGz still accepts the out-of-tree leaf symlinks real bottles ship" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
