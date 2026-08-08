@@ -1681,6 +1681,20 @@ test "parseCask rejects path-traversal in a binary artifact" {
     }
 }
 
+test "an app artifact's target hint is ignored, so it never becomes a path" {
+    const a = std.testing.allocator;
+    // `binary` targets are screened because malt turns them into
+    // `<prefix>/bin/<target>`. `app` targets are not screened because nothing
+    // reads them — `parseAppName` takes the first string and stops. Pin that,
+    // so the asymmetry stays a decision rather than looking like an oversight.
+    const json =
+        \\{"token":"ok","version":"1.0","url":"https://e/x.zip","artifacts":[{"app":["Real.app",{"target":"../../../Evil.app"}]}]}
+    ;
+    var cask = try parseCask(a, json);
+    defer cask.deinit();
+    try std.testing.expectEqualStrings("Real.app", parseAppName(cask.parsed.value.object).?);
+}
+
 test "parseCask accepts the artifact shapes real casks use" {
     const a = std.testing.allocator;
     // The guard must not narrow what already installs: nested app bundles,
