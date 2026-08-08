@@ -233,14 +233,9 @@ const template_map = std.StaticStringMap(enum {
     .{ "etc", .prefix_etc },
     .{ "user", .user },
     .{ "bin", .keg_bin },
-    // These four resolve as *bases* already, but a step may also embed them
-    // inline in a path — `{{libexec}}/lib/node_modules/npm`,
-    // `{{pkgetc}}/cert.pem`. Without an entry here `expandTemplates` leaves
-    // the token verbatim (its documented behaviour for unknown tokens), the
-    // literal `{{...}}` reaches the sandbox as a relative path, and the step
-    // dies as a path violation. Deliberately NOT a merge of `base_map`: the
-    // `bin`/`etc` tokens mean different things on each side, and folding them
-    // together would silently repoint every existing `{{bin}}` step.
+    // Also usable inline, not just as a base — an unresolved `{{pkgetc}}` reads
+    // as a relative path and dies in the sandbox. Kept separate from `base_map`
+    // on purpose: `bin`/`etc` mean different things on each side.
     .{ "libexec", .keg_libexec },
     .{ "pkgetc", .pkgetc },
     .{ "pkgshare", .pkgshare },
@@ -442,15 +437,9 @@ fn stepWrite(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     return true;
 }
 
-/// `copy`: materialise `source` at `target`, the way Homebrew's `cp_r` does.
-///
-/// The semantic that matters is the one `cp -R src dst` uses: when `dst` is an
-/// existing directory the source lands *inside* it as `dst/basename(src)`,
-/// not as its contents splattered across `dst`. node depends on exactly this —
-/// `copy {{libexec}}/lib/node_modules/npm` → `{{HOMEBREW_PREFIX}}/lib/node_modules`
-/// has to produce `lib/node_modules/npm/`, because the symlink steps that
-/// follow point `bin/npm` at `lib/node_modules/npm/bin/npm-cli.js`. Getting
-/// this wrong leaves that symlink dangling and npm simply absent.
+/// `copy`: materialise `source` at `target`, the way Homebrew's `cp_r` does —
+/// an existing directory `target` receives the source as a child, matching
+/// `cp -R`. The symlink steps that follow depend on that nesting.
 fn stepCopy(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const target = resolvePathSpec(ctx, obj, "target") orelse return false;
     if (!confined(ctx, target)) return false;
@@ -459,6 +448,9 @@ fn stepCopy(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         logUnsupported(ctx, "copy with a relative source");
         return false;
     }
+    // The source is cloned wholesale into the prefix, so it needs a boundary
+    // too — otherwise a tap names any readable tree.
+    if (!confinedSource(ctx, source)) return false;
 
     // An existing directory target receives the source as a child; anything
     // else is the destination path itself.
@@ -471,12 +463,8 @@ fn stepCopy(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         mkParent(ctx, target);
     }
 
-    // Always replace. Homebrew's `cp_r` overwrites, and formulae lean on that
-    // rather than on a flag: node's copy step carries no `force`, pairing
-    // instead with a preceding `remove` of the same path. Skipping an existing
-    // destination looks conservative but silently preserves a stale payload —
-    // an upgrade left npm 11.17.0 in the prefix while the new keg carried
-    // 11.19.0, which is exactly the class of bug this step is meant to fix.
+    // Always replace, as `cp_r` does — formulae omit `force` and rely on it.
+    // Skipping an existing destination would leave a stale payload behind.
     std.Io.Dir.cwd().deleteTree(ctx.io, dest) catch {};
 
     // APFS clone: same bytes, no double disk cost, mtimes preserved.
@@ -484,6 +472,25 @@ fn stepCopy(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         logUnsupported(ctx, "copy (clone failed)");
         return false;
     };
+    return true;
+}
+
+/// Confine a *read* source. Unlike `confined` this resolves the path itself,
+/// not just its parent: the keg is tap-controlled, so the doorway can be the
+/// source's own final component.
+fn confinedSource(ctx: StepsCtx, path: []const u8) bool {
+    if (isDir(ctx, path)) {
+        sandbox.validateDirTarget(ctx.io, path, ctx.keg_path, ctx.prefix) catch {
+            logViolation(ctx, path);
+            return false;
+        };
+        return true;
+    }
+    const f = sandbox.openTargetNoFollow(ctx.io, path, ctx.keg_path, ctx.prefix, .{ .write = false }) catch {
+        logViolation(ctx, path);
+        return false;
+    };
+    f.close(ctx.io);
     return true;
 }
 
@@ -1973,6 +1980,75 @@ test "copy places the source inside an existing directory target, not its conten
     // … and not flattened one level up.
     const flat = try std.fmt.allocPrint(a, "{s}/bin/npm-cli.js", .{dstdir});
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, flat, .{}));
+}
+
+test "copy refuses a source outside the keg and prefix" {
+    // The destination is confined; the source was only checked for being
+    // absolute, so a tap could clone any readable tree into the prefix. Mirror
+    // of the source-side guard the DSL's cp/cp_r already carry.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    const outside = try std.fmt.allocPrint(a, "{s}.outside", .{h.prefix});
+    defer std.Io.Dir.cwd().deleteTree(h.io, outside) catch {};
+    try std.Io.Dir.cwd().createDirPath(h.io, outside);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(
+            h.io,
+            try std.fmt.allocPrint(a, "{s}/secret", .{outside}),
+            .{ .truncate = true },
+        );
+        defer f.close(h.io);
+        try f.writeStreamingAll(h.io, "private\n");
+    }
+
+    const json = try testFormulaJson(&h, try std.fmt.allocPrint(a,
+        \\[{{"type":"copy",
+        \\  "source":{{"path":"{s}"}},
+        \\  "target":{{"path":"{{{{HOMEBREW_PREFIX}}}}/share/stolen"}}}}]
+    , .{outside}));
+    _ = execute(h.ctx(), json);
+    try testing.expect(h.flog.hasErrors());
+
+    const landed = try std.fmt.allocPrint(a, "{s}/share/stolen", .{h.prefix});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, landed, .{}));
+}
+
+test "copy refuses a source that is a symlink out of the keg" {
+    // The keg is tap-controlled, so a bottle can ship the doorway itself. The
+    // DSL's cp/cp_r already refuse a symlink-leaf source; this step must too.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    const outside = try std.fmt.allocPrint(a, "{s}.outside", .{h.prefix});
+    defer std.Io.Dir.cwd().deleteTree(h.io, outside) catch {};
+    try std.Io.Dir.cwd().createDirPath(h.io, outside);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(
+            h.io,
+            try std.fmt.allocPrint(a, "{s}/secret", .{outside}),
+            .{ .truncate = true },
+        );
+        defer f.close(h.io);
+        try f.writeStreamingAll(h.io, "private\n");
+    }
+
+    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, libexec);
+    const doorway = try std.fmt.allocPrint(a, "{s}/doorway", .{libexec});
+    try std.Io.Dir.symLinkAbsolute(h.io, outside, doorway, .{});
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"copy",
+        \\  "source":{"path":"{{libexec}}/doorway"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/share/stolen"}}]
+    );
+    _ = execute(h.ctx(), json);
+
+    const landed = try std.fmt.allocPrint(a, "{s}/share/stolen/secret", .{h.prefix});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, landed, .{}));
 }
 
 test "copy refuses a target outside the keg and prefix" {
