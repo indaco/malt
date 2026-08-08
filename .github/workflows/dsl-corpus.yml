@@ -38,6 +38,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2

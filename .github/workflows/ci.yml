@@ -28,11 +28,14 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          use-cache: false
 
       - name: Install just
         uses: taiki-e/install-action@v2.85.4
@@ -82,11 +85,14 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          use-cache: false
 
       - name: Check Zig formatting
         run: zig fmt --check src/ tests/
@@ -119,6 +125,8 @@ jobs:
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Verify manifest against committed pin
         run: ./scripts/gen-pins.sh --check
