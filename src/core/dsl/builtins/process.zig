@@ -32,19 +32,37 @@ fn childStdioMode(suppress: bool, raw: bool) std.process.SpawnOptions.StdIo {
 /// Threads (rather than draining inline) so a chatty child cannot deadlock by
 /// filling one pipe while we block on the other. `wait` owns the pipe fds, so
 /// the pumps use the non-closing `filterInto`.
-fn waitSanitized(ctx: ExecCtx, child: *std.process.Child) !std.process.Child.Term {
+/// Test seam, mirroring `sandbox/macos.zig`'s `SpawnHooks`: forces the Nth pump
+/// spawn to fail so the undrained-pipe path is reachable without exhausting
+/// threads for real.
+const PumpHooks = struct { fail_spawn_on: ?u32 = null };
+
+fn spawnPump(hooks: PumpHooks, idx: u32, fd: c_int, out_fd: c_int) std.Thread.SpawnError!std.Thread {
+    if (hooks.fail_spawn_on) |n| if (idx == n) return error.SystemResources;
+    return std.Thread.spawn(.{}, macos_sandbox.filterInto, .{ fd, out_fd });
+}
+
+fn waitSanitized(ctx: ExecCtx, child: *std.process.Child, hooks: PumpHooks) !std.process.Child.Term {
     var out_thread: ?std.Thread = null;
     var err_thread: ?std.Thread = null;
-    if (child.stdout) |f| {
-        out_thread = std.Thread.spawn(.{}, macos_sandbox.filterInto, .{ f.handle, std.c.STDOUT_FILENO }) catch null;
+    // A pump that never starts leaves its pipe undrained, so the child blocks
+    // on a full buffer and `wait` never returns. Kill first — that EOFs any
+    // pump that did start — then join.
+    errdefer {
+        child.kill(ctx.io);
+        if (out_thread) |t| t.join();
+        if (err_thread) |t| t.join();
     }
-    if (child.stderr) |f| {
-        err_thread = std.Thread.spawn(.{}, macos_sandbox.filterInto, .{ f.handle, std.c.STDERR_FILENO }) catch null;
-    }
+
+    if (child.stdout) |f| out_thread = try spawnPump(hooks, 0, f.handle, std.c.STDOUT_FILENO);
+    if (child.stderr) |f| err_thread = try spawnPump(hooks, 1, f.handle, std.c.STDERR_FILENO);
+
     // The pumps see EOF when the child's write ends close, i.e. when it exits,
     // so joining before `wait` cannot hang on a live child.
     if (out_thread) |t| t.join();
     if (err_thread) |t| t.join();
+    out_thread = null;
+    err_thread = null;
     return child.wait(ctx.io);
 }
 
@@ -88,7 +106,7 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
         .stdout = childStdioMode(ctx.suppress_child_stdout, raw),
         .stderr = childStdioMode(false, raw),
     }) catch return BuiltinError.SystemCommandFailed;
-    const term = waitSanitized(ctx, &child) catch return BuiltinError.SystemCommandFailed;
+    const term = waitSanitized(ctx, &child, .{}) catch return BuiltinError.SystemCommandFailed;
 
     switch (term) {
         .exited => |code| if (code == 0) return Value{ .bool = true } else recordFailure(ctx, argv_slice[0], code),
@@ -665,4 +683,35 @@ test "system strips terminal escapes a formula emits, keeping the text" {
     try std.testing.expect(std.mem.indexOf(u8, got, "VISIBLE") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "\x1b]52") == null);
     try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
+}
+
+// A pump that cannot start leaves its pipe undrained: the child blocks once the
+// buffer fills and `wait` never returns. Failing loudly is the only safe
+// outcome, and the test hangs rather than fails if that regresses.
+test "waitSanitized fails loudly when a sanitizer pump cannot start" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var lio: std.Io.Threaded = .init(alloc, .{});
+    defer lio.deinit();
+
+    const ctx = ExecCtx{
+        .allocator = alloc,
+        .io = lio.io(),
+        .environ = .empty,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+    };
+
+    // `yes` never stops writing, so an undrained stdout would wedge for good.
+    var child = try std.process.spawn(lio.io(), .{
+        .argv = &.{"/usr/bin/yes"},
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    try std.testing.expectError(
+        error.SystemResources,
+        waitSanitized(ctx, &child, .{ .fail_spawn_on = 0 }),
+    );
 }

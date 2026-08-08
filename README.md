@@ -640,7 +640,7 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 | `MALT_OFFLINE`                     | Set to `1`/`true` to route every fetch through the snapshot cache; misses surface `OfflineRequired` instead of stalling on connect (mirrors `--offline`) | unset                           |
 | `MALT_MIGRATE_PARALLEL_WORKERS`    | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                                                                                          | `4`                             |
 | `MALT_OUTDATED_MAX_AGE`            | TTL in minutes for the `outdated.json` snapshot                                                                                                          | `5`                             |
-| `MALT_ALLOW_RAW_POST_INSTALL`      | Disable terminal escape filter on ruby `post_install` output                                                                                             | unset                           |
+| `MALT_ALLOW_RAW_POST_INSTALL`      | Disable the terminal escape filter on `post_install` output, on both the native and ruby paths (children then keep a TTY)                                | unset                           |
 | `MALT_ALLOW_UNVERIFIED`            | Skip signature + checksum verification - in `install.sh`, and in `mt version update --no-verify` (use only when cosign is unavailable)                   | unset                           |
 | `MALT_ALLOW_UNVERIFIED_SOURCE`     | Allow `install.sh` to clone `main` when no release tag resolves                                                                                          | unset                           |
 
