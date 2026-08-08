@@ -300,3 +300,65 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
     try testing.expect(!cask.isInstalled(&db, "firefox"));
     try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(std.Options.debug_io, app_path_z, .{}));
 }
+
+// --- absent cask digest fails closed, and says so ------------------------
+
+/// Minimal loopback origin: answers every GET with `body`. Enough to drive
+/// `downloadOnly` through a real fetch without touching the network.
+const BodyStub = struct { io: std.Io, listener: *std.Io.net.Server, body: []const u8 };
+
+fn serveBody(s: *BodyStub) void {
+    const stream = s.listener.accept(s.io) catch return;
+    defer stream.close(s.io);
+    var rbuf: [8 * 1024]u8 = undefined;
+    var wbuf: [8 * 1024]u8 = undefined;
+    var reader = stream.reader(s.io, &rbuf);
+    var writer = stream.writer(s.io, &wbuf);
+    var srv = std.http.Server.init(&reader.interface, &writer.interface);
+    var req = srv.receiveHead() catch return;
+    req.respond(s.body, .{}) catch return;
+}
+
+test "downloadOnly reports a missing cask digest as its own error, not a mismatch" {
+    // Homebrew always emits `sha256` for a cask, so an absent one is a
+    // malformed or hostile manifest. Reporting it as Sha256Mismatch sends the
+    // user hunting for a corrupted download, and callers treat a mismatch as
+    // transient — so a hash-less cask would re-download and fail forever.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var stub = BodyStub{ .io = io, .listener = &listener, .body = "ARTIFACT BYTES" };
+    const t = try std.Thread.spawn(.{}, serveBody, .{&stub});
+    // Declared before the listener's, so it runs *after* it: closing the
+    // listener unblocks `accept` and lets the thread exit even when the
+    // assertion below fails before any request is made.
+    defer t.join();
+    defer listener.deinit(io);
+
+    var fx = try Fixture.init("sha_missing");
+    defer fx.deinit();
+    // `downloadOnly` creates `cache/Cask` with a single-level makedir.
+    try test_io.cwd().createDirPath(std.Options.debug_io, fx.p("cache"));
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const json = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"token\":\"nosha\",\"version\":\"1.0\",\"url\":\"http://127.0.0.1:{d}/x.zip\"}}",
+        .{port},
+    );
+    defer testing.allocator.free(json);
+    var c = try cask.parseCask(testing.allocator, json);
+    defer c.deinit();
+    try testing.expect(c.sha256 == null);
+
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    try testing.expectError(error.Sha256Missing, installer.downloadOnly(&c));
+}

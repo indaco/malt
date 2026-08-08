@@ -19,6 +19,10 @@ pub const CaskError = error{
     // Distinct from UninstallFailed so callers can say *why*: the app is live.
     AppRunning,
     Sha256Mismatch,
+    // Distinct from Sha256Mismatch: the manifest declared no digest at all.
+    // Callers retry a mismatch as transient corruption; this one never
+    // succeeds on a retry, so it must not wear the same name.
+    Sha256Missing,
     OutOfMemory,
 };
 
@@ -581,8 +585,12 @@ pub const CaskInstaller = struct {
             self.allocator.free(cache_path);
         }
 
-        self.verifySha256(cache_path, cask.sha256) catch
-            return CaskError.Sha256Mismatch;
+        self.verifySha256(cache_path, cask.sha256) catch |e| switch (e) {
+            // A retry re-downloads and fails identically, so it must not
+            // reach the caller wearing the transient error's name.
+            error.Sha256Missing => return CaskError.Sha256Missing,
+            else => return CaskError.Sha256Mismatch,
+        };
 
         return cache_path;
     }
