@@ -189,3 +189,26 @@ test "resolveLabel refuses to guess when one formula registers two services" {
     defer testing.allocator.free(exact);
     try testing.expectEqualStrings("com.malt.pg.repl", exact);
 }
+
+test "stopAndUnregister removes the row when given the keg name" {
+    // `cli/uninstall.zig` passes the formula name, but the DELETE matched on
+    // the launchd label — so uninstalling a formula with a service left the
+    // row behind and the job loaded.
+    var t = try TempDb.init("unregister_keg");
+    defer t.deinit();
+
+    try t.db.exec(
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start, last_status)
+        \\VALUES ('com.malt.mosquitto', 'mosquitto', '/dev/null', 0, 'registered');
+    );
+
+    const ctx: supervisor.SupervisorCtx = .{
+        .allocator = testing.allocator,
+        .io = std.Options.debug_io,
+        .db = &t.db,
+    };
+    supervisor.stopAndUnregister(ctx, "mosquitto");
+
+    try testing.expect(!supervisor.hasService(&t.db, "mosquitto"));
+    try testing.expect(!supervisor.hasService(&t.db, "com.malt.mosquitto"));
+}

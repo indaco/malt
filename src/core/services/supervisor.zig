@@ -321,27 +321,33 @@ fn lookupPlistPath(allocator: std.mem.Allocator, db: *sqlite.Database, name: []c
 pub fn start(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
     if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
     const allocator = ctx.allocator;
-    const plist_path = try lookupPlistPath(allocator, ctx.db, name);
+    // Resolve once: every row is keyed by the label, so the status write below
+    // silently matched nothing when the user typed the keg name.
+    const label = try resolveLabel(allocator, ctx.db, name);
+    defer allocator.free(label);
+    const plist_path = try lookupPlistPath(allocator, ctx.db, label);
     defer allocator.free(plist_path);
     const domain = userDomain(allocator) catch return SupervisorError.OutOfMemory;
     defer allocator.free(domain);
 
     try runLaunchctl(ctx.io, &.{ "launchctl", "bootstrap", domain, plist_path });
     // Status is a UI hint; launchctl is the source of truth for liveness.
-    setStatus(ctx.db, name, "running") catch {};
+    setStatus(ctx.db, label, "running") catch {};
 }
 
 pub fn stop(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
     if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
     const allocator = ctx.allocator;
-    const plist_path = try lookupPlistPath(allocator, ctx.db, name);
+    const label = try resolveLabel(allocator, ctx.db, name);
+    defer allocator.free(label);
+    const plist_path = try lookupPlistPath(allocator, ctx.db, label);
     defer allocator.free(plist_path);
     const domain = userDomain(allocator) catch return SupervisorError.OutOfMemory;
     defer allocator.free(domain);
 
     try runLaunchctl(ctx.io, &.{ "launchctl", "bootout", domain, plist_path });
     // Status is a UI hint; launchctl is the source of truth for liveness.
-    setStatus(ctx.db, name, "stopped") catch {};
+    setStatus(ctx.db, label, "stopped") catch {};
 }
 
 pub fn restart(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
@@ -351,11 +357,15 @@ pub fn restart(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
 }
 
 pub fn stopAndUnregister(ctx: SupervisorCtx, name: []const u8) void {
+    // `cli/uninstall.zig` passes the formula name, so resolve before deleting —
+    // matching on the raw name removed nothing and orphaned the row.
+    const label = resolveLabel(ctx.allocator, ctx.db, name) catch return;
+    defer ctx.allocator.free(label);
     // Unregister must remove the DB row even if the service is already down.
-    stop(ctx, name) catch {};
+    stop(ctx, label) catch {};
     var stmt = ctx.db.prepare("DELETE FROM services WHERE name = ?;") catch return;
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return;
+    stmt.bindText(1, label) catch return;
     // Row may not exist; DELETE is idempotent either way.
     _ = stmt.step() catch {};
 }

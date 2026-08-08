@@ -147,6 +147,10 @@ fn cmdStatus(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, res
         output.err("no such service: {s}", .{name});
         return ServicesError.SupervisorError;
     }
+    // Rows and launchd are both keyed by the label; the user may have typed the
+    // keg name, which every other verb accepts.
+    const label = try supervisor.resolveLabel(allocator, db, name);
+    defer allocator.free(label);
     if (output.isJson()) {
         // Reuse `supervisor.list` filtered down to `name`, so the JSON shape
         // matches `list --json` (single-element array, identical fields).
@@ -154,11 +158,11 @@ fn cmdStatus(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, res
         defer supervisor.freeServiceInfos(allocator, items);
         var picked: std.ArrayList(supervisor.ServiceInfo) = .empty;
         defer picked.deinit(allocator);
-        for (items) |s| if (std.mem.eql(u8, s.name, name)) try picked.append(allocator, s);
+        for (items) |s| if (std.mem.eql(u8, s.name, label)) try picked.append(allocator, s);
         return emitJson(io, allocator, picked.items);
     }
-    const runtime = supervisor.queryRuntime(io, allocator, name);
-    output.info("service {s}: {s}", .{ name, supervisor.runtimeStateName(runtime) });
+    const runtime = supervisor.queryRuntime(io, allocator, label);
+    output.info("service {s}: {s}", .{ label, supervisor.runtimeStateName(runtime) });
 }
 
 /// Render the supervisor's list of services as `--json`. Runtime state
@@ -205,7 +209,12 @@ fn cmdLogs(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []con
             follow = true;
         }
     }
-    const path = try supervisor.logPath(allocator, name, if (stream == .stdout) .stdout else .stderr);
+    // Log dirs are named by the label, so resolve what the user typed first.
+    var db = try openDb(ctx);
+    defer db.close();
+    const label = try supervisor.resolveLabel(allocator, &db, name);
+    defer allocator.free(label);
+    const path = try supervisor.logPath(allocator, label, if (stream == .stdout) .stdout else .stderr);
     defer allocator.free(path);
     const stdout = ctx.stdout;
     var write_buf: [4096]u8 = undefined;
