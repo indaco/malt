@@ -107,26 +107,17 @@ pub fn declaredDependencies(out: [][]const u8, rb_source: []const u8) []const []
     return out[0..n];
 }
 
-/// A `.rb` past this is not a formula. Mirrors the cap in `ruby/source.zig`,
-/// which reads the same files for a different question.
-const max_rb_bytes: u64 = 1024 * 1024;
+/// A `.rb` past this is not a formula; real ones are a few KB.
+pub const max_rb_bytes: u64 = 1024 * 1024;
 
-/// The formula source a keg's bottle ships at `<keg_path>/.brew/<name>.rb`,
-/// the input `declaredDependencies` parses. Caller owns the bytes.
+/// Read a formula's Ruby source at `rb_path`. Caller owns the bytes.
 ///
-/// Null on any read failure, including a short read: callers resolve
-/// placeholders best-effort, and a truncated source silently drops
-/// `depends_on` lines, which reads as "declares nothing" and bakes the wrong
-/// path. A keg with no source is the honest version of that same answer.
-pub fn readKegSource(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    keg_path: []const u8,
-    name: []const u8,
-) ?[]u8 {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rb_path = std.fmt.bufPrint(&path_buf, "{s}/.brew/{s}.rb", .{ keg_path, name }) catch return null;
-
+/// Null on any failure, and deliberately whole-or-nothing: a truncated Ruby
+/// file is still *parseable*, just as a smaller formula. Every caller then
+/// gets a plausible wrong answer instead of an error — dropped `depends_on`
+/// lines bake the wrong path, and a clipped `post_install` body is one that
+/// would run half an installation.
+pub fn readFormulaSource(io: std.Io, allocator: std.mem.Allocator, rb_path: []const u8) ?[]u8 {
     const file = std.Io.Dir.openFileAbsolute(io, rb_path, .{}) catch return null;
     defer file.close(io);
 
@@ -139,6 +130,19 @@ pub fn readKegSource(
         return null;
     }
     return src;
+}
+
+/// The formula source a keg's bottle ships at `<keg_path>/.brew/<name>.rb`,
+/// the input `declaredDependencies` parses.
+pub fn readKegSource(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    keg_path: []const u8,
+    name: []const u8,
+) ?[]u8 {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rb_path = std.fmt.bufPrint(&path_buf, "{s}/.brew/{s}.rb", .{ keg_path, name }) catch return null;
+    return readFormulaSource(io, allocator, rb_path);
 }
 
 /// Resolve this formula's dependency-scoped placeholder into `buf`.
