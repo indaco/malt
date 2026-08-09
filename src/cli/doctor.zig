@@ -7,6 +7,7 @@ const mount_c = @import("c_mount");
 
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const cellar = @import("../core/cellar.zig");
+const relocated_store = @import("../core/relocated_store.zig");
 const patch = @import("../core/patch.zig");
 const perms_mod = @import("../core/perms.zig");
 const lock_mod = @import("../db/lock.zig");
@@ -126,6 +127,7 @@ pub const checks = [_]Check{
     .{ .name = "Broken symlinks", .run = checkBrokenSymlinks },
     .{ .name = "Mach-O placeholders", .run = checkMachOPlaceholders },
     .{ .name = "Relocated prefix paths", .run = checkUnrelocatedPrefix },
+    .{ .name = "Relocation freshness", .run = checkRelocationFreshness },
     .{ .name = "Disk space", .run = checkDiskSpace },
     .{ .name = "Local formula sources", .run = checkLocalSources },
     .{ .name = "Dependency bin/sbin link census", .run = checkIsolationLeaks },
@@ -1145,6 +1147,72 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
     return .err_status;
 }
 
+/// Kegs whose relocation predates the current logic. Their embedded paths were
+/// rewritten by rules malt has since corrected, so they can still name the
+/// build prefix — `wget` reading `/opt/homebrew/etc/wgetrc` is the shape of it.
+/// The marker is the only sound signal: a relocatable bottle legitimately keeps
+/// build-prefix strings, so the keg's contents cannot distinguish the two.
+fn checkRelocationFreshness(ctx: CheckCtx, name: []const u8) CheckResult {
+    var cellar_root_buf: [512]u8 = undefined;
+    const cellar_root = std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{ctx.prefix}) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    var cellar_dir = std.Io.Dir.openDirAbsolute(ctx.io, cellar_root, .{ .iterate = true }) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer cellar_dir.close(ctx.io);
+
+    var stale: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (stale.items) |s| ctx.allocator.free(s);
+        stale.deinit(ctx.allocator);
+    }
+
+    var names = cellar_dir.iterate();
+    while (names.next(ctx.io) catch null) |pkg| {
+        if (pkg.kind != .directory) continue;
+        var pkg_dir = cellar_dir.openDir(ctx.io, pkg.name, .{ .iterate = true }) catch continue;
+        defer pkg_dir.close(ctx.io);
+
+        var versions = pkg_dir.iterate();
+        while (versions.next(ctx.io) catch null) |ver| {
+            if (ver.kind != .directory) continue;
+            var keg_buf: [512]u8 = undefined;
+            const keg = std.fmt.bufPrint(&keg_buf, "{s}/{s}/{s}", .{ cellar_root, pkg.name, ver.name }) catch continue;
+            // An absent stamp means the keg predates stamping, not that it is
+            // stale — flagging those would recommend reinstalling the whole
+            // prefix on a guess. `not_applicable` never goes stale at all.
+            const stamp = cellar.readRelocStamp(ctx.io, keg) orelse continue;
+            switch (stamp) {
+                .not_applicable => continue,
+                .version => |v| if (v >= relocated_store.RELOC_LOGIC_VERSION) continue,
+            }
+            const key = std.fmt.allocPrint(ctx.allocator, "{s} {s}", .{ pkg.name, ver.name }) catch continue;
+            stale.append(ctx.allocator, key) catch {
+                ctx.allocator.free(key);
+                continue;
+            };
+        }
+    }
+
+    if (stale.items.len == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    var msg_buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "{d} keg(s) were relocated by an older malt and may still reference the build prefix. Reinstall them to refresh: mt reinstall <name>",
+        .{stale.items.len},
+    ) catch "Some kegs were relocated by an older malt; reinstall them to refresh.";
+    printCheck(name, .warn_status, msg);
+    armVerboseHint();
+    if (output.isVerbose()) writeVerboseList(stale.items);
+    return .warn_status;
+}
+
 /// Relocation's own verdict — see `cellar.unrelocated_marker`. Scanning the
 /// kegs instead cannot work: a surviving `Cellar/<self>/share/…` is
 /// load-bearing in one bottle and inert build provenance in the next.
@@ -1589,6 +1657,7 @@ test "findingId: slugifies a title into a stable lowercase id" {
         .{ .title = "Orphaned store entries", .id = "orphaned_store_entries" },
         .{ .title = "Mach-O placeholders", .id = "mach_o_placeholders" },
         .{ .title = "Relocated prefix paths", .id = "relocated_prefix_paths" },
+        .{ .title = "Relocation freshness", .id = "relocation_freshness" },
         .{ .title = "Dependency bin/sbin link census", .id = "dependency_bin_sbin_link_census" },
         .{ .title = "Prefix on PATH", .id = "prefix_on_path" },
     };
@@ -1633,6 +1702,17 @@ test "formatSslCertRemedy: a command that runs on the state the row fires in" {
     // truncated one the user would paste.
     var tiny: [8]u8 = undefined;
     try testing.expect(formatSslCertRemedy(&tiny, "/opt/malt") == null);
+}
+
+test "checks table and json id list both carry the relocation-freshness row" {
+    var in_checks = false;
+    for (checks) |c| {
+        if (std.mem.eql(u8, c.name, "Relocation freshness")) in_checks = true;
+    }
+    try testing.expect(in_checks);
+    const id = try findingId(testing.allocator, "Relocation freshness");
+    defer testing.allocator.free(id);
+    try testing.expectEqualStrings("relocation_freshness", id);
 }
 
 test "unrelocatedMarkerPredicate: matches the sidecar, not a keg's own files" {
