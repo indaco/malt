@@ -744,6 +744,8 @@ pub fn materializeRubyFormula(
     // This path never relocates, so nothing overwrites a marker the archive
     // shipped — and a forged one would let its author drive doctor's verdict.
     cellar_mod.stripKegMarkers(ctx.io, cellar_path);
+    // Positively "relocation never ran", so no future bump names this keg.
+    cellar_mod.writeRelocStamp(ctx.io, allocator, cellar_path, .not_applicable);
 
     // Promote the binary to bin/ (GoReleaser may extract directly or
     // into a subdirectory — walk to handle both). For casks that

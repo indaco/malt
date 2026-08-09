@@ -73,7 +73,17 @@ json | grep -q '"id":"relocation_freshness","severity":"warn"' ||
   fail "doctor --json did not serialize a warn finding for relocation_freshness"
 pass "a keg relocated by older logic is reported by name"
 
-# ── 3. no stamp → silent ─────────────────────────────────────────────
+# ── 3. "relocation never ran" → silent at any version ────────────────
+# Kegs extracted from a tap archive are never relocated, so no bump can
+# leave them behind. Stamping that positively keeps them out of the row
+# instead of relying on the absent-stamp case below.
+printf 'n/a\n' >"$KEG/$MARKER"
+if row | grep -q 'Relocation freshness .*older malt'; then
+  fail "a keg marked as never-relocated was reported as stale"
+fi
+pass "a keg relocation never applied to is silent"
+
+# ── 4. no stamp → silent ─────────────────────────────────────────────
 # Every keg installed before this shipped is unstamped. Reporting them would
 # recommend reinstalling the whole prefix on the strength of a guess.
 rm -f "$KEG/$MARKER"

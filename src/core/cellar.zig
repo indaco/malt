@@ -394,20 +394,56 @@ fn writeUnrelocatedMarker(io: std.Io, allocator: std.mem.Allocator, cellar_path:
     writeKegMarker(io, allocator, cellar_path, unrelocated_marker, count);
 }
 
-/// Relocation logic that produced this keg. Written on every relocation, so a
-/// keg materialised by an older malt is distinguishable from a current one —
-/// the bottle itself carries no such signal, and the surviving paths cannot
-/// tell the two apart (a relocatable bottle legitimately keeps build-prefix
-/// strings). Kegs predating this marker read as stale, which they are.
+/// Holds the keg's `RelocStamp`. The bottle carries no such signal and its
+/// surviving paths cannot supply one — a relocatable bottle legitimately keeps
+/// build-prefix strings — so the stamp is written at the one place that knows.
 pub const reloc_version_marker = ".malt-reloc-version";
 
 fn writeKegMarker(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8, name: []const u8, value: u32) void {
+    var buf: [16]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch return;
+    writeKegMarkerText(io, allocator, cellar_path, name, text);
+}
+
+fn writeKegMarkerText(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8, name: []const u8, text: []const u8) void {
     const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ cellar_path, name }) catch return;
     defer allocator.free(path);
-    const body = std.fmt.allocPrint(allocator, "{d}\n", .{value}) catch return;
+    const body = std.fmt.allocPrint(allocator, "{s}\n", .{text}) catch return;
     defer allocator.free(body);
     // Best-effort: a failed write costs a doctor row, never the install.
     atomic.atomicWriteFile(io, path, body) catch {};
+}
+
+/// What relocation did to a keg. `not_applicable` is its own answer, not a
+/// version: a keg that is extracted rather than relocated has nothing to
+/// refresh, so no future bump should ever name it. A missing stamp is a third
+/// state — the keg predates stamping and malt cannot say which rules built it.
+pub const RelocStamp = union(enum) {
+    not_applicable,
+    version: u32,
+};
+
+const not_applicable_text = "n/a";
+
+pub fn writeRelocStamp(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8, stamp: RelocStamp) void {
+    switch (stamp) {
+        .not_applicable => writeKegMarkerText(io, allocator, cellar_path, reloc_version_marker, not_applicable_text),
+        .version => |v| writeKegMarker(io, allocator, cellar_path, reloc_version_marker, v),
+    }
+}
+
+/// Null when the stamp is absent or unreadable — never a version, since a
+/// coerced number would read as stale and send the user to reinstall.
+pub fn readRelocStamp(io: std.Io, cellar_path: []const u8) ?RelocStamp {
+    var path_buf: [512]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ cellar_path, reloc_version_marker }) catch return null;
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
+    defer file.close(io);
+    var buf: [32]u8 = undefined;
+    const n = file.readPositional(io, &.{&buf}, 0) catch return null;
+    const text = std.mem.trim(u8, buf[0..n], " \t\r\n");
+    if (std.mem.eql(u8, text, not_applicable_text)) return .not_applicable;
+    return .{ .version = std.fmt.parseInt(u32, text, 10) catch return null };
 }
 
 /// Marker names malt owns inside a keg. Relocation rewrites them last, so a
@@ -422,19 +458,6 @@ pub fn stripKegMarkers(io: std.Io, cellar_path: []const u8) void {
         const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ cellar_path, name }) catch continue;
         std.Io.Dir.cwd().deleteFile(io, path) catch {};
     }
-}
-
-/// Read a keg marker's `u32`, or null when absent or malformed.
-pub fn readKegMarker(io: std.Io, cellar_path: []const u8, name: []const u8) ?u32 {
-    var path_buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ cellar_path, name }) catch return null;
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
-    defer file.close(io);
-    var buf: [32]u8 = undefined;
-    // Short read is the normal case: the marker is a few digits.
-    const n = file.readPositional(io, &.{&buf}, 0) catch return null;
-    const text = std.mem.trim(u8, buf[0..n], " \t\r\n");
-    return std.fmt.parseInt(u32, text, 10) catch null;
 }
 
 fn relocateKegTree(
@@ -537,7 +560,7 @@ fn relocateKegTree(
     installBottleEtcVar(io, allocator, cellar_path, new_prefix);
 
     // Last: only a keg that got this far was relocated by this logic.
-    writeKegMarker(io, allocator, cellar_path, reloc_version_marker, relocated_store.RELOC_LOGIC_VERSION);
+    writeRelocStamp(io, allocator, cellar_path, .{ .version = relocated_store.RELOC_LOGIC_VERSION });
 }
 
 /// Pour the bottle's `.bottle/etc` and `.bottle/var` overlay into the
@@ -815,37 +838,37 @@ pub fn remove(io: std.Io, prefix: []const u8, name: []const u8, version: []const
 
 // Pins the describeError split: only the user-actionable mappings carry
 // prose; every other tag falls through to @errorName.
-test "keg markers round-trip, and a missing or malformed one reads as absent" {
+test "reloc stamp round-trips both states; anything unreadable is absent" {
     const testing = std.testing;
     const io = std.Options.debug_io;
 
-    var s = try Scratch.init("keg_marker");
+    var s = try Scratch.init("reloc_stamp");
     defer s.deinit();
     const keg = s.p("/Cellar/glow/1.2.3");
     try std.Io.Dir.cwd().createDirPath(io, keg);
 
-    // Absent: the only signal that a keg predates marker tracking, so it must
-    // never read as a version.
-    try testing.expect(readKegMarker(io, keg, reloc_version_marker) == null);
+    // Absent is its own state: the keg predates stamping, and reading it as a
+    // version would send the user to reinstall on no evidence.
+    try testing.expect(readRelocStamp(io, keg) == null);
 
-    writeKegMarker(io, testing.allocator, keg, reloc_version_marker, 4);
-    try testing.expectEqual(@as(?u32, 4), readKegMarker(io, keg, reloc_version_marker));
+    writeRelocStamp(io, testing.allocator, keg, .{ .version = 4 });
+    try testing.expectEqual(RelocStamp{ .version = 4 }, readRelocStamp(io, keg).?);
 
-    // Trailing newline is how the marker is written; leading space and CRLF
-    // cover a hand-edited file.
+    // A keg that was extracted, never relocated: no bump can make it stale.
+    writeRelocStamp(io, testing.allocator, keg, .not_applicable);
+    try testing.expectEqual(RelocStamp.not_applicable, readRelocStamp(io, keg).?);
+
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ keg, reloc_version_marker });
     defer testing.allocator.free(path);
+    // Hand-edited spacing still reads.
     try atomic.atomicWriteFile(io, path, " 12 \r\n");
-    try testing.expectEqual(@as(?u32, 12), readKegMarker(io, keg, reloc_version_marker));
+    try testing.expectEqual(RelocStamp{ .version = 12 }, readRelocStamp(io, keg).?);
 
-    // Garbage must not be coerced to a version — a bogus 0 would flag every
-    // keg as stale.
-    try atomic.atomicWriteFile(io, path, "v4\n");
-    try testing.expect(readKegMarker(io, keg, reloc_version_marker) == null);
-    try atomic.atomicWriteFile(io, path, "");
-    try testing.expect(readKegMarker(io, keg, reloc_version_marker) == null);
-    try atomic.atomicWriteFile(io, path, "99999999999999999999\n");
-    try testing.expect(readKegMarker(io, keg, reloc_version_marker) == null);
+    // Garbage must never coerce to a version — a bogus 0 flags every keg.
+    for ([_][]const u8{ "v4\n", "", "99999999999999999999\n", "n/a extra\n" }) |bad| {
+        try atomic.atomicWriteFile(io, path, bad);
+        try testing.expect(readRelocStamp(io, keg) == null);
+    }
 }
 
 test "stripKegMarkers clears a marker the extracted archive supplied" {
@@ -865,12 +888,10 @@ test "stripKegMarkers clears a marker the extracted archive supplied" {
         defer testing.allocator.free(p);
         try atomic.atomicWriteFile(io, p, "999\n");
     }
-    try testing.expectEqual(@as(?u32, 999), readKegMarker(io, keg, reloc_version_marker));
+    try testing.expectEqual(RelocStamp{ .version = 999 }, readRelocStamp(io, keg).?);
 
     stripKegMarkers(io, keg);
-    for (keg_markers) |name| {
-        try testing.expect(readKegMarker(io, keg, name) == null);
-    }
+    try testing.expect(readRelocStamp(io, keg) == null);
     // Idempotent: the strip runs on every such install, most with no markers.
     stripKegMarkers(io, keg);
 }

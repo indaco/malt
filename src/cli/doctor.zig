@@ -1181,12 +1181,14 @@ fn checkRelocationFreshness(ctx: CheckCtx, name: []const u8) CheckResult {
             if (ver.kind != .directory) continue;
             var keg_buf: [512]u8 = undefined;
             const keg = std.fmt.bufPrint(&keg_buf, "{s}/{s}/{s}", .{ cellar_root, pkg.name, ver.name }) catch continue;
-            // No marker means the keg predates relocation tracking, not that
-            // it is stale — malt cannot tell which logic built it. Flagging
-            // every such keg would recommend reinstalling the whole prefix on
-            // the strength of a guess.
-            const got = cellar.readKegMarker(ctx.io, keg, cellar.reloc_version_marker) orelse continue;
-            if (got >= relocated_store.RELOC_LOGIC_VERSION) continue;
+            // An absent stamp means the keg predates stamping, not that it is
+            // stale — flagging those would recommend reinstalling the whole
+            // prefix on a guess. `not_applicable` never goes stale at all.
+            const stamp = cellar.readRelocStamp(ctx.io, keg) orelse continue;
+            switch (stamp) {
+                .not_applicable => continue,
+                .version => |v| if (v >= relocated_store.RELOC_LOGIC_VERSION) continue,
+            }
             const key = std.fmt.allocPrint(ctx.allocator, "{s} {s}", .{ pkg.name, ver.name }) catch continue;
             stale.append(ctx.allocator, key) catch {
                 ctx.allocator.free(key);
