@@ -42,7 +42,11 @@ pub const RelocatedStoreError = error{
 /// v3: relocation gained dependency-scoped placeholder substitution. v2 entries
 /// cached the literal token, so an affected wrapper restored from one stays
 /// broken however many times it is reinstalled.
-pub const RELOC_LOGIC_VERSION: u32 = 3;
+///
+/// v4: relocation records the paths it could not rewrite in a keg sidecar.
+/// v3 trees carry no sidecar, so a keg restored from one reads as clean
+/// however badly its embedded paths were dropped.
+pub const RELOC_LOGIC_VERSION: u32 = 4;
 
 /// Reject anything that is not exactly 64 lowercase hex characters.
 /// Run this before forming any path so traversal sequences (`..`, `/`) and
