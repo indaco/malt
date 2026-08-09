@@ -125,7 +125,7 @@ pub const checks = [_]Check{
     .{ .name = "Orphaned store entries", .run = checkOrphanedStore },
     .{ .name = "Missing kegs", .run = checkMissingKegs },
     .{ .name = "Broken symlinks", .run = checkBrokenSymlinks },
-    .{ .name = "Mach-O placeholders", .run = checkMachOPlaceholders },
+    .{ .name = "Relocation placeholders", .run = checkMachOPlaceholders },
     .{ .name = "Relocated prefix paths", .run = checkUnrelocatedPrefix },
     .{ .name = "Relocation freshness", .run = checkRelocationFreshness },
     .{ .name = "Disk space", .run = checkDiskSpace },
@@ -181,10 +181,17 @@ fn recordFinding(sink: *FindingSink, name: []const u8, status: CheckStatus, deta
     sink.list.append(a, .{ .id = id, .severity = status, .title = title, .detail = det }) catch {};
 }
 
+/// Titles whose id predates their current wording. `--json` consumers key on
+/// the id, so clarifying a title must not rename the field under them.
+const pinned_finding_ids = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "Relocation placeholders", "mach_o_placeholders" },
+});
+
 /// Stable machine id for a finding: a slug of its title — lowercased,
 /// each run of non-alphanumeric bytes collapsed to a single `_`, edges
 /// trimmed. The title is static, so the id is stable across runs.
 fn findingId(a: std.mem.Allocator, title: []const u8) ![]const u8 {
+    if (pinned_finding_ids.get(title)) |pinned| return a.dupe(u8, pinned);
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(a);
     var pending_sep = false;
@@ -512,7 +519,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 }
 
 /// Armed by any check that surfaces offenders the user could see
-/// listed under `--verbose` (Mach-O placeholders, broken symlinks,
+/// listed under `--verbose` (relocation placeholders, broken symlinks,
 /// missing kegs, prefix-permissions). `execute` reads it after the
 /// check loop to emit a dim "run with --verbose for the full list"
 /// nudge. Reset by `resetVerboseHint` so re-entering the dispatcher
@@ -1120,7 +1127,9 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
             // would just duplicate the first row of that list.
             break :blk std.fmt.bufPrint(
                 &msg_buf,
-                "{d} package(s) ship file(s) with unpatched @@HOMEBREW_* placeholders. Reinstall the affected packages.",
+                // A reinstall alone re-runs the same substitution set that let
+                // the token through, so upgrading malt has to come first.
+                "{d} package(s) ship file(s) with unpatched @@HOMEBREW_* placeholders. Upgrade malt, then reinstall those packages.",
                 .{groups.count()},
             ) catch "Files with unpatched @@HOMEBREW_* placeholders found.";
         }
@@ -1130,7 +1139,7 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
         };
         break :blk std.fmt.bufPrint(
             &msg_buf,
-            "{d} package(s) ship file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Reinstall the affected packages.",
+            "{d} package(s) ship file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Upgrade malt, then reinstall those packages.",
             .{ groups.count(), first_key },
         ) catch "Files with unpatched @@HOMEBREW_* placeholders found.";
     };
@@ -1655,7 +1664,8 @@ test "findingId: slugifies a title into a stable lowercase id" {
         .{ .title = "SQLite integrity", .id = "sqlite_integrity" },
         .{ .title = "Stale lock", .id = "stale_lock" },
         .{ .title = "Orphaned store entries", .id = "orphaned_store_entries" },
-        .{ .title = "Mach-O placeholders", .id = "mach_o_placeholders" },
+        // Pinned: the id outlived the title it was slugified from.
+        .{ .title = "Relocation placeholders", .id = "mach_o_placeholders" },
         .{ .title = "Relocated prefix paths", .id = "relocated_prefix_paths" },
         .{ .title = "Relocation freshness", .id = "relocation_freshness" },
         .{ .title = "Dependency bin/sbin link census", .id = "dependency_bin_sbin_link_census" },

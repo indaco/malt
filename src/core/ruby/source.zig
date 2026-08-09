@@ -7,6 +7,7 @@
 const std = @import("std");
 const pins = @import("../pins.zig");
 const hash_mod = @import("../hash.zig");
+const formula = @import("../formula.zig");
 const http_client = @import("../../net/client.zig");
 const api_mod = @import("../../net/api.zig");
 const dsl_lexer = @import("../dsl/lexer.zig");
@@ -14,8 +15,9 @@ const dsl_parser = @import("../dsl/parser.zig");
 
 /// Upper bound on a fetched formula .rb blob. The Homebrew-wide 99th
 /// percentile is ~40 KiB; 1 MiB is orders of magnitude of headroom
-/// without giving a hostile response room to grow.
-const max_formula_rb_bytes: usize = 1024 * 1024;
+/// without giving a hostile response room to grow. Shared with the on-disk
+/// reader so a fetched blob and a poured one are bounded alike.
+const max_formula_rb_bytes: usize = formula.max_rb_bytes;
 
 /// Outcome of the GitHub fallback fetch. Distinguishing `body_not_found`
 /// (we got source, no parseable post_install) from `fetch_failed`
@@ -279,32 +281,18 @@ pub fn hasPostInstallStepsBlock(source: []const u8) bool {
 /// `extractPostInstallBody`'s read contract. False on any IO failure —
 /// the caller only uses it to decide whether a skip deserves a warning.
 pub fn rbHasPostInstallSteps(io: std.Io, allocator: std.mem.Allocator, rb_path: []const u8) bool {
-    const file = std.Io.Dir.openFileAbsolute(io, rb_path, .{}) catch return false;
-    defer file.close(io);
-
-    const st = file.stat(io) catch return false;
-    const size: usize = @intCast(@min(@as(u64, max_formula_rb_bytes), st.size));
-    const source = allocator.alloc(u8, size) catch return false;
+    const source = formula.readFormulaSource(io, allocator, rb_path) orelse return false;
     defer allocator.free(source);
-    const n = file.readPositionalAll(io, source, 0) catch return false;
-
-    return hasPostInstallStepsBlock(source[0..n]);
+    return hasPostInstallStepsBlock(source);
 }
 
 /// Extract the post_install method body + sibling helpers from a formula
 /// .rb source file. Thin file-IO wrapper around `extractPostInstallFromSource`
 /// so the parsing contract lives in one place.
 pub fn extractPostInstallBody(io: std.Io, allocator: std.mem.Allocator, rb_path: []const u8) ?[]const u8 {
-    const file = std.Io.Dir.openFileAbsolute(io, rb_path, .{}) catch return null;
-    defer file.close(io);
-
-    const st = file.stat(io) catch return null;
-    const size: usize = @intCast(@min(@as(u64, max_formula_rb_bytes), st.size));
-    const source = allocator.alloc(u8, size) catch return null;
+    const source = formula.readFormulaSource(io, allocator, rb_path) orelse return null;
     defer allocator.free(source);
-    const n = file.readPositionalAll(io, source, 0) catch return null;
-
-    return extractPostInstallFromSource(allocator, source[0..n]);
+    return extractPostInstallFromSource(allocator, source);
 }
 
 // --- tests ---------------------------------------------------------------
@@ -529,6 +517,34 @@ test "rbHasPostInstallSteps reads the block from a formula .rb on disk" {
     }
     try testing.expect(rbHasPostInstallSteps(io, testing.allocator, rb));
     try testing.expect(!rbHasPostInstallSteps(io, testing.allocator, "/tmp/malt_ruby_missing_xyz.rb"));
+}
+
+test "post_install readers refuse a formula source past the size bound" {
+    // Reading a prefix of an oversized .rb yields Ruby that still parses, so
+    // the body handed to the subprocess would be a clipped installation.
+    const io = testIo();
+    const tap = try uniqueDir(io, "oversize");
+    defer testing.allocator.free(tap);
+    defer std.Io.Dir.cwd().deleteTree(io, tap) catch {};
+    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/huge.rb", .{tap});
+    defer testing.allocator.free(rb);
+
+    // The head is a COMPLETE post_install block, so a reader that truncated
+    // at the bound would extract a body and report success. Only refusing the
+    // whole file distinguishes the two.
+    const head = "class Huge < Formula\n  def post_install\n    mkdir_p \"etc\"\n  end\n  post_install_steps do\n  end\n";
+    const filler = try testing.allocator.alloc(u8, max_formula_rb_bytes + 1);
+    defer testing.allocator.free(filler);
+    @memset(filler, '\n');
+    @memcpy(filler[0..head.len], head);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, rb, .{});
+        try f.writeStreamingAll(io, filler);
+        f.close(io);
+    }
+
+    try testing.expect(extractPostInstallBody(io, testing.allocator, rb) == null);
+    try testing.expect(!rbHasPostInstallSteps(io, testing.allocator, rb));
 }
 
 test "fetchPostInstallFromGitHub returns null for an empty name" {

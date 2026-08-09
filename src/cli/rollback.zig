@@ -899,21 +899,14 @@ fn storeKegPlaceholder(
     pkg_version: []const u8,
 ) ?formula_mod.Placeholder {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rb_path = std.fmt.bufPrint(
+    const keg_path = std.fmt.bufPrint(
         &path_buf,
-        "{s}/store/{s}/{s}/{s}/.brew/{s}.rb",
-        .{ prefix, sha256, name, pkg_version, name },
+        "{s}/store/{s}/{s}/{s}",
+        .{ prefix, sha256, name, pkg_version },
     ) catch return null;
 
-    const file = std.Io.Dir.openFileAbsolute(io, rb_path, .{}) catch return null;
-    defer file.close(io);
-
-    const stat = file.stat(io) catch return null;
-    if (stat.size == 0 or stat.size > 1024 * 1024) return null;
-    const src = allocator.alloc(u8, stat.size) catch return null;
+    const src = formula_mod.readKegSource(io, allocator, keg_path, name) orelse return null;
     defer allocator.free(src);
-    const read = file.readPositionalAll(io, src, 0) catch return null;
-    if (read < src.len) return null;
 
     var dep_buf: [64][]const u8 = undefined;
     const deps = formula_mod.declaredDependencies(&dep_buf, src);

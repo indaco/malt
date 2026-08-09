@@ -49,7 +49,11 @@ pub const RelocatedStoreError = error{
 ///
 /// v5: every keg is stamped with the logic version that produced it, so a
 /// later bump can name the kegs it left behind instead of guessing.
-pub const RELOC_LOGIC_VERSION: u32 = 5;
+///
+/// v6: the replacement set gained the perl shebang token (plus the repository
+/// and library ones). v5 entries hold the literal `@@HOMEBREW_PERL@@` as an
+/// interpreter path, so every perl script restored from one stays unrunnable.
+pub const RELOC_LOGIC_VERSION: u32 = 6;
 
 /// Reject anything that is not exactly 64 lowercase hex characters.
 /// Run this before forming any path so traversal sequences (`..`, `/`) and

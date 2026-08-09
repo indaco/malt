@@ -107,6 +107,44 @@ pub fn declaredDependencies(out: [][]const u8, rb_source: []const u8) []const []
     return out[0..n];
 }
 
+/// A `.rb` past this is not a formula; real ones are a few KB.
+pub const max_rb_bytes: u64 = 1024 * 1024;
+
+/// Read a formula's Ruby source at `rb_path`. Caller owns the bytes.
+///
+/// Null on any failure, and deliberately whole-or-nothing: a truncated Ruby
+/// file is still *parseable*, just as a smaller formula. Every caller then
+/// gets a plausible wrong answer instead of an error — dropped `depends_on`
+/// lines bake the wrong path, and a clipped `post_install` body is one that
+/// would run half an installation.
+pub fn readFormulaSource(io: std.Io, allocator: std.mem.Allocator, rb_path: []const u8) ?[]u8 {
+    const file = std.Io.Dir.openFileAbsolute(io, rb_path, .{}) catch return null;
+    defer file.close(io);
+
+    const stat = file.stat(io) catch return null;
+    if (stat.size == 0 or stat.size > max_rb_bytes) return null;
+    const src = allocator.alloc(u8, stat.size) catch return null;
+    const read = file.readPositionalAll(io, src, 0) catch 0;
+    if (read < src.len) {
+        allocator.free(src);
+        return null;
+    }
+    return src;
+}
+
+/// The formula source a keg's bottle ships at `<keg_path>/.brew/<name>.rb`,
+/// the input `declaredDependencies` parses.
+pub fn readKegSource(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    keg_path: []const u8,
+    name: []const u8,
+) ?[]u8 {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rb_path = std.fmt.bufPrint(&path_buf, "{s}/.brew/{s}.rb", .{ keg_path, name }) catch return null;
+    return readFormulaSource(io, allocator, rb_path);
+}
+
 /// Resolve this formula's dependency-scoped placeholder into `buf`.
 /// Null when it declares no matching dependency: guessing would bake a path
 /// to a keg the formula never asked for.
@@ -121,6 +159,9 @@ pub fn dependencyPlaceholder(
                 std.mem.startsWith(u8, dep, entry.dep) and
                 dep[entry.dep.len] == '@';
             if (!std.mem.eql(u8, dep, entry.dep) and !pinned) continue;
+            // Same screen as `perlPlaceholder`: the name becomes a directory
+            // component, and withholding beats baking one that hops out of it.
+            if (!path_component.isPathComponent(dep)) return null;
 
             const value = std.fmt.bufPrint(
                 buf,
@@ -131,6 +172,68 @@ pub fn dependencyPlaceholder(
         }
     }
     return null;
+}
+
+const perl_token = "@@HOMEBREW_PERL@@";
+const perl_dep = "perl";
+
+/// Sentinel for "could not read the macOS version"; `systemPerlPath` maps it
+/// to the newest interpreter, since a stale versioned path is guaranteed
+/// absent while the newest one is right for every macOS malt runs on.
+const unknown_macos_major: u32 = std.math.maxInt(u32);
+
+/// Interpreter each macOS release ships. Upstream pins the same versions, so
+/// a relocated keg lands byte-identical to a brew-poured one.
+fn systemPerlPath(macos_major: u32) []const u8 {
+    if (macos_major >= 14) return "/usr/bin/perl5.34"; // Sonoma and later
+    if (macos_major >= 11) return "/usr/bin/perl5.30"; // Big Sur and later
+    return "/usr/bin/perl5.18";
+}
+
+fn macosMajorVersion() u32 {
+    var buf: [32]u8 = undefined;
+    var len: usize = buf.len;
+    if (std.c.sysctlbyname("kern.osproductversion", &buf, &len, null, 0) != 0) return unknown_macos_major;
+    const text = std.mem.sliceTo(buf[0..len], 0);
+    const major = text[0 .. std.mem.indexOfScalar(u8, text, '.') orelse text.len];
+    return std.fmt.parseInt(u32, major, 10) catch unknown_macos_major;
+}
+
+/// Resolve `@@HOMEBREW_PERL@@`, which bottles carry in the shebang of every
+/// perl script they ship. Never null, unlike `dependencyPlaceholder`: the
+/// token lands where the kernel expects an interpreter, so withholding a value
+/// leaves an unrunnable script rather than a visible token. A formula that
+/// brews perl gets that keg; everything else gets the system interpreter,
+/// which is what `uses_from_macos "perl"` asks for.
+pub fn perlPlaceholder(
+    buf: []u8,
+    prefix: []const u8,
+    name: []const u8,
+    dependencies: []const []const u8,
+) Placeholder {
+    const brewed: ?[]const u8 = if (isPerl(name)) name else blk: {
+        for (dependencies) |dep| {
+            if (isPerl(dep)) break :blk dep;
+        }
+        break :blk null;
+    };
+
+    // The name lands as a directory component in the baked path, so it is
+    // screened like every other tap-controlled string that reaches disk.
+    if (brewed) |dep| brewed_keg: {
+        if (!path_component.isPathComponent(dep)) break :brewed_keg;
+        const value = std.fmt.bufPrint(buf, "{s}/opt/{s}/bin/perl", .{ prefix, dep }) catch break :brewed_keg;
+        return .{ .token = perl_token, .value = value };
+    }
+    return .{ .token = perl_token, .value = systemPerlPath(macosMajorVersion()) };
+}
+
+/// `perl` or a pinned `perl@5.xx`, which installs under its own `opt/` name.
+fn isPerl(candidate: []const u8) bool {
+    if (std.mem.eql(u8, candidate, perl_dep)) return true;
+    return candidate.len > perl_dep.len and
+        std.mem.startsWith(u8, candidate, perl_dep) and
+        candidate[perl_dep.len] == '@';
 }
 
 /// Parsed Homebrew formula. Every `[]const u8` and `[]const []const u8`
@@ -900,6 +1003,149 @@ test "dependencyPlaceholder declines a formula with no matching dependency" {
     var buf: [256]u8 = undefined;
     const deps = [_][]const u8{ "pcre2", "zstd" };
     try testing.expect(dependencyPlaceholder(&buf, "/opt/malt", &deps) == null);
+}
+
+/// Per-PID path: a fixed `/tmp` name races concurrent test binaries.
+fn kegSourceFixture(io: std.Io, tag: []const u8, body: []const u8) ![]u8 {
+    var rand: [8]u8 = undefined;
+    io.random(&rand);
+    const hex = std.fmt.bytesToHex(rand, .lower);
+    const keg = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_keg_src_{s}_{s}", .{ hex[0..], tag });
+    errdefer testing.allocator.free(keg);
+
+    const brew_dir = try std.fmt.allocPrint(testing.allocator, "{s}/.brew", .{keg});
+    defer testing.allocator.free(brew_dir);
+    try std.Io.Dir.cwd().createDirPath(io, brew_dir);
+
+    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/pkg.rb", .{brew_dir});
+    defer testing.allocator.free(rb);
+    const f = try std.Io.Dir.createFileAbsolute(io, rb, .{});
+    try f.writeStreamingAll(io, body);
+    f.close(io);
+    return keg;
+}
+
+test "readKegSource returns the formula source a bottle ships" {
+    const io = std.Options.debug_io;
+    const body = "class Pkg < Formula\n  depends_on \"perl\"\nend\n";
+    const keg = try kegSourceFixture(io, "ok", body);
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, keg) catch {};
+        testing.allocator.free(keg);
+    }
+
+    const src = readKegSource(io, testing.allocator, keg, "pkg").?;
+    defer testing.allocator.free(src);
+    try testing.expectEqualStrings(body, src);
+
+    // The whole point of the read: it feeds the dependency parse.
+    var out: [8][]const u8 = undefined;
+    const deps = declaredDependencies(&out, src);
+    try testing.expectEqual(@as(usize, 1), deps.len);
+    try testing.expectEqualStrings("perl", deps[0]);
+}
+
+test "readKegSource declines a keg that ships no formula source" {
+    // A local-Cellar copy or hand-dropped tree has no `.brew/`; callers read
+    // that as "declares nothing", never as a hard failure.
+    const io = std.Options.debug_io;
+    try testing.expect(readKegSource(io, testing.allocator, "/nonexistent/keg", "pkg") == null);
+}
+
+test "readKegSource declines a name that is not the keg's own formula" {
+    const io = std.Options.debug_io;
+    const keg = try kegSourceFixture(io, "wrongname", "class Pkg < Formula\nend\n");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, keg) catch {};
+        testing.allocator.free(keg);
+    }
+    try testing.expect(readKegSource(io, testing.allocator, keg, "other") == null);
+}
+
+test "readKegSource declines an empty formula source" {
+    // Zero bytes parses to zero dependencies either way, but it means the
+    // bottle is malformed — say so rather than resolving against a guess.
+    const io = std.Options.debug_io;
+    const keg = try kegSourceFixture(io, "empty", "");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, keg) catch {};
+        testing.allocator.free(keg);
+    }
+    try testing.expect(readKegSource(io, testing.allocator, keg, "pkg") == null);
+}
+
+test "perlPlaceholder points at the keg of a brewed perl" {
+    // A formula that depends on perl directly must run under that keg's
+    // interpreter, not the system one it was never built against.
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{ "perl", "libpng" };
+    const got = perlPlaceholder(&buf, "/opt/malt", "imagemagick", &deps);
+    try testing.expectEqualStrings("@@HOMEBREW_PERL@@", got.token);
+    try testing.expectEqualStrings("/opt/malt/opt/perl/bin/perl", got.value);
+}
+
+test "perlPlaceholder keeps the version suffix of a pinned perl" {
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{"perl@5.40"};
+    const got = perlPlaceholder(&buf, "/opt/malt", "pkg", &deps);
+    try testing.expectEqualStrings("/opt/malt/opt/perl@5.40/bin/perl", got.value);
+}
+
+test "perlPlaceholder resolves perl itself against its own keg" {
+    // `perl` declares no perl dependency, yet its own scripts carry the token.
+    var buf: [256]u8 = undefined;
+    const got = perlPlaceholder(&buf, "/opt/malt", "perl", &.{});
+    try testing.expectEqualStrings("/opt/malt/opt/perl/bin/perl", got.value);
+}
+
+test "perlPlaceholder falls back to the system interpreter" {
+    // Never null: an unresolved shebang is an unrunnable script, so the
+    // interpreter macOS ships is the answer when nothing brews one.
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{ "cmake", "zstd" };
+    const got = perlPlaceholder(&buf, "/opt/malt", "exiftool", &deps);
+    try testing.expect(std.mem.startsWith(u8, got.value, "/usr/bin/perl"));
+}
+
+test "perlPlaceholder refuses a dependency name that hops out of its directory" {
+    // The name is interpolated as a path component. A bottle's own .rb is the
+    // source, so this is malformed input rather than an attack — but baking
+    // the traversal would put an arbitrary path in a shebang.
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{"perl@../../../evil"};
+    const got = perlPlaceholder(&buf, "/opt/malt", "pkg", &deps);
+    try testing.expect(std.mem.startsWith(u8, got.value, "/usr/bin/perl"));
+}
+
+test "dependencyPlaceholder withholds a dependency name that hops out of its directory" {
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{"openjdk@../../.."};
+    try testing.expect(dependencyPlaceholder(&buf, "/opt/malt", &deps) == null);
+}
+
+test "perlPlaceholder ignores a dependency that merely starts with perl" {
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{"perl-xml"};
+    const got = perlPlaceholder(&buf, "/opt/malt", "pkg", &deps);
+    try testing.expect(std.mem.startsWith(u8, got.value, "/usr/bin/perl"));
+}
+
+test "systemPerlPath tracks the interpreter each macOS release ships" {
+    try testing.expectEqualStrings("/usr/bin/perl5.34", systemPerlPath(26));
+    try testing.expectEqualStrings("/usr/bin/perl5.34", systemPerlPath(14));
+    try testing.expectEqualStrings("/usr/bin/perl5.30", systemPerlPath(13));
+    try testing.expectEqualStrings("/usr/bin/perl5.30", systemPerlPath(11));
+    try testing.expectEqualStrings("/usr/bin/perl5.18", systemPerlPath(10));
+    // An unreadable version reads as "current": a stale path is guaranteed
+    // absent on a modern system, the newest one is right for every macOS
+    // malt runs on.
+    try testing.expectEqualStrings("/usr/bin/perl5.34", systemPerlPath(unknown_macos_major));
+}
+
+test "perlPlaceholder falls back to the system interpreter when the buffer is too small" {
+    var buf: [4]u8 = undefined;
+    const got = perlPlaceholder(&buf, "/opt/malt", "perl", &.{});
+    try testing.expect(std.mem.startsWith(u8, got.value, "/usr/bin/perl"));
 }
 
 test "declaredDependencies reads the names a keg's own formula source declares" {
