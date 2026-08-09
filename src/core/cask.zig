@@ -269,6 +269,7 @@ pub fn artifactTypeTag(t: ArtifactType) []const u8 {
         .zip => "zip",
         .pkg => "pkg",
         .tar_gz => "tar_gz",
+        .tar_xz => "tar_xz",
         .unknown => "unknown",
     };
 }
@@ -283,7 +284,7 @@ pub fn artifactTypeTag(t: ArtifactType) []const u8 {
 /// deleted — the caller uses that signal to gate the DB row delete
 /// so a read-only mount doesn't orphan history.
 pub fn deletePerVersionCacheFile(io: std.Io, prefix: []const u8, token: []const u8, version: []const u8) bool {
-    for ([_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz" }) |ext| {
+    for (cache_extensions) |ext| {
         var path_buf: [512]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/cache/Cask/{s}-{s}{s}", .{ prefix, token, version, ext }) catch continue;
         std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
@@ -316,26 +317,59 @@ pub fn artifactTypeFromTag(tag: []const u8) ArtifactType {
     if (std.mem.eql(u8, tag, "zip")) return .zip;
     if (std.mem.eql(u8, tag, "pkg")) return .pkg;
     if (std.mem.eql(u8, tag, "tar_gz")) return .tar_gz;
+    if (std.mem.eql(u8, tag, "tar_xz")) return .tar_xz;
     return .unknown;
 }
 
 /// Determine the artifact type from the cask download URL.
-/// `tar_gz` covers both `.tar.gz` and `.tgz` — the two spellings are
-/// treated as a single container format here; the extractor is the same.
-pub const ArtifactType = enum { dmg, zip, pkg, tar_gz, unknown };
+/// `tar_gz` covers both `.tar.gz` and `.tgz`, `tar_xz` both `.tar.xz` and
+/// `.txz` — each pair is one container format with one extractor.
+pub const ArtifactType = enum { dmg, zip, pkg, tar_gz, tar_xz, unknown };
+
+/// Every suffix a cached artefact can carry on disk. Sweeps iterate it
+/// rather than the recorded type because `cask_versions.artifact_type` is
+/// nullable on rows backfilled before v7. The `.tgz`/`.txz` aliases are
+/// absent on purpose: `downloadToCache` always stages the canonical name.
+pub const cache_extensions = [_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz", ".tar.xz" };
+
+/// Canonical suffix a downloaded artefact is staged under. Aliases collapse
+/// here (`.tgz` stages as `.tar.gz`) so the sweep only has to know one name
+/// per format. Every value must appear in `cache_extensions`.
+pub fn artifactExtension(t: ArtifactType) []const u8 {
+    return switch (t) {
+        .dmg => ".dmg",
+        .zip => ".zip",
+        .pkg => ".pkg",
+        .tar_gz => ".tar.gz",
+        .tar_xz => ".tar.xz",
+        .unknown => ".bin",
+    };
+}
+
+/// Suffix → type, longest first so `.tar.gz` is not read as a bare `.gz`
+/// sibling of `.tgz`. Query strings and fragments follow the same table.
+const artifact_suffixes = [_]struct { suffix: []const u8, type: ArtifactType }{
+    .{ .suffix = ".dmg", .type = .dmg },
+    .{ .suffix = ".zip", .type = .zip },
+    .{ .suffix = ".pkg", .type = .pkg },
+    .{ .suffix = ".tar.gz", .type = .tar_gz },
+    .{ .suffix = ".tgz", .type = .tar_gz },
+    .{ .suffix = ".tar.xz", .type = .tar_xz },
+    .{ .suffix = ".txz", .type = .tar_xz },
+};
 
 pub fn artifactTypeFromUrl(url: []const u8) ArtifactType {
-    if (std.mem.endsWith(u8, url, ".dmg")) return .dmg;
-    if (std.mem.endsWith(u8, url, ".zip")) return .zip;
-    if (std.mem.endsWith(u8, url, ".pkg")) return .pkg;
-    if (std.mem.endsWith(u8, url, ".tar.gz")) return .tar_gz;
-    if (std.mem.endsWith(u8, url, ".tgz")) return .tar_gz;
-    // Some URLs have query params after extension
-    if (std.mem.indexOf(u8, url, ".dmg?") != null or std.mem.indexOf(u8, url, ".dmg#") != null) return .dmg;
-    if (std.mem.indexOf(u8, url, ".zip?") != null or std.mem.indexOf(u8, url, ".zip#") != null) return .zip;
-    if (std.mem.indexOf(u8, url, ".pkg?") != null or std.mem.indexOf(u8, url, ".pkg#") != null) return .pkg;
-    if (std.mem.indexOf(u8, url, ".tar.gz?") != null or std.mem.indexOf(u8, url, ".tar.gz#") != null) return .tar_gz;
-    if (std.mem.indexOf(u8, url, ".tgz?") != null or std.mem.indexOf(u8, url, ".tgz#") != null) return .tar_gz;
+    for (artifact_suffixes) |row| {
+        if (std.mem.endsWith(u8, url, row.suffix)) return row.type;
+    }
+    // Some URLs carry a query string or fragment after the extension.
+    for (artifact_suffixes) |row| {
+        var pos: usize = 0;
+        while (std.mem.indexOfPos(u8, url, pos, row.suffix)) |at| : (pos = at + 1) {
+            const next = at + row.suffix.len;
+            if (next < url.len and (url[next] == '?' or url[next] == '#')) return row.type;
+        }
+    }
     return .unknown;
 }
 
@@ -616,7 +650,7 @@ pub const CaskInstaller = struct {
             .dmg => self.installDmg(cache_path, app_dir, cask) catch return CaskError.InstallFailed,
             .zip => self.installZip(cache_path, app_dir, cask) catch return CaskError.InstallFailed,
             .pkg => self.installPkg(cache_path) catch return CaskError.InstallFailed,
-            .tar_gz => self.installTarGz(cache_path, app_dir, cask) catch return CaskError.InstallFailed,
+            .tar_gz, .tar_xz => self.installTarball(cache_path, app_dir, cask, artifact_type) catch return CaskError.InstallFailed,
             .unknown => return CaskError.InstallFailed,
         };
 
@@ -702,7 +736,7 @@ pub const CaskInstaller = struct {
         // shape that retains rollback targets. Wipe both for `uninstall`,
         // since after uninstall there is no version left to roll back to.
         var cache_buf: [512]u8 = undefined;
-        for ([_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz" }) |ext| {
+        for (cache_extensions) |ext| {
             const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask/{s}{s}", .{ self.prefix, token, ext }) catch continue;
             std.Io.Dir.cwd().deleteFile(self.io, cache_file) catch {};
         }
@@ -845,13 +879,7 @@ pub const CaskInstaller = struct {
 
     fn downloadToCache(self: *CaskInstaller, cask: *const Cask, cache_dir: []const u8, progress: ?client_mod.ProgressCallback) ![]const u8 {
         const resolved = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
-        const ext_str = switch (resolved) {
-            .dmg => ".dmg",
-            .zip => ".zip",
-            .pkg => ".pkg",
-            .tar_gz => ".tar.gz",
-            .unknown => ".bin",
-        };
+        const ext_str = artifactExtension(resolved);
         // Per-version filename so older versions' artefacts survive a
         // newer install — `mt rollback <cask> --to <ver>` reaches for
         // the cached file at `<token>-<version>.<ext>` before falling
@@ -1116,19 +1144,23 @@ pub const CaskInstaller = struct {
         return .{ .bytes = bytes, .entries = entries };
     }
 
-    /// Install a `.tar.gz` cask. Two shapes are supported:
+    /// Install a tarball cask. Two shapes are supported:
     ///   1. `binary` artifacts — extract into `Caskroom/<token>/<version>/`
     ///      and symlink the first `binary` entry into `<prefix>/bin/`.
     ///   2. `app` artifacts — extract and promote the `.app` to `app_dir`,
-    ///      mirroring the zip path for the rare tar.gz-wrapped bundle.
+    ///      mirroring the zip path for the rare tarball-wrapped bundle.
+    ///
+    /// Only the decompressor differs between gzip and xz; everything after
+    /// extraction is identical, so both share this path.
     ///
     /// Returns the bin symlink for binary casks, the `.app` path for app
     /// casks — whichever the uninstaller needs to remove later.
-    fn installTarGz(
+    fn installTarball(
         self: *CaskInstaller,
         archive_path: []const u8,
         app_dir: []const u8,
         cask: *const Cask,
+        artifact_type: ArtifactType,
     ) ![]const u8 {
         // Caskroom/<token>/<version>/ doubles as the extraction root so
         // the extracted payload is already at its final home — binaries
@@ -1139,7 +1171,21 @@ pub const CaskInstaller = struct {
         }) catch return error.InstallFailed;
         std.Io.Dir.cwd().createDirPath(self.io, caskroom_ver) catch return error.InstallFailed;
 
-        archive_mod.extractTarGz(self.io, archive_path, caskroom_ver) catch return error.InstallFailed;
+        (switch (artifact_type) {
+            .tar_gz => archive_mod.extractTarGz(self.io, archive_path, caskroom_ver),
+            .tar_xz => archive_mod.extractTarXzFile(self.io, archive_path, caskroom_ver),
+            else => return error.InstallFailed,
+        }) catch return error.InstallFailed;
+
+        // Same precedence as the zip dispatch: fonts first (they carry no
+        // `.app` and no `binary`), then binaries, then a wrapped bundle.
+        if (self.font_entries_override) |entries| {
+            return self.installFontArtifacts(caskroom_ver, cask, entries);
+        }
+        if (try cask_font.collectFontArtifacts(self.allocator, cask.parsed.value.object)) |entries| {
+            defer self.allocator.free(entries);
+            return self.installFontArtifacts(caskroom_ver, cask, entries);
+        }
 
         if (parseBinaryName(cask.parsed.value.object)) |src_name| {
             const link_name = parseBinaryTarget(cask.parsed.value.object) orelse

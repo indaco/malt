@@ -91,6 +91,61 @@ test "artifactTypeFromUrl handles fragment after .tgz" {
     try std.testing.expectEqual(cask.ArtifactType.tar_gz, cask.artifactTypeFromUrl("https://cdn.example.com/app.tgz#sha=abc"));
 }
 
+// `.tar.xz` is the shape nerd-fonts and other release-asset casks ship;
+// it must classify like its gzip sibling, not fall through to unknown and
+// send the user to brew.
+test "artifactTypeFromUrl detects .tar.xz" {
+    try std.testing.expectEqual(
+        cask.ArtifactType.tar_xz,
+        cask.artifactTypeFromUrl("https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.0/Hack.tar.xz"),
+    );
+}
+
+test "artifactTypeFromUrl detects .txz" {
+    try std.testing.expectEqual(cask.ArtifactType.tar_xz, cask.artifactTypeFromUrl("https://example.com/app.txz"));
+}
+
+test "artifactTypeFromUrl handles query params after .tar.xz" {
+    try std.testing.expectEqual(cask.ArtifactType.tar_xz, cask.artifactTypeFromUrl("https://cdn.example.com/app.tar.xz?v=1"));
+}
+
+test "artifactTypeFromUrl handles fragment after .txz" {
+    try std.testing.expectEqual(cask.ArtifactType.tar_xz, cask.artifactTypeFromUrl("https://cdn.example.com/app.txz#sha=abc"));
+}
+
+// A suffix in the middle of a path must not classify the URL; only a real
+// extension does, otherwise `/tar.xz-mirror/app.dmg` would read as a tarball.
+test "artifactTypeFromUrl ignores a suffix that is not the extension" {
+    try std.testing.expectEqual(
+        cask.ArtifactType.dmg,
+        cask.artifactTypeFromUrl("https://cdn.example.com/tar.xz-mirror/App.dmg"),
+    );
+}
+
+// The tag round-trip is what `cask_versions.artifact_type` stores; a
+// one-way mapping would silently downgrade a tar.xz row to unknown on read.
+test "artifactType tags round-trip through the cask_versions column" {
+    for ([_]cask.ArtifactType{ .dmg, .zip, .pkg, .tar_gz, .tar_xz, .unknown }) |t| {
+        try std.testing.expectEqual(t, cask.artifactTypeFromTag(cask.artifactTypeTag(t)));
+    }
+}
+
+// Every artefact a download can stage must be sweepable, or uninstall
+// leaves the cached file behind forever.
+test "cache_extensions covers every staged artifact extension" {
+    for ([_]cask.ArtifactType{ .dmg, .zip, .pkg, .tar_gz, .tar_xz }) |t| {
+        const ext = cask.artifactExtension(t);
+        var found = false;
+        for (cask.cache_extensions) |known| {
+            if (std.mem.eql(u8, known, ext)) found = true;
+        }
+        if (!found) {
+            std.debug.print("no cache_extensions entry for {s}\n", .{ext});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 // --- parseCask ---
 
 const test_cask_json =

@@ -1352,7 +1352,7 @@ fn installCask(
 
     if (artifact_type == .unknown) {
         sink.err("Unsupported cask format for '{s}' — URL: {s}", .{ cask.token, cask.url });
-        sink.err("malt supports .dmg, .zip, and .pkg casks. Use: brew install --cask {s}", .{cask.token});
+        sink.err("malt supports .dmg, .zip, .pkg, .tar.gz, and .tar.xz casks. Use: brew install --cask {s}", .{cask.token});
         return InstallError.CaskNotFound;
     }
 

@@ -867,7 +867,7 @@ fn caskVersionFootprint(io: std.Io, allocator: std.mem.Allocator, prefix: []cons
         total += util.pathSize(io, allocator, caskroom_path);
     } else |_| {}
 
-    for ([_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz" }) |ext| {
+    for (cask_mod.cache_extensions) |ext| {
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/cache/Cask/{s}-{s}{s}", .{ prefix, token, version, ext }) catch continue;
         if (std.Io.Dir.cwd().statFile(io, cache_path, .{})) |st| {
             total += st.size;

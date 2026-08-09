@@ -405,7 +405,7 @@ pub fn tapCaskArtifactKind(url: []const u8, has_app: bool) ?cask_mod.ArtifactTyp
         .dmg => .dmg,
         .pkg => .pkg,
         .zip => if (has_app) .zip else null,
-        .tar_gz, .unknown => null,
+        .tar_gz, .tar_xz, .unknown => null,
     };
 }
 
