@@ -46,7 +46,10 @@ pub const RelocatedStoreError = error{
 /// v4: relocation records the paths it could not rewrite in a keg sidecar.
 /// v3 trees carry no sidecar, so a keg restored from one reads as clean
 /// however badly its embedded paths were dropped.
-pub const RELOC_LOGIC_VERSION: u32 = 4;
+///
+/// v5: every keg is stamped with the logic version that produced it, so a
+/// later bump can name the kegs it left behind instead of guessing.
+pub const RELOC_LOGIC_VERSION: u32 = 5;
 
 /// Reject anything that is not exactly 64 lowercase hex characters.
 /// Run this before forming any path so traversal sequences (`..`, `/`) and

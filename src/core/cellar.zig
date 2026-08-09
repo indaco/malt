@@ -391,13 +391,36 @@ pub fn cellarLinksPath(io: std.Io, allocator: std.mem.Allocator, cellar_path: []
 pub const unrelocated_marker = ".malt-unrelocated";
 
 fn writeUnrelocatedMarker(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8, count: u32) void {
-    const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ cellar_path, unrelocated_marker }) catch return;
+    writeKegMarker(io, allocator, cellar_path, unrelocated_marker, count);
+}
+
+/// Relocation logic that produced this keg. Written on every relocation, so a
+/// keg materialised by an older malt is distinguishable from a current one —
+/// the bottle itself carries no such signal, and the surviving paths cannot
+/// tell the two apart (a relocatable bottle legitimately keeps build-prefix
+/// strings). Kegs predating this marker read as stale, which they are.
+pub const reloc_version_marker = ".malt-reloc-version";
+
+fn writeKegMarker(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8, name: []const u8, value: u32) void {
+    const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ cellar_path, name }) catch return;
     defer allocator.free(path);
-    const body = std.fmt.allocPrint(allocator, "{d}\n", .{count}) catch return;
+    const body = std.fmt.allocPrint(allocator, "{d}\n", .{value}) catch return;
     defer allocator.free(body);
-    // Best-effort: the warning already fired, so a failed write costs the
-    // doctor row, not the install.
+    // Best-effort: a failed write costs a doctor row, never the install.
     atomic.atomicWriteFile(io, path, body) catch {};
+}
+
+/// Read a keg marker's `u32`, or null when absent or malformed.
+pub fn readKegMarker(io: std.Io, cellar_path: []const u8, name: []const u8) ?u32 {
+    var path_buf: [512]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ cellar_path, name }) catch return null;
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
+    defer file.close(io);
+    var buf: [32]u8 = undefined;
+    // Short read is the normal case: the marker is a few digits.
+    const n = file.readPositional(io, &.{&buf}, 0) catch return null;
+    const text = std.mem.trim(u8, buf[0..n], " \t\r\n");
+    return std.fmt.parseInt(u32, text, 10) catch null;
 }
 
 fn relocateKegTree(
@@ -498,6 +521,9 @@ fn relocateKegTree(
     // After text patching, so the poured configs already carry the malt
     // prefix instead of the bottled `/opt/homebrew` paths.
     installBottleEtcVar(io, allocator, cellar_path, new_prefix);
+
+    // Last: only a keg that got this far was relocated by this logic.
+    writeKegMarker(io, allocator, cellar_path, reloc_version_marker, relocated_store.RELOC_LOGIC_VERSION);
 }
 
 /// Pour the bottle's `.bottle/etc` and `.bottle/var` overlay into the
@@ -775,6 +801,39 @@ pub fn remove(io: std.Io, prefix: []const u8, name: []const u8, version: []const
 
 // Pins the describeError split: only the user-actionable mappings carry
 // prose; every other tag falls through to @errorName.
+test "keg markers round-trip, and a missing or malformed one reads as absent" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("keg_marker");
+    defer s.deinit();
+    const keg = s.p("/Cellar/glow/1.2.3");
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+
+    // Absent: the only signal that a keg predates marker tracking, so it must
+    // never read as a version.
+    try testing.expect(readKegMarker(io, keg, reloc_version_marker) == null);
+
+    writeKegMarker(io, testing.allocator, keg, reloc_version_marker, 4);
+    try testing.expectEqual(@as(?u32, 4), readKegMarker(io, keg, reloc_version_marker));
+
+    // Trailing newline is how the marker is written; leading space and CRLF
+    // cover a hand-edited file.
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ keg, reloc_version_marker });
+    defer testing.allocator.free(path);
+    try atomic.atomicWriteFile(io, path, " 12 \r\n");
+    try testing.expectEqual(@as(?u32, 12), readKegMarker(io, keg, reloc_version_marker));
+
+    // Garbage must not be coerced to a version — a bogus 0 would flag every
+    // keg as stale.
+    try atomic.atomicWriteFile(io, path, "v4\n");
+    try testing.expect(readKegMarker(io, keg, reloc_version_marker) == null);
+    try atomic.atomicWriteFile(io, path, "");
+    try testing.expect(readKegMarker(io, keg, reloc_version_marker) == null);
+    try atomic.atomicWriteFile(io, path, "99999999999999999999\n");
+    try testing.expect(readKegMarker(io, keg, reloc_version_marker) == null);
+}
+
 test "describeError: action-hint tags keep prose, trivial tags fall back to @errorName" {
     try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.InsufficientHeaderPad), "-headerpad_max_install_names") != null);
     try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.InstallNameToolMissing), "install_name_tool not found on PATH") != null);
