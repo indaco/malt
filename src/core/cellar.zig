@@ -464,9 +464,7 @@ pub fn stripKegMarkers(io: std.Io, cellar_path: []const u8) void {
 /// Resolve the perl shebang token from the keg's own `.brew/<name>.rb`, whose
 /// dependency list is what decides between a brewed perl and the system one.
 /// A keg without that file (a local-Cellar copy, a hand-dropped tree) resolves
-/// on its name alone, which still catches perl itself. The read stays here
-/// rather than shared with `rollback`'s store-path twin: they walk different
-/// trees, and neither is worth an I/O dependency in `formula`.
+/// on its name alone, which still catches perl itself.
 fn perlReplacement(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -492,18 +490,8 @@ fn perlFromFormulaSource(
     cellar_path: []const u8,
     name: []const u8,
 ) ?formula.Placeholder {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rb_path = std.fmt.bufPrint(&path_buf, "{s}/.brew/{s}.rb", .{ cellar_path, name }) catch return null;
-
-    const file = std.Io.Dir.openFileAbsolute(io, rb_path, .{}) catch return null;
-    defer file.close(io);
-
-    const stat = file.stat(io) catch return null;
-    if (stat.size == 0 or stat.size > 1024 * 1024) return null;
-    const src = allocator.alloc(u8, stat.size) catch return null;
+    const src = formula.readKegSource(io, allocator, cellar_path, name) orelse return null;
     defer allocator.free(src);
-    const read = file.readPositionalAll(io, src, 0) catch return null;
-    if (read < src.len) return null;
 
     var dep_buf: [64][]const u8 = undefined;
     return formula.perlPlaceholder(buf, prefix, name, formula.declaredDependencies(&dep_buf, src));

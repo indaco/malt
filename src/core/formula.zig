@@ -107,6 +107,40 @@ pub fn declaredDependencies(out: [][]const u8, rb_source: []const u8) []const []
     return out[0..n];
 }
 
+/// A `.rb` past this is not a formula. Mirrors the cap in `ruby/source.zig`,
+/// which reads the same files for a different question.
+const max_rb_bytes: u64 = 1024 * 1024;
+
+/// The formula source a keg's bottle ships at `<keg_path>/.brew/<name>.rb`,
+/// the input `declaredDependencies` parses. Caller owns the bytes.
+///
+/// Null on any read failure, including a short read: callers resolve
+/// placeholders best-effort, and a truncated source silently drops
+/// `depends_on` lines, which reads as "declares nothing" and bakes the wrong
+/// path. A keg with no source is the honest version of that same answer.
+pub fn readKegSource(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    keg_path: []const u8,
+    name: []const u8,
+) ?[]u8 {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rb_path = std.fmt.bufPrint(&path_buf, "{s}/.brew/{s}.rb", .{ keg_path, name }) catch return null;
+
+    const file = std.Io.Dir.openFileAbsolute(io, rb_path, .{}) catch return null;
+    defer file.close(io);
+
+    const stat = file.stat(io) catch return null;
+    if (stat.size == 0 or stat.size > max_rb_bytes) return null;
+    const src = allocator.alloc(u8, stat.size) catch return null;
+    const read = file.readPositionalAll(io, src, 0) catch 0;
+    if (read < src.len) {
+        allocator.free(src);
+        return null;
+    }
+    return src;
+}
+
 /// Resolve this formula's dependency-scoped placeholder into `buf`.
 /// Null when it declares no matching dependency: guessing would bake a path
 /// to a keg the formula never asked for.
@@ -960,6 +994,75 @@ test "dependencyPlaceholder declines a formula with no matching dependency" {
     var buf: [256]u8 = undefined;
     const deps = [_][]const u8{ "pcre2", "zstd" };
     try testing.expect(dependencyPlaceholder(&buf, "/opt/malt", &deps) == null);
+}
+
+/// Per-PID path: a fixed `/tmp` name races concurrent test binaries.
+fn kegSourceFixture(io: std.Io, tag: []const u8, body: []const u8) ![]u8 {
+    var rand: [8]u8 = undefined;
+    io.random(&rand);
+    const hex = std.fmt.bytesToHex(rand, .lower);
+    const keg = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_keg_src_{s}_{s}", .{ hex[0..], tag });
+    errdefer testing.allocator.free(keg);
+
+    const brew_dir = try std.fmt.allocPrint(testing.allocator, "{s}/.brew", .{keg});
+    defer testing.allocator.free(brew_dir);
+    try std.Io.Dir.cwd().createDirPath(io, brew_dir);
+
+    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/pkg.rb", .{brew_dir});
+    defer testing.allocator.free(rb);
+    const f = try std.Io.Dir.createFileAbsolute(io, rb, .{});
+    try f.writeStreamingAll(io, body);
+    f.close(io);
+    return keg;
+}
+
+test "readKegSource returns the formula source a bottle ships" {
+    const io = std.Options.debug_io;
+    const body = "class Pkg < Formula\n  depends_on \"perl\"\nend\n";
+    const keg = try kegSourceFixture(io, "ok", body);
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, keg) catch {};
+        testing.allocator.free(keg);
+    }
+
+    const src = readKegSource(io, testing.allocator, keg, "pkg").?;
+    defer testing.allocator.free(src);
+    try testing.expectEqualStrings(body, src);
+
+    // The whole point of the read: it feeds the dependency parse.
+    var out: [8][]const u8 = undefined;
+    const deps = declaredDependencies(&out, src);
+    try testing.expectEqual(@as(usize, 1), deps.len);
+    try testing.expectEqualStrings("perl", deps[0]);
+}
+
+test "readKegSource declines a keg that ships no formula source" {
+    // A local-Cellar copy or hand-dropped tree has no `.brew/`; callers read
+    // that as "declares nothing", never as a hard failure.
+    const io = std.Options.debug_io;
+    try testing.expect(readKegSource(io, testing.allocator, "/nonexistent/keg", "pkg") == null);
+}
+
+test "readKegSource declines a name that is not the keg's own formula" {
+    const io = std.Options.debug_io;
+    const keg = try kegSourceFixture(io, "wrongname", "class Pkg < Formula\nend\n");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, keg) catch {};
+        testing.allocator.free(keg);
+    }
+    try testing.expect(readKegSource(io, testing.allocator, keg, "other") == null);
+}
+
+test "readKegSource declines an empty formula source" {
+    // Zero bytes parses to zero dependencies either way, but it means the
+    // bottle is malformed — say so rather than resolving against a guess.
+    const io = std.Options.debug_io;
+    const keg = try kegSourceFixture(io, "empty", "");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, keg) catch {};
+        testing.allocator.free(keg);
+    }
+    try testing.expect(readKegSource(io, testing.allocator, keg, "pkg") == null);
 }
 
 test "perlPlaceholder points at the keg of a brewed perl" {
