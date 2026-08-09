@@ -407,8 +407,14 @@ pub fn build(b: *std.Build) void {
     // Throwaway prefix: `atomic.maltPrefixOrAbort()` otherwise falls back to
     // the literal /opt/malt, i.e. the developer's real install.
     run_all_tests.setEnvironmentVariable("MALT_PREFIX", "/tmp/malt-test-prefix");
-    b.step("test-one", "Run every test in a single binary (one process)")
-        .dependOn(&run_all_tests.step);
+    // Inline `test` blocks live in the `malt` module, and the comment on
+    // `lib_test_module` explains why crossing `addImport("malt", ...)` drops
+    // them: the aggregate root cannot collect them, however it is generated.
+    // So this target runs the lib binary too — two processes instead of ~160,
+    // and no test silently outside the fast loop.
+    const test_one_step = b.step("test-one", "Run every test in two binaries (lib + tests/ aggregate)");
+    test_one_step.dependOn(&run_lib_tests.step);
+    test_one_step.dependOn(&run_all_tests.step);
 
     @setEvalBranchQuota(30000);
     inline for (test_modules) |test_file| {
