@@ -410,6 +410,20 @@ fn writeKegMarker(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const
     atomic.atomicWriteFile(io, path, body) catch {};
 }
 
+/// Marker names malt owns inside a keg. Relocation rewrites them last, so a
+/// bottle cannot forge one — but a path that extracts an archive without
+/// relocating must strip them, or the archive's author decides what doctor
+/// reports about the keg.
+pub const keg_markers = [_][]const u8{ unrelocated_marker, reloc_version_marker };
+
+pub fn stripKegMarkers(io: std.Io, cellar_path: []const u8) void {
+    for (keg_markers) |name| {
+        var buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ cellar_path, name }) catch continue;
+        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    }
+}
+
 /// Read a keg marker's `u32`, or null when absent or malformed.
 pub fn readKegMarker(io: std.Io, cellar_path: []const u8, name: []const u8) ?u32 {
     var path_buf: [512]u8 = undefined;
@@ -832,6 +846,33 @@ test "keg markers round-trip, and a missing or malformed one reads as absent" {
     try testing.expect(readKegMarker(io, keg, reloc_version_marker) == null);
     try atomic.atomicWriteFile(io, path, "99999999999999999999\n");
     try testing.expect(readKegMarker(io, keg, reloc_version_marker) == null);
+}
+
+test "stripKegMarkers clears a marker the extracted archive supplied" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("strip_markers");
+    defer s.deinit();
+    const keg = s.p("/Cellar/glow/1.2.3");
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+
+    // An archive that ships a stamp would otherwise decide what doctor says
+    // about the keg — a high one silences it, a low one warns forever, since
+    // the path that extracted it never relocates and so never restamps.
+    for (keg_markers) |name| {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ keg, name });
+        defer testing.allocator.free(p);
+        try atomic.atomicWriteFile(io, p, "999\n");
+    }
+    try testing.expectEqual(@as(?u32, 999), readKegMarker(io, keg, reloc_version_marker));
+
+    stripKegMarkers(io, keg);
+    for (keg_markers) |name| {
+        try testing.expect(readKegMarker(io, keg, name) == null);
+    }
+    // Idempotent: the strip runs on every such install, most with no markers.
+    stripKegMarkers(io, keg);
 }
 
 test "describeError: action-hint tags keep prose, trivial tags fall back to @errorName" {

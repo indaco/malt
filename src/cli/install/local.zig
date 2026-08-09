@@ -8,6 +8,7 @@ const std = @import("std");
 
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const cask_mod = @import("../../core/cask.zig");
+const cellar_mod = @import("../../core/cellar.zig");
 const hash = @import("../../core/hash.zig");
 const linker_mod = @import("../../core/linker.zig");
 const tap_mod = @import("../../core/tap.zig");
@@ -739,6 +740,10 @@ pub fn materializeRubyFormula(
             return InstallError.CellarFailed;
         },
     }
+
+    // This path never relocates, so nothing overwrites a marker the archive
+    // shipped — and a forged one would let its author drive doctor's verdict.
+    cellar_mod.stripKegMarkers(ctx.io, cellar_path);
 
     // Promote the binary to bin/ (GoReleaser may extract directly or
     // into a subdirectory — walk to handle both). For casks that
