@@ -95,6 +95,40 @@ fn createPlaceholderBottleFixture(allocator: std.mem.Allocator, prefix: []const 
     f.close(std.Options.debug_io);
 }
 
+/// Keg whose only script carries the perl shebang token, alongside the
+/// `.brew/<name>.rb` relocation reads to decide which interpreter applies.
+fn createPerlBottleFixture(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    sha: []const u8,
+    name: []const u8,
+    rb_source: []const u8,
+) !void {
+    const keg = try std.fmt.allocPrint(allocator, "{s}/store/{s}/{s}/1.0/bin", .{ prefix, sha, name });
+    defer allocator.free(keg);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg);
+
+    const script_path = try std.fmt.allocPrint(allocator, "{s}/tool", .{keg});
+    defer allocator.free(script_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, script_path, .{
+            .permissions = std.Io.File.Permissions.fromMode(0o555),
+        });
+        try f.writeStreamingAll(std.Options.debug_io, "#!@@HOMEBREW_PERL@@\nprint \"hi\\n\";\n");
+        f.close(std.Options.debug_io);
+    }
+
+    const brew_dir = try std.fmt.allocPrint(allocator, "{s}/store/{s}/{s}/1.0/.brew", .{ prefix, sha, name });
+    defer allocator.free(brew_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, brew_dir);
+
+    const rb_path = try std.fmt.allocPrint(allocator, "{s}/{s}.rb", .{ brew_dir, name });
+    defer allocator.free(rb_path);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, rb_path, .{});
+    try f.writeStreamingAll(std.Options.debug_io, rb_source);
+    f.close(std.Options.debug_io);
+}
+
 fn setupMaltDirs(allocator: std.mem.Allocator, prefix: []const u8) !void {
     const dirs = [_][]const u8{ "store", "Cellar", "opt", "bin", "lib" };
     for (dirs) |d| {
@@ -363,6 +397,96 @@ test "relocation leaves an unresolved dependency placeholder in place" {
     try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_JAVA@@") != null);
     // The prefix-derived tokens still relocate — only the extra one is withheld.
     try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_CELLAR@@") == null);
+}
+
+test "relocation substitutes the perl shebang placeholder" {
+    // The token reaches the kernel as the interpreter path, so shipping it
+    // literally makes every perl script in the keg unrunnable.
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+
+    try setupMaltDirs(testing.allocator, prefix);
+    try createPerlBottleFixture(
+        testing.allocator,
+        prefix,
+        "perl123",
+        "pkg",
+        "class Pkg < Formula\n  depends_on \"perl\"\nend\n",
+    );
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        "perl123",
+        "pkg",
+        "1.0",
+        ":any",
+        null,
+    );
+    defer testing.allocator.free(keg.path);
+
+    var script_buf: [512]u8 = undefined;
+    const script_path = try std.fmt.bufPrint(&script_buf, "{s}/bin/tool", .{keg.path});
+    const content = try readFile(testing.allocator, script_path);
+    defer testing.allocator.free(content);
+
+    var want_buf: [512]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "#!{s}/opt/perl/bin/perl\n", .{prefix});
+    try testing.expect(std.mem.startsWith(u8, content, want));
+
+    // The rewrite goes through a replace, not a plain write: losing the exec
+    // bit would break the script just as thoroughly as the bad shebang.
+    const st = try test_io.cwd().statFile(std.Options.debug_io, script_path, .{});
+    try testing.expectEqual(@as(std.posix.mode_t, 0o555), st.permissions.toMode() & 0o7777);
+}
+
+test "relocation falls back to the system perl when no perl is brewed" {
+    // Most perl-shipping bottles declare `uses_from_macos "perl"`, which is
+    // not a keg — withholding a value here would leave the token on disk.
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+
+    try setupMaltDirs(testing.allocator, prefix);
+    try createPerlBottleFixture(
+        testing.allocator,
+        prefix,
+        "perl456",
+        "imgtool",
+        "class Imgtool < Formula\n  depends_on \"cmake\" => :build\n  uses_from_macos \"perl\"\nend\n",
+    );
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        "perl456",
+        "imgtool",
+        "1.0",
+        ":any",
+        null,
+    );
+    defer testing.allocator.free(keg.path);
+
+    var script_buf: [512]u8 = undefined;
+    const script_path = try std.fmt.bufPrint(&script_buf, "{s}/bin/tool", .{keg.path});
+    const content = try readFile(testing.allocator, script_path);
+    defer testing.allocator.free(content);
+
+    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_PERL@@") == null);
+    try testing.expect(std.mem.startsWith(u8, content, "#!/usr/bin/perl"));
 }
 
 test "placeholder substitution replaces multiple tokens in single file" {

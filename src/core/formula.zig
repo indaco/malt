@@ -133,6 +133,66 @@ pub fn dependencyPlaceholder(
     return null;
 }
 
+const perl_token = "@@HOMEBREW_PERL@@";
+const perl_dep = "perl";
+
+/// Sentinel for "could not read the macOS version"; `systemPerlPath` maps it
+/// to the newest interpreter, since a stale versioned path is guaranteed
+/// absent while the newest one is right for every macOS malt runs on.
+const unknown_macos_major: u32 = std.math.maxInt(u32);
+
+/// Interpreter each macOS release ships. Upstream pins the same versions, so
+/// a relocated keg lands byte-identical to a brew-poured one.
+fn systemPerlPath(macos_major: u32) []const u8 {
+    if (macos_major >= 14) return "/usr/bin/perl5.34"; // Sonoma and later
+    if (macos_major >= 11) return "/usr/bin/perl5.30"; // Big Sur and later
+    return "/usr/bin/perl5.18";
+}
+
+fn macosMajorVersion() u32 {
+    var buf: [32]u8 = undefined;
+    var len: usize = buf.len;
+    if (std.c.sysctlbyname("kern.osproductversion", &buf, &len, null, 0) != 0) return unknown_macos_major;
+    const text = std.mem.sliceTo(buf[0..len], 0);
+    const major = text[0 .. std.mem.indexOfScalar(u8, text, '.') orelse text.len];
+    return std.fmt.parseInt(u32, major, 10) catch unknown_macos_major;
+}
+
+/// Resolve `@@HOMEBREW_PERL@@`, which bottles carry in the shebang of every
+/// perl script they ship. Never null, unlike `dependencyPlaceholder`: the
+/// token lands where the kernel expects an interpreter, so withholding a value
+/// leaves an unrunnable script rather than a visible token. A formula that
+/// brews perl gets that keg; everything else gets the system interpreter,
+/// which is what `uses_from_macos "perl"` asks for.
+pub fn perlPlaceholder(
+    buf: []u8,
+    prefix: []const u8,
+    name: []const u8,
+    dependencies: []const []const u8,
+) Placeholder {
+    const brewed: ?[]const u8 = if (isPerl(name)) name else blk: {
+        for (dependencies) |dep| {
+            if (isPerl(dep)) break :blk dep;
+        }
+        break :blk null;
+    };
+
+    if (brewed) |dep| {
+        if (std.fmt.bufPrint(buf, "{s}/opt/{s}/bin/perl", .{ prefix, dep })) |value| {
+            return .{ .token = perl_token, .value = value };
+        } else |_| {}
+    }
+    return .{ .token = perl_token, .value = systemPerlPath(macosMajorVersion()) };
+}
+
+/// `perl` or a pinned `perl@5.xx`, which installs under its own `opt/` name.
+fn isPerl(candidate: []const u8) bool {
+    if (std.mem.eql(u8, candidate, perl_dep)) return true;
+    return candidate.len > perl_dep.len and
+        std.mem.startsWith(u8, candidate, perl_dep) and
+        candidate[perl_dep.len] == '@';
+}
+
 /// Parsed Homebrew formula. Every `[]const u8` and `[]const []const u8`
 /// field is owned by `_parsed` (either borrowed from the JSON source
 /// buffer or allocated through the parse arena); valid only until
@@ -900,6 +960,64 @@ test "dependencyPlaceholder declines a formula with no matching dependency" {
     var buf: [256]u8 = undefined;
     const deps = [_][]const u8{ "pcre2", "zstd" };
     try testing.expect(dependencyPlaceholder(&buf, "/opt/malt", &deps) == null);
+}
+
+test "perlPlaceholder points at the keg of a brewed perl" {
+    // A formula that depends on perl directly must run under that keg's
+    // interpreter, not the system one it was never built against.
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{ "perl", "libpng" };
+    const got = perlPlaceholder(&buf, "/opt/malt", "imagemagick", &deps);
+    try testing.expectEqualStrings("@@HOMEBREW_PERL@@", got.token);
+    try testing.expectEqualStrings("/opt/malt/opt/perl/bin/perl", got.value);
+}
+
+test "perlPlaceholder keeps the version suffix of a pinned perl" {
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{"perl@5.40"};
+    const got = perlPlaceholder(&buf, "/opt/malt", "pkg", &deps);
+    try testing.expectEqualStrings("/opt/malt/opt/perl@5.40/bin/perl", got.value);
+}
+
+test "perlPlaceholder resolves perl itself against its own keg" {
+    // `perl` declares no perl dependency, yet its own scripts carry the token.
+    var buf: [256]u8 = undefined;
+    const got = perlPlaceholder(&buf, "/opt/malt", "perl", &.{});
+    try testing.expectEqualStrings("/opt/malt/opt/perl/bin/perl", got.value);
+}
+
+test "perlPlaceholder falls back to the system interpreter" {
+    // Never null: an unresolved shebang is an unrunnable script, so the
+    // interpreter macOS ships is the answer when nothing brews one.
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{ "cmake", "zstd" };
+    const got = perlPlaceholder(&buf, "/opt/malt", "exiftool", &deps);
+    try testing.expect(std.mem.startsWith(u8, got.value, "/usr/bin/perl"));
+}
+
+test "perlPlaceholder ignores a dependency that merely starts with perl" {
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{"perl-xml"};
+    const got = perlPlaceholder(&buf, "/opt/malt", "pkg", &deps);
+    try testing.expect(std.mem.startsWith(u8, got.value, "/usr/bin/perl"));
+}
+
+test "systemPerlPath tracks the interpreter each macOS release ships" {
+    try testing.expectEqualStrings("/usr/bin/perl5.34", systemPerlPath(26));
+    try testing.expectEqualStrings("/usr/bin/perl5.34", systemPerlPath(14));
+    try testing.expectEqualStrings("/usr/bin/perl5.30", systemPerlPath(13));
+    try testing.expectEqualStrings("/usr/bin/perl5.30", systemPerlPath(11));
+    try testing.expectEqualStrings("/usr/bin/perl5.18", systemPerlPath(10));
+    // An unreadable version reads as "current": a stale path is guaranteed
+    // absent on a modern system, the newest one is right for every macOS
+    // malt runs on.
+    try testing.expectEqualStrings("/usr/bin/perl5.34", systemPerlPath(unknown_macos_major));
+}
+
+test "perlPlaceholder falls back to the system interpreter when the buffer is too small" {
+    var buf: [4]u8 = undefined;
+    const got = perlPlaceholder(&buf, "/opt/malt", "perl", &.{});
+    try testing.expect(std.mem.startsWith(u8, got.value, "/usr/bin/perl"));
 }
 
 test "declaredDependencies reads the names a keg's own formula source declares" {

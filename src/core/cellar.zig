@@ -7,6 +7,7 @@ const clonefile = @import("../fs/clonefile.zig");
 // an ELF backend behind the same surface, so cellar never reaches past
 // it into `macho/patcher.zig` for either load-command or text-file work.
 const patch = @import("patch.zig");
+const formula = @import("formula.zig");
 const codesign = @import("../macho/codesign.zig");
 const atomic = @import("../fs/atomic.zig");
 const relocated_store = @import("relocated_store.zig");
@@ -460,6 +461,54 @@ pub fn stripKegMarkers(io: std.Io, cellar_path: []const u8) void {
     }
 }
 
+/// Resolve the perl shebang token from the keg's own `.brew/<name>.rb`, whose
+/// dependency list is what decides between a brewed perl and the system one.
+/// A keg without that file (a local-Cellar copy, a hand-dropped tree) resolves
+/// on its name alone, which still catches perl itself. The read stays here
+/// rather than shared with `rollback`'s store-path twin: they walk different
+/// trees, and neither is worth an I/O dependency in `formula`.
+fn perlReplacement(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    buf: []u8,
+    prefix: []const u8,
+    cellar_path: []const u8,
+) patch.Replacement {
+    // `<prefix>/Cellar/<name>/<version>` — both call sites build it that way.
+    const name = std.fs.path.basename(std.fs.path.dirname(cellar_path) orelse "");
+
+    const ph = perlFromFormulaSource(io, allocator, buf, prefix, cellar_path, name) orelse
+        formula.perlPlaceholder(buf, prefix, name, &.{});
+    return .{ .old = ph.token, .new = ph.value };
+}
+
+/// Null when the formula source is unreadable. The dependency names borrow
+/// from it, so the placeholder is formatted into `buf` before it is freed.
+fn perlFromFormulaSource(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    buf: []u8,
+    prefix: []const u8,
+    cellar_path: []const u8,
+    name: []const u8,
+) ?formula.Placeholder {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rb_path = std.fmt.bufPrint(&path_buf, "{s}/.brew/{s}.rb", .{ cellar_path, name }) catch return null;
+
+    const file = std.Io.Dir.openFileAbsolute(io, rb_path, .{}) catch return null;
+    defer file.close(io);
+
+    const stat = file.stat(io) catch return null;
+    if (stat.size == 0 or stat.size > 1024 * 1024) return null;
+    const src = allocator.alloc(u8, stat.size) catch return null;
+    defer allocator.free(src);
+    const read = file.readPositionalAll(io, src, 0) catch return null;
+    if (read < src.len) return null;
+
+    var dep_buf: [64][]const u8 = undefined;
+    return formula.perlPlaceholder(buf, prefix, name, formula.declaredDependencies(&dep_buf, src));
+}
+
 fn relocateKegTree(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -528,17 +577,29 @@ fn relocateKegTree(
         writeUnrelocatedMarker(io, allocator, cellar_path, unrelocatable);
     }
 
+    var new_library_buf: [256]u8 = undefined;
+    const new_library = std.fmt.bufPrint(&new_library_buf, "{s}/Library", .{new_prefix}) catch new_prefix;
+
+    // Resolved here rather than at each call site so install, upgrade, migrate
+    // and rollback cannot drift apart on it.
+    var perl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const perl = perlReplacement(io, allocator, &perl_buf, new_prefix, cellar_path);
+
     // Last on purpose: `patchTextFiles` runs sequential passes, so appending
     // keeps the substituted path out of the prefix rewrites above.
-    var text_reps_buf: [5]patch.Replacement = undefined;
+    var text_reps_buf: [8]patch.Replacement = undefined;
     text_reps_buf[0] = .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix };
     text_reps_buf[1] = .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar };
-    text_reps_buf[2] = .{ .old = "/opt/homebrew", .new = new_prefix };
-    text_reps_buf[3] = .{ .old = "/usr/local", .new = new_prefix };
-    var text_reps_len: usize = 4;
+    // malt has no separate repository checkout; shellenv reports the prefix.
+    text_reps_buf[2] = .{ .old = "@@HOMEBREW_REPOSITORY@@", .new = new_prefix };
+    text_reps_buf[3] = .{ .old = "@@HOMEBREW_LIBRARY@@", .new = new_library };
+    text_reps_buf[4] = .{ .old = "/opt/homebrew", .new = new_prefix };
+    text_reps_buf[5] = .{ .old = "/usr/local", .new = new_prefix };
+    text_reps_buf[6] = perl;
+    var text_reps_len: usize = 7;
     if (extra_replacement) |r| {
-        text_reps_buf[4] = r;
-        text_reps_len = 5;
+        text_reps_buf[7] = r;
+        text_reps_len = 8;
     }
     _ = patch.patchTextFiles(io, allocator, cellar_path, text_reps_buf[0..text_reps_len]) catch |e| {
         std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
