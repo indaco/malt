@@ -10,10 +10,14 @@
 #      symlink dangled.
 #
 # This asserts the native fix end-to-end:
-#   * mt install ca-certificates → <prefix>/etc/ca-certificates/cert.pem is a
-#     symlink to the shipped cacert.pem and matches it by sha256.
+#   * mt install ca-certificates → <prefix>/etc/ca-certificates/cert.pem is the
+#     bundle the keg's own helper builds: a real file holding the shipped store
+#     *plus* the roots the system keychain trusts, not a copy of the store.
 #   * mt install openssl@3 → <prefix>/etc/openssl@3/cert.pem resolves (no
-#     dangle) through to the same bundle and matches it by sha256.
+#     dangle) through to that bundle byte for byte.
+#
+# The shipped `cacert.pem` is only an input to the helper. Asserting the
+# installed bundle equals it would pin the state where the helper never ran.
 #
 # Usage: scripts/regressions/ssl_ca_bundle.sh
 # Requirements: built `malt` binary at $MALT_BIN or zig-out/bin/malt,
@@ -55,13 +59,17 @@ pass "installed ca-certificates"
 [[ -e "$SHIPPED" ]] || fail "keg shipped no cacert.pem at $SHIPPED"
 
 CA_CERT="$PREFIX/etc/ca-certificates/cert.pem"
-[[ -L "$CA_CERT" ]] || fail "$CA_CERT is not a symlink"
-[[ -e "$CA_CERT" ]] || fail "$CA_CERT dangles (target missing)"
-pass "etc/ca-certificates/cert.pem is a symlink that resolves"
+[[ -e "$CA_CERT" ]] || fail "$CA_CERT was not provisioned"
+pass "etc/ca-certificates/cert.pem exists"
 
-[[ "$(sha "$CA_CERT")" == "$(sha "$SHIPPED")" ]] ||
-  fail "etc/ca-certificates/cert.pem does not match the shipped cacert.pem by sha256"
-pass "etc/ca-certificates/cert.pem matches the shipped bundle by sha256"
+certs() { grep -c 'BEGIN CERTIFICATE' "$1"; }
+SHIPPED_N=$(certs "$SHIPPED")
+CA_N=$(certs "$CA_CERT")
+[[ "$CA_N" -ge "$SHIPPED_N" ]] ||
+  fail "etc/ca-certificates/cert.pem holds $CA_N certs, fewer than the $SHIPPED_N shipped"
+[[ "$(sha "$CA_CERT")" != "$(sha "$SHIPPED")" ]] ||
+  fail "etc/ca-certificates/cert.pem is a copy of the shipped store — the keg's helper never ran"
+pass "etc/ca-certificates/cert.pem is the helper's bundle ($CA_N certs vs $SHIPPED_N shipped)"
 
 # ── 2. openssl@3 links etc/openssl@3/cert.pem through the chain. ─────
 printf '▸ malt install openssl@3\n'
@@ -73,8 +81,8 @@ OSSL_CERT="$PREFIX/etc/openssl@3/cert.pem"
 [[ -e "$OSSL_CERT" ]] || fail "$OSSL_CERT dangles — the cross-formula pkgetc chain is broken"
 pass "etc/openssl@3/cert.pem is a symlink that resolves (no dangle)"
 
-[[ "$(sha "$OSSL_CERT")" == "$(sha "$SHIPPED")" ]] ||
-  fail "etc/openssl@3/cert.pem does not resolve to the shipped cacert.pem"
-pass "etc/openssl@3/cert.pem reaches the shipped bundle (sha256 match)"
+[[ "$(sha "$OSSL_CERT")" == "$(sha "$CA_CERT")" ]] ||
+  fail "etc/openssl@3/cert.pem does not resolve to the ca-certificates bundle"
+pass "etc/openssl@3/cert.pem reaches the ca-certificates bundle (sha256 match)"
 
 printf '\n✔ ssl ca-bundle provisioning regression passed\n'
