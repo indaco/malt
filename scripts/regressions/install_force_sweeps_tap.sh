@@ -8,7 +8,7 @@
 #   - same-version --force could trip the linker's atomic-replace
 #     fallback (no checkConflicts, but stale state could linger)
 #   - revision/version bumps left the old keg + row on disk and
-#     in the DB, surfacing as doctor "Mach-O placeholders" later
+#     in the DB, surfacing as doctor "Relocation placeholders" later
 #
 # Drives the regression against the known-working `indaco/tap/sley`
 # fixture (also used by `install_tap_tmp_cleanup.sh`).
@@ -116,7 +116,7 @@ if echo "$DOCTOR_OUT" | grep -qE "keg\(s\) in DB but missing on disk"; then
 fi
 if echo "$DOCTOR_OUT" | grep -qE "package\(s\) ship file\(s\) with unpatched @@HOMEBREW"; then
   echo "$DOCTOR_OUT" >&2
-  fail "doctor reports Mach-O placeholders after tap-path force-sweep"
+  fail "doctor reports relocation placeholders after tap-path force-sweep"
 fi
 pass "doctor reports no Missing kegs / placeholder offenders"
 

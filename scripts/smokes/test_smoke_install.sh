@@ -13,7 +13,7 @@
 #
 # Assertions:
 #   1. `mt install` exits 0.
-#   2. `mt doctor` exits 0 (all checks green, including Mach-O placeholders).
+#   2. `mt doctor` exits 0 (all checks green, including relocation placeholders).
 #   3. Each binary runs and prints a plausible version string.
 #   4. otool -L on each binary shows no remaining `@@HOMEBREW_` tokens.
 #

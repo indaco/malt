@@ -374,7 +374,7 @@ pub fn safeLabel(kind: FixKind) []const u8 {
 }
 
 /// One-line manual-remediation hint for a dangerous class. Mirrors the
-/// inline check-row hints (e.g. "Reinstall the affected packages") so
+/// inline check-row hints (e.g. "reinstall the affected packages") so
 /// users see a single consistent voice.
 pub fn manualHint(kind: ManualKind) []const u8 {
     return switch (kind) {
@@ -382,7 +382,7 @@ pub fn manualHint(kind: ManualKind) []const u8 {
         .missing_kegs => "missing kegs — reinstall the affected packages",
         .missing_directories => "missing prefix directories — reinitialise the prefix",
         .weak_permissions => "weak permissions — review with `ls -l` and `chmod`",
-        .mach_o_placeholders => "unpatched Mach-O placeholders — reinstall the affected packages",
+        .mach_o_placeholders => "unpatched relocation placeholders — upgrade malt, then reinstall those packages",
     };
 }
 
@@ -623,7 +623,7 @@ test "planFixes: missing directories stay manual" {
     try std.testing.expect(plan.manual.contains(.missing_directories));
 }
 
-test "planFixes: unpatched Mach-O placeholders stay manual" {
+test "planFixes: unpatched relocation placeholders stay manual" {
     const plan = planFixes(.{ .mach_o_placeholders = true });
     try std.testing.expect(plan.manual.contains(.mach_o_placeholders));
 }

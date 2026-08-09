@@ -310,7 +310,7 @@ const doctor_help =
     \\                 DB, missing kegs) still print a manual
     \\                 remediation command.
     \\  --verbose      List every offender under the count-only
-    \\                 checks (Mach-O placeholders, broken symlinks,
+    \\                 checks (relocation placeholders, broken symlinks,
     \\                 missing kegs) on its own indented line, and
     \\                 include the per-(token version) breakdown
     \\                 under the retained-cask-versions summary.

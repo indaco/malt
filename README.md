@@ -416,7 +416,7 @@ mt doctor --post-install-status          # check DSL support per installed formu
 | Disk space          | > 1 GB free on prefix volume                  | Warn: low disk space                     |
 | Post-install DSL    | All installed post_install formulae parseable | Warn: unsupported construct              |
 
-`--fix` repairs only the **safe** classes - actions that are reversible and never touch user data: stale advisory locks (recorded PID is dead), broken symlinks under `bin/`, `lib/`, `include/`, `share/`, `sbin/`, and orphaned store entries. Dangerous classes (corrupt DB, missing kegs, missing prefix directories, weak permissions, unpatched Mach-O placeholders) keep their inline manual remediation hint.
+`--fix` repairs only the **safe** classes - actions that are reversible and never touch user data: stale advisory locks (recorded PID is dead), broken symlinks under `bin/`, `lib/`, `include/`, `share/`, `sbin/`, and orphaned store entries. Dangerous classes (corrupt DB, missing kegs, missing prefix directories, weak permissions, unpatched relocation placeholders) keep their inline manual remediation hint.
 
 `mt purge` is the housekeeping and full-wipe entry point. A scope flag is required.
 
