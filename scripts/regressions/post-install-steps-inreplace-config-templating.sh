@@ -52,7 +52,7 @@ if ! grep -q 'fn anchoredLineLiteral' "$STEPS"; then
   echo "FAIL: the regexp allowlist is gone — richer patterns would be approximated" >&2
   exit 1
 fi
-if ! grep -q 'fn guardsSatisfied' "$STEPS"; then
+if ! grep -q 'fn evalGuards' "$STEPS"; then
   echo "FAIL: guards are no longer evaluated — inreplace would run on absent config" >&2
   exit 1
 fi

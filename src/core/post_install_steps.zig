@@ -62,6 +62,7 @@ const StepTag = enum {
     update_mime_database,
     update_desktop_database,
     init_data_dir,
+    run,
 };
 
 /// Single source of truth for the native step set: `runStep` dispatch and
@@ -83,6 +84,7 @@ const step_map = std.StaticStringMap(StepTag).initComptime(.{
     .{ "update_mime_database", .update_mime_database },
     .{ "update_desktop_database", .update_desktop_database },
     .{ "init_data_dir", .init_data_dir },
+    .{ "run", .run },
 });
 
 /// True when the formula JSON carries a non-empty steps array whose every
@@ -178,6 +180,7 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         .gdk_pixbuf_query_loaders => stepGdkPixbufQueryLoaders(ctx),
         .gtk_update_icon_cache => stepGtkUpdateIconCache(ctx, obj),
         .init_data_dir => stepInitDataDir(ctx, obj),
+        .run => stepRun(ctx, obj),
     };
 }
 
@@ -214,6 +217,7 @@ const template_map = std.StaticStringMap(enum {
     version_major_minor,
     homebrew_prefix,
     prefix_etc,
+    prefix_var,
     user,
     keg_bin,
     keg_libexec,
@@ -231,6 +235,7 @@ const template_map = std.StaticStringMap(enum {
     .{ "version.major_minor", .version_major_minor },
     .{ "HOMEBREW_PREFIX", .homebrew_prefix },
     .{ "etc", .prefix_etc },
+    .{ "var", .prefix_var },
     .{ "user", .user },
     .{ "bin", .keg_bin },
     // Also usable inline, not just as a base — an unresolved `{{pkgetc}}` reads
@@ -255,6 +260,7 @@ fn templateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
         .version_major_minor => versionComponents(ctx.version, 2),
         .homebrew_prefix => ctx.prefix,
         .prefix_etc => std.fmt.allocPrint(a, "{s}/etc", .{ctx.prefix}) catch null,
+        .prefix_var => std.fmt.allocPrint(a, "{s}/var", .{ctx.prefix}) catch null,
         // Null when the environment has no USER: the caller must refuse
         // rather than write an unresolved token into a live config.
         .user => std.process.Environ.getPosix(ctx.environ, "USER"),
@@ -517,20 +523,23 @@ fn stepSymlink(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     return true;
 }
 
-/// `guards` gate a step on the target's state. Only `if_exists` appears
-/// upstream; an unknown condition counts as unmet, so the step is skipped
-/// rather than run against an assumption that was never checked.
-fn guardsSatisfied(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
-    const guards = obj.get("guards") orelse return true;
-    if (guards != .array) return true;
+/// `guards` gate a step on the target's state. `if_exists` is the only
+/// condition this executor evaluates; `unsupported` keeps a condition it
+/// cannot check distinguishable from one that genuinely did not hold, so a
+/// caller can refuse loudly instead of reading it as a deliberate skip.
+const GuardOutcome = enum { met, unmet, unsupported };
+
+fn evalGuards(ctx: StepsCtx, obj: std.json.ObjectMap) GuardOutcome {
+    const guards = obj.get("guards") orelse return .met;
+    if (guards != .array) return .met;
     for (guards.array.items) |item| {
         if (item != .object) continue;
-        const raw = getString(item.object, "path") orelse return false;
-        const path = expandTemplates(ctx, raw) catch return false;
-        if (!std.mem.eql(u8, getString(item.object, "condition") orelse "", "if_exists")) return false;
-        std.Io.Dir.accessAbsolute(ctx.io, path, .{}) catch return false;
+        if (!std.mem.eql(u8, getString(item.object, "condition") orelse "", "if_exists")) return .unsupported;
+        const raw = getString(item.object, "path") orelse return .unsupported;
+        const path = expandTemplates(ctx, raw) catch return .unmet;
+        std.Io.Dir.accessAbsolute(ctx.io, path, .{}) catch return .unmet;
     }
-    return true;
+    return .met;
 }
 
 /// Replace every line beginning with `literal` wholesale. Caller must have
@@ -568,7 +577,7 @@ fn anchoredLineLiteral(pattern: []const u8) ?[]const u8 {
 /// unresolved template, empty needle, unsupported regexp — refuses instead.
 fn stepInreplace(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // An unmet guard is the step declining to run, not a failure to report.
-    if (!guardsSatisfied(ctx, obj)) return true;
+    if (evalGuards(ctx, obj) != .met) return true;
 
     const path = resolvePathSpec(ctx, obj, "path") orelse return false;
     if (!confined(ctx, path)) return false;
@@ -743,6 +752,122 @@ fn stepGtkUpdateIconCache(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     if (fileExists(ctx.io, gtk4))
         return runPathTool(ctx, obj, "gtk4", "gtk4-update-icon-cache", &.{ "-q", "-t", "-f" });
     return runPathTool(ctx, obj, "gtk+3", "gtk3-update-icon-cache", &.{ "-q", "-t", "-f" });
+}
+
+// --- arbitrary commands ------------------------------------------------------
+
+/// A `run` command's base is keg-relative: upstream resolves it through the
+/// Formula object, so `bin` is `<keg>/bin` — not `<prefix>/bin`, which is what
+/// the same token means as a *path* base in `base_map`.
+const CommandBase = enum { keg, bin, sbin, lib, libexec };
+
+const command_base_map = std.StaticStringMap(CommandBase).initComptime(.{
+    .{ "prefix", .keg },
+    .{ "bin", .bin },
+    .{ "sbin", .sbin },
+    .{ "lib", .lib },
+    .{ "libexec", .libexec },
+});
+
+/// Fields upstream's `run` accepts that malt does not honour. Spawning without
+/// them would run a command whose declared environment, redirection, or working
+/// directory silently did not apply, so their presence refuses instead.
+const run_unsupported_keys = [_][]const u8{ "env", "stdin_path", "stdout_path", "chdir", "writable_paths" };
+
+/// Absolute path to a `run` step's command, or null (already logged) when the
+/// spec is malformed. A bare name is refused rather than resolved through the
+/// fence's PATH: which binary that finds is not the formula's to decide.
+fn resolveCommandPath(ctx: StepsCtx, obj: std.json.ObjectMap) ?[]const u8 {
+    const spec = getObject(obj, "command") orelse {
+        logUnsupported(ctx, "run without a command");
+        return null;
+    };
+    const raw = getString(spec, "path") orelse {
+        logUnsupported(ctx, "run without a command path");
+        return null;
+    };
+    const path = expandTemplates(ctx, raw) catch return null;
+    const base = getString(spec, "base") orelse "absolute";
+    if (std.mem.eql(u8, base, "absolute")) {
+        if (!std.fs.path.isAbsolute(path)) {
+            logUnsupported(ctx, "run with a relative command");
+            return null;
+        }
+        return path;
+    }
+    const tag = command_base_map.get(base) orelse {
+        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "run command base {s}", .{base}) catch base);
+        return null;
+    };
+    if (path.len == 0) {
+        logUnsupported(ctx, "run with an empty command path");
+        return null;
+    }
+    const root = if (tag == .keg)
+        ctx.keg_path
+    else
+        std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ ctx.keg_path, @tagName(tag) }) catch return null;
+    return std.fs.path.join(ctx.allocator, &.{ root, path }) catch null;
+}
+
+/// The formula's own helper: upstream's most common step, and the only one
+/// whose argv the formula supplies wholesale. It goes through the same argv
+/// lint and sandbox fence as every other spawn, with no extra grants.
+fn stepRun(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    for (run_unsupported_keys) |key| {
+        if (obj.get(key) != null) {
+            logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "run with {s}", .{key}) catch key);
+            return false;
+        }
+    }
+    // Only an explicit `false` — the compacted default — is a request malt can
+    // satisfy; malt never escalates.
+    if (obj.get("sudo")) |v| {
+        if (v != .bool or v.bool) {
+            logUnsupported(ctx, "run with sudo");
+            return false;
+        }
+    }
+    switch (evalGuards(ctx, obj)) {
+        .met => {},
+        .unmet => return true,
+        .unsupported => {
+            logUnsupported(ctx, "run with an unevaluable guard");
+            return false;
+        },
+    }
+
+    const cmd = resolveCommandPath(ctx, obj) orelse return false;
+    var argv: std.ArrayList([]const u8) = .empty;
+    argv.append(ctx.allocator, cmd) catch return false;
+    if (obj.get("args")) |args_val| {
+        if (args_val != .array) {
+            logUnsupported(ctx, "run with non-array args");
+            return false;
+        }
+        for (args_val.array.items) |item| {
+            const raw = switch (item) {
+                .string => |s| s,
+                else => {
+                    logUnsupported(ctx, "run with a non-string argument");
+                    return false;
+                },
+            };
+            const arg = expandTemplates(ctx, raw) catch return false;
+            argv.append(ctx.allocator, arg) catch return false;
+        }
+    }
+    // Lint before probing, so a traversal out of the keg reports as the
+    // confinement violation it is rather than as a missing file.
+    sandbox.validateArgv(argv.items, ctx.keg_path, ctx.prefix) catch {
+        logViolation(ctx, cmd);
+        return false;
+    };
+    if (!fileExists(ctx.io, cmd)) {
+        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} not found", .{cmd}) catch cmd);
+        return false;
+    }
+    return spawnFenced(ctx, argv.items, null, std.fs.path.basename(cmd), .{});
 }
 
 // --- data-dir initialisers ---------------------------------------------------
@@ -1906,11 +2031,215 @@ test "supportedStepType matches the executable tier and rejects the rest" {
         "mkdir_p",                  "touch",                 "write",                     "symlink",
         "link_dir",                 "link_children",         "compile_gsettings_schemas", "gio_querymodules",
         "gdk_pixbuf_query_loaders", "gtk_update_icon_cache", "update_mime_database",      "update_desktop_database",
-        "init_data_dir",            "remove",                "inreplace",
+        "init_data_dir",            "remove",                "inreplace",                 "run",
     };
     for (native) |t| try testing.expect(supportedStepType(t));
     const routed = [_][]const u8{ "mkdir", "move", "move_children", "frobnicate" };
     for (routed) |t| try testing.expect(!supportedStepType(t));
+}
+
+/// Parse one step object out of its JSON literal, for the helpers that take an
+/// already-parsed step rather than a whole formula.
+fn parseStep(h: *TestHarness, json: []const u8) !std.json.ObjectMap {
+    const parsed = try std.json.parseFromSlice(std.json.Value, h.arena.allocator(), json, .{});
+    return parsed.value.object;
+}
+
+test "resolveCommandPath resolves a command base against the keg, not the prefix" {
+    // Upstream sends a command base through the Formula object, so `bin` here
+    // means `<keg>/bin` — the opposite of what the same token means as a path
+    // base. dbus (`bin/dbus-uuidgen`) and ca-certificates (`libexec/…`) would
+    // both reach the wrong file under prefix semantics.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const c = h.ctx();
+    const a = h.arena.allocator();
+
+    const cases = [_]struct { spec: []const u8, want: []const u8 }{
+        .{ .spec =
+        \\{"command":{"base":"bin","path":"dbus-uuidgen"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/bin/dbus-uuidgen", .{h.keg}) },
+        .{ .spec =
+        \\{"command":{"base":"libexec","path":"post-install"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/libexec/post-install", .{h.keg}) },
+        .{ .spec =
+        \\{"command":{"base":"sbin","path":"daemon"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/sbin/daemon", .{h.keg}) },
+        .{ .spec =
+        \\{"command":{"base":"lib","path":"helper"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/lib/helper", .{h.keg}) },
+        .{ .spec =
+        \\{"command":{"base":"prefix","path":"bin/tool"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/bin/tool", .{h.keg}) },
+        // glib-networking ships a base-less absolute command carrying a token.
+        .{ .spec =
+        \\{"command":{"path":"{{HOMEBREW_PREFIX}}/opt/glib/bin/gio-querymodules"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/opt/glib/bin/gio-querymodules", .{h.prefix}) },
+    };
+    for (cases) |case| {
+        const got = resolveCommandPath(c, try parseStep(&h, case.spec)) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.want, got);
+    }
+    try testing.expect(!h.flog.hasErrors());
+
+    // A bare name would resolve through the fence's PATH; an empty or unknown
+    // base has no keg-relative meaning. All three refuse loudly.
+    const refused = [_][]const u8{
+        \\{"command":{"path":"fc-cache"}}
+        ,
+        \\{"command":{"base":"libexec","path":""}}
+        ,
+        \\{"command":{"base":"home","path":"tool"}}
+        ,
+        \\{"command":{"base":"bin"}}
+        ,
+        \\{"args":["x"]}
+        ,
+    };
+    for (refused) |spec| {
+        try testing.expect(resolveCommandPath(c, try parseStep(&h, spec)) == null);
+    }
+    try testing.expectEqual(@as(usize, refused.len), h.flog.entries().len);
+    for (h.flog.entries()) |e| try testing.expectEqual(fallback_log.FallbackReason.unknown_method, e.reason);
+}
+
+test "run executes the formula's own helper with its arguments expanded" {
+    // The debug Io cannot spawn (no allocator for the child argv), so this is
+    // the one step tier that needs a real threaded Io.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.io = threaded.io();
+    const a = h.arena.allocator();
+
+    // A helper the keg "ships": a system tool whose effect is observable, so
+    // the assertion covers the resolved base and the expanded argument rather
+    // than just an exit code.
+    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, libexec);
+    try std.Io.Dir.symLinkAbsolute(h.io, "/bin/mkdir", try std.fmt.allocPrint(a, "{s}/post-install", .{libexec}), .{});
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"run","command":{"base":"libexec","path":"post-install"},
+        \\  "args":["-p","{{var}}/lib/dbus"]}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 1), h.flog.handled_top_level);
+
+    // The created directory proves the child saw an expanded argument.
+    try testing.expect(dirExists(h.io, try std.fmt.allocPrint(a, "{s}/var/lib/dbus", .{h.prefix})));
+}
+
+test "run refuses the execution fields malt does not honour" {
+    // Compaction drops defaults, so a key that survives into the JSON is one
+    // the formula meant. Running without honouring it would be a truncated
+    // command, so each refuses instead.
+    const refused = [_][]const u8{
+        \\[{"type":"run","command":{"base":"bin","path":"t"},"sudo":true}]
+        ,
+        \\[{"type":"run","command":{"base":"bin","path":"t"},"sudo":"yes"}]
+        ,
+        \\[{"type":"run","command":{"base":"bin","path":"t"},"env":{"LC_ALL":"C"}}]
+        ,
+        \\[{"type":"run","command":{"base":"bin","path":"t"},"chdir":"/tmp"}]
+        ,
+        \\[{"type":"run","command":{"base":"bin","path":"t"},"stdin_path":"/dev/null"}]
+        ,
+        \\[{"type":"run","command":{"base":"bin","path":"t"},"stdout_path":"/tmp/o"}]
+        ,
+        \\[{"type":"run","command":{"base":"bin","path":"t"},"writable_paths":["/tmp"]}]
+        ,
+        \\[{"type":"run","command":{"base":"bin","path":"t"},"args":"--all"}]
+        ,
+        \\[{"type":"run","command":{"base":"bin","path":"t"},"args":[7]}]
+        ,
+    };
+    for (refused) |steps_json| {
+        var h = try TestHarness.init();
+        defer h.deinit();
+        try testing.expect(execute(h.ctx(), try testFormulaJson(&h, steps_json)));
+        try testing.expect(h.flog.hasErrors());
+        try testing.expect(!h.flog.hasFatal());
+        try testing.expectEqual(@as(usize, 1), h.flog.entries().len);
+        try testing.expectEqual(fallback_log.FallbackReason.unknown_method, h.flog.entries()[0].reason);
+        try testing.expectEqual(@as(usize, 0), h.flog.handled_top_level);
+    }
+
+    // `sudo: false` is the default spelled out, not a refusal.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"run","command":{"base":"bin","path":"t"},"sudo":false}]
+    )));
+    try testing.expectEqual(fallback_log.FallbackReason.system_command_failed, h.flog.entries()[0].reason);
+}
+
+test "run refuses a guard it cannot evaluate rather than reading it as a skip" {
+    // `unless_exists` and platform guards ship on real formulas. Treating an
+    // unevaluable condition as "declined to run" would turn a missing feature
+    // into a silent no-op — the exact failure the loud envelope exists for.
+    const unevaluable = [_][]const u8{
+        \\[{"type":"run","command":{"base":"bin","path":"t"},
+        \\  "guards":[{"base":"var","path":"rpm/rpmdb.sqlite","condition":"unless_exists","id":"1"}]}]
+        ,
+        \\[{"type":"run","command":{"base":"bin","path":"t"},
+        \\  "guards":[{"condition":"on","value":"macos","id":"1"}]}]
+        ,
+        \\[{"type":"run","command":{"base":"bin","path":"t"},
+        \\  "guards":[{"condition":"if_exists","id":"1"}]}]
+        ,
+    };
+    for (unevaluable) |steps_json| {
+        var h = try TestHarness.init();
+        defer h.deinit();
+        try testing.expect(execute(h.ctx(), try testFormulaJson(&h, steps_json)));
+        try testing.expectEqual(@as(usize, 1), h.flog.entries().len);
+        try testing.expectEqual(fallback_log.FallbackReason.unknown_method, h.flog.entries()[0].reason);
+    }
+}
+
+test "run declines quietly when an if_exists guard is unmet" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    // The command does not exist either; an unmet guard must short-circuit
+    // before that would be reported.
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"run","command":{"base":"bin","path":"t"},
+        \\  "guards":[{"path":"{{etc}}/absent.conf","condition":"if_exists","id":"1"}]}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 1), h.flog.handled_top_level);
+}
+
+test "run cannot escape the keg through its command path" {
+    // The base is keg-relative, so traversal in the path is the only way out;
+    // the shared argv lint catches it before anything spawns.
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"run","command":{"base":"libexec","path":"../../../../../usr/bin/killall"}},
+        \\ {"type":"mkdir_p","path":{"base":"var","path":"unreached"}}]
+    )));
+    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, h.flog.entries()[0].reason);
+    // A violation is fatal, so the following step never ran.
+    try testing.expect(h.flog.hasFatal());
+    try testing.expect(!dirExists(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/var/unreached", .{h.prefix})));
+}
+
+test "run reports a command missing from the keg as a loud failure" {
+    // A helper the bottle should have shipped is a broken install, not an
+    // unsupported step — it must not read as "malt can't do this".
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"run","command":{"base":"libexec","path":"post-install"}}]
+    )));
+    try testing.expectEqual(@as(usize, 1), h.flog.entries().len);
+    try testing.expectEqual(fallback_log.FallbackReason.system_command_failed, h.flog.entries()[0].reason);
 }
 
 test "expandTemplates resolves the keg/prefix tokens that only existed as bases" {
@@ -1936,6 +2265,12 @@ test "expandTemplates resolves the keg/prefix tokens that only existed as bases"
     try testing.expectEqualStrings(
         try std.fmt.allocPrint(h.arena.allocator(), "{s}/share/glow", .{h.prefix}),
         try expandTemplates(c, "{{pkgshare}}"),
+    );
+    // dbus embeds `{{var}}` in a run argument; it resolved as a base but had
+    // no inline mapping, so the token reached the child verbatim.
+    try testing.expectEqualStrings(
+        try std.fmt.allocPrint(h.arena.allocator(), "{s}/var/lib/dbus", .{h.prefix}),
+        try expandTemplates(c, "{{var}}/lib/dbus"),
     );
     // `{{bin}}` must keep meaning the *keg's* bin: the template and base maps
     // disagree on that name on purpose, and merging them would repoint every
