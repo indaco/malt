@@ -1173,7 +1173,19 @@ pub fn formatSslCertDetail(present: bool) ?[]const u8 {
     return if (present)
         null
     else
-        "ca-certificates installed but cert.pem isn't linked";
+        "ca-certificates installed but openssl@3's cert.pem isn't linked";
+}
+
+/// Hand-fix for the "SSL CA bundle" row. `pub` so the render test can pin a
+/// command that actually succeeds: the target directory is created rather than
+/// assumed, and the source is the bundle `ca-certificates` builds — not the
+/// raw upstream store, which is only ever an input to it.
+pub fn formatSslCertRemedy(buf: []u8, prefix: []const u8) ?[]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "mkdir -p {s}/etc/openssl@3 && ln -sf {s}/etc/ca-certificates/cert.pem {s}/etc/openssl@3/cert.pem",
+        .{ prefix, prefix, prefix },
+    ) catch null;
 }
 
 /// Check gated on its precondition: `<prefix>/etc/openssl@3/cert.pem` is
@@ -1201,15 +1213,14 @@ fn checkSslCaBundle(ctx: CheckCtx, name: []const u8) CheckResult {
     const status: CheckStatus = if (present) .ok else .warn_status;
     printCheck(name, status, formatSslCertDetail(present));
     if (!present) {
-        // Verbose-only remediation: the keg is on disk, so relink the
-        // bundle by hand.
-        var manual_buf: [768]u8 = undefined;
-        const manual = std.fmt.bufPrint(
-            &manual_buf,
-            "ln -sf {s}/opt/ca-certificates/share/ca-certificates/cacert.pem {s}/etc/openssl@3/cert.pem",
-            .{ ctx.prefix, ctx.prefix },
-        ) catch "ln -sf <prefix>/opt/ca-certificates/share/ca-certificates/cacert.pem <prefix>/etc/openssl@3/cert.pem";
-        writeVerboseList(&.{manual});
+        // Verbose-only remediation. The link source is ca-certificates' own
+        // bundle: without it there is nothing to point at, and `ln` into the
+        // missing openssl@3 dir would just exit 1, so create it first.
+        var src_buf: [512]u8 = undefined;
+        const src = std.fmt.bufPrint(&src_buf, "{s}/etc/ca-certificates/cert.pem", .{ctx.prefix}) catch return status;
+        std.Io.Dir.cwd().access(ctx.io, src, .{}) catch return status;
+        var manual_buf: [1024]u8 = undefined;
+        writeVerboseList(&.{formatSslCertRemedy(&manual_buf, ctx.prefix) orelse return status});
     }
     return status;
 }
@@ -1547,6 +1558,25 @@ test "formatSslCertDetail: null when present, unlinked-bundle hint when absent" 
     // the actual fault (the bundle isn't linked) so a user can act on it.
     try testing.expect(std.mem.indexOf(u8, missing, "ca-certificates") != null);
     try testing.expect(std.mem.indexOf(u8, missing, "isn't linked") != null);
+    // The row probes openssl@3's cert.pem, so that is what it must name.
+    try testing.expect(std.mem.indexOf(u8, missing, "openssl@3") != null);
+}
+
+test "formatSslCertRemedy: a command that runs on the state the row fires in" {
+    var buf: [1024]u8 = undefined;
+    const remedy = formatSslCertRemedy(&buf, "/opt/malt") orelse return error.TestUnexpectedResult;
+    // The row fires when etc/openssl@3 may not exist, so a bare `ln -sf` into
+    // it would exit 1; and the link source is the built bundle, not the raw
+    // upstream store the helper consumes.
+    try testing.expectEqualStrings(
+        "mkdir -p /opt/malt/etc/openssl@3 && ln -sf /opt/malt/etc/ca-certificates/cert.pem /opt/malt/etc/openssl@3/cert.pem",
+        remedy,
+    );
+
+    // A buffer too small for the command yields nothing rather than a
+    // truncated one the user would paste.
+    var tiny: [8]u8 = undefined;
+    try testing.expect(formatSslCertRemedy(&tiny, "/opt/malt") == null);
 }
 
 test "emitFixHintIfNeeded: silent without arming" {
