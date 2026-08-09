@@ -6,6 +6,7 @@ const std = @import("std");
 const mount_c = @import("c_mount");
 
 const AppCtx = @import("../app_ctx.zig").AppCtx;
+const cellar = @import("../core/cellar.zig");
 const patch = @import("../core/patch.zig");
 const perms_mod = @import("../core/perms.zig");
 const lock_mod = @import("../db/lock.zig");
@@ -124,6 +125,7 @@ pub const checks = [_]Check{
     .{ .name = "Missing kegs", .run = checkMissingKegs },
     .{ .name = "Broken symlinks", .run = checkBrokenSymlinks },
     .{ .name = "Mach-O placeholders", .run = checkMachOPlaceholders },
+    .{ .name = "Relocated prefix paths", .run = checkUnrelocatedPrefix },
     .{ .name = "Disk space", .run = checkDiskSpace },
     .{ .name = "Local formula sources", .run = checkLocalSources },
     .{ .name = "Dependency bin/sbin link census", .run = checkIsolationLeaks },
@@ -1049,55 +1051,61 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
     return .warn_status;
 }
 
-fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
-    var cellar_root_buf: [512]u8 = undefined;
-    const cellar_root = std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{ctx.prefix}) catch {
-        printCheck(name, .ok, null);
-        return .ok;
-    };
+/// Per-file test a Cellar scan applies. Returning false on any I/O or parse
+/// error keeps every scan best-effort, matching the checks that use them.
+const KegFilePredicate = *const fn (ctx: CheckCtx, base_dir: *std.Io.Dir, rel_path: []const u8) bool;
 
-    var cellar_dir = std.Io.Dir.openDirAbsolute(ctx.io, cellar_root, .{ .iterate = true }) catch {
-        // No Cellar yet — nothing to scan.
-        printCheck(name, .ok, null);
-        return .ok;
-    };
+const KegGroups = std.StringArrayHashMapUnmanaged(void);
+
+/// Walk the Cellar and collect a `<package> <version>` key per keg holding at
+/// least one file that matches `predicate`. Grouping is the point: one keg can
+/// bundle hundreds of offending files (Python site-packages, LLVM tools), and
+/// the user acts on the package, not the file. Null means the Cellar could not
+/// be walked — distinct from "walked, found nothing". Caller owns the keys.
+fn collectOffendingKegs(ctx: CheckCtx, predicate: KegFilePredicate) ?KegGroups {
+    var cellar_root_buf: [512]u8 = undefined;
+    const cellar_root = std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{ctx.prefix}) catch return null;
+
+    // No Cellar yet — nothing to scan, which is a clean result, not a failure.
+    var cellar_dir = std.Io.Dir.openDirAbsolute(ctx.io, cellar_root, .{ .iterate = true }) catch return .empty;
     defer cellar_dir.close(ctx.io);
 
-    var walker = cellar_dir.walk(ctx.allocator) catch {
+    var walker = cellar_dir.walk(ctx.allocator) catch return null;
+    defer walker.deinit();
+
+    var groups: KegGroups = .empty;
+    while (walker.next(ctx.io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!predicate(ctx, &cellar_dir, entry.path)) continue;
+        // Best-effort: an allocator failure drops this entry rather than
+        // faking a clean result — the headline reads `groups.count()`, which
+        // only grows when the key actually lands.
+        const key = caskCellarKegKey(ctx.allocator, entry.path) orelse continue;
+        const gop = groups.getOrPut(ctx.allocator, key) catch {
+            ctx.allocator.free(key);
+            continue;
+        };
+        if (gop.found_existing) ctx.allocator.free(key);
+    }
+    return groups;
+}
+
+fn freeKegGroups(ctx: CheckCtx, groups: *KegGroups) void {
+    var it = groups.iterator();
+    while (it.next()) |kv| ctx.allocator.free(kv.key_ptr.*);
+    groups.deinit(ctx.allocator);
+}
+
+fn placeholderPredicate(ctx: CheckCtx, base_dir: *std.Io.Dir, rel_path: []const u8) bool {
+    return hasUnpatchedPlaceholder(ctx.io, ctx.allocator, base_dir, rel_path) catch false;
+}
+
+fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
+    var groups = collectOffendingKegs(ctx, placeholderPredicate) orelse {
         printCheck(name, .warn_status, "Could not walk Cellar tree");
         return .warn_status;
     };
-    defer walker.deinit();
-
-    // Group by `<package> <version>` so the headline reports the
-    // reinstall target — the user reinstalls the keg, not the file.
-    // A single keg can bundle hundreds of placeholder-bearing files
-    // (Python site-packages inside a meta-package, LLVM tools);
-    // counting files there inflates the number without adding
-    // actionable information.
-    var groups: std.StringArrayHashMapUnmanaged(void) = .empty;
-    defer {
-        var it = groups.iterator();
-        while (it.next()) |kv| ctx.allocator.free(kv.key_ptr.*);
-        groups.deinit(ctx.allocator);
-    }
-
-    while (walker.next(ctx.io) catch null) |entry| {
-        if (entry.kind != .file) continue;
-        if (hasUnpatchedPlaceholder(ctx.io, ctx.allocator, &cellar_dir, entry.path) catch false) {
-            // Grouping is best-effort: an allocator failure here
-            // drops the group entry, never silently triggers an
-            // .ok outcome — the headline is still right because
-            // it's derived from `groups.count()` which only grows
-            // when the entry actually lands.
-            const key = caskCellarKegKey(ctx.allocator, entry.path) orelse continue;
-            const gop = groups.getOrPut(ctx.allocator, key) catch {
-                ctx.allocator.free(key);
-                continue;
-            };
-            if (gop.found_existing) ctx.allocator.free(key);
-        }
-    }
+    defer freeKegGroups(ctx, &groups);
 
     if (groups.count() == 0) {
         printCheck(name, .ok, null);
@@ -1135,6 +1143,53 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
         writeVerboseList(lines.items);
     }
     return .err_status;
+}
+
+/// Relocation's own verdict — see `cellar.unrelocated_marker`. Scanning the
+/// kegs instead cannot work: a surviving `Cellar/<self>/share/…` is
+/// load-bearing in one bottle and inert build provenance in the next.
+fn unrelocatedMarkerPredicate(_: CheckCtx, _: *std.Io.Dir, rel_path: []const u8) bool {
+    // Anchored at `<name>/<version>/` so a package shipping a file of the
+    // same name deeper in its tree cannot fake the verdict.
+    var it = std.mem.splitScalar(u8, rel_path, '/');
+    _ = it.next() orelse return false;
+    _ = it.next() orelse return false;
+    const leaf = it.next() orelse return false;
+    if (it.next() != null) return false;
+    return std.mem.eql(u8, leaf, cellar.unrelocated_marker);
+}
+
+/// Kegs relocation could not fully rewrite, because the malt prefix is longer
+/// than the prefix baked into their bottle.
+fn checkUnrelocatedPrefix(ctx: CheckCtx, name: []const u8) CheckResult {
+    var groups = collectOffendingKegs(ctx, unrelocatedMarkerPredicate) orelse {
+        printCheck(name, .warn_status, "Could not walk Cellar tree");
+        return .warn_status;
+    };
+    defer freeKegGroups(ctx, &groups);
+
+    if (groups.count() == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+
+    var msg_buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "{d} package(s) still reference the build prefix — this prefix ({d} bytes) is too long for relocation to rewrite their embedded paths. Reinstall under a shorter prefix.",
+        .{ groups.count(), ctx.prefix.len },
+    ) catch "Packages still reference the build prefix; reinstall under a shorter prefix.";
+    printCheck(name, .warn_status, msg);
+    armVerboseHint();
+
+    if (output.isVerbose()) {
+        var lines: std.ArrayList([]const u8) = .empty;
+        defer lines.deinit(ctx.allocator);
+        var it = groups.iterator();
+        while (it.next()) |kv| lines.append(ctx.allocator, kv.key_ptr.*) catch continue;
+        writeVerboseList(lines.items);
+    }
+    return .warn_status;
 }
 
 fn checkDiskSpace(ctx: CheckCtx, name: []const u8) CheckResult {
@@ -1533,6 +1588,7 @@ test "findingId: slugifies a title into a stable lowercase id" {
         .{ .title = "Stale lock", .id = "stale_lock" },
         .{ .title = "Orphaned store entries", .id = "orphaned_store_entries" },
         .{ .title = "Mach-O placeholders", .id = "mach_o_placeholders" },
+        .{ .title = "Relocated prefix paths", .id = "relocated_prefix_paths" },
         .{ .title = "Dependency bin/sbin link census", .id = "dependency_bin_sbin_link_census" },
         .{ .title = "Prefix on PATH", .id = "prefix_on_path" },
     };
@@ -1577,6 +1633,19 @@ test "formatSslCertRemedy: a command that runs on the state the row fires in" {
     // truncated one the user would paste.
     var tiny: [8]u8 = undefined;
     try testing.expect(formatSslCertRemedy(&tiny, "/opt/malt") == null);
+}
+
+test "unrelocatedMarkerPredicate: matches the sidecar, not a keg's own files" {
+    const ctx: CheckCtx = undefined;
+    var dir: std.Io.Dir = undefined;
+
+    // The walk is Cellar-relative, so the predicate sees a nested path.
+    try testing.expect(unrelocatedMarkerPredicate(ctx, &dir, "fontconfig/2.18.3/" ++ cellar.unrelocated_marker));
+    try testing.expect(!unrelocatedMarkerPredicate(ctx, &dir, "fontconfig/2.18.3/bin/fc-cache"));
+    // A package shipping a similarly-named file must not be reported, at the
+    // keg root or anywhere below it.
+    try testing.expect(!unrelocatedMarkerPredicate(ctx, &dir, "x/1.0/.malt-unrelocated.bak"));
+    try testing.expect(!unrelocatedMarkerPredicate(ctx, &dir, "x/1.0/share/" ++ cellar.unrelocated_marker));
 }
 
 test "emitFixHintIfNeeded: silent without arming" {
@@ -1785,6 +1854,19 @@ test "checks table includes the mirror-overrides row" {
         }
     }
     try testing.expect(found);
+}
+
+test "checks table and json id list both carry the relocated-prefix row" {
+    // The row is the only signal a long prefix left packages reading from the
+    // build prefix; a table shuffle that drops either half hides it silently.
+    var in_checks = false;
+    for (checks) |c| {
+        if (std.mem.eql(u8, c.name, "Relocated prefix paths")) in_checks = true;
+    }
+    try testing.expect(in_checks);
+    const id = try findingId(testing.allocator, "Relocated prefix paths");
+    defer testing.allocator.free(id);
+    try testing.expectEqualStrings("relocated_prefix_paths", id);
 }
 
 test "pathContainsDir: matches a complete entry, ignores trailing slashes" {

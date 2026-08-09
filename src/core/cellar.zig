@@ -254,6 +254,7 @@ fn walkMachOAndPatch(
     dir_path: []const u8,
     replacements: []const patch.Replacement,
     modified_out: *std.ArrayList([]const u8),
+    unrelocatable_out: *u32,
 ) CellarError!void {
     var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
     defer dir.close(io);
@@ -288,6 +289,8 @@ fn walkMachOAndPatch(
         var outcome = patch.patchPathsCollecting(io, allocator, full_path, replacements) catch
             continue;
         defer outcome.deinit(allocator);
+
+        unrelocatable_out.* += outcome.unrelocatable_count;
 
         if (outcome.overflow.len > 0) {
             patch.flushOverflow(io, allocator, full_path, outcome.overflow) catch |e| switch (e) {
@@ -382,6 +385,21 @@ pub fn cellarLinksPath(io: std.Io, allocator: std.mem.Allocator, cellar_path: []
 /// of whether it came from the store or a sibling brew install.
 /// `extra_replacement` is one caller-resolved substitution applied after the
 /// prefix-derived ones, for tokens this module cannot derive on its own.
+/// Count of embedded paths relocation could not rewrite. Recorded rather than
+/// re-derived later: whether a bottle was eligible for the absolute rewrite at
+/// all is decided here and nowhere else. Lives in the keg so it dies with it.
+pub const unrelocated_marker = ".malt-unrelocated";
+
+fn writeUnrelocatedMarker(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8, count: u32) void {
+    const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ cellar_path, unrelocated_marker }) catch return;
+    defer allocator.free(path);
+    const body = std.fmt.allocPrint(allocator, "{d}\n", .{count}) catch return;
+    defer allocator.free(body);
+    // Best-effort: the warning already fired, so a failed write costs the
+    // doctor row, not the install.
+    atomic.atomicWriteFile(io, path, body) catch {};
+}
+
 fn relocateKegTree(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -422,18 +440,33 @@ fn relocateKegTree(
         modified_macho_paths.deinit(allocator);
     }
 
+    var unrelocatable: u32 = 0;
     walkMachOAndPatch(
         io,
         allocator,
         cellar_path,
         macho_reps_buf[0..macho_reps_len],
         &modified_macho_paths,
+        &unrelocatable,
     ) catch |e| switch (e) {
         CellarError.PathTooLong => return CellarError.PathTooLong,
         CellarError.InsufficientHeaderPad => return CellarError.InsufficientHeaderPad,
         CellarError.InstallNameToolMissing => return CellarError.InstallNameToolMissing,
         else => return CellarError.PatchFailed,
     };
+
+    // An embedded string can only shrink in place, so a prefix longer than
+    // the bottled one leaves live references to the build prefix behind. The
+    // package then reads config from a directory malt does not own and fails
+    // in ways that look unrelated to the prefix — say so, and record it so
+    // doctor can still report the keg once this line has scrolled away.
+    if (unrelocatable > 0) {
+        std.log.warn(
+            "{s}: {d} embedded path(s) still point at the build prefix — the malt prefix ({d} bytes) is longer than the one baked into the bottle; a shorter prefix relocates them",
+            .{ cellar_path, unrelocatable, new_prefix.len },
+        );
+        writeUnrelocatedMarker(io, allocator, cellar_path, unrelocatable);
+    }
 
     // Last on purpose: `patchTextFiles` runs sequential passes, so appending
     // keeps the substituted path out of the prefix rewrites above.

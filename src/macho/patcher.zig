@@ -41,6 +41,13 @@ pub const OverflowEntry = struct {
 pub const PatchOutcome = struct {
     patched_count: u32,
     skipped_count: u32,
+    /// `__cstring` slots that carry a prefix relocation was meant to
+    /// rewrite but could not, because the new prefix is longer than the
+    /// bottled one. Distinct from `skipped_count`, which also counts load
+    /// commands that simply matched no replacement — the common case.
+    /// A non-zero value means the keg keeps live references to the build
+    /// prefix, so the caller must say so rather than record a clean install.
+    unrelocatable_count: u32,
     /// Slots that exceeded their cmd slot. Empty for the fast path.
     overflow: []OverflowEntry,
 
@@ -194,10 +201,12 @@ pub fn patchPathsCollecting(
         patched += 1;
     }
 
+    var unrelocatable: u32 = 0;
     for (macho.cstrings) |region| {
         const counts = patchCstringRegion(data, region, replacements);
         patched += counts.patched;
         skipped += counts.skipped;
+        unrelocatable += counts.skipped;
     }
 
     if (patched > 0) {
@@ -207,6 +216,7 @@ pub fn patchPathsCollecting(
     return .{
         .patched_count = patched,
         .skipped_count = skipped,
+        .unrelocatable_count = unrelocatable,
         .overflow = overflow.toOwnedSlice(allocator) catch return PatchError.OutOfMemory,
     };
 }

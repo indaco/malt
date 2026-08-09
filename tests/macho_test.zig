@@ -478,6 +478,76 @@ test "parse a Mach-O 64 with __TEXT,__cstring captures the section region" {
     try testing.expectEqual(@as(usize, blob.len), m.cstrings[0].size);
 }
 
+/// Write a one-`__cstring`-section Mach-O carrying `blob` and patch it.
+/// Returns the outcome so a caller can assert on the relocation verdict.
+fn patchCstringFixture(
+    io: std.Io,
+    scratch: *Scratch,
+    blob: []const u8,
+    replacements: []const patcher.Replacement,
+) !patcher.PatchOutcome {
+    const cstring_offset = @sizeOf(macho.mach_header_64) + @sizeOf(macho.segment_command_64) + @sizeOf(macho.section_64);
+    var sect: macho.section_64 = .{
+        .sectname = [_]u8{0} ** 16,
+        .segname = [_]u8{0} ** 16,
+        .offset = @intCast(cstring_offset),
+        .size = blob.len,
+        .flags = macho.S_CSTRING_LITERALS,
+    };
+    @memcpy(sect.sectname[0.."__cstring".len], "__cstring");
+    @memcpy(sect.segname[0.."__TEXT".len], "__TEXT");
+
+    const buf = try buildSegmentFixture(testing.allocator, &.{sect}, blob);
+    defer testing.allocator.free(buf);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/fixture.bin", .{scratch.path});
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, buf);
+    }
+    return patcher.patchPathsCollecting(io, testing.allocator, path, replacements);
+}
+
+test "an embedded path relocation cannot grow into is counted, not silently kept" {
+    // The count is the only signal that a keg still points at the build
+    // prefix: the slot is left byte-identical, so nothing downstream can
+    // tell the difference by looking at the file.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var scratch = try Scratch.init("cstring_unrelocatable");
+    defer scratch.deinit();
+
+    const blob = "/opt/homebrew/etc/fonts\x00";
+
+    // Longer replacement: cannot fit the fixed slot.
+    var grew = try patchCstringFixture(io, &scratch, blob, &.{
+        .{ .old = "/opt/homebrew", .new = "/tmp/a-much-longer-prefix" },
+    });
+    defer grew.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 1), grew.unrelocatable_count);
+    try testing.expectEqual(@as(u32, 0), grew.patched_count);
+
+    // Shorter replacement: fits, so nothing is left pointing at the build prefix.
+    var shrank = try patchCstringFixture(io, &scratch, blob, &.{
+        .{ .old = "/opt/homebrew", .new = "/opt/malt" },
+    });
+    defer shrank.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0), shrank.unrelocatable_count);
+    try testing.expectEqual(@as(u32, 1), shrank.patched_count);
+
+    // A slot naming no configured prefix is untouched, not a near miss —
+    // otherwise every unrelated string would read as damage.
+    var absent = try patchCstringFixture(io, &scratch, "/usr/share/zoneinfo\x00", &.{
+        .{ .old = "/opt/homebrew", .new = "/tmp/a-much-longer-prefix" },
+    });
+    defer absent.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0), absent.unrelocatable_count);
+}
+
 test "parse a Mach-O 64 ignores non-cstring sections in the same segment" {
     const blob = "anything\x00";
     const cstring_offset = @sizeOf(macho.mach_header_64) + @sizeOf(macho.segment_command_64) + 2 * @sizeOf(macho.section_64);
