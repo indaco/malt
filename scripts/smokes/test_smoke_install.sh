@@ -4,7 +4,8 @@
 # End-to-end smoke test for `mt install`. Runs an isolated install of the
 # three packages that P1 regressed (zig, curl, rust), each of which ships as
 # a `:any` Homebrew bottle carrying `@@HOMEBREW_PREFIX@@` / `@@HOMEBREW_CELLAR@@`
-# placeholder tokens in their Mach-O load commands.
+# placeholder tokens in their Mach-O load commands, plus exiftool, whose
+# placeholder is in a perl shebang rather than a load command.
 #
 # The script is a smoke test for the WHOLE install pipeline — download,
 # materialize, patch, link, codesign, record — not a unit test for any one
@@ -33,7 +34,10 @@ set -euo pipefail
 # The script is written for macOS /bin/bash (3.2), which has no associative
 # arrays — `expected_bin_for` is a case-based lookup instead.
 MT_BIN="${MT_BIN:-./zig-out/bin/malt}"
-PACKAGES=(zig curl rust)
+# exiftool earns its place by being a perl script, not a Mach-O binary: its
+# shebang is a relocation placeholder, so it is the one package here that fails
+# to launch if the text substitution set regresses.
+PACKAGES=(zig curl rust exiftool)
 
 # For each package, echo a glob pattern that resolves to the canonical binary
 # after install. curl is keg-only so it lives under Cellar/ rather than bin/.
@@ -42,6 +46,7 @@ expected_bin_for() {
   zig) echo "$PREFIX/bin/zig" ;;
   rust) echo "$PREFIX/bin/rustc" ;;
   curl) echo "$PREFIX/Cellar/curl/*/bin/curl" ;;
+  exiftool) echo "$PREFIX/bin/exiftool" ;;
   *) return 1 ;;
   esac
 }
@@ -52,6 +57,7 @@ version_args_for() {
   zig) printf 'version' ;;
   rust) printf '%s' '--version' ;;
   curl) printf '%s' '--version' ;;
+  exiftool) printf '%s' '-ver' ;;
   *) return 1 ;;
   esac
 }
@@ -116,7 +122,9 @@ log "cache:  $CACHE"
 # /opt/malt or the user's real prefix. Invoked indirectly via `trap` below.
 # shellcheck disable=SC2329
 cleanup() {
-  if [ -n "${PREFIX:-}" ] && [[ "$PREFIX" == /tmp/mt.* ]]; then
+  # Prefix-shaped, not exact-width: the template has changed once already, and
+  # a stale pattern here fails silently by leaking the tree instead of erroring.
+  if [ -n "${PREFIX:-}" ] && [[ "$PREFIX" == /tmp/mt* ]]; then
     rm -rf "$PREFIX"
   fi
   if [ -n "${CACHE:-}" ] && [[ "$CACHE" == /tmp/mc.* ]]; then
