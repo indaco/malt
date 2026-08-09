@@ -159,6 +159,9 @@ pub fn dependencyPlaceholder(
                 std.mem.startsWith(u8, dep, entry.dep) and
                 dep[entry.dep.len] == '@';
             if (!std.mem.eql(u8, dep, entry.dep) and !pinned) continue;
+            // Same screen as `perlPlaceholder`: the name becomes a directory
+            // component, and withholding beats baking one that hops out of it.
+            if (!path_component.isPathComponent(dep)) return null;
 
             const value = std.fmt.bufPrint(
                 buf,
@@ -215,10 +218,12 @@ pub fn perlPlaceholder(
         break :blk null;
     };
 
-    if (brewed) |dep| {
-        if (std.fmt.bufPrint(buf, "{s}/opt/{s}/bin/perl", .{ prefix, dep })) |value| {
-            return .{ .token = perl_token, .value = value };
-        } else |_| {}
+    // The name lands as a directory component in the baked path, so it is
+    // screened like every other tap-controlled string that reaches disk.
+    if (brewed) |dep| brewed_keg: {
+        if (!path_component.isPathComponent(dep)) break :brewed_keg;
+        const value = std.fmt.bufPrint(buf, "{s}/opt/{s}/bin/perl", .{ prefix, dep }) catch break :brewed_keg;
+        return .{ .token = perl_token, .value = value };
     }
     return .{ .token = perl_token, .value = systemPerlPath(macosMajorVersion()) };
 }
@@ -1100,6 +1105,22 @@ test "perlPlaceholder falls back to the system interpreter" {
     const deps = [_][]const u8{ "cmake", "zstd" };
     const got = perlPlaceholder(&buf, "/opt/malt", "exiftool", &deps);
     try testing.expect(std.mem.startsWith(u8, got.value, "/usr/bin/perl"));
+}
+
+test "perlPlaceholder refuses a dependency name that hops out of its directory" {
+    // The name is interpolated as a path component. A bottle's own .rb is the
+    // source, so this is malformed input rather than an attack — but baking
+    // the traversal would put an arbitrary path in a shebang.
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{"perl@../../../evil"};
+    const got = perlPlaceholder(&buf, "/opt/malt", "pkg", &deps);
+    try testing.expect(std.mem.startsWith(u8, got.value, "/usr/bin/perl"));
+}
+
+test "dependencyPlaceholder withholds a dependency name that hops out of its directory" {
+    var buf: [256]u8 = undefined;
+    const deps = [_][]const u8{"openjdk@../../.."};
+    try testing.expect(dependencyPlaceholder(&buf, "/opt/malt", &deps) == null);
 }
 
 test "perlPlaceholder ignores a dependency that merely starts with perl" {

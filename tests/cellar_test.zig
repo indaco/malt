@@ -447,6 +447,64 @@ test "relocation substitutes the perl shebang placeholder" {
     try testing.expectEqual(@as(std.posix.mode_t, 0o555), st.permissions.toMode() & 0o7777);
 }
 
+test "relocation substitutes the repository and library placeholders" {
+    // Both resolve to the prefix rather than a checkout malt does not have.
+    // Shipping either literally is the same defect class as the perl token:
+    // a real bottle carried the library one into a generated Makefile.
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+
+    try setupMaltDirs(testing.allocator, prefix);
+
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/repo123/pkg/1.0/lib", .{prefix});
+    defer testing.allocator.free(keg_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
+
+    const mk_path = try std.fmt.allocPrint(testing.allocator, "{s}/Makefile", .{keg_dir});
+    defer testing.allocator.free(mk_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, mk_path, .{});
+        try f.writeStreamingAll(
+            std.Options.debug_io,
+            "REPO=@@HOMEBREW_REPOSITORY@@\nLIB=@@HOMEBREW_LIBRARY@@\n",
+        );
+        f.close(std.Options.debug_io);
+    }
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        "repo123",
+        "pkg",
+        "1.0",
+        ":any",
+        null,
+    );
+    defer testing.allocator.free(keg.path);
+
+    var out_buf: [512]u8 = undefined;
+    const out_path = try std.fmt.bufPrint(&out_buf, "{s}/lib/Makefile", .{keg.path});
+    const content = try readFile(testing.allocator, out_path);
+    defer testing.allocator.free(content);
+
+    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_") == null);
+
+    var want_buf: [512]u8 = undefined;
+    const want_repo = try std.fmt.bufPrint(&want_buf, "REPO={s}\n", .{prefix});
+    try testing.expect(std.mem.indexOf(u8, content, want_repo) != null);
+
+    var lib_buf: [512]u8 = undefined;
+    const want_lib = try std.fmt.bufPrint(&lib_buf, "LIB={s}/Library\n", .{prefix});
+    try testing.expect(std.mem.indexOf(u8, content, want_lib) != null);
+}
+
 test "relocation falls back to the system perl when no perl is brewed" {
     // Most perl-shipping bottles declare `uses_from_macos "perl"`, which is
     // not a keg — withholding a value here would leave the token on disk.
