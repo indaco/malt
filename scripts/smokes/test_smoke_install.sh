@@ -102,9 +102,12 @@ if [ ! -x "$MT_BIN" ]; then
   exit 2
 fi
 
-# Short prefix (≤ 13 bytes is the Mach-O patch budget). mktemp -d /tmp/mt.XXX
-# gives us /tmp/mt.aBc, 11 bytes, with enough entropy for parallel runs.
-PREFIX=$(mktemp -d /tmp/mt.XXX)
+# The Mach-O patch budget is the SHORTEST path relocation rewrites, not the
+# longest: an embedded string can only shrink in place, and `/usr/local` is 10
+# bytes. An 11-byte prefix makes that pair grow, so every slot carrying it is
+# left pointing at the build prefix and doctor reports the keg. mktemp -d
+# /tmp/mtXXX gives /tmp/mtaBc — 10 bytes, still enough entropy for parallel runs.
+PREFIX=$(mktemp -d /tmp/mtXXX)
 CACHE=$(mktemp -d /tmp/mc.XXX)
 log "prefix: $PREFIX (${#PREFIX} bytes)"
 log "cache:  $CACHE"
