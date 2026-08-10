@@ -4,6 +4,125 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.23.0 - 2026-08-10
+
+### Highlights
+
+v0.23.0 widens the set of packages malt installs end to end, makes a warm run nearly free, and puts Ctrl-C in charge of any command.
+
+- **More packages install complete.** Formulas run the post-install step they declare, so `ca-certificates` and `fontconfig` land ready to use; perl-based packages like `exiftool` are runnable straight after install; and `.tar.xz` casks - every Nerd Font among them - install natively.
+- **Nothing to do costs nothing.** A `bundle install` where nothing changed does no network work at all, and relinking a large keg is ~3x faster.
+- **Ctrl-C stops any command.** Slow commands stop on the first press rather than finishing a walk you no longer want, and a second press always kills.
+- **A tighter trust path.** Cleartext download urls are refused, and self-update no longer trusts a signature verifier picked up from a directory packages can write to.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🚀 Enhancements
+
+- **macho:** patch universal binaries in 64-bit fat containers ([8219c0e2](https://github.com/indaco/malt/commit/8219c0e2)) ([#828](https://github.com/indaco/malt/pull/828))
+
+### 🩹 Fixes
+
+- **post-install:** honour the conditions and fields formulas declare ([e8681e99](https://github.com/indaco/malt/commit/e8681e99)) ([#832](https://github.com/indaco/malt/pull/832))
+- **post-install:** finish the install for formulas that clean up and glob ([d816caef](https://github.com/indaco/malt/commit/d816caef)) ([#831](https://github.com/indaco/malt/pull/831))
+- **security:** close the cleartext and verifier-shim gaps on the trust path ([51b955a0](https://github.com/indaco/malt/commit/51b955a0)) ([#826](https://github.com/indaco/malt/pull/826))
+- **install:** stop re-fetching metadata for packages already installed ([d3a5c871](https://github.com/indaco/malt/commit/d3a5c871)) ([#825](https://github.com/indaco/malt/pull/825))
+- **cli:** make Ctrl-C actually stop malt ([c1ed701e](https://github.com/indaco/malt/commit/c1ed701e)) ([#822](https://github.com/indaco/malt/pull/822))
+- **relocation:** make perl-based packages runnable after install ([dec3d5ac](https://github.com/indaco/malt/commit/dec3d5ac)) ([#819](https://github.com/indaco/malt/pull/819))
+- **build:** make the fast test target actually run every test ([3fd0cdad](https://github.com/indaco/malt/commit/3fd0cdad)) ([#818](https://github.com/indaco/malt/pull/818))
+- **relocation:** report kegs left behind when relocation logic changes ([88331287](https://github.com/indaco/malt/commit/88331287)) ([#817](https://github.com/indaco/malt/pull/817))
+- **relocation:** report the paths a long prefix leaves pointing at the build prefix ([8b931c7b](https://github.com/indaco/malt/commit/8b931c7b)) ([#816](https://github.com/indaco/malt/pull/816))
+- **cask:** install the .tar.xz casks malt was turning away ([c94ec734](https://github.com/indaco/malt/commit/c94ec734)) ([#815](https://github.com/indaco/malt/pull/815))
+- **post-install:** run the commands formulas declare in post-install steps ([a4ab5d7d](https://github.com/indaco/malt/commit/a4ab5d7d)) ([#814](https://github.com/indaco/malt/pull/814))
+- **services:** resolve the service name once per operation, not per lookup ([384296fd](https://github.com/indaco/malt/commit/384296fd)) ([#811](https://github.com/indaco/malt/pull/811))
+- **services:** create working_dir and accept a keg name ([870003b8](https://github.com/indaco/malt/commit/870003b8))
+- **post-install:** fail loudly instead of hanging when the output filter cannot start ([5a50b1a9](https://github.com/indaco/malt/commit/5a50b1a9)) ([#810](https://github.com/indaco/malt/pull/810))
+- **post-install:** sanitize child output on the native interpreter path ([66b1d064](https://github.com/indaco/malt/commit/66b1d064)) ([#793](https://github.com/indaco/malt/pull/793))
+- **post-install:** confine the copy step's source to the keg and prefix ([4306a9e0](https://github.com/indaco/malt/commit/4306a9e0)) ([#809](https://github.com/indaco/malt/pull/809))
+- **post-install:** add the copy step and expand keg/prefix tokens inline ([c9fb5eee](https://github.com/indaco/malt/commit/c9fb5eee)) ([#803](https://github.com/indaco/malt/pull/803))
+- **security:** refuse an undeclared cask digest and a symlinked link target ([9b126e94](https://github.com/indaco/malt/commit/9b126e94)) ([#807](https://github.com/indaco/malt/pull/807))
+- **security:** close tap-controlled path and sandbox escapes ([f03c3ca7](https://github.com/indaco/malt/commit/f03c3ca7))
+- **archive:** refuse entries written through an archive's own symlink ([1141bd54](https://github.com/indaco/malt/commit/1141bd54))
+- **post-install:** close declarative post-install step gaps ([9751540f](https://github.com/indaco/malt/commit/9751540f)) ([#787](https://github.com/indaco/malt/pull/787))
+- **install:** resolve dependency-scoped bottle placeholders ([95b51906](https://github.com/indaco/malt/commit/95b51906)) ([#786](https://github.com/indaco/malt/pull/786))
+- **ui:** gate 256-index custom themes on terminal depth ([07d163a3](https://github.com/indaco/malt/commit/07d163a3)) ([#785](https://github.com/indaco/malt/pull/785))
+- **ui:** decide colour per output stream ([7b56595d](https://github.com/indaco/malt/commit/7b56595d)) ([#784](https://github.com/indaco/malt/pull/784))
+- **ui:** honour CLICOLOR and CLICOLOR_FORCE ([bf131a79](https://github.com/indaco/malt/commit/bf131a79)) ([#783](https://github.com/indaco/malt/pull/783))
+- **cleanup:** sweep broken symlinks so doctor's advice works ([8ef0e131](https://github.com/indaco/malt/commit/8ef0e131)) ([#782](https://github.com/indaco/malt/pull/782))
+- **doctor:** find broken symlinks below the top level of each link dir ([13e636f3](https://github.com/indaco/malt/commit/13e636f3)) ([#781](https://github.com/indaco/malt/pull/781))
+- **cli:** give untap, help and the command aliases real help topics ([57a87686](https://github.com/indaco/malt/commit/57a87686)) ([#778](https://github.com/indaco/malt/pull/778))
+- **install:** refuse a keg the loader would reject ([5cf13106](https://github.com/indaco/malt/commit/5cf13106)) ([#776](https://github.com/indaco/malt/pull/776))
+- **store:** re-relocate kegs cached before the rpath dedup landed ([dc6575db](https://github.com/indaco/malt/commit/dc6575db)) ([#775](https://github.com/indaco/malt/pull/775))
+
+### 💅 Refactors
+
+- **macho:** make the fat-slice bounds check independent of field width ([d9a4a201](https://github.com/indaco/malt/commit/d9a4a201)) ([#827](https://github.com/indaco/malt/pull/827))
+
+### 📖 Documentation
+
+- **benchmark:** update results 2026-08-10 ([f360b5b8](https://github.com/indaco/malt/commit/f360b5b8)) ([#824](https://github.com/indaco/malt/pull/824))
+- **benchmark:** update results 2026-08-03 ([95f4b94d](https://github.com/indaco/malt/commit/95f4b94d)) ([#802](https://github.com/indaco/malt/pull/802))
+- **benchmark:** update results 2026-07-27 ([4d84ead6](https://github.com/indaco/malt/commit/4d84ead6)) ([#788](https://github.com/indaco/malt/pull/788))
+
+### ⚡ Performance
+
+- **linker:** cut warm-install link time by ~3x on large kegs ([fd7c09a7](https://github.com/indaco/malt/commit/fd7c09a7)) ([#779](https://github.com/indaco/malt/pull/779))
+
+### 🎨 Styling
+
+- restore zig fmt compliance in path_component ([8e2ffab7](https://github.com/indaco/malt/commit/8e2ffab7)) ([#808](https://github.com/indaco/malt/pull/808))
+
+### ✅ Tests
+
+- **archive:** pin symlink bookkeeping to the pax-overridden entry name ([009963a6](https://github.com/indaco/malt/commit/009963a6)) ([#806](https://github.com/indaco/malt/pull/806))
+- **regression:** stop the etag guard blaming malt for a shared rate limit ([b2fb0c8b](https://github.com/indaco/malt/commit/b2fb0c8b)) ([#780](https://github.com/indaco/malt/pull/780))
+- **regression:** tell apart a real etag regression from GitHub flakiness ([8da17b32](https://github.com/indaco/malt/commit/8da17b32)) ([#777](https://github.com/indaco/malt/pull/777))
+
+### 🏡 Chores
+
+- update codecov.json ([ad252597](https://github.com/indaco/malt/commit/ad252597))
+- **demos:** authenticate the demo recorder against the GitHub API ([43df4072](https://github.com/indaco/malt/commit/43df4072)) ([#830](https://github.com/indaco/malt/pull/830))
+- **deps:** bump vendored SQLite to 3.53.4 ([d8b75c9f](https://github.com/indaco/malt/commit/d8b75c9f)) ([#795](https://github.com/indaco/malt/pull/795))
+- **pins:** bump homebrew-core pin to b6ad3325be06 ([a24eea4e](https://github.com/indaco/malt/commit/a24eea4e)) ([#799](https://github.com/indaco/malt/pull/799))
+
+### 🤖 CI
+
+- restore push credentials for the workflows that publish branches ([868354cb](https://github.com/indaco/malt/commit/868354cb)) ([#823](https://github.com/indaco/malt/pull/823))
+- harden GitHub Actions workflows with zizmor recommendations ([b39bdeb7](https://github.com/indaco/malt/commit/b39bdeb7)) ([#813](https://github.com/indaco/malt/pull/813))
+- bump actions/setup-go from 6 to 7 ([7f359700](https://github.com/indaco/malt/commit/7f359700)) ([#800](https://github.com/indaco/malt/pull/800))
+- bump taiki-e/install-action from 2 to 2.85.4 ([c6afd9f2](https://github.com/indaco/malt/commit/c6afd9f2)) ([#801](https://github.com/indaco/malt/pull/801))
+
+### 📦 Build
+
+- generate the single-binary test root so it cannot drift from the module list ([439c4580](https://github.com/indaco/malt/commit/439c4580)) ([#812](https://github.com/indaco/malt/pull/812))
+- add a single-binary test target ([ebe5bc2f](https://github.com/indaco/malt/commit/ebe5bc2f))
+
+### 🎉 New Contributors
+
+- [@gitbutler](https://github.com/gitbutler) made their first contribution in [efb0a2d3](https://github.com/indaco/malt/commit/efb0a2d3)
+- [@rustytrees](https://github.com/rustytrees) made their first contribution in [#795](https://github.com/indaco/malt/pull/795)
+
+### ❤️ Contributors
+
+- [@gitbutler](https://github.com/gitbutler)
+- [@indaco](https://github.com/indaco)
+- [@rustytrees](https://github.com/rustytrees)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+- [@dependabot[bot]](https://github.com/dependabot[bot])
+
 ## v0.22.0 - 2026-07-24
 
 ### Highlights
