@@ -25,9 +25,9 @@ jobs:
       # latest release tags. Local runs leave this unset and bench the tree.
       BENCH_MALT_RELEASE: "1"
     steps:
+      # Credentials must persist: the publish step pushes the benchmark
+      # branch with the ambient GITHUB_TOKEN.
       - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2

@@ -364,8 +364,6 @@ jobs:
     steps:
       - name: Checkout tag
         uses: actions/checkout@v7
-        with:
-          persist-credentials: false
         # persist-credentials defaults true so `git push` can auth via the
         # ambient GITHUB_TOKEN. HEAD is the tag commit on a push:tags event.
 
