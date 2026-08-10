@@ -6,6 +6,7 @@ const testing = std.testing;
 
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const formula_mod = @import("../core/formula.zig");
+const signals = @import("../core/signals.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -80,6 +81,9 @@ pub fn collectDeps(
 
     var head: usize = 0;
     while (head < frontier.items.len) : (head += 1) {
+        // One lookup per node, each possibly a network fetch. `execute` turns
+        // the partial graph into a non-zero exit rather than rendering it.
+        if (signals.isInterrupted()) break;
         if (!opts.recursive) break;
         const current = frontier.items[head];
         const idx = entryIndex(entries.items, current) orelse continue;
@@ -401,6 +405,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }) catch empty_entries;
     defer freeEntries(allocator, entries);
 
+    if (signals.isInterrupted()) {
+        output.warn("Interrupted.", .{});
+        return error.UserInterrupted;
+    }
+
     if (json_mode) {
         try encodeJson(stdout, entries);
     } else {
@@ -579,6 +588,36 @@ test "collectDeps --recursive walks the transitive closure once per name" {
     try testing.expectEqualStrings("openssl@3", entries[1].formula);
     try testing.expectEqualStrings("ca-certificates", entries[1].depends_on[0]);
     try testing.expectEqualStrings("wget", entries[2].formula);
+}
+
+test "collectDeps: an interrupt stops the transitive walk" {
+    // One lookup per node, each possibly a network fetch. Uninterrupted this
+    // chain yields all four entries — the closure test above pins that — so a
+    // short result here is the walk stopping, not the graph being small.
+    var db_stub = StubLookup.init(testing.allocator);
+    defer db_stub.deinit();
+    try db_stub.add("a", &.{"b"});
+    try db_stub.add("b", &.{"c"});
+    try db_stub.add("c", &.{"d"});
+    try db_stub.add("d", &.{});
+
+    const prior = signals.isInterrupted();
+    defer signals.setInterruptedForTest(prior);
+    defer signals.armInterruptAfterForTest(0);
+    signals.setInterruptedForTest(false);
+    signals.armInterruptAfterForTest(2); // fires on the second frontier poll
+
+    const entries = try collectDeps(
+        testing.allocator,
+        db_stub.lookup(),
+        null,
+        "a",
+        .{ .recursive = true },
+    );
+    defer freeEntries(testing.allocator, entries);
+
+    // "a" expanded (appending "b"), then the walk stopped: "c"/"d" unreached.
+    try testing.expectEqual(@as(usize, 2), entries.len);
 }
 
 test "collectDeps --recursive terminates on a cycle" {

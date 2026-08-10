@@ -7,6 +7,7 @@ const std = @import("std");
 
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const output = @import("../ui/output.zig");
+const signals = @import("../core/signals.zig");
 const backup_mod = @import("backup.zig");
 const help = @import("help.zig");
 const install_mod = @import("install.zig");
@@ -140,7 +141,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         };
     }
 
-    if (casks.items.len > 0) {
+    // `install` stops itself on Ctrl-C; without these guards restore would
+    // then start the next batch as if nothing had happened.
+    if (casks.items.len > 0 and !signals.isInterrupted()) {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(allocator);
         try argv.append(allocator, "--cask");
@@ -158,11 +161,16 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // warn and continue so one missing service doesn't abort the rest
     // of the restore.
     for (services.items) |name| {
+        if (signals.isInterrupted()) break;
         services_mod.servicesStart(ctx, allocator, name) catch |e| {
             output.warn("service {s} skipped: {s}", .{ name, @errorName(e) });
         };
     }
 
+    if (signals.isInterrupted()) {
+        output.warn("Interrupted.", .{});
+        return error.UserInterrupted;
+    }
     if (any_failed) {
         return error.RestoreFailed;
     }

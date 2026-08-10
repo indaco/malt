@@ -7,6 +7,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const signals = @import("../core/signals.zig");
 const color = @import("../ui/color.zig");
 const cli_info = @import("info.zig");
 const help = @import("help.zig");
@@ -56,6 +57,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         dependents = collectDependents(allocator, db, name, recursive) catch &.{};
     }
 
+    // A partial dependent set read as complete would be worse than no answer.
+    if (signals.isInterrupted()) {
+        output.warn("Interrupted.", .{});
+        return error.UserInterrupted;
+    }
+
     if (json_mode) {
         try writeJson(stdout, name, dependents);
     } else {
@@ -86,6 +93,9 @@ pub fn collectDependents(
     // Peak ~2× max-in-flight: compact live tail to front once half-consumed.
     var head: usize = 0;
     while (head < frontier.items.len) {
+        // One reverse-dependency query per node: a wide graph is seconds of
+        // walking, so Ctrl-C is answered here rather than at the end.
+        if (signals.isInterrupted()) break;
         if (head > 0 and head * 2 >= frontier.items.len) {
             const live = frontier.items[head..];
             std.mem.copyForwards([]const u8, frontier.items[0..live.len], live);

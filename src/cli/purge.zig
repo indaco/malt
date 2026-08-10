@@ -5,6 +5,7 @@ const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const atomic = @import("../fs/atomic.zig");
 const prefix_path = @import("../fs/prefix_path.zig");
+const signals = @import("../core/signals.zig");
 const output = @import("../ui/output.zig");
 const lock_mod = @import("../db/lock.zig");
 const help = @import("help.zig");
@@ -196,6 +197,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     inline for (scope_run_order) |k| {
         if (@field(opts.scope, @tagName(k))) {
+            // Scope boundary only — a half-applied sweep is worse than one
+            // that finishes. Returning before `emitScopeStarted` keeps the
+            // ndjson started/completed pairs balanced.
+            if (signals.isInterrupted()) {
+                output.warn("Interrupted.", .{});
+                return error.UserInterrupted;
+            }
             const name = comptime k.label();
             purge_json.emitScopeStarted(name, dry_run);
             var r: TierResult = .{};

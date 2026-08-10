@@ -14,6 +14,7 @@ const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const path_write = @import("../fs/path_write.zig");
 const output = @import("../ui/output.zig");
+const signals = @import("../core/signals.zig");
 const install_sink_mod = @import("install/sink.zig");
 const install_cmd = @import("install.zig");
 const services_cmd = @import("services.zig");
@@ -221,6 +222,11 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
         any_hard = true;
     }
 
+    // A short report after Ctrl-C is not a completed bundle.
+    if (signals.isInterrupted()) {
+        output.warn("Interrupted — remaining bundle members were not installed.", .{});
+        return error.UserInterrupted;
+    }
     if (any_hard) return BundleError.RunnerFailed;
     output.success("bundle install complete", .{});
 }
@@ -306,6 +312,10 @@ fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
 
     // The uninstall pipeline already prints rich per-member diagnostics;
     // surface only the count here so users see a single summary line.
+    if (signals.isInterrupted()) {
+        output.warn("Interrupted — remaining bundle members were not removed.", .{});
+        return error.UserInterrupted;
+    }
     if (report.hasFailure()) {
         output.err("bundle cleanup completed with {d} failure(s)", .{report.failures.len});
         return BundleError.RunnerFailed;

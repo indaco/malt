@@ -21,6 +21,7 @@ const sqlite = @import("../../db/sqlite.zig");
 const schema = @import("../../db/schema.zig");
 const lock_mod = @import("../../db/lock.zig");
 const atomic = @import("../../fs/atomic.zig");
+const signals = @import("../signals.zig");
 const manifest_mod = @import("manifest.zig");
 
 pub const RunnerError = error{
@@ -185,7 +186,9 @@ pub fn run(
     var db_record_error: ?[]const u8 = null;
     // 5. Record bundle and members in DB (even on partial failure). Skipped
     //    in dry-run so the preview path stays read-only.
-    if (!opts.dry_run) recordBundle(io, db, manifest) catch |e| {
+    // An interrupted run installed only part of the manifest; recording it
+    // would claim members that never landed.
+    if (!opts.dry_run and !signals.isInterrupted()) recordBundle(io, db, manifest) catch |e| {
         // recordBundle's inferred set spans sqlite + clock; keep @errorName.
         db_record_error = @errorName(e);
     };
@@ -237,6 +240,10 @@ fn recordMember(
     failures: *std.ArrayList(MemberError),
     previews: *std.ArrayList(MemberPreview),
 ) RunnerError!void {
+    // A member is a whole install, so Ctrl-C cannot wait for the manifest to
+    // drain. One guard covers all four member loops: the rest fall through.
+    if (signals.isInterrupted()) return;
+
     if (opts.dry_run) {
         previews.append(allocator, .{ .kind = call.kind(), .name = call.name() }) catch
             return RunnerError.OutOfMemory;

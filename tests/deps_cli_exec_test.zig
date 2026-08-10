@@ -125,6 +125,26 @@ test "execute on a fresh prefix without --installed still completes" {
     try deps_cli.execute(&ctx, testing.allocator, &.{ "--installed", "ghost" });
 }
 
+// A partial graph must not be rendered as the answer. The error is what
+// `main` maps to the interrupt exit code, so it is the user-visible contract.
+test "execute surfaces an interrupt instead of printing a partial graph" {
+    var s = try Scratch.init(testing.allocator, "interrupted");
+    defer s.deinit(testing.allocator);
+    try seedDeps(s.path);
+
+    const prior = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior);
+    malt.signals.setInterruptedForTest(true);
+
+    const ctx = ctxWithSink();
+    quiet();
+    defer unquiet();
+    try testing.expectError(
+        error.UserInterrupted,
+        deps_cli.execute(&ctx, testing.allocator, &.{ "--installed", "-r", "wget" }),
+    );
+}
+
 // --- happy paths ------------------------------------------------------
 
 test "execute --installed reads direct deps from the DB" {
