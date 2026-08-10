@@ -517,10 +517,65 @@ fn stepSymlink(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         logUnsupported(ctx, "symlink with a relative source");
         return false;
     }
+    if (getFlag(obj, "source_glob")) return symlinkGlob(ctx, obj, source, target);
     mkParent(ctx, target);
     if (getFlag(obj, "force")) std.Io.Dir.cwd().deleteFile(ctx.io, target) catch {};
     std.Io.Dir.symLinkAbsolute(ctx.io, source, target, .{}) catch {};
     return true;
+}
+
+/// `source_glob`: the source's last component is a pattern and `target` is the
+/// directory every match lands in, keeping its own name. Without this the
+/// pattern would be symlinked verbatim and the files silently go unlinked.
+fn symlinkGlob(ctx: StepsCtx, obj: std.json.ObjectMap, source: []const u8, target: []const u8) bool {
+    const dir_path = std.fs.path.dirname(source) orelse return false;
+    const pattern = std.fs.path.basename(source);
+
+    std.Io.Dir.cwd().createDirPath(ctx.io, target) catch {};
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, dir_path, .{ .iterate = true }) catch return true;
+    defer dir.close(ctx.io);
+
+    const force = getFlag(obj, "force");
+    var iter = dir.iterate();
+    while (iter.next(ctx.io) catch null) |entry| {
+        if (!globMatch(ctx.allocator, pattern, entry.name)) continue;
+        const child = std.fs.path.join(ctx.allocator, &.{ dir_path, entry.name }) catch continue;
+        const link_path = std.fs.path.join(ctx.allocator, &.{ target, entry.name }) catch continue;
+        // Each match is its own write: a planted symlink must not redirect
+        // one of them out of the prefix.
+        if (!confined(ctx, link_path)) return false;
+        if (force) std.Io.Dir.cwd().deleteFile(ctx.io, link_path) catch {};
+        std.Io.Dir.symLinkAbsolute(ctx.io, child, link_path, .{}) catch {};
+    }
+    return true;
+}
+
+/// Shell-style match limited to what formula globs use: `*` and `{a,b}`.
+/// ponytail: no `?` or `[...]` — no formula in homebrew-core ships one.
+fn globMatch(a: std.mem.Allocator, pattern: []const u8, name: []const u8) bool {
+    const open = std.mem.indexOfScalar(u8, pattern, '{') orelse return starMatch(pattern, name);
+    const close = std.mem.indexOfScalarPos(u8, pattern, open + 1, '}') orelse return starMatch(pattern, name);
+    var alts = std.mem.splitScalar(u8, pattern[open + 1 .. close], ',');
+    while (alts.next()) |alt| {
+        const expanded = std.fmt.allocPrint(a, "{s}{s}{s}", .{
+            pattern[0..open], alt, pattern[close + 1 ..],
+        }) catch return false;
+        if (globMatch(a, expanded, name)) return true;
+    }
+    return false;
+}
+
+fn starMatch(pattern: []const u8, name: []const u8) bool {
+    if (pattern.len == 0) return name.len == 0;
+    if (pattern[0] == '*') {
+        var i: usize = 0;
+        while (true) : (i += 1) {
+            if (starMatch(pattern[1..], name[i..])) return true;
+            if (i == name.len) return false;
+        }
+    }
+    if (name.len == 0 or pattern[0] != name[0]) return false;
+    return starMatch(pattern[1..], name[1..]);
 }
 
 /// `guards` gate a step on the target's state. `if_exists` is the only
@@ -638,12 +693,17 @@ fn stepInreplace(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 /// elsewhere belongs to something else and must survive. `readLinkAbsolute`
 /// doubles as the type check, and the link is unlinked rather than followed.
 fn stepRemove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
-    const needle = getString(obj, "symlink_target_contains") orelse {
-        // Without the guard this would be an unconditional recursive delete
-        // driven by formula data — not something to infer.
-        logUnsupported(ctx, "remove without symlink_target_contains");
-        return false;
-    };
+    // An unmet guard is the step declining to run, not a failure to report:
+    // a first install has no earlier payload to retire.
+    switch (evalGuards(ctx, obj)) {
+        .met => {},
+        .unmet => return true,
+        .unsupported => {
+            logUnsupported(ctx, "remove with an unevaluable guard");
+            return false;
+        },
+    }
+
     const paths_val = obj.get("paths") orelse {
         logUnsupported(ctx, "remove");
         return false;
@@ -652,6 +712,14 @@ fn stepRemove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         logUnsupported(ctx, "remove");
         return false;
     }
+
+    const needle = getString(obj, "symlink_target_contains") orelse {
+        if (getFlag(obj, "recursive")) return removeTrees(ctx, paths_val.array.items);
+        // Neither a symlink guard nor an explicit recursive intent leaves
+        // nothing to infer safely.
+        logUnsupported(ctx, "remove without symlink_target_contains");
+        return false;
+    };
 
     for (paths_val.array.items) |item| {
         if (item != .object) continue;
@@ -664,6 +732,32 @@ fn stepRemove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         std.Io.Dir.cwd().deleteFile(ctx.io, path) catch {};
     }
     return true;
+}
+
+/// Retire a subtree this formula owns, so the `copy` that follows starts
+/// clean. Confinement keeps it inside the prefix; `sharedPrefixDir` keeps it
+/// off the top-level directories every other package also writes into.
+fn removeTrees(ctx: StepsCtx, items: []const std.json.Value) bool {
+    for (items) |item| {
+        if (item != .object) continue;
+        const path = resolveSpec(ctx, item.object, "paths") orelse continue;
+        if (!confined(ctx, path)) return false;
+        if (sharedPrefixDir(ctx, path)) {
+            logUnsupported(ctx, "recursive remove of a shared prefix directory");
+            return false;
+        }
+        std.Io.Dir.cwd().deleteTree(ctx.io, path) catch {};
+    }
+    return true;
+}
+
+/// True for the prefix itself and its immediate children (`<prefix>/lib`,
+/// `<prefix>/bin`, …) — shared ground, never one formula's to delete.
+fn sharedPrefixDir(ctx: StepsCtx, path: []const u8) bool {
+    const trimmed = std.mem.trimEnd(u8, path, "/");
+    if (std.mem.eql(u8, trimmed, ctx.prefix)) return true;
+    const parent = std.fs.path.dirname(trimmed) orelse return true;
+    return std.mem.eql(u8, parent, ctx.prefix);
 }
 
 fn stepLinkChildren(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
@@ -1617,6 +1711,151 @@ test "execute keeps a symlink whose target does not match the guard" {
     );
     try testing.expect(execute(h.ctx(), json));
     try std.Io.Dir.accessAbsolute(io, link, .{});
+}
+
+test "execute skips a remove whose if_exists guard is unmet" {
+    // A first install has nothing to clean up. Reporting the step as
+    // unsupported there downgrades the whole formula to the partial-skip
+    // envelope over work that was never going to happen.
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"remove","recursive":true,
+        \\  "paths":[{"path":"{{HOMEBREW_PREFIX}}/lib/node_modules/npm"}],
+        \\  "guards":[{"condition":"if_exists","path":"{{HOMEBREW_PREFIX}}/lib/node_modules/npm"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+}
+
+test "execute removes a directory tree when the guard finds it" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const io = h.io;
+    const a = h.arena.allocator();
+
+    const doomed = try std.fmt.allocPrint(a, "{s}/lib/node_modules/npm", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, doomed);
+    const child = try std.fmt.allocPrint(a, "{s}/index.js", .{doomed});
+    (try std.Io.Dir.createFileAbsolute(io, child, .{})).close(io);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"remove","recursive":true,
+        \\  "paths":[{"path":"{{HOMEBREW_PREFIX}}/lib/node_modules/npm"}],
+        \\  "guards":[{"condition":"if_exists","path":"{{HOMEBREW_PREFIX}}/lib/node_modules/npm"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, doomed, .{}));
+}
+
+test "execute refuses a recursive remove that would take a whole prefix dir" {
+    // Confinement alone would allow this: `<prefix>/lib` is inside the
+    // boundary. Formula data may retire its own subtree, never a shared
+    // top-level directory holding every other package's files.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const io = h.io;
+    const a = h.arena.allocator();
+
+    const lib = try std.fmt.allocPrint(a, "{s}/lib", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, lib);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"remove","recursive":true,
+        \\  "paths":[{"path":"{{HOMEBREW_PREFIX}}/lib"}],
+        \\  "guards":[{"condition":"if_exists","path":"{{HOMEBREW_PREFIX}}/lib"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(h.flog.hasErrors());
+    try std.Io.Dir.accessAbsolute(io, lib, .{});
+}
+
+test "a recursive remove unlinks a symlinked target instead of emptying it" {
+    // Confinement checks the parent chain, not the leaf, so a planted link can
+    // sit where the subtree is expected. Following it would delete a directory
+    // the formula never owned.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const io = h.io;
+    const a = h.arena.allocator();
+
+    const precious = try std.fmt.allocPrint(a, "{s}/etc/precious", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, precious);
+    const kept = try std.fmt.allocPrint(a, "{s}/keep.conf", .{precious});
+    (try std.Io.Dir.createFileAbsolute(io, kept, .{})).close(io);
+
+    const parent = try std.fmt.allocPrint(a, "{s}/lib/node_modules", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, parent);
+    const link = try std.fmt.allocPrint(a, "{s}/npm", .{parent});
+    try std.Io.Dir.symLinkAbsolute(io, precious, link, .{});
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"remove","recursive":true,
+        \\  "paths":[{"path":"{{HOMEBREW_PREFIX}}/lib/node_modules/npm"}],
+        \\  "guards":[{"condition":"if_exists","path":"{{HOMEBREW_PREFIX}}/lib/node_modules/npm"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try std.Io.Dir.accessAbsolute(io, kept, .{});
+}
+
+test "execute still refuses a bare remove with neither guard nor recursive" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"remove","paths":[{"path":"{{HOMEBREW_PREFIX}}/bin/glow-init"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(h.flog.hasErrors());
+}
+
+test "execute links every source_glob match into the target directory" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const io = h.io;
+    const a = h.arena.allocator();
+
+    const man_src = try std.fmt.allocPrint(a, "{s}/share/glow/man1", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(io, man_src);
+    for ([_][]const u8{ "npm.1", "npx.1", "package-json.1", "unrelated.1" }) |leaf| {
+        const p = try std.fmt.allocPrint(a, "{s}/{s}", .{ man_src, leaf });
+        (try std.Io.Dir.createFileAbsolute(io, p, .{})).close(io);
+    }
+    const man_dst = try std.fmt.allocPrint(a, "{s}/share/man/man1", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, man_dst);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"symlink","force":true,"source_glob":true,
+        \\  "source":{"base":"prefix","path":"share/glow/man1/{npm,npx,package-}*"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/share/man/man1"}}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+
+    for ([_][]const u8{ "npm.1", "npx.1", "package-json.1" }) |leaf| {
+        const p = try std.fmt.allocPrint(a, "{s}/{s}", .{ man_dst, leaf });
+        try std.Io.Dir.accessAbsolute(io, p, .{});
+    }
+    // A non-matching sibling must not be dragged along.
+    const stray = try std.fmt.allocPrint(a, "{s}/unrelated.1", .{man_dst});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, stray, .{}));
+}
+
+test "globMatch honours alternation and wildcards without matching neighbours" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try testing.expect(globMatch(a, "{npm,npx,package-}*", "npm.1"));
+    try testing.expect(globMatch(a, "{npm,npx,package-}*", "package-json.5"));
+    try testing.expect(!globMatch(a, "{npm,npx,package-}*", "unrelated.1"));
+    // A leading wildcard must not swallow the anchor that follows it.
+    try testing.expect(globMatch(a, "*.1", "npm.1"));
+    try testing.expect(!globMatch(a, "*.1", "npm.5"));
+    try testing.expect(globMatch(a, "literal", "literal"));
+    try testing.expect(!globMatch(a, "literal", "literals"));
 }
 
 test "execute runs the filesystem tier natively and leaves the log clean" {

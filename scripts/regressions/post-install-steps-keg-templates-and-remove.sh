@@ -56,6 +56,14 @@ if ! grep -q 'readLinkAbsolute' "$STEPS"; then
   exit 1
 fi
 
+# 3b. The recursive form retires a subtree the formula owns. Its boundary is
+#     `sharedPrefixDir`: without it, confinement alone would let formula data
+#     delete `<prefix>/lib` and every other package's files inside it.
+if ! grep -q 'fn sharedPrefixDir' "$STEPS"; then
+  echo "FAIL: recursive remove no longer refuses shared top-level prefix directories" >&2
+  exit 1
+fi
+
 # 4. Behavioural guards. If a test block is deleted the run below goes green
 #    vacuously, so assert each is present first.
 TEMPLATE_TEST="execute links keg-relative template paths into the prefix"
@@ -65,8 +73,13 @@ KEEP_LINK_TEST="execute keeps a symlink whose target does not match the guard"
 # The pre-existing base-form path shares stepSymlink; judged too so a fix to
 # the template form cannot quietly break the form every other formula uses.
 BASE_FORM_TEST="execute runs the filesystem tier natively and leaves the log clean"
+# The recursive form and its refusal. A first install must stay silent, and a
+# shared prefix directory must survive even when the guard finds it.
+UNMET_GUARD_TEST="execute skips a remove whose if_exists guard is unmet"
+SHARED_DIR_TEST="execute refuses a recursive remove that would take a whole prefix dir"
 
-for t in "$TEMPLATE_TEST" "$REMOVE_TEST" "$KEEP_FILE_TEST" "$KEEP_LINK_TEST" "$BASE_FORM_TEST"; do
+for t in "$TEMPLATE_TEST" "$REMOVE_TEST" "$KEEP_FILE_TEST" "$KEEP_LINK_TEST" "$BASE_FORM_TEST" \
+  "$UNMET_GUARD_TEST" "$SHARED_DIR_TEST"; do
   if ! grep -Rqs -- "$t" "$STEPS"; then
     echo "FAIL: guard test missing from post_install_steps.zig: $t" >&2
     exit 1
@@ -80,7 +93,8 @@ fi
 
 # One run of the suite, judged per guard line: a pass ends in "OK".
 out=$("$ROOT/zig-out/test-bin/lib_tests" 2>&1 || true)
-for t in "$TEMPLATE_TEST" "$REMOVE_TEST" "$KEEP_FILE_TEST" "$KEEP_LINK_TEST" "$BASE_FORM_TEST"; do
+for t in "$TEMPLATE_TEST" "$REMOVE_TEST" "$KEEP_FILE_TEST" "$KEEP_LINK_TEST" "$BASE_FORM_TEST" \
+  "$UNMET_GUARD_TEST" "$SHARED_DIR_TEST"; do
   line=$(printf '%s\n' "$out" | grep -F -- "$t" || true)
   if [[ -z "$line" ]]; then
     echo "FAIL: guard test did not run: $t" >&2
