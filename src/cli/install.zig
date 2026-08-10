@@ -317,12 +317,12 @@ fn tapPackagePresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) b
 /// Route one package name to the probe that matches how it would install.
 /// Mirrors the slow path's dispatch order (tap form wins over `--cask`) so
 /// the gate can never answer for a different install kind than the one the
-/// pipeline would take, and its `--download-only` carve-out: cask and tap
-/// slow paths refresh the cached artefact over an installed package, which
-/// is what `mt upgrade`'s prefetch relies on.
+/// pipeline would take. `--download-only` never reaches here: it vetoes the
+/// gate outright, because warming a cache is work an installed package does
+/// not excuse.
 fn alreadyInstalled(ctx: *const AppCtx, prefix: []const u8, pkg: []const u8, flags: args_mod.InstallFlags) bool {
-    if (isTapFormula(pkg)) return !flags.download_only and tapPackagePresent(ctx, prefix, pkg);
-    if (flags.force_cask) return !flags.download_only and caskPresent(ctx, prefix, pkg);
+    if (isTapFormula(pkg)) return tapPackagePresent(ctx, prefix, pkg);
+    if (flags.force_cask) return caskPresent(ctx, prefix, pkg);
     return kegPresent(ctx, prefix, pkg);
 }
 
@@ -771,6 +771,7 @@ fn runInstall(
                 .cache = &formula_cache,
                 .worker_backing = std.heap.smp_allocator,
                 .sink = sink,
+                .download_only = flags.download_only,
             }, pkg_name, formula_json, flags.force, &all_jobs) catch |e| {
                 sink.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
                 failed_count += 1;

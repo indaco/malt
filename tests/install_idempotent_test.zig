@@ -344,6 +344,31 @@ test "execute falls through when the tap form names a cask owned by another tap"
     try testing.expect(pathExists(lock_file));
 }
 
+test "execute --download-only still warms the store for an installed formula" {
+    const prefix = try setupPrefix("dlonlyformula");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+        _ = c.unsetenv("MALT_PREFIX");
+    }
+
+    // The keg row says nothing about whether the *current* version's bottle
+    // is in the store, so warming it is never a no-op worth skipping.
+    try seedCellarKeg(prefix, "ALPHA_FIXTURE", "1.0");
+
+    const db_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
+    defer testing.allocator.free(db_file);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    install.execute(&ctx, arena.allocator(), &.{ "--download-only", "--quiet", "ALPHA_FIXTURE" }) catch {};
+
+    try testing.expect(pathExists(db_file));
+}
+
 test "execute --download-only on the tap form still refreshes the cached artefact" {
     const prefix = try setupPrefix("tapdlonly");
     defer {

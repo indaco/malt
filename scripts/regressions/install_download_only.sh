@@ -100,6 +100,21 @@ pass "--only-dependencies combo refused"
 [[ -d "$PREFIX/Cellar/$TARGET" ]] || fail "Cellar/$TARGET missing after follow-up install"
 pass "follow-up install populated Cellar/$TARGET"
 
+# ── 4b. Warming over an installed keg must still warm, not no-op. ─────
+# An installed row says nothing about whether the current version's bottle
+# is cached, so the already-installed gate must not swallow the request.
+WARM_LOG="$PREFIX/warm-installed.log"
+"$BIN" install --download-only "$TARGET" >"$WARM_LOG" 2>&1 ||
+  fail "--download-only over an installed keg failed - see $WARM_LOG"
+grep -q 'is already installed' "$WARM_LOG" &&
+  fail "--download-only over an installed keg was skipped instead of warming"
+grep -q 'downloaded to' "$WARM_LOG" ||
+  fail "--download-only over an installed keg reported no download"
+keg_rows_warm=$(sqlite3 "$DB" "SELECT COUNT(*) FROM kegs WHERE name='$TARGET';")
+[[ "$keg_rows_warm" = "1" ]] ||
+  fail "--download-only over an installed keg disturbed the kegs table (rows=$keg_rows_warm)"
+pass "--download-only warms the store over an installed keg without touching it"
+
 # ── 5. Cask --download-only: cache filled, no Caskroom row, no app. ───
 # copilot-cli is a binary cask with no /Applications slot — safe to
 # exercise without touching shared system state.

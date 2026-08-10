@@ -189,12 +189,14 @@ pub const InstallFlags = struct {
     // ── Derived predicates: the flag interaction, named ───────────────
 
     /// Eligible for the idempotent fast path that skips DB/lock/HTTP.
-    /// Only modes that change install semantics veto it. `force_cask`
-    /// disambiguates a name rather than changing what install means, so it
-    /// stays out — the gate picks a cask-shaped presence probe instead.
+    /// Only modes that change install semantics veto it. `download_only`
+    /// is one of them: its job is warming the cache, which an installed
+    /// package neither satisfies nor excuses. `force_cask` is not - it
+    /// disambiguates a name rather than changing what install means, so
+    /// the gate picks a cask-shaped presence probe instead.
     pub fn fastpathEligible(self: InstallFlags) bool {
         return !self.force and !self.local_only and
-            !self.dry_run and !self.only_deps;
+            !self.dry_run and !self.only_deps and !self.download_only;
     }
 
     /// Whether the `--force` pre-materialize prune should run.
@@ -376,20 +378,22 @@ test "InstallFlags.fastpathEligible: clear when no semantic flag is set" {
     try std.testing.expect((InstallFlags{}).fastpathEligible());
 }
 
-test "InstallFlags.fastpathEligible: force/local/dry_run/only_deps each veto it" {
+test "InstallFlags.fastpathEligible: force/local/dry_run/only_deps/download_only each veto it" {
     try std.testing.expect(!(InstallFlags{ .force = true }).fastpathEligible());
     try std.testing.expect(!(InstallFlags{ .local_only = true }).fastpathEligible());
     try std.testing.expect(!(InstallFlags{ .dry_run = true }).fastpathEligible());
     try std.testing.expect(!(InstallFlags{ .only_deps = true }).fastpathEligible());
+    // An installed package is not a warm cache: `--download-only` must
+    // still reach the download path so the artefact lands in the store.
+    try std.testing.expect(!(InstallFlags{ .download_only = true }).fastpathEligible());
 }
 
-test "InstallFlags.fastpathEligible: cask/download_only/isolate_deps/force_formula do NOT gate it" {
-    // These four are absent from the fast-path conjunction; the test fails
+test "InstallFlags.fastpathEligible: cask/isolate_deps/force_formula do NOT gate it" {
+    // These three are absent from the fast-path conjunction; the test fails
     // if someone folds one into it and narrows the fast path. `--cask` in
     // particular only disambiguates a name - every bundle cask line sets it,
     // so vetoing on it costs the whole bundle path its fast path.
     try std.testing.expect((InstallFlags{ .force_cask = true }).fastpathEligible());
-    try std.testing.expect((InstallFlags{ .download_only = true }).fastpathEligible());
     try std.testing.expect((InstallFlags{ .isolate_deps = true }).fastpathEligible());
     try std.testing.expect((InstallFlags{ .force_formula = true }).fastpathEligible());
 }
