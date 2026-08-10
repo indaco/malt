@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const manifest_mod = @import("manifest.zig");
+const signals = @import("../signals.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const runner_mod = @import("runner.zig");
 
@@ -329,13 +330,17 @@ pub fn run(
             return CleanupError.OutOfMemory;
     } else {
         const d = opts.dispatcher orelse return CleanupError.NoDispatcher;
+        // Each entry is a full uninstall; stop at the next member boundary
+        // rather than draining the plan.
         for (plan.formulas) |n| {
+            if (signals.isInterrupted()) break;
             d.uninstallFormula(d.ctx, allocator, n) catch |e| {
                 failures.append(allocator, .{ .kind = .formula, .name = n, .err = e }) catch
                     return CleanupError.OutOfMemory;
             };
         }
         for (plan.casks) |n| {
+            if (signals.isInterrupted()) break;
             d.uninstallCask(d.ctx, allocator, n) catch |e| {
                 failures.append(allocator, .{ .kind = .cask, .name = n, .err = e }) catch
                     return CleanupError.OutOfMemory;
@@ -711,6 +716,42 @@ test "run executes uninstall via dispatcher in formula-then-cask order" {
     try testing.expectEqual(@as(usize, 1), fake.casks.items.len);
     try testing.expectEqualStrings("ghostty", fake.casks.items[0]);
     try testing.expectEqual(@as(usize, 0), report.failures.len);
+}
+
+test "run stops uninstalling at the next member boundary when interrupted" {
+    // The order test above pins 2 formulas + 1 cask uninterrupted, so a
+    // shorter dispatch here is the plan being abandoned, not a small plan.
+    var fake = TestDispatcher.init(testing.allocator);
+    defer fake.deinit();
+
+    var m = try testManifest(testing.allocator, &.{}, &.{});
+    defer m.deinit();
+    var plan = try diff(
+        testing.allocator,
+        m,
+        &[_][]const u8{ "jq", "wget" },
+        &[_][]const u8{"ghostty"},
+    );
+    defer plan.deinit();
+
+    const dispatcher = Dispatcher{
+        .ctx = &fake,
+        .uninstallFormula = TestDispatcher.uninstallFormulaFn,
+        .uninstallCask = TestDispatcher.uninstallCaskFn,
+    };
+
+    const prior = signals.isInterrupted();
+    defer signals.setInterruptedForTest(prior);
+    defer signals.armInterruptAfterForTest(0);
+    signals.setInterruptedForTest(false);
+    signals.armInterruptAfterForTest(2); // fires before the second formula
+
+    var report = try run(testing.allocator, plan, .{ .dry_run = false, .dispatcher = &dispatcher });
+    defer report.deinit();
+
+    try testing.expectEqual(@as(usize, 1), fake.formulas.items.len);
+    try testing.expectEqualStrings("jq", fake.formulas.items[0]);
+    try testing.expectEqual(@as(usize, 0), fake.casks.items.len);
 }
 
 test "run records per-member failures and keeps going" {

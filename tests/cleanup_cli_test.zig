@@ -108,6 +108,31 @@ test "cleanup with no extra args matches purge --housekeeping byte-for-byte" {
     try testing.expectEqualStrings(ref_buf.items, shim_buf.items);
 }
 
+// Ctrl-C is answered at the scope boundary, before any sweep starts, and
+// surfaces as the interrupt exit code rather than a silent success.
+test "cleanup stops at the scope boundary when interrupted" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "interrupted");
+    defer prefix.deinit(allocator);
+
+    const prior_out = OutputState.save();
+    defer prior_out.restore();
+    output.setMode(.human);
+    output.setDryRun(true);
+    output.setNdjson(false);
+    output.setQuiet(true);
+
+    const prior = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior);
+    malt.signals.setInterruptedForTest(true);
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try testing.expectError(
+        error.UserInterrupted,
+        purge.executeCleanup(&ctx, allocator, &.{}),
+    );
+}
+
 // `mt cleanup --help` must show cleanup's own help, not purge's. The
 // shim intercepts before forwarding so the verb the user typed is the
 // verb the help text names. Captures via a real fd so the byte stream

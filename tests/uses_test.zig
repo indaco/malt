@@ -140,6 +140,33 @@ test "collectDependents --recursive walks the transitive closure" {
     try testing.expectEqualStrings("whisper", hits[2]);
 }
 
+test "collectDependents: an interrupt stops the recursive walk" {
+    // Same graph as the closure test above, which pins 3 hits uninterrupted —
+    // so a shorter result here means the walk answered the signal.
+    var tdb = try TempDb.init("interrupted");
+    defer tdb.deinit();
+    const db = &tdb.db;
+
+    const node_id = try insertKeg(db, "node");
+    const whisper_id = try insertKeg(db, "whisper");
+    const tauri_id = try insertKeg(db, "tauri");
+    try addDep(db, node_id, "icu4c");
+    try addDep(db, whisper_id, "node");
+    try addDep(db, tauri_id, "node");
+
+    const prior = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior);
+    defer malt.signals.armInterruptAfterForTest(0);
+    malt.signals.setInterruptedForTest(false);
+    malt.signals.armInterruptAfterForTest(2); // fires on the second frontier poll
+
+    const hits = try uses.collectDependents(testing.allocator, db, "icu4c", true);
+    defer uses.freeDependents(testing.allocator, hits);
+
+    try testing.expectEqual(@as(usize, 1), hits.len);
+    try testing.expectEqualStrings("node", hits[0]);
+}
+
 test "collectDependents returns empty slice when nothing depends on target" {
     var tdb = try TempDb.init("empty");
     defer tdb.deinit();

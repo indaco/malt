@@ -155,6 +155,52 @@ test "runner routes members through the provided dispatcher" {
     try testing.expectEqual(@as(usize, 0), calls.services.items.len);
 }
 
+// Every bundle member is a whole install, so Ctrl-C has to be answered
+// between members. The run above pins the full dispatch set, so a short one
+// here is the manifest being abandoned.
+test "runner stops dispatching members and records no bundle when interrupted" {
+    var t = try TempDb.init("interrupted");
+    defer t.deinit();
+
+    var calls = Calls.init(testing.allocator);
+    defer calls.deinit();
+
+    const dispatcher = runner.Dispatcher{
+        .ctx = &calls,
+        .installFormula = Calls.installFormulaFn,
+        .installCask = Calls.installCaskFn,
+        .tapAdd = Calls.tapAddFn,
+        .serviceStart = Calls.serviceStartFn,
+    };
+
+    var m = try buildManifest(testing.allocator);
+    defer m.deinit();
+
+    const prior = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior);
+    defer malt.signals.armInterruptAfterForTest(0);
+    malt.signals.setInterruptedForTest(false);
+    malt.signals.armInterruptAfterForTest(2); // fires on the member after the tap
+
+    var report = try runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{
+        .dry_run = false,
+        .prefix = t.dir,
+        .dispatcher = &dispatcher,
+    });
+    defer report.deinit();
+
+    try testing.expectEqual(@as(usize, 1), calls.taps.items.len);
+    try testing.expectEqual(@as(usize, 0), calls.formulas.items.len);
+    try testing.expectEqual(@as(usize, 0), calls.casks.items.len);
+
+    // A partial run must not leave a bundle row claiming members that never
+    // landed — `bundle cleanup` would later act on them.
+    var stmt = try t.db.prepare("SELECT COUNT(*) FROM bundles;");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
+}
+
 const Calls = struct {
     allocator: std.mem.Allocator,
     taps: std.ArrayList([]const u8),

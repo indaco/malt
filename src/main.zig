@@ -655,6 +655,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             // Dedicated code so the TUI can footer the cause; mirrored in
             // `tui/app.zig`. Message already printed, like Aborted below.
             error.AppRunning => std.process.exit(3),
+            // Ctrl-C during a long walk. Deliberately not `error.Interrupted`
+            // — that name is std's EINTR value and would silently map an I/O
+            // hiccup onto a user-cancel exit code.
+            error.UserInterrupted => std.process.exit(130), // 128 + SIGINT
             error.Aborted => std.process.exit(1),
             else => if (install_family and install.isReportedInstallError(e)) std.process.exit(1) else return e,
         };
