@@ -56,16 +56,6 @@ brew install --cask indaco/tap/malt
 - **security:** refuse an undeclared cask digest and a symlinked link target ([9b126e94](https://github.com/indaco/malt/commit/9b126e94)) ([#807](https://github.com/indaco/malt/pull/807))
 - **security:** close tap-controlled path and sandbox escapes ([f03c3ca7](https://github.com/indaco/malt/commit/f03c3ca7))
 - **archive:** refuse entries written through an archive's own symlink ([1141bd54](https://github.com/indaco/malt/commit/1141bd54))
-- **post-install:** close declarative post-install step gaps ([9751540f](https://github.com/indaco/malt/commit/9751540f)) ([#787](https://github.com/indaco/malt/pull/787))
-- **install:** resolve dependency-scoped bottle placeholders ([95b51906](https://github.com/indaco/malt/commit/95b51906)) ([#786](https://github.com/indaco/malt/pull/786))
-- **ui:** gate 256-index custom themes on terminal depth ([07d163a3](https://github.com/indaco/malt/commit/07d163a3)) ([#785](https://github.com/indaco/malt/pull/785))
-- **ui:** decide colour per output stream ([7b56595d](https://github.com/indaco/malt/commit/7b56595d)) ([#784](https://github.com/indaco/malt/pull/784))
-- **ui:** honour CLICOLOR and CLICOLOR_FORCE ([bf131a79](https://github.com/indaco/malt/commit/bf131a79)) ([#783](https://github.com/indaco/malt/pull/783))
-- **cleanup:** sweep broken symlinks so doctor's advice works ([8ef0e131](https://github.com/indaco/malt/commit/8ef0e131)) ([#782](https://github.com/indaco/malt/pull/782))
-- **doctor:** find broken symlinks below the top level of each link dir ([13e636f3](https://github.com/indaco/malt/commit/13e636f3)) ([#781](https://github.com/indaco/malt/pull/781))
-- **cli:** give untap, help and the command aliases real help topics ([57a87686](https://github.com/indaco/malt/commit/57a87686)) ([#778](https://github.com/indaco/malt/pull/778))
-- **install:** refuse a keg the loader would reject ([5cf13106](https://github.com/indaco/malt/commit/5cf13106)) ([#776](https://github.com/indaco/malt/pull/776))
-- **store:** re-relocate kegs cached before the rpath dedup landed ([dc6575db](https://github.com/indaco/malt/commit/dc6575db)) ([#775](https://github.com/indaco/malt/pull/775))
 
 ### 💅 Refactors
 
@@ -77,10 +67,6 @@ brew install --cask indaco/tap/malt
 - **benchmark:** update results 2026-08-03 ([95f4b94d](https://github.com/indaco/malt/commit/95f4b94d)) ([#802](https://github.com/indaco/malt/pull/802))
 - **benchmark:** update results 2026-07-27 ([4d84ead6](https://github.com/indaco/malt/commit/4d84ead6)) ([#788](https://github.com/indaco/malt/pull/788))
 
-### ⚡ Performance
-
-- **linker:** cut warm-install link time by ~3x on large kegs ([fd7c09a7](https://github.com/indaco/malt/commit/fd7c09a7)) ([#779](https://github.com/indaco/malt/pull/779))
-
 ### 🎨 Styling
 
 - restore zig fmt compliance in path_component ([8e2ffab7](https://github.com/indaco/malt/commit/8e2ffab7)) ([#808](https://github.com/indaco/malt/pull/808))
@@ -88,8 +74,6 @@ brew install --cask indaco/tap/malt
 ### ✅ Tests
 
 - **archive:** pin symlink bookkeeping to the pax-overridden entry name ([009963a6](https://github.com/indaco/malt/commit/009963a6)) ([#806](https://github.com/indaco/malt/pull/806))
-- **regression:** stop the etag guard blaming malt for a shared rate limit ([b2fb0c8b](https://github.com/indaco/malt/commit/b2fb0c8b)) ([#780](https://github.com/indaco/malt/pull/780))
-- **regression:** tell apart a real etag regression from GitHub flakiness ([8da17b32](https://github.com/indaco/malt/commit/8da17b32)) ([#777](https://github.com/indaco/malt/pull/777))
 
 ### 🏡 Chores
 
@@ -112,16 +96,107 @@ brew install --cask indaco/tap/malt
 
 ### 🎉 New Contributors
 
-- [@gitbutler](https://github.com/gitbutler) made their first contribution in [efb0a2d3](https://github.com/indaco/malt/commit/efb0a2d3)
 - [@rustytrees](https://github.com/rustytrees) made their first contribution in [#795](https://github.com/indaco/malt/pull/795)
 
 ### ❤️ Contributors
 
-- [@gitbutler](https://github.com/gitbutler)
 - [@indaco](https://github.com/indaco)
 - [@rustytrees](https://github.com/rustytrees)
 - [@github-actions[bot]](https://github.com/github-actions[bot])
 - [@dependabot[bot]](https://github.com/dependabot[bot])
+
+## v0.22.3 - 2026-07-27
+
+### Highlights
+
+v0.22.3 is a fix release: packages that arrive fully set up and usable, and colour output that follows your terminal and your redirects.
+
+- **Formulas that finish setting themselves up.** Packages that publish a launcher or shell completions from their post-install step now land on your PATH instead of installing with nothing to run, stale links are retired on the way, and a shipped config file arrives filled in rather than with the placeholder still in it.
+- **Bottles that actually launch.** A bottle whose wrapper points inside another package now resolves that path at install time, so it runs instead of failing on first use - and `mt doctor` flags any leftover placeholder in a script, a case that used to install clean and break later.
+- **Colour that respects your terminal and your pipes.** `CLICOLOR_FORCE` gets you ANSI through `less -R` or a CI log, `CLICOLOR=0` turns it off, and `NO_COLOR` still overrides everything. Redirecting a command to a file no longer fills it with escape sequences, and a 256-colour custom theme falls back to the default palette on terminals that can't render it.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **post-install:** close declarative post-install step gaps ([97214997](https://github.com/indaco/malt/commit/97214997)) ([#787](https://github.com/indaco/malt/pull/787))
+- **install:** resolve dependency-scoped bottle placeholders ([12bbdcbf](https://github.com/indaco/malt/commit/12bbdcbf)) ([#786](https://github.com/indaco/malt/pull/786))
+- **ui:** gate 256-index custom themes on terminal depth ([c7156691](https://github.com/indaco/malt/commit/c7156691)) ([#785](https://github.com/indaco/malt/pull/785))
+- **ui:** decide colour per output stream ([85e6b1db](https://github.com/indaco/malt/commit/85e6b1db)) ([#784](https://github.com/indaco/malt/pull/784))
+- **ui:** honour CLICOLOR and CLICOLOR_FORCE ([7714b8c1](https://github.com/indaco/malt/commit/7714b8c1)) ([#783](https://github.com/indaco/malt/pull/783))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.22.2 - 2026-07-26
+
+### Highlights
+
+v0.22.2 makes cleanup and doctor agree on broken symlinks, speeds up relinking on large kegs, and stops a bad install from ever passing as a success.
+
+- **`mt cleanup` now actually removes broken symlinks.** Doctor's advice to run it used to do nothing - now it does, wherever the symlinks live.
+- **Faster relinking on big kegs.** Reinstalling packages like openssl@3 is up to 3x quicker.
+- **Bad installs get caught, not shipped.** A relocation defect that would leave a binary unable to load now fails the install instead of reporting success.
+- **Real help for every command.** `untap`, `help`, and the `remove`/`ls` aliases no longer dead-end on "No help available."
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **cleanup:** sweep broken symlinks so doctor's advice works ([f07460a6](https://github.com/indaco/malt/commit/f07460a6)) ([#782](https://github.com/indaco/malt/pull/782))
+- **doctor:** find broken symlinks below the top level of each link dir ([a1dc3b49](https://github.com/indaco/malt/commit/a1dc3b49)) ([#781](https://github.com/indaco/malt/pull/781))
+- **cli:** give untap, help and the command aliases real help topics ([95182d92](https://github.com/indaco/malt/commit/95182d92)) ([#778](https://github.com/indaco/malt/pull/778))
+- **install:** refuse a keg the loader would reject ([303e0632](https://github.com/indaco/malt/commit/303e0632)) ([#776](https://github.com/indaco/malt/pull/776))
+
+### ⚡ Performance
+
+- **linker:** cut warm-install link time by ~3x on large kegs ([a35d7705](https://github.com/indaco/malt/commit/a35d7705)) ([#779](https://github.com/indaco/malt/pull/779))
+
+### ✅ Tests
+
+- **regression:** stop the etag guard blaming malt for a shared rate limit ([5c4498de](https://github.com/indaco/malt/commit/5c4498de)) ([#780](https://github.com/indaco/malt/pull/780))
+- **regression:** tell apart a real etag regression from GitHub flakiness ([a94b3119](https://github.com/indaco/malt/commit/a94b3119)) ([#777](https://github.com/indaco/malt/pull/777))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.22.1 - 2026-07-25
+
+### 🩹 Fixes
+
+- **store:** re-relocate kegs cached before the rpath dedup landed ([743127d7](https://github.com/indaco/malt/commit/743127d7)) ([#775](https://github.com/indaco/malt/pull/775))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
 
 ## v0.22.0 - 2026-07-24
 
