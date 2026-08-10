@@ -477,6 +477,47 @@ test "collectFormulaJobs no-ops when the formula is already installed" {
     try testing.expectEqual(@as(usize, 0), jobs.items.len);
 }
 
+test "collectFormulaJobs still queues an installed formula under --download-only" {
+    // `--download-only` warms the store; an installed row proves nothing
+    // about whether the current version's bottle is cached, so the
+    // already-installed gate must not swallow the request.
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tdb = try TempDb.init("dlonly_installed");
+    defer tdb.deinit();
+
+    var stmt = try tdb.db.prepare(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason)
+        \\VALUES ('hello', 'hello', '1.0', 'sha', '/tmp', 'direct');
+    );
+    defer stmt.finalize();
+    _ = try stmt.step();
+
+    const json = bottleJsonWithoutDeps("hello");
+
+    var http: malt.client_pool.HttpClientPool = undefined;
+    var api: malt.api.BrewApi = undefined;
+    var store_inst: malt.store.Store = undefined;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
+    defer jobs.deinit(alloc);
+
+    var cache = malt.deps.FormulaCache.init(alloc);
+    defer cache.deinit();
+
+    try install_download.collectFormulaJobs(
+        .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst, .cache = &cache, .worker_backing = alloc, .download_only = true },
+        "hello",
+        json,
+        false, // force=false
+        &jobs,
+    );
+
+    try testing.expectEqual(@as(usize, 1), jobs.items.len);
+    try testing.expectEqualStrings("hello", jobs.items[0].name);
+}
+
 /// Seed a BrewApi cache_dir with a freshly-written formula JSON file
 /// under the `formula_<name>.json` naming convention that readCache
 /// honours. Used to avoid hitting the network when collectFormulaJobs

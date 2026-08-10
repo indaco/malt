@@ -44,6 +44,10 @@ pub const InstallJobDeps = struct {
     /// Where resolution-phase human lines go; terminal by default so the
     /// upgrade re-entry and `mt install` are unchanged.
     sink: OutputSink = sink_mod.terminal,
+    /// `--download-only`: collect jobs even for an installed package, so a
+    /// version bump lands in the store ahead of the upgrade that needs it.
+    /// The pool still stops before materialise/link/record.
+    download_only: bool = false,
 };
 
 /// A bottle download job for parallel processing.
@@ -253,8 +257,10 @@ pub fn collectFormulaJobs(
         return InstallError.FormulaNotFound;
     };
 
-    // Check if already installed
-    if (!force and record.isInstalled(db, formula.name)) {
+    // Check if already installed. `--download-only` skips the gate for the
+    // same reason the cask and tap paths do: the row says nothing about
+    // whether the *current* version's bottle is in the store.
+    if (!force and !ctx.download_only and record.isInstalled(db, formula.name)) {
         ctx.sink.info("{s} is already installed", .{formula.name});
         return;
     }
