@@ -67,7 +67,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
     const magic = std.mem.readInt(u32, data[0..4], .little);
 
     if (magic == macho.FAT_MAGIC or magic == macho.FAT_CIGAM) {
-        return parseFat(allocator, data);
+        return parseFat(allocator, data, false);
     }
 
     if (magic == macho.MH_MAGIC_64 or magic == macho.MH_CIGAM_64) {
@@ -100,11 +100,44 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
 /// corruption in an otherwise recognised slice, and silently skipping it would
 /// leave the patcher free to rewrite the surviving slices and produce a
 /// half-patched fat binary. Bubble it up so the caller aborts the whole patch.
-fn parseFat(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
+/// An arch-table entry with both layouts' fields widened to u64, so the
+/// caller's bounds arithmetic never depends on which layout produced them.
+const FatArch = struct {
+    offset: u64,
+    size: u64,
+};
+
+/// Byte stride of one arch-table entry. Zig 0.16 ships no `fat_arch_64`, so 32
+/// stays a literal while 20 is pinned to the ABI type.
+fn fatArchSize(is64: bool) usize {
+    comptime std.debug.assert(@sizeOf(macho.fat_arch) == 20);
+    return if (is64) 32 else 20;
+}
+
+/// Decode one arch-table entry; fat tables are always big-endian.
+///   fat_arch:    cputype(4) cpusubtype(4) offset(4) size(4) align(4)
+///   fat_arch_64: cputype(4) cpusubtype(4) offset(8) size(8) align(4) reserved(4)
+///
+/// Bounds live in the caller's entry guard so there is one place to audit —
+/// `entry` must already hold `fatArchSize(is64)` bytes.
+fn readFatArch(entry: []const u8, is64: bool) FatArch {
+    std.debug.assert(entry.len >= fatArchSize(is64));
+    return if (is64) .{
+        .offset = std.mem.readInt(u64, entry[8..16], .big),
+        .size = std.mem.readInt(u64, entry[16..24], .big),
+    } else .{
+        .offset = std.mem.readInt(u32, entry[8..12], .big),
+        .size = std.mem.readInt(u32, entry[12..16], .big),
+    };
+}
+
+fn parseFat(allocator: std.mem.Allocator, data: []const u8, is64: bool) ParseError!MachO {
     if (data.len < 8) return ParseError.TruncatedFile;
 
     // Fat header is big-endian: magic (4), nfat_arch (4).
     const nfat_arch = std.mem.readInt(u32, data[4..8], .big);
+    const data_len: u64 = data.len;
+    const entry_size = fatArchSize(is64);
 
     var all_paths: std.ArrayList(LoadCommandPath) = .empty;
     errdefer all_paths.deinit(allocator);
@@ -114,24 +147,26 @@ fn parseFat(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
     var offset: usize = 8;
     var i: u32 = 0;
     while (i < nfat_arch) : (i += 1) {
-        if (offset + 20 > data.len) return ParseError.TruncatedFile;
+        const entry_end = @addWithOverflow(offset, entry_size);
+        if (entry_end[1] != 0 or entry_end[0] > data.len) return ParseError.TruncatedFile;
 
-        // fat_arch layout: cputype(4), cpusubtype(4), offset(4), size(4), align(4).
-        // Widen to usize: both fields are ≤ 2³², so their sum can't overflow a
-        // 64-bit usize and the bounds check below stays honest. In u32 a crafted
-        // offset+size wraps and bypasses the guard.
-        const slice_offset: usize = std.mem.readInt(u32, data[offset + 8 ..][0..4], .big);
-        const slice_size: usize = std.mem.readInt(u32, data[offset + 12 ..][0..4], .big);
+        const arch = readFatArch(data[offset..entry_end[0]], is64);
+        offset = entry_end[0];
 
-        offset += 20;
+        // Overflow-checked, not bare `+`: correctness must not rest on how
+        // wide the decoded fields happen to be.
+        const slice_end = @addWithOverflow(arch.offset, arch.size);
+        if (slice_end[1] != 0 or slice_end[0] > data_len) return ParseError.TruncatedFile;
 
-        if (slice_offset + slice_size > data.len) return ParseError.TruncatedFile;
+        // Both bounded by data.len above.
+        const slice_offset: usize = @intCast(arch.offset);
+        const slice_limit: usize = @intCast(slice_end[0]);
 
         // Skip legacy/unsupported slices; bubble structural corruption.
         // See the doc comment above for the full policy.
         var slice_result = parseMachO64(
             allocator,
-            data[slice_offset .. slice_offset + slice_size],
+            data[slice_offset..slice_limit],
             slice_offset,
         ) catch |e| switch (e) {
             ParseError.InvalidMagic,
@@ -338,4 +373,53 @@ fn collectCstringSections(
             .size = sect_size_bytes,
         }) catch return ParseError.OutOfMemory;
     }
+}
+
+const testing = std.testing;
+
+test "fatArchSize is the on-disk stride of each layout" {
+    // Pinning the 32-bit stride to the ABI type keeps a later "simplification"
+    // from silently desynchronising the walk from the on-disk table.
+    try testing.expectEqual(@as(usize, 20), fatArchSize(false));
+    try testing.expectEqual(@sizeOf(macho.fat_arch), fatArchSize(false));
+    try testing.expectEqual(@as(usize, 32), fatArchSize(true));
+}
+
+test "readFatArch decodes the 32-bit layout big-endian" {
+    // Distinct neighbours prove it reads bytes 8..12 and 12..16, not around them.
+    var entry: [20]u8 = undefined;
+    std.mem.writeInt(u32, entry[0..4], 0x0100_000C, .big); // cputype
+    std.mem.writeInt(u32, entry[4..8], 0x8000_0002, .big); // cpusubtype
+    std.mem.writeInt(u32, entry[8..12], 0x0000_4000, .big); // offset
+    std.mem.writeInt(u32, entry[12..16], 0x0001_2345, .big); // size
+    std.mem.writeInt(u32, entry[16..20], 0x0000_000E, .big); // align
+
+    const arch = readFatArch(&entry, false);
+    try testing.expectEqual(@as(u64, 0x0000_4000), arch.offset);
+    try testing.expectEqual(@as(u64, 0x0001_2345), arch.size);
+}
+
+test "readFatArch widens 32-bit fields instead of mangling them" {
+    var entry: [20]u8 = [_]u8{0} ** 20;
+    std.mem.writeInt(u32, entry[8..12], 0xFFFF_FFFF, .big);
+    std.mem.writeInt(u32, entry[12..16], 0xFFFF_FFFE, .big);
+
+    const arch = readFatArch(&entry, false);
+    try testing.expectEqual(@as(u64, 0xFFFF_FFFF), arch.offset);
+    try testing.expectEqual(@as(u64, 0xFFFF_FFFE), arch.size);
+}
+
+test "readFatArch decodes the 64-bit layout big-endian" {
+    // Values above 0xFFFFFFFF fail loudly if the 64-bit arm ever truncates.
+    var entry: [32]u8 = undefined;
+    std.mem.writeInt(u32, entry[0..4], 0x0100_000C, .big); // cputype
+    std.mem.writeInt(u32, entry[4..8], 0x8000_0002, .big); // cpusubtype
+    std.mem.writeInt(u64, entry[8..16], 0x0000_0001_0000_4000, .big); // offset
+    std.mem.writeInt(u64, entry[16..24], 0x0000_0002_0001_2345, .big); // size
+    std.mem.writeInt(u32, entry[24..28], 0x0000_000E, .big); // align
+    std.mem.writeInt(u32, entry[28..32], 0xDEAD_BEEF, .big); // reserved
+
+    const arch = readFatArch(&entry, true);
+    try testing.expectEqual(@as(u64, 0x0000_0001_0000_4000), arch.offset);
+    try testing.expectEqual(@as(u64, 0x0000_0002_0001_2345), arch.size);
 }

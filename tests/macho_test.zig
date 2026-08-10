@@ -238,6 +238,31 @@ test "parse rejects a truncated fat header" {
     try testing.expectError(parser.ParseError.TruncatedFile, parser.parse(testing.allocator, &buf));
 }
 
+test "parse accepts a fat archive with an empty arch table" {
+    // Zero slices is well-formed, not corrupt: the walk must yield nothing
+    // rather than reading an entry that isn't there.
+    var buf: [8]u8 = undefined;
+    std.mem.writeInt(u32, buf[0..4], macho.FAT_MAGIC, .big);
+    std.mem.writeInt(u32, buf[4..8], 0, .big);
+
+    var m = try parser.parse(testing.allocator, &buf);
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 0), m.paths.len);
+    try testing.expectEqual(@as(usize, 0), m.cstrings.len);
+}
+
+test "parse rejects a fat archive whose arch table outruns the buffer" {
+    // nfat_arch claims two entries but the buffer holds one: the entry-table
+    // guard, not the slice guard, is what has to stop the walk.
+    var buf: [28]u8 = undefined;
+    @memset(&buf, 0);
+    std.mem.writeInt(u32, buf[0..4], macho.FAT_MAGIC, .big);
+    std.mem.writeInt(u32, buf[4..8], 2, .big); // nfat_arch = 2, room for 1
+    std.mem.writeInt(u32, buf[16..20], 8 + 20, .big); // first slice offset
+    std.mem.writeInt(u32, buf[20..24], 0, .big); // first slice size
+    try testing.expectError(parser.ParseError.TruncatedFile, parser.parse(testing.allocator, &buf));
+}
+
 test "parse rejects a fat archive whose slice extends beyond data" {
     // Build a fat header claiming one arch whose slice is out of bounds.
     var buf: [28]u8 = undefined;
