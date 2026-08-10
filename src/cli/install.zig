@@ -270,6 +270,11 @@ pub fn pruneOtherCellarVersionsForReinstall(
 /// down the parent when the last version goes; an orphan empty dir is
 /// `mt doctor --fix` territory rather than something to paper over.
 fn kegPresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) bool {
+    // The gate runs before the pipeline validates anything, so a dot-entry
+    // like `.` or `..` would otherwise resolve to a directory that always
+    // exists and report a bogus "already installed".
+    if (name.len == 0 or name[0] == '.') return false;
+    api_mod.validateName(name) catch return false;
     var buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return false;
     std.Io.Dir.accessAbsolute(ctx.io, cellar_path, .{}) catch return false;

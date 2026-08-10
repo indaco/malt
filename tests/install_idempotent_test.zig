@@ -143,6 +143,41 @@ test "execute falls through when one of several args is missing from the Cellar"
     try testing.expect(pathExists(db_file));
 }
 
+test "execute never claims a dot-entry name is already installed" {
+    const prefix = try setupPrefix("dotentry");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+        _ = c.unsetenv("MALT_PREFIX");
+    }
+
+    // `Cellar/.` and `Cellar/..` always resolve, so an unguarded probe
+    // reports success for a name that can never have been installed.
+    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar", .{prefix});
+    defer testing.allocator.free(cellar);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar);
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+
+    for ([_][]const u8{ ".", "..", "./x" }) |name| {
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        malt.output.beginStderrCapture(testing.allocator, &captured);
+        defer malt.output.endStderrCapture();
+
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+        defer threaded.deinit();
+        const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+        install.execute(&ctx, arena.allocator(), &.{name}) catch {};
+
+        try testing.expect(std.mem.indexOf(u8, captured.items, "is already installed") == null);
+    }
+}
+
 test "execute --cask short-circuits when the cask is recorded in the DB" {
     const prefix = try setupPrefix("cask");
     defer {
