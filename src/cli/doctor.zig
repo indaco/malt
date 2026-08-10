@@ -10,6 +10,7 @@ const cellar = @import("../core/cellar.zig");
 const relocated_store = @import("../core/relocated_store.zig");
 const patch = @import("../core/patch.zig");
 const perms_mod = @import("../core/perms.zig");
+const signals = @import("../core/signals.zig");
 const lock_mod = @import("../db/lock.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
@@ -139,6 +140,8 @@ pub const checks = [_]Check{
 pub fn runChecks(ctx: CheckCtx, table: []const Check) Tally {
     var tally: Tally = .{};
     for (table) |c| {
+        // Ctrl-C between rows. `execute` re-reads the flag for the exit code.
+        if (signals.isInterrupted()) break;
         switch (c.run(ctx, c.name)) {
             .ok => {},
             .warn_status => tally.warnings += 1,
@@ -435,6 +438,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }, &checks, want_checks_json);
     defer walk.deinit();
     const tally = walk.tally;
+
+    // Partial tally: a truncated-but-well-formed document would read as a
+    // complete run, and `--fix` must not act on an incomplete picture.
+    if (signals.isInterrupted()) {
+        if (!want_checks_json) output.warn("Interrupted.", .{});
+        std.process.exit(130); // 128 + SIGINT
+    }
 
     // `--json` is one merged, versioned document; the human view keeps the
     // three reports split so each renders in its own place after the rows.
@@ -1084,6 +1094,9 @@ fn collectOffendingKegs(ctx: CheckCtx, predicate: KegFilePredicate) ?KegGroups {
 
     var groups: KegGroups = .empty;
     while (walker.next(ctx.io) catch null) |entry| {
+        // Seconds of scanning on a populated Cellar — between-check polling
+        // alone would leave Ctrl-C unanswered for the whole walk.
+        if (signals.isInterrupted()) break;
         if (entry.kind != .file) continue;
         if (!predicate(ctx, &cellar_dir, entry.path)) continue;
         // Best-effort: an allocator failure drops this entry rather than
@@ -1115,6 +1128,8 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
         return .warn_status;
     };
     defer freeKegGroups(ctx, &groups);
+    // Partial groups: reporting them would blame whatever the scan reached.
+    if (signals.isInterrupted()) return .ok;
 
     if (groups.count() == 0) {
         printCheck(name, .ok, null);
@@ -1181,12 +1196,14 @@ fn checkRelocationFreshness(ctx: CheckCtx, name: []const u8) CheckResult {
 
     var names = cellar_dir.iterate();
     while (names.next(ctx.io) catch null) |pkg| {
+        if (signals.isInterrupted()) break;
         if (pkg.kind != .directory) continue;
         var pkg_dir = cellar_dir.openDir(ctx.io, pkg.name, .{ .iterate = true }) catch continue;
         defer pkg_dir.close(ctx.io);
 
         var versions = pkg_dir.iterate();
         while (versions.next(ctx.io) catch null) |ver| {
+            if (signals.isInterrupted()) break;
             if (ver.kind != .directory) continue;
             var keg_buf: [512]u8 = undefined;
             const keg = std.fmt.bufPrint(&keg_buf, "{s}/{s}/{s}", .{ cellar_root, pkg.name, ver.name }) catch continue;
@@ -1206,6 +1223,7 @@ fn checkRelocationFreshness(ctx: CheckCtx, name: []const u8) CheckResult {
         }
     }
 
+    if (signals.isInterrupted()) return .ok; // partial walk: nothing to report
     if (stale.items.len == 0) {
         printCheck(name, .ok, null);
         return .ok;
@@ -1244,6 +1262,7 @@ fn checkUnrelocatedPrefix(ctx: CheckCtx, name: []const u8) CheckResult {
         return .warn_status;
     };
     defer freeKegGroups(ctx, &groups);
+    if (signals.isInterrupted()) return .ok; // partial walk: nothing to report
 
     if (groups.count() == 0) {
         printCheck(name, .ok, null);
@@ -2054,6 +2073,128 @@ test "runChecks: an info_status finding counts as neither warning nor error" {
     }, &table);
     try testing.expectEqual(@as(u32, 0), tally.warnings);
     try testing.expectEqual(@as(u32, 0), tally.errors);
+}
+
+var checks_run_for_test: u32 = 0;
+
+fn warnCheckForTest(ctx: CheckCtx, name: []const u8) CheckResult {
+    _ = ctx;
+    _ = name;
+    checks_run_for_test += 1;
+    return .warn_status;
+}
+
+fn hermeticCtx() CheckCtx {
+    return .{
+        .allocator = testing.allocator,
+        .prefix = "/nonexistent",
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    };
+}
+
+test "runChecks: an interrupt ends the walk instead of finishing the table" {
+    // Ctrl-C used to be recorded and ignored: doctor ran every remaining
+    // check before exiting, so the user's press changed nothing.
+    const prior = signals.isInterrupted();
+    defer signals.setInterruptedForTest(prior);
+    defer signals.armInterruptAfterForTest(0);
+    signals.setInterruptedForTest(false);
+
+    const table = [_]Check{
+        .{ .name = "a", .run = warnCheckForTest },
+        .{ .name = "b", .run = warnCheckForTest },
+        .{ .name = "c", .run = warnCheckForTest },
+    };
+    checks_run_for_test = 0;
+    signals.armInterruptAfterForTest(2); // lands on the poll before "b"
+
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+    const tally = runChecks(hermeticCtx(), &table);
+
+    try testing.expectEqual(@as(u32, 1), checks_run_for_test);
+    try testing.expectEqual(@as(u32, 1), tally.warnings);
+}
+
+test "runChecks: an interrupt raised before the walk runs no check at all" {
+    const prior = signals.isInterrupted();
+    defer signals.setInterruptedForTest(prior);
+    signals.setInterruptedForTest(true);
+
+    const table = [_]Check{.{ .name = "a", .run = warnCheckForTest }};
+    checks_run_for_test = 0;
+
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+    const tally = runChecks(hermeticCtx(), &table);
+
+    try testing.expectEqual(@as(u32, 0), checks_run_for_test);
+    try testing.expectEqual(@as(u32, 0), tally.warnings);
+}
+
+test "checkMachOPlaceholders: an interrupted Cellar walk reports no fault" {
+    // The walk stops mid-tree, so its groups are partial. Printing a row from
+    // them would blame the packages the scan happened to reach.
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("doctor_sigint_placeholders");
+    defer s.deinit();
+
+    const keg = s.p("/Cellar/pkg/1.0/bin");
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const wrapper = try std.fmt.bufPrint(&path_buf, "{s}/wrapper", .{keg});
+    try atomic.atomicWriteFile(io, wrapper, "prefix=@@HOMEBREW_PREFIX@@\n");
+
+    const ctx: CheckCtx = .{ .allocator = allocator, .prefix = s.base, .io = io, .environ = .empty };
+    defer resetVerboseHint();
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    output.beginStderrCapture(allocator, &out);
+    defer output.endStderrCapture();
+
+    // Uninterrupted this tree is an error — that is what makes the
+    // interrupted result below discriminating rather than vacuous.
+    try testing.expectEqual(CheckResult.err_status, checkMachOPlaceholders(ctx, "Relocation placeholders"));
+
+    const prior = signals.isInterrupted();
+    defer signals.setInterruptedForTest(prior);
+    signals.setInterruptedForTest(true);
+
+    out.clearRetainingCapacity();
+    try testing.expectEqual(CheckResult.ok, checkMachOPlaceholders(ctx, "Relocation placeholders"));
+    try testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "checkRelocationFreshness: an interrupted Cellar walk reports no fault" {
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("doctor_sigint_freshness");
+    defer s.deinit();
+
+    const keg = s.p("/Cellar/pkg/1.0");
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    cellar.writeRelocStamp(io, allocator, keg, .{ .version = 0 });
+
+    const ctx: CheckCtx = .{ .allocator = allocator, .prefix = s.base, .io = io, .environ = .empty };
+    defer resetVerboseHint();
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    output.beginStderrCapture(allocator, &out);
+    defer output.endStderrCapture();
+
+    try testing.expectEqual(CheckResult.warn_status, checkRelocationFreshness(ctx, "Relocation freshness"));
+
+    const prior = signals.isInterrupted();
+    defer signals.setInterruptedForTest(prior);
+    signals.setInterruptedForTest(true);
+
+    out.clearRetainingCapacity();
+    try testing.expectEqual(CheckResult.ok, checkRelocationFreshness(ctx, "Relocation freshness"));
+    try testing.expectEqual(@as(usize, 0), out.items.len);
 }
 
 test "textCarriesPlaceholder flags a wrapper script that kept a token" {
