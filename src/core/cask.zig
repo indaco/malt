@@ -23,6 +23,9 @@ pub const CaskError = error{
     // Callers retry a mismatch as transient corruption; this one never
     // succeeds on a retry, so it must not wear the same name.
     Sha256Missing,
+    // Also never succeeds on a retry: the manifest asked for a cleartext
+    // origin for an artifact it declined to pin.
+    InsecureOrigin,
     OutOfMemory,
 };
 
@@ -612,8 +615,12 @@ pub const CaskInstaller = struct {
             else => return CaskError.InstallFailed,
         };
 
-        const cache_path = self.downloadToCache(cask, cache_dir, self.progress) catch
-            return CaskError.DownloadFailed;
+        const cache_path = self.downloadToCache(cask, cache_dir, self.progress) catch |e| switch (e) {
+            // A retry re-fetches the same manifest and refuses identically, so
+            // this must not reach the user wearing a transient error's name.
+            error.InsecureUrlScheme => return CaskError.InsecureOrigin,
+            else => return CaskError.DownloadFailed,
+        };
         errdefer {
             std.Io.Dir.cwd().deleteFile(self.io, cache_path) catch {};
             self.allocator.free(cache_path);
@@ -892,7 +899,7 @@ pub const CaskInstaller = struct {
         defer http.deinit();
         http.offline = self.offline;
 
-        var resp = try http.getWithHeaders(cask.url, &.{}, progress);
+        var resp = try http.getWithHeaders(cask.url, &.{}, progress, artifactIntegrity(cask.sha256));
         defer resp.deinit();
 
         if (resp.status != 200) return error.DownloadFailed;
@@ -1377,6 +1384,29 @@ pub fn verifyFileSha256(io: std.Io, file_path: []const u8, expected: ?[]const u8
     // Cask manifest SHAs are public: constant-time here is for uniformity
     // across malt's SHA paths, not to close a live oracle.
     if (!hash_mod.eqlHex256(got, expected_hash)) return error.Sha256Mismatch;
+}
+
+/// What backs a cask's artifact once it is off the wire — the mirror image of
+/// `verifyFileSha256`, decided before the fetch instead of after it.
+///
+/// Only the casks that hash-verify nothing are left leaning on the transport,
+/// and those are the only ones a cleartext origin actually endangers.
+pub fn artifactIntegrity(sha256: ?[]const u8) client_mod.Integrity {
+    const h = sha256 orelse return .transport_only;
+    if (std.mem.eql(u8, h, "no_check")) return .transport_only;
+    return .digest_pinned;
+}
+
+test "artifactIntegrity: only an opted-out or absent digest falls back to the transport" {
+    // The split has to track `verifyFileSha256` exactly: a cask that will be
+    // hash-checked gains nothing from refusing http, and one that will not is
+    // the whole reason the rule exists.
+    try std.testing.expectEqual(client_mod.Integrity.transport_only, artifactIntegrity(null));
+    try std.testing.expectEqual(client_mod.Integrity.transport_only, artifactIntegrity("no_check"));
+    try std.testing.expectEqual(
+        client_mod.Integrity.digest_pinned,
+        artifactIntegrity("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    );
 }
 
 /// ERE metacharacters, which a bundle name may legitimately contain.

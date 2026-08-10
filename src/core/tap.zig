@@ -1431,7 +1431,9 @@ pub fn getRawFile(
     var auth_buf: [8 * 1024]u8 = undefined;
     if (try forge.rawAuthHeader(forge_kind, environ, &auth_buf)) |header| {
         const headers = [_]std.http.Header{header};
-        return http.getWithHeaders(rb_url, &headers, null);
+        // Formula source, not an artifact: nothing downstream hashes it, and
+        // it carries a credential.
+        return http.getWithHeaders(rb_url, &headers, null, .transport_only);
     }
     return http.get(rb_url);
 }

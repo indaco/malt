@@ -362,3 +362,33 @@ test "downloadOnly reports a missing cask digest as its own error, not a mismatc
     var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
     try testing.expectError(error.Sha256Missing, installer.downloadOnly(&c));
 }
+
+test "downloadOnly reports a cleartext origin as its own error, not a download failure" {
+    // A cask that opts out of hashing and is served over cleartext is the one
+    // case the transport is all that stands behind the artifact. Refusing it
+    // as DownloadFailed reads as a network blip and invites a retry that can
+    // only fail the same way — the same trap the missing-digest case sets.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fx = try Fixture.init("cleartext_origin");
+    defer fx.deinit();
+    try test_io.cwd().createDirPath(std.Options.debug_io, fx.p("cache"));
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // `.invalid` never resolves, so a guard that failed to fire would surface
+    // as a connect error rather than quietly passing this test.
+    var c = try cask.parseCask(
+        testing.allocator,
+        "{\"token\":\"cleartext\",\"version\":\"1.0\"," ++
+            "\"url\":\"http://cask.invalid/x.zip\",\"sha256\":\"no_check\"}",
+    );
+    defer c.deinit();
+
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    try testing.expectError(error.InsecureOrigin, installer.downloadOnly(&c));
+}

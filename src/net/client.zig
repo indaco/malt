@@ -28,6 +28,9 @@ pub const GetError = error{
     OfflineRequired,
     RequestFailed,
     TlsDowngradeRefused,
+    /// A manifest handed us a cleartext origin for a payload nothing else
+    /// vouches for.
+    InsecureUrlScheme,
     TooManyHttpRedirects,
     HttpRedirectInvalid,
     ResponseTooLarge,
@@ -35,6 +38,20 @@ pub const GetError = error{
     WatchdogSpawnFailed,
     Canceled,
     OutOfMemory,
+};
+
+/// What still vouches for a payload once the transport does not.
+///
+/// Refusing every cleartext origin would cost the packages that are already
+/// safe without buying anything: a digest published over https pins the bytes,
+/// so a cleartext hop cannot substitute them undetected. The exemption is
+/// deliberately narrow — only a caller that verifies a digest it did not learn
+/// from the same connection may claim it.
+pub const Integrity = enum {
+    /// The caller checks the body against a digest obtained elsewhere.
+    digest_pinned,
+    /// Nothing behind the transport. Cleartext is refused.
+    transport_only,
 };
 
 pub const DownloadDiagnostic = struct {
@@ -446,11 +463,44 @@ pub const HttpClient = struct {
         return hostIsSameOrSubdomain(fh, th);
     }
 
+    /// True for the loopback names a local fixture server binds. Cleartext to
+    /// one of these never leaves the machine, so the https requirement below
+    /// does not apply — and the test suites that stand up a throwaway HTTP
+    /// server keep working without an escape hatch a real deployment could
+    /// trip over.
+    fn isLoopbackHost(host: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(host, "127.0.0.1") or
+            std.ascii.eqlIgnoreCase(host, "localhost") or
+            std.ascii.eqlIgnoreCase(host, "::1") or
+            std.ascii.eqlIgnoreCase(host, "[::1]");
+    }
+
+    /// Refuse a cleartext origin. The redirect loop already declines an
+    /// https→http downgrade mid-chain, but the *initial* scheme came straight
+    /// from a manifest: a tap that writes `http://` for a formula or cask URL
+    /// got a plaintext fetch.
+    ///
+    /// `cli/tap.zig` already refuses `http://` when registering a tap; this
+    /// applies the same rule to the URLs those taps hand back.
+    pub fn requireSecureOrigin(url: []const u8, integrity: Integrity) GetError!void {
+        if (std.mem.startsWith(u8, url, "https://")) return;
+        // Only cleartext http is ever a candidate for the exemptions below;
+        // `file://`, `ftp://` and an unparseable url stay refused either way.
+        if (!std.mem.startsWith(u8, url, "http://")) return error.InsecureUrlScheme;
+        if (integrity == .digest_pinned) return;
+        const host = urlHost(url) orelse return error.InsecureUrlScheme;
+        if (isLoopbackHost(host)) return;
+        return error.InsecureUrlScheme;
+    }
+
     /// GET request; auto-injects the GitHub API token (`MALT_GITHUB_TOKEN`,
     /// then `HOMEBREW_GITHUB_API_TOKEN`) as Authorization for GitHub/Homebrew
     /// hosts. Caller owns the returned `Response`.
     pub fn get(self: *HttpClient, url: []const u8) !Response {
         if (self.offline) return error.OfflineRequired;
+        // Every caller fetches metadata from a hardcoded https host; none has
+        // a digest to fall back on, so this one stays unconditional.
+        try requireSecureOrigin(url, .transport_only);
         if (try self.authHeaderValue(url)) |auth_value| {
             defer self.allocator.free(auth_value);
             const headers = [_]std.http.Header{
@@ -473,13 +523,19 @@ pub const HttpClient = struct {
     }
 
     /// GET with extra headers under `max_blob_bytes`. Caller owns `Response`.
+    ///
+    /// This is where a tap-supplied URL is actually downloaded, so `integrity`
+    /// has no default: every call site has to say what backs the bytes it is
+    /// about to trust.
     pub fn getWithHeaders(
         self: *HttpClient,
         url: []const u8,
         extra_headers: []const std.http.Header,
         progress: ?ProgressCallback,
+        integrity: Integrity,
     ) !Response {
         if (self.offline) return error.OfflineRequired;
+        try requireSecureOrigin(url, integrity);
         return self.doGetWithRetry(url, extra_headers, max_blob_bytes, progress);
     }
 
@@ -497,12 +553,18 @@ pub const HttpClient = struct {
         progress: ?ProgressCallback,
     ) GetError!u16 {
         if (self.offline) return error.OfflineRequired;
+        // Only ghcr blob fetches land here, and those are https with the
+        // digest in the URL.
+        try requireSecureOrigin(url, .transport_only);
         return self.doGetToWriterWithRetry(url, extra_headers, sink, progress);
     }
 
     /// Perform a HEAD request and return only the HTTP status code.
     pub fn head(self: *HttpClient, url: []const u8) !u16 {
         if (self.offline) return error.OfflineRequired;
+        // A HEAD returns no body to verify, so there is never a digest to
+        // weigh against the transport.
+        try requireSecureOrigin(url, .transport_only);
         const uri = try std.Uri.parse(url);
 
         var req = try self.client.request(.HEAD, uri, .{
@@ -575,6 +637,10 @@ pub const HttpClient = struct {
     /// HEAD with manual redirect follow — stdlib skips redirects on HEAD.
     pub fn headResolved(self: *HttpClient, url: []const u8) !HeadResolved {
         if (self.offline) return error.OfflineRequired;
+        // The final url and Content-Disposition this returns pick a cask's
+        // artifact type, and the pkg type reaches `sudo installer -target /`.
+        // No digest covers a response header, so cleartext is refused outright.
+        try requireSecureOrigin(url, .transport_only);
         // Build the result eagerly so a single errdefer covers every dupe
         // inside the redirect loop; on success the caller takes ownership.
         var resolved: HeadResolved = .{
@@ -1399,6 +1465,86 @@ test "githubTokenApplies: tolerates the FQDN trailing-dot root form" {
 
 fn environFrom(entries: [:null]const ?[*:0]const u8) std.process.Environ {
     return .{ .block = .{ .slice = entries } };
+}
+
+test "requireSecureOrigin: refuses a cleartext manifest origin" {
+    // A tap controls the `url` field of a formula or cask. With no digest to
+    // fall back on, the transport is all that stands between the manifest and
+    // an installed artifact.
+    const bad = [_][]const u8{
+        "http://example.com/pkg.tar.gz",
+        "http://github.com/x/y",
+        "http://192.168.1.10/pkg.dmg",
+        "http://evil.tld/127.0.0.1/pkg.zip", // loopback in the *path*, not the host
+        "http://127.0.0.1.evil.tld/pkg.zip", // and not as a prefix of the host
+        "ftp://example.com/pkg.tar.gz",
+        "file:///etc/passwd",
+        "not-a-url",
+        "",
+    };
+    for (bad) |u| try std.testing.expectError(
+        error.InsecureUrlScheme,
+        HttpClient.requireSecureOrigin(u, .transport_only),
+    );
+}
+
+test "requireSecureOrigin: allows https anywhere and cleartext only to loopback" {
+    // The loopback carve-out is what keeps the fixture-server tests honest
+    // without giving a real deployment a way to opt out.
+    const ok = [_][]const u8{
+        "https://formulae.brew.sh/api/formula/jq.json",
+        "https://ghcr.io/v2/x/blobs/sha256:ab",
+        "http://127.0.0.1:8080/blob",
+        "http://localhost:1234/start",
+        "http://LOCALHOST:1/x",
+    };
+    for (ok) |u| try HttpClient.requireSecureOrigin(u, .transport_only);
+}
+
+test "requireSecureOrigin: a digest-pinned payload may come over cleartext http" {
+    // Upstream ships ~29 formulae and casks on `http://` whose bytes are
+    // pinned by a sha256 from the https manifest. Refusing those buys no
+    // integrity — substitution is already detected — and only breaks installs
+    // that Homebrew itself performs.
+    const ok = [_][]const u8{
+        "http://ck.kolivas.org/apps/lrzip/lrzip-0.641.tar.xz",
+        "http://www.apptivateapp.com/resources/Apptivate-2.2.1.app.zip",
+    };
+    for (ok) |u| try HttpClient.requireSecureOrigin(u, .digest_pinned);
+}
+
+test "every url entry point refuses a cleartext origin before dialling out" {
+    // A guard added to some of the entry points and not the rest is the whole
+    // failure mode: `headResolved` takes a cask url too, and the type it hands
+    // back decides whether the artifact is fed to `sudo installer`.
+    const a = std.testing.allocator;
+    var http = HttpClient.init(std.Options.debug_io, .empty, a);
+    defer http.deinit();
+
+    const url = "http://example.com/pkg";
+    var sink: std.Io.Writer.Allocating = .init(a);
+    defer sink.deinit();
+
+    try std.testing.expectError(error.InsecureUrlScheme, http.get(url));
+    try std.testing.expectError(error.InsecureUrlScheme, http.getWithHeaders(url, &.{}, null, .transport_only));
+    try std.testing.expectError(error.InsecureUrlScheme, http.getToWriter(url, &.{}, &sink.writer, null));
+    try std.testing.expectError(error.InsecureUrlScheme, http.head(url));
+    try std.testing.expectError(error.InsecureUrlScheme, http.headResolved(url));
+}
+
+test "requireSecureOrigin: a digest never buys a non-http scheme" {
+    // The exemption is for cleartext transport, not for reading the local
+    // filesystem or dialling ftp; a manifest must not reach those at all.
+    const bad = [_][]const u8{
+        "file:///etc/passwd",
+        "ftp://example.com/pkg.tar.gz",
+        "not-a-url",
+        "",
+    };
+    for (bad) |u| try std.testing.expectError(
+        error.InsecureUrlScheme,
+        HttpClient.requireSecureOrigin(u, .digest_pinned),
+    );
 }
 
 test "githubTokenApplies: only the four credential-bearing hosts match" {
