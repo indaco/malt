@@ -188,6 +188,26 @@ pub fn installTapCask(
     return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, false, .cask_only, sink);
 }
 
+/// True when a row matching `(leaf, tap_slug)` exists. The tap match is what
+/// stops `owner/repo/jq` claiming a homebrew/core `jq` of the same leaf name.
+fn tapRowExists(db: *sqlite.Database, sql: [:0]const u8, leaf: []const u8, tap_slug: []const u8) bool {
+    var stmt = db.prepare(sql) catch return false;
+    defer stmt.finalize();
+    stmt.bindText(1, leaf) catch return false;
+    stmt.bindText(2, tap_slug) catch return false;
+    return stmt.step() catch false;
+}
+
+pub fn tapKegRecorded(db: *sqlite.Database, leaf: []const u8, tap_slug: []const u8) bool {
+    return tapRowExists(db, "SELECT 1 FROM kegs WHERE name=?1 AND tap=?2 LIMIT 1;", leaf, tap_slug);
+}
+
+/// `owner/repo/<token>` resolves to a cask as readily as to a formula, so
+/// the tap probes have to cover both tables.
+pub fn tapCaskRecorded(db: *sqlite.Database, leaf: []const u8, tap_slug: []const u8) bool {
+    return tapRowExists(db, "SELECT 1 FROM casks WHERE token=?1 AND tap=?2 LIMIT 1;", leaf, tap_slug);
+}
+
 fn installTapRb(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -206,16 +226,27 @@ fn installTapRb(
         return InstallError.FormulaNotFound;
     };
 
+    var tap_slug_buf: [128]u8 = undefined;
+    const tap_slug = std.fmt.bufPrint(&tap_slug_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
+        return InstallError.FormulaNotFound;
+
+    // An already-recorded package needs no `.rb` at all - the post-parse
+    // checks further down reach the same verdict several round trips later.
+    // `--force` and `--download-only` must still re-fetch, and `--dry-run`
+    // still owes the user a plan.
+    const recorded = tapKegRecorded(db, parts.formula, tap_slug) or
+        tapCaskRecorded(db, parts.formula, tap_slug);
+    if (!force and !download_only and !dry_run and recorded) {
+        sink.info("{s} is already installed", .{parts.formula});
+        return;
+    }
+
     sink.info("Resolving tap {s}/{s}/{s}...", .{ parts.user, parts.repo, parts.formula });
 
     // Determine the commit SHA to fetch against. Prefer the pin
     // already in the DB (set at tap-add or last --refresh); if no pin
     // exists yet, resolve HEAD once and record it below. Refuses to
     // build a URL from a floating HEAD at install time.
-    var tap_slug_buf: [128]u8 = undefined;
-    const tap_slug = std.fmt.bufPrint(&tap_slug_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
-        return InstallError.FormulaNotFound;
-
     const urls = try tap_mod.resolveTapBaseUrls(allocator, db, tap_slug);
     defer urls.deinit(allocator);
 
@@ -1183,6 +1214,29 @@ test "mapTapResolveError handles every TapError tag" {
             mapped == InstallError.FormulaNotFound or
             mapped == InstallError.RecordFailed);
     }
+}
+
+test "tap presence probes require the owning tap to match" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec(
+        \\CREATE TABLE kegs (name TEXT, tap TEXT);
+        \\CREATE TABLE casks (token TEXT, tap TEXT);
+        \\INSERT INTO kegs VALUES ('jq', 'homebrew/core'), ('prowl', 'caarlos0/tap');
+        \\INSERT INTO casks VALUES ('deckclip', 'yuzeguitarist/deck');
+    );
+
+    try std.testing.expect(tapKegRecorded(&db, "prowl", "caarlos0/tap"));
+    try std.testing.expect(tapCaskRecorded(&db, "deckclip", "yuzeguitarist/deck"));
+
+    // Same leaf name, different owner: claiming this one would install the
+    // wrong package under the right name.
+    try std.testing.expect(!tapKegRecorded(&db, "jq", "caarlos0/tap"));
+    try std.testing.expect(!tapCaskRecorded(&db, "deckclip", "someone/else"));
+
+    // The two tables are not interchangeable.
+    try std.testing.expect(!tapKegRecorded(&db, "deckclip", "yuzeguitarist/deck"));
+    try std.testing.expect(!tapCaskRecorded(&db, "prowl", "caarlos0/tap"));
 }
 
 test "finalizeTapCaskInstall persists the cask row on the happy path" {

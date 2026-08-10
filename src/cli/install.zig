@@ -276,16 +276,63 @@ fn kegPresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) bool {
     return true;
 }
 
+/// Open `<prefix>/db/malt.db` only when it is already there. `Database.open`
+/// carries `SQLITE_OPEN_CREATE`, and the fast path must not bring the DB
+/// into existence just by probing it.
+fn openExistingDb(ctx: *const AppCtx, prefix: []const u8) ?sqlite.Database {
+    var buf: [512]u8 = undefined;
+    const path = std.fmt.bufPrintSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
+    std.Io.Dir.accessAbsolute(ctx.io, path, .{}) catch return null;
+    return sqlite.Database.open(path) catch null;
+}
+
+/// Presence probe for a `--cask` name. The `casks` row is the marker rather
+/// than `Caskroom/<token>`: `recordCaskroom` is best-effort, so the
+/// directory can be absent under a genuinely installed cask.
+fn caskPresent(ctx: *const AppCtx, prefix: []const u8, token: []const u8) bool {
+    var db = openExistingDb(ctx, prefix) orelse return false;
+    defer db.close();
+    return cask_mod.isInstalled(&db, token);
+}
+
+/// Presence probe for the `owner/repo/leaf` form, which resolves to either
+/// a keg or a cask. The row's `tap` must match in both cases - without
+/// that, `owner/repo/jq` would claim the homebrew/core `jq` as its own.
+fn tapPackagePresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) bool {
+    const parts = args_mod.parseTapName(name) orelse return false;
+
+    var slug_buf: [256]u8 = undefined;
+    const slug = std.fmt.bufPrint(&slug_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch return false;
+
+    var db = openExistingDb(ctx, prefix) orelse return false;
+    defer db.close();
+
+    // Cask by row alone; its Caskroom dir is best-effort. Keg by row plus
+    // the Cellar entry, same as the plain-formula probe.
+    if (local_mod.tapCaskRecorded(&db, parts.formula, slug)) return true;
+    return kegPresent(ctx, prefix, parts.formula) and
+        local_mod.tapKegRecorded(&db, parts.formula, slug);
+}
+
+/// Route one package name to the probe that matches how it would install.
+/// Mirrors the slow path's dispatch order (tap form wins over `--cask`) so
+/// the gate can never answer for a different install kind than the one the
+/// pipeline would take, and its `--download-only` carve-out: cask and tap
+/// slow paths refresh the cached artefact over an installed package, which
+/// is what `mt upgrade`'s prefetch relies on.
+fn alreadyInstalled(ctx: *const AppCtx, prefix: []const u8, pkg: []const u8, flags: args_mod.InstallFlags) bool {
+    if (isTapFormula(pkg)) return !flags.download_only and tapPackagePresent(ctx, prefix, pkg);
+    if (flags.force_cask) return !flags.download_only and caskPresent(ctx, prefix, pkg);
+    return kegPresent(ctx, prefix, pkg);
+}
+
 /// Read-only DB probe used by the fast-path gate. Returns true iff any
 /// named pkg currently has `install_reason='dependency'` AND
 /// `bin_isolated=1` — i.e. the user is asking us to promote a dep keg
 /// the install pipeline must then re-link bin/sbin for. Quiet on
 /// errors: a missing DB is the empty case, not a failure to surface.
 fn anyNamedNeedsPromotion(ctx: *const AppCtx, prefix: []const u8, packages: []const []const u8) bool {
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return false;
-    std.Io.Dir.accessAbsolute(ctx.io, db_path, .{}) catch return false;
-    var db = sqlite.Database.open(db_path) catch return false;
+    var db = openExistingDb(ctx, prefix) orelse return false;
     defer db.close();
 
     var stmt = db.prepare(
@@ -294,8 +341,11 @@ fn anyNamedNeedsPromotion(ctx: *const AppCtx, prefix: []const u8, packages: []co
     defer stmt.finalize();
 
     for (packages) |pkg| {
+        // Tap kegs are recorded under their leaf name, so the tap form has
+        // to be reduced before it can match a row.
+        const keg_name = if (args_mod.parseTapName(pkg)) |p| p.formula else pkg;
         stmt.reset() catch return false;
-        stmt.bindText(1, pkg) catch return false;
+        stmt.bindText(1, keg_name) catch return false;
         if (stmt.step() catch false) return true;
     }
     return false;
@@ -497,15 +547,16 @@ fn runInstall(
     };
 
     // Idempotent fast path — skip DB / lock / HTTP setup when every named
-    // arg already has a Cellar entry. Flags that change semantics
-    // (--force / --cask / --local / --dry-run / --only-deps) and
-    // tap-form / .rb-path args route to the regular flow. All-or-nothing
-    // on multi-arg keeps the gate state-free.
+    // arg is already installed. Flags that change semantics
+    // (--force / --local / --dry-run / --only-deps) route to the regular
+    // flow, as do `.rb`-path args: a local formula can change on disk with
+    // no version bump, so it must be re-read. All-or-nothing on multi-arg
+    // keeps the gate state-free.
     const fastpath_eligible = flags.fastpathEligible();
     if (fastpath_eligible) fast: {
         for (packages) |pkg| {
-            if (isTapFormula(pkg) or isLocalFormulaPath(pkg)) break :fast;
-            if (!kegPresent(ctx, prefix, pkg)) break :fast;
+            if (isLocalFormulaPath(pkg)) break :fast;
+            if (!alreadyInstalled(ctx, prefix, pkg, flags)) break :fast;
         }
         // Promotion target — a named pkg currently recorded as an
         // isolated dependency — needs `install_reason` cleared and
@@ -1305,6 +1356,14 @@ fn installCask(
     flags: args_mod.InstallFlags,
     sink: OutputSink,
 ) !void {
+    // Callers that legitimately bypass the fast path would otherwise fetch
+    // just to discover there is nothing to do. The post-parse check below
+    // stays for a cask that ever renames its token.
+    if (!flags.download_only and cask_mod.isInstalled(db, token)) {
+        sink.info("{s} is already installed", .{token});
+        return;
+    }
+
     const cask_json = api.fetchCask(token) catch |e| {
         // Propagate the typed OfflineRequired so the outer dispatch
         // surfaces the snapshot-miss message instead of "not found".
