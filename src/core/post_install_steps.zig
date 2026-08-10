@@ -87,6 +87,52 @@ const step_map = std.StaticStringMap(StepTag).initComptime(.{
     .{ "run", .run },
 });
 
+/// Bookkeeping every step may carry: routing, gating, and audit hints that
+/// say nothing about the work itself.
+const common_keys = [_][]const u8{ "type", "guards", "id", "skip_audit" };
+
+/// The fields each step actually honours. Anything else upstream sends is a
+/// declaration this executor would drop on the floor.
+fn honouredKeys(tag: StepTag) []const []const u8 {
+    return switch (tag) {
+        .mkdir_p,
+        .touch,
+        .compile_gsettings_schemas,
+        .gio_querymodules,
+        .update_mime_database,
+        .update_desktop_database,
+        .gtk_update_icon_cache,
+        => &.{"path"},
+        .gdk_pixbuf_query_loaders => &.{},
+        .write => &.{ "path", "content", "overwrite" },
+        .symlink => &.{ "source", "target", "force", "source_glob" },
+        // `force` needs no branch: copy always replaces, as `cp_r` does.
+        .copy => &.{ "source", "target", "recursive", "force" },
+        .link_dir => &.{ "source", "target" },
+        .link_children => &.{ "source", "target", "prefix", "suffix" },
+        .remove => &.{ "paths", "recursive", "symlink_target_contains" },
+        .inreplace => &.{ "path", "before", "after", "regexp" },
+        .init_data_dir => &.{ "path", "using", "locale" },
+        .run => &.{ "command", "args", "sudo" },
+    };
+}
+
+/// Upstream compacts defaults away, so a key that survives into the JSON is
+/// one the formula meant. Doing the work while ignoring it is worse than
+/// refusing: the install looks complete and quietly is not.
+fn unhonouredKey(ctx: StepsCtx, tag: StepTag, obj: std.json.ObjectMap) bool {
+    var it = obj.iterator();
+    keys: while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        for (common_keys) |k| if (std.mem.eql(u8, key, k)) continue :keys;
+        for (honouredKeys(tag)) |k| if (std.mem.eql(u8, key, k)) continue :keys;
+        const detail = std.fmt.allocPrint(ctx.allocator, "{s} with {s}", .{ @tagName(tag), key }) catch key;
+        logUnsupported(ctx, detail);
+        return true;
+    }
+    return false;
+}
+
 /// True when the formula JSON carries a non-empty steps array whose every
 /// step type runs natively. Read-side classifier for the doctor probe —
 /// execution itself routes per-step through the FallbackLog instead.
@@ -163,6 +209,19 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         logUnsupported(ctx, step_type);
         return false;
     };
+    if (unhonouredKey(ctx, tag, obj)) return false;
+
+    // Central, so a guard holds back every step type. Leaving this to each
+    // step meant most of them ran regardless of what the formula declared.
+    switch (evalGuards(ctx, obj)) {
+        .met => {},
+        .unmet => return true,
+        .unsupported => {
+            logUnsupported(ctx, "a guard this executor cannot evaluate");
+            return false;
+        },
+    }
+
     return switch (tag) {
         .mkdir_p => stepMkdirP(ctx, obj),
         .touch => stepTouch(ctx, obj),
@@ -300,6 +359,7 @@ const BaseTag = enum {
     etc,
     lib,
     bin,
+    libexec,
     pkgetc,
     pkgshare,
     opt_pkgshare,
@@ -315,6 +375,9 @@ const base_map = std.StaticStringMap(BaseTag).initComptime(.{
     .{ "etc", .etc },
     .{ "lib", .lib },
     .{ "bin", .bin },
+    // Keg-relative, unlike its prefix-scoped neighbours — same meaning a `run`
+    // command's `libexec` base already carries.
+    .{ "libexec", .libexec },
     .{ "pkgetc", .pkgetc },
     .{ "pkgshare", .pkgshare },
     .{ "opt_pkgshare", .opt_pkgshare },
@@ -336,6 +399,7 @@ pub fn resolveBase(ctx: StepsCtx, base: []const u8, formula_ref: ?[]const u8) ?[
         .etc => std.fmt.allocPrint(a, "{s}/etc", .{ctx.prefix}) catch null,
         .lib => std.fmt.allocPrint(a, "{s}/lib", .{ctx.prefix}) catch null,
         .bin => std.fmt.allocPrint(a, "{s}/bin", .{ctx.prefix}) catch null,
+        .libexec => std.fmt.allocPrint(a, "{s}/libexec", .{ctx.keg_path}) catch null,
         .pkgetc => std.fmt.allocPrint(a, "{s}/etc/{s}", .{ ctx.prefix, ctx.name }) catch null,
         .pkgshare => std.fmt.allocPrint(a, "{s}/share/{s}", .{ ctx.prefix, ctx.name }) catch null,
         .opt_pkgshare => std.fmt.allocPrint(a, "{s}/opt/{s}/share/{s}", .{ ctx.prefix, ctx.name, ctx.name }) catch null,
@@ -362,16 +426,19 @@ fn resolvePathSpec(ctx: StepsCtx, obj: std.json.ObjectMap, key: []const u8) ?[]c
 
 /// Resolve one `{base, path, formula}` spec. Split out of `resolvePathSpec` so
 /// steps carrying an array of specs can reuse the same base/template handling.
-fn resolveSpec(ctx: StepsCtx, spec: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+/// A null `key` resolves quietly, for callers that report the failure better
+/// themselves than a second entry for the same spec would.
+fn resolveSpec(ctx: StepsCtx, spec: std.json.ObjectMap, key: ?[]const u8) ?[]const u8 {
     const raw = getString(spec, "path") orelse {
-        logUnsupported(ctx, key);
+        if (key) |k| logUnsupported(ctx, k);
         return null;
     };
     const path = expandTemplates(ctx, raw) catch return null;
     const base = getString(spec, "base") orelse "absolute";
     if (std.mem.eql(u8, base, "absolute") or std.mem.eql(u8, base, "relative")) return path;
     const root = resolveBase(ctx, base, getString(spec, "formula")) orelse {
-        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "base {s}", .{base}) catch base);
+        if (key != null)
+            logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "base {s}", .{base}) catch base);
         return null;
     };
     return std.fs.path.join(ctx.allocator, &.{ root, path }) catch null;
@@ -578,21 +645,33 @@ fn starMatch(pattern: []const u8, name: []const u8) bool {
     return starMatch(pattern[1..], name[1..]);
 }
 
-/// `guards` gate a step on the target's state. `if_exists` is the only
-/// condition this executor evaluates; `unsupported` keeps a condition it
-/// cannot check distinguishable from one that genuinely did not hold, so a
-/// caller can refuse loudly instead of reading it as a deliberate skip.
+/// `guards` gate a step on a path's state. `unsupported` keeps a condition
+/// this executor cannot check distinguishable from one that genuinely did not
+/// hold, so a caller can refuse loudly instead of reading it as a skip.
 const GuardOutcome = enum { met, unmet, unsupported };
+
+const GuardCondition = enum { if_exists, unless_exists };
+
+const guard_condition_map = std.StaticStringMap(GuardCondition).initComptime(.{
+    .{ "if_exists", .if_exists },
+    .{ "unless_exists", .unless_exists },
+});
 
 fn evalGuards(ctx: StepsCtx, obj: std.json.ObjectMap) GuardOutcome {
     const guards = obj.get("guards") orelse return .met;
     if (guards != .array) return .met;
     for (guards.array.items) |item| {
         if (item != .object) continue;
-        if (!std.mem.eql(u8, getString(item.object, "condition") orelse "", "if_exists")) return .unsupported;
-        const raw = getString(item.object, "path") orelse return .unsupported;
-        const path = expandTemplates(ctx, raw) catch return .unmet;
-        std.Io.Dir.accessAbsolute(ctx.io, path, .{}) catch return .unmet;
+        const raw = getString(item.object, "condition") orelse return .unsupported;
+        const condition = guard_condition_map.get(raw) orelse return .unsupported;
+        // A guard carries the same `{base, path}` spec as the step it gates,
+        // so it must resolve the same way or it tests the wrong location.
+        const path = resolveSpec(ctx, item.object, null) orelse return .unsupported;
+        const exists = if (std.Io.Dir.accessAbsolute(ctx.io, path, .{})) |_| true else |_| false;
+        switch (condition) {
+            .if_exists => if (!exists) return .unmet,
+            .unless_exists => if (exists) return .unmet,
+        }
     }
     return .met;
 }
@@ -631,9 +710,6 @@ fn anchoredLineLiteral(pattern: []const u8) ?[]const u8 {
 /// live user configuration, so the write is atomic and anything uncertain —
 /// unresolved template, empty needle, unsupported regexp — refuses instead.
 fn stepInreplace(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
-    // An unmet guard is the step declining to run, not a failure to report.
-    if (evalGuards(ctx, obj) != .met) return true;
-
     const path = resolvePathSpec(ctx, obj, "path") orelse return false;
     if (!confined(ctx, path)) return false;
 
@@ -693,17 +769,6 @@ fn stepInreplace(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 /// elsewhere belongs to something else and must survive. `readLinkAbsolute`
 /// doubles as the type check, and the link is unlinked rather than followed.
 fn stepRemove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
-    // An unmet guard is the step declining to run, not a failure to report:
-    // a first install has no earlier payload to retire.
-    switch (evalGuards(ctx, obj)) {
-        .met => {},
-        .unmet => return true,
-        .unsupported => {
-            logUnsupported(ctx, "remove with an unevaluable guard");
-            return false;
-        },
-    }
-
     const paths_val = obj.get("paths") orelse {
         logUnsupported(ctx, "remove");
         return false;
@@ -863,11 +928,6 @@ const command_base_map = std.StaticStringMap(CommandBase).initComptime(.{
     .{ "libexec", .libexec },
 });
 
-/// Fields upstream's `run` accepts that malt does not honour. Spawning without
-/// them would run a command whose declared environment, redirection, or working
-/// directory silently did not apply, so their presence refuses instead.
-const run_unsupported_keys = [_][]const u8{ "env", "stdin_path", "stdout_path", "chdir", "writable_paths" };
-
 /// Absolute path to a `run` step's command, or null (already logged) when the
 /// spec is malformed. A bare name is refused rather than resolved through the
 /// fence's PATH: which binary that finds is not the formula's to decide.
@@ -908,12 +968,6 @@ fn resolveCommandPath(ctx: StepsCtx, obj: std.json.ObjectMap) ?[]const u8 {
 /// whose argv the formula supplies wholesale. It goes through the same argv
 /// lint and sandbox fence as every other spawn, with no extra grants.
 fn stepRun(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
-    for (run_unsupported_keys) |key| {
-        if (obj.get(key) != null) {
-            logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "run with {s}", .{key}) catch key);
-            return false;
-        }
-    }
     // Only an explicit `false` — the compacted default — is a request malt can
     // satisfy; malt never escalates.
     if (obj.get("sudo")) |v| {
@@ -921,14 +975,6 @@ fn stepRun(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
             logUnsupported(ctx, "run with sudo");
             return false;
         }
-    }
-    switch (evalGuards(ctx, obj)) {
-        .met => {},
-        .unmet => return true,
-        .unsupported => {
-            logUnsupported(ctx, "run with an unevaluable guard");
-            return false;
-        },
     }
 
     const cmd = resolveCommandPath(ctx, obj) orelse return false;
@@ -1713,6 +1759,146 @@ test "execute keeps a symlink whose target does not match the guard" {
     try std.Io.Dir.accessAbsolute(io, link, .{});
 }
 
+test "an unmet guard holds back every step type, not just the few that checked" {
+    // `copy` is the dangerous one: running it anyway overwrites whatever the
+    // formula was trying to preserve.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const io = h.io;
+    const a = h.arena.allocator();
+
+    const src = try std.fmt.allocPrint(a, "{s}/share/glow", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(io, src);
+    const seed = try std.fmt.allocPrint(a, "{s}/glow.dat", .{src});
+    (try std.Io.Dir.createFileAbsolute(io, seed, .{})).close(io);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"copy","source":{"base":"prefix","path":"share/glow"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/share/copied"},
+        \\  "guards":[{"condition":"if_exists","path":"{{HOMEBREW_PREFIX}}/share/absent"}]},
+        \\ {"type":"mkdir_p","path":{"path":"{{HOMEBREW_PREFIX}}/share/made"},
+        \\  "guards":[{"condition":"if_exists","path":"{{HOMEBREW_PREFIX}}/share/absent"}]},
+        \\ {"type":"write","path":{"path":"{{HOMEBREW_PREFIX}}/etc/glow.conf"},"content":"x\n",
+        \\  "guards":[{"condition":"if_exists","path":"{{HOMEBREW_PREFIX}}/share/absent"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+
+    for ([_][]const u8{ "/share/copied", "/share/made", "/etc/glow.conf" }) |leaf| {
+        const p = try std.fmt.allocPrint(a, "{s}{s}", .{ h.prefix, leaf });
+        try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, p, .{}));
+    }
+}
+
+test "an unless_exists guard protects a file the user already has" {
+    // The condition formulas reach for when seeding config: write it once,
+    // never over the copy the user has since edited.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const io = h.io;
+    const a = h.arena.allocator();
+
+    const varcfg = try std.fmt.allocPrint(a, "{s}/var/app", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, varcfg);
+    const existing = try std.fmt.allocPrint(a, "{s}/app.conf", .{varcfg});
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, existing, .{ .truncate = true });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "user edits\n");
+    }
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"write","path":{"base":"var","path":"app/app.conf"},"content":"stock\n","overwrite":true,
+        \\  "guards":[{"base":"var","path":"app/app.conf","condition":"unless_exists","id":"1"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+
+    try testing.expectEqualStrings("user edits\n", try readBack(&h, existing));
+}
+
+test "an unless_exists guard lets the step run when the path is absent" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"write","path":{"base":"var","path":"app/app.conf"},"content":"stock\n",
+        \\  "guards":[{"base":"var","path":"app/app.conf","condition":"unless_exists","id":"1"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+    const written = try std.fmt.allocPrint(a, "{s}/var/app/app.conf", .{h.prefix});
+    try std.Io.Dir.accessAbsolute(h.io, written, .{});
+}
+
+test "a guard resolves its base like the step it gates" {
+    // Reading the guard's path raw would test the wrong location, and a guard
+    // pointed at the wrong path is worse than no guard at all.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const io = h.io;
+    const a = h.arena.allocator();
+
+    // Only the base-resolved location exists; the bare relative path does not.
+    const seeded = try std.fmt.allocPrint(a, "{s}/var/marker", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/var", .{h.prefix}));
+    (try std.Io.Dir.createFileAbsolute(io, seeded, .{})).close(io);
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"mkdir_p","path":{"base":"var","path":"made"},
+        \\  "guards":[{"base":"var","path":"marker","condition":"if_exists","id":"1"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try std.Io.Dir.accessAbsolute(io, try std.fmt.allocPrint(a, "{s}/var/made", .{h.prefix}), .{});
+}
+
+test "the libexec base resolves inside the keg, matching a run command's libexec" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const c = h.ctx();
+
+    const resolved = resolveBase(c, "libexec", null).?;
+    const expected = try std.fmt.allocPrint(h.arena.allocator(), "{s}/libexec", .{h.keg});
+    try testing.expectEqualStrings(expected, resolved);
+}
+
+test "a key the executor does honour is not mistaken for an unknown one" {
+    // `locale` reaches initdb's argv, so refusing it would be a false alarm.
+    // The refusal list only earns its keep if it tracks what is implemented.
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"init_data_dir","path":{"base":"var","path":"pg"},"using":"postgresql_initdb","locale":"C"}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    for (h.flog.entries()) |e| {
+        try testing.expect(std.mem.indexOf(u8, e.detail, "locale") == null);
+    }
+}
+
+test "a step carrying a key this executor does not honour refuses loudly" {
+    // Upstream compacts defaults away, so a surviving key is one the formula
+    // meant. Doing the work while ignoring it is the silent-wrong case.
+    const refused = [_][]const u8{
+        \\[{"type":"copy","source":{"base":"prefix","path":"share/*"},"target":{"path":"/tmp/x"},"source_glob":true}]
+        ,
+        \\[{"type":"symlink","source":{"base":"prefix","path":"bin/glow"},"target":{"path":"/tmp/x"},"resolve_source":true}]
+        ,
+        // A key upstream has not shipped yet must refuse too — that is the
+        // point of listing what is honoured rather than what is not.
+        \\[{"type":"touch","path":{"base":"etc","path":"glow.conf"},"mode":"0755"}]
+        ,
+    };
+    for (refused) |steps_json| {
+        var h = try TestHarness.init();
+        defer h.deinit();
+        try testing.expect(execute(h.ctx(), try testFormulaJson(&h, steps_json)));
+        try testing.expect(h.flog.hasErrors());
+    }
+}
+
 test "execute skips a remove whose if_exists guard is unmet" {
     // A first install has nothing to clean up. Reporting the step as
     // unsupported there downgrades the whole formula to the partial-skip
@@ -2415,13 +2601,10 @@ test "run refuses the execution fields malt does not honour" {
 }
 
 test "run refuses a guard it cannot evaluate rather than reading it as a skip" {
-    // `unless_exists` and platform guards ship on real formulas. Treating an
-    // unevaluable condition as "declined to run" would turn a missing feature
-    // into a silent no-op — the exact failure the loud envelope exists for.
+    // Platform guards ship on real formulas. Treating an unevaluable condition
+    // as "declined to run" would turn a missing feature into a silent no-op —
+    // the exact failure the loud envelope exists for.
     const unevaluable = [_][]const u8{
-        \\[{"type":"run","command":{"base":"bin","path":"t"},
-        \\  "guards":[{"base":"var","path":"rpm/rpmdb.sqlite","condition":"unless_exists","id":"1"}]}]
-        ,
         \\[{"type":"run","command":{"base":"bin","path":"t"},
         \\  "guards":[{"condition":"on","value":"macos","id":"1"}]}]
         ,
