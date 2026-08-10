@@ -36,6 +36,14 @@ PREFIX=/tmp/mt
 export MALT_PREFIX="$PREFIX"
 export MALT_CACHE="$PREFIX/cache"
 
+# The tape installs a third-party tap formula, which costs a GitHub API call to
+# resolve HEAD. A fresh prefix means no cached commit pin, so an unauthenticated
+# run burns through the 60/hr anonymous cap and the install fails mid-recording.
+if [[ -z "${MALT_GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
+  token="$(gh auth token 2>/dev/null || true)"
+  [[ -n "$token" ]] && export MALT_GITHUB_TOKEN="$token"
+fi
+
 # Put the dev build first so bare `malt` resolves to zig-out/bin/malt inside
 # the recorded shell. VHS inherits this PATH from the parent process.
 export PATH="$PWD/zig-out/bin:$PATH"
