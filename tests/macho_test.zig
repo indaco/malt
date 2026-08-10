@@ -348,6 +348,210 @@ test "parse rejects a cmdsize shorter than the generic load_command" {
     try testing.expectError(parser.ParseError.InvalidLoadCommand, parser.parse(testing.allocator, buf));
 }
 
+// --- 64-bit fat containers (lipo -fat64) ---
+
+const FatEntry = struct {
+    cputype: u32 = 0x0100000C,
+    offset: u64,
+    size: u64,
+};
+
+/// Writes a big-endian fat header plus arch table into `buf` and returns the
+/// offset just past the table — the natural place for the first slice.
+fn writeFatHeader(buf: []u8, is64: bool, entries: []const FatEntry) usize {
+    const stride: usize = if (is64) 32 else 20;
+    std.mem.writeInt(u32, buf[0..4], if (is64) macho.FAT_MAGIC_64 else macho.FAT_MAGIC, .big);
+    std.mem.writeInt(u32, buf[4..8], @intCast(entries.len), .big);
+    for (entries, 0..) |e, i| {
+        const at = 8 + i * stride;
+        std.mem.writeInt(u32, buf[at..][0..4], e.cputype, .big);
+        if (is64) {
+            std.mem.writeInt(u64, buf[at + 8 ..][0..8], e.offset, .big);
+            std.mem.writeInt(u64, buf[at + 16 ..][0..8], e.size, .big);
+        } else {
+            std.mem.writeInt(u32, buf[at + 8 ..][0..4], @intCast(e.offset), .big);
+            std.mem.writeInt(u32, buf[at + 12 ..][0..4], @intCast(e.size), .big);
+        }
+    }
+    return 8 + entries.len * stride;
+}
+
+test "isMachO detects both fat64 magics" {
+    var buf: [4]u8 = undefined;
+    for ([_]u32{ macho.FAT_MAGIC_64, macho.FAT_CIGAM_64 }) |m| {
+        std.mem.writeInt(u32, &buf, m, .little);
+        try testing.expect(parser.isMachO(&buf));
+    }
+    // The neighbouring value is not a container magic.
+    std.mem.writeInt(u32, &buf, macho.FAT_MAGIC_64 + 1, .little);
+    try testing.expect(!parser.isMachO(&buf));
+    try testing.expect(!parser.isMachO(buf[0..3]));
+}
+
+test "parse rejects a fat64 slice whose offset+size wraps a u64" {
+    // With genuine u64 fields the sum can wrap the address space itself. A
+    // bare `+` would produce a tiny in-bounds end and hand out a start>end
+    // slice; the walk must fail closed instead.
+    var buf: [8 + 32]u8 = undefined;
+    @memset(&buf, 0);
+    _ = writeFatHeader(&buf, true, &.{
+        .{ .offset = 0xFFFF_FFFF_FFFF_F000, .size = 0x1_0000 },
+    });
+    try testing.expectError(parser.ParseError.TruncatedFile, parser.parse(testing.allocator, &buf));
+}
+
+const rpath_cmdsize: u32 = 40;
+const rpath_slice_len: usize = @sizeOf(macho.mach_header_64) + rpath_cmdsize;
+
+/// Writes a minimal Mach-O 64 slice carrying a single LC_RPATH into `buf`.
+fn writeRpathSlice(buf: []u8, path: []const u8) void {
+    const header_size = @sizeOf(macho.mach_header_64);
+    const path_off: u32 = @sizeOf(macho.rpath_command);
+    const hdr = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    hdr.* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 1, .sizeofcmds = rpath_cmdsize };
+    const rp = std.mem.bytesAsValue(macho.rpath_command, buf[header_size..][0..path_off]);
+    rp.* = .{ .cmd = .RPATH, .cmdsize = rpath_cmdsize, .path = path_off };
+    @memcpy(buf[header_size + path_off ..][0..path.len], path); // buf is zeroed: NUL follows
+}
+
+/// Two rpath slices packed into one fat archive of the requested layout.
+fn buildTwoSliceFat(allocator: std.mem.Allocator, is64: bool) ![]u8 {
+    const slice0: usize = 8 + 2 * @as(usize, if (is64) 32 else 20);
+    const slice1 = slice0 + rpath_slice_len;
+    const buf = try allocator.alloc(u8, slice1 + rpath_slice_len);
+    @memset(buf, 0);
+    _ = writeFatHeader(buf, is64, &.{
+        .{ .offset = slice0, .size = rpath_slice_len },
+        .{ .offset = slice1, .size = rpath_slice_len },
+    });
+    writeRpathSlice(buf[slice0..], "@loader_path/../lib");
+    writeRpathSlice(buf[slice1..], "@executable_path/../lib");
+    return buf;
+}
+
+test "parse walks every slice of a fat64 archive" {
+    const slice0: usize = 8 + 2 * 32;
+    const slice1 = slice0 + rpath_slice_len;
+    const buf = try buildTwoSliceFat(testing.allocator, true);
+    defer testing.allocator.free(buf);
+
+    var m = try parser.parse(testing.allocator, buf);
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 2), m.paths.len);
+    try testing.expectEqualStrings("@loader_path/../lib", m.paths[0].path);
+    try testing.expectEqualStrings("@executable_path/../lib", m.paths[1].path);
+    try testing.expectEqual(slice0, m.paths[0].slice_offset);
+    try testing.expectEqual(slice1, m.paths[1].slice_offset);
+}
+
+test "fat32 and fat64 containers yield the same load-command paths" {
+    // The container width is an encoding detail. Decoding offset or size from
+    // the wrong byte range in either arm shows up as a mismatch here.
+    const b32 = try buildTwoSliceFat(testing.allocator, false);
+    defer testing.allocator.free(b32);
+    const b64 = try buildTwoSliceFat(testing.allocator, true);
+    defer testing.allocator.free(b64);
+
+    var m32 = try parser.parse(testing.allocator, b32);
+    defer m32.deinit();
+    var m64 = try parser.parse(testing.allocator, b64);
+    defer m64.deinit();
+
+    try testing.expectEqual(m32.paths.len, m64.paths.len);
+    for (m32.paths, m64.paths) |a, b| {
+        try testing.expectEqual(a.cmd, b.cmd);
+        try testing.expectEqual(a.max_path_len, b.max_path_len);
+        try testing.expectEqualStrings(a.path, b.path);
+    }
+}
+
+test "parse accepts either byte order of the fat64 magic" {
+    // The fixtures lay the magic down big-endian, which reads back as
+    // FAT_CIGAM_64; this pins the other dispatch arm.
+    const slice0: usize = 8 + 32;
+    const buf = try testing.allocator.alloc(u8, slice0 + rpath_slice_len);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+    _ = writeFatHeader(buf, true, &.{.{ .offset = slice0, .size = rpath_slice_len }});
+    std.mem.writeInt(u32, buf[0..4], macho.FAT_MAGIC_64, .little);
+    writeRpathSlice(buf[slice0..], "@rpath");
+
+    var m = try parser.parse(testing.allocator, buf);
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 1), m.paths.len);
+    try testing.expectEqualStrings("@rpath", m.paths[0].path);
+}
+
+test "parse accepts a fat64 archive with an empty arch table" {
+    // Zero slices is well-formed: the walk must yield nothing rather than
+    // decode an entry that isn't there.
+    var buf: [8]u8 = undefined;
+    _ = writeFatHeader(&buf, true, &.{});
+
+    var m = try parser.parse(testing.allocator, &buf);
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 0), m.paths.len);
+    try testing.expectEqual(@as(usize, 0), m.cstrings.len);
+}
+
+test "parse rejects a fat64 arch table that outruns the buffer" {
+    // 48 bytes hold two 20-byte entries but only one 32-byte entry, so this
+    // buffer is only rejected if the walk uses the 64-bit stride.
+    var buf: [48]u8 = undefined;
+    @memset(&buf, 0);
+    _ = writeFatHeader(&buf, true, &.{.{ .offset = 0, .size = 0 }});
+    std.mem.writeInt(u32, buf[4..8], 2, .big);
+    try testing.expectError(parser.ParseError.TruncatedFile, parser.parse(testing.allocator, &buf));
+}
+
+test "parse rejects a fat64 slice that extends beyond the buffer" {
+    var buf: [8 + 32]u8 = undefined;
+    @memset(&buf, 0);
+    _ = writeFatHeader(&buf, true, &.{.{ .offset = 100, .size = 200 }});
+    try testing.expectError(parser.ParseError.TruncatedFile, parser.parse(testing.allocator, &buf));
+}
+
+test "parse bubbles InvalidLoadCommand from a corrupt fat64 slice" {
+    const header_size = @sizeOf(macho.mach_header_64);
+    const lc_size = @sizeOf(macho.load_command);
+    const slice0: usize = 8 + 32;
+    const body = header_size + lc_size;
+
+    const buf = try testing.allocator.alloc(u8, slice0 + body);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+    _ = writeFatHeader(buf, true, &.{.{ .offset = slice0, .size = body }});
+
+    const slice = buf[slice0..];
+    const hdr = std.mem.bytesAsValue(macho.mach_header_64, slice[0..header_size]);
+    hdr.* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 1, .sizeofcmds = lc_size };
+    const lc = std.mem.bytesAsValue(macho.load_command, slice[header_size..][0..lc_size]);
+    lc.* = .{ .cmd = .LOAD_DYLIB, .cmdsize = 1 }; // bogus tiny cmdsize
+
+    try testing.expectError(parser.ParseError.InvalidLoadCommand, parser.parse(testing.allocator, buf));
+}
+
+test "parse skips an unparseable fat64 slice and keeps the valid one" {
+    const stub_len: usize = 16; // shorter than a mach_header_64
+    const slice0: usize = 8 + 2 * 32;
+    const slice1 = slice0 + stub_len;
+
+    const buf = try testing.allocator.alloc(u8, slice1 + rpath_slice_len);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+    _ = writeFatHeader(buf, true, &.{
+        .{ .offset = slice0, .size = stub_len },
+        .{ .offset = slice1, .size = rpath_slice_len },
+    });
+    writeRpathSlice(buf[slice1..], "@rpath");
+
+    var m = try parser.parse(testing.allocator, buf);
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 1), m.paths.len);
+    try testing.expectEqualStrings("@rpath", m.paths[0].path);
+    try testing.expectEqual(slice1, m.paths[0].slice_offset);
+}
+
 test "patchPaths preserves trailing NUL at max_path_len-1 boundary" {
     // Pins the NUL-terminator invariant for an LC_LOAD_DYLIB slot whose
     // path fills exactly `max_path_len - 1` content bytes. The guard must

@@ -56,8 +56,16 @@ pub const MachO = struct {
 pub fn isMachO(data: []const u8) bool {
     if (data.len < 4) return false;
     const magic = std.mem.readInt(u32, data[0..4], .little);
-    return magic == macho.MH_MAGIC_64 or magic == macho.MH_CIGAM_64 or
-        magic == macho.FAT_MAGIC or magic == macho.FAT_CIGAM;
+    return switch (magic) {
+        macho.MH_MAGIC_64,
+        macho.MH_CIGAM_64,
+        macho.FAT_MAGIC,
+        macho.FAT_CIGAM,
+        macho.FAT_MAGIC_64,
+        macho.FAT_CIGAM_64,
+        => true,
+        else => false,
+    };
 }
 
 /// Parse a Mach-O file from a memory-mapped buffer and extract all load command paths.
@@ -66,15 +74,12 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
 
     const magic = std.mem.readInt(u32, data[0..4], .little);
 
-    if (magic == macho.FAT_MAGIC or magic == macho.FAT_CIGAM) {
-        return parseFat(allocator, data, false);
-    }
-
-    if (magic == macho.MH_MAGIC_64 or magic == macho.MH_CIGAM_64) {
-        return parseMachO64(allocator, data, 0);
-    }
-
-    return ParseError.InvalidMagic;
+    return switch (magic) {
+        macho.FAT_MAGIC, macho.FAT_CIGAM => parseFat(allocator, data, false),
+        macho.FAT_MAGIC_64, macho.FAT_CIGAM_64 => parseFat(allocator, data, true),
+        macho.MH_MAGIC_64, macho.MH_CIGAM_64 => parseMachO64(allocator, data, 0),
+        else => ParseError.InvalidMagic,
+    };
 }
 
 /// Parse every arch slice in a fat Mach-O and return the union of their

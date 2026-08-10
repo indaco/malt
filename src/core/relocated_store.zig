@@ -53,7 +53,9 @@ pub const RelocatedStoreError = error{
 /// v6: the replacement set gained the perl shebang token (plus the repository
 /// and library ones). v5 entries hold the literal `@@HOMEBREW_PERL@@` as an
 /// interpreter path, so every perl script restored from one stays unrunnable.
-pub const RELOC_LOGIC_VERSION: u32 = 6;
+/// v7: 64-bit fat containers are parsed instead of rejected. A v6 keg holding
+/// such a binary was cached with its install-prefix paths left unpatched.
+pub const RELOC_LOGIC_VERSION: u32 = 7;
 
 /// Reject anything that is not exactly 64 lowercase hex characters.
 /// Run this before forming any path so traversal sequences (`..`, `/`) and
