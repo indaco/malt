@@ -251,7 +251,12 @@ else
   To bypass (not recommended): MALT_ALLOW_UNVERIFIED=1 curl … | bash"
   fi
 
-  EXPECTED=$(grep "$ARCHIVE_NAME" "$TMPDIR/checksums.txt" | awk '{print $1}')
+  # Compare the name field for equality. `grep "$ARCHIVE_NAME"` treated the
+  # name as a regex and matched anywhere on the line; anchoring the start of
+  # the field still leaves the near miss where `x.tar.gz` collects the hash
+  # of `x.tar.gz.sig`. checksums.txt is cosign-verified above, so neither was
+  # exploitable - the lookup just should not depend on what else is listed.
+  EXPECTED=$(awk -v want="$ARCHIVE_NAME" '$2 == want {print $1; exit}' "$TMPDIR/checksums.txt")
   [ -n "$EXPECTED" ] || error "Checksum for ${ARCHIVE_NAME} not listed in checksums.txt."
   ACTUAL=$(shasum -a 256 "$TMPDIR/$ARCHIVE_NAME" | awk '{print $1}')
   if [ "$EXPECTED" != "$ACTUAL" ]; then

@@ -657,7 +657,10 @@ pub fn materializeRubyFormula(
             .{ .context = @ptrCast(s.bind()), .func = &download.progressBridge }
         else
             null;
-        var download_resp = http.getWithHeaders(resolved.url, &.{}, bar_cb) catch {
+        // `resolved.sha256` is mandatory on this path and checked against the
+        // body a few lines down, so the digest — not the transport — is what
+        // detects a substituted archive.
+        var download_resp = http.getWithHeaders(resolved.url, &.{}, bar_cb, .digest_pinned) catch {
             if (sp) |*s| s.bar.finish();
             sink.err("Failed to download {s}", .{resolved.name});
             return InstallError.DownloadFailed;

@@ -402,6 +402,32 @@ else
   sed 's/^/      /' "$TMP/out.log" >&2 || true
 fi
 
+# ── test 8: a longer entry never shadows the wanted archive ──────────
+# checksums.txt is cosign-verified, so a wrong pick was never exploitable -
+# but the lookup must not depend on what else the file happens to list. The
+# decoy's name merely starts with the wanted one and sits first, so a lookup
+# that anchors only the start of the name field takes its bogus hash and the
+# install dies on a mismatch that is not there.
+printf '▸ prefix-colliding checksum entry\n'
+make_release_fixture "$TMP/releases8" "9.9.9"
+ck8="$TMP/releases8/v9.9.9/checksums.txt"
+archive8="malt_9.9.9_darwin_all.tar.gz"
+real8=$(awk '{print $1}' "$ck8")
+printf 'dead000000000000000000000000000000000000000000000000000000000000  %s.sig\n%s  %s\n' \
+  "$archive8" "$real8" "$archive8" >"$ck8"
+start_server "$TMP/releases8"
+split_result "$(run_installer)"
+stop_server
+case_result "prefix-colliding entry: rc=0" 0 "$RC"
+if [ -x "$INSTALL_DIR_USED/malt" ]; then
+  printf '  ✓ prefix-colliding entry: matched on the whole name\n'
+  pass=$((pass + 1))
+else
+  printf '  ✗ prefix-colliding entry: took the decoy hash\n' >&2
+  fail=$((fail + 1))
+  failures+=("prefix-collision")
+fi
+
 printf '\n── summary ──\n'
 printf 'pass: %d\n' "$pass"
 printf 'fail: %d\n' "$fail"

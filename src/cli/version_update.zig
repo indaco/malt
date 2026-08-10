@@ -16,6 +16,7 @@ const cleanup = @import("../update/cleanup.zig");
 const origin = @import("../update/origin.zig");
 const release = @import("../update/release.zig");
 const verify = @import("../update/verify.zig");
+const atomic = @import("../fs/atomic.zig");
 const swap = @import("../update/swap.zig");
 const notifier = @import("../update/notifier.zig");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
@@ -492,6 +493,10 @@ fn runVerification(rv: RunVerification) !void {
 
     output.info("Verifying cosign signature + SHA256 checksum...", .{});
     verify.verifyAll(rv.ctx.io, rv.allocator, .{
+        // The prefix is user-writable and on PATH, so a `cosign` resolving
+        // inside it is refused rather than trusted for its exit status.
+        .environ = rv.ctx.environ,
+        .prefix = atomic.maltPrefixOrAbort(),
         .tarball_path = rv.tarball_path,
         .checksums_path = rv.checksums_path,
         .sigstore_path = sigstore_path,
@@ -507,6 +512,13 @@ fn runVerification(rv: RunVerification) !void {
         },
         error.CosignVerifyFailed => {
             output.err("cosign signature verification failed for {s}", .{checksums_name});
+            return error.Aborted;
+        },
+        error.CosignUntrusted => {
+            output.err("Refusing to verify with a cosign found inside the malt prefix.", .{});
+            output.info("`{s}` is writable by malt and by the packages it installs, so a", .{atomic.maltPrefixOrAbort()});
+            output.info("cosign resolved from there could report success for any binary.", .{});
+            output.info("Install cosign system-wide (e.g. `brew install cosign`) and retry.", .{});
             return error.Aborted;
         },
         error.ChecksumMissing => {

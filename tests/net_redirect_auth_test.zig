@@ -106,7 +106,7 @@ test "auth headers stripped on redirect across a cross-domain hop" {
     defer http.deinit();
 
     const headers = [_]std.http.Header{.{ .name = "Authorization", .value = auth_value }};
-    const result = http.getWithHeaders(url, &headers, null);
+    const result = http.getWithHeaders(url, &headers, null, .transport_only);
 
     // Both hops always complete the chain (pre- and post-fix), so joining
     // never hangs; join before reading server-side state.
@@ -156,7 +156,7 @@ test "auth headers kept across a same-host redirect" {
     defer http.deinit();
 
     const headers = [_]std.http.Header{.{ .name = "Authorization", .value = auth_value }};
-    const result = http.getWithHeaders(url, &headers, null);
+    const result = http.getWithHeaders(url, &headers, null, .transport_only);
 
     t1.join();
     t2.join();

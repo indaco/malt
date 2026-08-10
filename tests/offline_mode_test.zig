@@ -57,7 +57,7 @@ test "HttpClient.get / getWithHeaders / getToWriter / head / headResolved all re
     var sink: std.Io.Writer.Discarding = .init(&discard_buf);
 
     try testing.expectError(error.OfflineRequired, http.get("https://example.invalid/x"));
-    try testing.expectError(error.OfflineRequired, http.getWithHeaders("https://example.invalid/x", &.{}, null));
+    try testing.expectError(error.OfflineRequired, http.getWithHeaders("https://example.invalid/x", &.{}, null, .transport_only));
     try testing.expectError(error.OfflineRequired, http.getToWriter("https://example.invalid/x", &.{}, &sink.writer, null));
     try testing.expectError(error.OfflineRequired, http.head("https://example.invalid/x"));
     try testing.expectError(error.OfflineRequired, http.headResolved("https://example.invalid/x"));

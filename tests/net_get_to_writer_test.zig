@@ -134,7 +134,7 @@ test "getWithHeaders remains byte-identical against the same fixture (buffer pat
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
 
-    const result = http.getWithHeaders(url, &.{}, null);
+    const result = http.getWithHeaders(url, &.{}, null, .transport_only);
 
     http.deinit();
     server_thread.join();
