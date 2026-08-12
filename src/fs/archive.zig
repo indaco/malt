@@ -316,6 +316,16 @@ fn preScanTarGz(
         }
     }
 
+    // Hard links are recreated only after the extractor has processed the
+    // entire archive. Recheck them against the complete symlink set so a link
+    // declared later cannot change how either deferred path resolves.
+    for (hardlinks.items) |hl| {
+        const canon_name = try canonicalEntryName(arena, hl.name);
+        if (traversesSymlink(&symlink_names, canon_name)) return error.ExtractionFailed;
+        const canon_target = try canonicalEntryName(arena, hl.target);
+        if (traversesSymlink(&symlink_names, canon_target)) return error.ExtractionFailed;
+    }
+
     return hardlinks.toOwnedSlice(arena);
 }
 
@@ -731,6 +741,31 @@ test "extractTarGz rejects a pax linkpath that escapes the destination" {
     try std.testing.expectError(error.ExtractionFailed, testExtract(io, &s, t.bytes()));
 }
 
+test "extractTarGz rejects a deferred hardlink through a later symlink" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("hardlink_later_symlink");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+    try s.dir.createDirPath(io, "outside");
+
+    var raw: [8192]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.file("victim", "payload");
+    // Hardlinks are re-applied only after extraction. A symlink declared
+    // later therefore exists by the time this destination is resolved.
+    t.entry("door/escaped", '1', "victim");
+    t.entry("door", '2', "../outside");
+
+    const result = testExtract(io, &s, t.bytes());
+    if (std.Io.Dir.accessAbsolute(io, s.p("/outside/escaped"), .{})) {
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.FileNotFound, err);
+    try std.testing.expectError(error.ExtractionFailed, result);
+}
+
 test "extractTarGz accepts a pax linkpath within the destination" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -1128,6 +1163,7 @@ test "extractTarGz still applies a hard link that does not cross a symlink" {
     var t = TestTar.init(&raw);
     t.file("pkg/bin/tool", "payload\n");
     t.entry("pkg/bin/tool-alias", '1', "pkg/bin/tool");
+    t.entry("unrelated", '2', "missing-target");
     try testExtract(io, &s, t.bytes());
 
     var dest_dir = try std.Io.Dir.openDirAbsolute(io, s.p("/dest"), .{});
