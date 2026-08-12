@@ -62,6 +62,9 @@ pub fn validatePathForProfile(p: []const u8) SandboxError!void {
 /// initialisers only — every other fenced child stays IPC-free.
 pub const ProfileOpts = struct {
     allow_ipc: bool = false,
+    /// Individual files needed by this spawn, such as the generated Ruby
+    /// wrapper. These are literal rules, not directory grants.
+    read_files: []const []const u8 = &.{},
 };
 
 /// Render the deny-by-default SCL profile; writes limited to `cellar_path`
@@ -87,7 +90,6 @@ pub fn renderRubyProfile(
         \\(allow sysctl-read)
         \\(allow mach-lookup)
         \\(allow iokit-open)
-        \\(allow file-read*)
         \\(deny network*)
         \\(allow file-write-data
         \\  (regex #"^/dev/(null|dtracehelper|tty|stdout|stderr)$")
@@ -98,12 +100,64 @@ pub fn renderRubyProfile(
     ;
     buf.appendSlice(allocator, header) catch return SandboxError.ProfileBuildFailed;
 
+    for (opts.read_files) |path| try validatePathForProfile(path);
+
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+    // macOS executables need read operations beyond file contents during
+    // startup. Keep those operations available, then deny file contents in
+    // every mutable or user-data root. More-specific grants below restore
+    // contents only for Malt and a small set of platform runtime paths.
+    w.writeAll(
+        \\(allow file-read*)
+        \\(deny file-read-data
+    ) catch return SandboxError.ProfileBuildFailed;
+    for ([_][]const u8{
+        "/Applications",
+        "/Library",
+        "/Users",
+        "/Volumes",
+        "/cores",
+        "/dev",
+        "/opt",
+        "/private",
+        "/usr/local",
+        "/System/Volumes/Data",
+    }) |root| w.print("\n  (subpath \"{s}\")", .{root}) catch
+        return SandboxError.ProfileBuildFailed;
+    w.writeAll(")\n(allow file-read-data") catch return SandboxError.ProfileBuildFailed;
+    for ([_][]const u8{
+        "/Library/Apple",
+        "/private/var/db/timezone",
+        "/dev/null",
+        "/dev/random",
+        "/dev/urandom",
+        "/dev/zero",
+        "/dev/tty",
+    }) |path| w.print("\n  (literal \"{s}\")", .{path}) catch
+        return SandboxError.ProfileBuildFailed;
+    var cellar_real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var prefix_real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    writeCellarRule(w, cellar_path) catch return SandboxError.ProfileBuildFailed;
+    if (resolvedForProfile(cellar_path, &cellar_real_buf)) |real|
+        writeCellarRule(w, real) catch return SandboxError.ProfileBuildFailed;
+    writeCellarRule(w, malt_prefix) catch return SandboxError.ProfileBuildFailed;
+    if (resolvedForProfile(malt_prefix, &prefix_real_buf)) |real|
+        writeCellarRule(w, real) catch return SandboxError.ProfileBuildFailed;
+    for (opts.read_files) |path| {
+        w.print("\n  (literal \"{s}\")", .{path}) catch return SandboxError.ProfileBuildFailed;
+        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (resolvedForProfile(path, &real_buf)) |real|
+            w.print("\n  (literal \"{s}\")", .{real}) catch return SandboxError.ProfileBuildFailed;
+    }
+    w.writeAll(")\n") catch return SandboxError.ProfileBuildFailed;
+
     // Database initialisers (postgres bootstrap) allocate SysV/POSIX shared
     // memory + SysV semaphores; without these grants initdb dies in
     // shmget/semctl. Scoped to `init_data_dir` so no other fenced child
     // (DSL system, cache-regen tools, Ruby fallback) gets IPC access.
     if (opts.allow_ipc) {
-        buf.appendSlice(allocator,
+        w.writeAll(
             \\(allow ipc-sysv-shm)
             \\(allow ipc-sysv-sem)
             \\(allow ipc-posix-shm)
@@ -111,16 +165,11 @@ pub fn renderRubyProfile(
         ) catch return SandboxError.ProfileBuildFailed;
     }
 
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
     w.writeAll("(allow file-write*") catch return SandboxError.ProfileBuildFailed;
 
     // The kernel matches subpath filters against resolved vnode paths;
     // a symlinked root (macOS /tmp → /private/tmp) needs its resolved
     // form granted too or writes under it are silently denied.
-    var cellar_real_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var prefix_real_buf: [std.fs.max_path_bytes]u8 = undefined;
-
     writeCellarRule(w, cellar_path) catch return SandboxError.ProfileBuildFailed;
     if (resolvedForProfile(cellar_path, &cellar_real_buf)) |real|
         writeCellarRule(w, real) catch return SandboxError.ProfileBuildFailed;
@@ -264,11 +313,13 @@ pub fn runRubySandboxed(
 ) SandboxError!u8 {
     if (builtin.os.tag != .macos) return SandboxError.SandboxUnsupported;
 
-    const profile = try renderRubyProfile(allocator, cellar_path, malt_prefix, .{});
+    const profile = try renderRubyProfile(allocator, cellar_path, malt_prefix, .{
+        .read_files = &.{script_path},
+    });
     defer allocator.free(profile);
 
     const argv = [_][]const u8{
-        "/usr/bin/sandbox-exec", "-p", profile, ruby_path, script_path,
+        "/usr/bin/sandbox-exec", "-p", profile, ruby_path, "--disable-gems", script_path,
     };
     const argv_z = try buildArgv(allocator, argv[0..]);
     defer freeArgv(allocator, argv_z);

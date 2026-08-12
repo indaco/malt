@@ -789,8 +789,12 @@ test "system drains child output larger than a pipe buffer" {
     var lio: std.Io.Threaded = .init(alloc, .{});
     defer lio.deinit();
 
-    const fixture = try std.fmt.allocPrint(alloc, "/tmp/malt_bigout_{d}", .{std.c.getpid()});
-    defer std.Io.Dir.cwd().deleteFile(lio.io(), fixture) catch {};
+    const root = try std.fmt.allocPrint(alloc, "/tmp/malt_bigout_{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(lio.io(), root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(lio.io(), root) catch {};
+    const cellar = try std.fmt.allocPrint(alloc, "{s}/Cellar/foo/1.0", .{root});
+    try std.Io.Dir.cwd().createDirPath(lio.io(), cellar);
+    const fixture = try std.fmt.allocPrint(alloc, "{s}/payload", .{root});
     {
         const f = try std.Io.Dir.createFileAbsolute(lio.io(), fixture, .{ .truncate = true });
         defer f.close(lio.io());
@@ -802,7 +806,10 @@ test "system drains child output larger than a pipe buffer" {
     }
 
     var cap = try FdCapture.start(alloc, lio.io(), std.c.STDOUT_FILENO, "big");
-    _ = system(sanitizeTestCtx(alloc, lio.io()), null, &.{
+    var ctx = sanitizeTestCtx(alloc, lio.io());
+    ctx.cellar_path = cellar;
+    ctx.malt_prefix = root;
+    _ = system(ctx, null, &.{
         .{ .string = "/bin/cat" },
         .{ .string = fixture },
     }) catch {};
