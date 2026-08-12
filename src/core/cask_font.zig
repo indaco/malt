@@ -2,9 +2,10 @@
 //! Self-contained font-artifact parsing, destination policy, name
 //! sanitization, file placement, and manifest I/O. `cask.zig` only
 //! dispatches here; this module imports `std` alone so the security-
-//! sensitive path handling lives in one auditable, std-only place.
+//! sensitive path handling lives in one auditable leaf.
 
 const std = @import("std");
+const confined_source = @import("../fs/confined_source.zig");
 
 /// One placed font: the archive-relative `source` to copy and the cask's
 /// optional `target` whose *basename* is honoured as a rename hint. The
@@ -144,7 +145,9 @@ pub fn placeFonts(
         const dest = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ fonts_dir, name });
         defer alloc.free(dest);
 
-        try std.Io.Dir.copyFileAbsolute(src, dest, io, .{});
+        var source = try confined_source.openFile(io, alloc, extract_root, src, .read_only);
+        defer source.deinit(io);
+        try source.copyToAbsolute(io, dest);
 
         if (manifest.items.len != 0) try manifest.append(alloc, '\n');
         try manifest.appendSlice(alloc, dest);
@@ -267,6 +270,31 @@ test "placeFonts copies nested and bare sources and manifests their dest paths" 
     try testing.expectEqualStrings(expected, manifest);
     try expectFile(io, s.p("/fonts/FiraCode-Bold.ttf"), "BOLD");
     try expectFile(io, s.p("/fonts/HackNerdFont-Regular.ttf"), "HACK");
+}
+
+test "placeFonts refuses a source symlink outside the extraction root" {
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("cask_font_source_symlink");
+    defer s.deinit();
+
+    const root = s.p("/extract");
+    const fonts = s.p("/fonts");
+    const victim = s.p("/private-font");
+    const link = s.p("/extract/leak.ttf");
+    try putFile(io, victim, "PRIVATE FONT DATA");
+    try std.Io.Dir.cwd().createDirPath(io, root);
+    try std.Io.Dir.symLinkAbsolute(io, victim, link, .{});
+
+    const result = placeFonts(io, testing.allocator, root, fonts, &.{.{
+        .source = "leak.ttf",
+        .target = null,
+    }});
+    if (result) |manifest| testing.allocator.free(manifest) else |_| {}
+
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/fonts/leak.ttf"), .{}),
+    );
 }
 
 test "placeFonts skips unsafe entries and omits them from the manifest" {

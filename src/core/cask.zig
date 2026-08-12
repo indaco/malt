@@ -7,6 +7,7 @@ const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
 const archive_mod = @import("../fs/archive.zig");
 const path_component = @import("../fs/path_component.zig");
+const confined_source = @import("../fs/confined_source.zig");
 const hash_mod = @import("hash.zig");
 const child_mod = @import("child.zig");
 const cask_font = @import("cask_font.zig");
@@ -1263,15 +1264,21 @@ pub const CaskInstaller = struct {
         src_name: []const u8,
         link_name: []const u8,
     ) ![]const u8 {
-        const abs_bin = try self.resolveCaskBinaryPath(caskroom_ver, src_name);
-        defer self.allocator.free(abs_bin);
+        const candidate = try self.resolveCaskBinaryPath(caskroom_ver, src_name);
+        defer self.allocator.free(candidate);
+
+        var source = confined_source.openFile(
+            self.io,
+            self.allocator,
+            caskroom_ver,
+            candidate,
+            .read_write,
+        ) catch return error.InstallFailed;
+        defer source.deinit(self.io);
 
         // Archives sometimes land without the x-bit when built on CI.
-        const exec_file = std.Io.Dir.openFileAbsolute(self.io, abs_bin, .{ .mode = .read_write }) catch
-            return error.InstallFailed;
         // chmod may fail on FUSE/NFS mounts; symlink still works if bit was set.
-        exec_file.setPermissions(self.io, std.Io.File.Permissions.fromMode(0o755)) catch {};
-        exec_file.close(self.io);
+        source.file.setPermissions(self.io, std.Io.File.Permissions.fromMode(0o755)) catch {};
 
         // The link name is one entry in `<prefix>/bin`; a `target` carrying a
         // separator would delete and re-create somewhere else entirely.
@@ -1287,7 +1294,7 @@ pub const CaskInstaller = struct {
 
         // stale link may not exist (fresh install); symLink below is authoritative.
         std.Io.Dir.cwd().deleteFile(self.io, link_path) catch {};
-        std.Io.Dir.symLinkAbsolute(self.io, abs_bin, link_path, .{}) catch return error.InstallFailed;
+        std.Io.Dir.symLinkAbsolute(self.io, source.path, link_path, .{}) catch return error.InstallFailed;
         return link_path;
     }
 
@@ -1839,6 +1846,76 @@ test "parseCask accepts legitimate token and version" {
         var cask = try parseCask(a, json);
         cask.deinit();
     }
+}
+
+test "linkCaskBinary refuses a source symlink outside Caskroom" {
+    const io = std.Options.debug_io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try std.fmt.allocPrintSentinel(a, "/tmp/malt_cask_binary_source_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const prefix = try std.fmt.allocPrintSentinel(a, "{s}/prefix", .{base}, 0);
+    const root = try std.fmt.allocPrint(a, "{s}/Caskroom/tool/1.0", .{prefix});
+    const victim = try std.fmt.allocPrint(a, "{s}/private", .{base});
+    const bin_dir = try std.fmt.allocPrint(a, "{s}/bin", .{root});
+    const link = try std.fmt.allocPrint(a, "{s}/tool", .{bin_dir});
+    try std.Io.Dir.cwd().createDirPath(io, bin_dir);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, victim, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "PRIVATE");
+    }
+    try std.Io.Dir.symLinkAbsolute(io, victim, link, .{});
+
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .db = undefined,
+        .progress = null,
+    };
+    try std.testing.expectError(
+        error.InstallFailed,
+        installer.linkCaskBinary(root, "bin/tool", "tool"),
+    );
+}
+
+test "linkCaskBinary refuses a prefix path outside its Caskroom version" {
+    const io = std.Options.debug_io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try std.fmt.allocPrintSentinel(a, "/tmp/malt_cask_binary_prefix_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const prefix = try std.fmt.allocPrintSentinel(a, "{s}/prefix", .{base}, 0);
+    const root = try std.fmt.allocPrint(a, "{s}/Caskroom/tool/1.0", .{prefix});
+    const victim = try std.fmt.allocPrint(a, "{s}/etc/private", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, root);
+    if (std.fs.path.dirname(victim)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, victim, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "PRIVATE");
+    }
+
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .db = undefined,
+        .progress = null,
+    };
+    try std.testing.expectError(
+        error.InstallFailed,
+        installer.linkCaskBinary(root, "$HOMEBREW_PREFIX/etc/private", "tool"),
+    );
 }
 
 test "parseCask does not length-cap a clean version" {
