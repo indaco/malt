@@ -13,6 +13,13 @@ const std = @import("std");
 pub fn readFileAllAbsolute(io: std.Io, allocator: std.mem.Allocator, abs_path: []const u8, max_bytes: usize) ![]u8 {
     const f = try std.Io.Dir.openFileAbsolute(io, abs_path, .{});
     defer f.close(io);
+    return readFileAll(io, allocator, f, max_bytes);
+}
+
+/// Read from an already-open file descriptor. Security-sensitive callers use
+/// this after opening with `O_NOFOLLOW`, keeping the read bound to the object
+/// that passed their confinement check.
+pub fn readFileAll(io: std.Io, allocator: std.mem.Allocator, f: std.Io.File, max_bytes: usize) ![]u8 {
     const st = try f.stat(io);
     const size = @min(@as(u64, max_bytes), st.size);
     const buf = try allocator.alloc(u8, @intCast(size));
