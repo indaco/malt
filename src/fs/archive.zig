@@ -184,11 +184,9 @@ fn applyHardLinks(io: std.Io, dir: std.Io.Dir, links: []const HardLink) !void {
 
 /// Walk the tar archive at raw 512-byte blocks to enforce path safety
 /// AND recover hard-link pairs the std iterator silently drops.
-/// Pax extended headers ('x') are interpreted for `linkpath=`/`path=` so
-/// the pre-scan validates the *effective* symlink target the extractor
-/// will use, not the stale ustar field. GNU long-name extensions remain
-/// uninterpreted: a hardlink whose name lives in a GNU header is not found
-/// here. Homebrew bottles use plain ustar paths, so that gap is acceptable.
+/// Pax extended headers ('x') and GNU long-name/long-link records ('L'/'K')
+/// are interpreted so the pre-scan validates the *effective* name and symlink
+/// target the extractor will use, not stale placeholder fields.
 fn preScanTarGz(
     io: std.Io,
     arena: std.mem.Allocator,
@@ -217,11 +215,11 @@ fn preScanTarGz(
     // "one level up" hops compose into an unbounded escape.
     var symlink_names: std.StringHashMapUnmanaged(void) = .empty;
 
-    // Pax overrides apply to the single entry that follows the 'x' header,
-    // mirroring std.tar: `path=` replaces the name, `linkpath=` the target.
-    // Both reset once consumed (or when a new 'x' supersedes them).
-    var pax_name: ?[]const u8 = null;
-    var pax_link: ?[]const u8 = null;
+    // Metadata overrides apply to the next real entry. A pax header replaces
+    // the whole pending record, while GNU L/K records replace one field. This
+    // mirrors std.tar.Iterator's File accumulator exactly.
+    var override_name: ?[]const u8 = null;
+    var override_link: ?[]const u8 = null;
 
     while (true) {
         var header: [512]u8 = undefined;
@@ -242,12 +240,21 @@ fn preScanTarGz(
         // fields, so validating the raw ustar field here would check bytes
         // the extractor never uses. Each 'x' supersedes the previous one.
         if (kind_byte == 'x') {
-            pax_name = null;
-            pax_link = null;
-            try parsePaxOverrides(r, arena, size, &pax_name, &pax_link);
+            override_name = null;
+            override_link = null;
+            try parsePaxOverrides(r, arena, size, &override_name, &override_link);
             // The parse consumed exactly `size` bytes; skip only the block pad.
             const pad: u64 = (512 - (size % 512)) % 512;
             if (pad > 0) r.discardAll64(pad) catch return error.ExtractionFailed;
+            continue;
+        }
+        // GNU metadata stores the next entry's effective name or link target
+        // as a NUL-terminated payload. std.tar applies these records before it
+        // validates or extracts the following entry, so the security scan must
+        // consume the same bytes.
+        if (kind_byte == 'L' or kind_byte == 'K') {
+            const value = try parseGnuOverride(r, arena, size);
+            if (kind_byte == 'L') override_name = value else override_link = value;
             continue;
         }
         // Global pax header is never applied to later entries (std.tar
@@ -268,11 +275,11 @@ fn preScanTarGz(
         if (!isSafeEntryPath(ustar_name)) return error.ExtractionFailed;
         // A pax `path=` override must clear the same bar; std.tar sanitises
         // names regardless, but the pre-scan should not silently diverge.
-        if (pax_name) |pn| if (!isSafeEntryPath(pn)) return error.ExtractionFailed;
-        const name = pax_name orelse ustar_name;
+        if (override_name) |pn| if (!isSafeEntryPath(pn)) return error.ExtractionFailed;
+        const name = override_name orelse ustar_name;
 
         const ustar_link = nullSlice(header[157..257]);
-        const link_name = pax_link orelse ustar_link;
+        const link_name = override_link orelse ustar_link;
 
         // No entry may be reached through a symlink this archive created —
         // that is the step that turns a bounded, dangling link into a write
@@ -304,10 +311,16 @@ fn preScanTarGz(
             },
             else => {},
         }
+        // std.tar consumes a pending L/K record only when it returns an entry
+        // upstream: normal file, symlink or directory. Every other header
+        // leaves its File accumulator untouched, so clearing the record here
+        // for those kinds would bind it to a different entry than extraction
+        // binds it to, and the two views would then disagree about which
+        // paths are symlinks.
         // Pending overrides are consumed by this entry whatever its kind;
         // reset so they can never leak forward to an unrelated entry.
-        pax_name = null;
-        pax_link = null;
+        override_name = null;
+        override_link = null;
 
         // Advance past the data payload (rounded up to the next 512-byte
         // boundary). Symlinks/hardlinks/dirs report size 0 so this is a
@@ -329,6 +342,18 @@ fn preScanTarGz(
     }
 
     return hardlinks.toOwnedSlice(arena);
+}
+
+/// Read one GNU `L`/`K` payload and its block padding. Zig's iterator buffers
+/// at most `max_path_bytes` and uses the bytes before the first NUL.
+fn parseGnuOverride(r: *std.Io.Reader, arena: std.mem.Allocator, size: u64) ![]const u8 {
+    const len = std.math.cast(usize, size) orelse return error.ExtractionFailed;
+    if (len > std.Io.Dir.max_path_bytes) return error.ExtractionFailed;
+    const payload = arena.alloc(u8, len) catch return error.ExtractionFailed;
+    r.readSliceAll(payload) catch return error.ExtractionFailed;
+    const pad: u64 = (512 - (size % 512)) % 512;
+    if (pad > 0) r.discardAll64(pad) catch return error.ExtractionFailed;
+    return nullSlice(payload);
 }
 
 /// Parse a pax extended-header payload (`size` bytes from the current block)
@@ -702,6 +727,20 @@ const TestTar = struct {
         self.len += (rec.len + 511) / 512 * 512;
     }
 
+    /// Append a GNU long-name/long-link metadata record. Zig's tar iterator
+    /// applies this value to the next entry, so the security pre-scan must
+    /// validate the same effective bytes rather than the following ustar
+    /// header's placeholder field.
+    fn gnuString(self: *TestTar, typeflag: u8, value: []const u8) void {
+        const payload_len = value.len + 1; // GNU payload is NUL-terminated.
+        const h = testTarHeader("././@LongLink", typeflag, "", payload_len);
+        @memcpy(self.buf[self.len..][0..512], h[0..]);
+        self.len += 512;
+        @memcpy(self.buf[self.len..][0..value.len], value);
+        self.buf[self.len + value.len] = 0;
+        self.len += (payload_len + 511) / 512 * 512;
+    }
+
     /// Append a regular-file entry with `data` as its payload.
     fn file(self: *TestTar, name: []const u8, data: []const u8) void {
         const h = testTarHeader(name, '0', "", data.len);
@@ -805,6 +844,74 @@ test "extractTarGz rejects a deferred hardlink through a later symlink" {
         return error.TestUnexpectedResult;
     } else |err| try std.testing.expectEqual(error.FileNotFound, err);
     try std.testing.expectError(error.ExtractionFailed, result);
+}
+
+test "extractTarGz rejects an escaping GNU long-link target" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("gnu_long_link_escape");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.gnuString('K', "../../../../../../tmp/malt-gnu-link-escape");
+    t.entry("alias", '2', "benign");
+
+    const result = testExtract(io, &s, t.bytes());
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (std.Io.Dir.readLinkAbsolute(io, s.p("/dest/alias"), &link_buf)) |_| {
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.FileNotFound, err);
+    try std.testing.expectError(error.ExtractionFailed, result);
+}
+
+test "extractTarGz rejects a write through a GNU long-named symlink" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("gnu_long_name_symlink");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+    try s.dir.createDirPath(io, "outside");
+
+    var raw: [8192]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.gnuString('L', "door");
+    t.entry("placeholder", '2', "../outside");
+    t.file("door/escaped", "owned");
+
+    const result = testExtract(io, &s, t.bytes());
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/outside/escaped"), .{}),
+    );
+    try std.testing.expectError(error.ExtractionFailed, result);
+}
+
+test "extractTarGz accepts safe GNU long-name and long-link metadata" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("gnu_long_safe");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [8192]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.file("target", "payload");
+    t.gnuString('L', "nested/alias");
+    t.gnuString('K', "../target");
+    t.entry("placeholder", '2', "placeholder");
+
+    try testExtract(io, &s, t.bytes());
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const link_len = try std.Io.Dir.readLinkAbsolute(io, s.p("/dest/nested/alias"), &link_buf);
+    try std.testing.expectEqualStrings("../target", link_buf[0..link_len]);
 }
 
 test "extractTarGz accepts a pax linkpath within the destination" {
