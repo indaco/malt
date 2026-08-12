@@ -991,20 +991,25 @@ pub const CaskInstaller = struct {
     }
 
     fn installZip(self: *CaskInstaller, zip_path: []const u8, app_dir: []const u8, cask: *const Cask) ![]const u8 {
-        // Create temp extraction directory
+        // A token-derived path is guessable, so it can be planted and then
+        // extracted through.
         var tmp_buf: [512]u8 = undefined;
-        const extract_dir = std.fmt.bufPrint(&tmp_buf, "{s}/tmp/cask_extract_{s}", .{ self.prefix, cask.token }) catch
-            return error.InstallFailed;
-        std.Io.Dir.createDirAbsolute(self.io, extract_dir, .default_dir) catch |e| switch (e) {
-            error.PathAlreadyExists => {},
-            else => return error.InstallFailed,
-        };
+        const extract_dir = try self.freshTempDir(&tmp_buf, "extract", cask.token);
         // temp extract dir; leftover tolerated if teardown races.
         defer std.Io.Dir.cwd().deleteTree(self.io, extract_dir) catch {};
 
-        // Extract with ditto -xk (handles macOS-specific ZIP features)
-        const ditto_argv = [_][]const u8{ system_tools.ditto, "-xk", zip_path, extract_dir };
-        child_mod.runOrFail(self.io, self.allocator, &ditto_argv) catch return error.InstallFailed;
+        // Hold the directory itself and make it the child's cwd. `fchdir`
+        // anchors ditto to the created inode, closing the check/use gap that a
+        // later pathname replacement would otherwise reopen.
+        const extract_handle = std.Io.Dir.openDirAbsolute(self.io, extract_dir, .{
+            .follow_symlinks = false,
+        }) catch return error.InstallFailed;
+        defer extract_handle.close(self.io);
+
+        // Extract with ditto -xk (handles macOS-specific ZIP features).
+        const ditto_argv = [_][]const u8{ system_tools.ditto, "-xk", zip_path, "." };
+        child_mod.runOrFailInDir(self.io, self.allocator, &ditto_argv, extract_handle) catch
+            return error.InstallFailed;
 
         return self.placeExtracted(extract_dir, app_dir, cask);
     }
@@ -2027,6 +2032,64 @@ test "linkCaskBinary links regular relative and in-prefix Caskroom sources" {
         const stat = try std.Io.Dir.cwd().statFile(io, source, .{});
         try std.testing.expectEqual(@as(std.posix.mode_t, 0o755), stat.permissions.toMode() & 0o777);
     }
+}
+
+test "installZip does not extract through a pre-existing predictable symlink" {
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try std.fmt.allocPrintSentinel(a, "/tmp/malt_cask_zip_root_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const prefix = try std.fmt.allocPrintSentinel(a, "{s}/prefix", .{base}, 0);
+    const tmp_dir = try std.fmt.allocPrint(a, "{s}/tmp", .{prefix});
+    const extract_link = try std.fmt.allocPrint(a, "{s}/cask_extract_evil", .{tmp_dir});
+    const outside = try std.fmt.allocPrint(a, "{s}/outside", .{base});
+    const source = try std.fmt.allocPrint(a, "{s}/source/Evil.app/Contents", .{base});
+    const source_root = try std.fmt.allocPrint(a, "{s}/source/Evil.app", .{base});
+    const payload = try std.fmt.allocPrint(a, "{s}/payload", .{source});
+    const zip_path = try std.fmt.allocPrint(a, "{s}/evil.zip", .{base});
+    const app_dir = try std.fmt.allocPrint(a, "{s}/Applications", .{base});
+
+    try std.Io.Dir.cwd().createDirPath(io, tmp_dir);
+    try std.Io.Dir.cwd().createDirPath(io, outside);
+    try std.Io.Dir.cwd().createDirPath(io, source);
+    try std.Io.Dir.cwd().createDirPath(io, app_dir);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, payload, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "OWNED");
+    }
+    try std.Io.Dir.symLinkAbsolute(io, outside, extract_link, .{});
+
+    const zip_argv = [_][]const u8{ system_tools.ditto, "-c", "-k", "--keepParent", source_root, zip_path };
+    try child_mod.runOrFail(io, a, &zip_argv);
+
+    var cask = try parseCask(a,
+        \\{"token":"evil","name":["Evil"],"version":"1.0","url":"https://example.invalid/evil.zip","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","artifacts":[{"app":["Evil.app"]}]}
+    );
+    defer cask.deinit();
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .db = undefined,
+        .progress = null,
+    };
+
+    const installed = try installer.installZip(zip_path, app_dir, &cask);
+    a.free(installed);
+
+    const escaped_payload = try std.fmt.allocPrint(a, "{s}/Evil.app/Contents/payload", .{outside});
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, escaped_payload, .{}),
+    );
 }
 
 test "parseCask does not length-cap a clean version" {
