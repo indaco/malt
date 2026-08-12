@@ -190,6 +190,24 @@ pub fn validateDirTarget(
     try resolvedDirWithinBoundary(io, dir_path, cellar_path, malt_prefix);
 }
 
+/// Validate the object a new symlink will resolve to. Relative targets use the
+/// link's parent directory, matching POSIX symlink semantics. Resolving the
+/// target itself, including an existing final component, prevents a link from
+/// becoming a doorway through another symlink that already leaves the prefix.
+pub fn validateLinkTarget(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    target: []const u8,
+    link_path: []const u8,
+    cellar_path: []const u8,
+    malt_prefix: []const u8,
+) (SandboxError || std.mem.Allocator.Error)!void {
+    const parent = std.fs.path.dirname(link_path) orelse "/";
+    const resolved = try std.fs.path.resolve(allocator, &.{ parent, target });
+    defer allocator.free(resolved);
+    try validateDirTarget(io, resolved, cellar_path, malt_prefix);
+}
+
 /// How `openTargetNoFollow` opens the leaf. `write` toggles WRONLY vs RDONLY
 /// (chmod only needs a handle to `fchmod`); `create`/`truncate` map to
 /// `O_CREAT`/`O_TRUNC`.

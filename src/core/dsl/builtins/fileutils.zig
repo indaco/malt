@@ -18,24 +18,6 @@ const Value = values.Value;
 const BuiltinError = pathname.BuiltinError;
 const ExecCtx = pathname.ExecCtx;
 
-/// Hold a symlink target to the same keg/prefix boundary a write gets.
-/// An absolute target is checked as-is; a relative one is resolved against the
-/// link's parent directory (POSIX semantics) before checking, so `../lib/x`
-/// from `<keg>/bin/y` is judged as `<keg>/lib/x` rather than rejected outright
-/// for containing a `..`.
-fn validateLinkTarget(ctx: ExecCtx, target: []const u8, link_path: []const u8) BuiltinError!void {
-    const parent = std.fs.path.dirname(link_path) orelse "/";
-    const resolved = std.fs.path.resolve(ctx.allocator, &.{ parent, target }) catch
-        return BuiltinError.OutOfMemory;
-    // Scratch only — the check consumes it, nothing downstream holds it.
-    defer ctx.allocator.free(resolved);
-    // Resolve the target's own parent chain, not just its spelling: a bottle
-    // can ship a directory symlink that a lexically in-keg target walks
-    // through. Same guard `rm_r`/`mkdir_p` use.
-    sandbox.validateWriteDir(ctx.io, resolved, ctx.cellar_path, ctx.malt_prefix) catch
-        return BuiltinError.PathSandboxViolation;
-}
-
 /// rm — remove a file or array of files
 pub fn rm(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return Value{ .nil = {} };
@@ -45,13 +27,13 @@ pub fn rm(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
         .array => |items| {
             for (items) |item| {
                 const path = item.asString(ctx.allocator) catch continue;
-                sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch continue;
+                sandbox.validateWriteDir(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch continue;
                 std.Io.Dir.cwd().deleteFile(ctx.io, path) catch {};
             }
         },
         else => {
             const path = try args[0].asString(ctx.allocator);
-            sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch
+            sandbox.validateWriteDir(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch
                 return BuiltinError.PathSandboxViolation;
             std.Io.Dir.cwd().deleteFile(ctx.io, path) catch {};
         },
@@ -230,7 +212,10 @@ pub fn lnS(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     // out of the keg for any later builtin (or the linker) to walk through.
     // POSIX resolves a relative target against the link's own directory, so
     // resolve it the same way and hold it to the same boundary as a write.
-    try validateLinkTarget(ctx, target, link_path);
+    sandbox.validateLinkTarget(ctx.allocator, ctx.io, target, link_path, ctx.cellar_path, ctx.malt_prefix) catch |e| switch (e) {
+        error.OutOfMemory => return BuiltinError.OutOfMemory,
+        error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
+    };
 
     if (std.fs.path.dirname(link_path)) |parent| {
         std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch {};
@@ -248,31 +233,38 @@ pub fn lnSf(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     switch (args[0]) {
         .array => |items| {
             const dest_dir = args[1].asString(ctx.allocator) catch return Value{ .nil = {} };
-            sandbox.validatePath(dest_dir, ctx.cellar_path, ctx.malt_prefix) catch
+            sandbox.validateDirTarget(ctx.io, dest_dir, ctx.cellar_path, ctx.malt_prefix) catch
                 return BuiltinError.PathSandboxViolation;
             std.Io.Dir.cwd().createDirPath(ctx.io, dest_dir) catch {};
             for (items) |item| {
                 const target = item.asString(ctx.allocator) catch continue;
                 const base = std.fs.path.basename(target);
                 const link_path = std.fs.path.join(ctx.allocator, &.{ dest_dir, base }) catch continue;
-                std.Io.Dir.cwd().deleteFile(ctx.io, link_path) catch {};
-                std.Io.Dir.symLinkAbsolute(ctx.io, target, link_path, .{}) catch {};
+                defer ctx.allocator.free(link_path);
+                try forceSymlink(ctx, target, link_path);
             }
         },
         else => {
             const target = try args[0].asString(ctx.allocator);
             const link_path = try args[1].asString(ctx.allocator);
-            sandbox.validatePath(link_path, ctx.cellar_path, ctx.malt_prefix) catch
-                return BuiltinError.PathSandboxViolation;
-
-            if (std.fs.path.dirname(link_path)) |parent| {
-                std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch {};
-            }
-            std.Io.Dir.cwd().deleteFile(ctx.io, link_path) catch {};
-            std.Io.Dir.symLinkAbsolute(ctx.io, target, link_path, .{}) catch {};
+            try forceSymlink(ctx, target, link_path);
         },
     }
     return Value{ .nil = {} };
+}
+
+fn forceSymlink(ctx: ExecCtx, target: []const u8, link_path: []const u8) BuiltinError!void {
+    sandbox.validateWriteDir(ctx.io, link_path, ctx.cellar_path, ctx.malt_prefix) catch
+        return BuiltinError.PathSandboxViolation;
+    sandbox.validateLinkTarget(ctx.allocator, ctx.io, target, link_path, ctx.cellar_path, ctx.malt_prefix) catch |e| switch (e) {
+        error.OutOfMemory => return BuiltinError.OutOfMemory,
+        error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
+    };
+    if (std.fs.path.dirname(link_path)) |parent| {
+        std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch {};
+    }
+    std.Io.Dir.cwd().deleteFile(ctx.io, link_path) catch {};
+    std.Io.Dir.symLinkAbsolute(ctx.io, target, link_path, .{}) catch {};
 }
 
 const fs_test_io = std.Options.debug_io;
