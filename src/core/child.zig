@@ -70,8 +70,18 @@ pub fn run(
     allocator: std.mem.Allocator,
     argv: []const []const u8,
 ) ChildError!RunReport {
+    return runWithCwd(io, allocator, argv, .inherit);
+}
+
+fn runWithCwd(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    cwd: std.process.Child.Cwd,
+) ChildError!RunReport {
     var child = std.process.spawn(io, .{
         .argv = argv,
+        .cwd = cwd,
         .stdout = .pipe,
         .stderr = .pipe,
     }) catch return error.SpawnFailed;
@@ -122,6 +132,25 @@ pub fn runOrFail(
     argv: []const []const u8,
 ) ChildError!void {
     const report = try run(io, allocator, argv);
+    defer report.deinit(allocator);
+    if (report.code == 0) return;
+
+    const stderr_file = std.Io.File.stderr();
+    if (report.stderr.len > 0) stderr_file.writeStreamingAll(io, report.stderr) catch {};
+    if (report.stdout.len > 0) stderr_file.writeStreamingAll(io, report.stdout) catch {};
+    return error.NonZeroExit;
+}
+
+/// Run a command with its working directory anchored to an already-open
+/// directory handle. On POSIX, spawn uses `fchdir`, so a pathname swap cannot
+/// redirect a child that writes relative to `.`.
+pub fn runOrFailInDir(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    cwd: std.Io.Dir,
+) ChildError!void {
+    const report = try runWithCwd(io, allocator, argv, .{ .dir = cwd });
     defer report.deinit(allocator);
     if (report.code == 0) return;
 
@@ -192,6 +221,44 @@ test "runOrFail returns SpawnFailed when program does not exist" {
     defer threaded.deinit();
     const argv = [_][]const u8{"/nonexistent/binary/malt_child_test"};
     try std.testing.expectError(ChildError.SpawnFailed, runOrFail(threaded.io(), std.testing.allocator, &argv));
+}
+
+test "runOrFailInDir anchors relative writes to the open directory" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const a = std.testing.allocator;
+    const base = try std.fmt.allocPrintSentinel(a, "/tmp/malt_child_cwd_{d}", .{std.c.getpid()}, 0);
+    defer a.free(base);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const work = try std.fmt.allocPrint(a, "{s}/work", .{base});
+    defer a.free(work);
+    const held = try std.fmt.allocPrint(a, "{s}/held", .{base});
+    defer a.free(held);
+    const outside = try std.fmt.allocPrint(a, "{s}/outside", .{base});
+    defer a.free(outside);
+    const held_marker = try std.fmt.allocPrint(a, "{s}/marker", .{held});
+    defer a.free(held_marker);
+    const outside_marker = try std.fmt.allocPrint(a, "{s}/marker", .{outside});
+    defer a.free(outside_marker);
+
+    try std.Io.Dir.cwd().createDirPath(io, work);
+    try std.Io.Dir.cwd().createDirPath(io, outside);
+    const work_handle = try std.Io.Dir.openDirAbsolute(io, work, .{ .follow_symlinks = false });
+    defer work_handle.close(io);
+    try std.Io.Dir.renameAbsolute(work, held, io);
+    try std.Io.Dir.symLinkAbsolute(io, outside, work, .{});
+
+    const argv = [_][]const u8{ "/usr/bin/touch", "marker" };
+    try runOrFailInDir(io, a, &argv, work_handle);
+
+    try std.Io.Dir.accessAbsolute(io, held_marker, .{});
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, outside_marker, .{}),
+    );
 }
 
 test "runOrFailInherit returns void on exit code 0" {
