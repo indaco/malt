@@ -2,6 +2,7 @@
 //! Cask JSON parsing and installation (DMG, PKG, ZIP, tar.gz).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const system_tools = @import("../system_tools.zig");
 
 const sqlite = @import("../db/sqlite.zig");
@@ -1675,6 +1676,29 @@ test "pgrepPattern rejects an empty path and a buffer it would overrun" {
     try std.testing.expect(pgrepPattern(&buf, "") == null);
     var tiny: [4]u8 = undefined;
     try std.testing.expect(pgrepPattern(&tiny, "/tmp/x/Running.app") == null);
+}
+
+test "isAppRunning ignores a PATH-resident pgrep shim" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const io = std.Options.debug_io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrintSentinel(a, "/tmp/malt_pgrep_shim_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const shim = try std.fmt.allocPrint(a, "{s}/pgrep", .{root});
+    try std.Io.Dir.cwd().createDirPath(io, root);
+    try std.Io.Dir.symLinkAbsolute(io, "/usr/bin/true", shim, .{});
+
+    const path_entry = try std.fmt.allocPrintSentinel(a, "PATH={s}", .{root}, 0);
+    const entries = [_:null]?[*:0]const u8{path_entry.ptr};
+    const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .environ = environ });
+    defer threaded.deinit();
+
+    try std.testing.expect(!isAppRunning(threaded.io(), "/nonexistent/Malt-test-never-running.app"));
 }
 
 test "parseCask rejects path-traversal in token or version" {
