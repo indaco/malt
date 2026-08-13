@@ -122,6 +122,10 @@ pub fn validatePathForProfile(p: []const u8) SandboxError!void {
 /// initialisers only — every other fenced child stays IPC-free.
 pub const ProfileOpts = struct {
     allow_ipc: bool = false,
+    /// Formula tools such as fontconfig legitimately scan the standard user
+    /// font directories. The renderer grants only those descendants, never
+    /// the rest of HOME.
+    home: ?[]const u8 = null,
     /// Individual files needed by this spawn, such as the generated Ruby
     /// wrapper. These are literal rules, not directory grants.
     read_files: []const []const u8 = &.{},
@@ -137,6 +141,7 @@ pub fn renderRubyProfile(
 ) SandboxError![]const u8 {
     try validatePathForProfile(cellar_path);
     try validatePathForProfile(malt_prefix);
+    if (opts.home) |home| try validatePathForProfile(home);
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -196,14 +201,21 @@ pub fn renderRubyProfile(
         "/dev/tty",
     }) |path| w.print("\n  (literal \"{s}\")", .{path}) catch
         return SandboxError.ProfileBuildFailed;
+    w.writeAll("\n  (subpath \"/Library/Fonts\")") catch return SandboxError.ProfileBuildFailed;
     var cellar_real_buf: [std.fs.max_path_bytes]u8 = undefined;
     var prefix_real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home_real_buf: [std.fs.max_path_bytes]u8 = undefined;
     writeCellarRule(w, cellar_path) catch return SandboxError.ProfileBuildFailed;
     if (resolvedForProfile(cellar_path, &cellar_real_buf)) |real|
         writeCellarRule(w, real) catch return SandboxError.ProfileBuildFailed;
     writeCellarRule(w, malt_prefix) catch return SandboxError.ProfileBuildFailed;
     if (resolvedForProfile(malt_prefix, &prefix_real_buf)) |real|
         writeCellarRule(w, real) catch return SandboxError.ProfileBuildFailed;
+    if (opts.home) |home| {
+        writeHomeFontRules(w, home) catch return SandboxError.ProfileBuildFailed;
+        if (resolvedForProfile(home, &home_real_buf)) |real|
+            writeHomeFontRules(w, real) catch return SandboxError.ProfileBuildFailed;
+    }
     for (opts.read_files) |path| {
         w.print("\n  (literal \"{s}\")", .{path}) catch return SandboxError.ProfileBuildFailed;
         var real_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -243,6 +255,13 @@ pub fn renderRubyProfile(
 
 fn writeCellarRule(w: *std.Io.Writer, root: []const u8) !void {
     try w.print("\n  (subpath \"{s}\")", .{root});
+}
+
+fn writeHomeFontRules(w: *std.Io.Writer, home: []const u8) !void {
+    const root = std.mem.trimEnd(u8, home, "/");
+    if (root.len == 0) return;
+    for ([_][]const u8{ "Library/Fonts", ".fonts", ".local/share/fonts" }) |sub|
+        try w.print("\n  (subpath \"{s}/{s}\")", .{ root, sub });
 }
 
 fn writePrefixRules(w: *std.Io.Writer, prefix: []const u8) !void {
@@ -374,6 +393,7 @@ pub fn runRubySandboxed(
     if (builtin.os.tag != .macos) return SandboxError.SandboxUnsupported;
 
     const profile = try renderRubyProfile(allocator, cellar_path, malt_prefix, .{
+        .home = env.home,
         .read_files = &.{script_path},
     });
     defer allocator.free(profile);
