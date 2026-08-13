@@ -1918,6 +1918,62 @@ test "linkCaskBinary refuses a prefix path outside its Caskroom version" {
     );
 }
 
+test "linkCaskBinary links regular relative and in-prefix Caskroom sources" {
+    const io = std.Options.debug_io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try std.fmt.allocPrintSentinel(a, "/tmp/malt_cask_binary_regular_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const prefix = try std.fmt.allocPrintSentinel(a, "{s}/prefix", .{base}, 0);
+    const root = try std.fmt.allocPrint(a, "{s}/Caskroom/tool/1.0", .{prefix});
+    const bin_dir = try std.fmt.allocPrint(a, "{s}/bin", .{root});
+    try std.Io.Dir.cwd().createDirPath(io, bin_dir);
+
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .db = undefined,
+        .progress = null,
+    };
+    const cases = [_]struct {
+        src_name: []const u8,
+        source_leaf: []const u8,
+        link_name: []const u8,
+    }{
+        .{ .src_name = "bin/relative-tool", .source_leaf = "relative-tool", .link_name = "relative-tool" },
+        .{
+            .src_name = "$HOMEBREW_PREFIX/Caskroom/tool/1.0/bin/prefix-tool",
+            .source_leaf = "prefix-tool",
+            .link_name = "prefix-tool",
+        },
+    };
+
+    for (cases) |case| {
+        const source = try std.fmt.allocPrint(a, "{s}/{s}", .{ bin_dir, case.source_leaf });
+        {
+            const f = try std.Io.Dir.createFileAbsolute(io, source, .{});
+            defer f.close(io);
+            try f.writeStreamingAll(io, "binary");
+        }
+
+        const linked = try installer.linkCaskBinary(root, case.src_name, case.link_name);
+        const expected_link = try std.fmt.allocPrint(a, "{s}/bin/{s}", .{ prefix, case.link_name });
+        try std.testing.expectEqualStrings(expected_link, linked);
+        var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const target_len = try std.Io.Dir.readLinkAbsolute(io, linked, &target_buf);
+        var source_real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const source_real_len = try std.Io.Dir.cwd().realPathFile(io, source, &source_real_buf);
+        try std.testing.expectEqualStrings(source_real_buf[0..source_real_len], target_buf[0..target_len]);
+        const stat = try std.Io.Dir.cwd().statFile(io, source, .{});
+        try std.testing.expectEqual(@as(std.posix.mode_t, 0o755), stat.permissions.toMode() & 0o777);
+    }
+}
+
 test "parseCask does not length-cap a clean version" {
     const a = std.testing.allocator;
     // Versions have no length convention, so the guard must stay length-
