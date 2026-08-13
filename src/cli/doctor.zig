@@ -747,16 +747,15 @@ fn checkStaleLock(ctx: CheckCtx, name: []const u8) CheckResult {
 }
 
 fn checkExternalTool(ctx: CheckCtx, name: []const u8) CheckResult {
-    // Row title is also the PATH binary to probe.
-    if (externalToolAvailable(ctx.io, ctx.environ, name)) {
+    if (externalToolAvailable(ctx.io, patch.external_tool_path)) {
         printCheck(name, .ok, null);
         return .ok;
     }
     var et_buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &et_buf,
-        "`{s}` not found on PATH. Install Xcode Command Line Tools: xcode-select --install",
-        .{name},
+        "`{s}` not found. Install Xcode Command Line Tools: xcode-select --install",
+        .{patch.external_tool_path},
     ) catch "External relocation tool missing. Install Xcode Command Line Tools.";
     printCheck(name, .warn_status, msg);
     return .warn_status;
@@ -1545,28 +1544,13 @@ pub fn pathContainsDir(path_env: []const u8, dir: []const u8) bool {
     return false;
 }
 
-/// Fast existence check for a platform relocation tool on PATH.
-/// Tries `/usr/bin/<tool>` first (where Xcode Command Line Tools land
-/// install_name_tool) and then walks `PATH` entry-by-entry. `pub` so
-/// the doctor render test can exercise both branches.
-pub fn externalToolAvailable(io: std.Io, environ: std.process.Environ, tool: []const u8) bool {
-    // Fast path for the common macOS case — avoids allocating a PATH
-    // walk on every `mt doctor` invocation.
-    var fast_buf: [64]u8 = undefined;
-    const fast_path = std.fmt.bufPrint(&fast_buf, "/usr/bin/{s}", .{tool}) catch null;
-    if (fast_path) |p| {
-        if (std.Io.Dir.accessAbsolute(io, p, .{})) |_| return true else |_| {}
-    }
-
-    const path_env = std.process.Environ.getPosix(environ, "PATH") orelse return false;
-    var it = std.mem.splitScalar(u8, path_env, ':');
-    while (it.next()) |dir| {
-        if (dir.len == 0) continue;
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const full = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, tool }) catch continue;
-        if (std.Io.Dir.accessAbsolute(io, full, .{})) |_| return true else |_| {}
-    }
-    return false;
+/// Check the exact platform helper path used by the relocation backend.
+/// A PATH lookup could report a prefix-resident shim as healthy even though
+/// production deliberately refuses to execute it.
+pub fn externalToolAvailable(io: std.Io, tool_path: []const u8) bool {
+    if (!std.fs.path.isAbsolute(tool_path)) return false;
+    std.Io.Dir.accessAbsolute(io, tool_path, .{}) catch return false;
+    return true;
 }
 
 /// Summary of how many locally-installed kegs still point at their

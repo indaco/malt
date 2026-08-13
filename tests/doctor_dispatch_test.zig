@@ -282,13 +282,12 @@ test "execute --post-install-status returns without invoking the walker" {
 
 // --- pure helpers ------------------------------------------------------
 
-test "externalToolAvailable returns false when PATH does not contain the tool" {
+test "externalToolAvailable rejects a missing absolute tool path" {
     quiet();
     defer unquiet();
     try testing.expect(!doctor.externalToolAvailable(
         std.Options.debug_io,
-        .empty,
-        "tool-name-that-cannot-possibly-exist-on-any-machine-xyz123",
+        "/usr/bin/tool-name-that-cannot-possibly-exist-on-any-machine-xyz123",
     ));
 }
 

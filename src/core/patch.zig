@@ -26,6 +26,7 @@ pub const patchPathsCollecting = backend.patchPathsCollecting;
 pub const patchTextFiles = backend.patchTextFiles;
 pub const flushOverflow = backend.flushOverflow;
 pub const external_tool_name = backend.external_tool_name;
+pub const external_tool_path = backend.external_tool_path;
 /// Read-only "does this binary link a path containing `needle`" probe.
 /// The ELF backend supplies a `DT_NEEDED`/`RUNPATH` equivalent.
 pub const fileLinksPath = backend.fileLinksPath;
@@ -44,6 +45,7 @@ test "facade re-exports the patcher surface cellar / doctor rely on" {
     _ = patchTextFiles;
     _ = flushOverflow;
     _ = external_tool_name;
+    _ = external_tool_path;
     _ = fileLinksPath;
     _ = VerifyError;
     _ = verifyFile;
@@ -52,6 +54,8 @@ test "facade re-exports the patcher surface cellar / doctor rely on" {
 test "facade external_tool_name matches the macOS backend" {
     try std.testing.expectEqualStrings("install_name_tool", external_tool_name);
     try std.testing.expectEqualStrings(backend.external_tool_name, external_tool_name);
+    try std.testing.expectEqualStrings("/usr/bin/install_name_tool", external_tool_path);
+    try std.testing.expectEqualStrings(backend.external_tool_path, external_tool_path);
 }
 
 test "facade Replacement / OverflowEntry / PatchOutcome are identical to the backend's" {

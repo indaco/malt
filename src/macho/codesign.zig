@@ -2,6 +2,7 @@
 //! Ad-hoc codesigning wrapper for arm64 Mach-O binaries.
 
 const std = @import("std");
+const system_tools = @import("../system_tools.zig");
 const builtin = @import("builtin");
 
 pub const CodesignError = error{
@@ -34,11 +35,11 @@ pub fn adHocSign(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Cod
 pub fn adHocSignAll(io: std.Io, allocator: std.mem.Allocator, paths: []const []const u8) CodesignError!void {
     if (paths.len == 0) return;
 
-    // argv = ["codesign", "--force", "--sign", "-", path1, path2, ...]
+    // argv = ["/usr/bin/codesign", "--force", "--sign", "-", path1, path2, ...]
     var argv = std.ArrayList([]const u8).initCapacity(allocator, paths.len + 4) catch
         return CodesignError.OutOfMemory;
     defer argv.deinit(allocator);
-    argv.appendAssumeCapacity("codesign");
+    argv.appendAssumeCapacity(system_tools.codesign);
     argv.appendAssumeCapacity("--force");
     argv.appendAssumeCapacity("--sign");
     argv.appendAssumeCapacity("-");
@@ -57,4 +58,30 @@ pub fn adHocSignAll(io: std.Io, allocator: std.mem.Allocator, paths: []const []c
         },
         else => return CodesignError.CodesignFailed,
     }
+}
+
+test "adHocSignAll does not execute a prefix-resident codesign shim" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrintSentinel(a, "/tmp/malt_codesign_shim_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{root});
+    const shim = try std.fmt.allocPrint(a, "{s}/codesign", .{bin});
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    try std.Io.Dir.symLinkAbsolute(io, "/usr/bin/true", shim, .{});
+
+    const path_entry = try std.fmt.allocPrintSentinel(a, "PATH={s}:/usr/bin:/bin", .{bin}, 0);
+    const entries = [_:null]?[*:0]const u8{path_entry.ptr};
+    const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });
+    defer threaded.deinit();
+
+    try testing.expectError(
+        CodesignError.CodesignFailed,
+        adHocSignAll(threaded.io(), a, &.{"/no/such/macho"}),
+    );
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const system_tools = @import("../system_tools.zig");
 
 /// `c_allocator` is used for `std.process.Child` internals (argv/env
 /// bookkeeping) throughout this module. Callers may be running under an
@@ -431,7 +432,7 @@ pub fn extractZip(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !v
     try validateZip(io, archive_path);
 
     // -q: quiet, -o: overwrite without prompting, -d: destination dir.
-    const argv = [_][]const u8{ "unzip", "-q", "-o", archive_path, "-d", dest_dir };
+    const argv = [_][]const u8{ system_tools.unzip, "-q", "-o", archive_path, "-d", dest_dir };
     var child = std.process.spawn(io, .{
         .argv = &argv,
     }) catch return error.ExtractionFailed;
@@ -451,7 +452,7 @@ pub fn extractZip(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !v
 fn validateZip(io: std.Io, archive_path: []const u8) !void {
     // `-Z1` prints one entry name per line with no headers or sizes —
     // a zero-column listing we can scan without parsing unzip's table.
-    const argv = [_][]const u8{ "unzip", "-Z1", archive_path };
+    const argv = [_][]const u8{ system_tools.unzip, "-Z1", archive_path };
     try validateSubprocessListing(io, &argv);
 }
 
@@ -464,7 +465,7 @@ fn validateZip(io: std.Io, archive_path: []const u8) !void {
 pub fn extractTarXzFile(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !void {
     try validateTarListing(io, archive_path);
 
-    const argv = [_][]const u8{ "tar", "xf", archive_path, "-C", dest_dir, "--no-same-permissions", "--no-same-owner" };
+    const argv = [_][]const u8{ system_tools.tar, "xf", archive_path, "-C", dest_dir, "--no-same-permissions", "--no-same-owner" };
     var child = std.process.spawn(io, .{
         .argv = &argv,
     }) catch return error.ExtractionFailed;
@@ -482,7 +483,7 @@ pub fn extractTarXzFile(io: std.Io, archive_path: []const u8, dest_dir: []const 
 }
 
 fn validateTarListing(io: std.Io, archive_path: []const u8) !void {
-    const argv = [_][]const u8{ "tar", "tf", archive_path };
+    const argv = [_][]const u8{ system_tools.tar, "tf", archive_path };
     try validateSubprocessListing(io, &argv);
 }
 

@@ -552,7 +552,7 @@ test "buildInstallNameToolArgv batches -change pairs into a single invocation" {
     defer testing.allocator.free(argv);
 
     try testing.expectEqual(@as(usize, 8), argv.len);
-    try testing.expectEqualStrings("install_name_tool", argv[0]);
+    try testing.expectEqualStrings("/usr/bin/install_name_tool", argv[0]);
     try testing.expectEqualStrings("-change", argv[1]);
     try testing.expectEqualStrings(entries[0].old_path, argv[2]);
     try testing.expectEqualStrings(entries[0].new_path, argv[3]);

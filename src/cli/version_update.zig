@@ -8,6 +8,7 @@
 //! `MALT_ALLOW_UNVERIFIED=1`.
 
 const std = @import("std");
+const system_tools = @import("../system_tools.zig");
 const builtin = @import("builtin");
 const client_mod = @import("../net/client.zig");
 const archive = @import("../fs/archive.zig");
@@ -340,7 +341,7 @@ fn replaceBinary(
 /// emits, so cleanup paths see one layout regardless of how the swap
 /// happened. macOS BSD-install spelling: GNU's `-S .old` is wrong here.
 pub fn buildSudoInstallArgv(new_binary: []const u8, target: []const u8) [9][]const u8 {
-    return .{ "sudo", "install", "-m", "0755", "-b", "-B", ".old", new_binary, target };
+    return .{ system_tools.sudo, system_tools.install, "-m", "0755", "-b", "-B", ".old", new_binary, target };
 }
 
 /// Spawn `sudo install` with the user's TTY inherited. Sudo prompts for
@@ -371,9 +372,9 @@ fn migrateTwinToSymlink(
     const mt_path = try std.fmt.bufPrint(&mt_buf, "{s}/mt", .{dir});
 
     const argv: []const []const u8 = if (mode == .sudo)
-        &.{ "sudo", "ln", "-sfn", "malt", mt_path }
+        &.{ system_tools.sudo, system_tools.ln, "-sfn", "malt", mt_path }
     else
-        &.{ "ln", "-sfn", "malt", mt_path };
+        &.{ system_tools.ln, "-sfn", "malt", mt_path };
 
     var child = std.process.spawn(ctx.io, .{ .argv = argv }) catch return error.SpawnFailed;
     const term = child.wait(ctx.io) catch return error.SpawnFailed;

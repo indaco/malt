@@ -2,6 +2,7 @@
 //! system() builtin using std.process.spawn
 
 const std = @import("std");
+const system_tools = @import("../../../system_tools.zig");
 const values = @import("../values.zig");
 const pathname = @import("pathname.zig");
 const sandbox = @import("../sandbox.zig");
@@ -211,7 +212,7 @@ pub fn osLinux(_: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Value {
 /// MacOS.version — return version as string (used for comparisons)
 pub fn macosVersion(ctx: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Value {
     // Get macOS version from sw_vers
-    const argv = [_][]const u8{ "sw_vers", "-productVersion" };
+    const argv = [_][]const u8{ system_tools.sw_vers, "-productVersion" };
     var child = std.process.spawn(ctx.io, .{
         .argv = &argv,
         .stdout = .pipe,

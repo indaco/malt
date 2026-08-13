@@ -2,6 +2,7 @@
 //! Cask JSON parsing and installation (DMG, PKG, ZIP, tar.gz).
 
 const std = @import("std");
+const system_tools = @import("../system_tools.zig");
 
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
@@ -928,16 +929,16 @@ pub const CaskInstaller = struct {
 
         // Mount DMG (hdiutil attach -nobrowse -readonly -mountpoint {path} {dmg})
         const mount_argv = [_][]const u8{
-            "hdiutil",     "attach",
-            "-nobrowse",   "-readonly",
-            "-mountpoint", mount_point,
+            system_tools.hdiutil, "attach",
+            "-nobrowse",          "-readonly",
+            "-mountpoint",        mount_point,
             dmg_path,
         };
         child_mod.runOrFail(self.io, self.allocator, &mount_argv) catch return error.InstallFailed;
 
         // Unmount on any exit; kernel reaps stuck mounts on reboot if both fail.
         defer {
-            const detach_argv = [_][]const u8{ "hdiutil", "detach", mount_point, "-quiet" };
+            const detach_argv = [_][]const u8{ system_tools.hdiutil, "detach", mount_point, "-quiet" };
             child_mod.runOrFail(self.io, self.allocator, &detach_argv) catch {};
             std.Io.Dir.deleteDirAbsolute(self.io, mount_point) catch {};
         }
@@ -961,7 +962,7 @@ pub const CaskInstaller = struct {
         std.Io.Dir.cwd().deleteTree(self.io, dst_app) catch {};
 
         // Copy .app bundle using ditto (preserves resource forks, xattrs)
-        const ditto_argv = [_][]const u8{ "ditto", src_app, dst_app };
+        const ditto_argv = [_][]const u8{ system_tools.ditto, src_app, dst_app };
         child_mod.runOrFail(self.io, self.allocator, &ditto_argv) catch return error.InstallFailed;
 
         return dst_app;
@@ -980,7 +981,7 @@ pub const CaskInstaller = struct {
         defer std.Io.Dir.cwd().deleteTree(self.io, extract_dir) catch {};
 
         // Extract with ditto -xk (handles macOS-specific ZIP features)
-        const ditto_argv = [_][]const u8{ "ditto", "-xk", zip_path, extract_dir };
+        const ditto_argv = [_][]const u8{ system_tools.ditto, "-xk", zip_path, extract_dir };
         child_mod.runOrFail(self.io, self.allocator, &ditto_argv) catch return error.InstallFailed;
 
         return self.placeExtracted(extract_dir, app_dir, cask);
@@ -1021,7 +1022,7 @@ pub const CaskInstaller = struct {
         std.Io.Dir.cwd().deleteTree(self.io, dst_app) catch {};
 
         // Move .app to /Applications
-        const mv_argv = [_][]const u8{ "ditto", src_app, dst_app };
+        const mv_argv = [_][]const u8{ system_tools.ditto, src_app, dst_app };
         child_mod.runOrFail(self.io, self.allocator, &mv_argv) catch return error.InstallFailed;
 
         return dst_app;
@@ -1216,7 +1217,7 @@ pub const CaskInstaller = struct {
 
         // existing app may not be present.
         std.Io.Dir.cwd().deleteTree(self.io, dst_app) catch {};
-        const mv_argv = [_][]const u8{ "ditto", src_app, dst_app };
+        const mv_argv = [_][]const u8{ system_tools.ditto, src_app, dst_app };
         child_mod.runOrFail(self.io, self.allocator, &mv_argv) catch return error.InstallFailed;
         return dst_app;
     }
@@ -1296,7 +1297,7 @@ pub const CaskInstaller = struct {
         // confirmation, so sudo here has a terminal to prompt on. Inherit
         // stdio (not the captured `run`) so the password prompt and the
         // installer's progress reach the user live, not as a post-mortem dump.
-        const argv = [_][]const u8{ "sudo", "installer", "-pkg", pkg_path, "-target", "/" };
+        const argv = [_][]const u8{ system_tools.sudo, system_tools.installer, "-pkg", pkg_path, "-target", "/" };
         child_mod.runOrFailInherit(self.io, &argv) catch return error.InstallFailed;
         // PKG installs don't have a single app path — record the pkg location
         return std.fmt.allocPrint(self.allocator, "{s}", .{pkg_path}) catch return error.OutOfMemory;
@@ -1436,7 +1437,7 @@ fn isAppRunning(io: std.Io, app_path: []const u8) bool {
     // pgrep -f reads its pattern as a regex over every process's whole command line.
     var pat_buf: [std.Io.Dir.max_path_bytes * 2 + 2]u8 = undefined;
     const pattern = pgrepPattern(&pat_buf, app_path) orelse return false;
-    const argv = [_][]const u8{ "pgrep", "-f", pattern };
+    const argv = [_][]const u8{ system_tools.pgrep, "-f", pattern };
     var child = std.process.spawn(io, .{
         .argv = &argv,
         .stdout = .ignore,
