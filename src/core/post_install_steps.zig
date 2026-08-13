@@ -1186,15 +1186,17 @@ fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, env_map: ?*const std.pro
         return false;
     };
 
+    const raw = sandbox_macos.rawPassthroughEnabled(ctx.environ);
     var child = std.process.spawn(ctx.io, .{
         .argv = fenced,
-        .stdout = if (ctx.suppress_child_stdout) .ignore else .inherit,
+        .stdout = sandbox_macos.childStdioMode(ctx.suppress_child_stdout, raw),
+        .stderr = sandbox_macos.childStdioMode(false, raw),
         .environ_map = env_map,
     }) catch {
         logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} failed to spawn", .{label}) catch label);
         return false;
     };
-    const term = child.wait(ctx.io) catch {
+    const term = sandbox_macos.waitSanitizedChild(ctx.io, &child, .{}) catch {
         logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} did not terminate cleanly", .{label}) catch label);
         return false;
     };
@@ -1357,6 +1359,44 @@ const TestHarness = struct {
         testing.allocator.free(self.prefix);
         self.flog.deinit();
         self.arena.deinit();
+    }
+};
+
+/// Capture what a declarative child writes to a terminal fd. The production
+/// path uses the process's real descriptors, so an in-memory output capture
+/// would miss the behavior under test.
+const TestFdCapture = struct {
+    fd: c_int,
+    saved: c_int,
+    path: [:0]const u8,
+    io: std.Io,
+
+    fn start(alloc: std.mem.Allocator, io: std.Io, fd: c_int) !TestFdCapture {
+        const path = try std.fmt.allocPrintSentinel(alloc, "/tmp/malt_steps_output_{d}", .{std.c.getpid()}, 0);
+        const saved = std.c.dup(fd);
+        const cap = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+        if (saved < 0 or cap < 0) return error.CaptureFailed;
+        _ = std.c.dup2(cap, fd);
+        _ = std.c.close(cap);
+        return .{ .fd = fd, .saved = saved, .path = path, .io = io };
+    }
+
+    fn finish(self: *TestFdCapture, alloc: std.mem.Allocator) ![]const u8 {
+        self.restore();
+        defer std.Io.Dir.cwd().deleteFile(self.io, self.path) catch {};
+        const f = try std.Io.Dir.openFileAbsolute(self.io, self.path, .{});
+        defer f.close(self.io);
+        const st = try f.stat(self.io);
+        const buf = try alloc.alloc(u8, @intCast(st.size));
+        _ = try f.readPositionalAll(self.io, buf, 0);
+        return buf;
+    }
+
+    fn restore(self: *TestFdCapture) void {
+        if (self.saved < 0) return;
+        _ = std.c.dup2(self.saved, self.fd);
+        _ = std.c.close(self.saved);
+        self.saved = -1;
     }
 };
 
@@ -2554,6 +2594,31 @@ test "run executes the formula's own helper with its arguments expanded" {
 
     // The created directory proves the child saw an expanded argument.
     try testing.expect(dirExists(h.io, try std.fmt.allocPrint(a, "{s}/var/lib/dbus", .{h.prefix})));
+}
+
+test "run strips terminal escapes a formula emits while preserving text" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.io = threaded.io();
+    const a = h.arena.allocator();
+
+    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, bin);
+    try std.Io.Dir.symLinkAbsolute(h.io, "/bin/echo", try std.fmt.allocPrint(a, "{s}/emit", .{bin}), .{});
+
+    var cap = try TestFdCapture.start(a, h.io, std.c.STDOUT_FILENO);
+    defer cap.restore();
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"run","command":{"base":"bin","path":"emit"},
+        \\  "args":["\u001b]52;c;ZXZpbA==\u0007VISIBLE"]}]
+    )));
+    const got = try cap.finish(a);
+
+    try testing.expect(std.mem.indexOf(u8, got, "VISIBLE") != null);
+    try testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
 }
 
 test "run refuses the execution fields malt does not honour" {
