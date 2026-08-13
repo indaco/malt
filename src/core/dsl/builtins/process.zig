@@ -13,59 +13,6 @@ const Value = values.Value;
 const BuiltinError = pathname.BuiltinError;
 const ExecCtx = pathname.ExecCtx;
 
-/// Post_install output is attacker-influenced: a formula's `system` call can
-/// emit whatever the child writes, and a terminal will act on it. The
-/// `--use-system-ruby` path already pumps the child through
-/// `ui/term_sanitize.zig`, which drops OSC (including OSC 52 clipboard
-/// writes), DCS, absolute cursor positioning, and scrollback erase. The
-/// native interpreter — the default path, and the one the README leads with —
-/// inherited the terminal directly, so none of that applied to it.
-///
-/// Piping means the child no longer sees a TTY, so colour-on-TTY heuristics
-/// turn themselves off. That is the same trade the ruby path already makes,
-/// and `MALT_ALLOW_RAW_POST_INSTALL=1` opts out of both.
-fn childStdioMode(suppress: bool, raw: bool) std.process.SpawnOptions.StdIo {
-    if (suppress) return .ignore;
-    return if (raw) .inherit else .pipe;
-}
-
-/// Test seam mirroring `sandbox/macos.zig`'s `SpawnHooks`: forces the Nth pump
-/// spawn to fail, so the undrained-pipe path is reachable without exhausting
-/// threads for real.
-const PumpHooks = struct { fail_spawn_on: ?u32 = null };
-
-fn spawnPump(hooks: PumpHooks, idx: u32, fd: c_int, out_fd: c_int) std.Thread.SpawnError!std.Thread {
-    if (hooks.fail_spawn_on) |n| if (idx == n) return error.SystemResources;
-    return std.Thread.spawn(.{}, macos_sandbox.filterInto, .{ fd, out_fd });
-}
-
-/// Pump `child`'s piped stdout/stderr through the sanitizer, then reap it.
-/// One thread each, so a chatty child cannot wedge one pipe while we block on
-/// the other. `wait` owns the pipe fds, hence the non-closing `filterInto`.
-fn waitSanitized(ctx: ExecCtx, child: *std.process.Child, hooks: PumpHooks) !std.process.Child.Term {
-    var out_thread: ?std.Thread = null;
-    var err_thread: ?std.Thread = null;
-    // A pump that never starts leaves its pipe undrained, so the child blocks
-    // on a full buffer and `wait` never returns. Kill first — that EOFs any
-    // pump that did start — then join.
-    errdefer {
-        child.kill(ctx.io);
-        if (out_thread) |t| t.join();
-        if (err_thread) |t| t.join();
-    }
-
-    if (child.stdout) |f| out_thread = try spawnPump(hooks, 0, f.handle, std.c.STDOUT_FILENO);
-    if (child.stderr) |f| err_thread = try spawnPump(hooks, 1, f.handle, std.c.STDERR_FILENO);
-
-    // The pumps see EOF when the child's write ends close, i.e. when it exits,
-    // so joining before `wait` cannot hang on a live child.
-    if (out_thread) |t| t.join();
-    if (err_thread) |t| t.join();
-    out_thread = null;
-    err_thread = null;
-    return child.wait(ctx.io);
-}
-
 /// Coerce every argument to a string and collect them into an owned argv.
 /// A coercion/allocation failure aborts the whole call rather than silently
 /// dropping an element and shifting the command line — the DSL runs untrusted
@@ -117,11 +64,11 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     defer env_map.deinit();
     var child = std.process.spawn(ctx.io, .{
         .argv = spawn_argv,
-        .stdout = childStdioMode(ctx.suppress_child_stdout, raw),
-        .stderr = childStdioMode(false, raw),
+        .stdout = macos_sandbox.childStdioMode(ctx.suppress_child_stdout, raw),
+        .stderr = macos_sandbox.childStdioMode(false, raw),
         .environ_map = &env_map,
     }) catch return BuiltinError.SystemCommandFailed;
-    const term = waitSanitized(ctx, &child, .{}) catch return BuiltinError.SystemCommandFailed;
+    const term = macos_sandbox.waitSanitizedChild(ctx.io, &child, .{}) catch return BuiltinError.SystemCommandFailed;
 
     switch (term) {
         .exited => |code| if (code == 0) return Value{ .bool = true } else recordFailure(ctx, argv_slice[0], code),
@@ -360,12 +307,12 @@ fn readPipeAll(file: std.Io.File, allocator: std.mem.Allocator, max_bytes: usize
 test "childStdioMode: suppression wins, then raw passthrough, else sanitized pipe" {
     // Under --json/--ndjson the caller suppresses the child's stdout so it
     // can't corrupt the document — that still takes precedence.
-    try std.testing.expect(std.meta.activeTag(childStdioMode(true, false)) == .ignore);
-    try std.testing.expect(std.meta.activeTag(childStdioMode(true, true)) == .ignore);
+    try std.testing.expect(std.meta.activeTag(macos_sandbox.childStdioMode(true, false)) == .ignore);
+    try std.testing.expect(std.meta.activeTag(macos_sandbox.childStdioMode(true, true)) == .ignore);
     // MALT_ALLOW_RAW_POST_INSTALL=1 hands the terminal straight to the child.
-    try std.testing.expect(std.meta.activeTag(childStdioMode(false, true)) == .inherit);
+    try std.testing.expect(std.meta.activeTag(macos_sandbox.childStdioMode(false, true)) == .inherit);
     // Default: pipe, so the bytes can be run through the sanitizer first.
-    try std.testing.expect(std.meta.activeTag(childStdioMode(false, false)) == .pipe);
+    try std.testing.expect(std.meta.activeTag(macos_sandbox.childStdioMode(false, false)) == .pipe);
 }
 
 // Homebrew's formula-context `system` raises on failure, so a child
@@ -744,7 +691,7 @@ test "waitSanitized fails loudly when a sanitizer pump cannot start" {
     });
     try std.testing.expectError(
         error.SystemResources,
-        waitSanitized(ctx, &child, .{ .fail_spawn_on = 0 }),
+        macos_sandbox.waitSanitizedChild(ctx.io, &child, .{ .fail_spawn_on = 0 }),
     );
 }
 

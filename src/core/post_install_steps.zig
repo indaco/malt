@@ -1903,15 +1903,17 @@ fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, extra_env: []const EnvVa
     };
     defer env_map.deinit();
 
+    const raw = sandbox_macos.rawPassthroughEnabled(ctx.environ);
     var child = std.process.spawn(ctx.io, .{
         .argv = fenced,
-        .stdout = if (ctx.suppress_child_stdout) .ignore else .inherit,
+        .stdout = sandbox_macos.childStdioMode(ctx.suppress_child_stdout, raw),
+        .stderr = sandbox_macos.childStdioMode(false, raw),
         .environ_map = &env_map,
     }) catch {
         logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} failed to spawn", .{label}) catch label);
         return false;
     };
-    const term = child.wait(ctx.io) catch {
+    const term = sandbox_macos.waitSanitizedChild(ctx.io, &child, .{}) catch {
         logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} did not terminate cleanly", .{label}) catch label);
         return false;
     };

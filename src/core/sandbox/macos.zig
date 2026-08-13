@@ -347,6 +347,52 @@ pub fn rawPassthroughEnabled(environ: std.process.Environ) bool {
     return std.mem.eql(u8, v, "1");
 }
 
+/// Select child stdio for every native post_install executor. Formula output
+/// is attacker-controlled, so normal output is piped through the sanitizer
+/// that drops OSC 52 clipboard writes and other active terminal controls.
+/// JSON modes may suppress stdout; the explicit raw opt-out preserves
+/// inherited terminal behavior. Piping also disables colour-on-TTY heuristics.
+pub fn childStdioMode(suppress: bool, raw: bool) std.process.SpawnOptions.StdIo {
+    if (suppress) return .ignore;
+    return if (raw) .inherit else .pipe;
+}
+
+/// Test seam for a failed sanitizer-pump spawn. Production uses the zero
+/// value; tests force the error path without exhausting threads for real.
+pub const ChildPumpHooks = struct { fail_spawn_on: ?u32 = null };
+
+fn spawnChildPump(hooks: ChildPumpHooks, idx: u32, fd: c_int, out_fd: c_int) std.Thread.SpawnError!std.Thread {
+    if (hooks.fail_spawn_on) |n| if (idx == n) return error.SystemResources;
+    return std.Thread.spawn(.{}, filterInto, .{ fd, out_fd });
+}
+
+/// Pump a std.process child through the terminal sanitizer and reap it. Both
+/// pipes drain concurrently so a chatty child cannot fill one while the
+/// caller blocks on the other. `wait` owns the pipe descriptors, so the pump
+/// uses `filterInto`, which leaves them open for `wait` to close.
+pub fn waitSanitizedChild(
+    io: std.Io,
+    child: *std.process.Child,
+    hooks: ChildPumpHooks,
+) !std.process.Child.Term {
+    var out_thread: ?std.Thread = null;
+    var err_thread: ?std.Thread = null;
+    errdefer {
+        child.kill(io);
+        if (out_thread) |t| t.join();
+        if (err_thread) |t| t.join();
+    }
+
+    if (child.stdout) |f| out_thread = try spawnChildPump(hooks, 0, f.handle, std.c.STDOUT_FILENO);
+    if (child.stderr) |f| err_thread = try spawnChildPump(hooks, 1, f.handle, std.c.STDERR_FILENO);
+
+    if (out_thread) |t| t.join();
+    if (err_thread) |t| t.join();
+    out_thread = null;
+    err_thread = null;
+    return child.wait(io);
+}
+
 fn spawnInherit(
     argv_z: [:null]?[*:0]u8,
     envp: [:null]?[*:0]u8,
