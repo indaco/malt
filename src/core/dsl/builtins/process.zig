@@ -94,7 +94,9 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     // The lint above waves bare/system-dir argv0 through; the real write
     // containment is the sandbox-exec fence wrapping the spawn (parity with
     // the --use-system-ruby path).
-    const spawn_argv = sandbox.fenceArgv(ctx.allocator, argv_slice, ctx.cellar_path, ctx.malt_prefix, .{}) catch |e| switch (e) {
+    const spawn_argv = sandbox.fenceArgv(ctx.allocator, argv_slice, ctx.cellar_path, ctx.malt_prefix, .{
+        .home = std.process.Environ.getPosix(ctx.environ, "HOME"),
+    }) catch |e| switch (e) {
         error.OutOfMemory => return BuiltinError.OutOfMemory,
         error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
     };
@@ -291,7 +293,9 @@ pub fn safePopenRead(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!
     // capturing stdout must not be a way to spawn unconfined.
     sandbox.validateArgv(argv_slice, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
-    const spawn_argv = sandbox.fenceArgv(ctx.allocator, argv_slice, ctx.cellar_path, ctx.malt_prefix, .{}) catch |e| switch (e) {
+    const spawn_argv = sandbox.fenceArgv(ctx.allocator, argv_slice, ctx.cellar_path, ctx.malt_prefix, .{
+        .home = std.process.Environ.getPosix(ctx.environ, "HOME"),
+    }) catch |e| switch (e) {
         error.OutOfMemory => return BuiltinError.OutOfMemory,
         error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
     };

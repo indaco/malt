@@ -72,6 +72,21 @@ test "renderRubyProfile grants IPC only under allow_ipc" {
     try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-sem)") != null);
 }
 
+test "renderRubyProfile grants standard font directories but not all of HOME" {
+    const profile = try sandbox.renderRubyProfile(
+        testing.allocator,
+        "/opt/malt/Cellar/fontconfig/2.18.3",
+        "/opt/malt",
+        .{ .home = "/test-home" },
+    );
+    defer testing.allocator.free(profile);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/Library/Fonts\")") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/test-home/Library/Fonts\")") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/test-home/.fonts\")") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/test-home/.local/share/fonts\")") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/test-home\")") == null);
+}
+
 test "renderRubyProfile refuses unsafe cellar path" {
     try testing.expectError(
         error.UnsafePath,
@@ -118,19 +133,22 @@ test "sandbox profile refuses copying a source from outside the prefix" {
     defer testing.allocator.free(keg);
     const share = try std.fmt.allocPrint(testing.allocator, "{s}/share", .{prefix});
     defer testing.allocator.free(share);
-    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/private", .{root});
+    const home = try std.fmt.allocPrint(testing.allocator, "{s}/home", .{root});
+    defer testing.allocator.free(home);
+    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/private", .{home});
     defer testing.allocator.free(victim);
     const leaked = try std.fmt.allocPrint(testing.allocator, "{s}/leaked", .{share});
     defer testing.allocator.free(leaked);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg);
     try test_io.cwd().createDirPath(std.Options.debug_io, share);
+    try test_io.cwd().createDirPath(std.Options.debug_io, home);
     {
         const f = try test_io.createFileAbsolute(std.Options.debug_io, victim, .{});
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, "PRIVATE");
     }
 
-    const profile = try sandbox.renderRubyProfile(testing.allocator, keg, prefix, .{});
+    const profile = try sandbox.renderRubyProfile(testing.allocator, keg, prefix, .{ .home = home });
     defer testing.allocator.free(profile);
     const argv = [_][]const u8{
         "/usr/bin/sandbox-exec", "-p", profile, "/bin/cp", victim, leaked,
