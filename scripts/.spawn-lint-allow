@@ -13,3 +13,11 @@ src/core/services/plist\.zig:.*"/(bin|usr/bin)/(sh|bash|zsh|ksh|env|tcsh|python|
 # docstrings/error messages.
 src/core/services/plist\.zig:.*///.*/bin/sh
 src/core/services/plist\.zig:.*//.*/bin/sh
+# `install_name_tool` also names the doctor row and the backend's tool label,
+# neither of which is an argv.
+src/macho/patcher\.zig:[0-9]+:pub const external_tool_name
+src/core/patch\.zig:[0-9]+:.*expectEqualStrings\("install_name_tool"
+# `sudo` is a declarative post_install_steps JSON key, not a command.
+src/core/post_install_steps\.zig:[0-9]+:.*obj\.get\("sudo"\)
+src/core/post_install_steps\.zig:[0-9]+:.*"args", "sudo"
+src/core/post_install_steps\.zig:[0-9]+:.*"sudo":
