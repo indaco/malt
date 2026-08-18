@@ -832,33 +832,39 @@ For installing malt from a local checkout (the end-user path), see [From source]
 Install times on macOS 14 (Apple Silicon).
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install (median ±σ)
 
-| Package | malt 0.22.3 | nanobrew v0.1.205 | zerobrew v0.3.2 | Homebrew |
-| ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.648±0.019s | 0.743±0.033s | 1.349±0.047s | 2.101±0.137s |
-| **wget** (6 deps) | 2.911±0.229s | 4.553±0.155s | 5.270±0.312s | 2.131±0.020s |
-| **ffmpeg** (11 deps) | 3.509±0.339s | 4.350±0.148s | 6.348±0.461s | 4.343±4.228s |
+| Package              | malt 0.22.3  | nanobrew v0.1.205 | zerobrew v0.3.2 | Homebrew     |
+| -------------------- | ------------ | ----------------- | --------------- | ------------ |
+| **tree** (0 deps)    | 0.648±0.019s | 0.743±0.033s      | 1.349±0.047s    | 2.101±0.137s |
+| **wget** (6 deps)    | 2.911±0.229s | 4.553±0.155s      | 5.270±0.312s    | 2.131±0.020s |
+| **ffmpeg** (11 deps) | 3.509±0.339s | 4.350±0.148s      | 6.348±0.461s    | 4.343±4.228s |
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew |
-| ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.008s | 0.012s | 0.268s |
-| **wget** (6 deps) | 0.015s | 0.015s | 0.695s |
-| **ffmpeg** (11 deps) | 0.020s | 0.016s | 2.367s |
+| Package              | malt   | nanobrew | zerobrew |
+| -------------------- | ------ | -------- | -------- |
+| **tree** (0 deps)    | 0.008s | 0.012s   | 0.268s   |
+| **wget** (6 deps)    | 0.015s | 0.015s   | 0.695s   |
+| **ffmpeg** (11 deps) | 0.020s | 0.016s   | 2.367s   |
+
 <!-- BENCH:WARM:END -->
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size   |
+| -------- | ------ |
 | **malt** | 4.0 MB |
 | nanobrew | 3.1 MB |
 | zerobrew | 8.7 MB |
+
 <!-- BENCH:SIZE:END -->
 
 Apple Silicon (GitHub Actions macos-14), 2026-08-10. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
@@ -893,7 +899,9 @@ Each package bench opens with a discarded warmup round: every tool runs one inst
 
 The measured rounds then rotate tool order (round _r_ starts with `tools[r mod N]`), so no single tool reliably eats the "cold network" slot or benefits from the warmest one.
 
-`scripts/bench.sh` `git fetch`es nanobrew and zerobrew before each build so the comparison is always malt-today vs. each peer's latest commit, not a weeks-old snapshot. Set `BENCH_SKIP_UPDATE=1` to pin whatever is already checked out.
+`scripts/bench.sh` resolves nanobrew's and zerobrew's latest release tag before each build, so a peer is never benched as a weeks-old snapshot nor as a mid-development commit. Set `BENCH_SKIP_UPDATE=1` to pin whatever is already checked out. CI additionally sets `BENCH_MALT_RELEASE=1` so the published table is release-vs-release; a local run benches your working tree.
+
+A peer tool whose cold install fails, or exceeds `BENCH_MAX_COLD` (50 s), has that cell withheld as ⚠️ - a regression in their tool is not a comparable number. malt is never withheld: its own numbers stay in the table however bad they get, and a failed malt install aborts the run instead of publishing anything.
 
 Each tool is built using the release flags its upstream ships with: malt `ReleaseSafe` (matches [`.goreleaser.yaml`](.goreleaser.yaml)), nanobrew `ReleaseFast`, zerobrew `cargo build --release`. Binary sizes may differ from the numbers shown on each tool's own repo - the gap is almost always version drift, not a flag difference.
 

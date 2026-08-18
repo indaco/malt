@@ -11,6 +11,10 @@
 #   2. over_threshold — the guard predicate: a peer tool's cold median above
 #      the ceiling trips; FAIL/empty medians and a disabled (0) ceiling never
 #      trip, so a legitimately slow-but-fine number is never hidden by mistake.
+#   3. fail-fast scope + failed-peer cells — a peer tool's broken install must
+#      degrade to a marked cell (like the ceiling guard already does) instead
+#      of aborting the run, which would also cost malt its own stress step;
+#      malt's own failure must still abort and stay visible in the table.
 #
 # Usage:
 #   ./scripts/test/bench_release_resolution_test.sh
@@ -112,6 +116,46 @@ check "active peer warm cell not clobbered" "" "$(emitted zb_warm)"
 set_result skip_nb ""
 emit_skipped_peers tree
 check "no-reason skip falls back to n/a" "⚠️ n/a" "$(emitted nb_cold_disp)"
+
+echo "fail-fast scope:"
+# BENCH_FAIL_FAST guards malt only. A peer's broken install records FAIL and
+# lets the run continue (its cell gets marked below); malt's aborts, so a
+# broken malt install can never publish a fake number.
+# Read by the sourced time_install, not locally.
+# shellcheck disable=SC2034
+BENCH_FAIL_FAST=1
+check "peer install failure records FAIL and continues" \
+  "FAIL" "$(time_install "$(command -v false)" install uninstall tree nb 2>/dev/null)"
+peer_rc=0
+(time_install "$(command -v false)" install uninstall tree mt) >/dev/null 2>&1 || peer_rc=$?
+check "malt install failure aborts" "1" "$peer_rc"
+
+echo "finalize_results (failed peer):"
+: >"$GITHUB_OUTPUT"
+# Two rounds of a peer whose install failed outright, and a healthy malt.
+append_sample cold nb tree FAIL
+append_sample cold nb tree FAIL
+append_sample warm nb tree FAIL
+append_sample warm nb tree FAIL
+append_sample cold mt tree 1.100
+append_sample cold mt tree 1.200
+append_sample warm mt tree 0.300
+append_sample warm mt tree 0.320
+finalize_results tree mt nb >/dev/null
+check "failed peer cold cell is a marker" "⚠️ n/a (install failed)" "$(emitted nb_cold_disp)"
+check "failed peer warm cell is a marker" "⚠️ n/a (install failed)" "$(emitted nb_warm)"
+check "healthy malt cold cell unaffected" "1.100±0.071s" "$(emitted mt_cold_disp)"
+check "healthy malt warm cell unaffected" "0.300s" "$(emitted mt_warm)"
+
+echo "finalize_results (slow peer):"
+: >"$GITHUB_OUTPUT"
+append_sample cold zb wget 130.802
+append_sample cold zb wget 131.000
+append_sample warm zb wget 0.400
+append_sample warm zb wget 0.410
+finalize_results wget zb >/dev/null
+check "over-ceiling peer cold cell is a marker" "⚠️ n/a (>${BENCH_MAX_COLD}s)" "$(emitted zb_cold_disp)"
+check "over-ceiling peer warm cell still published" "0.400s" "$(emitted zb_warm)"
 
 rm -f "$GITHUB_OUTPUT"
 
