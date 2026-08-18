@@ -464,8 +464,15 @@ build_zerobrew() {
 # Unlike the upstream workflow, this checks the install exit code: a silent
 # install failure (e.g. permission denied, tap missing) would otherwise look
 # like a sub-millisecond "install" in the captured time, making the table lie.
+#
+# `<key>` is the tool key (mt/nb/zb) and decides who fail-fast applies to:
+# only malt aborts the run. A peer tool's upstream regression used to take
+# the whole workflow down with it - including malt's own stress/race step,
+# which never ran - while the rest of the script already treats peer trouble
+# as a degraded cell (BENCH_MAX_COLD, emit_skipped_peers). A peer FAIL now
+# follows that same policy and surfaces as a loud marker in finalize_results.
 time_install() {
-  local bin="$1" install="$2" uninstall="$3" pkg="$4" t rc=0
+  local bin="$1" install="$2" uninstall="$3" pkg="$4" key="$5" t rc=0
   "$bin" "$uninstall" "$pkg" >/dev/null 2>&1 || true
   t=$({
     TIMEFORMAT='%R'
@@ -474,7 +481,7 @@ time_install() {
   if [ "$rc" -ne 0 ]; then
     warn "$bin install $pkg FAILED (exit=$rc); output:"
     sed 's/^/    /' /tmp/malt-bench.out >&2
-    if [ "$BENCH_FAIL_FAST" = "1" ]; then
+    if [ "$BENCH_FAIL_FAST" = "1" ] && [ "$key" = "mt" ]; then
       err "aborting (BENCH_FAIL_FAST=1)"
     fi
     printf 'FAIL'
@@ -483,6 +490,8 @@ time_install() {
   printf '%s' "$t"
 }
 
+# Homebrew is a peer column like nanobrew/zerobrew, so a brew failure never
+# aborts the run either - see the fail-fast note on time_install.
 time_brew_install() {
   local pkg="$1" t rc=0
   brew uninstall "$pkg" >/dev/null 2>&1 || true
@@ -492,9 +501,6 @@ time_brew_install() {
   } 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
     warn "brew install $pkg FAILED (exit=$rc)"
-    if [ "$BENCH_FAIL_FAST" = "1" ]; then
-      err "aborting (BENCH_FAIL_FAST=1)"
-    fi
     printf 'FAIL'
     return
   fi
@@ -768,8 +774,8 @@ run_one() {
   local bin="$1" install="$2" uninstall="$3" pkg="$4" key="$5" prep="$6" record="$7" round="${8:-0}"
   local c w
   if [ -n "$prep" ] && [ "$BENCH_TRUE_COLD" = "1" ]; then "$prep"; fi
-  c=$(time_install "$bin" "$install" "$uninstall" "$pkg")
-  w=$(time_install "$bin" "$install" "$uninstall" "$pkg")
+  c=$(time_install "$bin" "$install" "$uninstall" "$pkg" "$key")
+  w=$(time_install "$bin" "$install" "$uninstall" "$pkg" "$key")
   "$bin" "$uninstall" "$pkg" >/dev/null 2>&1 || true
   if [ "$record" = "1" ]; then
     append_sample cold "$key" "$pkg" "$c"
@@ -839,16 +845,26 @@ finalize_results() {
       local cold_med cold_disp
       cold_med=$(get_result "cold_${tool}_$pkg")
       cold_disp=$(fmt_disp "$cold_med" "$(get_result "cold_${tool}_${pkg}_std")")
-      # Anomaly guard: a peer tool's cold install above the sanity ceiling is
-      # a regression in *their* tool, not a comparable number — omit the cell
-      # (loud marker) instead of publishing garbage. malt is exempt so a real
-      # malt slowdown stays visible rather than hidden.
-      if [ "$tool" != "mt" ] && over_threshold "$cold_med" "$BENCH_MAX_COLD"; then
-        local tver
+      # Anomaly guard: a peer tool's cold install that fails outright, or lands
+      # above the sanity ceiling, is a regression in *their* tool rather than a
+      # comparable number - omit the cell (loud marker) instead of publishing
+      # garbage. malt is exempt so a real malt slowdown stays visible.
+      local tver note=""
+      if [ "$tool" != "mt" ]; then
+        case "$cold_med" in
+        *FAIL*) note="install failed" ;;
+        *)
+          if over_threshold "$cold_med" "$BENCH_MAX_COLD"; then
+            note=">${BENCH_MAX_COLD}s"
+          fi
+          ;;
+        esac
+      fi
+      if [ -n "$note" ]; then
         tver=$(get_result "ver_$tool")
-        warn "ANOMALY: $tool ${tver:+$tver }cold $pkg = ${cold_med}s > BENCH_MAX_COLD=${BENCH_MAX_COLD}s — omitting cell"
-        gha_warning "$tool ${tver:+($tver) }cold install of $pkg regressed: ${cold_med}s exceeds ${BENCH_MAX_COLD}s ceiling — cell omitted"
-        cold_disp="⚠️ n/a (>${BENCH_MAX_COLD}s)"
+        warn "ANOMALY: $tool ${tver:+$tver }cold $pkg = ${cold_med} ($note) - omitting cell"
+        gha_warning "$tool ${tver:+($tver) }cold install of $pkg: $note - cell omitted"
+        cold_disp="⚠️ n/a ($note)"
       fi
       emit_output "${tool}_cold_disp=$cold_disp"
     fi
@@ -862,7 +878,16 @@ finalize_results() {
         set_result "warm_${tool}_${pkg}_min" "$(min_of $samples)"
         # shellcheck disable=SC2086
         set_result "warm_${tool}_${pkg}_std" "$(stddev_of $samples)"
-        emit_output "${tool}_warm=$(get_result "warm_${tool}_$pkg")s"
+        # The README warm table reads this bare median, so a peer whose
+        # install failed must not land there as "FAILs" - same marker the
+        # cold cell and emit_skipped_peers use.
+        local warm_med warm_cell
+        warm_med=$(get_result "warm_${tool}_$pkg")
+        warm_cell="${warm_med}s"
+        if [ "$tool" != "mt" ]; then
+          case "$warm_med" in *FAIL*) warm_cell="⚠️ n/a (install failed)" ;; esac
+        fi
+        emit_output "${tool}_warm=$warm_cell"
         emit_output "${tool}_warm_min=$(get_result "warm_${tool}_${pkg}_min")s"
         emit_output "${tool}_warm_stddev=$(get_result "warm_${tool}_${pkg}_std")s"
         emit_output "${tool}_warm_disp=$(fmt_disp "$(get_result "warm_${tool}_$pkg")" "$(get_result "warm_${tool}_${pkg}_std")")"
