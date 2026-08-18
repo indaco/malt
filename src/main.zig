@@ -727,9 +727,14 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         .tui => {
             if (cli_help.showIfRequested(ctx, cmd_args, "tui")) return;
             // Resolve this binary's path so the TUI re-execs the *same* `mt` for
-            // delegated mutations; fall back to `mt` (PATH) if it can't be read.
+            // delegated mutations. Falling back to a bare `mt` would resolve
+            // through PATH, where a package's own bin directory can shadow us.
             var self_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const mt_path = if (std.process.executablePath(ctx.io, &self_buf)) |n| self_buf[0..n] else |_| "mt";
+            const n = std.process.executablePath(ctx.io, &self_buf) catch {
+                output_mod.err("cannot resolve malt's own path; refusing to start the dashboard", .{});
+                return error.Aborted;
+            };
+            const mt_path = self_buf[0..n];
             try @import("tui/app.zig").run(ctx.io, allocator, ctx.stderr, ctx.environ, mt_path, version);
         },
         .bundle => try bundle.execute(ctx, allocator, cmd_args),
