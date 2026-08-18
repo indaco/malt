@@ -3266,3 +3266,35 @@ test "interpreter: <<~ output is byte-identical to system Ruby" {
         };
     }
 }
+
+test "interpreter: ln_s with a relative target links instead of aborting" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var scratch = try makeTempPrefix();
+    defer scratch.deinit();
+    const prefix = scratch.path;
+
+    // `ln_s "../libexec/tool", bin/"tool"` is everyday formula shorthand. It
+    // used to abort the whole process, so this drives the real interpreter
+    // rather than the builtin, to prove no formula can take malt down.
+    const src =
+        \\(prefix/"libexec").mkpath
+        \\(prefix/"bin").mkpath
+        \\(prefix/"libexec"/"tool").write("#!/bin/sh\n")
+        \\ln_s "../libexec/tool", prefix/"bin"/"tool"
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+
+    const link = try std.fs.path.join(
+        testing.allocator,
+        &.{ prefix, "Cellar", "testpkg", "1.0", "bin", "tool" },
+    );
+    defer testing.allocator.free(link);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try test_io.cwd().readLink(std.Options.debug_io, link, &buf);
+    try testing.expectEqualStrings("../libexec/tool", buf[0..n]);
+    // Resolves through to the real file, so the keg is actually usable.
+    try test_io.cwd().access(std.Options.debug_io, link, .{});
+}
