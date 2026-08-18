@@ -279,7 +279,9 @@ fn linkInto(ctx: ExecCtx, dir: []const u8, source: []const u8, name: []const u8)
     };
 
     std.Io.Dir.cwd().deleteFile(ctx.io, link) catch {};
-    std.Io.Dir.symLinkAbsolute(ctx.io, source, link, .{}) catch {};
+    // Relative targets are ordinary in formulae and already bounds-checked above;
+    // `symLinkAbsolute` would assert on one and abort the process.
+    std.Io.Dir.cwd().symLink(ctx.io, source, link, .{}) catch {};
 }
 
 /// glob(pattern) — match files in a directory against a glob pattern
@@ -535,4 +537,85 @@ test "write refuses to follow a symlink out of the keg" {
     defer vf.close(io);
     const n = try vf.readPositionalAll(io, &rb, 0);
     try std.testing.expectEqualStrings("PRECIOUS", rb[0..n]);
+}
+
+test "install_symlink keeps a relative in-keg source instead of aborting" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("install_symlink_relative");
+    defer s.deinit();
+    const keg = s.base;
+
+    const libexec = try std.fs.path.join(alloc, &.{ keg, "libexec" });
+    defer alloc.free(libexec);
+    try std.Io.Dir.cwd().createDirPath(io, libexec);
+    const real = try std.fs.path.join(alloc, &.{ libexec, "tool" });
+    defer alloc.free(real);
+    (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
+    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    defer alloc.free(bin);
+
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    _ = try installSymlink(ctx, Value{ .pathname = bin }, &.{Value{ .string = "../libexec/tool" }});
+
+    const link = try std.fs.path.join(alloc, &.{ bin, "tool" });
+    defer alloc.free(link);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
+    try std.testing.expectEqualStrings("../libexec/tool", buf[0..n]);
+    try std.Io.Dir.cwd().access(io, link, .{});
+}
+
+test "install_symlink refuses a relative source that escapes the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("install_symlink_rel_escape");
+    defer s.deinit();
+    const base = s.base;
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    defer alloc.free(keg);
+    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    defer alloc.free(bin);
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        installSymlink(ctx, Value{ .pathname = bin }, &.{Value{ .string = "../../outside" }}),
+    );
+    const link = try std.fs.path.join(alloc, &.{ bin, "outside" });
+    defer alloc.free(link);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, link, .{}));
+}
+
+test "install_symlink hash form keeps a relative source under the given name" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("install_symlink_hash_relative");
+    defer s.deinit();
+    const keg = s.base;
+
+    const libexec = try std.fs.path.join(alloc, &.{ keg, "libexec" });
+    defer alloc.free(libexec);
+    try std.Io.Dir.cwd().createDirPath(io, libexec);
+    const real = try std.fs.path.join(alloc, &.{ libexec, "tool" });
+    defer alloc.free(real);
+    (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
+    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    defer alloc.free(bin);
+
+    const pairs = [_]Value.HashPair{.{
+        .key = Value{ .string = "../libexec/tool" },
+        .value = Value{ .string = "alias" },
+    }};
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    _ = try installSymlink(ctx, Value{ .pathname = bin }, &.{Value{ .hash = &pairs }});
+
+    const link = try std.fs.path.join(alloc, &.{ bin, "alias" });
+    defer alloc.free(link);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
+    try std.testing.expectEqualStrings("../libexec/tool", buf[0..n]);
+    try std.Io.Dir.cwd().access(io, link, .{});
 }
