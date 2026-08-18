@@ -245,6 +245,18 @@ pub fn openTargetNoFollow(
     return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
+/// Open a confined source without following its final component. Keeping the
+/// returned descriptor open binds subsequent reads to the checked object and
+/// closes the leaf-symlink and check-then-open windows.
+pub fn openSourceNoFollow(
+    io: std.Io,
+    source_path: []const u8,
+    cellar_path: []const u8,
+    malt_prefix: []const u8,
+) (SandboxError || std.posix.OpenError)!std.Io.File {
+    return openTargetNoFollow(io, source_path, cellar_path, malt_prefix, .{ .write = false });
+}
+
 const fs_test_io = std.Options.debug_io;
 
 var scratch_seq: std.atomic.Value(u32) = .init(0);

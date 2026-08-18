@@ -15,6 +15,7 @@ const sandbox_macos = @import("sandbox/macos.zig");
 const fallback_log = @import("dsl/fallback_log.zig");
 const atomic = @import("../fs/atomic.zig");
 const clonefile = @import("../fs/clonefile.zig");
+const fs_read = @import("../fs/read.zig");
 const text_replace = @import("../text_replace.zig");
 
 pub const FallbackLog = fallback_log.FallbackLog;
@@ -732,25 +733,14 @@ fn stepInreplace(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         return false;
     }
 
-    const file = std.Io.Dir.openFileAbsolute(ctx.io, path, .{}) catch return false;
-    const stat = file.stat(ctx.io) catch {
-        file.close(ctx.io);
+    const file = sandbox.openSourceNoFollow(ctx.io, path, ctx.keg_path, ctx.prefix) catch |e| {
+        if (e == error.PathSandboxViolation) logViolation(ctx, path);
         return false;
     };
-    if (stat.size > 4 * 1024 * 1024) {
-        file.close(ctx.io);
-        return false;
-    }
-    const content = ctx.allocator.alloc(u8, stat.size) catch {
-        file.close(ctx.io);
-        return false;
-    };
-    const read = file.readPositionalAll(ctx.io, content, 0) catch {
-        file.close(ctx.io);
-        return false;
-    };
-    file.close(ctx.io);
-    if (read < content.len) return false;
+    defer file.close(ctx.io);
+    const stat = file.stat(ctx.io) catch return false;
+    if (stat.size > 4 * 1024 * 1024) return false;
+    const content = fs_read.readFileAll(ctx.io, ctx.allocator, file, 4 * 1024 * 1024) catch return false;
 
     const updated = if (getFlag(obj, "regexp")) blk: {
         const literal = anchoredLineLiteral(before) orelse {
@@ -1480,6 +1470,36 @@ test "execute substitutes a literal inreplace and resolves the invoking user" {
     try testing.expect(execute(h.ctx(), json));
     try testing.expect(!h.flog.hasErrors());
     try testing.expectEqualStrings("username: \"ada\"\n", try readBack(&h, path));
+}
+
+test "execute refuses inreplace through a source symlink outside the prefix" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    var outside = try Scratch.init("steps_inreplace_source");
+    defer outside.deinit();
+    try std.Io.Dir.cwd().createDirPath(h.io, outside.base);
+    const victim = outside.p("/victim");
+    {
+        const f = try std.Io.Dir.createFileAbsolute(h.io, victim, .{});
+        defer f.close(h.io);
+        try f.writeStreamingAll(h.io, "PRIVATE");
+    }
+
+    const etc = try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, etc);
+    const link = try std.fmt.allocPrint(a, "{s}/leak.conf", .{etc});
+    try std.Io.Dir.symLinkAbsolute(h.io, victim, link, .{});
+
+    _ = execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"inreplace","path":{"base":"etc","path":"leak.conf"},
+        \\  "before":"PRIVATE","after":"PRIVATE"}]
+    ));
+
+    try testing.expect(h.flog.hasFatal());
+    var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(h.io, link, &target_buf);
 }
 
 test "execute skips an inreplace whose if_exists guard is unmet" {
