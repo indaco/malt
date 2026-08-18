@@ -588,3 +588,34 @@ test "install_symlink refuses a relative source that escapes the keg" {
     defer alloc.free(link);
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, link, .{}));
 }
+
+test "install_symlink hash form keeps a relative source under the given name" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("install_symlink_hash_relative");
+    defer s.deinit();
+    const keg = s.base;
+
+    const libexec = try std.fs.path.join(alloc, &.{ keg, "libexec" });
+    defer alloc.free(libexec);
+    try std.Io.Dir.cwd().createDirPath(io, libexec);
+    const real = try std.fs.path.join(alloc, &.{ libexec, "tool" });
+    defer alloc.free(real);
+    (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
+    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    defer alloc.free(bin);
+
+    const pairs = [_]Value.HashPair{.{
+        .key = Value{ .string = "../libexec/tool" },
+        .value = Value{ .string = "alias" },
+    }};
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    _ = try installSymlink(ctx, Value{ .pathname = bin }, &.{Value{ .hash = &pairs }});
+
+    const link = try std.fs.path.join(alloc, &.{ bin, "alias" });
+    defer alloc.free(link);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
+    try std.testing.expectEqualStrings("../libexec/tool", buf[0..n]);
+    try std.Io.Dir.cwd().access(io, link, .{});
+}

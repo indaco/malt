@@ -1339,3 +1339,57 @@ test "ln_sf leaves no link for an empty target" {
     _ = try lnSf(ctx, null, &.{ Value{ .string = "" }, Value{ .string = link } });
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, link, .{}));
 }
+
+test "ln_sf array form links a relative target under its basename" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("lnsf_array_relative");
+    defer s.deinit();
+    const keg = s.base;
+
+    const libexec = try std.fs.path.join(alloc, &.{ keg, "libexec" });
+    defer alloc.free(libexec);
+    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    defer alloc.free(bin);
+    try std.Io.Dir.cwd().createDirPath(io, libexec);
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    const real = try std.fs.path.join(alloc, &.{ libexec, "tool" });
+    defer alloc.free(real);
+    (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
+
+    // The array form names the link after `basename(target)`, so a relative
+    // target has to survive that trip as well as the scalar form does.
+    const items = [_]Value{Value{ .string = "../libexec/tool" }};
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    _ = try lnSf(ctx, null, &.{ Value{ .array = &items }, Value{ .string = bin } });
+
+    const link = try std.fs.path.join(alloc, &.{ bin, "tool" });
+    defer alloc.free(link);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
+    try std.testing.expectEqualStrings("../libexec/tool", buf[0..n]);
+    try std.Io.Dir.cwd().access(io, link, .{});
+}
+
+test "ln_s accepts a relative target that does not exist yet" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("lns_relative_dangling");
+    defer s.deinit();
+    const keg = s.base;
+
+    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    defer alloc.free(bin);
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    const link = try std.fs.path.join(alloc, &.{ bin, "tool" });
+    defer alloc.free(link);
+
+    // Formulae link ahead of the file they point at; an in-keg target that is
+    // still missing must link rather than be mistaken for an escape.
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    _ = try lnS(ctx, null, &.{ Value{ .string = "../libexec/later" }, Value{ .string = link } });
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
+    try std.testing.expectEqualStrings("../libexec/later", buf[0..n]);
+}
