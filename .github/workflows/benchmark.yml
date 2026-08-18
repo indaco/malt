@@ -16,8 +16,10 @@ jobs:
     env:
       # Wipe the malt prefix between cold runs so the published numbers
       # reflect a real network download, not a store-cache hit. Fail loud
-      # if any install returns non-zero so a broken install path can never
-      # silently publish fake timings.
+      # if a *malt* install returns non-zero so a broken install path can
+      # never silently publish fake timings; a peer tool's failure only
+      # withholds its own cell (⚠️) so its upstream regression can't take
+      # down malt's numbers or the stress step that follows.
       BENCH_TRUE_COLD: "1"
       BENCH_FAIL_FAST: "1"
       # Bench malt's shipped release (highest release/N.M branch), not the dev
@@ -173,16 +175,16 @@ jobs:
 
           # Explain any ⚠️ cell so a reader isn't left guessing why a number is
           # missing. The marker is only ever emitted for a peer tool whose cold
-          # median blew past BENCH_MAX_COLD, so the legend is appended only when
-          # such a cell exists — and it lands inside the START/END block, so a
-          # later clean run drops it again.
+          # install failed or blew past BENCH_MAX_COLD, so the legend is appended
+          # only when such a cell exists - and it lands inside the START/END
+          # block, so a later clean run drops it again.
           if grep -q '⚠️' /tmp/cold_table.md; then
             cat >> /tmp/cold_table.md << 'NOTE'
 
-          > ⚠️ = cell omitted. That tool's cold install exceeded the sanity
-          > ceiling (50 s), which reflects a regression in that tool rather than
-          > a comparable install time, so the number is withheld instead of
-          > published. malt is never omitted — a real malt slowdown stays visible.
+          > ⚠️ = cell omitted. That tool's cold install failed, or exceeded the
+          > sanity ceiling (50 s), which reflects a regression in that tool rather
+          > than a comparable install time, so the number is withheld instead of
+          > published. malt is never omitted - a real malt slowdown stays visible.
           NOTE
           fi
 
