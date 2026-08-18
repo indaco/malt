@@ -80,6 +80,14 @@ pub fn classifyStatus(status: u16) ?DownloadError {
     return null;
 }
 
+/// Statuses that never carry a body (RFC 9110 6.4.1). The release path
+/// decides by request method alone, so a bodiless response that also omits
+/// framing headers reads as "body ends when the peer closes" and blocks on
+/// a keep-alive socket until the idle timeout.
+pub fn statusHasNoBody(status: u16) bool {
+    return (status >= 100 and status < 200) or status == 204 or status == 304;
+}
+
 pub fn isTransientError(err: DownloadError) bool {
     return switch (err) {
         error.Timeout, error.ConnectionReset, error.HttpServerError, error.RateLimited, error.ReadFailed, error.WatchdogSpawnFailed => true,
@@ -957,6 +965,21 @@ pub const HttpClient = struct {
         return try out.toOwnedSlice();
     }
 
+    /// Release a request whose response carries no body. stdlib's `deinit`
+    /// decides by method alone, so on a bodiless status it drains until the
+    /// peer closes — on a keep-alive 304 that is a full idle timeout.
+    /// Declaring the body zero-length makes that drain a no-op.
+    ///
+    /// The connection is retired rather than pooled: if a broken peer did
+    /// send bytes we never read, reuse would feed them to the next request
+    /// as its response head.
+    fn finishBodiless(req: *std.http.Client.Request) void {
+        req.response_content_length = 0;
+        req.response_transfer_encoding = .none;
+        if (req.connection) |conn| conn.closing = true;
+        req.deinit();
+    }
+
     /// GET that follows redirects manually so credential/validator headers are
     /// stripped before leaving the origin's scope. In Zig 0.16 stdlib,
     /// `extra_headers` ride every redirect and `privileged_headers` are never
@@ -1022,12 +1045,11 @@ pub const HttpClient = struct {
                     etag_owned = try self.allocator.dupe(u8, e);
             }
 
-            // 304 has no body per HTTP spec — empty owned slice keeps deinit's
-            // `free(body)` uniform.
-            if (status == 304) {
+            // Empty owned slice keeps deinit's `free(body)` uniform.
+            if (statusHasNoBody(status)) {
                 const empty = try self.allocator.alloc(u8, 0);
-                req.deinit();
-                return .{ .status = status, .body = empty, .etag = etag_owned, .not_modified = true };
+                finishBodiless(&req);
+                return .{ .status = status, .body = empty, .etag = etag_owned, .not_modified = status == 304 };
             }
 
             const total_timeout = if (max_bytes > max_metadata_bytes)
@@ -1196,6 +1218,13 @@ pub const HttpClient = struct {
                 return status;
             }
 
+            // Nothing to drain when the status forbids a body, and trying
+            // would block until the idle timeout.
+            if (statusHasNoBody(status)) {
+                finishBodiless(&req);
+                return status;
+            }
+
             // Non-200: drain the error body into a bounded discard so status
             // classification / pre-body retry behave as on the buffer path and
             // the pooled connection stays reusable — all while `sink` is left
@@ -1282,6 +1311,28 @@ test "extractEtagFromHead: preserves GitHub's weak-ETag W/ prefix verbatim" {
     const bytes = "304 Not Modified\r\nETag: W/\"deadbeef\"\r\n\r\n";
     const et = extractEtagFromHead(bytes);
     try std.testing.expectEqualStrings("W/\"deadbeef\"", et.?);
+}
+
+test "statusHasNoBody covers exactly the bodiless statuses" {
+    // 204 and 304 are the reachable ones; 1xx is in the rule regardless.
+    try std.testing.expect(statusHasNoBody(204));
+    try std.testing.expect(statusHasNoBody(304));
+
+    // Both ends of the 1xx range, and the values just outside it.
+    try std.testing.expect(statusHasNoBody(100));
+    try std.testing.expect(statusHasNoBody(199));
+    try std.testing.expect(!statusHasNoBody(99));
+    try std.testing.expect(!statusHasNoBody(200));
+
+    // Everything else carries a body, and draining it is what keeps a
+    // pooled connection reusable. 205 and 304 are one apart; so are 204
+    // and 205.
+    try std.testing.expect(!statusHasNoBody(203));
+    try std.testing.expect(!statusHasNoBody(205));
+    try std.testing.expect(!statusHasNoBody(303));
+    try std.testing.expect(!statusHasNoBody(305));
+    try std.testing.expect(!statusHasNoBody(404));
+    try std.testing.expect(!statusHasNoBody(500));
 }
 
 test "extractEtagFromHead: returns null when ETag header is absent" {
