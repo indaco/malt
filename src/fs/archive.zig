@@ -1,4 +1,6 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const system_tools = @import("../system_tools.zig");
 
 /// `c_allocator` is used for `std.process.Child` internals (argv/env
 /// bookkeeping) throughout this module. Callers may be running under an
@@ -441,7 +443,7 @@ pub fn extractZip(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !v
     try validateZip(io, archive_path);
 
     // -q: quiet, -o: overwrite without prompting, -d: destination dir.
-    const argv = [_][]const u8{ "unzip", "-q", "-o", archive_path, "-d", dest_dir };
+    const argv = [_][]const u8{ system_tools.unzip, "-q", "-o", archive_path, "-d", dest_dir };
     var child = std.process.spawn(io, .{
         .argv = &argv,
     }) catch return error.ExtractionFailed;
@@ -461,7 +463,7 @@ pub fn extractZip(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !v
 fn validateZip(io: std.Io, archive_path: []const u8) !void {
     // `-Z1` prints one entry name per line with no headers or sizes —
     // a zero-column listing we can scan without parsing unzip's table.
-    const argv = [_][]const u8{ "unzip", "-Z1", archive_path };
+    const argv = [_][]const u8{ system_tools.unzip, "-Z1", archive_path };
     try validateSubprocessListing(io, &argv);
 }
 
@@ -474,7 +476,7 @@ fn validateZip(io: std.Io, archive_path: []const u8) !void {
 pub fn extractTarXzFile(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !void {
     try validateTarListing(io, archive_path);
 
-    const argv = [_][]const u8{ "tar", "xf", archive_path, "-C", dest_dir, "--no-same-permissions", "--no-same-owner" };
+    const argv = [_][]const u8{ system_tools.tar, "xf", archive_path, "-C", dest_dir, "--no-same-permissions", "--no-same-owner" };
     var child = std.process.spawn(io, .{
         .argv = &argv,
     }) catch return error.ExtractionFailed;
@@ -492,7 +494,7 @@ pub fn extractTarXzFile(io: std.Io, archive_path: []const u8, dest_dir: []const 
 }
 
 fn validateTarListing(io: std.Io, archive_path: []const u8) !void {
-    const argv = [_][]const u8{ "tar", "tf", archive_path };
+    const argv = [_][]const u8{ system_tools.tar, "tf", archive_path };
     try validateSubprocessListing(io, &argv);
 }
 
@@ -721,6 +723,45 @@ fn testExtract(io: std.Io, s: *Scratch, raw: []const u8) !void {
     const gz = testGzip(&gz_buf, raw);
     try s.dir.writeFile(io, .{ .sub_path = "a.tar.gz", .data = gz });
     return extractTarGz(io, s.p("/a.tar.gz"), s.p("/dest"));
+}
+
+test "extractZip ignores a PATH-resident unzip shim" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    var s = try Scratch.init("zip_path_shim");
+    defer s.deinit();
+    const source = s.p("/payload");
+    const archive_path = s.p("/payload.zip");
+    const dest = s.p("/dest");
+    const shim_dir = s.p("/shim");
+    const shim = s.p("/shim/unzip");
+    try s.dir.createDirPath(test_io, "dest");
+    try s.dir.createDirPath(test_io, "shim");
+    {
+        const f = try std.Io.Dir.createFileAbsolute(test_io, source, .{});
+        defer f.close(test_io);
+        try f.writeStreamingAll(test_io, "payload");
+    }
+
+    var host_io: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer host_io.deinit();
+    var zip = try std.process.spawn(host_io.io(), .{
+        .argv = &.{ "/usr/bin/zip", "-j", "-q", archive_path, source },
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    const zip_term = try zip.wait(host_io.io());
+    try std.testing.expect(zip_term == .exited and zip_term.exited == 0);
+    try std.Io.Dir.symLinkAbsolute(test_io, "/usr/bin/false", shim, .{});
+
+    const path_entry = try std.fmt.allocPrintSentinel(s.arena.allocator(), "PATH={s}", .{shim_dir}, 0);
+    const entries = [_:null]?[*:0]const u8{path_entry.ptr};
+    const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
+    var shim_io: std.Io.Threaded = .init(std.testing.allocator, .{ .environ = environ });
+    defer shim_io.deinit();
+
+    try extractZip(shim_io.io(), archive_path, dest);
+    try std.Io.Dir.accessAbsolute(test_io, s.p("/dest/payload"), .{});
 }
 
 test "extractTarGz rejects a pax linkpath that escapes the destination" {

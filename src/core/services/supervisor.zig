@@ -27,6 +27,7 @@
 //!   files.
 
 const std = @import("std");
+const system_tools = @import("../../system_tools.zig");
 const builtin = @import("builtin");
 const sqlite = @import("../../db/sqlite.zig");
 const plist_mod = @import("plist.zig");
@@ -330,7 +331,7 @@ pub fn start(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
     const domain = userDomain(allocator) catch return SupervisorError.OutOfMemory;
     defer allocator.free(domain);
 
-    try runLaunchctl(ctx.io, &.{ "launchctl", "bootstrap", domain, plist_path });
+    try runLaunchctl(ctx.io, &.{ system_tools.launchctl, "bootstrap", domain, plist_path });
     // Status is a UI hint; launchctl is the source of truth for liveness.
     setStatus(ctx.db, label, "running") catch {};
 }
@@ -345,7 +346,7 @@ pub fn stop(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
     const domain = userDomain(allocator) catch return SupervisorError.OutOfMemory;
     defer allocator.free(domain);
 
-    try runLaunchctl(ctx.io, &.{ "launchctl", "bootout", domain, plist_path });
+    try runLaunchctl(ctx.io, &.{ system_tools.launchctl, "bootout", domain, plist_path });
     // Status is a UI hint; launchctl is the source of truth for liveness.
     setStatus(ctx.db, label, "stopped") catch {};
 }
@@ -429,7 +430,7 @@ pub fn queryRuntime(io: std.Io, allocator: std.mem.Allocator, label: []const u8)
     // a sub-millisecond parse cost but the codebase doesn't otherwise
     // use that API, so the complexity isn't worth it for this cold path.
     const result = std.process.run(allocator, io, .{
-        .argv = &.{ "launchctl", "list" },
+        .argv = &.{ system_tools.launchctl, "list" },
         .stdout_limit = .limited(4 * 1024 * 1024),
         .stderr_limit = .limited(4 * 1024 * 1024),
     }) catch return .not_loaded;

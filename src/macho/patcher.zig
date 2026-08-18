@@ -2,6 +2,7 @@
 //! Path relocation in load commands and text file patching.
 
 const std = @import("std");
+const system_tools = @import("../system_tools.zig");
 const parser = @import("parser.zig");
 const text_replace = @import("../text_replace.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -414,6 +415,7 @@ pub const FallbackError = error{
 /// `comptime` so the doctor check renders the right name without a
 /// runtime branch; the future Linux backend swaps this for `"patchelf"`.
 pub const external_tool_name: []const u8 = "install_name_tool";
+pub const external_tool_path: []const u8 = system_tools.install_name_tool;
 
 /// Build the `install_name_tool` argv for one binary's overflow batch.
 /// Caller owns the returned slice (`allocator.free`); the strings inside
@@ -427,7 +429,7 @@ pub fn buildInstallNameToolArgv(
     var argv: std.ArrayList([]const u8) = try .initCapacity(allocator, 1 + entries.len * 3 + 1);
     errdefer argv.deinit(allocator);
 
-    argv.appendAssumeCapacity(external_tool_name);
+    argv.appendAssumeCapacity(external_tool_path);
     for (entries) |e| {
         if (e.delete) {
             // -delete_rpath <old> <file>: strip the collapsed duplicate.
@@ -507,10 +509,8 @@ pub fn flushOverflow(
         .stdout = .ignore,
         .stderr = .pipe,
     }) catch |e| switch (e) {
-        // `FileNotFound` is what `std.process.spawn` returns when the
-        // binary is not on PATH — caller's doctor check should have
-        // surfaced this already, but bottle installs may run before
-        // doctor on a fresh box.
+        // `FileNotFound` means the fixed Command Line Tools path is absent.
+        // Doctor should surface this, but bottle installs may run first.
         error.FileNotFound => return FallbackError.InstallNameToolMissing,
         else => return FallbackError.IoError,
     };
@@ -529,6 +529,36 @@ pub fn flushOverflow(
         },
         else => return FallbackError.InstallNameToolFailed,
     }
+}
+
+test "flushOverflow does not execute a prefix-resident install_name_tool shim" {
+    const io = std.Options.debug_io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrintSentinel(a, "/tmp/malt_install_name_tool_shim_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{root});
+    const shim = try std.fmt.allocPrint(a, "{s}/{s}", .{ bin, external_tool_name });
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    try std.Io.Dir.symLinkAbsolute(io, "/usr/bin/true", shim, .{});
+
+    const path_entry = try std.fmt.allocPrintSentinel(a, "PATH={s}:/usr/bin:/bin", .{bin}, 0);
+    const entries = [_:null]?[*:0]const u8{path_entry.ptr};
+    const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .environ = environ });
+    defer threaded.deinit();
+
+    const entries_to_flush = [_]OverflowEntry{.{
+        .cmd = @intFromEnum(std.macho.LC.LOAD_DYLIB),
+        .old_path = "/usr/local/lib/libx.dylib",
+        .new_path = "/opt/malt/lib/libx.dylib",
+    }};
+    try std.testing.expectError(
+        FallbackError.InstallNameToolFailed,
+        flushOverflow(threaded.io(), a, "/no/such/macho", &entries_to_flush),
+    );
 }
 
 /// Patch text files in a directory tree with a batch of replacements.
