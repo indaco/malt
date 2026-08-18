@@ -919,15 +919,25 @@ pub const CaskInstaller = struct {
         return verifyFileSha256(self.io, file_path, expected);
     }
 
-    fn installDmg(self: *CaskInstaller, dmg_path: []const u8, app_dir: []const u8, cask: *const Cask) ![]const u8 {
-        // Create a temp mount point
-        var mount_buf: [512]u8 = undefined;
-        const mount_point = std.fmt.bufPrint(&mount_buf, "{s}/tmp/cask_mount_{s}", .{ self.prefix, cask.token }) catch
+    /// A private directory under `<prefix>/tmp` that cannot have been planted:
+    /// the name carries OS entropy and creation is exclusive, so an existing
+    /// path is an error rather than something to adopt. `buf` owns the result.
+    fn freshTempDir(self: *CaskInstaller, buf: []u8, kind: []const u8, token: []const u8) ![]const u8 {
+        var nonce: [16]u8 = undefined;
+        self.io.randomSecure(&nonce) catch return error.InstallFailed;
+        const path = std.fmt.bufPrint(buf, "{s}/tmp/cask_{s}_{s}_{s}", .{
+            self.prefix, kind, token, std.fmt.bytesToHex(nonce, .lower),
+        }) catch return error.InstallFailed;
+        std.Io.Dir.createDirAbsolute(self.io, path, std.Io.File.Permissions.fromMode(0o700)) catch
             return error.InstallFailed;
-        std.Io.Dir.createDirAbsolute(self.io, mount_point, .default_dir) catch |e| switch (e) {
-            error.PathAlreadyExists => {},
-            else => return error.InstallFailed,
-        };
+        return path;
+    }
+
+    fn installDmg(self: *CaskInstaller, dmg_path: []const u8, app_dir: []const u8, cask: *const Cask) ![]const u8 {
+        // A token-derived path is guessable, so it can be planted and then
+        // adopted - mounted over, and removed on teardown.
+        var mount_buf: [512]u8 = undefined;
+        const mount_point = try self.freshTempDir(&mount_buf, "mount", cask.token);
 
         // Mount DMG (hdiutil attach -nobrowse -readonly -mountpoint {path} {dmg})
         const mount_argv = [_][]const u8{
@@ -2015,4 +2025,113 @@ test "parseCask does not length-cap a clean version" {
     defer a.free(json);
     var cask = try parseCask(a, json);
     cask.deinit();
+}
+
+test "installDmg does not adopt a predictable pre-existing mount point" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try std.fmt.allocPrintSentinel(a, "/tmp/malt_cask_dmg_mount_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const prefix = try std.fmt.allocPrintSentinel(a, "{s}/prefix", .{base}, 0);
+    const tmp_dir = try std.fmt.allocPrint(a, "{s}/tmp", .{prefix});
+    // Derived from the token alone, so anything with prefix write access can
+    // put its own directory here before the install runs.
+    const planted = try std.fmt.allocPrint(a, "{s}/cask_mount_evil", .{tmp_dir});
+    const source = try std.fmt.allocPrint(a, "{s}/source/Evil.app/Contents", .{base});
+    const source_root = try std.fmt.allocPrint(a, "{s}/source", .{base});
+    const dmg_path = try std.fmt.allocPrint(a, "{s}/evil.dmg", .{base});
+    const app_dir = try std.fmt.allocPrint(a, "{s}/Applications", .{base});
+
+    try std.Io.Dir.cwd().createDirPath(io, planted);
+    try std.Io.Dir.cwd().createDirPath(io, source);
+    try std.Io.Dir.cwd().createDirPath(io, app_dir);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = try std.fmt.allocPrint(a, "{s}/payload", .{source}),
+        .data = "OWNED",
+    });
+
+    const mk = [_][]const u8{
+        "/usr/bin/hdiutil", "create", "-quiet", "-srcfolder", source_root, "-volname", "EvilVol", dmg_path,
+    };
+    try child_mod.runOrFail(io, a, &mk);
+
+    var cask = try parseCask(a,
+        \\{"token":"evil","name":["Evil"],"version":"1.0","url":"https://example.invalid/evil.dmg","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","artifacts":[{"app":["Evil.app"]}]}
+    );
+    defer cask.deinit();
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .db = undefined,
+        .progress = null,
+    };
+    _ = installer.installDmg(dmg_path, app_dir, &cask) catch {};
+
+    // Mounting over the planted directory and then removing it on teardown
+    // destroys a directory malt never created. It must be left alone.
+    try std.Io.Dir.cwd().access(io, planted, .{});
+}
+
+test "freshTempDir hands out a distinct private directory each call" {
+    const io = std.Options.debug_io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prefix = try std.fmt.allocPrintSentinel(a, "/tmp/malt_fresh_tmp_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/tmp", .{prefix}));
+
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .db = undefined,
+        .progress = null,
+    };
+
+    var buf_a: [512]u8 = undefined;
+    var buf_b: [512]u8 = undefined;
+    const first = try installer.freshTempDir(&buf_a, "mount", "tok");
+    const second = try installer.freshTempDir(&buf_b, "mount", "tok");
+
+    // Same cask, same kind, different directory - otherwise the name is
+    // guessable and the path can be planted again.
+    try std.testing.expect(!std.mem.eql(u8, first, second));
+    const st = try std.Io.Dir.cwd().statFile(io, first, .{});
+    try std.testing.expectEqual(std.Io.File.Kind.directory, st.kind);
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o700), st.permissions.toMode() & 0o777);
+}
+
+test "freshTempDir fails instead of creating a prefix tmp dir that is absent" {
+    const io = std.Options.debug_io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prefix = try std.fmt.allocPrintSentinel(a, "/tmp/malt_fresh_tmp_missing_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, prefix); // no `tmp` underneath
+
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .db = undefined,
+        .progress = null,
+    };
+    var buf: [512]u8 = undefined;
+    // Creating the parent here would re-open the adoption hole it guards.
+    try std.testing.expectError(error.InstallFailed, installer.freshTempDir(&buf, "mount", "tok"));
 }
