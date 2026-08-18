@@ -15,7 +15,7 @@ For anything beyond a typo or a one-line fix, **open an issue first**. A short c
 **Where PRs go.** Open every PR against `main`, including bug fixes against the latest release. malt maintains a `release/X.Y` branch as the patch line for the current minor; the maintainer cherry-picks user-visible fixes from `main` onto it. Don't target `release/*` branches directly - it makes the next minor a regression risk and bypasses the gate.
 
 > [!NOTE]
-> **AI-assisted contributions are welcome.** malt itself is human-directed AI implementation, so PRs written with Claude, Copilot, or similar tools are fine - provided you've read the diff, understand what the patch does, and stand behind it as your own work. Treat the AI as a collaborator, not a release valve.
+> **AI-assisted contributions are welcome.** malt itself is human-directed AI implementation, so PRs written with Claude, Copilot, or similar tools are fine - provided you've read the diff, understand what the patch does, and stand behind it as your own work. Treat the AI as a collaborator, not a release valve. Point your agent at [AGENTS.md](AGENTS.md) - it carries the commands, invariants, and pre-PR checklist in machine-actionable form.
 
 ## Out of scope
 
@@ -70,8 +70,6 @@ The CI pipeline runs the full slate (including `local-bench.sh` and the smoke su
 ## Pointers before you start
 
 - **`README.md`** - the public face of the project. Read `## Why malt exists` and `## Architecture` so your design proposals don't contradict choices that are already load-bearing.
-- **`docs/`** - design notes, security audits, and the post_install DSL coverage doc live here. Skim the file most relevant to your change.
-- **`docs/plan/` and `docs/design/`** - ADRs and longer design write-ups. If you're proposing something architectural, check whether there's already an ADR on the topic.
 
 ## Tap forges
 
