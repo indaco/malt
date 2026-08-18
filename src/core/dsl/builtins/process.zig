@@ -80,6 +80,66 @@ fn buildArgv(ctx: ExecCtx, args: []const Value) BuiltinError![]const []const u8 
     return argv.toOwnedSlice(ctx.allocator);
 }
 
+const inherited_env_keys = std.StaticStringMap(void).initComptime(.{
+    .{ "LANG", {} },
+    .{ "LC_ALL", {} },
+    .{ "LC_CTYPE", {} },
+    .{ "TERM", {} },
+    .{ "SDKROOT", {} },
+    .{ "MACOSX_DEPLOYMENT_TARGET", {} },
+    .{ "CC", {} },
+    .{ "CXX", {} },
+    .{ "CFLAGS", {} },
+    .{ "CPPFLAGS", {} },
+    .{ "CXXFLAGS", {} },
+    .{ "LDFLAGS", {} },
+    .{ "MAKEFLAGS", {} },
+});
+
+/// Return the environment visible to formula code. Values that describe the
+/// installation are derived from the current sandbox instead of trusting the
+/// parent process; only non-secret build and locale settings are inherited.
+fn formulaEnvValue(ctx: ExecCtx, key: []const u8) BuiltinError!?[]const u8 {
+    if (std.mem.eql(u8, key, "HOME")) return ctx.malt_prefix;
+    if (std.mem.eql(u8, key, "PATH")) return macos_sandbox.sandbox_path;
+    if (std.mem.eql(u8, key, "MALT_PREFIX") or std.mem.eql(u8, key, "HOMEBREW_PREFIX"))
+        return ctx.malt_prefix;
+    if (std.mem.eql(u8, key, "HOMEBREW_CELLAR"))
+        return std.fmt.allocPrint(ctx.allocator, "{s}/Cellar", .{ctx.malt_prefix}) catch
+            return BuiltinError.OutOfMemory;
+    if (std.mem.eql(u8, key, "TMPDIR")) return "/tmp";
+    if (inherited_env_keys.has(key)) return std.process.Environ.getPosix(ctx.environ, key);
+    return null;
+}
+
+fn buildFormulaEnv(ctx: ExecCtx) BuiltinError!std.process.Environ.Map {
+    var map = std.process.Environ.Map.init(ctx.allocator);
+    errdefer map.deinit();
+    for ([_][]const u8{
+        "HOME",
+        "PATH",
+        "MALT_PREFIX",
+        "HOMEBREW_PREFIX",
+        "HOMEBREW_CELLAR",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "SDKROOT",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "CC",
+        "CXX",
+        "CFLAGS",
+        "CPPFLAGS",
+        "CXXFLAGS",
+        "LDFLAGS",
+        "MAKEFLAGS",
+    }) |key| if (try formulaEnvValue(ctx, key)) |value|
+        map.put(key, value) catch return BuiltinError.OutOfMemory;
+    return map;
+}
+
 /// system — execute a command
 pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return Value{ .nil = {} };
@@ -101,10 +161,13 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     };
 
     const raw = macos_sandbox.rawPassthroughEnabled(ctx.environ);
+    var env_map = try buildFormulaEnv(ctx);
+    defer env_map.deinit();
     var child = std.process.spawn(ctx.io, .{
         .argv = spawn_argv,
         .stdout = childStdioMode(ctx.suppress_child_stdout, raw),
         .stderr = childStdioMode(false, raw),
+        .environ_map = &env_map,
     }) catch return BuiltinError.SystemCommandFailed;
     const term = waitSanitized(ctx, &child, .{}) catch return BuiltinError.SystemCommandFailed;
 
@@ -266,7 +329,7 @@ pub fn pathnameNew(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Va
 pub fn envGet(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return Value{ .nil = {} };
     const key = args[0].asString(ctx.allocator) catch return Value{ .nil = {} };
-    if (std.process.Environ.getPosix(ctx.environ, key)) |val| {
+    if (try formulaEnvValue(ctx, key)) |val| {
         return Value{ .string = val };
     }
     return Value{ .nil = {} };
@@ -297,10 +360,13 @@ pub fn safePopenRead(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!
         error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
     };
 
+    var env_map = try buildFormulaEnv(ctx);
+    defer env_map.deinit();
     var child = std.process.spawn(ctx.io, .{
         .argv = spawn_argv,
         .stdout = .pipe,
         .stderr = .ignore,
+        .environ_map = &env_map,
     }) catch return Value{ .string = "" };
 
     const stdout = child.stdout orelse return Value{ .string = "" };

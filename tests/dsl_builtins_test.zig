@@ -1277,19 +1277,28 @@ test "pathnameNew wraps a string into a Pathname value" {
 test "envGet returns nil for absent keys, string for present keys" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    // ctx.environ is a snapshot captured at construction; mutate the
-    // process env first so the snapshot reflects the test fixture.
-    _ = c.setenv("MALT_DSL_ENV_TEST", "yes", 1);
-    defer _ = c.unsetenv("MALT_DSL_ENV_TEST");
-    const ctx = arenaCtx(&arena, "/tmp/malt");
-    const got = try process.envGet(ctx, null, &.{.{ .string = "MALT_DSL_ENV_TEST" }});
-    try testing.expectEqualStrings("yes", got.string);
+    const entries = [_:null]?[*:0]const u8{"LANG=malt-test-locale"};
+    var ctx = arenaCtx(&arena, "/tmp/malt");
+    ctx.environ = .{ .block = .{ .slice = &entries } };
+    const got = try process.envGet(ctx, null, &.{.{ .string = "LANG" }});
+    try testing.expectEqualStrings("malt-test-locale", got.string);
 
     const missing = try process.envGet(ctx, null, &.{.{ .string = "MALT_DSL_DOES_NOT_EXIST_XYZ" }});
     try testing.expect(missing == .nil);
 
     const noargs = try process.envGet(ctx, null, &.{});
     try testing.expect(noargs == .nil);
+}
+
+test "envGet refuses sensitive parent credentials" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=private-token"};
+    var ctx = arenaCtx(&arena, "/tmp/malt");
+    ctx.environ = .{ .block = .{ .slice = &entries } };
+
+    const got = try process.envGet(ctx, null, &.{.{ .string = "MALT_GITHUB_TOKEN" }});
+    try testing.expect(got == .nil);
 }
 
 test "envSet does not touch the real environment but returns the written value" {
@@ -1320,6 +1329,25 @@ test "safePopenRead captures stdout and chomps trailing newline" {
     defer lio.deinit();
     const v = try process.safePopenRead(arenaCtxLive(&arena, &lio, "/tmp/malt"), null, &.{ .{ .string = "/bin/echo" }, .{ .string = "hello" } });
     try testing.expectEqualStrings("hello", v.string);
+}
+
+test "safePopenRead does not pass parent credentials to the child" {
+    try test_io.skipIfNoSubprocess();
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    _ = c.setenv("MALT_GITHUB_TOKEN", "private-child-token", 1);
+    defer _ = c.unsetenv("MALT_GITHUB_TOKEN");
+    var lio = LiveIo.init();
+    defer lio.deinit();
+
+    const got = try process.safePopenRead(
+        arenaCtxLive(&arena, &lio, "/tmp/malt"),
+        null,
+        &.{.{ .string = "/usr/bin/env" }},
+    );
+    try testing.expect(std.mem.indexOf(u8, got.string, "private-child-token") == null);
 }
 
 // ---------------------------------------------------------------------------
