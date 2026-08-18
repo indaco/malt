@@ -104,7 +104,12 @@ pub fn write(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!V
 pub fn read(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .string = "" };
-    const content = fs_read.readFileAllAbsolute(ctx.io, ctx.allocator, path, 1024 * 1024) catch {
+    const file = sandbox.openSourceNoFollow(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch |e| switch (e) {
+        error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
+        else => return Value{ .string = "" },
+    };
+    defer file.close(ctx.io);
+    const content = fs_read.readFileAll(ctx.io, ctx.allocator, file, 1024 * 1024) catch {
         return Value{ .string = "" };
     };
     return Value{ .string = content };

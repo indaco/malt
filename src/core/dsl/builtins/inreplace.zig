@@ -38,8 +38,14 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
     sandbox.validateWriteDir(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
 
-    // Read file contents
-    const content = read.readFileAllAbsolute(ctx.io, ctx.allocator, path, 4 * 1024 * 1024) catch {
+    // Open the source itself without following a final symlink. The descriptor
+    // keeps the read bound to the object that passed the confinement check.
+    const file = sandbox.openSourceNoFollow(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch |e| switch (e) {
+        error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
+        else => return Value{ .nil = {} },
+    };
+    defer file.close(ctx.io);
+    const content = read.readFileAll(ctx.io, ctx.allocator, file, 4 * 1024 * 1024) catch {
         return Value{ .nil = {} };
     };
 
@@ -145,4 +151,41 @@ test "atomic-write failure message names the failing step" {
     const rename_msg = try formatAtomicWriteFailureMessage(&buf, error.RenameFailed, "CrossDeviceLink");
     try std.testing.expect(std.mem.indexOf(u8, rename_msg, "RenameFailed") != null);
     try std.testing.expect(std.mem.indexOf(u8, rename_msg, "CrossDeviceLink") != null);
+}
+
+test "inreplace refuses to read through a source symlink outside the keg" {
+    const io = std.Options.debug_io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const base = try std.fmt.allocPrint(alloc, "/tmp/malt_inreplace_source_{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const keg = try std.fmt.allocPrint(alloc, "{s}/keg", .{base});
+    const victim = try std.fmt.allocPrint(alloc, "{s}/victim", .{base});
+    const link = try std.fmt.allocPrint(alloc, "{s}/config", .{keg});
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, victim, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "PRIVATE");
+    }
+    try std.Io.Dir.symLinkAbsolute(io, victim, link, .{});
+
+    const ctx: ExecCtx = .{
+        .allocator = alloc,
+        .io = io,
+        .environ = .empty,
+        .cellar_path = keg,
+        .malt_prefix = keg,
+    };
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        inreplace(ctx, null, &.{
+            Value{ .string = link },
+            Value{ .string = "PRIVATE" },
+            Value{ .string = "PRIVATE" },
+        }),
+    );
 }

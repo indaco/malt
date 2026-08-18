@@ -171,8 +171,63 @@ test "Pathname.read returns empty string for a missing file" {
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
-    const out = try pathname.read(ctx, Value{ .pathname = "/tmp/malt_dsl_read_missing_xyz" }, &.{});
+    const missing = try std.fmt.allocPrint(testing.allocator, "{s}/missing", .{root});
+    defer testing.allocator.free(missing);
+    const out = try pathname.read(ctx, Value{ .pathname = missing }, &.{});
     try testing.expectEqualStrings("", out.string);
+}
+
+test "Pathname.read refuses a source outside the sandbox" {
+    const root = try uniqueSandbox("read_escape_root");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const outside = try uniqueSandbox("read_escape_outside");
+    defer testing.allocator.free(outside);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
+    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/private", .{outside});
+    defer testing.allocator.free(victim);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, victim, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "PRIVATE");
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = mkCtx(root);
+    ctx.allocator = arena.allocator();
+    try testing.expectError(
+        pathname.BuiltinError.PathSandboxViolation,
+        pathname.read(ctx, Value{ .pathname = victim }, &.{}),
+    );
+}
+
+test "Pathname.read refuses a final symlink outside the sandbox" {
+    const root = try uniqueSandbox("read_symlink_root");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const outside = try uniqueSandbox("read_symlink_outside");
+    defer testing.allocator.free(outside);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
+    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/private", .{outside});
+    defer testing.allocator.free(victim);
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/config", .{root});
+    defer testing.allocator.free(link);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, victim, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "PRIVATE");
+    }
+    try test_io.symLinkAbsolute(std.Options.debug_io, victim, link, .{});
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = mkCtx(root);
+    ctx.allocator = arena.allocator();
+    try testing.expectError(
+        pathname.BuiltinError.PathSandboxViolation,
+        pathname.read(ctx, Value{ .pathname = link }, &.{}),
+    );
 }
 
 test "Pathname.children returns array of children; empty for missing dir" {
