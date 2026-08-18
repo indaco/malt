@@ -331,26 +331,25 @@ const patch = malt.patch;
 // ── external-tool availability check ─────────────────────────────────
 //
 // Guards the doctor row that surfaces `install_name_tool` (today) or
-// `patchelf` (after the Linux backend lands). The tool name is read
-// from the facade so the check is platform-agnostic at the call site.
+// `patchelf` (after the Linux backend lands). The trusted tool path is read
+// from the facade so the check matches what the backend will execute.
 
-test "doctor.externalToolAvailable returns true when the tool is on PATH" {
+test "doctor.externalToolAvailable checks the exact trusted tool path" {
     // `install_name_tool` is part of Xcode Command Line Tools and is
     // always installed in the repo's dev environment — any bot that
     // can build malt can find it.
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const environ = malt.app_ctx.processEnviron();
-    try testing.expect(malt.doctor.externalToolAvailable(io, environ, patch.external_tool_name));
+    try testing.expect(malt.doctor.externalToolAvailable(io, patch.external_tool_path));
 }
 
 test "doctor.externalToolAvailable returns false for a clearly-missing binary" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const environ = malt.app_ctx.processEnviron();
-    try testing.expect(!malt.doctor.externalToolAvailable(io, environ, "mt_no_such_binary_ever_xyz"));
+    try testing.expect(!malt.doctor.externalToolAvailable(io, "/usr/bin/mt_no_such_binary_ever_xyz"));
+    try testing.expect(!malt.doctor.externalToolAvailable(io, "install_name_tool"));
 }
 
 fn seedKeg(db: *sqlite.Database, name: []const u8, tap: []const u8, full_name: []const u8) !void {

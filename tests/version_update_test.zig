@@ -235,8 +235,8 @@ test "resolveTwinRegularFile: returns null for unrelated basenames" {
 test "buildSudoInstallArgv: shape matches BSD install with .old backup suffix" {
     const argv = updater.buildSudoInstallArgv("/tmp/new-malt", "/usr/local/bin/malt");
     try testing.expectEqual(@as(usize, 9), argv.len);
-    try testing.expectEqualStrings("sudo", argv[0]);
-    try testing.expectEqualStrings("install", argv[1]);
+    try testing.expectEqualStrings("/usr/bin/sudo", argv[0]);
+    try testing.expectEqualStrings("/usr/bin/install", argv[1]);
     try testing.expectEqualStrings("-m", argv[2]);
     try testing.expectEqualStrings("0755", argv[3]);
     try testing.expectEqualStrings("-b", argv[4]);
