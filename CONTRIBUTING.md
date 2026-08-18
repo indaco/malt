@@ -70,8 +70,6 @@ The CI pipeline runs the full slate (including `local-bench.sh` and the smoke su
 ## Pointers before you start
 
 - **`README.md`** - the public face of the project. Read `## Why malt exists` and `## Architecture` so your design proposals don't contradict choices that are already load-bearing.
-- **`docs/`** - design notes, security audits, and the post_install DSL coverage doc live here. Skim the file most relevant to your change.
-- **`docs/plan/` and `docs/design/`** - ADRs and longer design write-ups. If you're proposing something architectural, check whether there's already an ADR on the topic.
 
 ## Tap forges
 
