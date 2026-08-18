@@ -731,8 +731,8 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
             // through PATH, where a package's own bin directory can shadow us.
             var self_buf: [std.fs.max_path_bytes]u8 = undefined;
             const n = std.process.executablePath(ctx.io, &self_buf) catch {
-                ctx.stderr.writeStreamingAll(ctx.io, "mt: cannot resolve its own executable path; refusing to start the dashboard\n") catch {};
-                return error.ExecutablePathUnavailable;
+                output_mod.err("cannot resolve malt's own path; refusing to start the dashboard", .{});
+                return error.Aborted;
             };
             const mt_path = self_buf[0..n];
             try @import("tui/app.zig").run(ctx.io, allocator, ctx.stderr, ctx.environ, mt_path, version);
