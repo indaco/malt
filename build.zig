@@ -106,6 +106,7 @@ pub fn build(b: *std.Build) void {
 
     // --- Unit tests ---
     const test_modules = .{
+        "tests/aggregate_drift_test.zig",
         "tests/formula_test.zig",
         "tests/deps_test.zig",
         "tests/macho_test.zig",
@@ -368,21 +369,15 @@ pub fn build(b: *std.Build) void {
     // authoritative target — one process per file is what isolates
     // process-global state, which a single binary cannot.
     //
-    // The root is generated from `test_modules` so the aggregate cannot drift
-    // from the per-file target; each entry is wired in as a named import by
-    // the loop below.
-    var all_root_src: std.ArrayList(u8) = .empty;
-    all_root_src.appendSlice(b.allocator, "comptime {\n") catch @panic("OOM");
-    inline for (test_modules) |test_file| {
-        // Entries are always `tests/<name>.zig`; slicing beats a comptime
-        // path parse, which blows the eval-branch budget at this list size.
-        const name = test_file["tests/".len .. test_file.len - ".zig".len];
-        all_root_src.appendSlice(b.allocator, "    _ = @import(\"" ++ name ++ "\");\n") catch @panic("OOM");
-    }
-    all_root_src.appendSlice(b.allocator, "}\n") catch @panic("OOM");
-    const all_root = b.addWriteFiles().add("all.zig", all_root_src.items);
+    // The root lives beside the files it pulls in, because it has to import
+    // them BY PATH: Zig collects `test` blocks from the files making up the
+    // root module, and a named module import compiles a file without running
+    // any of its tests. A generated root cannot do that — it materialises in
+    // the cache, where a relative path back to `tests/` is not addressable —
+    // so the list is committed and `aggregate_drift_test.zig` fails the build
+    // if it ever falls behind the directory.
     const all_tests_module = b.createModule(.{
-        .root_source_file = all_root,
+        .root_source_file = b.path("tests/all.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -437,9 +432,6 @@ pub fn build(b: *std.Build) void {
         t.root_module.addOptions("version_string", version_options);
         t.root_module.addImport("malt", malt_lib);
         t.root_module.addImport("test_io", test_io_mod);
-        // Same module backs the aggregate root, so a file can only be in one
-        // target if it is in the other.
-        all_tests_module.addImport(test_name, t.root_module);
 
         const run_t = b.addRunArtifact(t);
         run_t.setEnvironmentVariable("MALT_PREFIX", test_prefix);
