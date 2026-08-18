@@ -220,7 +220,9 @@ pub fn lnS(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (std.fs.path.dirname(link_path)) |parent| {
         std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch {};
     }
-    std.Io.Dir.symLinkAbsolute(ctx.io, target, link_path, .{}) catch {};
+    // Relative targets are ordinary in formulae and already bounds-checked above;
+    // `symLinkAbsolute` would assert on one and abort the process.
+    std.Io.Dir.cwd().symLink(ctx.io, target, link_path, .{}) catch {};
     return Value{ .nil = {} };
 }
 
@@ -264,7 +266,9 @@ fn forceSymlink(ctx: ExecCtx, target: []const u8, link_path: []const u8) Builtin
         std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch {};
     }
     std.Io.Dir.cwd().deleteFile(ctx.io, link_path) catch {};
-    std.Io.Dir.symLinkAbsolute(ctx.io, target, link_path, .{}) catch {};
+    // Relative targets are ordinary in formulae and already bounds-checked above;
+    // `symLinkAbsolute` would assert on one and abort the process.
+    std.Io.Dir.cwd().symLink(ctx.io, target, link_path, .{}) catch {};
 }
 
 const fs_test_io = std.Options.debug_io;
@@ -1212,4 +1216,126 @@ fn copyDirRecursive(io: std.Io, allocator: std.mem.Allocator, src: []const u8, d
             copyFileConfined(io, src_child, dst_child, cellar_path, malt_prefix) catch {};
         }
     }
+}
+
+test "ln_s keeps a relative in-keg target instead of aborting" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("lns_relative_target");
+    defer s.deinit();
+    const keg = s.base;
+
+    // `ln_s "../libexec/tool", bin/"tool"` is ordinary Homebrew shorthand: the
+    // target is relative so the link survives the keg being relocated.
+    const libexec = try std.fs.path.join(alloc, &.{ keg, "libexec" });
+    defer alloc.free(libexec);
+    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    defer alloc.free(bin);
+    try std.Io.Dir.cwd().createDirPath(io, libexec);
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    const real = try std.fs.path.join(alloc, &.{ libexec, "tool" });
+    defer alloc.free(real);
+    (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
+    const link = try std.fs.path.join(alloc, &.{ bin, "tool" });
+    defer alloc.free(link);
+
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    _ = try lnS(ctx, null, &.{ Value{ .string = "../libexec/tool" }, Value{ .string = link } });
+
+    // Stored verbatim, and it resolves to the real file.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
+    try std.testing.expectEqualStrings("../libexec/tool", buf[0..n]);
+    try std.Io.Dir.cwd().access(io, link, .{});
+}
+
+test "ln_sf keeps a relative in-keg target instead of aborting" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("lnsf_relative_target");
+    defer s.deinit();
+    const keg = s.base;
+
+    const libexec = try std.fs.path.join(alloc, &.{ keg, "libexec" });
+    defer alloc.free(libexec);
+    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    defer alloc.free(bin);
+    try std.Io.Dir.cwd().createDirPath(io, libexec);
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    const real = try std.fs.path.join(alloc, &.{ libexec, "tool" });
+    defer alloc.free(real);
+    (try std.Io.Dir.createFileAbsolute(io, real, .{})).close(io);
+    const link = try std.fs.path.join(alloc, &.{ bin, "tool" });
+    defer alloc.free(link);
+
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    _ = try lnSf(ctx, null, &.{ Value{ .string = "../libexec/tool" }, Value{ .string = link } });
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
+    try std.testing.expectEqualStrings("../libexec/tool", buf[0..n]);
+}
+
+test "ln_s refuses a relative target that escapes the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("lns_relative_escape");
+    defer s.deinit();
+    const base = s.base;
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    defer alloc.free(keg);
+    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    defer alloc.free(bin);
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    const link = try std.fs.path.join(alloc, &.{ bin, "pwn" });
+    defer alloc.free(link);
+
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    // Relative spelling must not become a way around the boundary check, and
+    // must be refused rather than abort the process.
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        lnS(ctx, null, &.{ Value{ .string = "../../outside" }, Value{ .string = link } }),
+    );
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, link, .{}));
+}
+
+test "ln_sf refuses a relative target that escapes the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("lnsf_relative_escape");
+    defer s.deinit();
+    const base = s.base;
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    defer alloc.free(keg);
+    const bin = try std.fs.path.join(alloc, &.{ keg, "bin" });
+    defer alloc.free(bin);
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    const link = try std.fs.path.join(alloc, &.{ bin, "pwn" });
+    defer alloc.free(link);
+
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        lnSf(ctx, null, &.{ Value{ .string = "../../outside" }, Value{ .string = link } }),
+    );
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, link, .{}));
+}
+
+test "ln_sf leaves no link for an empty target" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("lnsf_empty_target");
+    defer s.deinit();
+    const keg = s.base;
+
+    const link = try std.fs.path.join(alloc, &.{ keg, "tool" });
+    defer alloc.free(link);
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    // `ln_s` guards this arg but the force variant does not; it must still be
+    // an inert no-op rather than a crash or an empty dangling link.
+    _ = try lnSf(ctx, null, &.{ Value{ .string = "" }, Value{ .string = link } });
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, link, .{}));
 }
