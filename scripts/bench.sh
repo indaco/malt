@@ -357,8 +357,27 @@ malt_version() {
   "$MALT_BIN" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^ ]*' | head -1
 }
 
+# nanobrew ≥v0.1.208 relocates binaries through a `/opt/nb` symlink pointing
+# at its prefix, and now *fails* an install outright when that link is missing
+# ("incomplete relocation (run `sudo nb init` and retry)"). `nb init` can only
+# create it as root, so do it here: it is the one path the bench cannot keep
+# under /tmp. Never clobber an existing /opt/nb: on a dev box it belongs to a
+# real nanobrew install.
+ensure_nb_short_prefix() {
+  local target="$NB_BENCH_PREFIX/prefix" cur
+  cur=$(readlink /opt/nb 2>/dev/null || true)
+  [ "$cur" = "$target" ] && return 0
+  if [ -n "$cur" ] || [ -e /opt/nb ]; then
+    warn "/opt/nb exists (-> ${cur:-not a symlink}) - leaving it alone; nanobrew installs will fail"
+    return 0
+  fi
+  sudo -n ln -s "$target" /opt/nb 2>/dev/null ||
+    warn "could not create /opt/nb -> $target (needs sudo) - nanobrew installs will fail"
+}
+
 build_nanobrew() {
   local url="https://github.com/justrach/nanobrew.git"
+  ensure_nb_short_prefix
   if [ "$SKIP_BUILD" = "1" ] && [ -x "$NB_BIN" ]; then
     set_result ver_nb "$(git -C "$NB_DIR" describe --tags --always 2>/dev/null || true)"
     return
