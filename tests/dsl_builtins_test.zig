@@ -81,6 +81,23 @@ test "Pathname.mkpath creates a directory tree under the receiver" {
     d.close(std.Options.debug_io);
 }
 
+test "Pathname.mkpath refuses a directory outside the sandbox" {
+    const root = try uniqueSandbox("mkpath_escape_root");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const outside = try uniqueSandbox("mkpath_escape_outside");
+    defer testing.allocator.free(outside);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
+    const escaped = try std.fmt.allocPrint(testing.allocator, "{s}/created", .{outside});
+    defer testing.allocator.free(escaped);
+
+    try testing.expectError(
+        pathname.BuiltinError.PathSandboxViolation,
+        pathname.mkpath(mkCtx(root), Value{ .pathname = escaped }, &.{}),
+    );
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, escaped, .{}));
+}
+
 test "Pathname.exist?, .directory?, .file?, .symlink? classify entries correctly" {
     const root = try uniqueSandbox("classify");
     defer testing.allocator.free(root);
@@ -221,6 +238,30 @@ test "Pathname.unlink deletes a file in the sandbox" {
     try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, path, .{}));
 }
 
+test "Pathname.unlink refuses an intermediate symlink outside the sandbox" {
+    const root = try uniqueSandbox("unlink_escape_root");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const outside = try uniqueSandbox("unlink_escape_outside");
+    defer testing.allocator.free(outside);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
+
+    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{outside});
+    defer testing.allocator.free(victim);
+    (try test_io.createFileAbsolute(std.Options.debug_io, victim, .{})).close(std.Options.debug_io);
+    const doorway = try std.fmt.allocPrint(testing.allocator, "{s}/door", .{root});
+    defer testing.allocator.free(doorway);
+    try test_io.symLinkAbsolute(std.Options.debug_io, outside, doorway, .{});
+    const through = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{doorway});
+    defer testing.allocator.free(through);
+
+    try testing.expectError(
+        pathname.BuiltinError.PathSandboxViolation,
+        pathname.unlink(mkCtx(root), Value{ .pathname = through }, &.{}),
+    );
+    try test_io.accessAbsolute(std.Options.debug_io, victim, .{});
+}
+
 test "Pathname.install_symlink (positional) links <dir>/<basename(source)> -> source" {
     // Homebrew semantics: receiver is the target directory, arg[0] is the
     // source. The link lands at <dir>/<basename(source)>.
@@ -292,6 +333,59 @@ test "Pathname.install_symlink (array) links each source by basename" {
         defer testing.allocator.free(link);
         _ = try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf);
     }
+}
+
+test "Pathname.install_symlink refuses scalar, array, and hash targets outside the sandbox" {
+    const root = try uniqueSandbox("install_symlink_escape_root");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const outside = try uniqueSandbox("install_symlink_escape_outside");
+    defer testing.allocator.free(outside);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
+    const target = try std.fmt.allocPrint(testing.allocator, "{s}/private", .{outside});
+    defer testing.allocator.free(target);
+    (try test_io.createFileAbsolute(std.Options.debug_io, target, .{})).close(std.Options.debug_io);
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{root});
+    defer testing.allocator.free(dir);
+    const ctx = mkCtx(root);
+
+    try testing.expectError(
+        pathname.BuiltinError.PathSandboxViolation,
+        pathname.installSymlink(ctx, Value{ .pathname = dir }, &.{Value{ .string = target }}),
+    );
+    const items = [_]Value{Value{ .string = target }};
+    try testing.expectError(
+        pathname.BuiltinError.PathSandboxViolation,
+        pathname.installSymlink(ctx, Value{ .pathname = dir }, &.{Value{ .array = &items }}),
+    );
+    const pairs = [_]Value.HashPair{.{ .key = Value{ .string = target }, .value = Value{ .string = "alias" } }};
+    try testing.expectError(
+        pathname.BuiltinError.PathSandboxViolation,
+        pathname.installSymlink(ctx, Value{ .pathname = dir }, &.{Value{ .hash = &pairs }}),
+    );
+}
+
+test "Pathname.install_symlink refuses a destination symlink outside the sandbox" {
+    const root = try uniqueSandbox("install_symlink_dest_root");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const outside = try uniqueSandbox("install_symlink_dest_outside");
+    defer testing.allocator.free(outside);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
+    const target = try std.fmt.allocPrint(testing.allocator, "{s}/target", .{root});
+    defer testing.allocator.free(target);
+    (try test_io.createFileAbsolute(std.Options.debug_io, target, .{})).close(std.Options.debug_io);
+    const doorway = try std.fmt.allocPrint(testing.allocator, "{s}/door", .{root});
+    defer testing.allocator.free(doorway);
+    try test_io.symLinkAbsolute(std.Options.debug_io, outside, doorway, .{});
+    const escaped = try std.fmt.allocPrint(testing.allocator, "{s}/target", .{outside});
+    defer testing.allocator.free(escaped);
+
+    try testing.expectError(
+        pathname.BuiltinError.PathSandboxViolation,
+        pathname.installSymlink(mkCtx(root), Value{ .pathname = doorway }, &.{Value{ .string = target }}),
+    );
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, escaped, .{}));
 }
 
 test "Pathname.install_symlink replaces an existing link at the target name" {
@@ -701,6 +795,57 @@ test "FileUtils.ln_s/ln_sf create (and force-replace) symlinks" {
     try testing.expectEqualStrings(target, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
 }
 
+test "FileUtils.ln_sf scalar refuses an intermediate symlink outside the sandbox" {
+    const root = try uniqueSandbox("lnsf_scalar_escape_root");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const outside = try uniqueSandbox("lnsf_scalar_escape_outside");
+    defer testing.allocator.free(outside);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
+
+    const target = try std.fmt.allocPrint(testing.allocator, "{s}/target", .{root});
+    defer testing.allocator.free(target);
+    (try test_io.createFileAbsolute(std.Options.debug_io, target, .{})).close(std.Options.debug_io);
+    const doorway = try std.fmt.allocPrint(testing.allocator, "{s}/door", .{root});
+    defer testing.allocator.free(doorway);
+    try test_io.symLinkAbsolute(std.Options.debug_io, outside, doorway, .{});
+    const through = try std.fmt.allocPrint(testing.allocator, "{s}/escaped", .{doorway});
+    defer testing.allocator.free(through);
+    const escaped = try std.fmt.allocPrint(testing.allocator, "{s}/escaped", .{outside});
+    defer testing.allocator.free(escaped);
+
+    try testing.expectError(
+        pathname.BuiltinError.PathSandboxViolation,
+        fileutils.lnSf(mkCtx(root), null, &.{ Value{ .string = target }, Value{ .string = through } }),
+    );
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, escaped, .{}));
+}
+
+test "FileUtils.ln_sf array refuses a destination symlink outside the sandbox" {
+    const root = try uniqueSandbox("lnsf_array_escape_root");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const outside = try uniqueSandbox("lnsf_array_escape_outside");
+    defer testing.allocator.free(outside);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
+
+    const target = try std.fmt.allocPrint(testing.allocator, "{s}/target", .{root});
+    defer testing.allocator.free(target);
+    (try test_io.createFileAbsolute(std.Options.debug_io, target, .{})).close(std.Options.debug_io);
+    const doorway = try std.fmt.allocPrint(testing.allocator, "{s}/door", .{root});
+    defer testing.allocator.free(doorway);
+    try test_io.symLinkAbsolute(std.Options.debug_io, outside, doorway, .{});
+    const items = [_]Value{Value{ .string = target }};
+    const escaped = try std.fmt.allocPrint(testing.allocator, "{s}/target", .{outside});
+    defer testing.allocator.free(escaped);
+
+    try testing.expectError(
+        pathname.BuiltinError.PathSandboxViolation,
+        fileutils.lnSf(mkCtx(root), null, &.{ Value{ .array = &items }, Value{ .string = doorway } }),
+    );
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, escaped, .{}));
+}
+
 test "FileUtils.rm rejects paths outside the sandbox" {
     const root = try uniqueSandbox("fileutils_violate");
     defer testing.allocator.free(root);
@@ -710,6 +855,50 @@ test "FileUtils.rm rejects paths outside the sandbox" {
         error.PathSandboxViolation,
         fileutils.rm(ctx, null, &.{.{ .string = "/etc/passwd" }}),
     );
+}
+
+test "FileUtils.rm scalar refuses an intermediate symlink outside the sandbox" {
+    const root = try uniqueSandbox("rm_scalar_escape_root");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const outside = try uniqueSandbox("rm_scalar_escape_outside");
+    defer testing.allocator.free(outside);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
+    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{outside});
+    defer testing.allocator.free(victim);
+    (try test_io.createFileAbsolute(std.Options.debug_io, victim, .{})).close(std.Options.debug_io);
+    const doorway = try std.fmt.allocPrint(testing.allocator, "{s}/door", .{root});
+    defer testing.allocator.free(doorway);
+    try test_io.symLinkAbsolute(std.Options.debug_io, outside, doorway, .{});
+    const through = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{doorway});
+    defer testing.allocator.free(through);
+
+    try testing.expectError(
+        pathname.BuiltinError.PathSandboxViolation,
+        fileutils.rm(mkCtx(root), null, &.{Value{ .string = through }}),
+    );
+    try test_io.accessAbsolute(std.Options.debug_io, victim, .{});
+}
+
+test "FileUtils.rm array skips an intermediate symlink outside the sandbox" {
+    const root = try uniqueSandbox("rm_array_escape_root");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const outside = try uniqueSandbox("rm_array_escape_outside");
+    defer testing.allocator.free(outside);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, outside) catch {};
+    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{outside});
+    defer testing.allocator.free(victim);
+    (try test_io.createFileAbsolute(std.Options.debug_io, victim, .{})).close(std.Options.debug_io);
+    const doorway = try std.fmt.allocPrint(testing.allocator, "{s}/door", .{root});
+    defer testing.allocator.free(doorway);
+    try test_io.symLinkAbsolute(std.Options.debug_io, outside, doorway, .{});
+    const through = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{doorway});
+    defer testing.allocator.free(through);
+    const items = [_]Value{Value{ .string = through }};
+
+    _ = try fileutils.rm(mkCtx(root), null, &.{Value{ .array = &items }});
+    try test_io.accessAbsolute(std.Options.debug_io, victim, .{});
 }
 
 test "FileUtils.chmod returns nil for a non-int mode and is a no-op" {

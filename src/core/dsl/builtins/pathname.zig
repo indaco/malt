@@ -44,6 +44,8 @@ pub const ExecCtx = struct {
 pub fn mkpath(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .nil = {} };
+    sandbox.validateDirTarget(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch
+        return BuiltinError.PathSandboxViolation;
     std.Io.Dir.cwd().createDirPath(ctx.io, path) catch {};
     return Value{ .nil = {} };
 }
@@ -213,7 +215,7 @@ pub fn pkgetc(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Val
 pub fn unlink(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .nil = {} };
-    sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch
+    sandbox.validateWriteDir(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
     std.Io.Dir.cwd().deleteFile(ctx.io, path) catch {};
     return Value{ .nil = {} };
@@ -228,6 +230,9 @@ pub fn unlink(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Val
 pub fn installSymlink(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Value {
     const dir = try receiverPath(ctx.allocator, receiver);
     if (dir.len == 0) return Value{ .nil = {} };
+    sandbox.validateDirTarget(ctx.io, dir, ctx.cellar_path, ctx.malt_prefix) catch
+        return BuiltinError.PathSandboxViolation;
+    std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch {};
     for (args) |arg| try installSymlinkArg(ctx, dir, arg);
     return Value{ .nil = {} };
 }
@@ -251,8 +256,8 @@ fn installSymlinkArg(ctx: ExecCtx, dir: []const u8, arg: Value) BuiltinError!voi
     }
 }
 
-/// Symlink `<dir>/<name>` → `<source>`, sandbox-validated on the link
-/// path. Same non-raising fs contract as the rest of this module: a
+/// Symlink `<dir>/<name>` → `<source>`, sandbox-validated on both paths.
+/// Same non-raising fs contract as the rest of this module: a
 /// failed mkdir/symlink surfaces downstream, not here.
 fn linkInto(ctx: ExecCtx, dir: []const u8, source: []const u8, name: []const u8) BuiltinError!void {
     if (source.len == 0 or name.len == 0) return;
@@ -261,10 +266,13 @@ fn linkInto(ctx: ExecCtx, dir: []const u8, source: []const u8, name: []const u8)
     // Overflow means a pathological path — skip rather than truncate.
     const link = std.fmt.bufPrint(&link_buf, "{s}/{s}", .{ dir, name }) catch return;
 
-    sandbox.validatePath(link, ctx.cellar_path, ctx.malt_prefix) catch
+    sandbox.validateWriteDir(ctx.io, link, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
+    sandbox.validateLinkTarget(ctx.allocator, ctx.io, source, link, ctx.cellar_path, ctx.malt_prefix) catch |e| switch (e) {
+        error.OutOfMemory => return BuiltinError.OutOfMemory,
+        error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
+    };
 
-    std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch {};
     std.Io.Dir.cwd().deleteFile(ctx.io, link) catch {};
     std.Io.Dir.symLinkAbsolute(ctx.io, source, link, .{}) catch {};
 }
