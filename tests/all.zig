@@ -59,6 +59,7 @@ comptime {
     _ = @import("flag_drift_test.zig");
     _ = @import("forge_purity_test.zig");
     _ = @import("formula_test.zig");
+    _ = @import("http_bodiless_status_test.zig");
     _ = @import("ghcr_401_retry_test.zig");
     _ = @import("ghcr_test.zig");
     _ = @import("hash_test.zig");
