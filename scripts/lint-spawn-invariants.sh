@@ -43,3 +43,40 @@ if [ -n "$hits" ]; then
 fi
 
 printf '✓ argv-only spawn invariant holds across src/\n'
+
+# A platform helper named without a path resolves through PATH, and a package's
+# own bin directory can sit ahead of the system one. Every tool in
+# src/system_tools.zig is spawned by absolute path; this catches a bare name
+# creeping back. Matching the bare literal anywhere beats matching an argv
+# shape: a multi-line argv literal puts the name on its own line, which is the
+# form the original bug had.
+#
+# `install` is skipped: it is also a malt subcommand, so the bare literal is
+# ambiguous and would fire on ordinary argv tails.
+TOOLS=$(grep -oE '^pub const [a-z_]+ = "/[^"]+"' src/system_tools.zig |
+  sed -E 's|^pub const [a-z_]+ = "/.*/([^/"]+)"|\1|' | grep -vx install | tr '\n' ' ')
+
+bare=""
+for bin in $TOOLS; do
+  found=$(grep -RnF --include='*.zig' "\"$bin\"" src || true)
+  [ -n "$found" ] && bare="$bare$found
+"
+done
+
+if [ -s "$ALLOW_FILE" ]; then
+  while IFS= read -r rule; do
+    [ -z "$rule" ] && continue
+    [[ "$rule" == \#* ]] && continue
+    bare=$(printf '%s\n' "$bare" | grep -vE "$rule" || true)
+  done <"$ALLOW_FILE"
+fi
+bare=$(printf '%s' "$bare" | grep -v '^$' || true)
+
+if [ -n "$bare" ]; then
+  printf '✗ platform helper named without a path (resolves through PATH):\n\n' >&2
+  printf '%s\n' "$bare" >&2
+  printf '\nUse the matching constant in src/system_tools.zig, or allowlist in %s.\n' "$ALLOW_FILE" >&2
+  exit 1
+fi
+
+printf '✓ platform helpers are named by absolute path\n'
