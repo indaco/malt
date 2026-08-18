@@ -106,6 +106,7 @@ pub fn build(b: *std.Build) void {
 
     // --- Unit tests ---
     const test_modules = .{
+        "tests/http_bodiless_status_test.zig",
         "tests/aggregate_drift_test.zig",
         "tests/formula_test.zig",
         "tests/deps_test.zig",
