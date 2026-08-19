@@ -121,44 +121,6 @@ test "rollback returns error.Aborted when no previous version exists in store" {
     try testing.expectError(error.Aborted, err);
 }
 
-test "capturePinnedById reads the pinned column for a given keg id" {
-    var pbuf: [64]u8 = undefined;
-    const prefix = rbPrefix(&pbuf, "capture_pin");
-    test_io.makeDirAbsolute(std.Options.debug_io, prefix) catch {};
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
-
-    var db_buf: [96]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&db_buf, "{s}/db.db", .{prefix});
-    var db = try sqlite.Database.open(db_path);
-    defer db.close();
-    try schema.initSchema(&db);
-
-    try db.exec(
-        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned)
-        \\VALUES ('held', 'held', '1.0', 'sha', '/cellar/held/1.0', 1),
-        \\       ('loose', 'loose', '1.0', 'sha2', '/cellar/loose/1.0', 0);
-    );
-
-    const held_id = blk: {
-        var s = try db.prepare("SELECT id FROM kegs WHERE name = 'held';");
-        defer s.finalize();
-        _ = try s.step();
-        break :blk s.columnInt(0);
-    };
-    const loose_id = blk: {
-        var s = try db.prepare("SELECT id FROM kegs WHERE name = 'loose';");
-        defer s.finalize();
-        _ = try s.step();
-        break :blk s.columnInt(0);
-    };
-
-    try testing.expect(rollback.capturePinnedById(&db, held_id));
-    try testing.expect(!rollback.capturePinnedById(&db, loose_id));
-    // Unknown id collapses to false rather than erroring — matches the
-    // "best-effort, never lose data" stance the rollback flow needs.
-    try testing.expect(!rollback.capturePinnedById(&db, 999_999));
-}
-
 test "rollback distinguishes a cask token from a truly missing package" {
     var pbuf: [64]u8 = undefined;
     const prefix = rbPrefix(&pbuf, "cask_diag");
@@ -1006,4 +968,70 @@ test "a rollback that fails mid-swap restores the current version's links" {
     var new_buf: [512]u8 = undefined;
     const new_cellar = try std.fmt.bufPrint(&new_buf, "{s}/Cellar/wget/1.20", .{prefix});
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, new_cellar, .{}));
+}
+
+/// Make a keg dir's contents un-unlinkable so `cellar.remove` fails without
+/// affecting anything else in the prefix.
+fn freezeKegDir(prefix: [:0]const u8, name: []const u8, pkg_version: []const u8, mode: c_uint) void {
+    var buf: [512]u8 = undefined;
+    const bin = std.fmt.bufPrintZ(&buf, "{s}/Cellar/{s}/{s}/bin", .{ prefix, name, pkg_version }) catch return;
+    _ = std.c.chmod(bin.ptr, @intCast(mode));
+    var buf2: [512]u8 = undefined;
+    const dir = std.fmt.bufPrintZ(&buf2, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch return;
+    _ = std.c.chmod(dir.ptr, @intCast(mode));
+}
+
+// Sweeping the replaced version is housekeeping, not part of the swap: if it
+// fails the user still has a working, correctly recorded package and only
+// garbage is left behind.
+test "a rollback still succeeds when the old cellar dir cannot be removed" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // chmod doesn't deny root
+
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "stuck_cellar");
+    try makeSandbox(prefix);
+    defer {
+        freezeKegDir(prefix, "wget", "1.22", 0o755);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    }
+
+    try installKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, "sha_old", "wget", "1.20", 0);
+    freezeKegDir(prefix, "wget", "1.22", 0o500);
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try rollback.execute(&ctx, testing.allocator, &.{"wget"});
+
+    // The rollback itself landed...
+    const ver = try installedVersion(prefix, testing.allocator, "wget");
+    defer testing.allocator.free(ver);
+    try testing.expectEqualStrings("1.20", ver);
+
+    const io = std.Options.debug_io;
+    var buf: [512]u8 = undefined;
+    const new_cellar = try std.fmt.bufPrint(&buf, "{s}/Cellar/wget/1.20", .{prefix});
+    try test_io.accessAbsolute(io, new_cellar, .{});
+
+    // ...the stale dir is all that is left behind...
+    const old_cellar = try std.fmt.bufPrint(&buf, "{s}/Cellar/wget/1.22", .{prefix});
+    try test_io.accessAbsolute(io, old_cellar, .{});
+
+    // ...and the user was told about it.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Could not remove cellar entry") != null);
 }

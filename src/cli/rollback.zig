@@ -84,7 +84,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Find current installed version
     var cur_stmt = db.prepare(
-        "SELECT id, version, revision, store_sha256, cellar_path, bin_isolated, install_reason, tap FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
+        "SELECT id, version, revision, store_sha256, cellar_path, bin_isolated FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
     ) catch return error.Aborted;
     defer cur_stmt.finalize();
     cur_stmt.bindText(1, name) catch return error.Aborted;
@@ -111,10 +111,6 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const current_cellar_ptr = cur_stmt.columnText(4);
     const current_cellar_path = if (current_cellar_ptr) |c| std.mem.sliceTo(c, 0) else "";
     const current_bin_isolated = cur_stmt.columnInt(5) != 0;
-    const current_reason_ptr = cur_stmt.columnText(6);
-    const current_install_reason = if (current_reason_ptr) |r| std.mem.sliceTo(r, 0) else "direct";
-    const current_tap_ptr = cur_stmt.columnText(7);
-    const current_tap: ?[]const u8 = if (current_tap_ptr) |t| std.mem.sliceTo(t, 0) else null;
 
     // pkg_version is what the on-disk Cellar / store dir is named after,
     // so the store-scan below must compare against this — not the bare
@@ -215,35 +211,29 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
     defer allocator.free(keg.path);
 
-    // Update DB: delete old record, insert new one. Capture the old
-    // pin BEFORE the delete so the new row can inherit it — rolling
-    // back a held formula must not silently clear the user's hold.
-    const carried: Carried = .{
-        .pinned = capturePinnedById(&db, current_id),
-        .bin_isolated = current_bin_isolated,
-        .install_reason = current_install_reason,
-        .tap = current_tap,
-    };
-
     var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
+    const undo: Undo = .{
+        .io = ctx.io,
+        .db = &db,
+        .linker = &linker,
+        .prefix = prefix,
+        .name = name,
+        .keg_id = current_id,
+        .cellar_path = current_cellar_path,
+        .bin_isolated = current_bin_isolated,
+        .abandoned_pkg_version = target.pkg_version,
+    };
 
     db.beginTransaction() catch return error.Aborted;
 
-    const keg_id = swapKeg(&db, &linker, current_id, name, target, keg.path, carried) catch {
-        db.rollback();
-        restoreCurrentLinks(&linker, current_cellar_path, name, current_id, current_bin_isolated);
-        cellar.remove(ctx.io, prefix, name, target.pkg_version) catch {};
+    swapKeg(&db, &linker, current_id, name, target, keg.path, current_bin_isolated) catch {
+        undo.run();
         output.err("Failed to record rollback of {s} in the database", .{name});
         return error.Aborted;
     };
 
     db.commit() catch {
-        // Drop the new symlinks first: the filesystem isn't transactional,
-        // so rolling back the DB alone would strand them.
-        linker.unlink(keg_id) catch {};
-        db.rollback();
-        restoreCurrentLinks(&linker, current_cellar_path, name, current_id, current_bin_isolated);
-        cellar.remove(ctx.io, prefix, name, target.pkg_version) catch {};
+        undo.run();
         output.err("Failed to commit rollback of {s}", .{name});
         return error.Aborted;
     };
@@ -262,41 +252,51 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     output.info("{s} rolled back to {s}", .{ name, target.pkg_version });
 }
 
-/// Swap the current keg for `target` inside the caller's transaction.
-/// `unlink` deletes `links` rows, so all three steps have to share one
-/// transaction or a mid-flight failure strands them.
+/// Point the keg at `target` inside the caller's transaction. `unlink`
+/// deletes `links` rows, so all three steps have to share one transaction
+/// or a mid-flight failure strands them.
 fn swapKeg(
     db: *sqlite.Database,
     linker: *linker_mod.Linker,
-    current_id: i64,
+    keg_id: i64,
     name: []const u8,
     target: Entry,
     keg_path: []const u8,
-    carried: Carried,
-) !i64 {
-    try linker.unlink(current_id);
-    // target.pkg_version carries the on-disk pkg_version label (the store
-    // dir name), so replaceKegRow can split it back into version +
-    // revision and persist the rolled-back keg's true revision.
-    const keg_id = try replaceKegRow(db, current_id, name, target.pkg_version, target.sha256, keg_path, carried);
-    try linker.link(keg_path, name, keg_id, carried.bin_isolated);
-    return keg_id;
+    bin_isolated: bool,
+) !void {
+    try linker.unlink(keg_id);
+    try retargetKegRow(db, keg_id, target.pkg_version, target.sha256, keg_path);
+    try linker.link(keg_path, name, keg_id, bin_isolated);
 }
 
-/// Rebuild the symlinks of the version we were rolling away from. The DB
-/// transaction restores the `links` rows; the filesystem needs replaying.
-fn restoreCurrentLinks(
+/// Everything needed to put the machine back the way it was when a swap
+/// fails. One shape for both failure sites, so the recovery every rollback
+/// depends on is exercised wherever it runs.
+const Undo = struct {
+    io: std.Io,
+    db: *sqlite.Database,
     linker: *linker_mod.Linker,
-    cellar_path: []const u8,
+    prefix: []const u8,
     name: []const u8,
     keg_id: i64,
+    cellar_path: []const u8,
     bin_isolated: bool,
-) void {
-    if (cellar_path.len == 0) return;
-    linker.link(cellar_path, name, keg_id, bin_isolated) catch {
-        output.err("CRITICAL: could not restore symlinks for {s} - run: mt link {s}", .{ name, name });
-    };
-}
+    abandoned_pkg_version: []const u8,
+
+    fn run(self: Undo) void {
+        // Drop whatever links the swap managed to write before rolling the
+        // DB back: the filesystem isn't transactional, so the rows would
+        // come back without the symlinks they describe going away.
+        self.linker.unlink(self.keg_id) catch {};
+        self.db.rollback();
+        if (self.cellar_path.len > 0) {
+            self.linker.link(self.cellar_path, self.name, self.keg_id, self.bin_isolated) catch {
+                output.err("CRITICAL: could not restore symlinks for {s} - run: mt link {s}", .{ self.name, self.name });
+            };
+        }
+        cellar.remove(self.io, self.prefix, self.name, self.abandoned_pkg_version) catch {};
+    }
+};
 
 /// Handle the cask side of `mt rollback`. Mirrors the keg flow:
 ///   - `--list` prints retained versions (excluding current).
@@ -501,87 +501,35 @@ pub fn capturePinnedById(db: *sqlite.Database, keg_id: i64) bool {
     return stmt.columnBool(0);
 }
 
-/// Columns that describe the user's intent rather than the version being
-/// installed, so the row swap has to carry them across.
-pub const Carried = struct {
-    pinned: bool,
-    bin_isolated: bool,
-    /// Dropping this to 'direct' would strand a dependency-installed keg:
-    /// autoremove and cleanup only reclaim rows marked 'dependency'.
-    install_reason: []const u8,
-    /// Null for core formulas. Losing it sends the next `upgrade` looking
-    /// for a tap-only formula in core.
-    tap: ?[]const u8,
-};
-
-/// Swap the keg row identified by `old_keg_id` for a fresh row pointing
-/// at `pkg_version` (the on-disk label, e.g. "1.9.2_2"). Splits the
-/// label into `version` + `revision` so the new row reflects the
-/// rolled-back keg's true revision instead of silently writing 0.
-/// Returns the new keg row id. Caller owns the surrounding transaction.
-pub fn replaceKegRow(
+/// Point the keg row identified by `keg_id` at `pkg_version` (the on-disk
+/// label, e.g. "1.9.2_2"), splitting the label back into version + revision
+/// so the row reflects the rolled-back keg's true revision instead of
+/// silently writing 0. Updating in place rather than swapping the row keeps
+/// its id, so the `links` and `dependencies` rows hanging off it - and every
+/// column that records user intent - survive without being re-derived.
+/// Caller owns the surrounding transaction.
+pub fn retargetKegRow(
     db: *sqlite.Database,
-    old_keg_id: i64,
-    name: []const u8,
+    keg_id: i64,
     pkg_version: []const u8,
     store_sha256: []const u8,
     cellar_path: []const u8,
-    carried: Carried,
-) !i64 {
+) !void {
     const parsed = formula_mod.parsePkgVersion(pkg_version);
 
-    // Insert before deleting: `dependencies.keg_id` cascades, so removing
-    // the old row first would take the keg's dependency edges with it and
-    // leave cleanup free to reclaim packages that are still needed. The two
-    // rows coexist safely because the rollback target's (version, revision)
-    // always differs from the current one.
-    {
-        var ins = try db.prepare(
-            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason, pinned, bin_isolated, tap)
-            \\VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);
-        );
-        defer ins.finalize();
-        try ins.bindText(1, name);
-        try ins.bindText(2, parsed.version);
-        try ins.bindInt(3, parsed.revision);
-        try ins.bindText(4, store_sha256);
-        try ins.bindText(5, cellar_path);
-        try ins.bindText(6, carried.install_reason);
-        try ins.bindInt(7, @intFromBool(carried.pinned));
-        try ins.bindInt(8, @intFromBool(carried.bin_isolated));
-        if (carried.tap) |t| try ins.bindText(9, t) else try ins.bindNull(9);
-        _ = try ins.step();
-    }
-
-    const keg_id = blk: {
-        var id_stmt = try db.prepare("SELECT last_insert_rowid();");
-        defer id_stmt.finalize();
-        if (!(try id_stmt.step())) return error.RecordFailed;
-        break :blk id_stmt.columnInt(0);
-    };
-
-    // Copied rather than re-parsed from the target's formula: a partial
-    // store entry may ship no formula source at all, and the rows already
-    // carry the real `dep_type`.
-    {
-        var copy = try db.prepare(
-            \\INSERT OR IGNORE INTO dependencies (keg_id, dep_name, dep_type)
-            \\SELECT ?1, dep_name, dep_type FROM dependencies WHERE keg_id = ?2;
-        );
-        defer copy.finalize();
-        try copy.bindInt(1, keg_id);
-        try copy.bindInt(2, old_keg_id);
-        _ = try copy.step();
-    }
-
-    {
-        var del = try db.prepare("DELETE FROM kegs WHERE id = ?1;");
-        defer del.finalize();
-        try del.bindInt(1, old_keg_id);
-        _ = try del.step();
-    }
-
-    return keg_id;
+    var up = try db.prepare(
+        \\UPDATE kegs
+        \\SET version = ?1, revision = ?2, store_sha256 = ?3, cellar_path = ?4,
+        \\    installed_at = datetime('now')
+        \\WHERE id = ?5;
+    );
+    defer up.finalize();
+    try up.bindText(1, parsed.version);
+    try up.bindInt(2, parsed.revision);
+    try up.bindText(3, store_sha256);
+    try up.bindText(4, cellar_path);
+    try up.bindInt(5, keg_id);
+    _ = try up.step();
 }
 
 /// A single rolled-back-to candidate discovered in the malt store.
@@ -1313,7 +1261,7 @@ test "writeListJson escapes embedded quotes in the package name" {
     try testing.expectEqualStrings("weird\"name", parsed.value.object.get("name").?.string);
 }
 
-test "replaceKegRow splits pkg_version into version + revision" {
+test "retargetKegRow splits pkg_version into version + revision" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
@@ -1323,26 +1271,26 @@ test "replaceKegRow splits pkg_version into version + revision" {
         \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, pinned)
         \\VALUES ('libgit2', 'libgit2', '1.9.2', 2, 'sha-cur', '/c/libgit2/1.9.2_2', 1);
     );
-    const old_id = blk: {
+    const keg_id = blk: {
         var s = try db.prepare("SELECT id FROM kegs WHERE name='libgit2';");
         defer s.finalize();
         _ = try s.step();
         break :blk s.columnInt(0);
     };
 
-    const new_id = try replaceKegRow(&db, old_id, "libgit2", "1.9.2", "sha-old", "/c/libgit2/1.9.2", .{ .pinned = true, .bin_isolated = false, .install_reason = "direct", .tap = null });
+    try retargetKegRow(&db, keg_id, "1.9.2", "sha-old", "/c/libgit2/1.9.2");
 
-    var stmt = try db.prepare("SELECT version, revision, pinned FROM kegs WHERE id = ?1;");
+    var stmt = try db.prepare("SELECT version, revision, store_sha256, cellar_path FROM kegs WHERE id = ?1;");
     defer stmt.finalize();
-    try stmt.bindInt(1, new_id);
+    try stmt.bindInt(1, keg_id);
     _ = try stmt.step();
-    const ver = stmt.columnText(0) orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("1.9.2", std.mem.sliceTo(ver, 0));
+    try testing.expectEqualStrings("1.9.2", std.mem.sliceTo(stmt.columnText(0).?, 0));
     try testing.expectEqual(@as(i64, 0), stmt.columnInt(1));
-    try testing.expect(stmt.columnBool(2));
+    try testing.expectEqualStrings("sha-old", std.mem.sliceTo(stmt.columnText(2).?, 0));
+    try testing.expectEqualStrings("/c/libgit2/1.9.2", std.mem.sliceTo(stmt.columnText(3).?, 0));
 }
 
-test "replaceKegRow recovers a non-zero revision from pkg_version" {
+test "retargetKegRow recovers a non-zero revision from pkg_version" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
@@ -1351,7 +1299,7 @@ test "replaceKegRow recovers a non-zero revision from pkg_version" {
         \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
         \\VALUES ('python@3.14', 'python@3.14', '3.14.4', 1, 'sha-cur', '/c/python@3.14/3.14.4_1');
     );
-    const old_id = blk: {
+    const keg_id = blk: {
         var s = try db.prepare("SELECT id FROM kegs WHERE name='python@3.14';");
         defer s.finalize();
         _ = try s.step();
@@ -1359,202 +1307,85 @@ test "replaceKegRow recovers a non-zero revision from pkg_version" {
     };
 
     // Rolling back to an earlier revision-2 build.
-    const new_id = try replaceKegRow(&db, old_id, "python@3.14", "3.14.3_2", "sha-old", "/c/python@3.14/3.14.3_2", .{ .pinned = false, .bin_isolated = false, .install_reason = "direct", .tap = null });
+    try retargetKegRow(&db, keg_id, "3.14.3_2", "sha-old", "/c/python@3.14/3.14.3_2");
 
     var stmt = try db.prepare("SELECT version, revision FROM kegs WHERE id = ?1;");
     defer stmt.finalize();
-    try stmt.bindInt(1, new_id);
+    try stmt.bindInt(1, keg_id);
     _ = try stmt.step();
-    const ver = stmt.columnText(0) orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("3.14.3", std.mem.sliceTo(ver, 0));
+    try testing.expectEqualStrings("3.14.3", std.mem.sliceTo(stmt.columnText(0).?, 0));
     try testing.expectEqual(@as(i64, 2), stmt.columnInt(1));
 
-    // Old row was deleted in the same swap.
+    // Still exactly one row for the package.
     var cnt = try db.prepare("SELECT COUNT(*) FROM kegs WHERE name='python@3.14';");
     defer cnt.finalize();
     _ = try cnt.step();
     try testing.expectEqual(@as(i64, 1), cnt.columnInt(0));
 }
 
-// A rolled-back keg the user had installed bin-isolated must stay
-// bin-isolated: the swap replaces the version, not the user's intent.
-test "replaceKegRow carries pinned and bin_isolated across the swap" {
+// The reason this updates in place instead of swapping the row: a DELETE
+// cascades `dependencies`/`links` away and every user-intent column has to
+// be re-bound by hand, which is how holds, bin isolation, install_reason and
+// tap attribution each got silently dropped in turn.
+test "retargetKegRow leaves user intent, tap and dependency edges untouched" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
 
     try db.exec(
-        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, pinned, bin_isolated)
-        \\VALUES ('node', 'node', '22.1.0', 0, 'sha-cur', '/c/node/22.1.0', 1, 1);
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path,
+        \\                  install_reason, pinned, bin_isolated, tap)
+        \\VALUES ('prowl', 'prowl', '1.2', 0, 'sha-cur', '/c/prowl/1.2',
+        \\        'dependency', 1, 1, 'caarlos0/tap');
     );
-    const old_id = blk: {
-        var s = try db.prepare("SELECT id FROM kegs WHERE name='node';");
-        defer s.finalize();
-        _ = try s.step();
-        break :blk s.columnInt(0);
-    };
-
-    const new_id = try replaceKegRow(&db, old_id, "node", "22.0.0", "sha-old", "/c/node/22.0.0", .{
-        .pinned = true,
-        .bin_isolated = true,
-        .install_reason = "direct",
-        .tap = null,
-    });
-
-    var stmt = try db.prepare("SELECT pinned, bin_isolated FROM kegs WHERE id = ?1;");
-    defer stmt.finalize();
-    try stmt.bindInt(1, new_id);
-    _ = try stmt.step();
-    try testing.expect(stmt.columnBool(0));
-    try testing.expect(stmt.columnBool(1));
-}
-
-test "replaceKegRow leaves a non-isolated keg non-isolated" {
-    var db = try sqlite.Database.open(":memory:");
-    defer db.close();
-    try schema.initSchema(&db);
-
-    try db.exec(
-        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
-        \\VALUES ('jq', 'jq', '1.7.1', 0, 'sha-cur', '/c/jq/1.7.1');
-    );
-    const old_id = blk: {
-        var s = try db.prepare("SELECT id FROM kegs WHERE name='jq';");
-        defer s.finalize();
-        _ = try s.step();
-        break :blk s.columnInt(0);
-    };
-
-    const new_id = try replaceKegRow(&db, old_id, "jq", "1.7", "sha-old", "/c/jq/1.7", .{
-        .pinned = false,
-        .bin_isolated = false,
-        .install_reason = "direct",
-        .tap = null,
-    });
-
-    var stmt = try db.prepare("SELECT pinned, bin_isolated FROM kegs WHERE id = ?1;");
-    defer stmt.finalize();
-    try stmt.bindInt(1, new_id);
-    _ = try stmt.step();
-    try testing.expect(!stmt.columnBool(0));
-    try testing.expect(!stmt.columnBool(1));
-}
-
-// A dependency-installed keg that rolls back must stay a dependency:
-// relabelling it 'direct' hides it from autoremove forever.
-test "replaceKegRow carries install_reason across the swap" {
-    var db = try sqlite.Database.open(":memory:");
-    defer db.close();
-    try schema.initSchema(&db);
-
-    try db.exec(
-        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason)
-        \\VALUES ('pcre2', 'pcre2', '10.45', 0, 'sha-cur', '/c/pcre2/10.45', 'dependency');
-    );
-    const old_id = blk: {
-        var s = try db.prepare("SELECT id FROM kegs WHERE name='pcre2';");
-        defer s.finalize();
-        _ = try s.step();
-        break :blk s.columnInt(0);
-    };
-
-    const new_id = try replaceKegRow(&db, old_id, "pcre2", "10.44", "sha-old", "/c/pcre2/10.44", .{
-        .pinned = false,
-        .bin_isolated = false,
-        .install_reason = "dependency",
-        .tap = null,
-    });
-
-    var stmt = try db.prepare("SELECT install_reason FROM kegs WHERE id = ?1;");
-    defer stmt.finalize();
-    try stmt.bindInt(1, new_id);
-    _ = try stmt.step();
-    const reason = stmt.columnText(0) orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("dependency", std.mem.sliceTo(reason, 0));
-}
-
-// The row swap deletes the old keg, and `dependencies.keg_id` cascades.
-// Losing those edges makes cleanup reclaim packages the keg still needs.
-test "replaceKegRow moves dependency edges onto the new keg row" {
-    var db = try sqlite.Database.open(":memory:");
-    defer db.close();
-    try schema.initSchema(&db);
-
-    try db.exec(
-        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
-        \\VALUES ('wget', 'wget', '1.22', 0, 'sha-cur', '/c/wget/1.22');
-    );
-    const old_id = blk: {
-        var s = try db.prepare("SELECT id FROM kegs WHERE name='wget';");
+    const keg_id = blk: {
+        var s = try db.prepare("SELECT id FROM kegs WHERE name='prowl';");
         defer s.finalize();
         _ = try s.step();
         break :blk s.columnInt(0);
     };
     try db.exec("INSERT INTO dependencies (keg_id, dep_name, dep_type) VALUES (1, 'openssl@3', 'runtime');");
     try db.exec("INSERT INTO dependencies (keg_id, dep_name, dep_type) VALUES (1, 'cmake', 'build');");
+    try db.exec("INSERT INTO links (keg_id, link_path, target) VALUES (1, '/opt/malt/bin/prowl', '/c/prowl/1.2/bin/prowl');");
 
-    const new_id = try replaceKegRow(&db, old_id, "wget", "1.20", "sha-old", "/c/wget/1.20", .{
-        .pinned = false,
-        .bin_isolated = false,
-        .install_reason = "direct",
-        .tap = null,
-    });
+    try retargetKegRow(&db, keg_id, "1.1", "sha-old", "/c/prowl/1.1");
 
-    var stmt = try db.prepare("SELECT dep_name, dep_type FROM dependencies WHERE keg_id = ?1 ORDER BY dep_name;");
-    defer stmt.finalize();
-    try stmt.bindInt(1, new_id);
-
-    _ = try stmt.step();
-    try testing.expectEqualStrings("cmake", std.mem.sliceTo(stmt.columnText(0).?, 0));
-    // dep_type is preserved, not flattened to 'runtime'.
-    try testing.expectEqualStrings("build", std.mem.sliceTo(stmt.columnText(1).?, 0));
-
-    _ = try stmt.step();
-    try testing.expectEqualStrings("openssl@3", std.mem.sliceTo(stmt.columnText(0).?, 0));
-
-    // Nothing is left pointing at the deleted row.
-    var orphans = try db.prepare("SELECT COUNT(*) FROM dependencies WHERE keg_id = ?1;");
-    defer orphans.finalize();
-    try orphans.bindInt(1, old_id);
-    _ = try orphans.step();
-    try testing.expectEqual(@as(i64, 0), orphans.columnInt(0));
+    {
+        var stmt = try db.prepare(
+            "SELECT id, install_reason, pinned, bin_isolated, tap FROM kegs WHERE name='prowl';",
+        );
+        defer stmt.finalize();
+        _ = try stmt.step();
+        // Same row, so nothing hanging off the id needs re-pointing.
+        try testing.expectEqual(keg_id, stmt.columnInt(0));
+        try testing.expectEqualStrings("dependency", std.mem.sliceTo(stmt.columnText(1).?, 0));
+        try testing.expect(stmt.columnBool(2));
+        try testing.expect(stmt.columnBool(3));
+        try testing.expectEqualStrings("caarlos0/tap", std.mem.sliceTo(stmt.columnText(4).?, 0));
+    }
+    {
+        var stmt = try db.prepare("SELECT dep_name, dep_type FROM dependencies WHERE keg_id = ?1 ORDER BY dep_name;");
+        defer stmt.finalize();
+        try stmt.bindInt(1, keg_id);
+        _ = try stmt.step();
+        try testing.expectEqualStrings("cmake", std.mem.sliceTo(stmt.columnText(0).?, 0));
+        // dep_type survives too, not flattened to 'runtime'.
+        try testing.expectEqualStrings("build", std.mem.sliceTo(stmt.columnText(1).?, 0));
+        _ = try stmt.step();
+        try testing.expectEqualStrings("openssl@3", std.mem.sliceTo(stmt.columnText(0).?, 0));
+    }
+    {
+        var stmt = try db.prepare("SELECT COUNT(*) FROM links WHERE keg_id = ?1;");
+        defer stmt.finalize();
+        try stmt.bindInt(1, keg_id);
+        _ = try stmt.step();
+        try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+    }
 }
 
-// A tap-installed keg must stay attributed to its tap: a NULL `tap` sends
-// the next upgrade looking for the formula in core, where it isn't.
-test "replaceKegRow carries the tap across the swap" {
-    var db = try sqlite.Database.open(":memory:");
-    defer db.close();
-    try schema.initSchema(&db);
-
-    try db.exec(
-        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, tap)
-        \\VALUES ('prowl', 'prowl', '1.2', 0, 'sha-cur', '/c/prowl/1.2', 'caarlos0/tap');
-    );
-    const old_id = blk: {
-        var s = try db.prepare("SELECT id FROM kegs WHERE name='prowl';");
-        defer s.finalize();
-        _ = try s.step();
-        break :blk s.columnInt(0);
-    };
-
-    const new_id = try replaceKegRow(&db, old_id, "prowl", "1.1", "sha-old", "/c/prowl/1.1", .{
-        .pinned = false,
-        .bin_isolated = false,
-        .install_reason = "direct",
-        .tap = "caarlos0/tap",
-    });
-
-    var stmt = try db.prepare("SELECT tap FROM kegs WHERE id = ?1;");
-    defer stmt.finalize();
-    try stmt.bindInt(1, new_id);
-    _ = try stmt.step();
-    try testing.expectEqualStrings("caarlos0/tap", std.mem.sliceTo(stmt.columnText(0).?, 0));
-}
-
-// Core kegs carry a NULL tap; binding "" instead would make them look
-// tap-owned to `install`'s tap-ownership probe.
-test "replaceKegRow leaves a core keg's tap NULL" {
+// A core keg carries a NULL tap; writing "" would make it look tap-owned
+// to install's tap-ownership probe.
+test "retargetKegRow leaves a core keg's tap NULL" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
@@ -1563,23 +1394,18 @@ test "replaceKegRow leaves a core keg's tap NULL" {
         \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
         \\VALUES ('jq', 'jq', '1.7.1', 0, 'sha-cur', '/c/jq/1.7.1');
     );
-    const old_id = blk: {
+    const keg_id = blk: {
         var s = try db.prepare("SELECT id FROM kegs WHERE name='jq';");
         defer s.finalize();
         _ = try s.step();
         break :blk s.columnInt(0);
     };
 
-    const new_id = try replaceKegRow(&db, old_id, "jq", "1.7", "sha-old", "/c/jq/1.7", .{
-        .pinned = false,
-        .bin_isolated = false,
-        .install_reason = "direct",
-        .tap = null,
-    });
+    try retargetKegRow(&db, keg_id, "1.7", "sha-old", "/c/jq/1.7");
 
     var stmt = try db.prepare("SELECT tap IS NULL FROM kegs WHERE id = ?1;");
     defer stmt.finalize();
-    try stmt.bindInt(1, new_id);
+    try stmt.bindInt(1, keg_id);
     _ = try stmt.step();
     try testing.expect(stmt.columnBool(0));
 }
