@@ -619,6 +619,10 @@ test "rollback <cask> with empty history refuses with a useful diagnostic" {
 /// matching `kegs` + `links` rows. Enough for `execute` to have something
 /// real to destroy if the rollback isn't ordered correctly.
 fn installKeg(prefix: [:0]const u8, name: []const u8, pkg_version: []const u8) !void {
+    return installKegIsolated(prefix, name, pkg_version, false);
+}
+
+fn installKegIsolated(prefix: [:0]const u8, name: []const u8, pkg_version: []const u8, bin_isolated: bool) !void {
     const io = std.Options.debug_io;
 
     var keg_buf: [512]u8 = undefined;
@@ -651,13 +655,14 @@ fn installKeg(prefix: [:0]const u8, name: []const u8, pkg_version: []const u8) !
 
     {
         var stmt = try db.prepare(
-            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason)
-            \\VALUES (?1, ?1, ?2, 0, 'cur-sha', ?3, 'direct');
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason, bin_isolated)
+            \\VALUES (?1, ?1, ?2, 0, 'cur-sha', ?3, 'direct', ?4);
         );
         defer stmt.finalize();
         try stmt.bindText(1, name);
         try stmt.bindText(2, pkg_version);
         try stmt.bindText(3, cellar_path);
+        try stmt.bindInt(4, @intFromBool(bin_isolated));
         _ = try stmt.step();
     }
     {
@@ -739,4 +744,65 @@ test "a rollback that cannot materialize leaves the current version installed" {
     const ver = try installedVersion(prefix, testing.allocator, "wget");
     defer testing.allocator.free(ver);
     try testing.expectEqualStrings("1.22", ver);
+}
+
+fn kegFlag(prefix: [:0]const u8, name: []const u8, column: []const u8) !bool {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+
+    var sql_buf: [128]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(&sql_buf, "SELECT {s} FROM kegs WHERE name = ?1;", .{column});
+    var stmt = try db.prepare(sql);
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    if (!(try stmt.step())) return error.TestUnexpectedResult;
+    return stmt.columnBool(0);
+}
+
+// Pins the whole happy path plus the columns the row swap has to carry:
+// a bin-isolated, held keg must come back bin-isolated and still held.
+test "a completed rollback preserves bin isolation and the hold" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "carry_flags");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try installKegIsolated(prefix, "wget", "1.22", true);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try db.exec("UPDATE kegs SET pinned = 1 WHERE name = 'wget';");
+    }
+    try seedStoreEntry(prefix, "sha_old", "wget", "1.20", 0);
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try rollback.execute(&ctx, testing.allocator, &.{"wget"});
+
+    const ver = try installedVersion(prefix, testing.allocator, "wget");
+    defer testing.allocator.free(ver);
+    try testing.expectEqualStrings("1.20", ver);
+
+    try testing.expect(try kegFlag(prefix, "wget", "bin_isolated"));
+    try testing.expect(try kegFlag(prefix, "wget", "pinned"));
+
+    // The version we rolled away from is gone from disk only after the swap.
+    const io = std.Options.debug_io;
+    var buf: [512]u8 = undefined;
+    const old_cellar = try std.fmt.bufPrint(&buf, "{s}/Cellar/wget/1.22", .{prefix});
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, old_cellar, .{}));
 }

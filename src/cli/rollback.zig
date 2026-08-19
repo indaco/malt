@@ -209,17 +209,21 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.err("Failed to materialize {s} {s} from store", .{ name, target.pkg_version });
         return error.Aborted;
     };
+    defer allocator.free(keg.path);
 
     // Update DB: delete old record, insert new one. Capture the old
     // pin BEFORE the delete so the new row can inherit it — rolling
     // back a held formula must not silently clear the user's hold.
-    const old_pinned = capturePinnedById(&db, current_id);
+    const carried: Carried = .{
+        .pinned = capturePinnedById(&db, current_id),
+        .bin_isolated = current_bin_isolated,
+    };
 
     var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
 
     db.beginTransaction() catch return error.Aborted;
 
-    const keg_id = swapKeg(&db, &linker, current_id, name, target, keg.path, old_pinned) catch {
+    const keg_id = swapKeg(&db, &linker, current_id, name, target, keg.path, carried) catch {
         db.rollback();
         restoreCurrentLinks(&linker, current_cellar_path, name, current_id, current_bin_isolated);
         cellar.remove(ctx.io, prefix, name, target.pkg_version) catch {};
@@ -262,14 +266,14 @@ fn swapKeg(
     name: []const u8,
     target: Entry,
     keg_path: []const u8,
-    pinned: bool,
+    carried: Carried,
 ) !i64 {
     try linker.unlink(current_id);
     // target.pkg_version carries the on-disk pkg_version label (the store
     // dir name), so replaceKegRow can split it back into version +
     // revision and persist the rolled-back keg's true revision.
-    const keg_id = try replaceKegRow(db, current_id, name, target.pkg_version, target.sha256, keg_path, pinned);
-    try linker.link(keg_path, name, keg_id, false);
+    const keg_id = try replaceKegRow(db, current_id, name, target.pkg_version, target.sha256, keg_path, carried);
+    try linker.link(keg_path, name, keg_id, carried.bin_isolated);
     return keg_id;
 }
 
@@ -491,6 +495,13 @@ pub fn capturePinnedById(db: *sqlite.Database, keg_id: i64) bool {
     return stmt.columnBool(0);
 }
 
+/// Columns that describe the user's intent rather than the version being
+/// installed, so the row swap has to carry them across.
+pub const Carried = struct {
+    pinned: bool,
+    bin_isolated: bool,
+};
+
 /// Swap the keg row identified by `old_keg_id` for a fresh row pointing
 /// at `pkg_version` (the on-disk label, e.g. "1.9.2_2"). Splits the
 /// label into `version` + `revision` so the new row reflects the
@@ -503,7 +514,7 @@ pub fn replaceKegRow(
     pkg_version: []const u8,
     store_sha256: []const u8,
     cellar_path: []const u8,
-    pinned: bool,
+    carried: Carried,
 ) !i64 {
     const parsed = formula_mod.parsePkgVersion(pkg_version);
 
@@ -516,8 +527,8 @@ pub fn replaceKegRow(
 
     {
         var ins = try db.prepare(
-            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason, pinned)
-            \\VALUES (?1, ?1, ?2, ?3, ?4, ?5, 'direct', ?6);
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason, pinned, bin_isolated)
+            \\VALUES (?1, ?1, ?2, ?3, ?4, ?5, 'direct', ?6, ?7);
         );
         defer ins.finalize();
         try ins.bindText(1, name);
@@ -525,7 +536,8 @@ pub fn replaceKegRow(
         try ins.bindInt(3, parsed.revision);
         try ins.bindText(4, store_sha256);
         try ins.bindText(5, cellar_path);
-        try ins.bindInt(6, @intFromBool(pinned));
+        try ins.bindInt(6, @intFromBool(carried.pinned));
+        try ins.bindInt(7, @intFromBool(carried.bin_isolated));
         _ = try ins.step();
     }
 
@@ -1281,7 +1293,7 @@ test "replaceKegRow splits pkg_version into version + revision" {
         break :blk s.columnInt(0);
     };
 
-    const new_id = try replaceKegRow(&db, old_id, "libgit2", "1.9.2", "sha-old", "/c/libgit2/1.9.2", true);
+    const new_id = try replaceKegRow(&db, old_id, "libgit2", "1.9.2", "sha-old", "/c/libgit2/1.9.2", .{ .pinned = true, .bin_isolated = false });
 
     var stmt = try db.prepare("SELECT version, revision, pinned FROM kegs WHERE id = ?1;");
     defer stmt.finalize();
@@ -1310,7 +1322,7 @@ test "replaceKegRow recovers a non-zero revision from pkg_version" {
     };
 
     // Rolling back to an earlier revision-2 build.
-    const new_id = try replaceKegRow(&db, old_id, "python@3.14", "3.14.3_2", "sha-old", "/c/python@3.14/3.14.3_2", false);
+    const new_id = try replaceKegRow(&db, old_id, "python@3.14", "3.14.3_2", "sha-old", "/c/python@3.14/3.14.3_2", .{ .pinned = false, .bin_isolated = false });
 
     var stmt = try db.prepare("SELECT version, revision FROM kegs WHERE id = ?1;");
     defer stmt.finalize();
@@ -1325,6 +1337,66 @@ test "replaceKegRow recovers a non-zero revision from pkg_version" {
     defer cnt.finalize();
     _ = try cnt.step();
     try testing.expectEqual(@as(i64, 1), cnt.columnInt(0));
+}
+
+// A rolled-back keg the user had installed bin-isolated must stay
+// bin-isolated: the swap replaces the version, not the user's intent.
+test "replaceKegRow carries pinned and bin_isolated across the swap" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, pinned, bin_isolated)
+        \\VALUES ('node', 'node', '22.1.0', 0, 'sha-cur', '/c/node/22.1.0', 1, 1);
+    );
+    const old_id = blk: {
+        var s = try db.prepare("SELECT id FROM kegs WHERE name='node';");
+        defer s.finalize();
+        _ = try s.step();
+        break :blk s.columnInt(0);
+    };
+
+    const new_id = try replaceKegRow(&db, old_id, "node", "22.0.0", "sha-old", "/c/node/22.0.0", .{
+        .pinned = true,
+        .bin_isolated = true,
+    });
+
+    var stmt = try db.prepare("SELECT pinned, bin_isolated FROM kegs WHERE id = ?1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, new_id);
+    _ = try stmt.step();
+    try testing.expect(stmt.columnBool(0));
+    try testing.expect(stmt.columnBool(1));
+}
+
+test "replaceKegRow leaves a non-isolated keg non-isolated" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES ('jq', 'jq', '1.7.1', 0, 'sha-cur', '/c/jq/1.7.1');
+    );
+    const old_id = blk: {
+        var s = try db.prepare("SELECT id FROM kegs WHERE name='jq';");
+        defer s.finalize();
+        _ = try s.step();
+        break :blk s.columnInt(0);
+    };
+
+    const new_id = try replaceKegRow(&db, old_id, "jq", "1.7", "sha-old", "/c/jq/1.7", .{
+        .pinned = false,
+        .bin_isolated = false,
+    });
+
+    var stmt = try db.prepare("SELECT pinned, bin_isolated FROM kegs WHERE id = ?1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, new_id);
+    _ = try stmt.step();
+    try testing.expect(!stmt.columnBool(0));
+    try testing.expect(!stmt.columnBool(1));
 }
 
 test "removeCurrentCellarDir wipes the revision-bumped on-disk dir" {
