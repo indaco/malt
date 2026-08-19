@@ -7,6 +7,7 @@
 //! build if this list ever falls behind the directory.
 
 comptime {
+    _ = @import("tap_fresh_prefix_test.zig");
     _ = @import("aggregate_drift_test.zig");
     _ = @import("api_test.zig");
     _ = @import("archive_extract_symlink_test.zig");
