@@ -623,6 +623,16 @@ fn installKeg(prefix: [:0]const u8, name: []const u8, pkg_version: []const u8) !
 }
 
 fn installKegIsolated(prefix: [:0]const u8, name: []const u8, pkg_version: []const u8, bin_isolated: bool) !void {
+    return installKegAs(prefix, name, pkg_version, bin_isolated, "direct");
+}
+
+fn installKegAs(
+    prefix: [:0]const u8,
+    name: []const u8,
+    pkg_version: []const u8,
+    bin_isolated: bool,
+    install_reason: []const u8,
+) !void {
     const io = std.Options.debug_io;
 
     var keg_buf: [512]u8 = undefined;
@@ -656,13 +666,14 @@ fn installKegIsolated(prefix: [:0]const u8, name: []const u8, pkg_version: []con
     {
         var stmt = try db.prepare(
             \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason, bin_isolated)
-            \\VALUES (?1, ?1, ?2, 0, 'cur-sha', ?3, 'direct', ?4);
+            \\VALUES (?1, ?1, ?2, 0, 'cur-sha', ?3, ?5, ?4);
         );
         defer stmt.finalize();
         try stmt.bindText(1, name);
         try stmt.bindText(2, pkg_version);
         try stmt.bindText(3, cellar_path);
         try stmt.bindInt(4, @intFromBool(bin_isolated));
+        try stmt.bindText(5, install_reason);
         _ = try stmt.step();
     }
     {
@@ -805,4 +816,48 @@ test "a completed rollback preserves bin isolation and the hold" {
     var buf: [512]u8 = undefined;
     const old_cellar = try std.fmt.bufPrint(&buf, "{s}/Cellar/wget/1.22", .{prefix});
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, old_cellar, .{}));
+}
+
+fn kegInstallReason(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+
+    var stmt = try db.prepare("SELECT install_reason FROM kegs WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    if (!(try stmt.step())) return error.TestUnexpectedResult;
+    const r = stmt.columnText(0) orelse return error.TestUnexpectedResult;
+    return allocator.dupe(u8, std.mem.sliceTo(r, 0));
+}
+
+// A keg pulled in as a dependency stays reclaimable after a rollback:
+// relabelling it 'direct' would make autoremove skip it forever.
+test "rolling back a dependency keeps it marked as a dependency" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "carry_reason");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try installKegAs(prefix, "pcre2", "10.45", false, "dependency");
+    try seedStoreEntry(prefix, "sha_old", "pcre2", "10.44", 0);
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try rollback.execute(&ctx, testing.allocator, &.{"pcre2"});
+
+    const reason = try kegInstallReason(prefix, testing.allocator, "pcre2");
+    defer testing.allocator.free(reason);
+    try testing.expectEqualStrings("dependency", reason);
 }

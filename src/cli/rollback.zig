@@ -84,7 +84,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Find current installed version
     var cur_stmt = db.prepare(
-        "SELECT id, version, revision, store_sha256, cellar_path, bin_isolated FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
+        "SELECT id, version, revision, store_sha256, cellar_path, bin_isolated, install_reason FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
     ) catch return error.Aborted;
     defer cur_stmt.finalize();
     cur_stmt.bindText(1, name) catch return error.Aborted;
@@ -111,6 +111,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const current_cellar_ptr = cur_stmt.columnText(4);
     const current_cellar_path = if (current_cellar_ptr) |c| std.mem.sliceTo(c, 0) else "";
     const current_bin_isolated = cur_stmt.columnInt(5) != 0;
+    const current_reason_ptr = cur_stmt.columnText(6);
+    const current_install_reason = if (current_reason_ptr) |r| std.mem.sliceTo(r, 0) else "direct";
 
     // pkg_version is what the on-disk Cellar / store dir is named after,
     // so the store-scan below must compare against this — not the bare
@@ -217,6 +219,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const carried: Carried = .{
         .pinned = capturePinnedById(&db, current_id),
         .bin_isolated = current_bin_isolated,
+        .install_reason = current_install_reason,
     };
 
     var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
@@ -500,6 +503,9 @@ pub fn capturePinnedById(db: *sqlite.Database, keg_id: i64) bool {
 pub const Carried = struct {
     pinned: bool,
     bin_isolated: bool,
+    /// Dropping this to 'direct' would strand a dependency-installed keg:
+    /// autoremove and cleanup only reclaim rows marked 'dependency'.
+    install_reason: []const u8,
 };
 
 /// Swap the keg row identified by `old_keg_id` for a fresh row pointing
@@ -528,7 +534,7 @@ pub fn replaceKegRow(
     {
         var ins = try db.prepare(
             \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason, pinned, bin_isolated)
-            \\VALUES (?1, ?1, ?2, ?3, ?4, ?5, 'direct', ?6, ?7);
+            \\VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);
         );
         defer ins.finalize();
         try ins.bindText(1, name);
@@ -536,8 +542,9 @@ pub fn replaceKegRow(
         try ins.bindInt(3, parsed.revision);
         try ins.bindText(4, store_sha256);
         try ins.bindText(5, cellar_path);
-        try ins.bindInt(6, @intFromBool(carried.pinned));
-        try ins.bindInt(7, @intFromBool(carried.bin_isolated));
+        try ins.bindText(6, carried.install_reason);
+        try ins.bindInt(7, @intFromBool(carried.pinned));
+        try ins.bindInt(8, @intFromBool(carried.bin_isolated));
         _ = try ins.step();
     }
 
@@ -1293,7 +1300,7 @@ test "replaceKegRow splits pkg_version into version + revision" {
         break :blk s.columnInt(0);
     };
 
-    const new_id = try replaceKegRow(&db, old_id, "libgit2", "1.9.2", "sha-old", "/c/libgit2/1.9.2", .{ .pinned = true, .bin_isolated = false });
+    const new_id = try replaceKegRow(&db, old_id, "libgit2", "1.9.2", "sha-old", "/c/libgit2/1.9.2", .{ .pinned = true, .bin_isolated = false, .install_reason = "direct" });
 
     var stmt = try db.prepare("SELECT version, revision, pinned FROM kegs WHERE id = ?1;");
     defer stmt.finalize();
@@ -1322,7 +1329,7 @@ test "replaceKegRow recovers a non-zero revision from pkg_version" {
     };
 
     // Rolling back to an earlier revision-2 build.
-    const new_id = try replaceKegRow(&db, old_id, "python@3.14", "3.14.3_2", "sha-old", "/c/python@3.14/3.14.3_2", .{ .pinned = false, .bin_isolated = false });
+    const new_id = try replaceKegRow(&db, old_id, "python@3.14", "3.14.3_2", "sha-old", "/c/python@3.14/3.14.3_2", .{ .pinned = false, .bin_isolated = false, .install_reason = "direct" });
 
     var stmt = try db.prepare("SELECT version, revision FROM kegs WHERE id = ?1;");
     defer stmt.finalize();
@@ -1360,6 +1367,7 @@ test "replaceKegRow carries pinned and bin_isolated across the swap" {
     const new_id = try replaceKegRow(&db, old_id, "node", "22.0.0", "sha-old", "/c/node/22.0.0", .{
         .pinned = true,
         .bin_isolated = true,
+        .install_reason = "direct",
     });
 
     var stmt = try db.prepare("SELECT pinned, bin_isolated FROM kegs WHERE id = ?1;");
@@ -1389,6 +1397,7 @@ test "replaceKegRow leaves a non-isolated keg non-isolated" {
     const new_id = try replaceKegRow(&db, old_id, "jq", "1.7", "sha-old", "/c/jq/1.7", .{
         .pinned = false,
         .bin_isolated = false,
+        .install_reason = "direct",
     });
 
     var stmt = try db.prepare("SELECT pinned, bin_isolated FROM kegs WHERE id = ?1;");
@@ -1397,6 +1406,38 @@ test "replaceKegRow leaves a non-isolated keg non-isolated" {
     _ = try stmt.step();
     try testing.expect(!stmt.columnBool(0));
     try testing.expect(!stmt.columnBool(1));
+}
+
+// A dependency-installed keg that rolls back must stay a dependency:
+// relabelling it 'direct' hides it from autoremove forever.
+test "replaceKegRow carries install_reason across the swap" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason)
+        \\VALUES ('pcre2', 'pcre2', '10.45', 0, 'sha-cur', '/c/pcre2/10.45', 'dependency');
+    );
+    const old_id = blk: {
+        var s = try db.prepare("SELECT id FROM kegs WHERE name='pcre2';");
+        defer s.finalize();
+        _ = try s.step();
+        break :blk s.columnInt(0);
+    };
+
+    const new_id = try replaceKegRow(&db, old_id, "pcre2", "10.44", "sha-old", "/c/pcre2/10.44", .{
+        .pinned = false,
+        .bin_isolated = false,
+        .install_reason = "dependency",
+    });
+
+    var stmt = try db.prepare("SELECT install_reason FROM kegs WHERE id = ?1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, new_id);
+    _ = try stmt.step();
+    const reason = stmt.columnText(0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("dependency", std.mem.sliceTo(reason, 0));
 }
 
 test "removeCurrentCellarDir wipes the revision-bumped on-disk dir" {
