@@ -1335,7 +1335,7 @@ test "retargetKegRow leaves user intent, tap and dependency edges untouched" {
     try db.exec(
         \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path,
         \\                  install_reason, pinned, bin_isolated, tap)
-        \\VALUES ('prowl', 'prowl', '1.2', 0, 'sha-cur', '/c/prowl/1.2',
+        \\VALUES ('prowl', 'caarlos0/prowl', '1.2', 0, 'sha-cur', '/c/prowl/1.2',
         \\        'dependency', 1, 1, 'caarlos0/tap');
     );
     const keg_id = blk: {
@@ -1352,7 +1352,7 @@ test "retargetKegRow leaves user intent, tap and dependency edges untouched" {
 
     {
         var stmt = try db.prepare(
-            "SELECT id, install_reason, pinned, bin_isolated, tap FROM kegs WHERE name='prowl';",
+            "SELECT id, install_reason, pinned, bin_isolated, tap, full_name FROM kegs WHERE name='prowl';",
         );
         defer stmt.finalize();
         _ = try stmt.step();
@@ -1362,6 +1362,8 @@ test "retargetKegRow leaves user intent, tap and dependency edges untouched" {
         try testing.expect(stmt.columnBool(2));
         try testing.expect(stmt.columnBool(3));
         try testing.expectEqualStrings("caarlos0/tap", std.mem.sliceTo(stmt.columnText(4).?, 0));
+        // Tap-qualified, so it must not collapse back to the bare name.
+        try testing.expectEqualStrings("caarlos0/prowl", std.mem.sliceTo(stmt.columnText(5).?, 0));
     }
     {
         var stmt = try db.prepare("SELECT dep_name, dep_type FROM dependencies WHERE keg_id = ?1 ORDER BY dep_name;");

@@ -778,6 +778,13 @@ test "a completed rollback preserves bin isolation and the hold" {
     var buf: [512]u8 = undefined;
     const old_cellar = try std.fmt.bufPrint(&buf, "{s}/Cellar/wget/1.22", .{prefix});
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, old_cellar, .{}));
+
+    // Dependents resolve through opt/, so it has to follow the rollback.
+    var opt_buf: [512]u8 = undefined;
+    const opt_link = try std.fmt.bufPrint(&opt_buf, "{s}/opt/wget", .{prefix});
+    var target_buf: [512]u8 = undefined;
+    const opt_target = try test_io.readLinkAbsolute(io, opt_link, &target_buf);
+    try testing.expect(std.mem.endsWith(u8, opt_target, "/Cellar/wget/1.20"));
 }
 
 fn kegInstallReason(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
