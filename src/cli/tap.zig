@@ -525,6 +525,32 @@ pub fn executeUntap(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []co
     return run(ctx, allocator, args, .remove);
 }
 
+/// True when argv asks only to *read* the tap list. Everything else has work
+/// to do and therefore needs `db/` on disk, so a new mutating flag that
+/// forgets to land here would silently go back to doing nothing.
+fn isListingIntent(
+    positional: ?[]const u8,
+    pin_slug: ?[]const u8,
+    refresh_target: ?[]const u8,
+    refresh_all: bool,
+) bool {
+    return positional == null and pin_slug == null and
+        refresh_target == null and !refresh_all;
+}
+
+test "isListingIntent: bare argv is the only read-only shape" {
+    try std.testing.expect(isListingIntent(null, null, null, false));
+}
+
+test "isListingIntent: each intent that mutates opts out on its own" {
+    // One per argv shape: a flag missing from the conjunction would leave its
+    // command unable to create the database it is about to write to.
+    try std.testing.expect(!isListingIntent("user/repo", null, null, false));
+    try std.testing.expect(!isListingIntent(null, "user/repo", null, false));
+    try std.testing.expect(!isListingIntent(null, null, "user/repo", false));
+    try std.testing.expect(!isListingIntent(null, null, null, true));
+}
+
 const Action = enum { add, remove };
 
 fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8, action: Action) !void {
@@ -717,18 +743,30 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
 
     const prefix = atomic.maltPrefixOrAbort();
 
-    // Listing-intent under `--json` needs a parseable empty array even on a
-    // fresh prefix where `db/` doesn't exist — otherwise `jq` chokes on
-    // silently-empty stdout. Detect intent from already-parsed argv.
-    const is_listing = positional == null and pin_slug == null and
-        refresh_target == null and !refresh_all;
+    const is_listing = isListingIntent(positional, pin_slug, refresh_target, refresh_all);
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+
+    // sqlite cannot create its file inside a `db/` that does not exist, so
+    // every intent with work to do has to make the directory first. Listing
+    // stays read-only: it answers for the empty prefix without building one.
+    if (!is_listing) {
+        var dir_buf: [512]u8 = undefined;
+        const db_dir = std.fmt.bufPrint(&dir_buf, "{s}/db", .{prefix}) catch return;
+        std.Io.Dir.cwd().createDirPath(ctx.io, db_dir) catch {
+            output.err("Cannot create {s} - check the prefix is writable.", .{db_dir});
+            return error.Aborted;
+        };
+    }
+
     var db = sqlite.Database.open(db_path) catch {
-        // Fresh prefix with no `db/` yet = no taps registered.
-        if (is_listing and output.isJson()) output.writeStdoutAll("[]\n");
-        return;
+        if (is_listing) {
+            if (output.isJson()) output.writeStdoutAll("[]\n") else output.info("No taps registered", .{});
+            return;
+        }
+        output.err("Cannot open the tap database at {s}", .{db_path});
+        return error.Aborted;
     };
     defer db.close();
     schema.initSchema(&db) catch return;
