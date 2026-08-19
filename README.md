@@ -82,8 +82,6 @@ shasum -a 256 install.sh
 bash install.sh
 ```
 
-`v0.20.0` here is an example - swap it for the release you intend to install (see the version badge at the top).
-
 ### Via Homebrew
 
 malt is published as a Homebrew cask:
