@@ -861,3 +861,149 @@ test "rolling back a dependency keeps it marked as a dependency" {
     defer testing.allocator.free(reason);
     try testing.expectEqualStrings("dependency", reason);
 }
+
+fn depNames(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+
+    var stmt = try db.prepare(
+        \\SELECT d.dep_name FROM dependencies d
+        \\JOIN kegs k ON k.id = d.keg_id WHERE k.name = ?1 ORDER BY d.dep_name;
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    while (try stmt.step()) {
+        const n = stmt.columnText(0) orelse continue;
+        if (out.items.len > 0) try out.append(allocator, ',');
+        try out.appendSlice(allocator, std.mem.sliceTo(n, 0));
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn addDep(prefix: [:0]const u8, name: []const u8, dep: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+
+    var stmt = try db.prepare(
+        "INSERT INTO dependencies (keg_id, dep_name) SELECT id, ?2 FROM kegs WHERE name = ?1;",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    try stmt.bindText(2, dep);
+    _ = try stmt.step();
+}
+
+// Without this the rolled-back keg has no recorded dependencies, and the
+// next cleanup reclaims the packages it still links against.
+test "a completed rollback keeps the keg's dependency edges" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "carry_deps");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try installKeg(prefix, "wget", "1.22");
+    try addDep(prefix, "wget", "openssl@3");
+    try addDep(prefix, "wget", "libidn2");
+    try seedStoreEntry(prefix, "sha_old", "wget", "1.20", 0);
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try rollback.execute(&ctx, testing.allocator, &.{"wget"});
+
+    const deps = try depNames(prefix, testing.allocator, "wget");
+    defer testing.allocator.free(deps);
+    try testing.expectEqualStrings("libidn2,openssl@3", deps);
+}
+
+/// Park a decoy keg row on the version we are about to roll back to, so the
+/// swap's INSERT trips `UNIQUE(name, version, revision)` after `unlink` has
+/// already torn the current version's symlinks down.
+fn seedColliding(prefix: [:0]const u8, name: []const u8, version: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+
+    var stmt = try db.prepare(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, installed_at)
+        \\VALUES (?1, ?1, ?2, 0, 'sha-decoy', '/c/decoy', '1970-01-01 00:00:00');
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    try stmt.bindText(2, version);
+    _ = try stmt.step();
+}
+
+// The restore half of the fix: once `unlink` has run, a failing swap has to
+// put the current version's symlinks back and drop the half-installed target.
+test "a rollback that fails mid-swap restores the current version's links" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "swap_fail");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try installKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, "sha_old", "wget", "1.20", 0);
+    try seedColliding(prefix, "wget", "1.20");
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try testing.expectError(error.Aborted, rollback.execute(&ctx, testing.allocator, &.{"wget"}));
+
+    const io = std.Options.debug_io;
+
+    // The symlink `unlink` removed is back on disk...
+    var link_buf: [512]u8 = undefined;
+    const link = try std.fmt.bufPrint(&link_buf, "{s}/bin/wget", .{prefix});
+    try test_io.accessAbsolute(io, link, .{});
+
+    // ...and so is its DB row, courtesy of the transaction rollback.
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        var stmt = try db.prepare("SELECT COUNT(*) FROM links WHERE link_path = ?1;");
+        defer stmt.finalize();
+        try stmt.bindText(1, link);
+        _ = try stmt.step();
+        try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+    }
+
+    // The current version's Cellar tree was never touched...
+    var cur_buf: [512]u8 = undefined;
+    const cur_cellar = try std.fmt.bufPrint(&cur_buf, "{s}/Cellar/wget/1.22", .{prefix});
+    try test_io.accessAbsolute(io, cur_cellar, .{});
+
+    // ...and the half-installed target was cleaned up.
+    var new_buf: [512]u8 = undefined;
+    const new_cellar = try std.fmt.bufPrint(&new_buf, "{s}/Cellar/wget/1.20", .{prefix});
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, new_cellar, .{}));
+}
