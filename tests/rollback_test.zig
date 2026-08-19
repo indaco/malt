@@ -612,3 +612,131 @@ test "rollback <cask> with empty history refuses with a useful diagnostic" {
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "No previous version") != null);
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1.32.427") != null);
 }
+
+// --- failed-rollback safety -----------------------------------------------
+
+/// Seed a fully installed keg: Cellar tree, a linked `bin/` symlink, and the
+/// matching `kegs` + `links` rows. Enough for `execute` to have something
+/// real to destroy if the rollback isn't ordered correctly.
+fn installKeg(prefix: [:0]const u8, name: []const u8, pkg_version: []const u8) !void {
+    const io = std.Options.debug_io;
+
+    var keg_buf: [512]u8 = undefined;
+    const keg_bin = try std.fmt.bufPrint(&keg_buf, "{s}/Cellar/{s}/{s}/bin", .{ prefix, name, pkg_version });
+    try test_io.cwd().createDirPath(io, keg_bin);
+
+    var exe_buf: [600]u8 = undefined;
+    const exe = try std.fmt.bufPrint(&exe_buf, "{s}/{s}", .{ keg_bin, name });
+    {
+        const f = try test_io.createFileAbsolute(io, exe, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "#!/bin/sh\n");
+    }
+
+    var bin_dir_buf: [512]u8 = undefined;
+    const bin_dir = try std.fmt.bufPrint(&bin_dir_buf, "{s}/bin", .{prefix});
+    try test_io.cwd().createDirPath(io, bin_dir);
+
+    var link_buf: [600]u8 = undefined;
+    const link = try std.fmt.bufPrint(&link_buf, "{s}/{s}", .{ bin_dir, name });
+    try test_io.symLinkAbsolute(io, exe, link, .{});
+
+    var cellar_buf: [512]u8 = undefined;
+    const cellar_path = try std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version });
+
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+
+    {
+        var stmt = try db.prepare(
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason)
+            \\VALUES (?1, ?1, ?2, 0, 'cur-sha', ?3, 'direct');
+        );
+        defer stmt.finalize();
+        try stmt.bindText(1, name);
+        try stmt.bindText(2, pkg_version);
+        try stmt.bindText(3, cellar_path);
+        _ = try stmt.step();
+    }
+    {
+        var stmt = try db.prepare(
+            "INSERT INTO links (keg_id, link_path, target) VALUES (last_insert_rowid(), ?1, ?2);",
+        );
+        defer stmt.finalize();
+        try stmt.bindText(1, link);
+        try stmt.bindText(2, exe);
+        _ = try stmt.step();
+    }
+}
+
+/// Deny all access to a store keg dir so `materializeWithCellar` fails the
+/// way a corrupt or unreadable store entry does, without deleting it (the
+/// entry has to stay discoverable by `collectEntries`).
+fn denyAccess(prefix: [:0]const u8, sha: []const u8, name: []const u8, pkg_version: []const u8, mode: c_uint) void {
+    var buf: [512]u8 = undefined;
+    const dir = std.fmt.bufPrintZ(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version }) catch return;
+    _ = std.c.chmod(dir.ptr, @intCast(mode));
+}
+
+fn installedVersion(prefix: [:0]const u8, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+
+    var stmt = try db.prepare("SELECT version FROM kegs WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    if (!(try stmt.step())) return allocator.dupe(u8, "");
+    const v = stmt.columnText(0) orelse return allocator.dupe(u8, "");
+    return allocator.dupe(u8, std.mem.sliceTo(v, 0));
+}
+
+// The failure this pins: rollback used to unlink and delete the current keg
+// before the fallible materialize, so a bad store entry left the machine with
+// no working version and a DB row pointing at nothing.
+test "a rollback that cannot materialize leaves the current version installed" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // chmod 000 doesn't bite root
+
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "materialize_fail");
+    try makeSandbox(prefix);
+    defer {
+        denyAccess(prefix, "sha_old", "wget", "1.20", 0o755);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    }
+
+    try installKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, "sha_old", "wget", "1.20", 0);
+    denyAccess(prefix, "sha_old", "wget", "1.20", 0o000);
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try testing.expectError(error.Aborted, rollback.execute(&ctx, testing.allocator, &.{"wget"}));
+
+    const io = std.Options.debug_io;
+    var buf: [512]u8 = undefined;
+
+    const cellar = try std.fmt.bufPrint(&buf, "{s}/Cellar/wget/1.22", .{prefix});
+    try test_io.accessAbsolute(io, cellar, .{});
+
+    var buf2: [512]u8 = undefined;
+    const link = try std.fmt.bufPrint(&buf2, "{s}/bin/wget", .{prefix});
+    try test_io.accessAbsolute(io, link, .{});
+
+    const ver = try installedVersion(prefix, testing.allocator, "wget");
+    defer testing.allocator.free(ver);
+    try testing.expectEqualStrings("1.22", ver);
+}

@@ -84,7 +84,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Find current installed version
     var cur_stmt = db.prepare(
-        "SELECT id, version, revision, store_sha256 FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
+        "SELECT id, version, revision, store_sha256, cellar_path, bin_isolated FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
     ) catch return error.Aborted;
     defer cur_stmt.finalize();
     cur_stmt.bindText(1, name) catch return error.Aborted;
@@ -105,6 +105,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const current_ver_ptr = cur_stmt.columnText(1);
     const current_ver = if (current_ver_ptr) |v| std.mem.sliceTo(v, 0) else "unknown";
     const current_revision = cur_stmt.columnInt(2);
+
+    // Kept so a failed swap can rebuild the current version's symlinks:
+    // the filesystem half of the swap isn't covered by the DB transaction.
+    const current_cellar_ptr = cur_stmt.columnText(4);
+    const current_cellar_path = if (current_cellar_ptr) |c| std.mem.sliceTo(c, 0) else "";
+    const current_bin_isolated = cur_stmt.columnInt(5) != 0;
 
     // pkg_version is what the on-disk Cellar / store dir is named after,
     // so the store-scan below must compare against this — not the bare
@@ -173,18 +179,6 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
     defer lk.release(ctx.io);
 
-    // Unlink current version
-    var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
-    linker.unlink(current_id) catch {
-        output.warn("Could not unlink current {s} — links may be stale", .{name});
-    };
-
-    // Remove current cellar entry — pkg_version-aware so a revision-bumped
-    // current keg dir (e.g. "1.9.2_2") doesn't get left on disk.
-    removeCurrentCellarDir(ctx.io, prefix, name, current_ver, current_revision) catch {
-        output.warn("Could not remove cellar entry for {s} {s}", .{ name, current_pkg_version });
-    };
-
     // No parsed formula here, and the DB rows describe the version being
     // rolled away from — so read the target's own shipped formula source.
     var ph_buf: [512]u8 = undefined;
@@ -198,7 +192,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         target.pkg_version,
     );
 
-    // Materialize the old version from store
+    // Materialize before touching the current install: store entries are
+    // on-disk input, so a corrupt one must not cost the user a working
+    // version. Nothing is destroyed yet, so failure needs no restore.
     const keg = cellar.materializeWithCellar(
         ctx.io,
         allocator,
@@ -219,33 +215,77 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // back a held formula must not silently clear the user's hold.
     const old_pinned = capturePinnedById(&db, current_id);
 
+    var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
+
     db.beginTransaction() catch return error.Aborted;
-    errdefer db.rollback();
 
-    // target.pkg_version carries the on-disk pkg_version label (the store
-    // dir name), so replaceKegRow can split it back into version +
-    // revision and persist the rolled-back keg's true revision.
-    const keg_id = replaceKegRow(
-        &db,
-        current_id,
-        name,
-        target.pkg_version,
-        target.sha256,
-        keg.path,
-        old_pinned,
-    ) catch return error.Aborted;
-
-    // Link the old version
-    linker.link(keg.path, name, keg_id, false) catch {
-        output.warn("Could not link restored {s} — try: mt link {s}", .{ name, name });
+    const keg_id = swapKeg(&db, &linker, current_id, name, target, keg.path, old_pinned) catch {
+        db.rollback();
+        restoreCurrentLinks(&linker, current_cellar_path, name, current_id, current_bin_isolated);
+        cellar.remove(ctx.io, prefix, name, target.pkg_version) catch {};
+        output.err("Failed to record rollback of {s} in the database", .{name});
+        return error.Aborted;
     };
+
+    db.commit() catch {
+        // Drop the new symlinks first: the filesystem isn't transactional,
+        // so rolling back the DB alone would strand them.
+        linker.unlink(keg_id) catch {};
+        db.rollback();
+        restoreCurrentLinks(&linker, current_cellar_path, name, current_id, current_bin_isolated);
+        cellar.remove(ctx.io, prefix, name, target.pkg_version) catch {};
+        output.err("Failed to commit rollback of {s}", .{name});
+        return error.Aborted;
+    };
+
+    // Only now is the previous version expendable. pkg_version-aware so a
+    // revision-bumped current keg dir (e.g. "1.9.2_2") doesn't linger.
+    removeCurrentCellarDir(ctx.io, prefix, name, current_ver, current_revision) catch {
+        output.warn("Could not remove cellar entry for {s} {s}", .{ name, current_pkg_version });
+    };
+
+    // opt/ is a plain symlink, so it stays outside the transaction.
     linker.linkOpt(name, target.pkg_version) catch {
         output.warn("Could not create opt link for {s}", .{name});
     };
 
-    db.commit() catch return error.Aborted;
-
     output.info("{s} rolled back to {s}", .{ name, target.pkg_version });
+}
+
+/// Swap the current keg for `target` inside the caller's transaction.
+/// `unlink` deletes `links` rows, so all three steps have to share one
+/// transaction or a mid-flight failure strands them.
+fn swapKeg(
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    current_id: i64,
+    name: []const u8,
+    target: Entry,
+    keg_path: []const u8,
+    pinned: bool,
+) !i64 {
+    try linker.unlink(current_id);
+    // target.pkg_version carries the on-disk pkg_version label (the store
+    // dir name), so replaceKegRow can split it back into version +
+    // revision and persist the rolled-back keg's true revision.
+    const keg_id = try replaceKegRow(db, current_id, name, target.pkg_version, target.sha256, keg_path, pinned);
+    try linker.link(keg_path, name, keg_id, false);
+    return keg_id;
+}
+
+/// Rebuild the symlinks of the version we were rolling away from. The DB
+/// transaction restores the `links` rows; the filesystem needs replaying.
+fn restoreCurrentLinks(
+    linker: *linker_mod.Linker,
+    cellar_path: []const u8,
+    name: []const u8,
+    keg_id: i64,
+    bin_isolated: bool,
+) void {
+    if (cellar_path.len == 0) return;
+    linker.link(cellar_path, name, keg_id, bin_isolated) catch {
+        output.err("CRITICAL: could not restore symlinks for {s} - run: mt link {s}", .{ name, name });
+    };
 }
 
 /// Handle the cask side of `mt rollback`. Mirrors the keg flow:
