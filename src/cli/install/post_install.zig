@@ -14,6 +14,7 @@ const ruby_sub = @import("../../core/ruby_subprocess.zig");
 const steps_mod = @import("../../core/post_install_steps.zig");
 const sandbox = @import("../../core/sandbox/macos.zig");
 const output = @import("../../ui/output.zig");
+const term_sanitize = @import("../../ui/term_sanitize.zig");
 const download = @import("download.zig");
 pub const DownloadJob = download.DownloadJob;
 const sink_mod = @import("sink.zig");
@@ -224,7 +225,25 @@ fn renderUnknown(flog: *const dsl.FallbackLog, tag: []const u8) void {
 /// fallback warnings) plus any OOM-drop notice. The DSL records these
 /// during execution; rendering is the CLI's job so core/dsl stays UI-free.
 fn renderNotes(flog: *const dsl.FallbackLog) void {
-    for (flog.notes()) |line| output.writeStderrAll(line);
+    // Note bodies are formula-authored, and the log owns them immutably, so a
+    // stack window buys a mutable copy to scrub without dropping long notes.
+    var window: [1024]u8 = undefined;
+    for (flog.notes()) |line| {
+        var rest = line;
+        while (rest.len > 0) {
+            var n = @min(rest.len, window.len);
+            // Splitting a codepoint would leave the scrub's counter unarmed for
+            // the tail, so back off to a lead byte. A window with no boundary
+            // at all is malformed anyway; take it whole and let the scrub judge.
+            if (n < rest.len) {
+                while (n > 0 and rest[n] & 0xC0 == 0x80) n -= 1;
+                if (n == 0) n = window.len;
+            }
+            @memcpy(window[0..n], rest[0..n]);
+            output.writeStderrAll(term_sanitize.scrubInPlace(window[0..n]));
+            rest = rest[n..];
+        }
+    }
     if (flog.dropped_oom)
         output.writeStderrAll("malt: fallback log dropped an entry due to OOM\n");
 }
@@ -783,4 +802,72 @@ test "provisionShippedCaBundle: self-heals a stale dangling cert.pem symlink" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().readLink(std.Options.debug_io, dest, &buf);
     try std.testing.expectEqualStrings(s.p("/opt/ca-certificates/share/ca-certificates/cacert.pem"), buf[0..n]);
+}
+
+// The render seam is the last place to strip control bytes out of
+// formula-authored note text.
+test "renderNotes drops terminal control bytes from a formula-authored note" {
+    var flog = dsl.FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+    flog.note("boom\x1b]52;c;ZXZpbA==\x07 done\n");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    renderNotes(&flog);
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x07) == null);
+    try std.testing.expect(std.mem.startsWith(u8, buf.items, "boom"));
+    try std.testing.expect(std.mem.endsWith(u8, buf.items, " done\n"));
+}
+
+test "renderNotes keeps a codepoint that straddles the scrub buffer intact" {
+    var flog = dsl.FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+    // 1023 filler bytes put the coffee cup's lead byte on the window edge.
+    const note = ("x" ** 1023) ++ "\u{2615}tail\n";
+    flog.note(note);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    renderNotes(&flog);
+    try std.testing.expectEqualStrings(note, buf.items);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(buf.items));
+}
+
+test "renderNotes makes progress on a note that is all continuation bytes" {
+    var flog = dsl.FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+    // No lead byte anywhere: the boundary walk-back finds nothing to back off
+    // to, so this pins that the loop still advances instead of spinning.
+    flog.note("\x80" ** 1100 ++ "ok\n");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    renderNotes(&flog);
+    try std.testing.expectEqualStrings("ok\n", buf.items);
+}
+
+test "renderNotes keeps a note longer than the scrub buffer whole" {
+    var flog = dsl.FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+    const long = "x" ** 3000;
+    flog.note(long ++ "\x1btail\n");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    renderNotes(&flog);
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expectEqual(long.len + "tail\n".len, buf.items.len);
 }
