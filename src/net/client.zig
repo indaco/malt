@@ -658,18 +658,21 @@ pub const HttpClient = struct {
         };
         errdefer resolved.deinit();
 
+        // Every exit below returns an error rather than what the walk reached
+        // so far: a partial walk is indistinguishable from a resolved url, and
+        // the caller picks a cask's artifact type from it.
         for (0..max_head_redirects) |_| {
-            const uri = std.Uri.parse(resolved.final_url) catch break;
+            const uri = std.Uri.parse(resolved.final_url) catch return error.RequestFailed;
 
             var req = self.client.request(.HEAD, uri, .{
                 .extra_headers = &.{},
-            }) catch break;
+            }) catch return error.RequestFailed;
             defer req.deinit();
 
-            req.sendBodiless() catch break;
+            req.sendBodiless() catch return error.RequestFailed;
 
             var redirect_buf: [32 * 1024]u8 = undefined;
-            const response = req.receiveHead(&redirect_buf) catch break;
+            const response = req.receiveHead(&redirect_buf) catch return error.RequestFailed;
 
             if (resolved.content_disposition == null) {
                 if (response.head.content_disposition) |cd| {
@@ -678,22 +681,12 @@ pub const HttpClient = struct {
             }
 
             const status: u16 = @intFromEnum(response.head.status);
-            if (status >= 301 and status <= 308) {
-                if (response.head.location) |loc| {
-                    const next = self.nextHopUrl(uri, loc) catch |e| switch (e) {
-                        // A refusal must reach the caller: silently returning the
-                        // pre-hop url would read as a successful resolution.
-                        error.OutOfMemory, error.TlsDowngradeRefused => return e,
-                        // A malformed Location ends resolution here, as it did
-                        // when the raw value failed to parse on the next hop.
-                        else => break,
-                    };
-                    defer self.allocator.free(next);
-                    try resolved.replaceFinalUrl(next);
-                    continue;
-                }
-            }
-            break;
+            if (!isFollowableRedirect(status)) break;
+
+            const loc = response.head.location orelse return error.HttpRedirectLocationMissing;
+            const next = try self.nextHopUrl(uri, loc);
+            defer self.allocator.free(next);
+            try resolved.replaceFinalUrl(next);
         }
 
         return resolved;

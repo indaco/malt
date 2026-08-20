@@ -1316,14 +1316,27 @@ fn mapApiFetchError(e: api_mod.ApiError) ?InstallError {
     };
 }
 
+/// Classify a failed artifact-URL resolution. A walk that never completed
+/// says nothing about the cask's format, so `.unknown` stays reserved for a
+/// URL malt actually resolved and could not classify.
+fn mapHeadResolveError(e: anyerror) InstallError {
+    // OOM is handled by the caller: it is not a property of the URL.
+    return switch (e) {
+        // Both mean the artifact would be fetched in the clear.
+        error.InsecureUrlScheme, error.TlsDowngradeRefused => InstallError.InsecureArchiveUrl,
+        else => InstallError.NetworkError,
+    };
+}
+
 /// HEAD-based fallback for extensionless cask URLs.
-/// Follows redirects to discover the real file extension.
-fn resolveCaskArtifactViaHead(ctx: *const AppCtx, allocator: std.mem.Allocator, url: []const u8) cask_mod.ArtifactType {
+/// Follows redirects to discover the real file extension. The walk's own
+/// error reaches the caller, which reports it before classifying.
+fn resolveCaskArtifactViaHead(ctx: *const AppCtx, allocator: std.mem.Allocator, url: []const u8) !cask_mod.ArtifactType {
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
     http.offline = ctx.offline;
 
-    var resolved = http.headResolved(url) catch return .unknown;
+    var resolved = try http.headResolved(url);
     defer resolved.deinit();
 
     return cask_mod.resolveArtifactType(allocator, resolved.final_url, resolved.content_disposition);
@@ -1403,7 +1416,15 @@ fn installCask(
     // Extensionless URLs (e.g. download APIs that 302 to the real file):
     // resolve via HEAD to discover the final URL and Content-Disposition.
     if (artifact_type == .unknown) {
-        artifact_type = resolveCaskArtifactViaHead(ctx, allocator, cask.url);
+        artifact_type = resolveCaskArtifactViaHead(ctx, allocator, cask.url) catch |e| switch (e) {
+            // Report the walk's own error — "NetworkError" would say less than
+            // the message already does.
+            error.OutOfMemory => return e,
+            else => {
+                sink.err("Could not resolve the download URL for '{s}': {s} — URL: {s}", .{ cask.token, @errorName(e), cask.url });
+                return mapHeadResolveError(e);
+            },
+        };
     }
 
     if (flags.dry_run) {
@@ -1622,6 +1643,17 @@ test "mapApiFetchError surfaces ApiUnreachable as NetworkError" {
     // path-specific "not found" tag, so the dispatch summary said
     // FormulaNotFound or CaskNotFound when the cause was a flaky DNS.
     try std.testing.expectEqual(InstallError.NetworkError, mapApiFetchError(error.ApiUnreachable).?);
+}
+
+test "mapHeadResolveError reports a dead walk as a network failure, not a format one" {
+    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.RequestFailed));
+    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.OfflineRequired));
+    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.HttpRedirectLocationMissing));
+}
+
+test "mapHeadResolveError keeps a cleartext artifact URL distinct from a network failure" {
+    try std.testing.expectEqual(InstallError.InsecureArchiveUrl, mapHeadResolveError(error.InsecureUrlScheme));
+    try std.testing.expectEqual(InstallError.InsecureArchiveUrl, mapHeadResolveError(error.TlsDowngradeRefused));
 }
 
 test "mapApiFetchError leaves other ApiError variants for the path's own fallback" {

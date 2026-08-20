@@ -19,9 +19,10 @@ const Hop = struct {
     // per-request read buffer so it outlives `serveOne`.
     target_buf: [512]u8 = undefined,
     target_len: usize = 0,
-    // When set, answer 302 to this Location; otherwise 200 with `blob_body`.
+    // Non-null: answer this status, carrying `redirect_to` as Location and
+    // `content_disposition` when they are set. Null: 200 with `blob_body`.
+    status: ?std.http.Status = null,
     redirect_to: ?[]const u8 = null,
-    // When set, the 200 carries this Content-Disposition.
     content_disposition: ?[]const u8 = null,
 };
 
@@ -46,12 +47,21 @@ fn serveOne(hop: *Hop) void {
     while (it.next()) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "authorization")) hop.saw_auth = true;
     }
-    if (hop.redirect_to) |loc| {
-        // A non-empty 302 body exercises the redirect-body drain on hop teardown.
-        req.respond("redirecting\n", .{
-            .status = .found,
-            .extra_headers = &.{.{ .name = "location", .value = loc }},
-        }) catch return;
+    if (hop.status) |status| {
+        var hdrs: [2]std.http.Header = undefined;
+        var n: usize = 0;
+        if (hop.redirect_to) |loc| {
+            hdrs[n] = .{ .name = "location", .value = loc };
+            n += 1;
+        }
+        if (hop.content_disposition) |cd| {
+            hdrs[n] = .{ .name = "content-disposition", .value = cd };
+            n += 1;
+        }
+        // A non-empty 302 body exercises the redirect-body drain on hop
+        // teardown; 304 must stay bodiless.
+        const body = if (status == .found) "redirecting\n" else "";
+        req.respond(body, .{ .status = status, .extra_headers = hdrs[0..n] }) catch return;
     } else if (hop.content_disposition) |cd| {
         req.respond(blob_body, .{
             .extra_headers = &.{.{ .name = "content-disposition", .value = cd }},
@@ -68,6 +78,15 @@ fn hopTarget(hop: *const Hop) []const u8 {
 fn bindIp4(io: std.Io) !net.Server {
     var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
     return try addr.listen(io, .{ .reuse_address = true });
+}
+
+// A port bound and released again: a connection to it is refused immediately,
+// so a hop the client must not take fails fast instead of hanging the test.
+fn closedPort(io: std.Io) !u16 {
+    var l = try bindIp4(io);
+    const port = l.socket.address.getPort();
+    l.deinit(io);
+    return port;
 }
 
 fn bindIp6(io: std.Io) !net.Server {
@@ -101,7 +120,7 @@ test "auth headers stripped on redirect across a cross-domain hop" {
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
     const p1 = l1.socket.address.getPort();
-    var hop1 = Hop{ .io = io, .listener = &l1, .redirect_to = loc };
+    var hop1 = Hop{ .io = io, .listener = &l1, .redirect_to = loc, .status = .found };
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
@@ -151,7 +170,7 @@ test "auth headers kept across a same-host redirect" {
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
     const p1 = l1.socket.address.getPort();
-    var hop1 = Hop{ .io = io, .listener = &l1, .redirect_to = loc };
+    var hop1 = Hop{ .io = io, .listener = &l1, .redirect_to = loc, .status = .found };
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
@@ -196,7 +215,7 @@ test "headResolved follows a hop and harvests the artifact headers from it" {
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
     const p1 = l1.socket.address.getPort();
-    var hop1 = Hop{ .io = io, .listener = &l1, .redirect_to = loc };
+    var hop1 = Hop{ .io = io, .listener = &l1, .redirect_to = loc, .status = .found };
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
 
     var url_buf: [64]u8 = undefined;
@@ -219,4 +238,122 @@ test "headResolved follows a hop and harvests the artifact headers from it" {
     try std.testing.expectEqualStrings(want, resolved.final_url);
     try std.testing.expectEqualStrings(cd, resolved.content_disposition.?);
     try std.testing.expectEqualStrings("/artifact", hopTarget(&hop2));
+}
+
+// Stands up one hop answering `status` with a Location pointing at a dead
+// port, and returns what `headResolved` made of it.
+fn resolveAgainstNonRedirect(status: std.http.Status) !void {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/artifact.pkg", .{try closedPort(io)});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var hop1 = Hop{ .io = io, .listener = &l1, .redirect_to = loc, .status = status };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    const result = http.headResolved(url);
+    t1.join();
+
+    var resolved = try result;
+    defer resolved.deinit();
+
+    // Unchanged: the hop was terminal, so the walk never moved off the origin.
+    try std.testing.expectEqualStrings(url, resolved.final_url);
+}
+
+test "headResolved does not follow Location on a non-redirect status" {
+    // 304, 305 and 306 sit inside the 301..308 range but none is a redirect.
+    // The port each one points at is never bound, so a follow is unmistakable.
+    try resolveAgainstNonRedirect(.not_modified);
+    try resolveAgainstNonRedirect(.use_proxy);
+    try resolveAgainstNonRedirect(@enumFromInt(306));
+}
+
+test "headResolved reports an unreachable origin instead of the untouched url" {
+    // The pre-fix loop returned the caller's own url here, which the cask
+    // installer classified as an unreadable format rather than a dead network.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/download", .{try closedPort(io)});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    try std.testing.expectError(error.RequestFailed, http.headResolved(url));
+}
+
+test "headResolved reports a dead hop instead of a half-walked resolution" {
+    // Hop 1 hands over a Content-Disposition on its way to a dead hop 2.
+    // Returning that harvested header against a stale final_url would let a
+    // cask be classified from partial data.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/artifact", .{try closedPort(io)});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var hop1 = Hop{
+        .io = io,
+        .listener = &l1,
+        .redirect_to = loc,
+        .status = .found,
+        .content_disposition = "attachment; filename=\"artifact.pkg\"",
+    };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    const result = http.headResolved(url);
+    t1.join();
+
+    try std.testing.expectError(error.RequestFailed, result);
+}
+
+test "headResolved reports a redirect with no Location instead of the pre-hop url" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var hop1 = Hop{ .io = io, .listener = &l1, .status = .moved_permanently };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    const result = http.headResolved(url);
+    t1.join();
+
+    try std.testing.expectError(error.HttpRedirectLocationMissing, result);
 }
