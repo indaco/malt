@@ -5,13 +5,15 @@
 //! UTF-8 (validated per byte position, so lone C1 controls in 0x80..0x9F
 //! drop while real multibyte output passes) +
 //! a whitelisted subset of CSI sequences, gated on the final byte AND
-//! numeric-only parameters: SGR colours, relative cursor motion
-//! (A–G/E/F), line erase (K), and visible-screen erase (J with no
-//! param or 0/1/2).
+//! numeric-only parameters: SGR colours, horizontal cursor motion
+//! (C/D/G), line erase (K), and visible-screen erase (J with no
+//! param or 0/1/2). CR passes too, so a child can still redraw the
+//! line it is writing.
 //! Everything else — OSC (including clipboard-reading OSC 52), DCS,
 //! SOS/PM/APC, 8-bit C1 introducers, absolute positioning (H/f),
-//! cursor save/restore (s/u), scrollback erase (CSI 3 J), other CSI
-//! commands, C0 controls, stray/mid-sequence ESC, and any CSI carrying
+//! cursor save/restore (s/u), vertical motion (A/B/E/F), scrollback
+//! erase (CSI 3 J), other CSI commands, C0 controls,
+//! stray/mid-sequence ESC, and any CSI carrying
 //! a private prefix or intermediate byte (`CSI > 4 ; 2 m` is XTMODKEYS,
 //! not SGR) — is dropped.
 //!
@@ -260,13 +262,12 @@ fn csiAllowed(final: u8, params: []const u8) bool {
     };
     return switch (final) {
         'm' => true, // SGR: colours, bold, underline
-        'A', 'B', 'C', 'D' => true, // cursor up/down/right/left
-        'E', 'F' => true, // cursor next/prev line
-        'G' => true, // cursor column
-        // H/f absolute positioning and s/u save/restore enable screen
-        // spoofing and no in-repo progress output uses them (relative motion
-        // only); dropped, keeping save/restore uniformly out (ESC 7/8 already
-        // drop as stray ESC).
+        // C/D move relative, G jumps to an absolute column; none leaves the line.
+        'C', 'D', 'G' => true,
+        // Vertical motion (A/B/E/F) joins H/f and s/u: each one puts the cursor
+        // on a line malt wrote, where the permitted erase can repaint it. No
+        // count is safe either, because the attack is net-zero (up, erase,
+        // forge, back down), so only removing the reach closes it.
         'J' => eraseDisplayAllowed(params), // reject CSI 3 J (erase scrollback)
         'K' => true, // erase line
         else => false,
@@ -288,10 +289,16 @@ fn eraseDisplayAllowed(params: []const u8) bool {
 // Full feed()/flush() byte-stream behaviour lives in tests/term_sanitize_test.zig;
 // these cover the file-private classifiers that the integration file can't reach.
 
-test "csiAllowed whitelists SGR/relative motion, drops positioning + save/restore" {
-    for ("mABCDEFGK") |f| try std.testing.expect(csiAllowed(f, ""));
-    // Absolute positioning (H/f) and cursor save/restore (s/u) are spoofing aids.
-    for ("Hfsu") |f| try std.testing.expect(!csiAllowed(f, ""));
+test "csiAllowed whitelists SGR/horizontal motion, drops every way onto another line" {
+    for ("mCDGK") |f| try std.testing.expect(csiAllowed(f, ""));
+    // Absolute positioning (H/f), save/restore (s/u) and vertical motion
+    // (A/B/E/F) all reach a line the child never wrote.
+    for ("HfsuABEF") |f| try std.testing.expect(!csiAllowed(f, ""));
+    // No count rehabilitates vertical motion; horizontal motion needs no cap
+    // because it cannot leave the current line.
+    for ([_][]const u8{ "", "1", "3", "999" }) |p| try std.testing.expect(!csiAllowed('A', p));
+    try std.testing.expect(csiAllowed('C', "999"));
+    try std.testing.expect(csiAllowed('G', "80"));
     // J is param-gated, not final-byte-only.
     try std.testing.expect(csiAllowed('J', "2"));
     try std.testing.expect(!csiAllowed('J', "3"));
@@ -311,7 +318,7 @@ test "csiAllowed rejects private-prefix and intermediate parameter bytes" {
     // Numeric params, including SGR subparameters, stay allowed.
     try std.testing.expect(csiAllowed('m', "1;31"));
     try std.testing.expect(csiAllowed('m', "4:3"));
-    try std.testing.expect(csiAllowed('A', "3"));
+    try std.testing.expect(csiAllowed('C', "3"));
 }
 
 test "eraseDisplayAllowed permits only visible-screen variants" {

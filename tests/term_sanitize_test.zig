@@ -89,10 +89,34 @@ test "SGR with multiple params passes" {
     try check("\x1b[1;32;40mx", "\x1b[1;32;40mx");
 }
 
-// ── CSI cursor motion allowed ───────────────────────────────────────
+// ── CSI cursor motion ───────────────────────────────────────────────
 
-test "cursor up passes" {
-    try check("\x1b[3A", "\x1b[3A");
+test "horizontal motion passes" {
+    // The child already owns the line it is writing, so moving along it grants
+    // nothing a bare CR would not.
+    try check("\x1b[C", "\x1b[C");
+    try check("\x1b[5C", "\x1b[5C");
+    try check("\x1b[3D", "\x1b[3D");
+    try check("\x1b[40G", "\x1b[40G");
+}
+
+test "vertical cursor motion dropped" {
+    // Reaching another line is the whole spoofing primitive: with the line
+    // erase, a child that can move up repaints output malt printed. No count is
+    // safe -- small hops repeat, and any count clamps at the viewport edge --
+    // so A/B/E/F drop outright, like H/f.
+    try check("\x1b[10A\x1b[2Kok: verified\x1b[10B", "\x1b[2Kok: verified");
+    for ([_][]const u8{ "A", "1A", "3A", "999A", "1B", "99B", "9E", "10E", "40F", "0000000009A", "1;999A", "99999999999999999999A" }) |seq| {
+        var in: [40]u8 = undefined;
+        const s = std.fmt.bufPrint(&in, "a\x1b[{s}b", .{seq}) catch unreachable;
+        try check(s, "ab");
+    }
+}
+
+test "CR still redraws the child's own line" {
+    // The escape hatch the ban leaves open: in-place progress needs no CSI.
+    try check("50%\r100%", "50%\r100%");
+    try check("50%\r\x1b[2K100%", "50%\r\x1b[2K100%");
 }
 
 test "absolute cursor position dropped" {
@@ -296,6 +320,14 @@ test "CR mid-codepoint disarms the sequence" {
     try check("\xe2\r\x9b>4;2m", "\xe2\r");
 }
 
+test "8-bit CSI introducer cannot reach another line either" {
+    // 0x9B is CSI: the ban must not be bypassable through the 8-bit door.
+    try check("a\x9b99Ab", "ab");
+    try check("a\x9b9Ab", "ab");
+    // The 8-bit form of a permitted command still normalises to 7-bit ESC [.
+    try check("a\x9b5Cb", "a\x1b[5Cb");
+}
+
 test "an ill-formed sequence split across feed() calls still drops" {
     var buf: Buf = .{};
     defer buf.deinit();
@@ -364,6 +396,18 @@ test "CSI split across feed() calls is reassembled" {
     try s.feed("1mred\x1b[0m bye", buf.sink());
     try s.flush(buf.sink());
     try testing.expectEqualStrings("hi \x1b[31mred\x1b[0m bye", buf.list.items);
+}
+
+test "a seek split across feed() calls still drops" {
+    // A hostile child picks its own write boundaries; the final byte decides,
+    // and it can land in any chunk.
+    var buf: Buf = .{};
+    defer buf.deinit();
+    var s = ts.Sanitizer.init();
+    try s.feed("a\x1b[99", buf.sink());
+    try s.feed("Ab", buf.sink());
+    try s.flush(buf.sink());
+    try testing.expectEqualStrings("ab", buf.list.items);
 }
 
 test "OSC split across chunks is dropped end-to-end" {

@@ -71,7 +71,7 @@ test "private-parameter and intermediate CSI forms drop" {
         "\x1b[=5m",
         "\x1b[0;1$m",
         "\x1b[!K",
-        "\x1b[ A", // SL (scroll left) smuggled under the cursor-up arm
+        "\x1b[ A", // SL (scroll left) must not read as any whitelisted final
     };
     for (hostile) |bad| {
         var b: Buf = .{};
@@ -88,7 +88,7 @@ test "legitimate numeric sequences still pass byte-identically" {
         "\x1b[4:3m", // SGR subparameters: curly underline
         "\x1b[2K",
         "\x1b[2J",
-        "\x1b[3A",
+        "\x1b[5C",
     };
     for (good) |ok| {
         var b: Buf = .{};
