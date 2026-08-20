@@ -163,30 +163,51 @@ pub const Sanitizer = struct {
     }
 
     fn passable(self: *Sanitizer, b: u8) bool {
-        // A continuation byte passes only while a lead byte is still expecting
-        // one; this is what tells a real 0x80..0x9F continuation from a lone C1
-        // control (the 8-bit CSI/OSC/DCS/ST introducers we must drop).
-        if (self.utf8_remaining > 0) switch (b) {
-            0x80...0xBF => {
-                self.utf8_remaining -= 1;
-                return true;
-            },
-            else => self.utf8_remaining = 0, // truncated — reclassify below
-        };
-        return switch (b) {
-            0x20...0x7E, '\n', '\r', '\t' => true,
-            // UTF-8 lead byte: pass raw and arm the continuation counter. std
-            // rejects continuation bytes and invalid leads (0xF8..0xFF), both of
-            // which fall through to `false` — closing the lone-C1 hole.
-            0x80...0xFF => blk: {
-                const len = std.unicode.utf8ByteSequenceLength(b) catch break :blk false;
-                self.utf8_remaining = @intCast(len - 1);
-                break :blk true;
-            },
-            else => false, // C0 controls, DEL
-        };
+        // CR is a stream byte here: child output uses it for in-place progress.
+        return passableByte(b, &self.utf8_remaining) or b == '\r';
     }
 };
+
+/// Shared pass predicate. The continuation counter is what tells a real
+/// 0x80..0xBF continuation from a lone C1 control, so both callers must
+/// classify through here rather than reimplement the rule.
+fn passableByte(b: u8, utf8_remaining: *u2) bool {
+    if (utf8_remaining.* > 0) switch (b) {
+        0x80...0xBF => {
+            utf8_remaining.* -= 1;
+            return true;
+        },
+        else => utf8_remaining.* = 0, // truncated — reclassify below
+    };
+    return switch (b) {
+        0x20...0x7E, '\n', '\t' => true,
+        // UTF-8 lead byte: pass raw and arm the continuation counter. std
+        // rejects continuation bytes and invalid leads (0xF8..0xFF), both of
+        // which fall through to `false` — closing the lone-C1 hole.
+        0x80...0xFF => blk: {
+            const len = std.unicode.utf8ByteSequenceLength(b) catch break :blk false;
+            utf8_remaining.* = @intCast(len - 1);
+            break :blk true;
+        },
+        else => false, // C0 controls, DEL
+    };
+}
+
+/// Filter `buf` in place, returning the kept prefix.
+///
+/// Stricter than `Sanitizer` by design: text interpolated into malt's own
+/// output has no legitimate reason to carry an escape, so there is no CSI
+/// whitelist here and CR drops with the other C0 controls.
+pub fn scrubInPlace(buf: []u8) []u8 {
+    var out: usize = 0;
+    var utf8_remaining: u2 = 0;
+    for (buf) |b| {
+        if (!passableByte(b, &utf8_remaining)) continue;
+        buf[out] = b;
+        out += 1;
+    }
+    return buf[0..out];
+}
 
 /// Maps an 8-bit C1 control introducer to the state that drops or filters
 /// its payload, mirroring the 7-bit ESC forms. `null` for any other byte.
@@ -267,4 +288,53 @@ test "passable drops lone C1 but passes UTF-8 continuation under an armed counte
     try std.testing.expect(s.passable(0x9C));
     try std.testing.expect(s.passable(0x93));
     try std.testing.expect(!s.passable(0x9C));
+}
+
+// ── inline unit tests: scrubInPlace ─────────────────────────────────
+
+test "scrubInPlace drops ESC, other C0, DEL and CR but keeps TAB/LF" {
+    var buf = "a\x1bb\x00c\x07d\x7fe\rf\tg\nh".*;
+    try std.testing.expectEqualStrings("abcdef\tg\nh", scrubInPlace(&buf));
+}
+
+test "scrubInPlace keeps accented UTF-8 and emoji byte-identical" {
+    const text = "Café ☕ déjà-vu 🚀";
+    var buf: [64]u8 = undefined;
+    @memcpy(buf[0..text.len], text);
+    try std.testing.expectEqualStrings(text, scrubInPlace(buf[0..text.len]));
+}
+
+test "scrubInPlace drops lone C1 introducers but keeps them as continuations" {
+    // 0x9B/0x9D are the 8-bit CSI/OSC forms; bare they must go.
+    var lone = [_]u8{ 'a', 0x9B, 0x9D, 0x80, 'b' };
+    try std.testing.expectEqualStrings("ab", scrubInPlace(&lone));
+    // Inside ✓ (E2 9C 93) the same byte values are continuations and stay.
+    var check = "x\u{2713}y".*;
+    try std.testing.expectEqualStrings("x\u{2713}y", scrubInPlace(&check));
+}
+
+test "scrubInPlace drops a truncated multibyte lead and its stray bytes" {
+    // Lead byte promising two continuations, followed by ASCII: the lead is
+    // kept (it is a valid lead) but the counter unwinds so 'b' still passes.
+    var buf = [_]u8{ 0xE2, 'a', 'b' };
+    const got = scrubInPlace(&buf);
+    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
+    try std.testing.expectEqualStrings("ab", got[got.len - 2 ..]);
+    // An invalid lead (0xFF) has no sequence length and drops outright.
+    var bad = [_]u8{ 'a', 0xFF, 'b' };
+    try std.testing.expectEqualStrings("ab", scrubInPlace(&bad));
+}
+
+test "scrubInPlace strips a whole OSC 52 clipboard payload of its controls" {
+    var buf = "evil\x1b]52;c;ZXZpbA==\x07tail".*;
+    const got = scrubInPlace(&buf);
+    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x07) == null);
+    try std.testing.expect(std.mem.startsWith(u8, got, "evil"));
+    try std.testing.expect(std.mem.endsWith(u8, got, "tail"));
+}
+
+test "scrubInPlace handles an empty buffer" {
+    var buf: [0]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), scrubInPlace(&buf).len);
 }
