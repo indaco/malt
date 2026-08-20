@@ -420,7 +420,7 @@ test "headResolved reports an exhausted redirect walk instead of an un-fetched u
 
     // The walk sends exactly one request per hop in the cap pre- and post-fix,
     // so the hop thread always drains and the join never hangs.
-    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_head_redirects });
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_redirects + 1 });
 
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
@@ -438,10 +438,10 @@ test "headResolved reports an exhausted redirect walk instead of an un-fetched u
     try std.testing.expectError(error.TooManyHttpRedirects, result);
 }
 
-test "headResolved resolves a chain that uses the hop cap exactly" {
-    // Guards against over-correcting: the last hop inside the cap may still be
-    // the terminal response. This passes on the pre-fix loop too - it pins a
-    // legal chain that must keep resolving if the budget is ever retuned.
+test "headResolved resolves a chain as long as the download can follow" {
+    // Guards against over-correcting: a chain the download would follow to the
+    // end must still classify. Expressed in the download's budget so retuning
+    // it moves both loops together.
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -457,9 +457,9 @@ test "headResolved resolves a chain that uses the hop cap exactly" {
         .listener = &l1,
         .redirect_to = loc,
         .status = .found,
-        .redirects_left = client.HttpClient.max_head_redirects - 1,
+        .redirects_left = client.HttpClient.max_redirects,
     };
-    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_head_redirects });
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_redirects + 1 });
 
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
@@ -476,4 +476,170 @@ test "headResolved resolves a chain that uses the hop cap exactly" {
     defer resolved.deinit();
 
     try std.testing.expectEqualStrings(loc, resolved.final_url);
+}
+
+test "headResolved refuses a chain one hop longer than the download can follow" {
+    // The window this closes: classifying a cask - possibly as `.pkg`, which
+    // raises the sudo installer prompt - from a chain the download then
+    // rejects. One hop past the download's budget must never resolve.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    var hop1 = Hop{
+        .io = io,
+        .listener = &l1,
+        .redirect_to = loc,
+        .status = .found,
+        .redirects_left = client.HttpClient.max_redirects + 1,
+    };
+    // Serves one request more than the walk may spend, so a loop that follows
+    // the extra hop reaches a terminal 200 and resolves instead of hanging.
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_redirects + 2 });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+
+    const result = http.headResolved(url);
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    if (result) |r| {
+        var resolved = r;
+        resolved.deinit();
+    } else |_| {}
+    try std.testing.expectError(error.TooManyHttpRedirects, result);
+}
+
+test "a download follows a chain the full length of the shared redirect budget" {
+    // The other half of the invariant: the HEAD walk is only allowed to resolve
+    // what the download reaches, so the download must actually reach it.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    var hop1 = Hop{
+        .io = io,
+        .listener = &l1,
+        .redirect_to = loc,
+        .status = .found,
+        .redirects_left = client.HttpClient.max_redirects,
+    };
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_redirects + 1 });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+
+    const result = http.getWithHeaders(url, &.{}, null, .transport_only);
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    const resp = try result;
+    defer resp.allocator.free(resp.body);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expectEqualStrings(blob_body, resp.body);
+}
+
+test "a streaming download follows a chain the full length of the shared redirect budget" {
+    // The bottle path streams rather than buffers, and it walks redirects on
+    // its own; without this it is the only walk whose hop following is untested.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    var hop1 = Hop{
+        .io = io,
+        .listener = &l1,
+        .redirect_to = loc,
+        .status = .found,
+        .redirects_left = client.HttpClient.max_redirects,
+    };
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_redirects + 1 });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+
+    const status = http.getToWriter(url, &.{}, &sink.writer, null);
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    try std.testing.expectEqual(@as(u16, 200), try status);
+    try std.testing.expectEqualStrings(blob_body, sink.writer.buffered());
+}
+
+test "a streaming download names an over-long chain rather than calling it malformed" {
+    // The streaming walk maps hop failures into its own error set, where an
+    // exhausted budget is one `else` arm away from being reported as a
+    // malformed redirect - a different fault with a different remedy.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    var hop1 = Hop{
+        .io = io,
+        .listener = &l1,
+        .redirect_to = loc,
+        .status = .found,
+    };
+    // A pre-body failure is retried, so the fixture has to outlast every
+    // attempt: each spends the whole budget before giving up.
+    const attempts = 4;
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, attempts * (client.HttpClient.max_redirects + 1) });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+
+    const status = http.getToWriter(url, &.{}, &sink.writer, null);
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    try std.testing.expectError(error.TooManyHttpRedirects, status);
+    try std.testing.expectEqualStrings("", sink.writer.buffered());
 }

@@ -610,8 +610,6 @@ pub const HttpClient = struct {
         }
     };
 
-    pub const max_head_redirects = 5;
-
     /// Conditional GET — sends `If-None-Match: <etag>` when `if_none_match`
     /// is non-null and returns a `ConditionalResponse` that surfaces the
     /// server's ETag plus a `not_modified` flag when the server answered
@@ -661,7 +659,8 @@ pub const HttpClient = struct {
         // Every exit below returns an error rather than what the walk reached
         // so far: a partial walk is indistinguishable from a resolved url, and
         // the caller picks a cask's artifact type from it.
-        for (0..max_head_redirects) |_| {
+        var hops: usize = 0;
+        while (true) : (hops += 1) {
             const uri = std.Uri.parse(resolved.final_url) catch return error.RequestFailed;
 
             var req = self.client.request(.HEAD, uri, .{
@@ -681,15 +680,10 @@ pub const HttpClient = struct {
             }
 
             const status: u16 = @intFromEnum(response.head.status);
-            if (!isFollowableRedirect(status)) break;
-
-            const loc = response.head.location orelse return error.HttpRedirectLocationMissing;
-            const next = try self.nextHopUrl(uri, loc);
+            const next = (try self.nextRedirectHop(uri, status, response.head.location, hops)) orelse break;
             defer self.allocator.free(next);
             try resolved.replaceFinalUrl(next);
-            // No `break` above means every hop redirected, so the cap ran out
-            // mid-walk and `final_url` names a url nothing ever requested.
-        } else return error.TooManyHttpRedirects;
+        }
 
         return resolved;
     }
@@ -935,9 +929,11 @@ pub const HttpClient = struct {
         };
     }
 
-    /// Max redirects followed on a credentialed GET — matches stdlib's default
-    /// so download depth is unchanged by taking over redirect handling.
-    const max_get_redirects: usize = 3;
+    /// Redirect budget for every walk - matches stdlib's default so download
+    /// depth is unchanged by taking over redirect handling. The HEAD walk that
+    /// classifies a cask shares it, so it cannot resolve a chain the download
+    /// would reject.
+    pub const max_redirects: usize = 3;
 
     const GetOutcome = struct {
         status: u16,
@@ -980,6 +976,24 @@ pub const HttpClient = struct {
         if (schemeIsHttps(base.scheme) and !schemeIsHttps(next_uri.scheme))
             return error.TlsDowngradeRefused;
         return next;
+    }
+
+    /// The redirect decision every walk shares, so the rules cannot drift
+    /// between them. A missing `Location` and a spent budget both error here
+    /// rather than reading as terminal - either one would otherwise hand back
+    /// a url nothing ever requested as if it were resolved. Null means
+    /// terminal; caller owns the url.
+    fn nextRedirectHop(
+        self: *HttpClient,
+        base: std.Uri,
+        status: u16,
+        location: ?[]const u8,
+        hops: usize,
+    ) !?[]const u8 {
+        if (!isFollowableRedirect(status)) return null;
+        const loc = location orelse return error.HttpRedirectLocationMissing;
+        if (hops >= max_redirects) return error.TooManyHttpRedirects;
+        return try self.nextHopUrl(base, loc);
     }
 
     /// Release a request whose response carries no body. stdlib's `deinit`
@@ -1032,12 +1046,7 @@ pub const HttpClient = struct {
             var response = try req.receiveHead(&redirect_buf);
             const status: u16 = @intFromEnum(response.head.status);
 
-            if (isFollowableRedirect(status)) {
-                // A redirect without a Location is malformed — fail loud rather
-                // than hand the redirect's body back to the caller as a "success".
-                const loc = response.head.location orelse return error.HttpRedirectLocationMissing;
-                if (hops >= max_get_redirects) return error.TooManyHttpRedirects;
-                const next = try self.nextHopUrl(uri, loc);
+            if (try self.nextRedirectHop(uri, status, response.head.location, hops)) |next| {
                 errdefer self.allocator.free(next);
                 if (!credsSurviveRedirect(current, next)) live_creds = &.{};
                 // Hop committed: no fallible op past here, so the errdefers
@@ -1202,14 +1211,13 @@ pub const HttpClient = struct {
             var response = req.receiveHead(&redirect_buf) catch return error.RequestFailed;
             const status: u16 = @intFromEnum(response.head.status);
 
-            if (isFollowableRedirect(status)) {
-                const loc = response.head.location orelse return error.HttpRedirectInvalid;
-                if (hops >= max_get_redirects) return error.TooManyHttpRedirects;
-                const next = self.nextHopUrl(uri, loc) catch |e| switch (e) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.TlsDowngradeRefused => return error.TlsDowngradeRefused,
-                    else => return error.HttpRedirectInvalid,
-                };
+            const hop = self.nextRedirectHop(uri, status, response.head.location, hops) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.TlsDowngradeRefused => return error.TlsDowngradeRefused,
+                error.TooManyHttpRedirects => return error.TooManyHttpRedirects,
+                else => return error.HttpRedirectInvalid,
+            };
+            if (hop) |next| {
                 errdefer self.allocator.free(next);
                 if (!credsSurviveRedirect(current, next)) live_creds = &.{};
                 req.deinit();
