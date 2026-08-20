@@ -239,6 +239,74 @@ test "incomplete UTF-8 lead is flushed when a control follows" {
     try check("x\xe2\x1b[?25ly", "x\xe2y");
 }
 
+test "invalid UTF-8 lead does not arm the continuation counter" {
+    // C0/C1 and F5..F7 are never legal leads, yet a length classifier hands
+    // them a 1- and 3-byte window. The lead must drop and the C1 introducer
+    // behind it must still reach the CSI/OSC filter.
+    try check("a\xc0\x9b>4;2mb", "ab");
+    try check("a\xc1\x9b>4;2mb", "ab");
+    // 'm' terminates the CSI the introducer opened, so the tail is plain text.
+    try check("a\xf5\x9b\x9dmb", "ab");
+    try check("a\xf6\x9b\x9dmb", "ab");
+    try check("a\xf7\x9b\x9dmb", "ab");
+    // A whitelisted CSI behind an invalid lead is still filtered, not smuggled.
+    try check("\xc0\x9b1;31m", "\x1b[1;31m");
+    // An invalid lead followed by an OSC introducer drops the whole payload.
+    try check("a\xc0\x9d52;c;ZXZpbA==\x07b", "ab");
+}
+
+test "overlong sequence cannot carry an 8-bit C1 introducer" {
+    // The continuation bytes below are all in 0x80..0xBF, so a range-only
+    // check accepts them; only per-position bounds reject the encoding.
+    try check("\xe0\x80\x9b>4;2m", "\xe0"); // overlong 3-byte
+    try check("\xf0\x80\x80\x9b>4;2m", "\xf0"); // overlong 4-byte
+    try check("\xed\xa0\x9b>4;2m", "\xed"); // UTF-16 surrogate
+    try check("\xf4\x90\x9b\x9d", "\xf4"); // beyond U+10FFFF
+}
+
+test "well-formed boundary codepoints still pass byte-identically" {
+    // Guards against fixing the bug by dropping multibyte output wholesale.
+    try check("\xc2\x80", "\xc2\x80"); // U+0080, lowest 2-byte
+    try check("\xdf\xbf", "\xdf\xbf"); // U+07FF, highest 2-byte
+    try check("\xe0\xa0\x80", "\xe0\xa0\x80"); // U+0800, lowest 3-byte
+    try check("\xed\x9f\xbf", "\xed\x9f\xbf"); // U+D7FF, last before surrogates
+    try check("\xee\x80\x80", "\xee\x80\x80"); // U+E000, first after surrogates
+    try check("\xef\xbf\xbf", "\xef\xbf\xbf"); // U+FFFF
+    try check("\xf0\x90\x80\x80", "\xf0\x90\x80\x80"); // U+10000
+    try check("\xf4\x8f\xbf\xbf", "\xf4\x8f\xbf\xbf"); // U+10FFFF, highest legal
+    // U+D6C0: its own continuation byte is 0x9B, the 8-bit CSI introducer.
+    try check("\xed\x9b\x80", "\xed\x9b\x80");
+}
+
+test "a dropped escape disarms a pending UTF-8 sequence" {
+    // Without the reset, the introducer lands inside the lead's continuation
+    // window and is emitted raw instead of opening a filtered CSI.
+    try check("\xe2\x1bZ\x9b>4;2m", "\xe2");
+    // ESC immediately followed by the 8-bit introducer: both drop as a two-byte
+    // escape, so the parameters that follow are plain text.
+    try check("\xe2\x1b\x9b>4;2m", "\xe2>4;2m");
+    // A whitelisted CSI between the lead and the introducer must not rearm it.
+    try check("\xe2\x1b[0m\x9b>4;2m", "\xe2\x1b[0m");
+}
+
+test "CR mid-codepoint disarms the sequence" {
+    // Child progress output uses CR; it must not be mistaken for a continuation
+    // nor leave the counter armed for whatever follows.
+    try check("\xe2\ry", "\xe2\ry");
+    try check("\xe2\r\x9b>4;2m", "\xe2\r");
+}
+
+test "an ill-formed sequence split across feed() calls still drops" {
+    var buf: Buf = .{};
+    defer buf.deinit();
+    var s = ts.Sanitizer.init();
+    try s.feed("\xed", buf.sink());
+    try s.feed("\xa0", buf.sink());
+    try s.feed("\x9b>4;2m", buf.sink());
+    try s.flush(buf.sink());
+    try testing.expectEqualSlices(u8, "\xed", buf.list.items);
+}
+
 // ── OSC always dropped ──────────────────────────────────────────────
 
 test "OSC 52 clipboard attempt dropped" {

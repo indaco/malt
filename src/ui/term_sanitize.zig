@@ -1,9 +1,9 @@
 //! malt — terminal escape-sequence sanitizer
 //!
 //! Filters bytes from an untrusted child process before they reach
-//! the user's terminal. Permits printable ASCII + CR/LF/TAB + valid
-//! UTF-8 (tracked with a small continuation counter, so lone C1
-//! controls in 0x80..0x9F drop while real multibyte output passes) +
+//! the user's terminal. Permits printable ASCII + CR/LF/TAB + well-formed
+//! UTF-8 (validated per byte position, so lone C1 controls in 0x80..0x9F
+//! drop while real multibyte output passes) +
 //! a whitelisted subset of CSI sequences, gated on the final byte AND
 //! numeric-only parameters: SGR colours, relative cursor motion
 //! (A–G/E/F), line erase (K), and visible-screen erase (J with no
@@ -50,9 +50,9 @@ pub const Sanitizer = struct {
     csi_overflow: bool = false,
     out_buf: [out_buf]u8 = undefined,
     out_len: usize = 0,
-    // Outstanding UTF-8 continuation bytes expected after a lead byte, so a
-    // continuation in 0x80..0x9F passes while a lone C1 control is dropped.
-    utf8_remaining: u2 = 0,
+    // Pending UTF-8 sequence, so a continuation in 0x80..0x9F passes while a
+    // lone C1 control is dropped.
+    utf8: Utf8State = .{},
 
     const State = enum {
         normal,
@@ -87,9 +87,9 @@ pub const Sanitizer = struct {
             .normal => {
                 if (b == 0x1B) {
                     try self.flush(sink);
-                    self.utf8_remaining = 0;
+                    self.utf8 = .{};
                     self.state = .esc;
-                } else if (self.utf8_remaining == 0) {
+                } else if (self.utf8.remaining == 0) {
                     if (c1Target(b)) |target| {
                         // 8-bit C1 introducer: drop it and its payload just like
                         // the 7-bit ESC form, so an 8-bit terminal can't
@@ -167,32 +167,60 @@ pub const Sanitizer = struct {
 
     fn passable(self: *Sanitizer, b: u8) bool {
         // CR is a stream byte here: child output uses it for in-place progress.
-        return passableByte(b, &self.utf8_remaining) or b == '\r';
+        return passableByte(b, &self.utf8) or b == '\r';
     }
 };
 
-/// Shared pass predicate. The continuation counter is what tells a real
-/// 0x80..0xBF continuation from a lone C1 control, so both callers must
-/// classify through here rather than reimplement the rule.
-fn passableByte(b: u8, utf8_remaining: *u2) bool {
-    if (utf8_remaining.* > 0) switch (b) {
-        0x80...0xBF => {
-            utf8_remaining.* -= 1;
-            return true;
-        },
-        else => utf8_remaining.* = 0, // truncated — reclassify below
+/// Pending multibyte sequence. `lo`/`hi` bound the *next* byte, which is what
+/// separates a well-formed encoding from an overlong, surrogate or
+/// out-of-range one — a plain 0x80..0xBF range check cannot tell them apart.
+const Utf8State = struct {
+    remaining: u2 = 0,
+    lo: u8 = 0x80,
+    hi: u8 = 0xBF,
+};
+
+/// Unicode Table 3-7: the only leads that begin a well-formed sequence, each
+/// with the range its successor byte must fall in. A length classifier is not
+/// a substitute — it accepts 0xC0/0xC1 and 0xF5..0xF7, which are never legal.
+fn leadState(b: u8) ?Utf8State {
+    return switch (b) {
+        0xC2...0xDF => .{ .remaining = 1, .lo = 0x80, .hi = 0xBF },
+        0xE0 => .{ .remaining = 2, .lo = 0xA0, .hi = 0xBF },
+        0xE1...0xEC => .{ .remaining = 2, .lo = 0x80, .hi = 0xBF },
+        0xED => .{ .remaining = 2, .lo = 0x80, .hi = 0x9F },
+        0xEE...0xEF => .{ .remaining = 2, .lo = 0x80, .hi = 0xBF },
+        0xF0 => .{ .remaining = 3, .lo = 0x90, .hi = 0xBF },
+        0xF1...0xF3 => .{ .remaining = 3, .lo = 0x80, .hi = 0xBF },
+        0xF4 => .{ .remaining = 3, .lo = 0x80, .hi = 0x8F },
+        else => null,
     };
+}
+
+/// Shared pass predicate. The pending-sequence state is what tells a real
+/// continuation from a lone C1 control, so both callers must classify through
+/// here rather than reimplement the rule.
+///
+/// Emission stays byte-at-a-time: every byte that passes is part of a
+/// well-formed prefix, so a later rejection leaves a maximal subpart that a
+/// strict decoder eats as one error rather than resyncing into it as C1.
+fn passableByte(b: u8, st: *Utf8State) bool {
+    if (st.remaining > 0) {
+        if (b >= st.lo and b <= st.hi) {
+            st.remaining -= 1;
+            // Only the byte after the lead is range-restricted.
+            st.lo = 0x80;
+            st.hi = 0xBF;
+            return true;
+        }
+        st.* = .{}; // ill-formed — reclassify below
+    }
     return switch (b) {
         0x20...0x7E, '\n', '\t' => true,
-        // UTF-8 lead byte: pass raw and arm the continuation counter. std
-        // rejects continuation bytes and invalid leads (0xF8..0xFF), both of
-        // which fall through to `false` — closing the lone-C1 hole.
-        0x80...0xFF => blk: {
-            const len = std.unicode.utf8ByteSequenceLength(b) catch break :blk false;
-            utf8_remaining.* = @intCast(len - 1);
+        else => if (leadState(b)) |armed| blk: {
+            st.* = armed;
             break :blk true;
-        },
-        else => false, // C0 controls, DEL
+        } else false, // C0 controls, DEL, continuation and invalid lead bytes
     };
 }
 
@@ -203,9 +231,9 @@ fn passableByte(b: u8, utf8_remaining: *u2) bool {
 /// whitelist here and CR drops with the other C0 controls.
 pub fn scrubInPlace(buf: []u8) []u8 {
     var out: usize = 0;
-    var utf8_remaining: u2 = 0;
+    var st: Utf8State = .{};
     for (buf) |b| {
-        if (!passableByte(b, &utf8_remaining)) continue;
+        if (!passableByte(b, &st)) continue;
         buf[out] = b;
         out += 1;
     }
@@ -300,6 +328,86 @@ test "c1Target maps 8-bit introducers to their drop/filter state" {
     for ([_]u8{ 0x9C, 'A', 0x80, 0x1B }) |b| try std.testing.expect(c1Target(b) == null);
 }
 
+test "leadState arms only the leads Unicode Table 3-7 permits" {
+    // Length classifiers accept these; only a table of legal leads rejects them.
+    for ([_]u8{ 0xC0, 0xC1, 0xF5, 0xF6, 0xF7, 0xF8, 0xFD, 0xFF, 0x80, 0x9B, 0xBF }) |b|
+        try std.testing.expect(leadState(b) == null);
+    // Leads that constrain their successor byte, per Table 3-7.
+    try std.testing.expectEqual(Utf8State{ .remaining = 1, .lo = 0x80, .hi = 0xBF }, leadState(0xC2).?);
+    try std.testing.expectEqual(Utf8State{ .remaining = 2, .lo = 0xA0, .hi = 0xBF }, leadState(0xE0).?);
+    try std.testing.expectEqual(Utf8State{ .remaining = 2, .lo = 0x80, .hi = 0x9F }, leadState(0xED).?);
+    try std.testing.expectEqual(Utf8State{ .remaining = 3, .lo = 0x90, .hi = 0xBF }, leadState(0xF0).?);
+    try std.testing.expectEqual(Utf8State{ .remaining = 3, .lo = 0x80, .hi = 0x8F }, leadState(0xF4).?);
+}
+
+test "every well-formed codepoint survives the lead table byte-identically" {
+    // The table is hand-transcribed, so check it against an independent decoder
+    // rather than hand-picked examples: for each lead, sweep the successor byte
+    // (the only other position the table constrains) over a well-formed tail.
+    // Only acceptance is asserted -- a rejected sequence still emits its
+    // maximal subpart, so passthrough is not equivalent to validity.
+    var buf: [4]u8 = undefined;
+    for (0xC0..0x100) |lead| {
+        inline for (.{ 2, 3, 4 }) |n| {
+            for (0x80..0x100) |second| {
+                var seq: [n]u8 = @splat(0x80); // well-formed tail
+                seq[0] = @intCast(lead);
+                seq[1] = @intCast(second);
+                if (!std.unicode.utf8ValidateSlice(&seq)) continue;
+                @memcpy(buf[0..n], &seq);
+                try std.testing.expectEqualSlices(u8, &seq, scrubInPlace(buf[0..n]));
+            }
+        }
+    }
+}
+
+test "passableByte rejects ill-formed leads and out-of-range continuations" {
+    var st: Utf8State = .{};
+    // An invalid lead must drop and leave the counter disarmed, so the C1
+    // introducer behind it is still classified as an introducer.
+    for ([_]u8{ 0xC0, 0xC1, 0xF5, 0xF6, 0xF7, 0xF8, 0xFF }) |b| {
+        try std.testing.expect(!passableByte(b, &st));
+        try std.testing.expectEqual(@as(u2, 0), st.remaining);
+        try std.testing.expect(!passableByte(0x9B, &st));
+    }
+    // Overlong, surrogate and out-of-range forms all use continuation bytes in
+    // 0x80..0xBF, so only the per-position bounds reject them.
+    for ([_][2]u8{ .{ 0xE0, 0x80 }, .{ 0xED, 0xA0 }, .{ 0xF0, 0x80 }, .{ 0xF4, 0x90 } }) |seq| {
+        st = .{};
+        try std.testing.expect(passableByte(seq[0], &st));
+        try std.testing.expect(!passableByte(seq[1], &st));
+        try std.testing.expectEqual(@as(u2, 0), st.remaining);
+    }
+    // Only the second byte is range-restricted; the rest are plain continuations.
+    st = .{};
+    for ([_]u8{ 0xF0, 0x90, 0x80, 0x80 }) |b| try std.testing.expect(passableByte(b, &st));
+    try std.testing.expectEqual(@as(u2, 0), st.remaining);
+}
+
+test "passableByte reclassifies the byte that broke a sequence" {
+    // A truncated codepoint must not swallow the byte that follows it.
+    var st: Utf8State = .{};
+    try std.testing.expect(passableByte(0xE2, &st));
+    try std.testing.expect(passableByte('a', &st)); // ASCII resumes immediately
+    try std.testing.expectEqual(@as(u2, 0), st.remaining);
+    // A fresh lead in the broken position arms a fresh sequence.
+    st = .{};
+    try std.testing.expect(passableByte(0xE2, &st));
+    try std.testing.expect(passableByte(0xC3, &st));
+    try std.testing.expectEqual(@as(u2, 1), st.remaining);
+    try std.testing.expect(passableByte(0xA9, &st));
+}
+
+test "CR resets an armed sequence instead of counting as a continuation" {
+    // `passable` ORs in CR after `passableByte`; the reset must still happen or
+    // a CR mid-codepoint would leave the counter armed for the next byte.
+    var s = Sanitizer.init();
+    try std.testing.expect(s.passable(0xE2));
+    try std.testing.expect(s.passable('\r'));
+    try std.testing.expectEqual(@as(u2, 0), s.utf8.remaining);
+    try std.testing.expect(!s.passable(0x9B));
+}
+
 test "passable drops lone C1 but passes UTF-8 continuation under an armed counter" {
     var s = Sanitizer.init();
     // Printable ASCII and whitespace pass; C0 and DEL drop.
@@ -358,6 +466,12 @@ test "scrubInPlace strips a whole OSC 52 clipboard payload of its controls" {
     try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x07) == null);
     try std.testing.expect(std.mem.startsWith(u8, got, "evil"));
     try std.testing.expect(std.mem.endsWith(u8, got, "tail"));
+}
+
+test "scrubInPlace drops CR mid-codepoint without arming the next byte" {
+    // CR is a C0 control here, so it both drops and disarms.
+    var buf = [_]u8{ 0xE2, '\r', 0x9B, 'x' };
+    try std.testing.expectEqualStrings("\xe2x", scrubInPlace(&buf));
 }
 
 test "scrubInPlace handles an empty buffer" {
