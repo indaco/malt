@@ -99,7 +99,8 @@ fn escapeEnd(row: []const u8, i: usize) usize {
 }
 
 /// Byte length of the rune at `row[i]`, clamped to what remains. An invalid lead
-/// byte counts as one raw byte (term_sanitize passes UTF-8 through unvalidated).
+/// counts as one byte: this measures pre-scrub bytes, so it only has to avoid
+/// splitting one — whether the byte survives is `putContent`'s call.
 fn runeLen(row: []const u8, i: usize) usize {
     const want = std.unicode.utf8ByteSequenceLength(row[i]) catch return 1;
     return @min(@as(usize, want), row.len - i);
@@ -145,7 +146,8 @@ test "truncate handles an empty row and an all-escape row" {
 }
 
 test "truncate counts an invalid UTF-8 byte as one raw column and never splits it" {
-    // 0xff is never a valid lead; treat it as one opaque byte (term_sanitize stance).
+    // 0xff is never a valid lead; count it as one column rather than splitting it.
+    // Truncation runs before the scrub, so a dropped byte only ever shrinks a row.
     try std.testing.expectEqualStrings("a\xff", truncate("a\xffb", 2));
     try std.testing.expectEqualStrings("a", truncate("a\xffb", 1)); // stops before the bad byte
 }
