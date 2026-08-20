@@ -680,7 +680,16 @@ pub const HttpClient = struct {
             const status: u16 = @intFromEnum(response.head.status);
             if (status >= 301 and status <= 308) {
                 if (response.head.location) |loc| {
-                    try resolved.replaceFinalUrl(loc);
+                    const next = self.nextHopUrl(uri, loc) catch |e| switch (e) {
+                        // A refusal must reach the caller: silently returning the
+                        // pre-hop url would read as a successful resolution.
+                        error.OutOfMemory, error.TlsDowngradeRefused => return e,
+                        // A malformed Location ends resolution here, as it did
+                        // when the raw value failed to parse on the next hop.
+                        else => break,
+                    };
+                    defer self.allocator.free(next);
+                    try resolved.replaceFinalUrl(next);
                     continue;
                 }
             }
@@ -965,6 +974,19 @@ pub const HttpClient = struct {
         return try out.toOwnedSlice();
     }
 
+    /// Resolve one redirect hop, refusing it when the origin's TLS is dropped.
+    /// Shared by all three redirect loops so the rule cannot drift between them.
+    /// Resolving first matters: a relative `Location` carries no scheme and
+    /// would otherwise read as a downgrade. Caller owns the returned slice.
+    fn nextHopUrl(self: *HttpClient, base: std.Uri, location: []const u8) ![]const u8 {
+        const next = try self.resolveRedirectUrl(base, location);
+        errdefer self.allocator.free(next);
+        const next_uri = std.Uri.parse(next) catch return error.HttpRedirectLocationInvalid;
+        if (schemeIsHttps(base.scheme) and !schemeIsHttps(next_uri.scheme))
+            return error.TlsDowngradeRefused;
+        return next;
+    }
+
     /// Release a request whose response carries no body. stdlib's `deinit`
     /// decides by method alone, so on a bodiless status it drains until the
     /// peer closes — on a keep-alive 304 that is a full idle timeout.
@@ -1003,7 +1025,6 @@ pub const HttpClient = struct {
 
         while (true) : (hops += 1) {
             const uri = try std.Uri.parse(current);
-            const https_origin = schemeIsHttps(uri.scheme);
 
             var req = try self.client.request(.GET, uri, .{
                 .extra_headers = live_creds,
@@ -1021,11 +1042,8 @@ pub const HttpClient = struct {
                 // than hand the redirect's body back to the caller as a "success".
                 const loc = response.head.location orelse return error.HttpRedirectLocationMissing;
                 if (hops >= max_get_redirects) return error.TooManyHttpRedirects;
-                const next = try self.resolveRedirectUrl(uri, loc);
+                const next = try self.nextHopUrl(uri, loc);
                 errdefer self.allocator.free(next);
-                const next_uri = std.Uri.parse(next) catch return error.HttpRedirectLocationInvalid;
-                if (https_origin and !schemeIsHttps(next_uri.scheme))
-                    return error.TlsDowngradeRefused;
                 if (!credsSurviveRedirect(current, next)) live_creds = &.{};
                 // Hop committed: no fallible op past here, so the errdefers
                 // stay dormant while we hand `req`/`current` off cleanly.
@@ -1177,7 +1195,6 @@ pub const HttpClient = struct {
 
         while (true) : (hops += 1) {
             const uri = std.Uri.parse(current) catch return error.RequestFailed;
-            const https_origin = schemeIsHttps(uri.scheme);
 
             var req = self.client.request(.GET, uri, .{
                 .extra_headers = live_creds,
@@ -1193,14 +1210,12 @@ pub const HttpClient = struct {
             if (isFollowableRedirect(status)) {
                 const loc = response.head.location orelse return error.HttpRedirectInvalid;
                 if (hops >= max_get_redirects) return error.TooManyHttpRedirects;
-                const next = self.resolveRedirectUrl(uri, loc) catch |e| switch (e) {
+                const next = self.nextHopUrl(uri, loc) catch |e| switch (e) {
                     error.OutOfMemory => return error.OutOfMemory,
+                    error.TlsDowngradeRefused => return error.TlsDowngradeRefused,
                     else => return error.HttpRedirectInvalid,
                 };
                 errdefer self.allocator.free(next);
-                const next_uri = std.Uri.parse(next) catch return error.HttpRedirectInvalid;
-                if (https_origin and !schemeIsHttps(next_uri.scheme))
-                    return error.TlsDowngradeRefused;
                 if (!credsSurviveRedirect(current, next)) live_creds = &.{};
                 req.deinit();
                 self.allocator.free(current);
@@ -1989,6 +2004,84 @@ test "credsSurviveRedirect: dropped on https to http downgrade" {
 
 test "credsSurviveRedirect: dropped for a look-alike suffix without a dot boundary" {
     try std.testing.expect(!HttpClient.credsSurviveRedirect("https://github.com/x", "https://evilgithub.com/y"));
+}
+
+// --- redirect hop resolution (shared by the HEAD and both GET loops) ---
+
+fn expectHop(base_url: []const u8, location: []const u8, want: []const u8) !void {
+    const a = std.testing.allocator;
+    var http = HttpClient.init(std.Options.debug_io, .empty, a);
+    defer http.deinit();
+    const next = try http.nextHopUrl(try std.Uri.parse(base_url), location);
+    defer a.free(next);
+    try std.testing.expectEqualStrings(want, next);
+}
+
+fn expectHopError(base_url: []const u8, location: []const u8, want: anyerror) !void {
+    const a = std.testing.allocator;
+    var http = HttpClient.init(std.Options.debug_io, .empty, a);
+    defer http.deinit();
+    try std.testing.expectError(want, http.nextHopUrl(try std.Uri.parse(base_url), location));
+}
+
+test "nextHopUrl refuses an https to http downgrade" {
+    // The headers harvested from the hop pick a cask's artifact type, and the
+    // pkg type reaches `sudo installer -target /`.
+    try expectHopError("https://example.com/a", "http://example.com/b", error.TlsDowngradeRefused);
+}
+
+test "nextHopUrl refuses a downgrade announced with an upper-case scheme" {
+    try expectHopError("https://example.com/a", "HTTP://example.com/b", error.TlsDowngradeRefused);
+}
+
+test "nextHopUrl allows an https to https hop" {
+    try expectHop("https://example.com/a", "https://cdn.example.com/b", "https://cdn.example.com/b");
+}
+
+test "nextHopUrl allows a cleartext origin to hop to cleartext" {
+    // Loopback fixtures dial http and must keep working; the rule is "do not
+    // lose TLS", not "require TLS" — the origin guard already decides that.
+    try expectHop("http://127.0.0.1:8080/a", "http://127.0.0.1:9090/b", "http://127.0.0.1:9090/b");
+}
+
+test "nextHopUrl allows a cleartext origin to upgrade to https" {
+    try expectHop("http://example.com/a", "https://example.com/b", "https://example.com/b");
+}
+
+test "nextHopUrl keeps a relative location on the base scheme" {
+    // A relative Location carries no scheme, so it must be resolved before the
+    // comparison or every relative hop would read as a downgrade.
+    try expectHop("https://example.com/a/b", "/c", "https://example.com/c");
+    try expectHop("http://127.0.0.1:8080/a/b", "/c", "http://127.0.0.1:8080/c");
+}
+
+test "nextHopUrl inherits the base scheme for a scheme-relative location" {
+    try expectHop("https://example.com/a", "//cdn.example.com/b", "https://cdn.example.com/b");
+}
+
+test "nextHopUrl accepts a location landing exactly on the size cap" {
+    // Pins which side of the cap is inclusive, so the reject test above cannot
+    // drift into rejecting locations that were always legal.
+    const a = std.testing.allocator;
+    const at_cap = try a.alloc(u8, 8 * 1024);
+    defer a.free(at_cap);
+    at_cap[0] = '/';
+    @memset(at_cap[1..], 'a');
+
+    var want: std.Io.Writer.Allocating = .init(a);
+    defer want.deinit();
+    try want.writer.writeAll("https://example.com");
+    try want.writer.writeAll(at_cap);
+
+    try expectHop("https://example.com/a", at_cap, want.written());
+}
+
+test "nextHopUrl rejects an oversize location before resolving it" {
+    const a = std.testing.allocator;
+    const huge = try a.alloc(u8, 9 * 1024);
+    defer a.free(huge);
+    @memset(huge, 'x');
+    try expectHopError("https://example.com/a", huge, error.HttpRedirectLocationOversize);
 }
 
 test "isFollowableRedirect: follows 301/302/303/307/308" {

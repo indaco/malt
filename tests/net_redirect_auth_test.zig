@@ -21,6 +21,8 @@ const Hop = struct {
     target_len: usize = 0,
     // When set, answer 302 to this Location; otherwise 200 with `blob_body`.
     redirect_to: ?[]const u8 = null,
+    // When set, the 200 carries this Content-Disposition.
+    content_disposition: ?[]const u8 = null,
 };
 
 // Serves exactly one request. Records whether the client sent Authorization and
@@ -49,6 +51,10 @@ fn serveOne(hop: *Hop) void {
         req.respond("redirecting\n", .{
             .status = .found,
             .extra_headers = &.{.{ .name = "location", .value = loc }},
+        }) catch return;
+    } else if (hop.content_disposition) |cd| {
+        req.respond(blob_body, .{
+            .extra_headers = &.{.{ .name = "content-disposition", .value = cd }},
         }) catch return;
     } else {
         req.respond(blob_body, .{}) catch return;
@@ -167,4 +173,50 @@ test "auth headers kept across a same-host redirect" {
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(hop1.saw_auth);
     try std.testing.expect(hop2.saw_auth);
+}
+
+test "headResolved follows a hop and harvests the artifact headers from it" {
+    // The HEAD loop is what picks a cask's artifact type, and it was the one
+    // redirect loop with no fixture coverage. The scheme-relative Location also
+    // pins that a hop is resolved against the base rather than taken verbatim.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cd = "attachment; filename=\"artifact.zip\"";
+    var l2 = try bindIp4(io);
+    defer l2.deinit(io);
+    const p2 = l2.socket.address.getPort();
+    var hop2 = Hop{ .io = io, .listener = &l2, .content_disposition = cd };
+    const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "//127.0.0.1:{d}/artifact", .{p2});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var hop1 = Hop{ .io = io, .listener = &l1, .redirect_to = loc };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    const result = http.headResolved(url);
+
+    t1.join();
+    t2.join();
+
+    var resolved = try result;
+    defer resolved.deinit();
+
+    var want_buf: [64]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "http://127.0.0.1:{d}/artifact", .{p2});
+    try std.testing.expectEqualStrings(want, resolved.final_url);
+    try std.testing.expectEqualStrings(cd, resolved.content_disposition.?);
+    try std.testing.expectEqualStrings("/artifact", hopTarget(&hop2));
 }
