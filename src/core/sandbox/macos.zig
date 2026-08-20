@@ -607,7 +607,7 @@ test "buildFormulaEnv derives install paths and drops what is not allowlisted" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{
-        "MALT_GITHUB_TOKEN=secret",
+        "MALT_SECRET_PROBE=secret",
         "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib",
         "RUBYOPT=-rexploit",
         "PATH=/attacker/bin:/usr/bin",
@@ -624,7 +624,7 @@ test "buildFormulaEnv derives install paths and drops what is not allowlisted" {
     try std.testing.expectEqualStrings("/opt/malt/Cellar", map.get("HOMEBREW_CELLAR").?);
     try std.testing.expectEqualStrings("/tmp", map.get("TMPDIR").?);
     try std.testing.expectEqualStrings("en_US.UTF-8", map.get("LANG").?);
-    try std.testing.expect(map.get("MALT_GITHUB_TOKEN") == null);
+    try std.testing.expect(map.get("MALT_SECRET_PROBE") == null);
     try std.testing.expect(map.get("DYLD_INSERT_LIBRARIES") == null);
     try std.testing.expect(map.get("RUBYOPT") == null);
 }

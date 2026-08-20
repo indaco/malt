@@ -2633,8 +2633,10 @@ test "run executes the formula's own helper with its arguments expanded" {
 }
 
 /// A secret plus an allowlisted locale var, shaped like malt's real environ.
+/// The stand-in name is deliberate: the tap-resolution contract guard keeps
+/// the real forge-token literal inside the forge seam.
 const test_secret_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{
-    "MALT_GITHUB_TOKEN=sentinel-must-not-leak",
+    "MALT_SECRET_PROBE=sentinel-must-not-leak",
     "LANG=en_US.UTF-8",
     "PATH=/attacker/bin:/usr/bin:/bin",
 } } };
