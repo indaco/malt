@@ -9,6 +9,7 @@ var pkg_io: std.Io = std.Options.debug_io;
 const builtin = @import("builtin");
 
 const color = @import("color.zig");
+const term_sanitize = @import("term_sanitize.zig");
 
 pub const OutputMode = enum {
     human,
@@ -323,7 +324,9 @@ inline fn emitPrefixLine(
     if (spec.respect_quiet and quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writePrefixLine(spec.role, spec.emoji_prefix, spec.plain_prefix, spec.shape, msg);
+    // The comptime `fmt` is trusted; the interpolated args carry tap and
+    // formula text. Scrub the message only — the role colour is added outside.
+    writePrefixLine(spec.role, spec.emoji_prefix, spec.plain_prefix, spec.shape, term_sanitize.scrubInPlace(msg));
 }
 
 pub fn info(comptime fmt: []const u8, args: anytype) void {
@@ -497,7 +500,8 @@ pub fn writeField(
         try w.writeAll("\n");
         return;
     };
-    try w.writeAll(value);
+    // Values are tap-sourced free text (`desc`); keys are compile-time literals.
+    try w.writeAll(term_sanitize.scrubInPlace(value));
     try w.writeAll("\n");
 }
 
@@ -977,4 +981,90 @@ test "isInteractive treats a pty slave as interactive" {
 
     const slave_file: std.Io.File = .{ .handle = slave, .flags = .{ .nonblocking = false } };
     try std.testing.expect(isInteractive(slave_file, std.Options.debug_io));
+}
+
+// ── interpolated-text scrub ─────────────────────────────────────────
+// Asserted on bytes, not on the rendered string: which characters survive
+// is a policy choice, but no escape may.
+
+/// A clipboard-write escape a hostile tap could hide in free-form text.
+const osc52_payload = "evil\x1b]52;c;ZXZpbA==\x07tail";
+
+test "info drops OSC 52 from an interpolated message" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const prior_quiet = isQuiet();
+    color.setForTest(false, false);
+    setQuiet(false);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer {
+        endStderrCapture();
+        color.setForTest(null, null);
+        setQuiet(prior_quiet);
+    }
+
+    info("{s}", .{osc52_payload});
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x07) == null);
+    try std.testing.expect(std.mem.startsWith(u8, buf.items, "  > evil"));
+    try std.testing.expect(std.mem.endsWith(u8, buf.items, "tail\n"));
+}
+
+test "err drops OSC 52 even though it ignores --quiet" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const prior_quiet = isQuiet();
+    color.setForTest(false, false);
+    setQuiet(true);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer {
+        endStderrCapture();
+        color.setForTest(null, null);
+        setQuiet(prior_quiet);
+    }
+
+    err("{s}", .{osc52_payload});
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x07) == null);
+}
+
+test "the role colour codes survive the message scrub" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const prior_quiet = isQuiet();
+    color.setForTest(true, true);
+    setQuiet(false);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer {
+        endStderrCapture();
+        color.setForTest(null, null);
+        setQuiet(prior_quiet);
+    }
+
+    info("{s}", .{"a\x1b[31mb"});
+    // The prefix is coloured outside the scrubbed message, so ESC survives
+    // in the line while the payload's own escape is gone from the body.
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) != null);
+    try std.testing.expect(std.mem.endsWith(u8, buf.items, "a[31mb\n"));
+}
+
+test "writeField drops OSC 52 from a tap-sourced value" {
+    var out: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    var scratch: [256]u8 = undefined;
+    try writeField(&w, &scratch, false, 14, "Description", "{s}", .{osc52_payload});
+    const got = w.buffered();
+    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, got, 0x07) == null);
+    try std.testing.expect(std.mem.startsWith(u8, got, "Description:"));
+    try std.testing.expect(std.mem.endsWith(u8, got, "tail\n"));
+}
+
+test "writeField keeps an accented, emoji-bearing description intact" {
+    const desc = "Café ☕ pour déjà-vu 🚀";
+    var out: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    var scratch: [256]u8 = undefined;
+    try writeField(&w, &scratch, false, 14, "Description", "{s}", .{desc});
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), desc) != null);
 }
