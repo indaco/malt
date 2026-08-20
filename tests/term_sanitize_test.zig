@@ -145,6 +145,43 @@ test "CSI 3 J erase scrollback dropped" {
     try check("a\x1b[3Jb", "ab");
 }
 
+// ── CSI private-prefix / intermediate forms dropped ─────────────────
+// A whitelisted final byte does not identify the command: these all use one
+// (m/K/A) yet are different commands with different side effects.
+
+test "private-prefix CSI with a whitelisted final dropped" {
+    // ESC [ > 4 ; 2 m — XTMODKEYS, rewrites modifier-key reporting.
+    try check("a\x1b[>4;2mb", "ab");
+    // ESC [ ? 4 m — XTQMODKEYS, makes the terminal report into stdin.
+    try check("a\x1b[?4mb", "ab");
+    try check("a\x1b[<0;0;0mb", "ab");
+    try check("a\x1b[=5mb", "ab");
+}
+
+test "intermediate byte CSI with a whitelisted final dropped" {
+    try check("a\x1b[0;1$mb", "ab");
+    try check("a\x1b[!Kb", "ab");
+    // ESC [ SP A is SL (scroll left), not cursor up.
+    try check("a\x1b[ Ab", "ab");
+}
+
+test "numeric SGR subparameters still pass" {
+    // CSI 4:3 m is a curly underline real build output emits.
+    try check("a\x1b[4:3mb", "a\x1b[4:3mb");
+}
+
+test "byte just below the digit range dropped" {
+    // '/' (0x2F) is a legal CSI intermediate one code point under '0'.
+    try check("a\x1b[/mb", "ab");
+}
+
+test "private prefix via the 8-bit CSI introducer dropped" {
+    // 0x9B reaches the same filter, so the C1 form must not be a way around it.
+    try check("a\x9b>4;2mb", "ab");
+    // A bare prefix with no digits is still not SGR.
+    try check("a\x1b[>mb", "ab");
+}
+
 // ── anti-injection: 8-bit C1 introducers handled like 7-bit ─────────
 
 test "8-bit CSI introducer routed through the CSI filter" {

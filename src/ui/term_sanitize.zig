@@ -4,13 +4,16 @@
 //! the user's terminal. Permits printable ASCII + CR/LF/TAB + valid
 //! UTF-8 (tracked with a small continuation counter, so lone C1
 //! controls in 0x80..0x9F drop while real multibyte output passes) +
-//! a whitelisted subset of CSI sequences: SGR colours, relative
-//! cursor motion (A–G/E/F), line erase (K), and visible-screen erase
-//! (J with no param or 0/1/2).
+//! a whitelisted subset of CSI sequences, gated on the final byte AND
+//! numeric-only parameters: SGR colours, relative cursor motion
+//! (A–G/E/F), line erase (K), and visible-screen erase (J with no
+//! param or 0/1/2).
 //! Everything else — OSC (including clipboard-reading OSC 52), DCS,
 //! SOS/PM/APC, 8-bit C1 introducers, absolute positioning (H/f),
 //! cursor save/restore (s/u), scrollback erase (CSI 3 J), other CSI
-//! commands, C0 controls, stray/mid-sequence ESC — is dropped.
+//! commands, C0 controls, stray/mid-sequence ESC, and any CSI carrying
+//! a private prefix or intermediate byte (`CSI > 4 ; 2 m` is XTMODKEYS,
+//! not SGR) — is dropped.
 //!
 //! Used to wrap post_install stdout/stderr so a hostile formula
 //! cannot rewrite scrollback or exfiltrate via terminal extensions.
@@ -221,6 +224,12 @@ fn c1Target(b: u8) ?Sanitizer.State {
 }
 
 fn csiAllowed(final: u8, params: []const u8) bool {
+    // The prefix is part of the opcode: `CSI > 4 ; 2 m` is XTMODKEYS, not SGR.
+    // ':' stays for SGR subparameters (`CSI 4:3 m`).
+    for (params) |p| switch (p) {
+        '0'...'9', ';', ':' => {},
+        else => return false,
+    };
     return switch (final) {
         'm' => true, // SGR: colours, bold, underline
         'A', 'B', 'C', 'D' => true, // cursor up/down/right/left
@@ -258,6 +267,23 @@ test "csiAllowed whitelists SGR/relative motion, drops positioning + save/restor
     // J is param-gated, not final-byte-only.
     try std.testing.expect(csiAllowed('J', "2"));
     try std.testing.expect(!csiAllowed('J', "3"));
+}
+
+test "csiAllowed rejects private-prefix and intermediate parameter bytes" {
+    // The prefix is part of the opcode: `CSI > 4 ; 2 m` is XTMODKEYS, not SGR.
+    for ([_][]const u8{ ">4;2", "?4", "<0;0;0", "=5" }) |p|
+        try std.testing.expect(!csiAllowed('m', p));
+    // Intermediates likewise: `CSI SP A` is SL (scroll left), not cursor up.
+    try std.testing.expect(!csiAllowed('m', "0;1$"));
+    try std.testing.expect(!csiAllowed('K', "!"));
+    try std.testing.expect(!csiAllowed('A', " "));
+    // Bytes either side of the accepted '0'..'9' ';' ':' run.
+    try std.testing.expect(!csiAllowed('m', "/"));
+    try std.testing.expect(!csiAllowed('m', "<"));
+    // Numeric params, including SGR subparameters, stay allowed.
+    try std.testing.expect(csiAllowed('m', "1;31"));
+    try std.testing.expect(csiAllowed('m', "4:3"));
+    try std.testing.expect(csiAllowed('A', "3"));
 }
 
 test "eraseDisplayAllowed permits only visible-screen variants" {
