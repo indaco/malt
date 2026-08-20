@@ -13,7 +13,8 @@
 #
 # The fix routes all three loops through one `nextHopUrl` helper that resolves
 # the location against the current base and refuses the downgrade in one place,
-# so the rule cannot drift between them again.
+# so the rule cannot drift between them again. The loops now reach it through
+# the shared hop decision, leaving it a single call site.
 #
 # Presenting a real https origin needs a TLS fixture, so the guard is judged
 # through the colocated inline unit tests (`lib_tests`). This script builds and
@@ -45,7 +46,11 @@ if grep -Fqs -- "replaceFinalUrl(loc)" "$SRC"; then
   echo "FAIL: headResolved still follows Location without a scheme check" >&2
   exit 1
 fi
-if [[ "$(grep -Fc -- "nextHopUrl(uri, loc)" "$SRC")" -ne 3 ]]; then
+if [[ "$(grep -Fc -- "self.nextHopUrl(base, loc)" "$SRC")" -ne 1 ]]; then
+  echo "FAIL: the scheme-checking hop resolver is bypassed or duplicated" >&2
+  exit 1
+fi
+if [[ "$(grep -Fc -- "self.nextRedirectHop(uri, status, response.head.location, hops)" "$SRC")" -ne 3 ]]; then
   echo "FAIL: not all three redirect loops resolve their hop through the helper" >&2
   exit 1
 fi

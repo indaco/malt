@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Regression: the manual HEAD redirect loop must fail when it runs out of hops.
 #
-# The loop capped its walk at `max_head_redirects`. When the last response
-# inside the cap was still a redirect, the loop swapped `final_url` to the next
-# hop and fell out of the `for`, returning that URL as resolved - nothing had
-# ever requested it. Falling out and breaking out converged on the same
-# `return resolved`, so cap exhaustion was indistinguishable from a terminal
-# response. The cask installer then classified the artifact type from that
+# When the last response inside the cap was still a redirect, the loop swapped
+# `final_url` to the next hop and fell out, returning that URL as resolved -
+# nothing had ever requested it. Falling out and breaking out converged on the
+# same `return resolved`, so cap exhaustion was indistinguishable from a
+# terminal response. The walk now takes every hop from a shared decision that
+# errors on exhaustion, before there is a url to adopt. The cask installer then classified the artifact type from that
 # URL and could raise a `sudo installer -target /` prompt on the strength of
 # a URL malt never contacted. Both GET loops already error out here.
 #
-# The fixture test is the honest gate. The source precondition guards the
-# one-line `for`-`else` from drifting back out.
+# The fixture test is the honest gate. The source precondition guards the walk
+# from resolving its own hops again.
 #
 # No network, no temp state, well under 30s.
 
@@ -22,7 +22,7 @@ cd "$ROOT"
 
 SRC="src/net/client.zig"
 
-if ! grep -Eqs -- "^[[:space:]]*\} else return error\.TooManyHttpRedirects;" "$SRC"; then
+if ! grep -Eqs -- "nextRedirectHop\(uri, status, response\.head\.location, hops\)\) orelse break" "$SRC"; then
   echo "FAIL: the HEAD loop still returns an un-fetched url when it runs out of hops" >&2
   exit 1
 fi
