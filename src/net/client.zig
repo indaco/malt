@@ -610,7 +610,7 @@ pub const HttpClient = struct {
         }
     };
 
-    const max_head_redirects = 5;
+    pub const max_head_redirects = 5;
 
     /// Conditional GET — sends `If-None-Match: <etag>` when `if_none_match`
     /// is non-null and returns a `ConditionalResponse` that surfaces the
@@ -687,7 +687,9 @@ pub const HttpClient = struct {
             const next = try self.nextHopUrl(uri, loc);
             defer self.allocator.free(next);
             try resolved.replaceFinalUrl(next);
-        }
+            // No `break` above means every hop redirected, so the cap ran out
+            // mid-walk and `final_url` names a url nothing ever requested.
+        } else return error.TooManyHttpRedirects;
 
         return resolved;
     }

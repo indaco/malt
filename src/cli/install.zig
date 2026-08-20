@@ -1649,6 +1649,7 @@ test "mapHeadResolveError reports a dead walk as a network failure, not a format
     try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.RequestFailed));
     try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.OfflineRequired));
     try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.HttpRedirectLocationMissing));
+    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.TooManyHttpRedirects));
 }
 
 test "mapHeadResolveError keeps a cleartext artifact URL distinct from a network failure" {
