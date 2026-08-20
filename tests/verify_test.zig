@@ -458,3 +458,62 @@ test "verifyCosignBlob errors when cosign exits non-zero" {
     args.cosign_bin = path;
     try testing.expectError(error.CosignVerifyFailed, verify.verifyCosignBlob(lio.io(), args));
 }
+
+test "the spawned cosign is the one the guard resolved" {
+    try fs_compat.skipIfNoSubprocess();
+    const a = testing.allocator;
+    const dio = std.Options.debug_io;
+
+    // A decoy that `access(X_OK)` accepts but `execve` rejects with ENOENT:
+    // the kernel's own PATH walk continues past it, so a guard that only
+    // vetted the decoy would let the next hit -- the prefix shim -- run.
+    const root = try fs_compat.uniqueTempPath(a, "verify", "cosign_pin");
+    defer a.free(root);
+    fs_compat.deleteTreeAbsolute(dio, root) catch {};
+    defer fs_compat.deleteTreeAbsolute(dio, root) catch {};
+
+    const decoy_dir = try std.fmt.allocPrint(a, "{s}/decoy", .{root});
+    defer a.free(decoy_dir);
+    const prefix = try std.fmt.allocPrint(a, "{s}/prefix", .{root});
+    defer a.free(prefix);
+    const prefix_bin = try std.fmt.allocPrint(a, "{s}/bin", .{prefix});
+    defer a.free(prefix_bin);
+    try std.Io.Dir.cwd().createDirPath(dio, decoy_dir);
+    try std.Io.Dir.cwd().createDirPath(dio, prefix_bin);
+
+    const decoy = try std.fmt.allocPrint(a, "{s}/cosign", .{decoy_dir});
+    defer a.free(decoy);
+    {
+        const f = try fs_compat.createFileAbsolute(dio, decoy, .{});
+        defer f.close(dio);
+        try f.writeStreamingAll(dio, "#!/nonexistent/interp\n");
+        try f.setPermissions(dio, std.Io.File.Permissions.fromMode(0o755));
+    }
+
+    // The rubber stamp: runnable, exits 0, and inside malt's own prefix.
+    const shim = try std.fmt.allocPrint(a, "{s}/cosign", .{prefix_bin});
+    defer a.free(shim);
+    try writeFakeCosign(shim, 0);
+
+    // The spawn reads PATH from the runtime's environ and the guard from the
+    // injected one; setting only one would prove nothing.
+    var orig_buf: [8192]u8 = undefined;
+    const orig_raw = fs_compat.getenv("PATH") orelse "";
+    if (orig_raw.len >= orig_buf.len) return error.SkipZigTest;
+    @memcpy(orig_buf[0..orig_raw.len], orig_raw);
+    orig_buf[orig_raw.len] = 0;
+
+    var path_buf: [8192]u8 = undefined;
+    const new_path = try std.fmt.bufPrintZ(&path_buf, "{s}:{s}", .{ decoy_dir, prefix_bin });
+    if (setenv("PATH", new_path.ptr, 1) != 0) return error.SetEnvFailed;
+    defer _ = if (orig_raw.len == 0) unsetenv("PATH") else setenv("PATH", @ptrCast(&orig_buf), 1);
+
+    var lio = LiveIo.init();
+    defer lio.deinit();
+    var args = fake_args;
+    args.cosign_bin = "cosign";
+    args.environ = malt.app_ctx.processEnviron();
+    args.prefix = prefix;
+    // The decoy is what the guard resolved, so the decoy is what must fail.
+    try testing.expectError(error.CosignNotFound, verify.verifyCosignBlob(lio.io(), args));
+}
