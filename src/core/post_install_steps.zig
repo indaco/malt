@@ -1086,7 +1086,9 @@ fn stepInitDataDir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // non-empty data dir, and they create their own subtrees.
     const tmpdir = std.fmt.allocPrint(ctx.allocator, "{s}/var/tmp", .{ctx.prefix}) catch return false;
     std.Io.Dir.cwd().createDirPath(ctx.io, tmpdir) catch {};
-    if (spawnFenced(ctx, plan.argv, &.{}, using, .{ .allow_ipc = true })) return true;
+    // initdb takes no --tmpdir, so TMPDIR is the only way to keep its scratch
+    // space inside the prefix, where the fence grants file creation.
+    if (spawnFenced(ctx, plan.argv, &.{.{ .key = "TMPDIR", .value = tmpdir }}, using, .{ .allow_ipc = true })) return true;
     // A failed initialiser can leave a partial data dir; mysql/mariadb
     // then refuse the non-empty dir on every retry. Remove what this run
     // created so the next install/upgrade starts clean. postgres already
@@ -2357,6 +2359,43 @@ test "init_data_dir removes a datadir it created when the initialiser fails" {
     try testing.expect(execute(h.ctx(), step_json));
     const f = std.Io.Dir.openFileAbsolute(io, try std.fmt.allocPrint(a, "{s}/precious", .{datadir}), .{}) catch return error.TestUnexpectedResult;
     f.close(io);
+}
+
+test "init_data_dir points the initialiser at a tmpdir the fence can create in" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.io = threaded.io();
+    const a = h.arena.allocator();
+
+    const keg_bin = try std.fmt.allocPrint(a, "{s}/bin", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, keg_bin);
+    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix}));
+    const seen = try std.fmt.allocPrint(a, "{s}/etc/seen.txt", .{h.prefix});
+    {
+        const f = try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/initdb", .{keg_bin}), .{});
+        defer f.close(h.io);
+        var w = f.writer(h.io, &.{});
+        try w.interface.print("#!" ++ "/bin/" ++ "sh\n/usr/bin/" ++ "env > '{s}'\n", .{seen});
+        try w.interface.flush();
+        try f.setPermissions(h.io, @enumFromInt(0o755));
+    }
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"init_data_dir","path":{"base":"var","path":"postgresql"},"using":"postgresql_initdb"}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+
+    var buf: [64 * 1024]u8 = undefined;
+    const f = try std.Io.Dir.openFileAbsolute(h.io, seen, .{});
+    defer f.close(h.io);
+    var r = f.reader(h.io, &.{});
+    const dump = buf[0..try r.interface.readSliceShort(&buf)];
+
+    // initdb takes no --tmpdir, so TMPDIR is its only handle on scratch space.
+    // The fence grants create under the prefix but only write-data under /tmp.
+    try testing.expect(std.mem.indexOf(u8, dump, try std.fmt.allocPrint(a, "TMPDIR={s}/var/tmp\n", .{h.prefix})) != null);
 }
 
 test "init_data_dir with a missing initialiser binary fails loudly" {
