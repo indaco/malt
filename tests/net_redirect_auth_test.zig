@@ -24,20 +24,53 @@ const Hop = struct {
     status: ?std.http.Status = null,
     redirect_to: ?[]const u8 = null,
     content_disposition: ?[]const u8 = null,
+    // When set, the hop redirects this many times and answers 200 after, so a
+    // single hop can stand in for a whole chain.
+    redirects_left: ?usize = null,
 };
 
-// Serves exactly one request. Records whether the client sent Authorization and
-// the request target, then either redirects or returns the blob. Errors are
-// swallowed: a failed serve surfaces as a client-side failure the test asserts on.
 fn serveOne(hop: *Hop) void {
-    const stream = hop.listener.accept(hop.io) catch return;
-    defer stream.close(hop.io);
-    var rbuf: [16 * 1024]u8 = undefined;
-    var wbuf: [16 * 1024]u8 = undefined;
-    var reader = stream.reader(hop.io, &rbuf);
-    var writer = stream.writer(hop.io, &wbuf);
-    var srv = std.http.Server.init(&reader.interface, &writer.interface);
-    var req = srv.receiveHead() catch return;
+    serveCount(hop, 1);
+}
+
+// Serves `count` requests, reusing a kept-alive connection and accepting a
+// fresh one when the client drops it. Errors are swallowed: a failed serve
+// surfaces as a client-side failure the test asserts on.
+fn serveCount(hop: *Hop, count: usize) void {
+    var served: usize = 0;
+    while (served < count) {
+        const stream = hop.listener.accept(hop.io) catch return;
+        defer stream.close(hop.io);
+        var rbuf: [16 * 1024]u8 = undefined;
+        var wbuf: [16 * 1024]u8 = undefined;
+        var reader = stream.reader(hop.io, &rbuf);
+        var writer = stream.writer(hop.io, &wbuf);
+        var srv = std.http.Server.init(&reader.interface, &writer.interface);
+        var served_here = false;
+        while (served < count) {
+            var req = srv.receiveHead() catch break;
+            served_here = true;
+            served += 1;
+            answer(hop, &req);
+        }
+        // A connection carrying no request is `knock`: the client is done, so
+        // stop waiting for requests it is never going to send.
+        if (!served_here) return;
+    }
+}
+
+// Wakes a hop still parked in `accept`. Without it, a client that dials fewer
+// times than the fixture expects hangs the test instead of failing it - and CI
+// has no per-test timeout to cut that short.
+fn knock(io: std.Io, port: u16) void {
+    var addr = net.IpAddress.parseIp4("127.0.0.1", port) catch return;
+    const s = addr.connect(io, .{ .mode = .stream }) catch return;
+    s.close(io);
+}
+
+// Records whether the client sent Authorization and the request target, then
+// either redirects or returns the blob.
+fn answer(hop: *Hop, req: *std.http.Server.Request) void {
     const target = req.head.target;
     if (target.len <= hop.target_buf.len) {
         @memcpy(hop.target_buf[0..target.len], target);
@@ -46,6 +79,9 @@ fn serveOne(hop: *Hop) void {
     var it = req.iterateHeaders();
     while (it.next()) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "authorization")) hop.saw_auth = true;
+    }
+    if (hop.redirects_left) |*left| {
+        if (left.* == 0) hop.status = null else left.* -= 1;
     }
     if (hop.status) |status| {
         var hdrs: [2]std.http.Header = undefined;
@@ -356,4 +392,88 @@ test "headResolved reports a redirect with no Location instead of the pre-hop ur
     t1.join();
 
     try std.testing.expectError(error.HttpRedirectLocationMissing, result);
+}
+
+test "headResolved reports an exhausted redirect walk instead of an un-fetched url" {
+    // A hop that redirects to itself burns the whole cap without ever reaching
+    // a terminal response, so the url the walk ends on was never requested -
+    // and the cask installer would raise a sudo prompt on the strength of it.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    // The Content-Disposition also puts the error path's cleanup under the
+    // testing allocator.
+    var hop1 = Hop{
+        .io = io,
+        .listener = &l1,
+        .redirect_to = loc,
+        .status = .found,
+        .content_disposition = "attachment; filename=\"artifact.pkg\"",
+    };
+
+    // The walk sends exactly one request per hop in the cap pre- and post-fix,
+    // so the hop thread always drains and the join never hangs.
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_head_redirects });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+
+    const result = http.headResolved(url);
+    // Drop the client first: the hop is parked reading the kept-alive
+    // connection, and only closing it lets the hop reach `knock`.
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    try std.testing.expectError(error.TooManyHttpRedirects, result);
+}
+
+test "headResolved resolves a chain that uses the hop cap exactly" {
+    // Guards against over-correcting: the last hop inside the cap may still be
+    // the terminal response. This passes on the pre-fix loop too - it pins a
+    // legal chain that must keep resolving if the budget is ever retuned.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    var hop1 = Hop{
+        .io = io,
+        .listener = &l1,
+        .redirect_to = loc,
+        .status = .found,
+        .redirects_left = client.HttpClient.max_head_redirects - 1,
+    };
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_head_redirects });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+
+    const result = http.headResolved(url);
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    var resolved = try result;
+    defer resolved.deinit();
+
+    try std.testing.expectEqualStrings(loc, resolved.final_url);
 }
