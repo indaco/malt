@@ -80,64 +80,16 @@ fn buildArgv(ctx: ExecCtx, args: []const Value) BuiltinError![]const []const u8 
     return argv.toOwnedSlice(ctx.allocator);
 }
 
-const inherited_env_keys = std.StaticStringMap(void).initComptime(.{
-    .{ "LANG", {} },
-    .{ "LC_ALL", {} },
-    .{ "LC_CTYPE", {} },
-    .{ "TERM", {} },
-    .{ "SDKROOT", {} },
-    .{ "MACOSX_DEPLOYMENT_TARGET", {} },
-    .{ "CC", {} },
-    .{ "CXX", {} },
-    .{ "CFLAGS", {} },
-    .{ "CPPFLAGS", {} },
-    .{ "CXXFLAGS", {} },
-    .{ "LDFLAGS", {} },
-    .{ "MAKEFLAGS", {} },
-});
-
-/// Return the environment visible to formula code. Values that describe the
-/// installation are derived from the current sandbox instead of trusting the
-/// parent process; only non-secret build and locale settings are inherited.
+/// Formula-visible environment. The contract lives next to the sandbox
+/// profile so the native post_install executor spawns with the same one.
 fn formulaEnvValue(ctx: ExecCtx, key: []const u8) BuiltinError!?[]const u8 {
-    if (std.mem.eql(u8, key, "HOME")) return ctx.malt_prefix;
-    if (std.mem.eql(u8, key, "PATH")) return macos_sandbox.sandbox_path;
-    if (std.mem.eql(u8, key, "MALT_PREFIX") or std.mem.eql(u8, key, "HOMEBREW_PREFIX"))
-        return ctx.malt_prefix;
-    if (std.mem.eql(u8, key, "HOMEBREW_CELLAR"))
-        return std.fmt.allocPrint(ctx.allocator, "{s}/Cellar", .{ctx.malt_prefix}) catch
-            return BuiltinError.OutOfMemory;
-    if (std.mem.eql(u8, key, "TMPDIR")) return "/tmp";
-    if (inherited_env_keys.has(key)) return std.process.Environ.getPosix(ctx.environ, key);
-    return null;
+    return macos_sandbox.formulaEnvValue(ctx.allocator, ctx.environ, ctx.malt_prefix, key) catch
+        BuiltinError.OutOfMemory;
 }
 
 fn buildFormulaEnv(ctx: ExecCtx) BuiltinError!std.process.Environ.Map {
-    var map = std.process.Environ.Map.init(ctx.allocator);
-    errdefer map.deinit();
-    for ([_][]const u8{
-        "HOME",
-        "PATH",
-        "MALT_PREFIX",
-        "HOMEBREW_PREFIX",
-        "HOMEBREW_CELLAR",
-        "TMPDIR",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "TERM",
-        "SDKROOT",
-        "MACOSX_DEPLOYMENT_TARGET",
-        "CC",
-        "CXX",
-        "CFLAGS",
-        "CPPFLAGS",
-        "CXXFLAGS",
-        "LDFLAGS",
-        "MAKEFLAGS",
-    }) |key| if (try formulaEnvValue(ctx, key)) |value|
-        map.put(key, value) catch return BuiltinError.OutOfMemory;
-    return map;
+    return macos_sandbox.buildFormulaEnv(ctx.allocator, ctx.environ, ctx.malt_prefix) catch
+        BuiltinError.OutOfMemory;
 }
 
 /// system — execute a command

@@ -997,7 +997,7 @@ fn stepRun(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} not found", .{cmd}) catch cmd);
         return false;
     }
-    return spawnFenced(ctx, argv.items, null, std.fs.path.basename(cmd), .{});
+    return spawnFenced(ctx, argv.items, &.{}, std.fs.path.basename(cmd), .{});
 }
 
 // --- data-dir initialisers ---------------------------------------------------
@@ -1086,7 +1086,7 @@ fn stepInitDataDir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // non-empty data dir, and they create their own subtrees.
     const tmpdir = std.fmt.allocPrint(ctx.allocator, "{s}/var/tmp", .{ctx.prefix}) catch return false;
     std.Io.Dir.cwd().createDirPath(ctx.io, tmpdir) catch {};
-    if (spawnFenced(ctx, plan.argv, null, using, .{ .allow_ipc = true })) return true;
+    if (spawnFenced(ctx, plan.argv, &.{}, using, .{ .allow_ipc = true })) return true;
     // A failed initialiser can leave a partial data dir; mysql/mariadb
     // then refuse the non-empty dir on every retry. Remove what this run
     // created so the next install/upgrade starts clean. postgres already
@@ -1135,21 +1135,20 @@ fn stepGdkPixbufQueryLoaders(ctx: StepsCtx) bool {
     // must exist up front — same real-dirs-at-prefix layout brew links.
     if (!confined(ctx, env.moduledir)) return false;
     std.Io.Dir.cwd().createDirPath(ctx.io, env.moduledir) catch {};
-    var env_map = std.process.Environ.Map.init(ctx.allocator);
-    defer env_map.deinit();
-    env_map.put("GDK_PIXBUF_MODULEDIR", env.moduledir) catch return false;
-    env_map.put("GDK_PIXBUF_MODULE_FILE", env.module_file) catch return false;
-    return runFormulaToolEnv(ctx, "gdk-pixbuf", "gdk-pixbuf-query-loaders", &.{"--update-cache"}, &env_map);
+    return runFormulaToolEnv(ctx, "gdk-pixbuf", "gdk-pixbuf-query-loaders", &.{"--update-cache"}, &.{
+        .{ .key = "GDK_PIXBUF_MODULEDIR", .value = env.moduledir },
+        .{ .key = "GDK_PIXBUF_MODULE_FILE", .value = env.module_file },
+    });
 }
 
 /// Spawn `<prefix>/opt/<formula>/bin/<exe>` through the same argv lint +
 /// sandbox fence as the DSL `system` builtin. Failure routes exactly like
 /// a failed formula `system` call.
 fn runFormulaTool(ctx: StepsCtx, tool_formula: []const u8, exe: []const u8, args: []const []const u8) bool {
-    return runFormulaToolEnv(ctx, tool_formula, exe, args, null);
+    return runFormulaToolEnv(ctx, tool_formula, exe, args, &.{});
 }
 
-fn runFormulaToolEnv(ctx: StepsCtx, tool_formula: []const u8, exe: []const u8, args: []const []const u8, env_map: ?*const std.process.Environ.Map) bool {
+fn runFormulaToolEnv(ctx: StepsCtx, tool_formula: []const u8, exe: []const u8, args: []const []const u8, extra_env: []const EnvVar) bool {
     const tool = std.fmt.allocPrint(ctx.allocator, "{s}/opt/{s}/bin/{s}", .{ ctx.prefix, tool_formula, exe }) catch return false;
     if (!fileExists(ctx.io, tool)) {
         logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} not found (is {s} installed?)", .{ exe, tool_formula }) catch exe);
@@ -1160,13 +1159,25 @@ fn runFormulaToolEnv(ctx: StepsCtx, tool_formula: []const u8, exe: []const u8, a
     argv.append(ctx.allocator, tool) catch return false;
     argv.appendSlice(ctx.allocator, args) catch return false;
 
-    return spawnFenced(ctx, argv.items, env_map, exe, .{});
+    return spawnFenced(ctx, argv.items, extra_env, exe, .{});
+}
+
+/// Step-specific variable layered on top of the scrubbed base environment.
+const EnvVar = struct { key: []const u8, value: []const u8 };
+
+fn buildChildEnv(ctx: StepsCtx, extra_env: []const EnvVar) error{OutOfMemory}!std.process.Environ.Map {
+    var map = try sandbox_macos.buildFormulaEnv(ctx.allocator, ctx.environ, ctx.prefix);
+    errdefer map.deinit();
+    for (extra_env) |v| try map.put(v.key, v.value);
+    return map;
 }
 
 /// Argv lint + sandbox fence + spawn + wait — the one exec chokepoint for
 /// every tool and initialiser step. `label` names the child in the log.
 /// `opts` carries per-spawn fence knobs (IPC only for the DB initialisers).
-fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, env_map: ?*const std.process.Environ.Map, label: []const u8, opts: sandbox_macos.ProfileOpts) bool {
+/// The child always starts from the scrubbed formula environment; `extra_env`
+/// layers onto it, so no caller can fall back to inheriting malt's own.
+fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, extra_env: []const EnvVar, label: []const u8, opts: sandbox_macos.ProfileOpts) bool {
     sandbox.validateArgv(argv, ctx.keg_path, ctx.prefix) catch {
         logViolation(ctx, argv[0]);
         return false;
@@ -1176,10 +1187,16 @@ fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, env_map: ?*const std.pro
         return false;
     };
 
+    var env_map = buildChildEnv(ctx, extra_env) catch {
+        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} failed to spawn", .{label}) catch label);
+        return false;
+    };
+    defer env_map.deinit();
+
     var child = std.process.spawn(ctx.io, .{
         .argv = fenced,
         .stdout = if (ctx.suppress_child_stdout) .ignore else .inherit,
-        .environ_map = env_map,
+        .environ_map = &env_map,
     }) catch {
         logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} failed to spawn", .{label}) catch label);
         return false;
@@ -2574,6 +2591,106 @@ test "run executes the formula's own helper with its arguments expanded" {
 
     // The created directory proves the child saw an expanded argument.
     try testing.expect(dirExists(h.io, try std.fmt.allocPrint(a, "{s}/var/lib/dbus", .{h.prefix})));
+}
+
+/// A secret plus an allowlisted locale var, shaped like malt's real environ.
+const test_secret_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{
+    "MALT_GITHUB_TOKEN=sentinel-must-not-leak",
+    "LANG=en_US.UTF-8",
+    "PATH=/attacker/bin:/usr/bin:/bin",
+} } };
+
+test "run hands the child a scrubbed environment, not malt's own" {
+    // Seed the Io from the same environ main.zig seeds it from: with the
+    // default `.empty` the child inherits nothing and this cannot observe an
+    // inherit-everything spawn.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.io = threaded.io();
+    h.environ = test_secret_environ;
+    const a = h.arena.allocator();
+
+    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, libexec);
+    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix}));
+    const seen = try std.fmt.allocPrint(a, "{s}/etc/seen.txt", .{h.prefix});
+    {
+        const f = try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/post-install", .{libexec}), .{});
+        defer f.close(h.io);
+        var w = f.writer(h.io, &.{});
+        // Split literals: scripts/lint-spawn-invariants.sh greps src/ for
+        // these argv shapes, string literals inside tests included.
+        try w.interface.print("#!" ++ "/bin/" ++ "sh\n/usr/bin/" ++ "env > '{s}'\n", .{seen});
+        try w.interface.flush();
+        try f.setPermissions(h.io, @enumFromInt(0o755));
+    }
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"run","command":{"base":"libexec","path":"post-install"}}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+
+    var buf: [64 * 1024]u8 = undefined;
+    const f = try std.Io.Dir.openFileAbsolute(h.io, seen, .{});
+    defer f.close(h.io);
+    var r = f.reader(h.io, &.{});
+    const dump = buf[0..try r.interface.readSliceShort(&buf)];
+
+    // The forge token and the user's PATH are the two the fence cannot cover:
+    // the profile allows process-exec* and keg/tmp writes.
+    try testing.expect(std.mem.indexOf(u8, dump, "sentinel-must-not-leak") == null);
+    try testing.expect(std.mem.indexOf(u8, dump, "/attacker/bin") == null);
+    try testing.expect(std.mem.indexOf(u8, dump, "PATH=" ++ sandbox_macos.sandbox_path ++ "\n") != null);
+    // A scrub, not a wipe: build/locale keys still reach the child, and HOME
+    // points at the prefix as it does for the DSL `system` builtin.
+    try testing.expect(std.mem.indexOf(u8, dump, "LANG=en_US.UTF-8\n") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, try std.fmt.allocPrint(a, "HOME={s}\n", .{h.prefix})) != null);
+}
+
+test "a tool step's own env vars layer onto the scrubbed base" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.io = threaded.io();
+    h.environ = test_secret_environ;
+    const a = h.arena.allocator();
+
+    // gdk-pixbuf-query-loaders is the one step that sets its own variables;
+    // it derives them from the versioned module dir under the prefix.
+    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/opt/gdk-pixbuf/lib/gdk-pixbuf-2.0/2.10.0", .{h.prefix}));
+    const bin = try std.fmt.allocPrint(a, "{s}/opt/gdk-pixbuf/bin", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, bin);
+    const seen = try std.fmt.allocPrint(a, "{s}/etc/seen.txt", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix}));
+    {
+        const f = try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/gdk-pixbuf-query-loaders", .{bin}), .{});
+        defer f.close(h.io);
+        var w = f.writer(h.io, &.{});
+        try w.interface.print("#!" ++ "/bin/" ++ "sh\n/usr/bin/" ++ "env > '{s}'\n", .{seen});
+        try w.interface.flush();
+        try f.setPermissions(h.io, @enumFromInt(0o755));
+    }
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"gdk_pixbuf_query_loaders"}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+
+    var buf: [64 * 1024]u8 = undefined;
+    const f = try std.Io.Dir.openFileAbsolute(h.io, seen, .{});
+    defer f.close(h.io);
+    var r = f.reader(h.io, &.{});
+    const dump = buf[0..try r.interface.readSliceShort(&buf)];
+
+    try testing.expect(std.mem.indexOf(u8, dump, "GDK_PIXBUF_MODULEDIR=") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "GDK_PIXBUF_MODULE_FILE=") != null);
+    // The step used to replace the whole environment with those two, leaving
+    // the tool without a PATH; they now sit on top of the scrubbed base.
+    try testing.expect(std.mem.indexOf(u8, dump, "PATH=" ++ sandbox_macos.sandbox_path ++ "\n") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "sentinel-must-not-leak") == null);
 }
 
 test "run refuses the execution fields malt does not honour" {

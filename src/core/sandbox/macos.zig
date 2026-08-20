@@ -39,6 +39,66 @@ pub const ScrubbedEnv = struct {
 /// Minimal PATH — keeps a hostile formula off user-owned bin prefixes.
 pub const sandbox_path: []const u8 = "/usr/bin:/bin:/usr/sbin:/sbin";
 
+/// Non-secret build and locale settings a formula may legitimately read.
+/// Everything else — forge tokens, DYLD_*, RUBYOPT/RUBYLIB — is dropped.
+const inherited_env_keys = std.StaticStringMap(void).initComptime(.{
+    .{ "LANG", {} },
+    .{ "LC_ALL", {} },
+    .{ "LC_CTYPE", {} },
+    .{ "TERM", {} },
+    .{ "SDKROOT", {} },
+    .{ "MACOSX_DEPLOYMENT_TARGET", {} },
+    .{ "CC", {} },
+    .{ "CXX", {} },
+    .{ "CFLAGS", {} },
+    .{ "CPPFLAGS", {} },
+    .{ "CXXFLAGS", {} },
+    .{ "LDFLAGS", {} },
+    .{ "MAKEFLAGS", {} },
+});
+
+const formula_env_keys = [_][]const u8{
+    "HOME",
+    "PATH",
+    "MALT_PREFIX",
+    "HOMEBREW_PREFIX",
+    "HOMEBREW_CELLAR",
+    "TMPDIR",
+} ++ inherited_env_keys.keys();
+
+/// Value a formula child sees for `key`, or null when the key is not visible.
+/// Installation-describing values are derived from the sandbox rather than
+/// trusted from the parent process.
+pub fn formulaEnvValue(
+    allocator: std.mem.Allocator,
+    environ: std.process.Environ,
+    malt_prefix: []const u8,
+    key: []const u8,
+) error{OutOfMemory}!?[]const u8 {
+    if (std.mem.eql(u8, key, "HOME")) return malt_prefix;
+    if (std.mem.eql(u8, key, "PATH")) return sandbox_path;
+    if (std.mem.eql(u8, key, "MALT_PREFIX") or std.mem.eql(u8, key, "HOMEBREW_PREFIX")) return malt_prefix;
+    if (std.mem.eql(u8, key, "HOMEBREW_CELLAR"))
+        return try std.fmt.allocPrint(allocator, "{s}/Cellar", .{malt_prefix});
+    if (std.mem.eql(u8, key, "TMPDIR")) return "/tmp";
+    if (inherited_env_keys.has(key)) return std.process.Environ.getPosix(environ, key);
+    return null;
+}
+
+/// The environment every formula-controlled child is spawned with. Shared by
+/// the DSL `system`/`safe_popen_read` builtins and the native steps executor.
+pub fn buildFormulaEnv(
+    allocator: std.mem.Allocator,
+    environ: std.process.Environ,
+    malt_prefix: []const u8,
+) error{OutOfMemory}!std.process.Environ.Map {
+    var map = std.process.Environ.Map.init(allocator);
+    errdefer map.deinit();
+    for (formula_env_keys) |key|
+        if (try formulaEnvValue(allocator, environ, malt_prefix, key)) |value| try map.put(key, value);
+    return map;
+}
+
 /// Where the sandboxed child's stdout/stderr land. Production passes the
 /// process's real fd 1/2; tests redirect to `/dev/null` so subprocess
 /// chatter doesn't leak past `output.beginStderrCapture` into the build
@@ -542,6 +602,46 @@ const Scratch = struct {
         self.arena.deinit();
     }
 };
+
+test "buildFormulaEnv derives install paths and drops what is not allowlisted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{
+        "MALT_GITHUB_TOKEN=secret",
+        "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib",
+        "RUBYOPT=-rexploit",
+        "PATH=/attacker/bin:/usr/bin",
+        "HOME=/Users/ada",
+        "LANG=en_US.UTF-8",
+    } } };
+
+    var map = try buildFormulaEnv(arena.allocator(), environ, "/opt/malt");
+    defer map.deinit();
+
+    try std.testing.expectEqualStrings("/opt/malt", map.get("HOME").?);
+    try std.testing.expectEqualStrings(sandbox_path, map.get("PATH").?);
+    try std.testing.expectEqualStrings("/opt/malt", map.get("HOMEBREW_PREFIX").?);
+    try std.testing.expectEqualStrings("/opt/malt/Cellar", map.get("HOMEBREW_CELLAR").?);
+    try std.testing.expectEqualStrings("/tmp", map.get("TMPDIR").?);
+    try std.testing.expectEqualStrings("en_US.UTF-8", map.get("LANG").?);
+    try std.testing.expect(map.get("MALT_GITHUB_TOKEN") == null);
+    try std.testing.expect(map.get("DYLD_INSERT_LIBRARIES") == null);
+    try std.testing.expect(map.get("RUBYOPT") == null);
+}
+
+test "buildFormulaEnv omits allowlisted keys the parent never set" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var map = try buildFormulaEnv(arena.allocator(), .empty, "/opt/malt");
+    defer map.deinit();
+
+    try std.testing.expect(map.get("LANG") == null);
+    try std.testing.expect(map.get("CFLAGS") == null);
+    // Derived keys never depend on the parent, so an empty environ still
+    // yields a usable child environment rather than an empty one.
+    try std.testing.expectEqualStrings(sandbox_path, map.get("PATH").?);
+    try std.testing.expectEqualStrings("/opt/malt", map.get("HOME").?);
+}
 
 test "validatePathForProfile accepts normal absolute paths" {
     try validatePathForProfile("/opt/malt");
