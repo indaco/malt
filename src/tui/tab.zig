@@ -17,6 +17,7 @@ const layout = @import("layout.zig");
 const filter_input = @import("filter_input.zig");
 const keys = @import("keys.zig");
 const term = @import("term.zig");
+const term_sanitize = @import("../ui/term_sanitize.zig");
 
 pub const Key = keys.Key;
 pub const Rect = layout.Rect;
@@ -79,18 +80,26 @@ pub const Frame = struct {
     }
 
     /// Paint untrusted row content as inert text: TAB becomes a space and every
-    /// C0 control byte — ESC included — plus DEL is dropped, so a child-derived
-    /// row can neither re-drive the cursor (ESC/CSI), set the window title (OSC),
-    /// inject an extra frame line (LF/CR/VT/FF), nor disturb column alignment
-    /// (TAB). Printable bytes and UTF-8 continuation bytes (≥ 0x80) pass through.
+    /// control byte is dropped, so a child-derived row can neither re-drive the
+    /// cursor (ESC/CSI), set the window title (OSC), inject an extra frame line
+    /// (LF/CR/VT/FF), nor disturb column alignment (TAB). Only well-formed UTF-8
+    /// passes: a lone 0x9B/0x9D is an 8-bit CSI/OSC that needs no ESC, and only
+    /// the pending-sequence state tells it from a continuation byte — so
+    /// `term_sanitize.passableByte` owns that rule for both choke points.
     /// Every tab paints row content through here, so frame integrity is enforced
-    /// in this one choke point rather than trusted to each renderer.
+    /// in this one place rather than trusted to each renderer.
     pub fn putContent(self: *Frame, bytes: []const u8) void {
-        for (bytes) |b| switch (b) {
-            '\t' => self.put(" "), // tab: collapse to one column
-            0x00...0x08, 0x0a...0x1f, 0x7f => {}, // C0 controls (incl. ESC), CR/LF, DEL: drop
-            else => self.put(&[_]u8{b}),
-        };
+        // Per call, not a Frame field: a codepoint never spans two calls, so a
+        // reused Frame cannot inherit a half-armed sequence from the last frame.
+        var st: term_sanitize.Utf8State = .{};
+        for (bytes) |b| {
+            if (!term_sanitize.passableByte(b, &st)) continue;
+            switch (b) {
+                '\t' => self.put(" "), // tab: collapse to one column
+                '\n' => {}, // passable for the stream caller; a row must not break the line
+                else => self.put(&[_]u8{b}),
+            }
+        }
     }
 };
 
@@ -381,10 +390,10 @@ test "Frame.moveClear positions then erases to end of line" {
     try std.testing.expectEqualStrings("\x1b[3;5H\x1b[K", f.slice());
 }
 
-test "Frame.putContent strips line breakers and turns tab into a space" {
+test "Frame.putContent strips line breakers and DEL, and turns tab into a space" {
     var buf: [32]u8 = undefined;
     var f: Frame = .{ .buf = &buf };
-    f.putContent("a\nb\tc\rd\x0b\x0ce"); // LF, TAB, CR, VT, FF
+    f.putContent("a\nb\tc\rd\x0b\x0ce\x7f"); // LF, TAB, CR, VT, FF, DEL
     try std.testing.expectEqualStrings("ab cde", f.slice());
 }
 
@@ -405,6 +414,44 @@ test "putContent strips the control introducers from a hostile row (OSC + BEL + 
     try std.testing.expect(std.mem.indexOfScalar(u8, out, 0x1b) == null); // no ESC → no CSI/OSC executes
     try std.testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null); // BEL dropped
     try std.testing.expect(std.mem.indexOf(u8, out, "x") != null and std.mem.indexOf(u8, out, "y") != null);
+}
+
+test "putContent drops a lone 8-bit C1 introducer from row content" {
+    var buf: [64]u8 = undefined;
+    // A lone 0x9B/0x9D/0x9C is an 8-bit CSI/OSC/ST: no ESC, yet a terminal that
+    // honours C1 controls executes it on the cursor moveClear just positioned.
+    for ([_][]const u8{
+        "\x9b31mX",
+        "a\x9d0;pwn\x9c",
+        "\xc0\xaf", // overlong: C0 is never a legal lead
+        "\x80", // lone continuation byte
+        "\xf5\x9b\x9d", // invalid lead: a length classifier would arm 3 bytes here
+    }) |bad| {
+        var f: Frame = .{ .buf = &buf };
+        f.putContent(bad);
+        for (f.slice()) |b| try std.testing.expect(b < 0x80 or b > 0x9F);
+    }
+}
+
+test "putContent passes well-formed UTF-8 through byte-identically" {
+    var buf: [64]u8 = undefined;
+    // U+065B's own continuation byte is 0x9B, and app.zig paints a 4-byte
+    // U+1D7F6: the filter must be UTF-8-aware, not a blanket C1 drop.
+    for ([_][]const u8{ "caf\u{00e9} \u{2014} \u{1d7f6}", "\u{065b}", "\u{d6c0}" }) |ok| {
+        var f: Frame = .{ .buf = &buf };
+        f.putContent(ok);
+        try std.testing.expectEqualStrings(ok, f.slice());
+    }
+}
+
+test "putContent state is per call, so a split rune cannot arm the next row" {
+    var buf: [64]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    f.putContent("a\xe2\x80"); // a rune cut short by a narrow-width hard break
+    f.putContent("\x94b"); // fresh state: the orphan tail is a lone continuation
+    // The truncated prefix stays as the maximal subpart a decoder eats as one
+    // error; what must not happen is the next row completing it.
+    try std.testing.expectEqualStrings("a\xe2\x80b", f.slice());
 }
 
 test "paintRows self-erases every painted row so a shorter repaint drops no tail" {

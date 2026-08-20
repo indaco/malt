@@ -1,11 +1,11 @@
 //! malt — responsive layout engine for `mt tui`.
 //!
-//! Leaf module: imports only `std` and the read-only `ui/term_sanitize` helper
-//! (via `scroll_list`). The frame is a *pure function of `(cols, rows)`* so a
-//! terminal resize is just a re-render, not a data refetch, and the whole layer
-//! is testable without a PTY. Splits the screen into five stacked, full-width
-//! regions — header / tab-bar / filter / content / footer — and, below a minimum size,
-//! renders a clean "terminal too small" fallback instead of a corrupt frame.
+//! Leaf module: imports only `std` and `scroll_list`. The frame is a *pure
+//! function of `(cols, rows)`* so a terminal resize is just a re-render, not a
+//! data refetch, and the whole layer is testable without a PTY. Splits the
+//! screen into five stacked, full-width regions — header / tab-bar / filter /
+//! content / footer — and, below a minimum size, renders a clean "terminal too
+//! small" fallback instead of a corrupt frame.
 //! Nothing here touches the terminal, so a degenerate size yields the fallback,
 //! never a panic that would bypass the caller's `errdefer` restoration.
 

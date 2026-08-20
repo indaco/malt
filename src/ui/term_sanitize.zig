@@ -176,7 +176,7 @@ pub const Sanitizer = struct {
 /// Pending multibyte sequence. `lo`/`hi` bound the *next* byte, which is what
 /// separates a well-formed encoding from an overlong, surrogate or
 /// out-of-range one — a plain 0x80..0xBF range check cannot tell them apart.
-const Utf8State = struct {
+pub const Utf8State = struct {
     remaining: u2 = 0,
     lo: u8 = 0x80,
     hi: u8 = 0xBF,
@@ -200,13 +200,13 @@ fn leadState(b: u8) ?Utf8State {
 }
 
 /// Shared pass predicate. The pending-sequence state is what tells a real
-/// continuation from a lone C1 control, so both callers must classify through
+/// continuation from a lone C1 control, so every caller must classify through
 /// here rather than reimplement the rule.
 ///
 /// Emission stays byte-at-a-time: every byte that passes is part of a
 /// well-formed prefix, so a later rejection leaves a maximal subpart that a
 /// strict decoder eats as one error rather than resyncing into it as C1.
-fn passableByte(b: u8, st: *Utf8State) bool {
+pub fn passableByte(b: u8, st: *Utf8State) bool {
     if (st.remaining > 0) {
         if (b >= st.lo and b <= st.hi) {
             st.remaining -= 1;
