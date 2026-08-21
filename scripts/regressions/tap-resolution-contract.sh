@@ -21,6 +21,11 @@
 # Allowed sites:
 #   - src/core/forge.zig        the host-shaped seam (URLs, parse, auth)
 #   - src/core/tap.zig          the row/orchestration caller of the seam
+#   - src/tap_slug.zig          the canonical-identity leaf: strip and
+#                                 re-prefix live together so they cannot
+#                                 drift, and a leaf is the only tier both
+#                                 core/ and db/ (the repair migration) can
+#                                 import
 #   - src/cli/migrate/keg.zig   on-disk Cellar path
 #                                 (<prefix>/Library/Taps/<user>/homebrew-<repo>) —
 #                                 Homebrew's filesystem layout, not a URL
@@ -59,6 +64,7 @@ bs=$'\\'
 filtered=$(printf '%s\n' "$all" |
   grep -v '^src/core/forge\.zig:' |
   grep -v '^src/core/tap\.zig:' |
+  grep -v '^src/tap_slug\.zig:' |
   grep -v '^src/cli/migrate/keg\.zig:' |
   grep -v '^src/net/client\.zig:' |
   grep -vE ":[0-9]+:[[:space:]]*${bs}${bs}" |

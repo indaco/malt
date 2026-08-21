@@ -60,7 +60,7 @@ test "initSchema runs v1 then migrates to the current known version" {
     try testing.expect(try tableExists(&tdb.db, "bundle_members"));
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 13), ver);
+    try testing.expectEqual(schema.known_schema_version, ver);
 }
 
 test "migrate is idempotent on re-run" {
@@ -72,7 +72,7 @@ test "migrate is idempotent on re-run" {
     try schema.migrate(&tdb.db);
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 13), ver);
+    try testing.expectEqual(schema.known_schema_version, ver);
 }
 
 test "v4 migration adds pinned column to casks" {
@@ -102,7 +102,7 @@ test "v4 migration is idempotent on re-run" {
     try schema.migrate(&tdb.db);
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 13), ver);
+    try testing.expectEqual(schema.known_schema_version, ver);
 }
 
 test "v6 migration adds tap column to casks" {
@@ -232,4 +232,55 @@ test "bundle_members cascade-deletes with bundle" {
     defer stmt.finalize();
     _ = try stmt.step();
     try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
+}
+
+test "v14 leaves one identity per tap across taps, kegs and casks" {
+    // Whole-registry view the per-table unit tests cannot give: three
+    // spellings of one tap, spread over three tables, must join again
+    // after the repair.
+    var t = try TempDb.init("v14_identity");
+    defer t.deinit();
+    try schema.initSchema(&t.db);
+
+    try t.db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo) VALUES
+        \\  ('Indaco/Homebrew-Tap', 'https://github.com/Indaco/homebrew-Homebrew-Tap', NULL,
+        \\   'Indaco', 'homebrew-Homebrew-Tap'),
+        \\  ('indaco/tap', 'https://github.com/indaco/homebrew-tap', 'abc123', 'indaco', 'homebrew-tap');
+    );
+    try t.db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap) VALUES
+        \\  ('a', 'Indaco/Homebrew-Tap/a', '1.0', 'sha-a', '/c/a/1.0', 'Indaco/Homebrew-Tap'),
+        \\  ('b', 'indaco/tap/b',          '2.0', 'sha-b', '/c/b/2.0', 'indaco/tap');
+    );
+    try t.db.exec(
+        \\INSERT INTO casks (token, name, version, url, tap)
+        \\VALUES ('c', 'C', '3.0', 'https://x/c.zip', 'INDACO/linuxbrew-tap');
+    );
+
+    try t.db.exec("DELETE FROM schema_version WHERE version >= 14;");
+    try schema.migrate(&t.db);
+
+    // One surviving tap row, and it is the one carrying the real pin.
+    var taps = try t.db.prepare("SELECT name, commit_sha FROM taps;");
+    defer taps.finalize();
+    try testing.expect(try taps.step());
+    try testing.expectEqualStrings("indaco/tap", std.mem.sliceTo(taps.columnText(0).?, 0));
+    try testing.expectEqualStrings("abc123", std.mem.sliceTo(taps.columnText(1).?, 0));
+    try testing.expect(!try taps.step());
+
+    // Every keg and cask now points at that one row.
+    var joined = try t.db.prepare(
+        \\SELECT COUNT(*) FROM (
+        \\  SELECT tap FROM kegs UNION ALL SELECT tap FROM casks
+        \\) WHERE tap = 'indaco/tap';
+    );
+    defer joined.finalize();
+    try testing.expect(try joined.step());
+    try testing.expectEqual(@as(i64, 3), joined.columnInt(0));
+
+    var full = try t.db.prepare("SELECT full_name FROM kegs WHERE name='a';");
+    defer full.finalize();
+    try testing.expect(try full.step());
+    try testing.expectEqualStrings("indaco/tap/a", std.mem.sliceTo(full.columnText(0).?, 0));
 }

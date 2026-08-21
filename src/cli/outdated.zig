@@ -8,6 +8,7 @@ const formula_mod = @import("../core/formula.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const tap_slug = @import("../tap_slug.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const color = @import("../ui/color.zig");
@@ -248,10 +249,12 @@ pub fn planEmit(
 /// Trim ASCII whitespace from a `--tap` label; return null when the
 /// trimmed result is empty so the caller can fail with a precise
 /// error instead of running the DB lookup against `""`.
-pub fn normalizeTapLabel(label: []const u8) ?[]const u8 {
+pub fn normalizeTapLabel(buf: []u8, label: []const u8) ?[]const u8 {
     const trimmed = std.mem.trim(u8, label, " \t\n\r");
     if (trimmed.len == 0) return null;
-    return trimmed;
+    // Rows are stored canonical; fold the filter so `--tap User/Homebrew-X`
+    // and `--tap user/x` select the same set.
+    return tap_slug.canonicalTapSlug(buf, trimmed) orelse trimmed;
 }
 
 /// "All clear" summary line for the current scope, or null when at
@@ -661,14 +664,34 @@ test "planEmit recomputes when --tap= narrows the scope (equals form)" {
 }
 
 test "normalizeTapLabel returns null for empty and whitespace-only labels" {
-    try std.testing.expectEqual(@as(?[]const u8, null), normalizeTapLabel(""));
-    try std.testing.expectEqual(@as(?[]const u8, null), normalizeTapLabel("   "));
-    try std.testing.expectEqual(@as(?[]const u8, null), normalizeTapLabel("\t\n"));
+    var buf: [160]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), normalizeTapLabel(&buf, ""));
+    try std.testing.expectEqual(@as(?[]const u8, null), normalizeTapLabel(&buf, "   "));
+    try std.testing.expectEqual(@as(?[]const u8, null), normalizeTapLabel(&buf, "\t\n"));
 }
 
 test "normalizeTapLabel trims surrounding whitespace from a valid label" {
-    try std.testing.expectEqualStrings("user/repo", normalizeTapLabel("  user/repo  ").?);
-    try std.testing.expectEqualStrings("user/repo", normalizeTapLabel("user/repo").?);
+    var buf: [160]u8 = undefined;
+    try std.testing.expectEqualStrings("user/repo", normalizeTapLabel(&buf, "  user/repo  ").?);
+    try std.testing.expectEqualStrings("user/repo", normalizeTapLabel(&buf, "user/repo").?);
+}
+
+test "normalizeTapLabel passes through a label it cannot fold" {
+    // No slash means no tap identity to fold onto; the raw value is bound
+    // and simply matches nothing, rather than silently selecting a row.
+    var buf: [160]u8 = undefined;
+    try std.testing.expectEqualStrings("noslash", normalizeTapLabel(&buf, " noslash ").?);
+    // Too long for the buffer — same pass-through, no truncation.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("user/repo", normalizeTapLabel(&tiny, "user/repo").?);
+}
+
+test "normalizeTapLabel folds a --tap label onto the stored tap identity" {
+    // `--tap` is matched against rows written in canonical form, so the
+    // user's spelling has to be folded before it is bound.
+    var buf: [160]u8 = undefined;
+    try std.testing.expectEqualStrings("indaco/tap", normalizeTapLabel(&buf, " Indaco/Homebrew-Tap ").?);
+    try std.testing.expectEqualStrings("homebrew/core", normalizeTapLabel(&buf, "Homebrew/homebrew-core").?);
 }
 
 test "summaryMessage suppresses 'all up to date' when any row was printed" {
@@ -866,8 +889,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Validate --tap before any cache/network I/O so a typo never
     // writes a partial snapshot or warms an API cache for nothing.
+    var tap_label_buf: [tap_slug.max_slug_len]u8 = undefined;
     if (tap_filter) |raw_label| {
-        const label = normalizeTapLabel(raw_label) orelse {
+        const label = normalizeTapLabel(&tap_label_buf, raw_label) orelse {
             output.err("--tap requires a non-empty label (e.g. `--tap user/repo`)", .{});
             return error.Aborted;
         };
