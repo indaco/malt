@@ -69,6 +69,7 @@ comptime {
     _ = @import("info_cli_test.zig");
     _ = @import("info_test.zig");
     _ = @import("install_ambiguity_test.zig");
+    _ = @import("install_download_cancel_test.zig");
     _ = @import("install_download_only_test.zig");
     _ = @import("install_execute_test.zig");
     _ = @import("install_idempotent_test.zig");

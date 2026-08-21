@@ -164,6 +164,7 @@ pub fn build(b: *std.Build) void {
         "tests/ghcr_401_retry_test.zig",
         "tests/net_get_to_writer_test.zig",
         "tests/bottle_download_test.zig",
+        "tests/install_download_cancel_test.zig",
         "tests/linker_core_test.zig",
         "tests/supervisor_pure_test.zig",
         "tests/install_pure_test.zig",
