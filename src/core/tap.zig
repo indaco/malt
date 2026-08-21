@@ -3,6 +3,11 @@ const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
 const forge = @import("forge.zig");
+const tap_slug = @import("../tap_slug.zig");
+
+/// Re-exported so every tap-facing caller folds a slug the same way.
+pub const canonicalTapSlug = tap_slug.canonicalTapSlug;
+pub const max_slug_len = tap_slug.max_slug_len;
 
 pub const TapInfo = struct {
     name: []const u8,
@@ -562,12 +567,19 @@ pub fn effectiveOwnerRepo(
     // a GitHub-community convention — it does not hold on other forges, so
     // a non-github registration must name its repo explicitly.
     if (!std.mem.eql(u8, host, "github.com")) return error.ExplicitRepoRequired;
-    const slash = std.mem.indexOfScalar(u8, slug, '/') orelse unreachable;
-    const user = slug[0..slash];
-    const repo_part = slug[slash + 1 ..];
+    // Synthesize from the canonical identity, not the typed spelling: an
+    // input that already carries `homebrew-` would otherwise be addressed
+    // as `homebrew-homebrew-<repo>`, which no tap repo answers to.
+    var canon_buf: [160]u8 = undefined;
+    const canon = tap_slug.canonicalTapSlug(&canon_buf, slug) orelse return error.ExplicitRepoRequired;
+    const slash = std.mem.indexOfScalar(u8, canon, '/').?;
+    const user = canon[0..slash];
+    const repo_part = canon[slash + 1 ..];
     const owner_owned = try allocator.dupe(u8, user);
     errdefer allocator.free(owner_owned);
-    const repo_owned = try std.fmt.allocPrint(allocator, "homebrew-{s}", .{repo_part});
+    var repo_buf: [192]u8 = undefined;
+    const repo_synth = tap_slug.synthRepo(&repo_buf, repo_part) orelse return error.ExplicitRepoRequired;
+    const repo_owned = try allocator.dupe(u8, repo_synth);
     errdefer allocator.free(repo_owned);
     const host_owned = try allocator.dupe(u8, "github.com");
     return .{ .owner = owner_owned, .repo = repo_owned, .host = host_owned };
@@ -1012,6 +1024,31 @@ test "effectiveOwnerRepo cold path synthesizes homebrew- for github.com" {
     defer pair.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("github.com", pair.host);
     try std.testing.expectEqualStrings("aeroxy", pair.owner);
+    try std.testing.expectEqualStrings("homebrew-tap", pair.repo);
+}
+
+test "effectiveOwnerRepo synthesizes from the canonical slug, never a doubled prefix" {
+    // A slug that already carries `homebrew-` used to become
+    // `homebrew-homebrew-<repo>`, which 404s on every real tap.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+
+    const pair = try effectiveOwnerRepo(std.testing.allocator, &db, "Aeroxy/Homebrew-Tap", "github.com");
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("aeroxy", pair.owner);
+    try std.testing.expectEqualStrings("homebrew-tap", pair.repo);
+}
+
+test "effectiveOwnerRepo re-prefixes a linuxbrew- slug as homebrew-, like brew" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+
+    const pair = try effectiveOwnerRepo(std.testing.allocator, &db, "aeroxy/linuxbrew-tap", "github.com");
+    defer pair.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("homebrew-tap", pair.repo);
 }
 

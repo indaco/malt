@@ -20,6 +20,7 @@ const plist_mod = @import("../core/services/plist.zig");
 const supervisor_mod = @import("../core/services/supervisor.zig");
 const signals = @import("../core/signals.zig");
 const store_mod = @import("../core/store.zig");
+const tap_slug = @import("../tap_slug.zig");
 const lock_mod = @import("../db/lock.zig");
 const lock_report = @import("lock_report.zig");
 const schema = @import("../db/schema.zig");
@@ -306,8 +307,11 @@ fn caskPresent(ctx: *const AppCtx, prefix: []const u8, token: []const u8) bool {
 fn tapPackagePresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) bool {
     const parts = args_mod.parseTapName(name) orelse return false;
 
-    var slug_buf: [256]u8 = undefined;
-    const slug = std.fmt.bufPrint(&slug_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch return false;
+    // Must key the probe the same way the install path records the row.
+    var slug_raw_buf: [tap_slug.max_slug_len]u8 = undefined;
+    const slug_raw = std.fmt.bufPrint(&slug_raw_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch return false;
+    var slug_buf: [tap_slug.max_slug_len]u8 = undefined;
+    const slug = tap_slug.canonicalTapSlug(&slug_buf, slug_raw) orelse return false;
 
     var db = openExistingDb(ctx, prefix) orelse return false;
     defer db.close();

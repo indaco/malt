@@ -9,6 +9,7 @@ const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const dirsize = @import("../fs/dirsize.zig");
+const tap_slug = @import("../tap_slug.zig");
 const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
@@ -53,6 +54,11 @@ pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
             tap_filter = arg["--tap=".len..];
         }
     }
+    // Rows are stored canonical; fold the filter so every spelling of a
+    // tap selects the same set.
+    var tap_filter_buf: [tap_slug.max_slug_len]u8 = undefined;
+    if (tap_filter) |raw| tap_filter = tap_slug.canonicalTapSlug(&tap_filter_buf, raw) orelse raw;
+
     const json_mode = output.isJson();
 
     // If neither specified, show both

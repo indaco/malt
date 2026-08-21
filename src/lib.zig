@@ -97,6 +97,7 @@ pub const client_pool = @import("net/client_pool.zig");
 pub const ghcr = @import("net/ghcr.zig");
 pub const mirror = @import("net/mirror.zig");
 pub const offline = @import("net/offline.zig");
+pub const tap_slug = @import("tap_slug.zig");
 pub const text_replace = @import("text_replace.zig");
 pub const color = @import("ui/color.zig");
 pub const custom_theme = @import("ui/custom_theme.zig");

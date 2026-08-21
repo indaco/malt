@@ -12,6 +12,7 @@ const cellar_mod = @import("../../core/cellar.zig");
 const hash = @import("../../core/hash.zig");
 const linker_mod = @import("../../core/linker.zig");
 const tap_mod = @import("../../core/tap.zig");
+
 const forge = @import("../../core/forge.zig");
 const tap_cache = @import("../../core/tap_cache.zig");
 const sqlite = @import("../../db/sqlite.zig");
@@ -226,8 +227,14 @@ fn installTapRb(
         return InstallError.FormulaNotFound;
     };
 
-    var tap_slug_buf: [128]u8 = undefined;
-    const tap_slug = std.fmt.bufPrint(&tap_slug_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
+    // Single construction point for the tap key: the registry row,
+    // `kegs.tap`/`casks.tap` and the resolve URLs all inherit it, so
+    // canonicalizing here is what keeps one tap from splitting in two.
+    var tap_slug_raw_buf: [tap_mod.max_slug_len]u8 = undefined;
+    const tap_slug_raw = std.fmt.bufPrint(&tap_slug_raw_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
+        return InstallError.FormulaNotFound;
+    var tap_slug_buf: [tap_mod.max_slug_len]u8 = undefined;
+    const tap_slug = tap_mod.canonicalTapSlug(&tap_slug_buf, tap_slug_raw) orelse
         return InstallError.FormulaNotFound;
 
     // An already-recorded package needs no `.rb` at all - the post-parse
