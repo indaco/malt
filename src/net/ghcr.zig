@@ -286,6 +286,7 @@ pub const GhcrClient = struct {
                 error.ResponseTooLarge,
                 error.ReadFailed,
                 error.WatchdogSpawnFailed,
+                error.HeadTimeout,
                 error.Canceled,
                 => return GhcrError.DownloadFailed,
             };
