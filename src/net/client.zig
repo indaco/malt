@@ -654,6 +654,9 @@ pub const HttpClient = struct {
         extra_headers: []const std.http.Header,
     ) !ConditionalResponse {
         if (self.offline) return error.OfflineRequired;
+        // Metadata no digest covers it, and the caller may pass an
+        // `Authorization` header - cleartext is never acceptable here.
+        try requireSecureOrigin(url, .transport_only);
 
         // Stack-buffered header list: today's only callers add at most
         // `If-None-Match` + `Authorization`. Bump if a real caller exceeds.
@@ -1663,6 +1666,33 @@ test "every url entry point refuses a cleartext origin before dialling out" {
     // A guard added to some of the entry points and not the rest is the whole
     // failure mode: `headResolved` takes a cask url too, and the type it hands
     // back decides whether the artifact is fed to `sudo installer`.
+
+    // An assertion only covers the entry points someone remembered to list, so
+    // the roster is pinned at comptime: a new `pub fn (*HttpClient, []const u8,
+    // ...)` breaks the build until it is added here and asserted below. Decl
+    // enumeration sees only `pub`, and the match is on that exact shape - an
+    // entry point taking its url any other way still needs the guard by hand.
+    const entry_points = [_][]const u8{
+        "get",
+        "getConditional",
+        "getWithHeaders",
+        "getToWriter",
+        "head",
+        "headResolved",
+    };
+    comptime {
+        for (@typeInfo(HttpClient).@"struct".decls) |decl| {
+            const field = @field(HttpClient, decl.name);
+            const info = @typeInfo(@TypeOf(field));
+            if (info != .@"fn") continue;
+            const params = info.@"fn".params;
+            if (params.len < 2) continue;
+            if (params[0].type != *HttpClient or params[1].type != []const u8) continue;
+            for (entry_points) |name| {
+                if (std.mem.eql(u8, name, decl.name)) break;
+            } else @compileError("url entry point missing from the cleartext sweep: " ++ decl.name);
+        }
+    }
     const a = std.testing.allocator;
     var http = HttpClient.init(std.Options.debug_io, .empty, a);
     defer http.deinit();
@@ -1672,6 +1702,7 @@ test "every url entry point refuses a cleartext origin before dialling out" {
     defer sink.deinit();
 
     try std.testing.expectError(error.InsecureUrlScheme, http.get(url));
+    try std.testing.expectError(error.InsecureUrlScheme, http.getConditional(url, null, &.{}));
     try std.testing.expectError(error.InsecureUrlScheme, http.getWithHeaders(url, &.{}, null, .transport_only));
     try std.testing.expectError(error.InsecureUrlScheme, http.getToWriter(url, &.{}, &sink.writer, null));
     try std.testing.expectError(error.InsecureUrlScheme, http.head(url));
