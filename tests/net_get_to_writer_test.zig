@@ -20,6 +20,9 @@ const Mode = enum {
     ok,
     /// First GET answers 503 (a transient error net retries), later ones 200.
     err_then_ok,
+    /// Every GET answers 503, so the loop retries until its budget or a
+    /// cancel stops it.
+    always_err,
     /// First GET answers 401 (a non-transient status the caller re-auths on),
     /// later ones 200 — mirrors GHCR's re-auth handshake.
     unauth_then_ok,
@@ -30,6 +33,15 @@ const Mode = enum {
     /// exercises the streaming redirect loop.
     redirect_then_ok,
 };
+
+// Set by the always_err stub once it has answered an attempt; the cancel
+// predicate below reads it so the cancel lands on the retry, not before the
+// first request is even sent.
+var served_one: std.atomic.Value(bool) = .init(false);
+
+fn cancelAfterFirstServe() bool {
+    return served_one.load(.acquire);
+}
 
 const Stub = struct {
     io: std.Io,
@@ -62,6 +74,12 @@ fn serve(s: *Stub) void {
                     .status = .found,
                     .extra_headers = &.{.{ .name = "location", .value = "/final" }},
                 }) catch return,
+            .always_err => {
+                // Signal that an attempt has been served, so the test's cancel
+                // predicate only trips once a retry is actually pending.
+                served_one.store(true, .release);
+                req.respond("service unavailable\n", .{ .status = .service_unavailable }) catch return;
+            },
             .err_then_ok => if (s.get_count == 1)
                 req.respond("service unavailable\n", .{ .status = .service_unavailable }) catch return
             else
@@ -371,4 +389,45 @@ test "getToWriter trips ResponseTooLarge when the 200 body exceeds the blob cap"
 
     try std.testing.expectError(error.ResponseTooLarge, status);
     try std.testing.expect(sink.writer.buffered().len <= 8);
+}
+
+test "getToWriter stops re-dialling when a cancel lands on the retry backoff" {
+    // The backoff sits between a transient failure and the next attempt. Until
+    // it honoured the cancel predicate, a Ctrl-C there was slept off and the
+    // request re-dialled through the whole budget. One GET, not four, is the
+    // user-visible contract; the sliced polling itself is pinned by the unit
+    // tests next to `retrySleep`.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const port = listener.socket.address.getPort();
+
+    served_one.store(false, .release);
+    var stub = Stub{ .io = io, .listener = &listener, .mode = .always_err };
+    const server_thread = try std.Thread.spawn(.{}, serve, .{&stub});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blobs/sha256:abc", .{port});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    // A budget long enough that sleeping it off would be unmistakable.
+    http.retry_backoff_ms = &.{ 4000, 4000, 4000 };
+    http.cancel = &cancelAfterFirstServe;
+
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+
+    const status = http.getToWriter(url, &.{}, &sink.writer, null);
+
+    http.deinit();
+    server_thread.join();
+
+    try std.testing.expectError(error.Canceled, status);
+    // The retry never happened: the cancel ended the wait instead of it.
+    try std.testing.expectEqual(@as(usize, 1), stub.get_count);
 }
