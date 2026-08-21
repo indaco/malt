@@ -72,7 +72,9 @@ pub fn describeResolveError(buf: []u8, err: TapError, forge_kind: forge.Forge, h
 fn githubResolveError(err: TapError) []const u8 {
     return switch (err) {
         error.RateLimited => "GitHub API rate limit reached. Set MALT_GITHUB_TOKEN to an authorized GitHub token to lift the 60/hr anonymous cap.",
-        error.NotFound => "GitHub returned 404 for the tap repo. If the repo lives at github.com/<user>/<exact-name> instead of github.com/<user>/homebrew-<repo>, rerun with --repo <user>/<exact-name>.",
+        // `--repo` is a `mt tap` flag; this hint is shared with `mt install`,
+        // where the escape hatch is to register the tap first.
+        error.NotFound => "GitHub returned 404 for the tap repo. If the repo lives at github.com/<user>/<exact-name> instead of github.com/<user>/homebrew-<repo>, register it with `mt tap <user>/<repo> --repo <user>/<exact-name>` first.",
         error.NetworkError => "Network failure while reaching api.github.com — check connectivity and retry.",
         error.AuthTokenTooLong => "MALT_GITHUB_TOKEN is too long to fit the auth request buffer — verify the token value.",
         error.MalformedJson => "Unexpected response shape from GitHub — rerun with --debug and attach the log when filing an issue.",
@@ -140,6 +142,15 @@ test "describeResolveError gitlab: NetworkError names the instance host, not api
     try std.testing.expect(std.mem.indexOf(u8, msg, "api.github.com") == null);
     // The skip-guard regex in scripts/regressions/*.sh keys on this phrase.
     try std.testing.expect(std.mem.indexOf(u8, msg, "Network failure") != null);
+}
+
+test "describeResolveError github: NotFound points --repo at the command that accepts it" {
+    // The hint is shared with `mt install`, which has no --repo flag, so a
+    // bare "rerun with --repo" would be unactionable for half its callers.
+    var buf: [512]u8 = undefined;
+    const msg = describeResolveError(&buf, error.NotFound, .github, "github.com");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "mt tap <user>/<repo> --repo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "rerun with --repo") == null);
 }
 
 test "describeResolveError gitlab: NotFound drops the github-only homebrew-/--repo hint" {
