@@ -6,11 +6,11 @@
 # else.
 #
 # Allowed sites:
-#   - src/core/tap.zig          single-point fallback in `effectiveOwnerRepo`
-#                               (the cold path during initial `mt tap`).
-#   - src/db/schema.zig         v8→v9 migration backfill needs the prefix
-#                               literal to derive (owner, "homebrew-" || repo)
-#                               from the existing slug.
+#   - src/tap_slug.zig          the one synthesis, beside the prefix strip
+#                               it has to stay consistent with. Both the
+#                               cold-path fallback in `effectiveOwnerRepo`
+#                               and the repair migration call it, which is
+#                               why it sits in a leaf.
 #   - src/cli/migrate/keg.zig   `<prefix>/Library/Taps/<user>/homebrew-<repo>`
 #                               on-disk path — Homebrew's filesystem layout,
 #                               not a URL.
@@ -29,8 +29,7 @@ cd "$ROOT"
 hits=$(grep -rn --include='*.zig' -F 'homebrew-{' src || true)
 
 filtered=$(printf '%s\n' "$hits" |
-  grep -v '^src/core/tap\.zig:' |
-  grep -v '^src/db/schema\.zig:' |
+  grep -v '^src/tap_slug\.zig:' |
   grep -v '^src/cli/migrate/keg\.zig:' |
   grep -v '^$' || true)
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const sqlite = @import("sqlite.zig");
+const tap_slug = @import("../tap_slug.zig");
 
 /// Initialize the database schema (CREATE TABLE IF NOT EXISTS).
 /// Idempotent — safe to call on an existing database.
@@ -127,7 +128,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 13;
+pub const known_schema_version: i64 = 14;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -150,6 +151,7 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 11) try migrateV10toV11(db);
     if (ver < 12) try migrateV11toV12(db);
     if (ver < 13) try migrateV12toV13(db);
+    if (ver < 14) try migrateV13toV14(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -678,13 +680,11 @@ fn migrateV12toV13(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
-/// Return true iff every column in `wanted` is present on the `casks`
-/// table. Mirrors the PRAGMA-guarded probes used by v2→v3 / v3→v4 /
-/// v5→v6; centralised here because the v6→v7 backfill needs five
-/// columns, not one.
-fn caskColumnsPresent(db: *sqlite.Database, wanted: []const []const u8) sqlite.SqliteError!bool {
+/// True iff `pragma` reports every column in `wanted`. Generalises the
+/// per-table probes above; the v14 repair spans three tables.
+fn columnsPresent(db: *sqlite.Database, comptime pragma: [:0]const u8, wanted: []const []const u8) sqlite.SqliteError!bool {
     var seen: u32 = 0;
-    var stmt = try db.prepare("PRAGMA table_info(casks);");
+    var stmt = try db.prepare(pragma);
     defer stmt.finalize();
     while (try stmt.step()) {
         const name_ptr = stmt.columnText(1) orelse continue;
@@ -695,6 +695,240 @@ fn caskColumnsPresent(db: *sqlite.Database, wanted: []const []const u8) sqlite.S
     }
     const all: u32 = (@as(u32, 1) << @intCast(wanted.len)) - 1;
     return seen == all;
+}
+
+/// Rows longer than a slug can legally be are left untouched rather
+/// than truncated.
+const tap_slug_cap = tap_slug.max_slug_len;
+
+/// v14 — one identity per tap. Slugs used to be stored exactly as typed,
+/// so `user/homebrew-tap`, `user/tap` and `User/Tap` were three rows for
+/// one tap, and the v9 backfill baked a doubled `homebrew-homebrew-<x>`
+/// repo into any row registered with the prefix.
+///
+/// Written in Zig, not SQL, and driven by the same `tap_slug` helper the
+/// runtime uses: v9's defect got baked in precisely because the backfill
+/// re-implemented the rule in SQL, and sharing the helper is what stops
+/// the stored form and the live form drifting apart again.
+///
+/// `github_repo`/`github_owner`/`url` are repaired only where the stored
+/// value provably came from that backfill — an explicit `--repo`/`--url`
+/// registration survives byte-for-byte.
+///
+/// PRAGMA-guarded like the migrations above so forensic and partial
+/// fixture DBs bump the marker instead of aborting the chain.
+fn migrateV13toV14(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    if (try columnsPresent(db, "PRAGMA table_info(taps);", &.{ "id", "name", "url", "github_owner", "github_repo", "commit_sha", "host" })) {
+        try canonicalizeTaps(db);
+    }
+    if (try columnsPresent(db, "PRAGMA table_info(kegs);", &.{ "id", "tap", "full_name" })) {
+        try canonicalizeKegs(db);
+    }
+    if (try columnsPresent(db, "PRAGMA table_info(casks);", &.{ "token", "tap" })) {
+        try canonicalizeCasks(db);
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (14);");
+
+    try db.commit();
+}
+
+/// Stage the canonical form of every tap row in a temp table, then let
+/// SQL do the set work. Staging first keeps us from mutating `taps`
+/// while stepping a cursor over it.
+fn canonicalizeTaps(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.exec("DROP TABLE IF EXISTS temp._tap_v14;");
+    try db.exec(
+        \\CREATE TEMP TABLE _tap_v14 (
+        \\    id     INTEGER PRIMARY KEY,
+        \\    canon  TEXT NOT NULL,
+        \\    can_fetch INTEGER NOT NULL,
+        \\    owner  TEXT,
+        \\    repo   TEXT,
+        \\    url    TEXT
+        \\);
+    );
+
+    {
+        var read = try db.prepare("SELECT id, name, github_owner, github_repo, url FROM taps;");
+        defer read.finalize();
+        var write = try db.prepare(
+            "INSERT INTO temp._tap_v14 (id, canon, can_fetch, owner, repo, url) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+        );
+        defer write.finalize();
+
+        while (try read.step()) {
+            const id = read.columnInt(0);
+            const name = std.mem.sliceTo(read.columnText(1) orelse continue, 0);
+            const owner = std.mem.sliceTo(read.columnText(2) orelse "", 0);
+            const repo = std.mem.sliceTo(read.columnText(3) orelse "", 0);
+            const url = std.mem.sliceTo(read.columnText(4) orelse "", 0);
+
+            var canon_buf: [tap_slug_cap]u8 = undefined;
+            const canon = tap_slug.canonicalTapSlug(&canon_buf, name) orelse continue;
+            const slash = std.mem.indexOfScalar(u8, canon, '/').?;
+
+            // The row that can actually fetch wins a collision.
+            var want_buf: [tap_slug_cap]u8 = undefined;
+            const want_repo = tap_slug.synthRepo(&want_buf, canon[slash + 1 ..]) orelse continue;
+            const can_fetch: i64 = if (std.mem.eql(u8, repo, want_repo)) 1 else 0;
+
+            // Damage test: the stored repo equals what the v9 backfill
+            // would have produced from this row's own spelling. Anything
+            // else is an explicit registration and stays as it is.
+            // Folding only downcases and strips a prefix, so `canon`'s slash
+            // sits at the same index as `name`'s.
+            var damaged_buf: [tap_slug_cap]u8 = undefined;
+            const backfilled = tap_slug.synthRepo(&damaged_buf, name[slash + 1 ..]);
+            const damaged = backfilled != null and std.mem.eql(u8, repo, backfilled.?);
+
+            try write.reset();
+            try write.bindInt(1, id);
+            try write.bindText(2, canon);
+            try write.bindInt(3, can_fetch);
+            if (damaged) {
+                try write.bindText(4, canon[0..slash]);
+                try write.bindText(5, want_repo);
+                // Rewrite only the trailing `/<owner>/<repo>`: no URL
+                // shape is assumed beyond the repo being the last segment.
+                var tail_buf: [tap_slug_cap * 2]u8 = undefined;
+                const tail = std.fmt.bufPrint(&tail_buf, "/{s}/{s}", .{ owner, repo }) catch "";
+                var new_buf: [1024]u8 = undefined;
+                if (tail.len != 0 and std.mem.endsWith(u8, url, tail)) {
+                    const fixed = std.fmt.bufPrint(&new_buf, "{s}/{s}/{s}", .{
+                        url[0 .. url.len - tail.len], canon[0..slash], want_repo,
+                    }) catch "";
+                    if (fixed.len != 0) try write.bindText(6, fixed) else try write.bindNull(6);
+                } else {
+                    try write.bindNull(6);
+                }
+            } else {
+                try write.bindNull(4);
+                try write.bindNull(5);
+                try write.bindNull(6);
+            }
+            _ = try write.step();
+        }
+    }
+
+    // Rows that fold together but live on different forges are two real
+    // taps, not one spelled twice — `homebrew-` is a GitHub convention and
+    // says nothing about a repo of that name elsewhere. Folding would make
+    // one of them unrepresentable under UNIQUE(name), so leave the whole
+    // group exactly as registered rather than delete a tap the user still
+    // uses.
+    try db.exec(
+        \\DELETE FROM temp._tap_v14 WHERE canon IN (
+        \\  SELECT k.canon FROM temp._tap_v14 k JOIN taps t ON t.id = k.id
+        \\  GROUP BY k.canon HAVING COUNT(DISTINCT t.host) > 1
+        \\);
+    );
+
+    // `name` is UNIQUE, so canonicalizing can collide. Keep the row that
+    // can fetch, else the one carrying a real pin, else the oldest.
+    try db.exec(
+        \\DELETE FROM taps WHERE id IN (
+        \\  SELECT c.id FROM temp._tap_v14 c
+        \\  WHERE c.id <> (
+        \\    SELECT k.id FROM temp._tap_v14 k JOIN taps t ON t.id = k.id
+        \\    WHERE k.canon = c.canon
+        \\    ORDER BY k.can_fetch DESC, (t.commit_sha IS NOT NULL) DESC, k.id ASC
+        \\    LIMIT 1)
+        \\);
+    );
+    try db.exec("DELETE FROM temp._tap_v14 WHERE id NOT IN (SELECT id FROM taps);");
+
+    try db.exec(
+        \\UPDATE taps SET
+        \\  name         = (SELECT c.canon FROM temp._tap_v14 c WHERE c.id = taps.id),
+        \\  github_owner = COALESCE((SELECT c.owner FROM temp._tap_v14 c WHERE c.id = taps.id), github_owner),
+        \\  github_repo  = COALESCE((SELECT c.repo  FROM temp._tap_v14 c WHERE c.id = taps.id), github_repo),
+        \\  url          = COALESCE((SELECT c.url   FROM temp._tap_v14 c WHERE c.id = taps.id), url)
+        \\WHERE id IN (SELECT id FROM temp._tap_v14);
+    );
+    try db.exec("DROP TABLE temp._tap_v14;");
+}
+
+/// `kegs.tap` plus the tap half of `kegs.full_name` (`<tap>/<name>`),
+/// which `mt info` and uninstall-by-full-name match on. Canonical slugs
+/// are never longer than what they replace, so the width budget the
+/// migrate path works to can only shrink.
+fn canonicalizeKegs(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.exec("DROP TABLE IF EXISTS temp._keg_v14;");
+    try db.exec("CREATE TEMP TABLE _keg_v14 (id INTEGER PRIMARY KEY, tap TEXT NOT NULL, full_name TEXT);");
+    {
+        var read = try db.prepare("SELECT id, tap, full_name FROM kegs WHERE tap IS NOT NULL AND tap <> '';");
+        defer read.finalize();
+        var stage = try db.prepare("INSERT INTO temp._keg_v14 (id, tap, full_name) VALUES (?1, ?2, ?3);");
+        defer stage.finalize();
+        while (try read.step()) {
+            const id = read.columnInt(0);
+            const tap = std.mem.sliceTo(read.columnText(1) orelse continue, 0);
+            var canon_buf: [tap_slug_cap]u8 = undefined;
+            const canon = tap_slug.canonicalTapSlug(&canon_buf, tap) orelse continue;
+
+            try stage.reset();
+            try stage.bindInt(1, id);
+            try stage.bindText(2, canon);
+            // NULL full_name means "leave it"; the UPDATE coalesces.
+            const full = if (read.columnText(2)) |f| std.mem.sliceTo(f, 0) else "";
+            var full_buf: [1024]u8 = undefined;
+            const rewritable = full.len > tap.len and
+                std.mem.startsWith(u8, full, tap) and full[tap.len] == '/';
+            const fixed = if (rewritable)
+                std.fmt.bufPrint(&full_buf, "{s}{s}", .{ canon, full[tap.len..] }) catch ""
+            else
+                "";
+            if (fixed.len != 0) try stage.bindText(3, fixed) else try stage.bindNull(3);
+            _ = try stage.step();
+        }
+    }
+    try db.exec(
+        \\UPDATE kegs SET
+        \\  tap       = (SELECT k.tap FROM temp._keg_v14 k WHERE k.id = kegs.id),
+        \\  full_name = COALESCE((SELECT k.full_name FROM temp._keg_v14 k WHERE k.id = kegs.id), full_name)
+        \\WHERE id IN (SELECT id FROM temp._keg_v14);
+    );
+    try db.exec("DROP TABLE temp._keg_v14;");
+}
+
+/// `casks.tap` has no UNIQUE constraint, so every non-empty value folds
+/// with no collision handling.
+fn canonicalizeCasks(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.exec("DROP TABLE IF EXISTS temp._cask_v14;");
+    try db.exec("CREATE TEMP TABLE _cask_v14 (token TEXT PRIMARY KEY, tap TEXT NOT NULL);");
+    {
+        var read = try db.prepare("SELECT token, tap FROM casks WHERE tap IS NOT NULL AND tap <> '';");
+        defer read.finalize();
+        var stage = try db.prepare("INSERT OR REPLACE INTO temp._cask_v14 (token, tap) VALUES (?1, ?2);");
+        defer stage.finalize();
+        while (try read.step()) {
+            const token = std.mem.sliceTo(read.columnText(0) orelse continue, 0);
+            const tap = std.mem.sliceTo(read.columnText(1) orelse continue, 0);
+            var canon_buf: [tap_slug_cap]u8 = undefined;
+            const canon = tap_slug.canonicalTapSlug(&canon_buf, tap) orelse continue;
+            try stage.reset();
+            try stage.bindText(1, token);
+            try stage.bindText(2, canon);
+            _ = try stage.step();
+        }
+    }
+    try db.exec(
+        \\UPDATE casks SET tap = (SELECT c.tap FROM temp._cask_v14 c WHERE c.token = casks.token)
+        \\WHERE token IN (SELECT token FROM temp._cask_v14);
+    );
+    try db.exec("DROP TABLE temp._cask_v14;");
+}
+
+/// Return true iff every column in `wanted` is present on the `casks`
+/// table. Mirrors the PRAGMA-guarded probes used by v2→v3 / v3→v4 /
+/// v5→v6; centralised here because the v6→v7 backfill needs five
+/// columns, not one.
+fn caskColumnsPresent(db: *sqlite.Database, wanted: []const []const u8) sqlite.SqliteError!bool {
+    return columnsPresent(db, "PRAGMA table_info(casks);", wanted);
 }
 
 /// Query the current schema version.
@@ -788,6 +1022,326 @@ test "fresh DB ships kegs at the v5 UNIQUE without a rebuild (v5 shape)" {
     // The short-circuit still has to bump the marker and let the rest of
     // the ladder run.
     try testing.expectEqual(known_schema_version, try currentVersion(&db));
+}
+
+fn seedV13Taps(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.exec("DELETE FROM schema_version WHERE version >= 14;");
+}
+
+fn tapField(db: *sqlite.Database, comptime sql: [:0]const u8, key: []const u8, buf: []u8) sqlite.SqliteError!?[]const u8 {
+    var stmt = try db.prepare(sql);
+    defer stmt.finalize();
+    try stmt.bindText(1, key);
+    if (!(try stmt.step())) return null;
+    const v = stmt.columnText(0) orelse return null;
+    const t = std.mem.sliceTo(v, 0);
+    @memcpy(buf[0..t.len], t);
+    return buf[0..t.len];
+}
+
+test "v13→v14 canonicalizes a prefixed tap row and repairs its synthesised repo" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url, github_owner, github_repo)
+        \\VALUES ('Indaco/Homebrew-Tap', 'https://github.com/Indaco/homebrew-Homebrew-Tap',
+        \\        'Indaco', 'homebrew-Homebrew-Tap');
+    );
+    try seedV13Taps(&db);
+    try migrate(&db);
+
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("homebrew-tap", (try tapField(&db, "SELECT github_repo FROM taps WHERE name = ?1;", "indaco/tap", &buf)).?);
+    var buf2: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "https://github.com/indaco/homebrew-tap",
+        (try tapField(&db, "SELECT url FROM taps WHERE name = ?1;", "indaco/tap", &buf2)).?,
+    );
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
+}
+
+test "v13→v14 leaves an explicitly registered repo and url byte-for-byte" {
+    // An explicit `--repo`/`--url` pair is intent, not v9 damage: only a
+    // value equal to the synthesised one may be rewritten.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url, github_owner, github_repo)
+        \\VALUES ('Grp/Homebrew-Tap', 'https://gitlab.com/grp/exact-name', 'grp', 'exact-name');
+    );
+    try seedV13Taps(&db);
+    try migrate(&db);
+
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("exact-name", (try tapField(&db, "SELECT github_repo FROM taps WHERE name = ?1;", "grp/tap", &buf)).?);
+    var buf2: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "https://gitlab.com/grp/exact-name",
+        (try tapField(&db, "SELECT url FROM taps WHERE name = ?1;", "grp/tap", &buf2)).?,
+    );
+}
+
+test "v13→v14 collapses colliding spellings onto the row that can actually fetch" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    // The prefixed row carries the doubled repo (never fetched); the bare
+    // row is the one whose repo resolves, so it must be the survivor.
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo) VALUES
+        \\  ('u/homebrew-tap', 'https://github.com/u/homebrew-homebrew-tap', 'a', 'u', 'homebrew-homebrew-tap'),
+        \\  ('u/tap',          'https://github.com/u/homebrew-tap',          NULL, 'u', 'homebrew-tap');
+    );
+    try seedV13Taps(&db);
+    try migrate(&db);
+
+    var count = try db.prepare("SELECT COUNT(*) FROM taps;");
+    defer count.finalize();
+    try testing.expect(try count.step());
+    try testing.expectEqual(@as(i64, 1), count.columnInt(0));
+
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("homebrew-tap", (try tapField(&db, "SELECT github_repo FROM taps WHERE name = ?1;", "u/tap", &buf)).?);
+}
+
+test "v13→v14 keeps the pinned row when neither collision side has a fetchable repo" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo) VALUES
+        \\  ('u/homebrew-tap', 'https://x/a', NULL, 'u', 'zzz'),
+        \\  ('u/Tap',          'https://x/b', 'deadbeef', 'u', 'yyy');
+    );
+    try seedV13Taps(&db);
+    try migrate(&db);
+
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("deadbeef", (try tapField(&db, "SELECT commit_sha FROM taps WHERE name = ?1;", "u/tap", &buf)).?);
+}
+
+test "v13→v14 keeps two same-named taps that live on different forges" {
+    // `homebrew-` is a GitHub convention; a repo of that name on another
+    // forge is a different tap. Folding these together would delete a
+    // registration the user still uses.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo, host) VALUES
+        \\  ('Acme/Homebrew-Tap', 'https://github.com/Acme/homebrew-Homebrew-Tap', NULL,
+        \\   'Acme', 'homebrew-Homebrew-Tap', 'github.com'),
+        \\  ('acme/tap', 'https://gitlab.example.com/acme/tap', 'deadbeef', 'acme', 'tap',
+        \\   'gitlab.example.com');
+    );
+    try seedV13Taps(&db);
+    try migrate(&db);
+
+    var count = try db.prepare("SELECT COUNT(*) FROM taps;");
+    defer count.finalize();
+    try testing.expect(try count.step());
+    try testing.expectEqual(@as(i64, 2), count.columnInt(0));
+
+    // Both keep the name they were registered under.
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "gitlab.example.com",
+        (try tapField(&db, "SELECT host FROM taps WHERE name = ?1;", "acme/tap", &buf)).?,
+    );
+    var buf2: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "github.com",
+        (try tapField(&db, "SELECT host FROM taps WHERE name = ?1;", "Acme/Homebrew-Tap", &buf2)).?,
+    );
+}
+
+test "v13→v14 carries the surviving row's untouched columns through a collision" {
+    // The repair rewrites name/owner/repo/url; everything else on the
+    // winning row must come through byte-for-byte.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, head_etag, github_owner, github_repo, host, forge, added_at) VALUES
+        \\  ('u/homebrew-tap', 'https://x/a', NULL, NULL, 'u', 'homebrew-homebrew-tap', 'github.com', NULL, '2020-01-01 00:00:00'),
+        \\  ('U/Tap', 'https://github.com/u/homebrew-tap', 'sha', 'etag-keep', 'u', 'homebrew-tap', 'github.com', 'github', '2021-02-03 04:05:06');
+    );
+    try seedV13Taps(&db);
+    try migrate(&db);
+
+    var stmt = try db.prepare("SELECT commit_sha, head_etag, host, forge, added_at FROM taps WHERE name='u/tap';");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqualStrings("sha", std.mem.sliceTo(stmt.columnText(0).?, 0));
+    try testing.expectEqualStrings("etag-keep", std.mem.sliceTo(stmt.columnText(1).?, 0));
+    try testing.expectEqualStrings("github.com", std.mem.sliceTo(stmt.columnText(2).?, 0));
+    try testing.expectEqualStrings("github", std.mem.sliceTo(stmt.columnText(3).?, 0));
+    try testing.expectEqualStrings("2021-02-03 04:05:06", std.mem.sliceTo(stmt.columnText(4).?, 0));
+    try testing.expect(!try stmt.step());
+}
+
+test "v13→v14 resolves a three-way collision down to a single row" {
+    // Two rows deleted in one statement whose subquery reads the same
+    // table it deletes from — the arity the two-row case cannot expose.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo) VALUES
+        \\  ('U/Homebrew-Tap',   'https://x/a', NULL, 'U', 'homebrew-Homebrew-Tap'),
+        \\  ('u/linuxbrew-tap',  'https://x/b', NULL, 'u', 'homebrew-linuxbrew-tap'),
+        \\  ('u/tap',            'https://x/c', 'sha', 'u', 'homebrew-tap');
+    );
+    try seedV13Taps(&db);
+    try migrate(&db);
+
+    var count = try db.prepare("SELECT COUNT(*) FROM taps;");
+    defer count.finalize();
+    try testing.expect(try count.step());
+    try testing.expectEqual(@as(i64, 1), count.columnInt(0));
+
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("sha", (try tapField(&db, "SELECT commit_sha FROM taps WHERE name = ?1;", "u/tap", &buf)).?);
+}
+
+test "v13→v14 is idempotent when re-run over already-canonical rows" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url, github_owner, github_repo)
+        \\VALUES ('Indaco/Homebrew-Tap', 'https://github.com/Indaco/homebrew-Homebrew-Tap',
+        \\        'Indaco', 'homebrew-Homebrew-Tap');
+    );
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap)
+        \\VALUES ('a', 'Indaco/Homebrew-Tap/a', '1.0', 'sha-a', '/c/a/1.0', 'Indaco/Homebrew-Tap');
+    );
+    try seedV13Taps(&db);
+    try migrate(&db);
+    try seedV13Taps(&db);
+    try migrate(&db);
+
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "https://github.com/indaco/homebrew-tap",
+        (try tapField(&db, "SELECT url FROM taps WHERE name = ?1;", "indaco/tap", &buf)).?,
+    );
+    var buf2: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "indaco/tap/a",
+        (try tapField(&db, "SELECT full_name FROM kegs WHERE name = ?1;", "a", &buf2)).?,
+    );
+}
+
+test "v13→v14 leaves a full_name that does not carry its tap prefix alone" {
+    // Pre-full_name rows store the bare leaf; rewriting blindly would
+    // corrupt what `mt info` and uninstall-by-full-name match on.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap)
+        \\VALUES ('a', 'a', '1.0', 'sha-a', '/c/a/1.0', 'U/Homebrew-Tap');
+    );
+    try seedV13Taps(&db);
+    try migrate(&db);
+
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("a", (try tapField(&db, "SELECT full_name FROM kegs WHERE name = ?1;", "a", &buf)).?);
+    var buf2: [128]u8 = undefined;
+    try testing.expectEqualStrings("u/tap", (try tapField(&db, "SELECT tap FROM kegs WHERE name = ?1;", "a", &buf2)).?);
+}
+
+test "v13→v14 bumps the marker past a degenerate slug it cannot canonicalize" {
+    // Forensic fixtures must not abort the migration chain.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url, github_owner, github_repo)
+        \\VALUES ('noslash', 'https://x/a', 'noslash', 'noslash');
+    );
+    try seedV13Taps(&db);
+    try migrate(&db);
+
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("noslash", (try tapField(&db, "SELECT name FROM taps WHERE name = ?1;", "noslash", &buf)).?);
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
+}
+
+test "v13→v14 bumps the marker even when every table is empty" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+    try seedV13Taps(&db);
+    try migrate(&db);
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
+}
+
+test "v13→v14 canonicalizes kegs.tap, casks.tap and the tap half of full_name" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap)
+        \\VALUES ('myx', 'HaseebKhalid1507/homebrew-tap/myx', '0.4.0', 'sha-myx', '/c/myx/0.4.0',
+        \\        'HaseebKhalid1507/homebrew-tap');
+    );
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url, tap)
+        \\VALUES ('font-x', 'Font X', '1.0', 'https://x/f.zip', 'U/Homebrew-Fonts');
+    );
+    try seedV13Taps(&db);
+    try migrate(&db);
+
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "haseebkhalid1507/tap",
+        (try tapField(&db, "SELECT tap FROM kegs WHERE name = ?1;", "myx", &buf)).?,
+    );
+    var buf2: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "haseebkhalid1507/tap/myx",
+        (try tapField(&db, "SELECT full_name FROM kegs WHERE name = ?1;", "myx", &buf2)).?,
+    );
+    var buf3: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "u/fonts",
+        (try tapField(&db, "SELECT tap FROM casks WHERE token = ?1;", "font-x", &buf3)).?,
+    );
+}
+
+test "v13→v14 leaves a core-tap keg and a NULL tap alone" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap)
+        \\VALUES ('jq', 'jq', '1.7', 'sha-jq', '/c/jq/1.7', NULL);
+    );
+    try seedV13Taps(&db);
+    try migrate(&db);
+
+    var stmt = try db.prepare("SELECT full_name, tap FROM kegs WHERE name='jq';");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqualStrings("jq", std.mem.sliceTo(stmt.columnText(0).?, 0));
+    try testing.expect(stmt.columnText(1) == null);
 }
 
 test "v4→v5 migration is idempotent when kegs already carries the v5 UNIQUE" {
@@ -1025,7 +1579,7 @@ test "v6→v7 migration backfills cask_versions from existing casks rows" {
     const token1 = stmt.columnText(0) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("flux-markdown", std.mem.sliceTo(token1, 0));
 
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 test "v6→v7 migration is idempotent when cask_versions already carries the rows" {
@@ -1074,7 +1628,7 @@ test "fresh DB ships with taps.head_etag (v8 shape)" {
         }
     }
     try testing.expect(found);
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 test "v7→v8 migration adds head_etag and preserves existing tap rows" {
@@ -1105,7 +1659,7 @@ test "v7→v8 migration adds head_etag and preserves existing tap rows" {
     );
     // Pre-v8 rows must carry NULL until a conditional GET populates it.
     try testing.expect(probe.columnText(1) == null);
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 test "v7→v8 migration is idempotent when head_etag is already present" {
@@ -1154,7 +1708,7 @@ test "fresh DB ships with taps.github_owner and taps.github_repo (v9 shape)" {
     }
     try testing.expect(owner_seen);
     try testing.expect(repo_seen);
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 test "v8→v9 migration backfills (user, \"homebrew-\" || repo) from existing slugs" {
@@ -1174,7 +1728,7 @@ test "v8→v9 migration backfills (user, \"homebrew-\" || repo) from existing sl
 
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 
     var probe = try db.prepare(
         "SELECT name, github_owner, github_repo FROM taps ORDER BY name;",
@@ -1236,7 +1790,7 @@ test "v8→v9 migration bumps the marker even when taps is empty" {
     try db.exec("DELETE FROM schema_version WHERE version >= 9;");
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 // Pre-v3 rows could in theory have escaped slug validation. The CASE
@@ -1263,7 +1817,7 @@ test "v8→v9 migration tolerates a slug starting with a slash (degenerate fixtu
 
     // We don't pin the specific (owner, repo) values for degenerate
     // input — only that the migration completes and the marker bumps.
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 test "v8→v9 migration falls back to verbatim name on a slug missing the slash" {
@@ -1308,7 +1862,7 @@ test "fresh DB ships with kegs.bin_isolated (v10 shape)" {
         }
     }
     try testing.expect(found);
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 test "v9→v10 migration adds bin_isolated and defaults existing rows to 0" {
@@ -1327,7 +1881,7 @@ test "v9→v10 migration adds bin_isolated and defaults existing rows to 0" {
 
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 
     var probe = try db.prepare("SELECT name, bin_isolated FROM kegs ORDER BY name;");
     defer probe.finalize();
@@ -1401,7 +1955,7 @@ test "fresh DB ships with taps.host defaulting to github.com (v11 shape)" {
     try testing.expect(try probe.step());
     try testing.expectEqualStrings("github.com", std.mem.sliceTo(probe.columnText(0) orelse "", 0));
 
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 test "v10→v11 migration backfills host=github.com on existing tap rows" {
@@ -1419,7 +1973,7 @@ test "v10→v11 migration backfills host=github.com on existing tap rows" {
 
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 
     var probe = try db.prepare("SELECT host FROM taps WHERE name='aeroxy/tap';");
     defer probe.finalize();
@@ -1460,7 +2014,7 @@ test "v10→v11 migration bumps the marker even when taps is empty" {
     try db.exec("DELETE FROM schema_version WHERE version >= 11;");
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 // v11→v12 adds taps.forge so a tap can name its provider explicitly when
@@ -1496,7 +2050,7 @@ test "fresh DB ships with a nullable taps.forge column (v12 shape)" {
     try testing.expect(try probe.step());
     try testing.expect(probe.columnText(0) == null);
 
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 test "v11→v12 migration adds taps.forge as NULL on existing rows" {
@@ -1512,7 +2066,7 @@ test "v11→v12 migration adds taps.forge as NULL on existing rows" {
 
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 
     var probe = try db.prepare("SELECT forge FROM taps WHERE name='aeroxy/tap';");
     defer probe.finalize();
@@ -1573,7 +2127,7 @@ test "fresh DB ships with a nullable services.schedule column (v13 shape)" {
     try testing.expect(try probe.step());
     try testing.expect(probe.columnText(0) == null);
 
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 test "v12→v13 migration adds services.schedule as NULL on existing rows" {
@@ -1591,7 +2145,7 @@ test "v12→v13 migration adds services.schedule as NULL on existing rows" {
 
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 
     var probe = try db.prepare("SELECT schedule FROM services WHERE name='redis';");
     defer probe.finalize();

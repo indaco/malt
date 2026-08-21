@@ -53,7 +53,8 @@ pub fn loadFormulaRows(
     const sql: [:0]const u8 = switch (filter) {
         .all => "SELECT name, version, revision, tap, pinned FROM kegs ORDER BY name;",
         .pinned_only => "SELECT name, version, revision, tap, pinned FROM kegs WHERE pinned = 1 ORDER BY name;",
-        // NOCASE so `--tap User/Repo` resolves a row stored lowercase.
+        // NOCASE: redundant now both sides are canonical, kept for
+        // hand-edited or un-migrated DBs. See `tapExists`.
         .by_tap => "SELECT name, version, revision, tap, pinned FROM kegs WHERE tap = ?1 COLLATE NOCASE ORDER BY name;",
     };
     const bind: ?[]const u8 = switch (filter) {
@@ -77,7 +78,8 @@ pub fn loadCaskRows(
     const sql: [:0]const u8 = switch (filter) {
         .all => "SELECT token, version, 0 AS revision, tap, pinned FROM casks ORDER BY token;",
         .pinned_only => "SELECT token, version, 0 AS revision, tap, pinned FROM casks WHERE pinned = 1 ORDER BY token;",
-        // NOCASE so `--tap User/Repo` resolves a row stored lowercase.
+        // NOCASE: redundant now both sides are canonical, kept for
+        // hand-edited or un-migrated DBs. See `tapExists`.
         .by_tap => "SELECT token, version, 0 AS revision, tap, pinned FROM casks WHERE tap = ?1 COLLATE NOCASE ORDER BY token;",
     };
     const bind: ?[]const u8 = switch (filter) {
@@ -94,10 +96,11 @@ pub fn loadCaskRows(
 /// `untap`ped while keeping their installs.
 pub fn tapExists(db: *sqlite.Database, label: []const u8) !bool {
     // Three sources, single round-trip: `?1` is reused across the
-    // UNION ALL legs; `COLLATE NOCASE` matches `--tap User/Repo`
-    // against a lowercase row; `LIMIT 1` short-circuits after the
-    // first match. Caller propagates `error.PrepareFailed` so a
-    // broken schema is diagnosed distinctly from a typo.
+    // UNION ALL legs; `LIMIT 1` short-circuits after the first match.
+    // `COLLATE NOCASE` predates canonicalization and is now redundant —
+    // kept so hand-edited or un-migrated DBs still match. Caller
+    // propagates `error.PrepareFailed` so a broken schema is diagnosed
+    // distinctly from a typo.
     var stmt = try db.prepare(
         \\SELECT 1 FROM taps  WHERE name = ?1 COLLATE NOCASE
         \\UNION ALL

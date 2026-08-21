@@ -1289,7 +1289,7 @@ test "v6→v7 migration leaves cask_versions empty when casks has a broken shape
     _ = try stmt.step();
     try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
     // Migration still bumps the schema marker so a future run skips this path.
-    try testing.expectEqual(@as(i64, 13), try schema.currentVersion(&db));
+    try testing.expectEqual(schema.known_schema_version, try schema.currentVersion(&db));
 }
 
 // v7→v8 / v8→v9 ALTERs must skip when `taps` is missing entirely
@@ -1310,7 +1310,7 @@ test "v7→v8 migration tolerates a missing taps table" {
 
     try schema.migrate(&db);
 
-    try testing.expectEqual(@as(i64, 13), try schema.currentVersion(&db));
+    try testing.expectEqual(schema.known_schema_version, try schema.currentVersion(&db));
 }
 
 // --- coverage: lookupCaskVersion refuses a malformed row ----------------

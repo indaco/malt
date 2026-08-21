@@ -840,11 +840,15 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
         return;
     }
 
-    const name = positional.?;
-    validateTapName(name) catch {
-        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{name});
+    const raw_name = positional.?;
+    validateTapName(raw_name) catch {
+        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{raw_name});
         return error.Aborted;
     };
+    // One identity per tap: fold here so add and remove agree on the row
+    // key no matter which spelling the user typed.
+    var name_buf: [tap_mod.max_slug_len]u8 = undefined;
+    const name = tap_mod.canonicalTapSlug(&name_buf, raw_name) orelse raw_name;
 
     switch (action) {
         .add => {
