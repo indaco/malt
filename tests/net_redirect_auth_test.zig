@@ -27,6 +27,11 @@ const Hop = struct {
     // When set, the hop redirects this many times and answers 200 after, so a
     // single hop can stand in for a whole chain.
     redirects_left: ?usize = null,
+    // Drop the first request without answering it, so an otherwise healthy hop
+    // hands the client one transport failure.
+    fail_first: bool = false,
+    // Requests actually received, so a test can assert how many walks happened.
+    requests: usize = 0,
 };
 
 fn serveOne(hop: *Hop) void {
@@ -51,11 +56,34 @@ fn serveCount(hop: *Hop, count: usize) void {
             var req = srv.receiveHead() catch break;
             served_here = true;
             served += 1;
+            hop.requests += 1;
+            if (hop.fail_first) {
+                hop.fail_first = false;
+                break; // close mid-request: the client sees a dead connection
+            }
             answer(hop, &req);
         }
         // A connection carrying no request is `knock`: the client is done, so
         // stop waiting for requests it is never going to send.
         if (!served_here) return;
+    }
+}
+
+// Serves `count` requests, then refuses: every further connection is accepted
+// and closed at once. `serveCount` stops accepting at its quota, so an extra
+// dial would block on the listen backlog instead of failing the test's count
+// assertion. Ends on `knock`, like its bounded sibling.
+fn serveCountThenRefuse(hop: *Hop, count: usize) void {
+    serveCount(hop, count);
+    // Knocked before the quota ran out: the test is already finished.
+    if (hop.requests < count) return;
+    while (true) {
+        const stream = hop.listener.accept(hop.io) catch return;
+        defer stream.close(hop.io);
+        var rbuf: [1024]u8 = undefined;
+        var reader = stream.reader(hop.io, &rbuf);
+        // A connection carrying no request is `knock`: the test is done.
+        _ = reader.interface.peekByte() catch return;
     }
 }
 
@@ -330,6 +358,8 @@ test "headResolved reports an unreachable origin instead of the untouched url" {
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
     defer http.deinit();
+    // The subject is the error surfaced, not the retry that precedes it.
+    http.retry_backoff_ms = &.{};
 
     try std.testing.expectError(error.RequestFailed, http.headResolved(url));
 }
@@ -363,6 +393,9 @@ test "headResolved reports a dead hop instead of a half-walked resolution" {
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
     defer http.deinit();
+    // One walk only: hop 1 serves a single request, and the dead hop 2 behind it
+    // is what this asserts on.
+    http.retry_backoff_ms = &.{};
 
     const result = http.headResolved(url);
     t1.join();
@@ -379,16 +412,20 @@ test "headResolved reports a redirect with no Location instead of the pre-hop ur
     defer l1.deinit(io);
     const p1 = l1.socket.address.getPort();
     var hop1 = Hop{ .io = io, .listener = &l1, .status = .moved_permanently };
-    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+    // Refusing rather than bounded: a missing Location is settled by the
+    // response, so a walk that retried it would fail here instead of stalling.
+    const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, 1 });
 
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
-    defer http.deinit();
 
     const result = http.headResolved(url);
+    // Drop the client, then knock: a refusing hop only stops on the knock.
+    http.deinit();
+    knock(io, p1);
     t1.join();
 
     try std.testing.expectError(error.HttpRedirectLocationMissing, result);
@@ -418,15 +455,16 @@ test "headResolved reports an exhausted redirect walk instead of an un-fetched u
         .content_disposition = "attachment; filename=\"artifact.pkg\"",
     };
 
-    // The walk sends exactly one request per hop in the cap pre- and post-fix,
-    // so the hop thread always drains and the join never hangs.
-    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_redirects + 1 });
-
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+
+    // One walk's worth of requests; a second walk is refused rather than left
+    // to stall, so a loop that retries the tripped cap fails the count below.
+    const one_walk = client.HttpClient.max_redirects + 1;
+    const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, one_walk });
 
     const result = http.headResolved(url);
     // Drop the client first: the hop is parked reading the kept-alive
@@ -436,6 +474,9 @@ test "headResolved reports an exhausted redirect walk instead of an un-fetched u
     t1.join();
 
     try std.testing.expectError(error.TooManyHttpRedirects, result);
+    // A spent budget is a property of the chain: re-walking it only delays the
+    // same answer.
+    try std.testing.expectEqual(one_walk, hop1.requests);
 }
 
 test "headResolved resolves a chain as long as the download can follow" {
@@ -500,8 +541,9 @@ test "headResolved refuses a chain one hop longer than the download can follow" 
         .redirects_left = client.HttpClient.max_redirects + 1,
     };
     // Serves one request more than the walk may spend, so a loop that follows
-    // the extra hop reaches a terminal 200 and resolves instead of hanging.
-    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, client.HttpClient.max_redirects + 2 });
+    // the extra hop reaches a terminal 200 and resolves instead of hanging;
+    // refusing after that keeps a retried cap trip from stalling either.
+    const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, client.HttpClient.max_redirects + 2 });
 
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
@@ -514,10 +556,12 @@ test "headResolved refuses a chain one hop longer than the download can follow" 
     knock(io, p1);
     t1.join();
 
-    if (result) |r| {
+    // Assert before releasing: on failure `expectError` formats the payload,
+    // and a freed `final_url` would crash the report instead of printing it.
+    defer if (result) |r| {
         var resolved = r;
         resolved.deinit();
-    } else |_| {}
+    } else |_| {};
     try std.testing.expectError(error.TooManyHttpRedirects, result);
 }
 
@@ -621,16 +665,16 @@ test "a streaming download names an over-long chain rather than calling it malfo
         .redirect_to = loc,
         .status = .found,
     };
-    // A pre-body failure is retried, so the fixture has to outlast every
-    // attempt: each spends the whole budget before giving up.
-    const attempts = 4;
-    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, attempts * (client.HttpClient.max_redirects + 1) });
-
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+
+    // One walk's worth of requests; a second walk is refused rather than left
+    // to stall, so a loop that re-walks a spent cap fails the count below.
+    const one_walk = client.HttpClient.max_redirects + 1;
+    const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, one_walk });
 
     var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer sink.deinit();
@@ -642,4 +686,192 @@ test "a streaming download names an over-long chain rather than calling it malfo
 
     try std.testing.expectError(error.TooManyHttpRedirects, status);
     try std.testing.expectEqualStrings("", sink.writer.buffered());
+    // The download side of the same rule: no backoff spent on a chain whose
+    // budget is already gone.
+    try std.testing.expectEqual(one_walk, hop1.requests);
+}
+
+test "a buffered download spends one walk on a chain whose budget is gone" {
+    // The third retry loop. Its two siblings are covered above; without this
+    // the buffered GET could keep re-walking a spent budget unnoticed.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/loop", .{p1});
+    var hop1 = Hop{ .io = io, .listener = &l1, .redirect_to = loc, .status = .found };
+
+    const one_walk = client.HttpClient.max_redirects + 1;
+    const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, one_walk });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+
+    const result = http.getWithHeaders(url, &.{}, null, .transport_only);
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    try std.testing.expectError(error.TooManyHttpRedirects, result);
+    try std.testing.expectEqual(one_walk, hop1.requests);
+}
+
+test "a buffered download survives a hop that fails once" {
+    // The mirror of the classification test: the shared predicate is unit
+    // tested, but only a live fixture proves each loop is wired to it.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var hop1 = Hop{ .io = io, .listener = &l1, .fail_first = true };
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, 2 });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blob", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{0};
+
+    const result = http.getWithHeaders(url, &.{}, null, .transport_only);
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    var resp = try result;
+    defer resp.deinit();
+    try std.testing.expectEqualStrings(blob_body, resp.body);
+    try std.testing.expectEqual(@as(usize, 2), hop1.requests);
+}
+
+test "a url that cannot be parsed fails without spending the retry budget" {
+    // Deterministic: no attempt can parse what the first one could not. The
+    // walks used to call this a transport fault, which is retriable, so a
+    // malformed manifest url cost the whole backoff before failing.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    // This pins the tag each walk reports; that the tag is terminal is asserted
+    // against the predicate in client.zig, where it can be checked directly.
+    // Passes the scheme guard, then fails `std.Uri.parse` on the port.
+    const bad = "https://example.com:port/artifact";
+    try std.testing.expectError(error.InvalidUrl, http.headResolved(bad));
+    try std.testing.expectError(error.InvalidUrl, http.getWithHeaders(bad, &.{}, null, .transport_only));
+
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+    try std.testing.expectError(error.InvalidUrl, http.getToWriter(bad, &.{}, &sink.writer, null));
+}
+
+test "a retried walk starts over at the origin rather than resuming mid-chain" {
+    // What makes retrying a classification safe: a fresh walk, not a resumed
+    // one. Resuming would hand back a url no attempt requested end to end -
+    // the half-walked resolution the cask installer must never classify from.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    var l2 = try bindIp4(io);
+    defer l2.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    const p2 = l2.socket.address.getPort();
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/artifact", .{p2});
+    const cd = "attachment; filename=\"artifact.dmg\"";
+    var hop1 = Hop{
+        .io = io,
+        .listener = &l1,
+        .redirect_to = loc,
+        .status = .found,
+        .content_disposition = cd,
+    };
+    // Hop 2 drops the first request: the retry has to come back through hop 1.
+    var hop2 = Hop{ .io = io, .listener = &l2, .fail_first = true };
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, 2 });
+    const t2 = try std.Thread.spawn(.{}, serveCount, .{ &hop2, 2 });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{0};
+
+    const result = http.headResolved(url);
+    http.deinit();
+    knock(io, p1);
+    knock(io, p2);
+    t1.join();
+    t2.join();
+
+    var resolved = try result;
+    defer resolved.deinit();
+
+    try std.testing.expectEqualStrings(loc, resolved.final_url);
+    try std.testing.expectEqualStrings(cd, resolved.content_disposition.?);
+    // Two full walks: the origin was re-requested, not skipped past.
+    try std.testing.expectEqual(@as(usize, 2), hop1.requests);
+    try std.testing.expectEqual(@as(usize, 2), hop2.requests);
+}
+
+test "a hop that fails once is classified rather than reported as a network failure" {
+    // The classification walk feeds a download that retries the identical hop
+    // three times. Surfacing the first blip here fails an install that the very
+    // next step already knows how to survive.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    const cd = "attachment; filename=\"artifact.dmg\"";
+    var hop1 = Hop{
+        .io = io,
+        .listener = &l1,
+        .fail_first = true,
+        .content_disposition = cd,
+    };
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, 2 });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    // One retry, no wall-clock: the subject is whether the walk retries at all.
+    http.retry_backoff_ms = &.{0};
+
+    const result = http.headResolved(url);
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    var resolved = try result;
+    defer resolved.deinit();
+
+    try std.testing.expectEqualStrings(url, resolved.final_url);
+    try std.testing.expectEqualStrings(cd, resolved.content_disposition.?);
+    try std.testing.expectEqual(@as(usize, 2), hop1.requests);
 }

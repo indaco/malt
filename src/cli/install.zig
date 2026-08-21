@@ -1318,20 +1318,34 @@ fn mapApiFetchError(e: api_mod.ApiError) ?InstallError {
 
 /// Classify a failed artifact-URL resolution. A walk that never completed
 /// says nothing about the cask's format, so `.unknown` stays reserved for a
-/// URL malt actually resolved and could not classify.
-fn mapHeadResolveError(e: anyerror) InstallError {
-    // OOM is handled by the caller: it is not a property of the URL.
+/// URL malt actually resolved and could not classify. `null` means the failure
+/// is not a verdict on the URL, and the caller reports it itself. Exhaustive so
+/// a new tag fails compilation here instead of defaulting to "network is down".
+fn mapHeadResolveError(e: client_mod.HeadResolveError) ?InstallError {
     return switch (e) {
         // Both mean the artifact would be fetched in the clear.
         error.InsecureUrlScheme, error.TlsDowngradeRefused => InstallError.InsecureArchiveUrl,
-        else => InstallError.NetworkError,
+        error.OfflineRequired,
+        error.RequestFailed,
+        error.InvalidUrl,
+        error.HttpRedirectLocationMissing,
+        error.HttpRedirectLocationInvalid,
+        error.HttpRedirectLocationOversize,
+        error.TooManyHttpRedirects,
+        => InstallError.NetworkError,
+        // One is malt running out of memory, the other the user stopping.
+        error.OutOfMemory, error.Canceled => null,
     };
 }
 
 /// HEAD-based fallback for extensionless cask URLs.
 /// Follows redirects to discover the real file extension. The walk's own
 /// error reaches the caller, which reports it before classifying.
-fn resolveCaskArtifactViaHead(ctx: *const AppCtx, allocator: std.mem.Allocator, url: []const u8) !cask_mod.ArtifactType {
+fn resolveCaskArtifactViaHead(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    url: []const u8,
+) client_mod.HeadResolveError!cask_mod.ArtifactType {
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
     http.offline = ctx.offline;
@@ -1416,14 +1430,20 @@ fn installCask(
     // Extensionless URLs (e.g. download APIs that 302 to the real file):
     // resolve via HEAD to discover the final URL and Content-Disposition.
     if (artifact_type == .unknown) {
-        artifact_type = resolveCaskArtifactViaHead(ctx, allocator, cask.url) catch |e| switch (e) {
-            // Report the walk's own error — "NetworkError" would say less than
-            // the message already does.
-            error.OutOfMemory => return e,
-            else => {
+        artifact_type = resolveCaskArtifactViaHead(ctx, allocator, cask.url) catch |e| {
+            if (mapHeadResolveError(e)) |classified| {
+                // Report the walk's own error — "NetworkError" would say less
+                // than the message already does.
                 sink.err("Could not resolve the download URL for '{s}': {s} — URL: {s}", .{ cask.token, @errorName(e), cask.url });
-                return mapHeadResolveError(e);
-            },
+                return classified;
+            }
+            // A cancelled walk is the user stopping: "could not resolve the
+            // download URL" would blame the tap for a Ctrl-C.
+            if (e == error.Canceled) {
+                sink.warn("Interrupted.", .{});
+                return;
+            }
+            return e;
         };
     }
 
@@ -1646,15 +1666,24 @@ test "mapApiFetchError surfaces ApiUnreachable as NetworkError" {
 }
 
 test "mapHeadResolveError reports a dead walk as a network failure, not a format one" {
-    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.RequestFailed));
-    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.OfflineRequired));
-    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.HttpRedirectLocationMissing));
-    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.TooManyHttpRedirects));
+    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.RequestFailed).?);
+    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.OfflineRequired).?);
+    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.HttpRedirectLocationMissing).?);
+    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.HttpRedirectLocationInvalid).?);
+    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.HttpRedirectLocationOversize).?);
+    try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.TooManyHttpRedirects).?);
 }
 
 test "mapHeadResolveError keeps a cleartext artifact URL distinct from a network failure" {
-    try std.testing.expectEqual(InstallError.InsecureArchiveUrl, mapHeadResolveError(error.InsecureUrlScheme));
-    try std.testing.expectEqual(InstallError.InsecureArchiveUrl, mapHeadResolveError(error.TlsDowngradeRefused));
+    try std.testing.expectEqual(InstallError.InsecureArchiveUrl, mapHeadResolveError(error.InsecureUrlScheme).?);
+    try std.testing.expectEqual(InstallError.InsecureArchiveUrl, mapHeadResolveError(error.TlsDowngradeRefused).?);
+}
+
+test "mapHeadResolveError does not diagnose the cask when malt or the user stopped the walk" {
+    // Ctrl-C mid-classification used to be reported as "could not resolve the
+    // download URL", blaming the tap for the user's own interruption.
+    try std.testing.expect(mapHeadResolveError(error.Canceled) == null);
+    try std.testing.expect(mapHeadResolveError(error.OutOfMemory) == null);
 }
 
 test "mapApiFetchError leaves other ApiError variants for the path's own fallback" {

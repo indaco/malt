@@ -275,10 +275,12 @@ pub const GhcrClient = struct {
                 error.OfflineRequired,
                 error.RequestFailed,
                 error.TlsDowngradeRefused,
-                // A cleartext origin is a manifest defect, not a transient
-                // fault; it collapses here with the rest because the outer
-                // loop's retry is harmless (it will fail identically).
+                // A cleartext origin or an unparseable url is a manifest
+                // defect, not a transient fault; both collapse here with the
+                // rest because the outer loop's retry is harmless (it will
+                // fail identically).
                 error.InsecureUrlScheme,
+                error.InvalidUrl,
                 error.TooManyHttpRedirects,
                 error.HttpRedirectInvalid,
                 error.ResponseTooLarge,

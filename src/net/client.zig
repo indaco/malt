@@ -27,6 +27,8 @@ pub const DownloadError = error{
 pub const GetError = error{
     OfflineRequired,
     RequestFailed,
+    /// The url does not parse. A property of the string, so no walk retries it.
+    InvalidUrl,
     TlsDowngradeRefused,
     /// A manifest handed us a cleartext origin for a payload nothing else
     /// vouches for.
@@ -38,6 +40,30 @@ pub const GetError = error{
     WatchdogSpawnFailed,
     Canceled,
     OutOfMemory,
+};
+
+/// What the shared redirect decision can produce. Closed (Rule U1) so the retry
+/// policy can be derived from it: every member is settled by the response or by
+/// memory, never by the transport - the invariant `isRetriableWalkError` leans
+/// on.
+pub const RedirectError = error{
+    HttpRedirectLocationMissing,
+    HttpRedirectLocationInvalid,
+    HttpRedirectLocationOversize,
+    TooManyHttpRedirects,
+    TlsDowngradeRefused,
+    OutOfMemory,
+};
+
+/// Explicit error set for the classification walk. The cask installer switches
+/// on it to tell a dead network from a cleartext artifact from a Ctrl-C - an
+/// open set let one be reported as another.
+pub const HeadResolveError = RedirectError || error{
+    OfflineRequired,
+    RequestFailed,
+    InvalidUrl,
+    InsecureUrlScheme,
+    Canceled,
 };
 
 /// What still vouches for a payload once the transport does not.
@@ -305,6 +331,11 @@ pub const HttpClient = struct {
     /// it to exercise the cap without a multi-GiB fixture.
     blob_cap: usize = max_blob_bytes,
 
+    /// Backoff before each retried attempt; its length is the retry budget.
+    /// Defaults to the production schedule; tests shrink it so a retry can be
+    /// observed without paying its wall-clock.
+    retry_backoff_ms: []const u64 = &default_retry_backoff_ms,
+
     /// Reused across requests; each HttpClient is borrowed single-threaded
     /// from a pool, so no concurrent access.
     zstd_window: ?[]u8 = null,
@@ -490,7 +521,7 @@ pub const HttpClient = struct {
     ///
     /// `cli/tap.zig` already refuses `http://` when registering a tap; this
     /// applies the same rule to the URLs those taps hand back.
-    pub fn requireSecureOrigin(url: []const u8, integrity: Integrity) GetError!void {
+    pub fn requireSecureOrigin(url: []const u8, integrity: Integrity) error{InsecureUrlScheme}!void {
         if (std.mem.startsWith(u8, url, "https://")) return;
         // Only cleartext http is ever a candidate for the exemptions below;
         // `file://`, `ftp://` and an unparseable url stay refused either way.
@@ -641,12 +672,34 @@ pub const HttpClient = struct {
     }
 
     /// HEAD with manual redirect follow — stdlib skips redirects on HEAD.
-    pub fn headResolved(self: *HttpClient, url: []const u8) !HeadResolved {
+    ///
+    /// Retried on the download's policy: this walk only classifies what the
+    /// download then fetches, so a blip the fetch would have survived must not
+    /// be fatal here. Each attempt re-walks from `url`; nothing pins a later
+    /// attempt to the chain an earlier one saw.
+    pub fn headResolved(self: *HttpClient, url: []const u8) HeadResolveError!HeadResolved {
         if (self.offline) return error.OfflineRequired;
         // The final url and Content-Disposition this returns pick a cask's
         // artifact type, and the pkg type reaches `sudo installer -target /`.
         // No digest covers a response header, so cleartext is refused outright.
         try requireSecureOrigin(url, .transport_only);
+
+        var attempt: usize = 0;
+        while (true) {
+            if (self.headResolvedOnce(url)) |resolved| {
+                return resolved;
+            } else |err| {
+                if (isRetriableWalkError(err) and attempt < self.retry_backoff_ms.len) {
+                    try self.retrySleep(attempt);
+                    attempt += 1;
+                    continue;
+                }
+                return err;
+            }
+        }
+    }
+
+    fn headResolvedOnce(self: *HttpClient, url: []const u8) HeadResolveError!HeadResolved {
         // Build the result eagerly so a single errdefer covers every dupe
         // inside the redirect loop; on success the caller takes ownership.
         var resolved: HeadResolved = .{
@@ -661,7 +714,7 @@ pub const HttpClient = struct {
         // the caller picks a cask's artifact type from it.
         var hops: usize = 0;
         while (true) : (hops += 1) {
-            const uri = std.Uri.parse(resolved.final_url) catch return error.RequestFailed;
+            const uri = std.Uri.parse(resolved.final_url) catch return error.InvalidUrl;
 
             var req = self.client.request(.HEAD, uri, .{
                 .extra_headers = &.{},
@@ -696,8 +749,7 @@ pub const HttpClient = struct {
 
     // ---- internal helper ----
 
-    const max_retries = 3;
-    const retry_delays_ms = [_]u64{ 1000, 2000, 4000 };
+    const default_retry_backoff_ms = [_]u64{ 1000, 2000, 4000 };
 
     /// Counts written bytes, enforces an upper bound mid-stream, and reports
     /// progress. On overflow `drain`/`sendFile` return `error.WriteFailed`
@@ -869,13 +921,37 @@ pub const HttpClient = struct {
         return try body_writer.toOwnedSlice();
     }
 
+    /// Failures no second walk can clear. Every redirect decision is one, plus
+    /// the refusals and exhaustions the walk raises on its own behalf; a tag
+    /// added to `RedirectError` joins this set without another edit.
+    const TerminalWalkError = RedirectError || error{
+        /// The streaming walk's collapsed form of the malformed-redirect tags.
+        HttpRedirectInvalid,
+        InvalidUrl,
+        InsecureUrlScheme,
+        ResponseTooLarge,
+        OfflineRequired,
+        /// The user's answer, not a fault to sleep off.
+        Canceled,
+    };
+
+    /// Whether a second walk could plausibly reach a different answer. Only the
+    /// terminal side is closed: the buffered GET's set is still inferred, so an
+    /// unnamed tag arriving here defaults to retriable.
+    fn isRetriableWalkError(err: anyerror) bool {
+        inline for (@typeInfo(TerminalWalkError).error_set.?) |variant| {
+            if (err == @field(TerminalWalkError, variant.name)) return false;
+        }
+        return true;
+    }
+
     /// Cancellable backoff between retry attempts. Common to every
     /// retry loop so a Ctrl-C during the wait surfaces immediately
     /// instead of being swallowed by std.Io.sleep's silent return.
     fn retrySleep(self: *HttpClient, attempt: usize) error{Canceled}!void {
         std.Io.sleep(
             self.io,
-            std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)),
+            std.Io.Duration.fromNanoseconds(@intCast(self.retry_backoff_ms[attempt] * std.time.ns_per_ms)),
             .awake,
         ) catch |e| switch (e) {
             error.Canceled => return error.Canceled,
@@ -892,7 +968,7 @@ pub const HttpClient = struct {
             const result = self.doGetConditionalOnce(url, extra_headers);
             if (result) |resp| {
                 if (classifyStatus(resp.status)) |dl_err| {
-                    if (isTransientError(dl_err) and attempt < max_retries) {
+                    if (isTransientError(dl_err) and attempt < self.retry_backoff_ms.len) {
                         var r = resp;
                         r.deinit();
                         try self.retrySleep(attempt);
@@ -902,7 +978,7 @@ pub const HttpClient = struct {
                 }
                 return resp;
             } else |err| {
-                if (attempt < max_retries) {
+                if (isRetriableWalkError(err) and attempt < self.retry_backoff_ms.len) {
                     try self.retrySleep(attempt);
                     attempt += 1;
                     continue;
@@ -945,7 +1021,7 @@ pub const HttpClient = struct {
     /// Resolve a redirect `Location` (absolute or relative) against `base`
     /// into an owned absolute URL, dropping any userinfo. Uses std's own
     /// resolver so relative targets behave exactly as stdlib's auto-follow did.
-    fn resolveRedirectUrl(self: *HttpClient, base: std.Uri, location: []const u8) ![]const u8 {
+    fn resolveRedirectUrl(self: *HttpClient, base: std.Uri, location: []const u8) RedirectError![]const u8 {
         var buf: [8 * 1024]u8 = undefined;
         if (location.len > buf.len) return error.HttpRedirectLocationOversize;
         @memcpy(buf[0..location.len], location);
@@ -969,7 +1045,7 @@ pub const HttpClient = struct {
     /// Shared by all three redirect loops so the rule cannot drift between them.
     /// Resolving first matters: a relative `Location` carries no scheme and
     /// would otherwise read as a downgrade. Caller owns the returned slice.
-    fn nextHopUrl(self: *HttpClient, base: std.Uri, location: []const u8) ![]const u8 {
+    fn nextHopUrl(self: *HttpClient, base: std.Uri, location: []const u8) RedirectError![]const u8 {
         const next = try self.resolveRedirectUrl(base, location);
         errdefer self.allocator.free(next);
         const next_uri = std.Uri.parse(next) catch return error.HttpRedirectLocationInvalid;
@@ -989,7 +1065,7 @@ pub const HttpClient = struct {
         status: u16,
         location: ?[]const u8,
         hops: usize,
-    ) !?[]const u8 {
+    ) RedirectError!?[]const u8 {
         if (!isFollowableRedirect(status)) return null;
         const loc = location orelse return error.HttpRedirectLocationMissing;
         if (hops >= max_redirects) return error.TooManyHttpRedirects;
@@ -1033,7 +1109,7 @@ pub const HttpClient = struct {
         var hops: usize = 0;
 
         while (true) : (hops += 1) {
-            const uri = try std.Uri.parse(current);
+            const uri = std.Uri.parse(current) catch return error.InvalidUrl;
 
             var req = try self.client.request(.GET, uri, .{
                 .extra_headers = live_creds,
@@ -1096,25 +1172,21 @@ pub const HttpClient = struct {
             const result = self.doGetLimited(url, extra_headers, max_bytes, progress);
             if (result) |resp| {
                 if (classifyStatus(resp.status)) |dl_err| {
-                    if (isTransientError(dl_err) and attempt < max_retries) {
+                    if (isTransientError(dl_err) and attempt < self.retry_backoff_ms.len) {
                         resp.allocator.free(resp.body);
                         // Cancellation is single-shot per task in std.Io —
                         // swallowing it here means the caller's stop signal
                         // is consumed by the backoff and never reaches the
                         // next request, so propagate it as the result.
-                        std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch |e| switch (e) {
-                            error.Canceled => return error.Canceled,
-                        };
+                        try self.retrySleep(attempt);
                         attempt += 1;
                         continue;
                     }
                 }
                 return resp;
             } else |err| {
-                if (attempt < max_retries) {
-                    std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch |e| switch (e) {
-                        error.Canceled => return error.Canceled,
-                    };
+                if (isRetriableWalkError(err) and attempt < self.retry_backoff_ms.len) {
+                    try self.retrySleep(attempt);
                     attempt += 1;
                     continue;
                 }
@@ -1157,7 +1229,7 @@ pub const HttpClient = struct {
             const result = self.followGetToWriter(url, extra_headers, sink, progress, &sink_committed);
             if (result) |status| {
                 if (classifyStatus(status)) |dl_err| {
-                    if (isTransientError(dl_err) and attempt < max_retries) {
+                    if (isTransientError(dl_err) and attempt < self.retry_backoff_ms.len) {
                         try self.retrySleep(attempt);
                         attempt += 1;
                         continue;
@@ -1169,7 +1241,7 @@ pub const HttpClient = struct {
                 // be rewound, so the caller owns recovery: surface the error
                 // instead of retrying into a dirty sink.
                 if (sink_committed) return err;
-                if (attempt < max_retries) {
+                if (isRetriableWalkError(err) and attempt < self.retry_backoff_ms.len) {
                     try self.retrySleep(attempt);
                     attempt += 1;
                     continue;
@@ -1198,7 +1270,7 @@ pub const HttpClient = struct {
         var hops: usize = 0;
 
         while (true) : (hops += 1) {
-            const uri = std.Uri.parse(current) catch return error.RequestFailed;
+            const uri = std.Uri.parse(current) catch return error.InvalidUrl;
 
             var req = self.client.request(.GET, uri, .{
                 .extra_headers = live_creds,
@@ -1211,11 +1283,16 @@ pub const HttpClient = struct {
             var response = req.receiveHead(&redirect_buf) catch return error.RequestFailed;
             const status: u16 = @intFromEnum(response.head.status);
 
+            // Exhaustive on purpose: a new redirect outcome must be given a
+            // name here rather than defaulting into "malformed".
             const hop = self.nextRedirectHop(uri, status, response.head.location, hops) catch |e| switch (e) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.TlsDowngradeRefused => return error.TlsDowngradeRefused,
                 error.TooManyHttpRedirects => return error.TooManyHttpRedirects,
-                else => return error.HttpRedirectInvalid,
+                error.HttpRedirectLocationMissing,
+                error.HttpRedirectLocationInvalid,
+                error.HttpRedirectLocationOversize,
+                => return error.HttpRedirectInvalid,
             };
             if (hop) |next| {
                 errdefer self.allocator.free(next);
@@ -1894,6 +1971,51 @@ test "doGetWithRetry surfaces sleep cancellation on a later backoff" {
     const result = http.get("http://127.0.0.1:1/nothing-listens-here");
     try std.testing.expectError(error.Canceled, result);
     try std.testing.expectEqual(@as(usize, 3), CancelSleepProbe.sleep_calls);
+}
+
+test "headResolved surfaces sleep cancellation instead of finishing the backoff" {
+    // The classification walk gained a retry, so it also gained a window where
+    // Ctrl-C lands in the backoff. The cask installer reports that case as an
+    // interruption rather than a dead network, which only holds if the tag
+    // reaches it intact.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const cancel_io = CancelSleepProbe.wrap(threaded.io(), 1);
+
+    var http = HttpClient.init(cancel_io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    // Nothing listens on port 1, so the walk fails on connect and reaches the
+    // first backoff without waiting on the network.
+    const result = http.headResolved("http://127.0.0.1:1/extensionless");
+    try std.testing.expectError(error.Canceled, result);
+    try std.testing.expectEqual(@as(usize, 1), CancelSleepProbe.sleep_calls);
+}
+
+test "isRetriableWalkError: every redirect decision is terminal" {
+    // The predicate derives its terminal side from these sets. Asserting the
+    // derivation - rather than a hand-written list - is what stops a tag added
+    // to RedirectError from becoming retriable by omission.
+    inline for (@typeInfo(RedirectError).error_set.?) |variant| {
+        try std.testing.expect(!HttpClient.isRetriableWalkError(@field(RedirectError, variant.name)));
+    }
+}
+
+test "isRetriableWalkError: transport faults retry, refusals and exhaustions do not" {
+    // The HEAD walk collapses every transport fault into RequestFailed, while
+    // the buffered GET leaks the stdlib tag - both must stay retriable.
+    try std.testing.expect(HttpClient.isRetriableWalkError(error.RequestFailed));
+    try std.testing.expect(HttpClient.isRetriableWalkError(error.ReadFailed));
+    try std.testing.expect(HttpClient.isRetriableWalkError(error.ConnectionResetByPeer));
+    try std.testing.expect(HttpClient.isRetriableWalkError(error.WatchdogSpawnFailed));
+
+    // Re-walking any of these reaches the same answer, just later.
+    try std.testing.expect(!HttpClient.isRetriableWalkError(error.InvalidUrl));
+    try std.testing.expect(!HttpClient.isRetriableWalkError(error.HttpRedirectInvalid));
+    try std.testing.expect(!HttpClient.isRetriableWalkError(error.InsecureUrlScheme));
+    try std.testing.expect(!HttpClient.isRetriableWalkError(error.ResponseTooLarge));
+    try std.testing.expect(!HttpClient.isRetriableWalkError(error.OfflineRequired));
+    try std.testing.expect(!HttpClient.isRetriableWalkError(error.Canceled));
 }
 
 // ── Wake + watchdogLoop: poll(2)-based watchdog wake mechanism ─────
