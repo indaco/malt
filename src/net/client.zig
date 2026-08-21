@@ -1033,17 +1033,31 @@ pub const HttpClient = struct {
         return true;
     }
 
-    /// Cancellable backoff between retry attempts. Common to every
-    /// retry loop so a Ctrl-C during the wait surfaces immediately
-    /// instead of being swallowed by std.Io.sleep's silent return.
+    /// How long the backoff may nap before re-checking `cancel`. Short
+    /// enough that a Ctrl-C is honoured promptly, long enough that a 4 s
+    /// wait is not thousands of wakeups.
+    const backoff_poll_slice_ms: u64 = 50;
+
+    /// Cancellable backoff between retry attempts, shared by every retry
+    /// loop. std.Io cancellation is never armed in this process, so the wait
+    /// polls `cancel` itself - trusting `std.Io.sleep` alone would sleep a
+    /// Ctrl-C off and re-dial.
     fn retrySleep(self: *HttpClient, attempt: usize) error{Canceled}!void {
-        std.Io.sleep(
-            self.io,
-            std.Io.Duration.fromNanoseconds(@intCast(self.retry_backoff_ms[attempt] * std.time.ns_per_ms)),
-            .awake,
-        ) catch |e| switch (e) {
-            error.Canceled => return error.Canceled,
-        };
+        const total_ms = self.retry_backoff_ms[attempt];
+        var waited: u64 = 0;
+        while (true) {
+            if (self.cancel) |cancelled| if (cancelled()) return error.Canceled;
+            if (waited >= total_ms) return;
+            const step: u64 = @min(backoff_poll_slice_ms, total_ms - waited);
+            std.Io.sleep(
+                self.io,
+                std.Io.Duration.fromNanoseconds(@intCast(step * std.time.ns_per_ms)),
+                .awake,
+            ) catch |e| switch (e) {
+                error.Canceled => return error.Canceled,
+            };
+            waited += step;
+        }
     }
 
     fn doGetConditionalWithRetry(
@@ -2618,4 +2632,82 @@ test "CountingWriter.sendFile: clamps the source so a file cannot overshoot the 
     try std.testing.expectError(error.WriteFailed, cw.writer.vtable.sendFile(&cw.writer, &fr, .unlimited));
     try std.testing.expect(cw.limit_exceeded);
     try std.testing.expectEqual(@as(usize, 10), inner.writer.end);
+}
+
+// Predicates for the retry-backoff cancellation tests. `TripsLater` proves the
+// backoff keeps polling while it waits: a cancel that arrives after the sleep
+// has already started is the real Ctrl-C case, and an up-front-only check
+// would sleep straight through it.
+const AlwaysCancel = struct {
+    fn cancel() bool {
+        return true;
+    }
+};
+const NeverCancel = struct {
+    fn cancel() bool {
+        return false;
+    }
+};
+const TripsLater = struct {
+    var calls: usize = 0;
+    fn reset() void {
+        calls = 0;
+    }
+    fn cancel() bool {
+        calls += 1;
+        return calls > 1;
+    }
+};
+
+test "retrySleep reports a cancel that is already pending" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = threaded.io() };
+    var http = HttpClient.initWith(&inner, threaded.io(), std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    // A long budget: without the predicate poll this waits it out and reports
+    // success, which is the bug.
+    http.retry_backoff_ms = &.{4000};
+    http.cancel = &AlwaysCancel.cancel;
+
+    try std.testing.expectError(error.Canceled, http.retrySleep(0));
+}
+
+test "retrySleep observes a cancel that arrives mid-backoff" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = threaded.io() };
+    var http = HttpClient.initWith(&inner, threaded.io(), std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.retry_backoff_ms = &.{200};
+    TripsLater.reset();
+    http.cancel = &TripsLater.cancel;
+
+    try std.testing.expectError(error.Canceled, http.retrySleep(0));
+    // More than one poll: the wait is sliced, not a single up-front check.
+    try std.testing.expect(TripsLater.calls > 1);
+}
+
+test "retrySleep waits out the backoff when nothing cancels" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = threaded.io() };
+    var http = HttpClient.initWith(&inner, threaded.io(), std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.retry_backoff_ms = &.{10};
+    http.cancel = &NeverCancel.cancel;
+
+    try http.retrySleep(0);
+}
+
+test "retrySleep completes when no cancel predicate is wired" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = threaded.io() };
+    var http = HttpClient.initWith(&inner, threaded.io(), std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.retry_backoff_ms = &.{10};
+    http.cancel = null;
+
+    try http.retrySleep(0);
 }
