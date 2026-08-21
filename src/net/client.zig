@@ -38,6 +38,9 @@ pub const GetError = error{
     ResponseTooLarge,
     ReadFailed,
     WatchdogSpawnFailed,
+    /// The peer accepted the connection and then said nothing for the whole
+    /// head budget. Silence that long is a diagnosis, not a blip.
+    HeadTimeout,
     Canceled,
     OutOfMemory,
 };
@@ -63,6 +66,7 @@ pub const HeadResolveError = RedirectError || error{
     RequestFailed,
     InvalidUrl,
     InsecureUrlScheme,
+    HeadTimeout,
     Canceled,
 };
 
@@ -313,6 +317,14 @@ pub const HttpClient = struct {
 
     /// Per-request timeout in nanoseconds. Default: 30 seconds.
     timeout_ns: u64 = default_timeout_ns,
+
+    /// How long one hop may take to answer its head. Per hop, not per walk:
+    /// a hop that answers is proof its peer is alive, the same evidence the
+    /// body's idle watchdog reads from byte progress. Defaults to the request
+    /// timeout because "too quiet" is one question, not a separate one for the
+    /// head. Tests shrink it so a stall is observable without paying its
+    /// wall-clock, and without shortening the body's clock too.
+    head_timeout_ns: u64 = default_timeout_ns,
 
     /// Optional cancellation predicate polled on every watchdog tick.
     /// Lets best-effort callers (e.g. the post-dispatch update probe)
@@ -608,15 +620,20 @@ pub const HttpClient = struct {
 
         var req = self.client.request(.HEAD, uri, .{
             .extra_headers = &.{},
+            // Stdlib returns every HEAD response before its redirect branch,
+            // so this is already the effective behaviour; pinning it keeps the
+            // watchdog's connection stable by contract, not by stdlib branch
+            // order.
+            .redirect_behavior = .unhandled,
         }) catch |e| return walkTransportError(e);
         defer req.deinit();
-
-        req.sendBodiless() catch |e| return walkTransportError(e);
 
         // 32 KiB — GHCR's multi-scope token + signed-URL redirects exceed
         // the 8 KiB default and tripped `HeaderBufferTooSmall`.
         var redirect_buf: [32 * 1024]u8 = undefined;
-        const response = req.receiveHead(&redirect_buf) catch |e| return walkTransportError(e);
+        var fired = std.atomic.Value(bool).init(false);
+        const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.head_timeout_ns, &fired) catch |e|
+            return self.headWalkError(&fired, e);
 
         return @intFromEnum(response.head.status);
     }
@@ -715,19 +732,29 @@ pub const HttpClient = struct {
         // Every exit below returns an error rather than what the walk reached
         // so far: a partial walk is indistinguishable from a resolved url, and
         // the caller picks a cask's artifact type from it.
+
         var hops: usize = 0;
         while (true) : (hops += 1) {
             const uri = std.Uri.parse(resolved.final_url) catch return error.InvalidUrl;
 
             var req = self.client.request(.HEAD, uri, .{
                 .extra_headers = &.{},
+                // This walk follows Location itself; stdlib returns a HEAD
+                // before its redirect branch anyway, so pinning it keeps the
+                // watchdog's connection stable by contract, not by stdlib
+                // branch order.
+                .redirect_behavior = .unhandled,
             }) catch |e| return walkTransportError(e);
             defer req.deinit();
 
-            req.sendBodiless() catch |e| return walkTransportError(e);
-
             var redirect_buf: [32 * 1024]u8 = undefined;
-            const response = req.receiveHead(&redirect_buf) catch |e| return walkTransportError(e);
+            var fired = std.atomic.Value(bool).init(false);
+            const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.head_timeout_ns, &fired) catch |e| switch (self.headWalkError(&fired, e)) {
+                // `HeadResolveError` stays closed: a watchdog that could not
+                // start is one more way the request failed.
+                error.WatchdogSpawnFailed => return error.RequestFailed,
+                else => |mapped| return mapped,
+            };
 
             if (resolved.content_disposition == null) {
                 if (response.head.content_disposition) |cd| {
@@ -835,6 +862,60 @@ pub const HttpClient = struct {
         return self.doGetWithRetry(url, extra_headers, max_metadata_bytes, null);
     }
 
+    /// Send the request and read its head under the same watchdog the body
+    /// gets: without one a connected-but-silent origin parks the walk forever
+    /// and nothing polls `cancel`. Idle and total share a clock because a head
+    /// read has no byte progress to measure. A stall inside `client.request`
+    /// stays uncovered - the watchdog needs a connection that call has not
+    /// returned yet.
+    fn receiveHeadDeadlined(
+        self: *HttpClient,
+        req: *std.http.Client.Request,
+        buf: []u8,
+        budget_ns: u64,
+        fired: *std.atomic.Value(bool),
+    ) !std.http.Client.Response {
+        var no_progress = std.atomic.Value(u64).init(0);
+        var wake = try Wake.init();
+        const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
+            self.io,
+            wake.read_fd,
+            &no_progress,
+            budget_ns,
+            budget_ns,
+            req,
+            self.cancel,
+            fired,
+        }) catch {
+            wake.deinit();
+            return error.WatchdogSpawnFailed;
+        };
+        defer {
+            wake.signal();
+            watchdog.join();
+            wake.deinit();
+        }
+
+        try req.sendBodiless();
+        return try req.receiveHead(buf);
+    }
+
+    /// Why the head read failed decides whether a second walk is worth its
+    /// backoff. Only a read the watchdog itself cut short is the peer's
+    /// answer; anything else is an ordinary fault the retry policy handles.
+    fn headWalkError(
+        self: *HttpClient,
+        fired: *const std.atomic.Value(bool),
+        e: anyerror,
+    ) error{ Canceled, OutOfMemory, WatchdogSpawnFailed, HeadTimeout, RequestFailed } {
+        if (e == error.WatchdogSpawnFailed) return error.WatchdogSpawnFailed;
+        if (fired.load(.acquire)) {
+            if (self.cancel) |cancelled| if (cancelled()) return error.Canceled;
+            return error.HeadTimeout;
+        }
+        return walkTransportError(e);
+    }
+
     /// Stream a response body into a caller-provided `sink` with the same
     /// decompress + idle/total watchdog + size cap the buffer path uses. The
     /// watchdog's spawn/join wraps the streaming call so a stalled sink is
@@ -887,6 +968,7 @@ pub const HttpClient = struct {
             total_timeout_ns,
             req,
             self.cancel,
+            null,
         }) catch {
             wake.deinit();
             return error.WatchdogSpawnFailed;
@@ -934,6 +1016,9 @@ pub const HttpClient = struct {
         InsecureUrlScheme,
         ResponseTooLarge,
         OfflineRequired,
+        /// A peer that went silent for the whole budget has answered; re-dialling
+        /// it three more times only lengthens the wait under `db/malt.lock`.
+        HeadTimeout,
         /// The user's answer, not a fault to sleep off.
         Canceled,
     };
@@ -1146,9 +1231,10 @@ pub const HttpClient = struct {
             }) catch |e| return walkTransportError(e);
             errdefer req.deinit();
 
-            req.sendBodiless() catch |e| return walkTransportError(e);
             var redirect_buf: [32 * 1024]u8 = undefined;
-            var response = req.receiveHead(&redirect_buf) catch |e| return walkTransportError(e);
+            var fired = std.atomic.Value(bool).init(false);
+            var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.head_timeout_ns, &fired) catch |e|
+                return self.headWalkError(&fired, e);
             const status: u16 = @intFromEnum(response.head.status);
 
             const hop = self.nextRedirectHop(uri, status, response.head.location, hops) catch |e| return walkRedirectError(e);
@@ -1308,9 +1394,10 @@ pub const HttpClient = struct {
             }) catch |e| return walkTransportError(e);
             errdefer req.deinit();
 
-            req.sendBodiless() catch |e| return walkTransportError(e);
             var redirect_buf: [32 * 1024]u8 = undefined;
-            var response = req.receiveHead(&redirect_buf) catch |e| return walkTransportError(e);
+            var fired = std.atomic.Value(bool).init(false);
+            var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.head_timeout_ns, &fired) catch |e|
+                return self.headWalkError(&fired, e);
             const status: u16 = @intFromEnum(response.head.status);
 
             const hop = self.nextRedirectHop(uri, status, response.head.location, hops) catch |e| return walkRedirectError(e);
@@ -1359,6 +1446,10 @@ pub const HttpClient = struct {
     /// `shutdown(.both)` because setting closing alone does not wake a
     /// parked read - stalled TLS reads hung the previous single-deadline
     /// implementation.
+    ///
+    /// `fired` lets a caller tell its own shutdown from an unrelated transport
+    /// fault, which decides whether the failure is worth retrying. The body
+    /// path retries on neither, so it passes null.
     fn watchdogFn(
         io: std.Io,
         wake_fd: std.posix.fd_t,
@@ -1367,8 +1458,11 @@ pub const HttpClient = struct {
         total_timeout_ns: u64,
         req: *std.http.Client.Request,
         cancel: ?*const fn () bool,
+        fired: ?*std.atomic.Value(bool),
     ) void {
         if (!watchdogLoop(io, wake_fd, bytes_progress, idle_timeout_ns, total_timeout_ns, cancel)) return;
+        // Ordered before the shutdown so the woken reader always sees it set.
+        if (fired) |f| f.store(true, .release);
         if (req.connection) |conn| {
             conn.closing = true;
             const fd = conn.stream_reader.stream.socket.handle;
@@ -1682,6 +1776,9 @@ test "requireSecureOrigin: a digest-pinned payload may come over cleartext http"
 /// An inferred set drags std.http's own tags in, which is exactly what Rule U1
 /// forbids a leaf from leaking.
 fn assertErrorSetFitsIn(comptime f: anytype, comptime Allowed: type, comptime name: []const u8) void {
+    // Every entry point compares each tag against the whole allowed set, so the
+    // pair count grows with both and outran the default quota.
+    @setEvalBranchQuota(10_000);
     const ret = @typeInfo(@TypeOf(f)).@"fn".return_type.?;
     const actual = @typeInfo(@typeInfo(ret).error_union.error_set).error_set.?;
     for (actual) |tag| {
@@ -1737,6 +1834,60 @@ test "a collapsed redirect tag is still retriable exactly as before" {
     try std.testing.expect(!HttpClient.isRetriableWalkError(error.OutOfMemory));
     // ...while a transport failure still earns a second walk.
     try std.testing.expect(HttpClient.isRetriableWalkError(error.RequestFailed));
+    // A peer silent for the whole head budget has answered. Sleeping on it
+    // would re-dial a known-silent host while `db/malt.lock` stays held.
+    try std.testing.expect(!HttpClient.isRetriableWalkError(error.HeadTimeout));
+}
+
+test "headWalkError: only a watchdog-cut read is the peer's answer" {
+    // The decision table behind both guarantees: a stall must not be slept off
+    // as a blip, and a Ctrl-C must not be reported as one either.
+    const a = std.testing.allocator;
+    var http = HttpClient.init(std.Options.debug_io, .empty, a);
+    defer http.deinit();
+
+    var quiet = std.atomic.Value(bool).init(false);
+    var cut = std.atomic.Value(bool).init(true);
+
+    // Watchdog never fired: an ordinary fault the retry policy still owns.
+    try std.testing.expectEqual(error.RequestFailed, http.headWalkError(&quiet, error.ReadFailed));
+    try std.testing.expectEqual(error.OutOfMemory, http.headWalkError(&quiet, error.OutOfMemory));
+
+    // Watchdog cut the read and nothing asked to stop: the peer went silent.
+    try std.testing.expectEqual(error.HeadTimeout, http.headWalkError(&cut, error.ReadFailed));
+
+    // A watchdog that never started is not a verdict on the peer.
+    try std.testing.expectEqual(
+        error.WatchdogSpawnFailed,
+        http.headWalkError(&cut, error.WatchdogSpawnFailed),
+    );
+}
+
+test "headWalkError: a set cancel flag only speaks for a read the watchdog cut" {
+    const Probe = struct {
+        var answer: bool = false;
+        fn cancelled() bool {
+            return answer;
+        }
+    };
+
+    const a = std.testing.allocator;
+    var http = HttpClient.init(std.Options.debug_io, .empty, a);
+    defer http.deinit();
+    http.cancel = &Probe.cancelled;
+
+    var quiet = std.atomic.Value(bool).init(false);
+    var cut = std.atomic.Value(bool).init(true);
+
+    // Present but unset: a stall is still a stall.
+    Probe.answer = false;
+    try std.testing.expectEqual(error.HeadTimeout, http.headWalkError(&cut, error.ReadFailed));
+
+    Probe.answer = true;
+    try std.testing.expectEqual(error.Canceled, http.headWalkError(&cut, error.ReadFailed));
+    // Set, but this read failed on its own - consulting the flag here would
+    // report an unrelated fault as the user's answer.
+    try std.testing.expectEqual(error.RequestFailed, http.headWalkError(&quiet, error.ReadFailed));
 }
 
 test "every buffered GET entry point exposes a closed error set" {
@@ -2037,6 +2188,17 @@ test "shouldFireIdleWatchdog: cancellation fires regardless of elapsed time" {
     // deadline has elapsed yet — otherwise Ctrl-C waits out the read.
     try std.testing.expect(shouldFireIdleWatchdog(0, 0, 30, 600, true));
     try std.testing.expect(shouldFireIdleWatchdog(1, 1, 999_999, 999_999, true));
+}
+
+test "the head phase is bounded by the same threshold as every other read" {
+    // Its own knob so a test can shorten the head phase alone, but no number
+    // of its own to justify: a third figure for "too quiet" is a third thing
+    // that can drift.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var http = HttpClient.init(threaded.io(), std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    try std.testing.expectEqual(HttpClient.default_timeout_ns, http.head_timeout_ns);
 }
 
 // Patches an inner Io's vtable so `sleep` reports cancellation on the

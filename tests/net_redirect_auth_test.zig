@@ -30,6 +30,13 @@ const Hop = struct {
     // Drop the first request without answering it, so an otherwise healthy hop
     // hands the client one transport failure.
     fail_first: bool = false,
+    // Read the request and never answer it, holding the connection open: the
+    // connected-but-silent origin the head-phase deadline exists for.
+    stall: bool = false,
+    // Answer, but only after burning this much of the hop's budget. Lets a
+    // test spend more than one budget's worth across a chain while leaving
+    // every single hop comfortably inside its own.
+    answer_delay_ns: u64 = 0,
     // Requests actually received, so a test can assert how many walks happened.
     requests: usize = 0,
 };
@@ -60,6 +67,15 @@ fn serveCount(hop: *Hop, count: usize) void {
             if (hop.fail_first) {
                 hop.fail_first = false;
                 break; // close mid-request: the client sees a dead connection
+            }
+            if (hop.answer_delay_ns > 0) {
+                std.Io.sleep(hop.io, std.Io.Duration.fromNanoseconds(@intCast(hop.answer_delay_ns)), .awake) catch {};
+            }
+            if (hop.stall) {
+                // Park until the client gives up and drops the socket. Nothing
+                // else can end this wait, which is the point of the fixture.
+                _ = reader.interface.peekByte() catch {};
+                return;
             }
             answer(hop, &req);
         }
@@ -874,4 +890,249 @@ test "a hop that fails once is classified rather than reported as a network fail
     try std.testing.expectEqualStrings(url, resolved.final_url);
     try std.testing.expectEqualStrings(cd, resolved.content_disposition.?);
     try std.testing.expectEqual(@as(usize, 2), hop1.requests);
+}
+
+// Short enough that a green run costs nothing, long enough that the watchdog's
+// 100 ms tick floor gets a couple of ticks before it fires.
+const stall_budget_ns: u64 = 300 * std.time.ns_per_ms;
+
+test "a classification walk gives up on an origin that never answers" {
+    // The stall is the severity driver: `mt install <cask>` classifies under
+    // `db/malt.lock`, so a parked head read blocks every other invocation too.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var hop1 = Hop{ .io = io, .listener = &l1, .stall = true };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = stall_budget_ns;
+    http.retry_backoff_ms = &.{};
+
+    const result = http.headResolved(url);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HeadTimeout, result);
+    try std.testing.expectEqual(@as(usize, 1), hop1.requests);
+}
+
+test "a download gives up on an origin that never answers" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var hop1 = Hop{ .io = io, .listener = &l1, .stall = true };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/blob", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = stall_budget_ns;
+    http.retry_backoff_ms = &.{};
+
+    const result = http.getWithHeaders(url, &.{}, null, .transport_only);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HeadTimeout, result);
+    try std.testing.expectEqual(@as(usize, 1), hop1.requests);
+}
+
+test "Ctrl-C during a stalled head read is the answer, not a blip to retry" {
+    // Without the cancel check the fix makes Ctrl-C slower: the watchdog's
+    // socket shutdown looks like an ordinary transport fault, so the walk
+    // would sleep off the whole backoff and re-dial while the flag stays set.
+    const Probe = struct {
+        fn cancelled() bool {
+            return true;
+        }
+    };
+
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var hop1 = Hop{ .io = io, .listener = &l1, .stall = true };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = stall_budget_ns;
+    http.cancel = &Probe.cancelled;
+    // A budget the retry loop could spend if it treated the cancel as a blip.
+    http.retry_backoff_ms = &.{ 0, 0, 0 };
+
+    const result = http.headResolved(url);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.Canceled, result);
+    try std.testing.expectEqual(@as(usize, 1), hop1.requests);
+}
+
+test "a blob download gives up on an origin that never answers" {
+    // `followGetToWriter` wires the deadline separately from the buffered
+    // walk, so its own fixture is what proves that wiring exists.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var hop1 = Hop{ .io = io, .listener = &l1, .stall = true };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/bottle", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = stall_budget_ns;
+    http.retry_backoff_ms = &.{};
+
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+    const result = http.getToWriter(url, &.{}, &sink.writer, null);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HeadTimeout, result);
+    try std.testing.expectEqual(@as(usize, 1), hop1.requests);
+}
+
+test "a bare HEAD gives up on an origin that never answers" {
+    // `doctor`'s reachability probe is the caller here: a silent host used to
+    // park the whole check with nothing on screen.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var hop1 = Hop{ .io = io, .listener = &l1, .stall = true };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/probe", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = stall_budget_ns;
+
+    const result = http.head(url);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HeadTimeout, result);
+    try std.testing.expectEqual(@as(usize, 1), hop1.requests);
+}
+
+test "a silent peer is not re-dialled three more times" {
+    // Silence for the whole budget is the peer's answer. Retrying it spends
+    // the backoff for nothing while `db/malt.lock` stays held - the cost that
+    // made the original hang severe in the first place.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var hop1 = Hop{ .io = io, .listener = &l1, .stall = true };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = stall_budget_ns;
+    // A full budget the walk would spend if it read the silence as a blip.
+    http.retry_backoff_ms = &.{ 0, 0, 0 };
+
+    const result = http.headResolved(url);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HeadTimeout, result);
+    try std.testing.expectEqual(@as(usize, 1), hop1.requests);
+}
+
+test "a hop that answers refreshes the budget for the next one" {
+    // Per hop, not per walk: a chain is not at fault for being long, and each
+    // answering peer is fresh evidence of liveness. Both hops answer well
+    // inside their own budget while together exceeding one, so a single clock
+    // shared across the walk would cut the second hop off.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const budget_ns: u64 = 1000 * std.time.ns_per_ms;
+    const per_hop_ns: u64 = 600 * std.time.ns_per_ms;
+
+    var l2 = try bindIp4(io);
+    defer l2.deinit(io);
+    const p2 = l2.socket.address.getPort();
+    var hop2 = Hop{ .io = io, .listener = &l2, .answer_delay_ns = per_hop_ns };
+    const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/artifact", .{p2});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var hop1 = Hop{
+        .io = io,
+        .listener = &l1,
+        .redirect_to = loc,
+        .status = .found,
+        .answer_delay_ns = per_hop_ns,
+    };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = budget_ns;
+    http.retry_backoff_ms = &.{};
+
+    const result = http.headResolved(url);
+    http.deinit();
+    t1.join();
+    t2.join();
+
+    var resolved = try result;
+    defer resolved.deinit();
+    try std.testing.expectEqualStrings(loc, resolved.final_url);
 }

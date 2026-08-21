@@ -1336,6 +1336,7 @@ fn mapHeadResolveError(e: client_mod.HeadResolveError) ?InstallError {
         error.HttpRedirectLocationInvalid,
         error.HttpRedirectLocationOversize,
         error.TooManyHttpRedirects,
+        error.HeadTimeout,
         => InstallError.NetworkError,
         // One is malt running out of memory, the other the user stopping.
         error.OutOfMemory, error.Canceled => null,
