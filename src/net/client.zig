@@ -535,7 +535,7 @@ pub const HttpClient = struct {
     /// GET request; auto-injects the GitHub API token (`MALT_GITHUB_TOKEN`,
     /// then `HOMEBREW_GITHUB_API_TOKEN`) as Authorization for GitHub/Homebrew
     /// hosts. Caller owns the returned `Response`.
-    pub fn get(self: *HttpClient, url: []const u8) !Response {
+    pub fn get(self: *HttpClient, url: []const u8) GetError!Response {
         if (self.offline) return error.OfflineRequired;
         // Every caller fetches metadata from a hardcoded https host; none has
         // a digest to fall back on, so this one stays unconditional.
@@ -555,7 +555,7 @@ pub const HttpClient = struct {
     /// fine-grained / GitHub-App / GHCR token is never dropped. Caller frees
     /// the returned slice. Host-component match, not substring: a look-alike
     /// host or a path containing "github.com" never receives the token.
-    fn authHeaderValue(self: *HttpClient, url: []const u8) !?[]u8 {
+    fn authHeaderValue(self: *HttpClient, url: []const u8) error{OutOfMemory}!?[]u8 {
         const token = githubApiToken(self.environ) orelse return null;
         if (!githubTokenApplies(url)) return null;
         return try std.fmt.allocPrint(self.allocator, "token {s}", .{token});
@@ -572,7 +572,7 @@ pub const HttpClient = struct {
         extra_headers: []const std.http.Header,
         progress: ?ProgressCallback,
         integrity: Integrity,
-    ) !Response {
+    ) GetError!Response {
         if (self.offline) return error.OfflineRequired;
         try requireSecureOrigin(url, integrity);
         return self.doGetWithRetry(url, extra_headers, max_blob_bytes, progress);
@@ -599,24 +599,24 @@ pub const HttpClient = struct {
     }
 
     /// Perform a HEAD request and return only the HTTP status code.
-    pub fn head(self: *HttpClient, url: []const u8) !u16 {
+    pub fn head(self: *HttpClient, url: []const u8) GetError!u16 {
         if (self.offline) return error.OfflineRequired;
         // A HEAD returns no body to verify, so there is never a digest to
         // weigh against the transport.
         try requireSecureOrigin(url, .transport_only);
-        const uri = try std.Uri.parse(url);
+        const uri = std.Uri.parse(url) catch return error.InvalidUrl;
 
-        var req = try self.client.request(.HEAD, uri, .{
+        var req = self.client.request(.HEAD, uri, .{
             .extra_headers = &.{},
-        });
+        }) catch |e| return walkTransportError(e);
         defer req.deinit();
 
-        try req.sendBodiless();
+        req.sendBodiless() catch |e| return walkTransportError(e);
 
         // 32 KiB — GHCR's multi-scope token + signed-URL redirects exceed
         // the 8 KiB default and tripped `HeaderBufferTooSmall`.
         var redirect_buf: [32 * 1024]u8 = undefined;
-        const response = try req.receiveHead(&redirect_buf);
+        const response = req.receiveHead(&redirect_buf) catch |e| return walkTransportError(e);
 
         return @intFromEnum(response.head.status);
     }
@@ -652,7 +652,7 @@ pub const HttpClient = struct {
         url: []const u8,
         if_none_match: ?[]const u8,
         extra_headers: []const std.http.Header,
-    ) !ConditionalResponse {
+    ) GetError!ConditionalResponse {
         if (self.offline) return error.OfflineRequired;
         // Metadata no digest covers it, and the caller may pass an
         // `Authorization` header - cleartext is never acceptable here.
@@ -721,13 +721,13 @@ pub const HttpClient = struct {
 
             var req = self.client.request(.HEAD, uri, .{
                 .extra_headers = &.{},
-            }) catch return error.RequestFailed;
+            }) catch |e| return walkTransportError(e);
             defer req.deinit();
 
-            req.sendBodiless() catch return error.RequestFailed;
+            req.sendBodiless() catch |e| return walkTransportError(e);
 
             var redirect_buf: [32 * 1024]u8 = undefined;
-            const response = req.receiveHead(&redirect_buf) catch return error.RequestFailed;
+            const response = req.receiveHead(&redirect_buf) catch |e| return walkTransportError(e);
 
             if (resolved.content_disposition == null) {
                 if (response.head.content_disposition) |cd| {
@@ -831,7 +831,7 @@ pub const HttpClient = struct {
         self: *HttpClient,
         url: []const u8,
         extra_headers: []const std.http.Header,
-    ) !Response {
+    ) GetError!Response {
         return self.doGetWithRetry(url, extra_headers, max_metadata_bytes, null);
     }
 
@@ -938,9 +938,9 @@ pub const HttpClient = struct {
         Canceled,
     };
 
-    /// Whether a second walk could plausibly reach a different answer. Only the
-    /// terminal side is closed: the buffered GET's set is still inferred, so an
-    /// unnamed tag arriving here defaults to retriable.
+    /// Whether a second walk could plausibly reach a different answer. Both
+    /// walks now hand up a closed `GetError`, so every tag reaching here is
+    /// named on one side or the other.
     fn isRetriableWalkError(err: anyerror) bool {
         inline for (@typeInfo(TerminalWalkError).error_set.?) |variant| {
             if (err == @field(TerminalWalkError, variant.name)) return false;
@@ -965,7 +965,7 @@ pub const HttpClient = struct {
         self: *HttpClient,
         url: []const u8,
         extra_headers: []const std.http.Header,
-    ) !ConditionalResponse {
+    ) GetError!ConditionalResponse {
         var attempt: usize = 0;
         while (true) {
             const result = self.doGetConditionalOnce(url, extra_headers);
@@ -995,7 +995,7 @@ pub const HttpClient = struct {
         self: *HttpClient,
         url: []const u8,
         extra_headers: []const std.http.Header,
-    ) !ConditionalResponse {
+    ) GetError!ConditionalResponse {
         // Conditional GETs target tiny JSON, never blobs — the metadata cap
         // and timeout follow from `max_metadata_bytes` inside `followGet`.
         const out = try self.followGet(url, extra_headers, max_metadata_bytes, null, true);
@@ -1098,6 +1098,32 @@ pub const HttpClient = struct {
     /// when scheme and parent domain are preserved; an https→http downgrade is
     /// refused outright (the secret would otherwise hit a cleartext socket and
     /// the plaintext body could be substituted).
+    /// Transport faults collapse into one tag, but a cancellation is the user's
+    /// answer and an OOM is not something a second walk clears - both must stay
+    /// themselves or the retry policy sleeps them off as an ordinary hiccup.
+    fn walkTransportError(e: anyerror) error{ Canceled, OutOfMemory, RequestFailed } {
+        return switch (e) {
+            error.Canceled => error.Canceled,
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.RequestFailed,
+        };
+    }
+
+    /// Shared by both walks and exhaustive on purpose: a tag added to
+    /// `RedirectError` gets named in one place instead of quietly defaulting
+    /// into "malformed" in two.
+    fn walkRedirectError(e: RedirectError) GetError {
+        return switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.TlsDowngradeRefused => error.TlsDowngradeRefused,
+            error.TooManyHttpRedirects => error.TooManyHttpRedirects,
+            error.HttpRedirectLocationMissing,
+            error.HttpRedirectLocationInvalid,
+            error.HttpRedirectLocationOversize,
+            => error.HttpRedirectInvalid,
+        };
+    }
+
     fn followGet(
         self: *HttpClient,
         url: []const u8,
@@ -1105,7 +1131,7 @@ pub const HttpClient = struct {
         max_bytes: usize,
         progress: ?ProgressCallback,
         capture_etag: bool,
-    ) !GetOutcome {
+    ) GetError!GetOutcome {
         var current: []const u8 = try self.allocator.dupe(u8, url);
         defer self.allocator.free(current);
         var live_creds = creds;
@@ -1114,18 +1140,19 @@ pub const HttpClient = struct {
         while (true) : (hops += 1) {
             const uri = std.Uri.parse(current) catch return error.InvalidUrl;
 
-            var req = try self.client.request(.GET, uri, .{
+            var req = self.client.request(.GET, uri, .{
                 .extra_headers = live_creds,
                 .redirect_behavior = .unhandled,
-            });
+            }) catch |e| return walkTransportError(e);
             errdefer req.deinit();
 
-            try req.sendBodiless();
+            req.sendBodiless() catch |e| return walkTransportError(e);
             var redirect_buf: [32 * 1024]u8 = undefined;
-            var response = try req.receiveHead(&redirect_buf);
+            var response = req.receiveHead(&redirect_buf) catch |e| return walkTransportError(e);
             const status: u16 = @intFromEnum(response.head.status);
 
-            if (try self.nextRedirectHop(uri, status, response.head.location, hops)) |next| {
+            const hop = self.nextRedirectHop(uri, status, response.head.location, hops) catch |e| return walkRedirectError(e);
+            if (hop) |next| {
                 errdefer self.allocator.free(next);
                 if (!credsSurviveRedirect(current, next)) live_creds = &.{};
                 // Hop committed: no fallible op past here, so the errdefers
@@ -1169,7 +1196,7 @@ pub const HttpClient = struct {
         extra_headers: []const std.http.Header,
         max_bytes: usize,
         progress: ?ProgressCallback,
-    ) !Response {
+    ) GetError!Response {
         var attempt: usize = 0;
         while (true) {
             const result = self.doGetLimited(url, extra_headers, max_bytes, progress);
@@ -1204,7 +1231,7 @@ pub const HttpClient = struct {
         extra_headers: []const std.http.Header,
         max_bytes: usize,
         progress: ?ProgressCallback,
-    ) !Response {
+    ) GetError!Response {
         const out = try self.followGet(url, extra_headers, max_bytes, progress, false);
         return .{
             .status = out.status,
@@ -1278,25 +1305,15 @@ pub const HttpClient = struct {
             var req = self.client.request(.GET, uri, .{
                 .extra_headers = live_creds,
                 .redirect_behavior = .unhandled,
-            }) catch return error.RequestFailed;
+            }) catch |e| return walkTransportError(e);
             errdefer req.deinit();
 
-            req.sendBodiless() catch return error.RequestFailed;
+            req.sendBodiless() catch |e| return walkTransportError(e);
             var redirect_buf: [32 * 1024]u8 = undefined;
-            var response = req.receiveHead(&redirect_buf) catch return error.RequestFailed;
+            var response = req.receiveHead(&redirect_buf) catch |e| return walkTransportError(e);
             const status: u16 = @intFromEnum(response.head.status);
 
-            // Exhaustive on purpose: a new redirect outcome must be given a
-            // name here rather than defaulting into "malformed".
-            const hop = self.nextRedirectHop(uri, status, response.head.location, hops) catch |e| switch (e) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.TlsDowngradeRefused => return error.TlsDowngradeRefused,
-                error.TooManyHttpRedirects => return error.TooManyHttpRedirects,
-                error.HttpRedirectLocationMissing,
-                error.HttpRedirectLocationInvalid,
-                error.HttpRedirectLocationOversize,
-                => return error.HttpRedirectInvalid,
-            };
+            const hop = self.nextRedirectHop(uri, status, response.head.location, hops) catch |e| return walkRedirectError(e);
             if (hop) |next| {
                 errdefer self.allocator.free(next);
                 if (!credsSurviveRedirect(current, next)) live_creds = &.{};
@@ -1660,6 +1677,80 @@ test "requireSecureOrigin: a digest-pinned payload may come over cleartext http"
         "http://www.apptivateapp.com/resources/Apptivate-2.2.1.app.zip",
     };
     for (ok) |u| try HttpClient.requireSecureOrigin(u, .digest_pinned);
+}
+
+/// An inferred set drags std.http's own tags in, which is exactly what Rule U1
+/// forbids a leaf from leaking.
+fn assertErrorSetFitsIn(comptime f: anytype, comptime Allowed: type, comptime name: []const u8) void {
+    const ret = @typeInfo(@TypeOf(f)).@"fn".return_type.?;
+    const actual = @typeInfo(@typeInfo(ret).error_union.error_set).error_set.?;
+    for (actual) |tag| {
+        for (@typeInfo(Allowed).error_set.?) |allowed| {
+            if (std.mem.eql(u8, tag.name, allowed.name)) break;
+        } else @compileError(name ++ " leaks an unnamed error tag: " ++ tag.name);
+    }
+}
+
+test "head names a malformed url the same way every other walk does" {
+    // It used to hand back std's own parse tag, so the same bad url was
+    // reported one way through a HEAD and another through a GET.
+    const a = std.testing.allocator;
+    var http = HttpClient.init(std.Options.debug_io, .empty, a);
+    defer http.deinit();
+
+    // Passes the scheme gate, fails the parse - so nothing is dialled.
+    try std.testing.expectError(error.InvalidUrl, http.head("https://[oops"));
+}
+
+test "walkRedirectError keeps the refusals distinct from the malformed tags" {
+    // Collapsing the three malformed-location tags is fine - the caller has no
+    // different recovery for them. Collapsing a downgrade refusal or an
+    // exhausted budget would not be: those are the ones a caller reports.
+    try std.testing.expectEqual(GetError.TlsDowngradeRefused, HttpClient.walkRedirectError(error.TlsDowngradeRefused));
+    try std.testing.expectEqual(GetError.TooManyHttpRedirects, HttpClient.walkRedirectError(error.TooManyHttpRedirects));
+    try std.testing.expectEqual(GetError.OutOfMemory, HttpClient.walkRedirectError(error.OutOfMemory));
+    try std.testing.expectEqual(GetError.HttpRedirectInvalid, HttpClient.walkRedirectError(error.HttpRedirectLocationMissing));
+    try std.testing.expectEqual(GetError.HttpRedirectInvalid, HttpClient.walkRedirectError(error.HttpRedirectLocationInvalid));
+    try std.testing.expectEqual(GetError.HttpRedirectInvalid, HttpClient.walkRedirectError(error.HttpRedirectLocationOversize));
+}
+
+test "collapsing a transport fault never makes a terminal tag retriable" {
+    // The catch-alls destroy the real tag before any name-based assertion can
+    // see it, so the invariant is checked against the transport's own error
+    // set: a Ctrl-C during DNS must abort, not get slept off as a hiccup.
+    const ret = @typeInfo(@TypeOf(std.http.Client.request)).@"fn".return_type.?;
+    const raised = @typeInfo(@typeInfo(ret).error_union.error_set).error_set.?;
+    inline for (raised) |tag| {
+        const e = @field(anyerror, tag.name);
+        if (!HttpClient.isRetriableWalkError(e)) {
+            try std.testing.expect(!HttpClient.isRetriableWalkError(HttpClient.walkTransportError(e)));
+        }
+    }
+}
+
+test "a collapsed redirect tag is still retriable exactly as before" {
+    // The mapping must not move a tag across the retry boundary: a refusal and
+    // an exhausted budget stay terminal, memory pressure stays terminal.
+    try std.testing.expect(!HttpClient.isRetriableWalkError(error.TlsDowngradeRefused));
+    try std.testing.expect(!HttpClient.isRetriableWalkError(error.TooManyHttpRedirects));
+    try std.testing.expect(!HttpClient.isRetriableWalkError(error.HttpRedirectInvalid));
+    try std.testing.expect(!HttpClient.isRetriableWalkError(error.OutOfMemory));
+    // ...while a transport failure still earns a second walk.
+    try std.testing.expect(HttpClient.isRetriableWalkError(error.RequestFailed));
+}
+
+test "every buffered GET entry point exposes a closed error set" {
+    // Rule U1: net is a leaf, so callers switch on a typed set. The retry
+    // policy leans on it too - `isRetriableWalkError` treats any tag it does
+    // not recognise as retriable, so a leaked transport tag would be slept on.
+    comptime {
+        assertErrorSetFitsIn(HttpClient.get, GetError, "get");
+        assertErrorSetFitsIn(HttpClient.getWithHeaders, GetError, "getWithHeaders");
+        assertErrorSetFitsIn(HttpClient.getConditional, GetError, "getConditional");
+        assertErrorSetFitsIn(HttpClient.getToWriter, GetError, "getToWriter");
+        assertErrorSetFitsIn(HttpClient.head, GetError, "head");
+        assertErrorSetFitsIn(HttpClient.headResolved, HeadResolveError, "headResolved");
+    }
 }
 
 test "every url entry point refuses a cleartext origin before dialling out" {
@@ -2033,8 +2124,8 @@ test "isRetriableWalkError: every redirect decision is terminal" {
 }
 
 test "isRetriableWalkError: transport faults retry, refusals and exhaustions do not" {
-    // The HEAD walk collapses every transport fault into RequestFailed, while
-    // the buffered GET leaks the stdlib tag - both must stay retriable.
+    // Every walk collapses a transport fault into RequestFailed now, and a
+    // fault is worth a second walk - unlike a refusal, which is settled.
     try std.testing.expect(HttpClient.isRetriableWalkError(error.RequestFailed));
     try std.testing.expect(HttpClient.isRetriableWalkError(error.ReadFailed));
     try std.testing.expect(HttpClient.isRetriableWalkError(error.ConnectionResetByPeer));
