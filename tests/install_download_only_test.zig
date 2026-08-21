@@ -936,3 +936,49 @@ test "materializeRubyFormula installs a lib-only keg that ships no binary" {
     defer testing.allocator.free(link);
     try testing.expect(pathExists(link));
 }
+
+test "--download-only reports a Ctrl-C as an interruption" {
+    // The download-only branch returns before the shared interrupt check, so
+    // without its own poll a cancelled batch never said it was interrupted -
+    // it just listed per-formula download failures. The arm value lets
+    // resolution finish and flips the flag around the pool; anything in 3..5
+    // lands in that window, so 4 tolerates a poll site moving by one.
+    const prefix = try setupPrefix("dlint");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha = "44" ** 32;
+    try seedStoreBottle(prefix, sha, "intpkg", "1.0");
+    var arena_json = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_json.deinit();
+    const json = try warmFormulaJson(arena_json.allocator(), "intpkg", sha);
+    try seedFormulaCache(prefix, "intpkg", json);
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+
+    const prior_interrupted = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior_interrupted);
+    malt.signals.setInterruptedForTest(false);
+    malt.signals.armInterruptAfterForTest(4);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    install.execute(&ctx, arena.allocator(), &.{ "--download-only", "intpkg" }) catch {};
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Interrupted") != null);
+    // Paired half of the same flag: a cancelled job must not also be listed
+    // as a download failure.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Download failed for") == null);
+}

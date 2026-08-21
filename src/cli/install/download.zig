@@ -94,15 +94,16 @@ pub fn progressBridge(ctx: *anyopaque, bytes_so_far: u64, content_length: ?u64) 
     bar.update(clamped);
 }
 
-/// Sleeps for `ms` between retries. Returns false when the caller's
-/// stop signal cancels the sleep, true otherwise. std.Io cancellation
-/// is single-shot per task, so a swallowed Canceled would silently
-/// consume the request and the loop would keep retrying.
-fn cancellableBackoff(io: std.Io, ms: u64) bool {
-    std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(ms * std.time.ns_per_ms)), .awake) catch |e| switch (e) {
-        error.Canceled => return false,
-    };
-    return true;
+/// At file scope so the invariants between the two can be pinned by a unit
+/// test, without standing up a registry.
+const max_download_attempts: u8 = 3;
+const download_retry_delays_ms = [_]u64{ 100, 400 };
+
+/// True only when the loop spent its whole budget. Every early exit - an
+/// interrupt included - leaves `dl_attempt` short of it, which is what keeps
+/// the attempts-exhausted diagnostic off the cancellation path.
+fn attemptsExhausted(dl_attempt: u8) bool {
+    return dl_attempt >= max_download_attempts;
 }
 
 /// Errors that re-running the download cannot rescue: the cause is in the
@@ -637,13 +638,16 @@ pub fn downloadBottleToStore(
         .func = &progressBridge,
     } else null;
 
-    const max_attempts: u8 = 3;
-    const retry_delays_ms = [_]u64{ 100, 400 };
     var dl_attempt: u8 = 0;
     var dl_ok = false;
     var last_err: bottle_mod.BottleError = bottle_mod.BottleError.DownloadFailed;
     var last_mismatch: ?bottle_mod.MismatchInfo = null;
-    while (dl_attempt < max_attempts) : (dl_attempt += 1) {
+    while (dl_attempt < max_download_attempts) : (dl_attempt += 1) {
+        // Re-dialling after a Ctrl-C reports the user's own stop as a
+        // network failure. Breaking short of the budget also suppresses the
+        // attempts-exhausted line, so the caller reports it once.
+        if (signals.isInterrupted()) break;
+
         var mismatch: bottle_mod.MismatchInfo = undefined;
         if (bottle_mod.download(
             ctx.io,
@@ -672,8 +676,11 @@ pub fn downloadBottleToStore(
                 deps.sink.err("  {s}: {s}", .{ formula.name, @errorName(dl_err) });
                 break;
             }
-            if (dl_attempt + 1 < max_attempts) {
-                if (!cancellableBackoff(ctx.io, retry_delays_ms[dl_attempt])) break;
+            if (dl_attempt + 1 < max_download_attempts) {
+                const delay = download_retry_delays_ms[dl_attempt] * std.time.ns_per_ms;
+                // A cancelled sleep needs no special case: the next iteration
+                // polls the flag before spending another attempt.
+                std.Io.sleep(ctx.io, std.Io.Duration.fromNanoseconds(@intCast(delay)), .awake) catch {};
             }
         }
     }
@@ -691,8 +698,15 @@ pub fn downloadBottleToStore(
 
     if (!dl_ok) {
         if (deps.bar) |bar| bar.finish();
-        if (dl_attempt >= max_attempts) {
-            deps.sink.err("  {s}: {s} (after {d} attempts)", .{ formula.name, @errorName(last_err), max_attempts });
+        // A failed attempt wipes the temp dir itself, but an interrupt can
+        // break before the first one runs. deleteTree no-ops when it is
+        // already gone, so this covers every failing exit.
+        atomic.cleanupTempDir(ctx.io, tmp_dir);
+        // The flag can also be raised while the last attempt is in flight,
+        // which the loop's own poll can no longer catch - re-check so that
+        // window reports as a cancel rather than an exhausted budget.
+        if (attemptsExhausted(dl_attempt) and !signals.isInterrupted()) {
+            deps.sink.err("  {s}: {s} (after {d} attempts)", .{ formula.name, @errorName(last_err), max_download_attempts });
         }
         allocator.free(tmp_dir);
         return InstallError.DownloadFailed;
@@ -946,56 +960,26 @@ test "MaterializeResult.kegPath reflects keg_path_len after write" {
     try std.testing.expectEqualStrings(path, r.kegPath());
 }
 
-// Patches an inner Io's vtable so `sleep` reports cancellation on the
-// configured call index; non-canceled sleeps return immediately so the
-// retry-table delays don't pad the test runtime.
-const CancelSleepProbe = struct {
-    var vtable: std.Io.VTable = undefined;
-    var sleep_calls: usize = 0;
-    var cancel_at: usize = 1;
-
-    fn wrap(inner: std.Io, cancel_at_call: usize) std.Io {
-        vtable = inner.vtable.*;
-        vtable.sleep = sleepMaybeCanceled;
-        sleep_calls = 0;
-        cancel_at = cancel_at_call;
-        return .{ .userdata = inner.userdata, .vtable = &vtable };
+test "attemptsExhausted is false for every attempt an early break can reach" {
+    // The interrupt poll breaks from inside the loop body, so `dl_attempt` is
+    // always below the budget there. That is the whole mechanism keeping the
+    // "(after N attempts)" line off a cancelled download - if this ever went
+    // true early, a Ctrl-C would be misreported as a network failure again.
+    var i: u8 = 0;
+    while (i < max_download_attempts) : (i += 1) {
+        try std.testing.expect(!attemptsExhausted(i));
     }
-
-    fn sleepMaybeCanceled(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
-        sleep_calls += 1;
-        if (sleep_calls >= cancel_at) return error.Canceled;
-    }
-};
-
-test "cancellableBackoff returns true when sleep completes normally" {
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    // Zero-ms request keeps the test deterministic without exercising the
-    // real clock; a successful sleep must report true so the retry loop
-    // moves on to the next attempt.
-    try std.testing.expect(cancellableBackoff(threaded.io(), 0));
+    try std.testing.expect(attemptsExhausted(max_download_attempts));
 }
 
-test "cancellableBackoff returns false when sleep is cancelled" {
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const cancel_io = CancelSleepProbe.wrap(threaded.io(), 1);
-    try std.testing.expect(!cancellableBackoff(cancel_io, 100));
-    try std.testing.expectEqual(@as(usize, 1), CancelSleepProbe.sleep_calls);
-}
-
-test "cancellableBackoff propagates cancellation when called repeatedly" {
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    // Cancel the third call: the prior two complete and report true,
-    // pinning that the helper isn't inadvertently latched after the
-    // first non-cancelled sleep.
-    const cancel_io = CancelSleepProbe.wrap(threaded.io(), 3);
-    try std.testing.expect(cancellableBackoff(cancel_io, 0));
-    try std.testing.expect(cancellableBackoff(cancel_io, 0));
-    try std.testing.expect(!cancellableBackoff(cancel_io, 0));
-    try std.testing.expectEqual(@as(usize, 3), CancelSleepProbe.sleep_calls);
+test "the backoff table covers every gap between attempts" {
+    // The loop indexes the table by attempt number on all but the last
+    // attempt, so a budget raised without extending the table would panic on
+    // a real retry - a path no offline test would otherwise reach.
+    try std.testing.expectEqual(
+        @as(usize, max_download_attempts - 1),
+        download_retry_delays_ms.len,
+    );
 }
 
 // ---------------------------------------------------------------------------

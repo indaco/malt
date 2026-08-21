@@ -1006,10 +1006,17 @@ fn runInstall(
     // each warmed bottle's `<prefix>/store/<sha>` path so a follow-up
     // real install can consume the bytes.
     if (flags.download_only) {
+        // This branch returns before the shared interrupt check below, so it
+        // owns its own: without it a Ctrl-C reads as a wall of download
+        // failures. Polled once - the flag drives every job in the loop.
+        const interrupted = signals.isInterrupted();
+        if (interrupted) sink.warn("Interrupted. Cleaning up...", .{});
         for (all_jobs.items) |job| {
             if (!job.succeeded) {
                 output.emitNdjsonEvent(.download_complete, job.name, "failed");
-                sink.err("Download failed for {s}", .{job.name});
+                // A cancelled job is not a download failure; the interruption
+                // is already reported once, above.
+                if (!interrupted) sink.err("Download failed for {s}", .{job.name});
                 failed_count += 1;
                 continue;
             }
