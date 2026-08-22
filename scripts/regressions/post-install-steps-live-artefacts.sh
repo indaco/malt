@@ -87,6 +87,42 @@ install_clean() {
   pass "$formula: post_install completed natively, no fallback envelope"
 }
 
+# ── the hook phase must stay deferred ────────────────────────────────
+# A `run` step executes a binary out of its own keg, and that binary resolves
+# its dependencies through `<prefix>/opt/...`. Dependency resolution walks the
+# graph breadth-first, which is not a topological order, so a hook run inline
+# with linking can start before a dependency it needs is linked — dyld then
+# kills the child (fontconfig's fc-cache against gettext's libintl). This is
+# graph-shaped, not timing-dependent, so it hides on small dependency sets;
+# assert the structure rather than hope a live case reproduces it.
+INSTALL="$ROOT/src/cli/install.zig"
+drive_calls=$(grep -c 'drive(ctx, allocator' "$INSTALL")
+[[ "$drive_calls" == "1" ]] ||
+  fail "expected exactly one drive() call site, found $drive_calls — a hook may have moved back inline"
+# Judge the CALL's position, not the comments': a rename or a reworded banner
+# must not be able to leave this passing while the hook runs inline again.
+awk '
+  /Serial link \+ record phase/      { link = NR }
+  /Deferred post-install phase/      { deferred = NR }
+  /drive\(ctx, allocator/            { call = NR }
+  /provisionShippedCaBundle/         { bundle = NR }
+  END {
+    if (!link || !deferred || !call || !bundle) exit 1
+    if (deferred <= link) exit 1     # phase must come after the link loop
+    if (call <= deferred) exit 1     # the call must live inside that phase
+    if (bundle <= call) exit 1       # the CA fallback must follow the hook
+  }' "$INSTALL" ||
+  fail "post_install no longer runs after the link phase, or the CA-bundle fallback no longer follows it"
+pass "post_install hooks stay deferred until every keg in the transaction is linked"
+
+# Static-only mode: the checks above need no network or built binary, so
+# `just test` can run them on every commit while the install cases below stay
+# in the network-bound pool.
+if [[ -n "${MALT_STATIC_ONLY:-}" ]]; then
+  echo "OK: post_install ordering guards hold (static-only)"
+  exit 0
+fi
+
 # ── set_permissions, applied through the prefix's link farm ──────────
 install_clean redis
 modules="$PREFIX/lib/redis/modules"
