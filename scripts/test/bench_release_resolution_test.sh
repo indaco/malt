@@ -117,6 +117,20 @@ set_result skip_nb ""
 emit_skipped_peers tree
 check "no-reason skip falls back to n/a" "⚠️ n/a" "$(emitted nb_cold_disp)"
 
+# Present binary + recorded reason -> still a marker. nanobrew relocates
+# through /opt/nb and cannot install without it, so a built-but-unusable peer
+# has to be skipped like a missing one; measuring it anyway published a column
+# of FAIL cells that read as a peer regression rather than an unconfigured host.
+: >"$GITHUB_OUTPUT"
+# shellcheck disable=SC2034
+NB_BIN=$(command -v sh)
+set_result skip_nb "n/a (/opt/nb missing, needs sudo)"
+emit_skipped_peers tree
+check "built-but-unusable peer cold cell is a marker" "⚠️ n/a (/opt/nb missing, needs sudo)" "$(emitted nb_cold_disp)"
+check "built-but-unusable peer warm cell is a marker" "⚠️ n/a (/opt/nb missing, needs sudo)" "$(emitted nb_warm)"
+check "built-but-unusable peer is not measurable" "no" "$(peer_usable nb && echo yes || echo no)"
+check "built-and-clean peer is measurable" "yes" "$(set_result skip_nb "" && peer_usable nb && echo yes || echo no)"
+
 echo "fail-fast scope:"
 # BENCH_FAIL_FAST guards malt only. A peer's broken install records FAIL and
 # lets the run continue (its cell gets marked below); malt's aborts, so a
