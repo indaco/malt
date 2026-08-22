@@ -368,11 +368,14 @@ ensure_nb_short_prefix() {
   cur=$(readlink /opt/nb 2>/dev/null || true)
   [ "$cur" = "$target" ] && return 0
   if [ -n "$cur" ] || [ -e /opt/nb ]; then
-    warn "/opt/nb exists (-> ${cur:-not a symlink}) - leaving it alone; nanobrew installs will fail"
+    warn "/opt/nb exists (-> ${cur:-not a symlink}) - leaving it alone"
+    set_result skip_nb "n/a (/opt/nb points elsewhere)"
     return 0
   fi
-  sudo -n ln -s "$target" /opt/nb 2>/dev/null ||
-    warn "could not create /opt/nb -> $target (needs sudo) - nanobrew installs will fail"
+  sudo -n ln -s "$target" /opt/nb 2>/dev/null || {
+    warn "could not create /opt/nb -> $target (needs sudo)"
+    set_result skip_nb "n/a (/opt/nb missing, needs sudo)"
+  }
 }
 
 build_nanobrew() {
@@ -906,17 +909,34 @@ finalize_results() {
 # published table never lies. Active peers (binary present) are left to
 # finalize_results; this only fills the holes it leaves behind.
 emit_skipped_peers() {
-  local pkg="$1" tool bin reason
+  local pkg="$1" tool reason
   for tool in nb zb; do
-    case "$tool" in
-    nb) bin="$NB_BIN" ;;
-    zb) bin="$ZB_BIN" ;;
-    esac
-    [ -x "$bin" ] && continue
+    peer_usable "$tool" && continue
     reason=$(get_result "skip_$tool")
     emit_output "${tool}_cold_disp=⚠️ ${reason:-n/a}"
     emit_output "${tool}_warm=⚠️ ${reason:-n/a}"
   done
+}
+
+# peer_usable <nb|zb>
+#
+# A peer counts as measurable only when its binary exists *and* nothing has
+# recorded a reason to skip it. Presence alone is not enough: nanobrew installs
+# relocate through `/opt/nb`, and without that symlink every install exits
+# non-zero. Running them anyway spent 24 rounds proving a precondition we had
+# already checked, dumped each failure's output into the log — enough `✗` lines
+# to make any wrapper scanning for failure markers report the bench as broken —
+# and published a column of FAIL cells that read like a peer regression rather
+# than an unconfigured host.
+peer_usable() {
+  local bin
+  case "$1" in
+  nb) bin="$NB_BIN" ;;
+  zb) bin="$ZB_BIN" ;;
+  *) return 1 ;;
+  esac
+  [ -x "$bin" ] || return 1
+  [ -z "$(get_result "skip_$1")" ]
 }
 
 # --- orchestration -----------------------------------------------------------
@@ -927,8 +947,8 @@ run_bench_for() {
   # warmup order; measured rounds rotate from it.
   local tools=(mt)
   if [ "$SKIP_OTHERS" != "1" ]; then
-    [ -x "$NB_BIN" ] && tools+=(nb)
-    [ -x "$ZB_BIN" ] && tools+=(zb)
+    peer_usable nb && tools+=(nb)
+    peer_usable zb && tools+=(zb)
   fi
   if [ "$SKIP_BREW" != "1" ] && command -v brew >/dev/null 2>&1; then
     tools+=(brew)
