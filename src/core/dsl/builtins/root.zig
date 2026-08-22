@@ -67,7 +67,7 @@ pub const bare_builtins = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "Hardware::CPU.arch", process.cpuArch },
     .{ "Hardware::CPU.arm?", process.osMac }, // arm? = true on Apple Silicon
     .{ "Hardware::CPU.intel?", process.osLinux }, // intel? = false on Apple Silicon
-    .{ "OS.kernel_version", process.macosVersion },
+    .{ "OS.kernel_version", process.kernelVersion },
 
     // Module constants. The parser lowers `A::B::C` and `A::B.C` to the
     // same chained method_call shape, so one key covers both syntaxes.
