@@ -651,11 +651,12 @@ fn starMatch(pattern: []const u8, name: []const u8) bool {
 /// hold, so a caller can refuse loudly instead of reading it as a skip.
 const GuardOutcome = enum { met, unmet, unsupported };
 
-const GuardCondition = enum { if_exists, unless_exists };
+const GuardCondition = enum { if_exists, unless_exists, on };
 
 const guard_condition_map = std.StaticStringMap(GuardCondition).initComptime(.{
     .{ "if_exists", .if_exists },
     .{ "unless_exists", .unless_exists },
+    .{ "on", .on },
 });
 
 fn evalGuards(ctx: StepsCtx, obj: std.json.ObjectMap) GuardOutcome {
@@ -665,16 +666,40 @@ fn evalGuards(ctx: StepsCtx, obj: std.json.ObjectMap) GuardOutcome {
         if (item != .object) continue;
         const raw = getString(item.object, "condition") orelse return .unsupported;
         const condition = guard_condition_map.get(raw) orelse return .unsupported;
-        // A guard carries the same `{base, path}` spec as the step it gates,
-        // so it must resolve the same way or it tests the wrong location.
-        const path = resolveSpec(ctx, item.object, null) orelse return .unsupported;
-        const exists = if (std.Io.Dir.accessAbsolute(ctx.io, path, .{})) |_| true else |_| false;
-        switch (condition) {
-            .if_exists => if (!exists) return .unmet,
-            .unless_exists => if (exists) return .unmet,
-        }
+        // Dispatched before any spec resolution: an `on` guard carries a
+        // platform value and no path at all.
+        const outcome = switch (condition) {
+            .on => platformGuard(item.object),
+            .if_exists => existsGuard(ctx, item.object, true),
+            .unless_exists => existsGuard(ctx, item.object, false),
+        };
+        if (outcome != .met) return outcome;
     }
     return .met;
+}
+
+const Platform = enum { macos, linux };
+
+const platform_map = std.StaticStringMap(Platform).initComptime(.{
+    .{ "macos", .macos },
+    .{ "linux", .linux },
+});
+
+/// malt builds macOS-only, so the platform is known at compile time — this is a
+/// real evaluation, not a stub standing in for one.
+fn platformGuard(spec: std.json.ObjectMap) GuardOutcome {
+    const value = getString(spec, "value") orelse return .unsupported;
+    return switch (platform_map.get(value) orelse return .unsupported) {
+        .macos => .met,
+        .linux => .unmet,
+    };
+}
+
+fn existsGuard(ctx: StepsCtx, spec: std.json.ObjectMap, want_exists: bool) GuardOutcome {
+    // A guard carries the same `{base, path}` spec as the step it gates, so it
+    // must resolve the same way or it tests the wrong location.
+    const path = resolveSpec(ctx, spec, null) orelse return .unsupported;
+    return if (pathExists(ctx.io, path) == want_exists) .met else .unmet;
 }
 
 /// Replace every line beginning with `literal` wholesale. Caller must have
@@ -1223,6 +1248,11 @@ fn fileExists(io: std.Io, path: []const u8) bool {
     const f = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
     f.close(io);
     return true;
+}
+
+/// Unlike `fileExists`, true for directories too.
+fn pathExists(io: std.Io, path: []const u8) bool {
+    return if (std.Io.Dir.accessAbsolute(io, path, .{})) |_| true else |_| false;
 }
 
 fn getString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -1890,6 +1920,59 @@ test "a guard resolves its base like the step it gates" {
     );
     try testing.expect(execute(h.ctx(), json));
     try std.Io.Dir.accessAbsolute(io, try std.fmt.allocPrint(a, "{s}/var/made", .{h.prefix}), .{});
+}
+
+test "the on guard admits a macOS step and skips a Linux one silently" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    // Upstream gates platform-specific steps with a guard carrying a value and
+    // no path — a Linux-only step is a normal skip here, never a failure.
+    const json = try testFormulaJson(&h,
+        \\[{"type":"mkdir_p","path":{"base":"var","path":"mac"},
+        \\  "guards":[{"condition":"on","value":"macos","id":"1"}]},
+        \\ {"type":"mkdir_p","path":{"base":"var","path":"linux"},
+        \\  "guards":[{"condition":"on","value":"linux","id":"2"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(!h.flog.hasErrors());
+    try std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/var/mac", .{h.prefix}), .{});
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/var/linux", .{h.prefix}), .{}),
+    );
+}
+
+test "the on guard routes an unknown platform value loudly" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    // A platform malt cannot reason about must not read as "skip": the step's
+    // work may still be required here.
+    const json = try testFormulaJson(&h,
+        \\[{"type":"mkdir_p","path":{"base":"var","path":"made"},
+        \\  "guards":[{"condition":"on","value":"haiku","id":"1"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(h.flog.hasErrors());
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/var/made", .{h.prefix}), .{}),
+    );
+}
+
+test "the on guard refuses a step whose platform value is missing entirely" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"mkdir_p","path":{"base":"var","path":"made"},
+        \\  "guards":[{"condition":"on","id":"1"}]}]
+    );
+    try testing.expect(execute(h.ctx(), json));
+    try testing.expect(h.flog.hasErrors());
 }
 
 test "the libexec base resolves inside the keg, matching a run command's libexec" {
@@ -2779,12 +2862,13 @@ test "run refuses the execution fields malt does not honour" {
 }
 
 test "run refuses a guard it cannot evaluate rather than reading it as a skip" {
-    // Platform guards ship on real formulas. Treating an unevaluable condition
-    // as "declined to run" would turn a missing feature into a silent no-op —
-    // the exact failure the loud envelope exists for.
+    // Treating an unevaluable condition as "declined to run" would turn a
+    // missing feature into a silent no-op — the exact failure the loud
+    // envelope exists for. A platform malt knows is evaluated instead; see the
+    // on-guard tests.
     const unevaluable = [_][]const u8{
         \\[{"type":"run","command":{"base":"bin","path":"t"},
-        \\  "guards":[{"condition":"on","value":"macos","id":"1"}]}]
+        \\  "guards":[{"condition":"on","value":"haiku","id":"1"}]}]
         ,
         \\[{"type":"run","command":{"base":"bin","path":"t"},
         \\  "guards":[{"condition":"if_exists","id":"1"}]}]
