@@ -909,6 +909,10 @@ To reproduce locally, `./scripts/local-bench.sh` runs the four CI phases (tree, 
 
 Contributions are welcome. Please open an issue to discuss before submitting large changes. See [CONTRIBUTING](CONTRIBUTING.md).
 
+## Security
+
+Found a vulnerability? Report it privately - do not open a public issue. See [SECURITY](.github/SECURITY.md).
+
 ## License
 
 malt is licensed under the [MIT License](LICENSE). Third-party components and upstream projects - including Homebrew (BSD-2-Clause) and homebrew-core (BSD-2-Clause) - are acknowledged in the [LICENSE](LICENSE) file.
