@@ -241,6 +241,20 @@ pub fn macosVersion(ctx: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Valu
     return Value{ .string = trimmed };
 }
 
+/// `OS.kernel_version` — the Darwin release (`25.6.0`), NOT the macOS product
+/// version. Formulas chain `.major` on it to name toolchain config files, so
+/// answering `26` where Darwin says `25` writes plausible, wrong filenames.
+pub fn kernelVersion(ctx: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Value {
+    var buf: [64]u8 = undefined;
+    var len: usize = buf.len;
+    // A guess here is worse than a loud refusal, so there is no fallback.
+    if (std.c.sysctlbyname("kern.osrelease", &buf, &len, null, 0) != 0)
+        return BuiltinError.UnknownMethod;
+    const text = std.mem.sliceTo(buf[0..len], 0);
+    return Value{ .string = std.fmt.allocPrint(ctx.allocator, "{s}", .{text}) catch
+        return BuiltinError.OutOfMemory };
+}
+
 /// MacOS::CLT.PKG_PATH — Homebrew's canonical Command Line Tools prefix.
 /// Hard-coded because Apple's installer places CLT here on every macOS
 /// version our DSL could plausibly run on; resolving it lets formulas
@@ -854,4 +868,20 @@ test "suppressed child stdout stays off the json document" {
     const got = try cap.finish(alloc);
 
     try std.testing.expectEqual(@as(usize, 0), got.len);
+}
+
+test "OS.kernel_version answers the Darwin release, not the macOS product version" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var lio: std.Io.Threaded = .init(alloc, .{});
+    defer lio.deinit();
+    const ctx = sanitizeTestCtx(alloc, lio.io());
+
+    const kernel = (try kernelVersion(ctx, null, &.{})).string;
+    const product = (try macosVersion(ctx, null, &.{})).string;
+    try std.testing.expect(kernel.len > 0);
+    // The two majors differ on every current release, which is exactly why a
+    // formula naming `darwin#{OS.kernel_version.major}.cfg` needs this one.
+    try std.testing.expect(!std.mem.eql(u8, kernel, product));
 }

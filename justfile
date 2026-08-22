@@ -38,6 +38,7 @@ regressions-static:
     @./scripts/regressions/tap-resolution-contract.sh
     @./scripts/regressions/relocated-store-logic-version-pin.sh
     @./scripts/regressions/post-install-native-spawns-inherit-full-environment.sh
+    @MALT_STATIC_ONLY=1 ./scripts/regressions/post-install-steps-live-artefacts.sh
     @./scripts/test/bench_release_resolution_test.sh
 
 # Run unit tests + cheap static regression guards.
