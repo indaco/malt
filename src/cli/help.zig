@@ -318,6 +318,10 @@ const doctor_help =
     \\                 stable `{cask_history: {retained_versions,
     \\                 bytes}}` payload on stdout. Empty state still
     \\                 surfaces with zero values.
+    \\  --post-install-status
+    \\                 Report, per installed keg, whether its
+    \\                 post_install work runs natively or needs the
+    \\                 Ruby fallback. Read-only probe; runs no steps.
     \\
 ;
 

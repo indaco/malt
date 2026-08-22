@@ -1049,10 +1049,16 @@ fn runInstall(
     }
 
     // ── Serial link + record phase ──────────────────────────────────
-    // Runs in dep order so `findFailedDep` propagates failures down the
-    // graph; linker + SQLite writes cannot be parallelised.
+    // linker + SQLite writes cannot be parallelised. Post-install hooks are
+    // deliberately NOT run here — see the deferred phase below. Wording is
+    // asserted by scripts/regressions/post-install-steps-live-artefacts.sh.
     var failed_kegs = std.StringHashMap(void).init(allocator);
     defer failed_kegs.deinit();
+
+    // Jobs that linked cleanly, in link order. Their post-install work runs
+    // only once the whole transaction is linked — see the deferred phase.
+    var linked_jobs: std.ArrayList(usize) = .empty;
+    defer linked_jobs.deinit(allocator);
 
     for (all_jobs.items, 0..) |*job, i| {
         if (signals.isInterrupted()) {
@@ -1124,13 +1130,41 @@ fn runInstall(
             pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, job.name, job.version_str);
         }
 
+        // Post-install work is deferred, not run here: a hook may execute a
+        // binary out of its own keg, and that binary links against its
+        // dependencies through `<prefix>/opt/...`. Dependency resolution walks
+        // the graph breadth-first, which is not a topological order, so a
+        // dependency can still be unlinked at this point and dyld kills the
+        // child.
+        linked_jobs.append(allocator, i) catch {
+            // Deliberately not `failed_kegs`: the keg is linked, recorded and
+            // usable, so dependents must not be skipped. Only its follow-up
+            // work is lost, and the exit code says so.
+            sink.err("Out of memory scheduling post_install for {s}", .{job.name});
+            failed_count += 1;
+        };
+    }
+
+    // ── Deferred post-install phase ─────────────────────────────────
+    // Safe here for the reason given at `linked_jobs` above: everything the
+    // transaction installs is linked. Wording is asserted by
+    // scripts/regressions/post-install-steps-live-artefacts.sh.
+    //
+    // Deliberately not gated on the interrupt flag. `signals.isInterrupted()`
+    // latches for the rest of the process, so checking it here would abandon
+    // the hooks of every keg linked *before* the Ctrl-C too — and a keg that is
+    // linked and recorded but never provisioned is not something a later
+    // `mt install` retries, since that takes the already-installed path.
+    for (linked_jobs.items) |idx| {
+        const job = all_jobs.items[idx];
         if (job.wants_post_install) {
             drive(ctx, allocator, job.name, job.version_str, job.formula_json, prefix, flags.system_ruby, &formula_cache, sink);
         }
-
         // ca-certificates' macOS post_install can't run natively, so the
         // shipped Mozilla bundle is linked into etc/<name>/cert.pem here.
-        // No-op for every keg that ships no CA bundle.
+        // After the keg's own hook, never before: the helper stands down when a
+        // bundle is already present, so running it first would shadow one the
+        // hook meant to write.
         post_install_mod.provisionShippedCaBundle(ctx.io, prefix, job.name);
     }
 
