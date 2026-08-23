@@ -1016,6 +1016,14 @@ test "isDeterministicDownloadError: DownloadFailed IS retried" {
     try std.testing.expect(!isDeterministicDownloadError(bottle_mod.BottleError.DownloadFailed));
 }
 
+test "isDeterministicDownloadError: local exhaustion IS retried" {
+    // A sibling worker finishing frees the thread or descriptor this one
+    // could not get, so the second attempt can genuinely succeed.
+    try std.testing.expect(!isDeterministicDownloadError(
+        bottle_mod.BottleError.DownloadLocalResourceExhausted,
+    ));
+}
+
 test "isDeterministicDownloadError: DownloadRateLimited IS retried" {
     // Rate limits are time-based, not deterministic — backoff gets a
     // shot at the next request.

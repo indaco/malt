@@ -12,6 +12,9 @@ pub const BottleError = error{
     DownloadFailed,
     DownloadPermanent,
     DownloadRateLimited,
+    /// Local threads or file descriptors, not the registry. Retriable, since
+    /// a busy sibling worker freeing capacity is the usual cause.
+    DownloadLocalResourceExhausted,
     Sha256Mismatch,
     ExtractionFailed,
     OutOfMemory,
@@ -169,6 +172,7 @@ pub fn download(
     dl catch |e| return switch (e) {
         ghcr_mod.GhcrError.DownloadHttpClientError => BottleError.DownloadPermanent,
         ghcr_mod.GhcrError.DownloadRateLimited => BottleError.DownloadRateLimited,
+        ghcr_mod.GhcrError.DownloadLocalResourceExhausted => BottleError.DownloadLocalResourceExhausted,
         else => BottleError.DownloadFailed,
     };
 

@@ -25,6 +25,10 @@ pub const InstallError = error{
     /// or was skipped because an ancestor dep failed. Returned from `execute`
     /// so `main` exits non-zero.
     PartialFailure,
+    /// This machine ran out of threads or file descriptors, not the network.
+    /// Separate from `NetworkError` so the user is pointed at their own box
+    /// instead of at their connection.
+    LocalResourceExhausted,
     /// MALT_PREFIX is absurdly long (exceeds the 256-byte sanity cap).
     /// Raised before any network activity so pathological values never
     /// reach the relocation subprocess.
@@ -90,6 +94,9 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
         InstallError.CellarFailed,
         InstallError.RateLimited,
         InstallError.NetworkError,
+        // Raise site names the exhausted local resource and what to do
+        // about it, which the generic summary would only bury.
+        InstallError.LocalResourceExhausted,
         // Raise site prints the actionable "builds from source" line, so
         // the generic dispatch summary stays suppressed.
         InstallError.BuildFromSourceUnsupported,

@@ -68,6 +68,10 @@ pub const HeadResolveError = RedirectError || error{
     InsecureUrlScheme,
     HeadTimeout,
     Canceled,
+    /// This machine could not spare a thread or a pipe for the deadline.
+    /// Kept distinct from `RequestFailed` because the peer is fine and the
+    /// user's next move is local - retrying the network is not it.
+    WatchdogSpawnFailed,
 };
 
 /// What still vouches for a payload once the transport does not.
@@ -756,19 +760,12 @@ pub const HttpClient = struct {
                 // watchdog's connection stable by contract, not by stdlib
                 // branch order.
                 .redirect_behavior = .unhandled,
-            }, self.head_timeout_ns, &fired) catch |e| switch (self.headWalkError(&fired, e)) {
-                error.WatchdogSpawnFailed => return error.RequestFailed,
-                else => |mapped| return mapped,
-            };
+            }, self.head_timeout_ns, &fired) catch |e| return self.headWalkError(&fired, e);
             defer req.deinit();
 
             var redirect_buf: [32 * 1024]u8 = undefined;
-            const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired) catch |e| switch (self.headWalkError(&fired, e)) {
-                // `HeadResolveError` stays closed: a watchdog that could not
-                // start is one more way the request failed.
-                error.WatchdogSpawnFailed => return error.RequestFailed,
-                else => |mapped| return mapped,
-            };
+            const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired) catch |e|
+                return self.headWalkError(&fired, e);
 
             if (resolved.content_disposition == null) {
                 if (response.head.content_disposition) |cd| {
