@@ -10,6 +10,7 @@ on:
       - "**/*.zon"
       - "scripts/**/*.sh"
       - "src/core/pins_manifest.txt"
+      - "justfile"
       - ".github/workflows/ci.yml"
   pull_request:
     branches:
@@ -20,6 +21,7 @@ on:
       - "**/*.zon"
       - "scripts/**/*.sh"
       - "src/core/pins_manifest.txt"
+      - "justfile"
       - ".github/workflows/ci.yml"
 
 jobs:
@@ -110,6 +112,36 @@ jobs:
         run: |
           shellcheck scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh scripts/release/*.sh
           shfmt -i 2 -d scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh scripts/release/*.sh
+
+  # The regression pool is where field bugs get their permanent guard, but
+  # only the loopback ones can gate a PR - the rest need a token and live
+  # installs. Running that subset here is what stops a guard from silently
+  # never being run again after the branch that added it merges.
+  regressions-hermetic:
+    name: Regression guards (hermetic)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: false
+
+      - name: Install just
+        uses: taiki-e/install-action@v2.85.4
+        with:
+          tool: just
+
+      # The guards bound themselves with `timeout`, which macOS does not ship.
+      - name: Install coreutils
+        run: brew install coreutils
+
+      - name: Hermetic regression guards
+        run: just regressions-hermetic
 
   # Drift guard: verify every committed manifest entry's hash against the
   # committed pin on every PR. Catches "bumped pins.zig, forgot to
