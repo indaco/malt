@@ -42,6 +42,10 @@ if [[ "$(grep -Fc -- "self.client.request(" "$SRC")" -ne 0 ]]; then
   fail "a walk still connects with no deadline"
 fi
 
+# `zig build test-bin` does not prune, so a binary left by an earlier build
+# still runs after its file is dropped from the build. Pin the registration.
+grep -Fqs -- "tests/net_redirect_auth_test.zig" build.zig || fail "the test file is no longer built"
+
 # Always rebuild: a prebuilt binary could predate the fix, and zig 0.16 has no
 # --test-filter to narrow this down.
 zig build test-bin >/dev/null 2>&1 || fail "could not build the test binaries"
@@ -56,5 +60,8 @@ elapsed=$(($(date +%s) - start))
 # Wide enough for a loaded CI box: the pre-fix shape parks forever, so the
 # ceiling only has to separate "finished" from "never".
 ((elapsed < 75)) || fail "the connect phase took ${elapsed}s - the deadline did not fire"
+
+grep -Fqs -- "never starts its TLS handshake...OK" "$OUT" || fail "the connect-deadline tests did not run"
+grep -Fqs -- "stalled TLS handshake is the answer, not a blip to retry...OK" "$OUT" || fail "the connect-deadline tests did not run"
 
 echo "PASS: a silent TLS peer cannot park the connect phase"

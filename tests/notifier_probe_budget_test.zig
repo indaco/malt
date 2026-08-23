@@ -91,9 +91,13 @@ test "a transient failure is still worth retrying for everyone else" {
     try trustFixtureCa(&inner, io, fx.ca_path);
 
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
-    try testing.expect(http.retry_backoff_ms.len > 0);
+    // Pin the stock schedule itself: the attempt count below is only evidence
+    // about the client default if that default is what is being shortened.
+    const stock_retries = http.retry_backoff_ms.len;
+    try testing.expectEqual(@as(usize, 3), stock_retries);
 
-    // Zeroed delays: the count is the assertion, not the wall-clock.
+    // Zeroed delays of the same length: the count is the assertion, not the
+    // wall-clock.
     http.retry_backoff_ms = &.{ 0, 0, 0 };
 
     var url_buf: [96]u8 = undefined;

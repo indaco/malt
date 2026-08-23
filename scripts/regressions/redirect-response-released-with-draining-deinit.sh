@@ -40,6 +40,10 @@ if [[ "$(grep -Fc -- "finishRedirect(&req, &response.head)" "$SRC")" -ne 2 ]]; t
   fail "a redirect hop is still released with a draining deinit"
 fi
 
+# `zig build test-bin` does not prune, so a binary left by an earlier build
+# still runs after its file is dropped from the build. Pin the registration.
+grep -Fqs -- "tests/net_redirect_auth_test.zig" build.zig || fail "the test file is no longer built"
+
 # Always rebuild: a prebuilt binary could predate the fix, and zig 0.16 has no
 # --test-filter to narrow this down.
 zig build test-bin >/dev/null 2>&1 || fail "could not build the test binaries"
@@ -48,5 +52,8 @@ OUT=$(mktemp -t redirect-drain)
 trap 'rm -f "$OUT"' EXIT
 
 timeout 60 "$BIN" >"$OUT" 2>&1 || fail "an unframed redirect was not released: $(tail -3 "$OUT")"
+
+grep -Fqs -- "released without draining until the peer closes...OK" "$OUT" || fail "the redirect-release tests did not run"
+grep -Fqs -- "released on the way out, not drained...OK" "$OUT" || fail "the redirect-release tests did not run"
 
 echo "PASS: an unframed redirect is released without draining until close"

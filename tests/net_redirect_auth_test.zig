@@ -187,9 +187,13 @@ const UnframedRedirectPeer = struct {
     io: std.Io,
     listener: *net.Server,
     location: []const u8,
-    // Frame the body with a chunked encoding instead of leaving it to end at
-    // close. Chunked terminates itself, so this hop must still be drained.
-    chunked: bool = false,
+    // How the 3xx frames its body. Framing does not make a drain bounded: a
+    // peer that announces a body and never sends it parks the reader just as
+    // an unframed one does.
+    framing: enum { none, chunked, oversize_length } = .none,
+    // Omit `Location` so the walk unwinds through its error path, which
+    // releases the hop somewhere else entirely.
+    omit_location: bool = false,
 };
 
 // Bounds a regression: the drain hits EOF here instead of hanging the suite,
@@ -213,17 +217,27 @@ fn serveUnframedRedirect(peer: *UnframedRedirectPeer) void {
     // single loopback segment.
     _ = reader.interface.peek(1) catch return;
 
-    if (peer.chunked) {
-        writer.interface.print(
+    if (peer.omit_location) {
+        // No Location and no framing: the walk errors out, and the hop is
+        // released on the unwind path rather than the committed-hop one.
+        writer.interface.writeAll("HTTP/1.1 302 Found\r\n\r\nredirecting\n") catch return;
+    } else switch (peer.framing) {
+        // Chunked, but the terminating zero-chunk never arrives.
+        .chunked => writer.interface.print(
             "HTTP/1.1 302 Found\r\nLocation: {s}\r\n" ++
-                "Transfer-Encoding: chunked\r\n\r\nc\r\nredirecting\n\r\n0\r\n\r\n",
+                "Transfer-Encoding: chunked\r\n\r\nc\r\nredirecting\n",
             .{peer.location},
-        ) catch return;
-    } else {
-        writer.interface.print(
+        ) catch return,
+        // A declared length far larger than anything that follows.
+        .oversize_length => writer.interface.print(
+            "HTTP/1.1 302 Found\r\nLocation: {s}\r\n" ++
+                "Content-Length: 4294967296\r\n\r\nredirecting\n",
+            .{peer.location},
+        ) catch return,
+        .none => writer.interface.print(
             "HTTP/1.1 302 Found\r\nLocation: {s}\r\n\r\nredirecting\n",
             .{peer.location},
-        ) catch return;
+        ) catch return,
     }
     writer.interface.flush() catch return;
 
@@ -1398,12 +1412,9 @@ test "an unframed redirect is released without draining until the peer closes" {
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
     http.retry_backoff_ms = &.{};
 
-    const started_ns: i128 = std.Io.Clock.real.now(io).toNanoseconds();
+    const started_ms = test_io.elapsedMillis(io);
     const result = http.get(url);
-    const elapsed_ms: i64 = @intCast(@divTrunc(
-        std.Io.Clock.real.now(io).toNanoseconds() - started_ns,
-        std.time.ns_per_ms,
-    ));
+    const elapsed_ms = test_io.elapsedMillis(io) - started_ms;
     http.deinit();
     t1.join();
     t2.join();
@@ -1445,12 +1456,9 @@ test "a streamed walk releases an unframed redirect without draining it" {
     var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer sink.deinit();
 
-    const started_ns: i128 = std.Io.Clock.real.now(io).toNanoseconds();
+    const started_ms = test_io.elapsedMillis(io);
     const result = http.getToWriter(url, &.{}, &sink.writer, null);
-    const elapsed_ms: i64 = @intCast(@divTrunc(
-        std.Io.Clock.real.now(io).toNanoseconds() - started_ns,
-        std.time.ns_per_ms,
-    ));
+    const elapsed_ms = test_io.elapsedMillis(io) - started_ms;
     http.deinit();
     t1.join();
     t2.join();
@@ -1458,47 +1466,6 @@ test "a streamed walk releases an unframed redirect without draining it" {
     try std.testing.expectEqual(@as(u16, 200), try result);
     try std.testing.expectEqualStrings(blob_body, sink.written());
     try std.testing.expect(elapsed_ms < drain_budget_ms);
-}
-
-test "a framed redirect still drains, so its connection stays poolable" {
-    // Only the unframed case skips the drain. A 302 that declares its body
-    // costs a cheap read, and retiring that connection would pay for a fresh
-    // handshake on every hop of a healthy chain.
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var l2 = try bindIp4(io);
-    defer l2.deinit(io);
-    const p2 = l2.socket.address.getPort();
-    var hop2 = Hop{ .io = io, .listener = &l2 };
-    const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
-
-    var loc_buf: [64]u8 = undefined;
-    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
-
-    var l1 = try bindIp4(io);
-    defer l1.deinit(io);
-    const p1 = l1.socket.address.getPort();
-    // `Hop` answers a 302 with a declared body.
-    var hop1 = Hop{ .io = io, .listener = &l1, .redirect_to = loc, .status = .found };
-    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
-
-    var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
-
-    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
-    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
-    http.retry_backoff_ms = &.{};
-
-    const result = http.get(url);
-    http.deinit();
-    t1.join();
-    t2.join();
-
-    var resp = try result;
-    defer resp.deinit();
-    try std.testing.expectEqualStrings(blob_body, resp.body);
 }
 
 test "the version probe's budget spends one attempt on a peer that keeps failing" {
@@ -1572,11 +1539,10 @@ test "the stock client still retries a failing peer" {
     try std.testing.expectEqual(@as(usize, 4), hop1.requests);
 }
 
-test "a chunked redirect is drained rather than retired" {
-    // Chunked framing ends at its own zero-chunk, so the drain terminates
-    // without the peer closing - which is why this hop keeps its connection
-    // instead of paying for a fresh handshake. The classifier says so; this
-    // proves it at the socket, against a peer that never closes.
+test "a chunked redirect whose zero-chunk never arrives is still released" {
+    // Framing was the old reason to drain a redirect. It is not a guarantee:
+    // a peer that opens a chunked body and stops parks the drain exactly like
+    // an unframed one, so the hop is retired regardless of how it is framed.
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1593,7 +1559,7 @@ test "a chunked redirect is drained rather than retired" {
     var l1 = try bindIp4(io);
     defer l1.deinit(io);
     const p1 = l1.socket.address.getPort();
-    var peer = UnframedRedirectPeer{ .io = io, .listener = &l1, .location = loc, .chunked = true };
+    var peer = UnframedRedirectPeer{ .io = io, .listener = &l1, .location = loc, .framing = .chunked };
     const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
 
     var url_buf: [64]u8 = undefined;
@@ -1602,10 +1568,12 @@ test "a chunked redirect is drained rather than retired" {
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
     http.retry_backoff_ms = &.{};
+    // Bounds the drain of a framed body the peer never finishes sending.
+    http.head_timeout_ns = stall_budget_ns;
 
-    const started_ms = test_io.milliTimestamp(io);
+    const started_ms = test_io.elapsedMillis(io);
     const result = http.get(url);
-    const elapsed_ms = test_io.milliTimestamp(io) - started_ms;
+    const elapsed_ms = test_io.elapsedMillis(io) - started_ms;
     http.deinit();
     t1.join();
     t2.join();
@@ -1613,5 +1581,82 @@ test "a chunked redirect is drained rather than retired" {
     var resp = try result;
     defer resp.deinit();
     try std.testing.expectEqualStrings(blob_body, resp.body);
+    try std.testing.expect(elapsed_ms < drain_budget_ms);
+}
+
+test "a redirect that declares a body it never sends is still released" {
+    // `Content-Length` was the strongest framing signal, and it is the easiest
+    // to lie about: the drain waits for bytes that never come.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l2 = try bindIp4(io);
+    defer l2.deinit(io);
+    const p2 = l2.socket.address.getPort();
+    var hop2 = Hop{ .io = io, .listener = &l2 };
+    const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var peer = UnframedRedirectPeer{ .io = io, .listener = &l1, .location = loc, .framing = .oversize_length };
+    const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{};
+    // Bounds the drain of a framed body the peer never finishes sending.
+    http.head_timeout_ns = stall_budget_ns;
+
+    const started_ms = test_io.elapsedMillis(io);
+    const result = http.get(url);
+    const elapsed_ms = test_io.elapsedMillis(io) - started_ms;
+    http.deinit();
+    t1.join();
+    t2.join();
+
+    var resp = try result;
+    defer resp.deinit();
+    try std.testing.expectEqualStrings(blob_body, resp.body);
+    try std.testing.expect(elapsed_ms < drain_budget_ms);
+}
+
+test "a redirect the walk refuses is released on the way out, not drained" {
+    // The unwind path had its own release. A malformed `Location`, an
+    // exhausted budget, or a refused https downgrade all land there, so a
+    // hostile peer could park the walk on the very error that rejected it.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var peer = UnframedRedirectPeer{ .io = io, .listener = &l1, .location = "", .omit_location = true };
+    const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{};
+    // Bounds the drain of a framed body the peer never finishes sending.
+    http.head_timeout_ns = stall_budget_ns;
+
+    const started_ms = test_io.elapsedMillis(io);
+    const result = http.get(url);
+    const elapsed_ms = test_io.elapsedMillis(io) - started_ms;
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HttpRedirectInvalid, result);
     try std.testing.expect(elapsed_ms < drain_budget_ms);
 }

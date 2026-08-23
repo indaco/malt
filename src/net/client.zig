@@ -1306,21 +1306,39 @@ pub const HttpClient = struct {
     }
 
     /// Release a redirect hop. Its body is never read, and stdlib's `deinit`
-    /// drains an unread one - with no framing headers that ends only when the
-    /// peer closes, and no watchdog covers a redirect hop. A declared body
-    /// drains cheaply and keeps the connection poolable, so only the unframed
-    /// case is retired.
-    fn finishRedirect(req: *std.http.Client.Request, hop_head: *const std.http.Client.Response.Head) void {
+    /// drains an unread one. Two different hazards live there, so two answers:
+    /// a body that can only end at close is skipped outright, and any other is
+    /// drained under a watchdog, because framing is a promise the peer can
+    /// simply not keep. Draining when it is cheap keeps the connection
+    /// poolable, which a same-host redirect chain would otherwise pay for.
+    fn finishRedirect(
+        self: *HttpClient,
+        req: *std.http.Client.Request,
+        hop_head: *const std.http.Client.Response.Head,
+    ) void {
         if (bodyIsCloseDelimited(hop_head.content_length, hop_head.transfer_encoding)) {
             finishBodiless(req);
             return;
+        }
+        var no_progress = std.atomic.Value(u64).init(0);
+        var wake = Wake.init() catch return finishBodiless(req);
+        const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
+            self.io,              wake.read_fd, &no_progress, self.head_timeout_ns,
+            self.head_timeout_ns, req,          self.cancel,  null,
+        }) catch {
+            wake.deinit();
+            return finishBodiless(req);
+        };
+        defer {
+            wake.signal();
+            watchdog.join();
+            wake.deinit();
         }
         req.deinit();
     }
 
     /// A body with neither a length nor a chunked encoding ends only when the
-    /// peer closes, so draining one is unbounded. Anything else terminates on
-    /// its own and is cheaper to read than to re-handshake.
+    /// peer closes, so draining one can never finish on its own.
     fn bodyIsCloseDelimited(
         content_length: ?u64,
         transfer_encoding: std.http.TransferEncoding,
@@ -1384,7 +1402,9 @@ pub const HttpClient = struct {
                 .extra_headers = live_creds,
                 .redirect_behavior = .unhandled,
             }, self.head_timeout_ns, &fired) catch |e| return self.headWalkError(&fired, e);
-            errdefer req.deinit();
+            // Drains on a plain deinit, and no watchdog covers a redirect hop:
+            // a peer that stops mid-body parks the walk here too.
+            errdefer finishBodiless(&req);
 
             var redirect_buf: [32 * 1024]u8 = undefined;
             var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired) catch |e|
@@ -1397,7 +1417,7 @@ pub const HttpClient = struct {
                 if (!credsSurviveRedirect(current, next)) live_creds = &.{};
                 // Hop committed: no fallible op past here, so the errdefers
                 // stay dormant while we hand `req`/`current` off cleanly.
-                finishRedirect(&req, &response.head);
+                self.finishRedirect(&req, &response.head);
                 self.allocator.free(current);
                 current = next;
                 continue;
@@ -1548,7 +1568,9 @@ pub const HttpClient = struct {
                 .extra_headers = live_creds,
                 .redirect_behavior = .unhandled,
             }, self.head_timeout_ns, &fired) catch |e| return self.headWalkError(&fired, e);
-            errdefer req.deinit();
+            // Drains on a plain deinit, and no watchdog covers a redirect hop:
+            // a peer that stops mid-body parks the walk here too.
+            errdefer finishBodiless(&req);
 
             var redirect_buf: [32 * 1024]u8 = undefined;
             var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired) catch |e|
@@ -1559,7 +1581,7 @@ pub const HttpClient = struct {
             if (hop) |next| {
                 errdefer self.allocator.free(next);
                 if (!credsSurviveRedirect(current, next)) live_creds = &.{};
-                finishRedirect(&req, &response.head);
+                self.finishRedirect(&req, &response.head);
                 self.allocator.free(current);
                 current = next;
                 continue;
@@ -2345,16 +2367,17 @@ test "shouldFireIdleWatchdog: cancellation fires regardless of elapsed time" {
     try std.testing.expect(shouldFireIdleWatchdog(1, 1, 999_999, 999_999, true));
 }
 
-test "bodyIsCloseDelimited: only an unframed body waits on the peer to close" {
+test "bodyIsCloseDelimited: only an unframed body can never end on its own" {
+    // The one shape where draining is pointless rather than merely risky: it
+    // is skipped outright, while framed bodies get a bounded drain instead.
     try std.testing.expect(HttpClient.bodyIsCloseDelimited(null, .none));
     try std.testing.expect(!HttpClient.bodyIsCloseDelimited(12, .none));
     try std.testing.expect(!HttpClient.bodyIsCloseDelimited(null, .chunked));
 }
 
 test "bodyIsCloseDelimited: a declared empty body is framed, not missing" {
-    // `Content-Length: 0` and no header at all read the same on a redirect
-    // whose body nobody wants. Conflating them would retire a connection per
-    // hop of a healthy chain.
+    // `Content-Length: 0` is a complete answer; draining it is a no-op, so
+    // there is nothing to skip and the connection stays poolable.
     try std.testing.expect(!HttpClient.bodyIsCloseDelimited(0, .none));
 }
 
