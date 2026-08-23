@@ -135,6 +135,7 @@ pub const tui_tab_services = @import("tui/services_tab.zig");
 pub const tui_term = @import("tui/term.zig");
 pub const update_cleanup = @import("update/cleanup.zig");
 pub const update_notifier = @import("update/notifier.zig");
+pub const cli_version_notice = @import("cli/version_notice.zig");
 pub const update_origin = @import("update/origin.zig");
 pub const update_release = @import("update/release.zig");
 pub const update_swap = @import("update/swap.zig");

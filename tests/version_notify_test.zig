@@ -246,8 +246,7 @@ test "markUpdatedTo bumps current_seen so a manual --check stops the nag" {
     });
 
     // Snapshot the live env so cachePath sees MALT_CACHE.
-    const ctx: app_ctx.AppCtx = .{ .io = io, .environ = app_ctx.processEnviron() };
-    notifier.markUpdatedTo(&ctx, "v0.10.1", "0.10.1");
+    notifier.markUpdatedTo(io, app_ctx.processEnviron(), "v0.10.1", "0.10.1");
 
     const got = (try notifier.readCache(io, allocator, path)) orelse return error.TestExpectedNonNull;
     defer notifier.freeState(allocator, got);
@@ -367,4 +366,142 @@ test "readCache: corrupt file surfaces InvalidPayload (caller can choose to igno
     }
 
     try testing.expectError(error.InvalidPayload, notifier.readCache(io, testing.allocator, path));
+}
+
+// `pendingNotice` is the seam the CLI actually calls, and nothing exercised it
+// before or after the rendering split. These drive it against a seeded cache
+// so the decision half is pinned without touching the network: the cache is
+// fresh, so no refresh is attempted.
+fn seedFreshCache(io: std.Io, path: []const u8, now: i64, latest: []const u8, seen: []const u8) !void {
+    try notifier.writeCache(io, path, .{
+        .checked_at = now,
+        .latest_tag = latest,
+        .current_seen = seen,
+        .last_attempt = now,
+    });
+}
+
+/// `pendingNotice` reads every variable it consults through its `environ`
+/// argument, so these tests hand it one they own. The host's would carry `CI`
+/// on a runner, which the notifier treats as a hard suppressor — the notice
+/// would vanish for a reason none of these tests are about.
+fn fixtureEnviron(entries: [:null]const ?[*:0]const u8) std.process.Environ {
+    return .{ .block = .{ .slice = entries } };
+}
+
+test "pendingNotice hands back the tag to announce when the user is behind" {
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+
+    const dir_base = try test_io.uniqueTempPath(allocator, "notify", "pending");
+    defer allocator.free(dir_base);
+    const dir = try std.fmt.allocPrintSentinel(allocator, "{s}", .{dir_base}, 0);
+    defer allocator.free(dir);
+    fs_compat.deleteTreeAbsolute(io, dir) catch {};
+    try fs_compat.makeDirAbsolute(io, dir);
+    defer fs_compat.deleteTreeAbsolute(io, dir) catch {};
+
+    const cache_var = try std.fmt.allocPrintSentinel(allocator, "MALT_CACHE={s}", .{dir}, 0);
+    defer allocator.free(cache_var);
+    // The notice is stderr-gated on a TTY, which a test run does not have.
+    const entries = [_:null]?[*:0]const u8{ cache_var.ptr, "MALT_VERSION_NOTIFIER_ASSUME_TTY=1" };
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    try seedFreshCache(io, path, now, "v0.99.0", "0.10.0");
+
+    const tag = notifier.pendingNotice(
+        io,
+        fixtureEnviron(&entries),
+        false,
+        allocator,
+        "0.10.0",
+        "install",
+        .{},
+    ) orelse return error.TestExpectedNonNull;
+    defer allocator.free(tag);
+
+    try testing.expectEqualStrings("v0.99.0", tag);
+}
+
+test "pendingNotice stays silent when the output mode suppresses it" {
+    // `--json` and friends are machine-readable surfaces; a heads-up on stderr
+    // is noise there, and the gate now lives with the caller that owns it.
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+
+    const dir_base = try test_io.uniqueTempPath(allocator, "notify", "gated");
+    defer allocator.free(dir_base);
+    const dir = try std.fmt.allocPrintSentinel(allocator, "{s}", .{dir_base}, 0);
+    defer allocator.free(dir);
+    fs_compat.deleteTreeAbsolute(io, dir) catch {};
+    try fs_compat.makeDirAbsolute(io, dir);
+    defer fs_compat.deleteTreeAbsolute(io, dir) catch {};
+
+    const cache_var = try std.fmt.allocPrintSentinel(allocator, "MALT_CACHE={s}", .{dir}, 0);
+    defer allocator.free(cache_var);
+    const entries = [_:null]?[*:0]const u8{ cache_var.ptr, "MALT_VERSION_NOTIFIER_ASSUME_TTY=1" };
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    try seedFreshCache(io, path, now, "v0.99.0", "0.10.0");
+
+    inline for (.{
+        notifier.Gates{ .json = true },
+        notifier.Gates{ .quiet = true },
+        notifier.Gates{ .ndjson = true },
+        notifier.Gates{ .dry_run = true },
+    }) |gates| {
+        const tag = notifier.pendingNotice(
+            io,
+            fixtureEnviron(&entries),
+            false,
+            allocator,
+            "0.10.0",
+            "install",
+            gates,
+        );
+        if (tag) |t| {
+            allocator.free(t);
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "pendingNotice stays silent on a command that never carries the notice" {
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+
+    const dir_base = try test_io.uniqueTempPath(allocator, "notify", "skipcmd");
+    defer allocator.free(dir_base);
+    const dir = try std.fmt.allocPrintSentinel(allocator, "{s}", .{dir_base}, 0);
+    defer allocator.free(dir);
+    fs_compat.deleteTreeAbsolute(io, dir) catch {};
+    try fs_compat.makeDirAbsolute(io, dir);
+    defer fs_compat.deleteTreeAbsolute(io, dir) catch {};
+
+    const cache_var = try std.fmt.allocPrintSentinel(allocator, "MALT_CACHE={s}", .{dir}, 0);
+    defer allocator.free(cache_var);
+    const entries = [_:null]?[*:0]const u8{ cache_var.ptr, "MALT_VERSION_NOTIFIER_ASSUME_TTY=1" };
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    try seedFreshCache(io, path, now, "v0.99.0", "0.10.0");
+
+    const tag = notifier.pendingNotice(
+        io,
+        fixtureEnviron(&entries),
+        false,
+        allocator,
+        "0.10.0",
+        "version",
+        .{},
+    );
+    if (tag) |t| {
+        allocator.free(t);
+        return error.TestUnexpectedResult;
+    }
 }

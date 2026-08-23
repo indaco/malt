@@ -2,6 +2,7 @@
 //! Human + JSON output formatting.
 
 const std = @import("std");
+const json_escape = @import("../core/json_escape.zig");
 /// Process-wide io seeded once from `main` via `setRuntime`. Defaults to
 /// `debug_io` so tests that don't seed see deterministic, allocation-
 /// free behaviour.
@@ -505,50 +506,11 @@ pub fn writeField(
     try w.writeAll("\n");
 }
 
-/// Write `s` to `w` as a JSON string literal — surrounding quotes plus RFC 8259
-/// escapes for `"`, `\`, and control characters. Use this wherever handwritten
-/// JSON output embeds an identifier, tap name, version string, file path, or
-/// anything else that might contain special characters.
-pub fn jsonStr(w: *std.Io.Writer, s: []const u8) !void {
-    try w.writeAll("\"");
-    var start: usize = 0;
-    for (s, 0..) |byte, i| {
-        const escape: ?[]const u8 = switch (byte) {
-            '"' => "\\\"",
-            '\\' => "\\\\",
-            '\n' => "\\n",
-            '\r' => "\\r",
-            '\t' => "\\t",
-            0x08 => "\\b",
-            0x0c => "\\f",
-            else => null,
-        };
-        if (escape) |esc| {
-            if (i > start) try w.writeAll(s[start..i]);
-            try w.writeAll(esc);
-            start = i + 1;
-        } else if (byte < 0x20) {
-            if (i > start) try w.writeAll(s[start..i]);
-            var hex_buf: [6]u8 = undefined;
-            // `\u` + 4 hex digits = 6 bytes exactly; bufPrint cannot overflow a 6-byte buffer.
-            const hex = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{byte}) catch unreachable;
-            try w.writeAll(hex);
-            start = i + 1;
-        }
-    }
-    if (start < s.len) try w.writeAll(s[start..]);
-    try w.writeAll("\"");
-}
-
-/// Write a `["a","b",...]` JSON array of RFC-8259-escaped strings to `w`.
-pub fn jsonStringArray(w: *std.Io.Writer, items: []const []const u8) !void {
-    try w.writeAll("[");
-    for (items, 0..) |item, i| {
-        if (i != 0) try w.writeAll(",");
-        try jsonStr(w, item);
-    }
-    try w.writeAll("]");
-}
+/// JSON string escaping lives in `core/json_escape.zig` so the leaves can
+/// reach it without importing the UI layer. Re-exported here because every
+/// `--json` emitter in `cli/` already writes through this module.
+pub const jsonStr = json_escape.jsonStr;
+pub const jsonStringArray = json_escape.jsonStringArray;
 
 /// Version stamped on every read command's `--json` root (`list`, `info`,
 /// `outdated`, `services`, `doctor`). Bump when a documented field shape

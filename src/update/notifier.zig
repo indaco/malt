@@ -7,11 +7,8 @@
 
 const std = @import("std");
 
-const AppCtx = @import("../app_ctx.zig").AppCtx;
 const signals = @import("../core/signals.zig");
 const client_mod = @import("../net/client.zig");
-const color = @import("../ui/color.zig");
-const output = @import("../ui/output.zig");
 const origin_mod = @import("origin.zig");
 const release = @import("release.zig");
 const cache = @import("notifier/cache.zig");
@@ -41,8 +38,25 @@ pub const freeState = cache.freeState;
 pub const readCache = cache.readCache;
 pub const writeCache = cache.writeCache;
 
+/// Output modes that suppress the notice. They are CLI-layer process state,
+/// so the caller reads them and hands the answer down rather than the leaf
+/// reaching back into the UI it must not know about.
+pub const Gates = struct {
+    quiet: bool = false,
+    json: bool = false,
+    ndjson: bool = false,
+    dry_run: bool = false,
+
+    pub fn anySuppress(self: Gates) bool {
+        return self.quiet or self.json or self.ndjson or self.dry_run;
+    }
+};
+
 /// Bounded so a cache miss can't drag the user's hot path. Fires after
-/// dispatch, so the command's output is already on screen.
+/// dispatch, so the command's output is already on screen. Covers the whole
+/// hop - DNS, connect and TLS included - so a cold handshake on a slow link
+/// can spend it and drop the user into the failure backoff rather than
+/// stalling them.
 pub const network_timeout_ns: u64 = 1_500 * std.time.ns_per_ms;
 
 /// Hold every phase of the probe to the bound above. Connect, head read and
@@ -55,13 +69,13 @@ pub fn applyProbeBudget(http: *client_mod.HttpClient) void {
     http.retry_backoff_ms = &.{};
 }
 
-fn fetchLatestTag(ctx: *const AppCtx, allocator: std.mem.Allocator) ![]u8 {
-    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
+fn fetchLatestTag(io: std.Io, environ: std.process.Environ, offline: bool, allocator: std.mem.Allocator) ![]u8 {
+    var http = client_mod.HttpClient.init(io, environ, allocator);
     applyProbeBudget(&http);
     // SIGINT on the prompt-after-success window collapses the probe
     // instead of stalling the user behind the 1.5 s deadline.
     http.cancel = signals.isInterrupted;
-    http.offline = ctx.offline;
+    http.offline = offline;
     defer http.deinit();
     var resp = try http.get(release.releases_latest_url);
     defer resp.deinit();
@@ -88,9 +102,9 @@ fn originIsHomebrew(io: std.Io) bool {
 /// Cheapest checks first. `originIsHomebrew` is deliberately not here —
 /// the `executablePath` + `realpath` pair is deferred to `runNotify` so
 /// the cache-fresh hot path skips it entirely.
-fn suppressed(io: std.Io, environ: std.process.Environ, cmd_str: []const u8) bool {
+fn suppressed(io: std.Io, environ: std.process.Environ, cmd_str: []const u8, gates: Gates) bool {
     if (policy.isSkippedCommand(cmd_str)) return true;
-    if (output.isQuiet() or output.isJson() or output.isNdjson() or output.isDryRun()) return true;
+    if (gates.anySuppress()) return true;
     if (policy.notifierDisabled(environ)) return true;
     if (policy.isCi(environ)) return true;
     // The assume-TTY seam lets scripted runs exercise the notice without a
@@ -101,81 +115,49 @@ fn suppressed(io: std.Io, environ: std.process.Environ, cmd_str: []const u8) boo
     return false;
 }
 
-/// Headline keeps the violet `notice` palette so an available update reads
-/// as a heads-up, not a warning; the action hint stays dim — reference
-/// material, not the message. Rendered inline (rather than via
-/// `output.notice`/`output.dim`) so the layout can sit flush-left under a
-/// blank-line separator, which reads better at the tail of any subcommand.
-fn printNotice(latest_tag: []const u8, current_version: []const u8) void {
-    const latest_no_v = release.stripVPrefix(latest_tag);
-
-    var notice_buf: [4096]u8 = undefined;
-    const notice_msg = std.fmt.bufPrint(
-        &notice_buf,
-        "A newer malt is available: {s} (you're on {s}).",
-        .{ latest_no_v, current_version },
-    ) catch return;
-    const dim_msg = "Run 'mt version update' to upgrade, or set MALT_NO_VERSION_NOTIFIER=1 to silence this.";
-
-    const colorize = color.isColorEnabledForStderr();
-    const emoji = color.isEmojiEnabled();
-    const notice_prefix: []const u8 = if (emoji) "ⓘ " else "i ";
-    const dim_prefix: []const u8 = if (emoji) "▸ " else "> ";
-
-    // Blank line separates the heads-up from whatever the subcommand
-    // printed last. Safe: notifier fires post-dispatch, no other worker
-    // is writing concurrently here.
-    output.writeStderrAll("\n");
-
-    if (colorize) {
-        output.writeStderrAll(color.SemanticStyle.notice.code());
-        output.writeStderrAll(notice_prefix);
-        output.writeStderrAll(color.Style.reset.code());
-    } else {
-        output.writeStderrAll(notice_prefix);
-    }
-    output.writeStderrAll(notice_msg);
-    output.writeStderrAll("\n");
-
-    if (colorize) {
-        output.writeStderrAll(color.SemanticStyle.detail.code());
-        output.writeStderrAll(dim_prefix);
-        output.writeStderrAll(dim_msg);
-        output.writeStderrAll(color.Style.reset.code());
-    } else {
-        output.writeStderrAll(dim_prefix);
-        output.writeStderrAll(dim_msg);
-    }
-    output.writeStderrAll("\n");
-}
-
 /// Best-effort cache write so a successful self-update silences the
 /// nag immediately, not on the next 24h refresh.
-pub fn markUpdatedTo(ctx: *const AppCtx, latest_tag: []const u8, current_version: []const u8) void {
+pub fn markUpdatedTo(io: std.Io, environ: std.process.Environ, latest_tag: []const u8, current_version: []const u8) void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = cachePath(ctx.environ, &path_buf) orelse return;
-    writeCache(ctx.io, path, .{
-        .checked_at = std.Io.Clock.real.now(ctx.io).toSeconds(),
+    const path = cachePath(environ, &path_buf) orelse return;
+    writeCache(io, path, .{
+        .checked_at = std.Io.Clock.real.now(io).toSeconds(),
         .latest_tag = latest_tag,
         .current_seen = current_version,
     }) catch {};
 }
 
-/// Best-effort entrypoint. `cmd_str` is the canonical subcommand name;
-/// `version`/`help` aliases bypass the notice via the suppression list.
-pub fn maybeNotify(ctx: *const AppCtx, allocator: std.mem.Allocator, current_version: []const u8, cmd_str: []const u8) void {
-    if (suppressed(ctx.io, ctx.environ, cmd_str)) return;
-    runNotify(ctx, allocator, current_version) catch {};
+/// Best-effort entrypoint: returns the tag to announce, or null when no
+/// notice is due. `cmd_str` is the canonical subcommand name; `version`/`help`
+/// aliases bypass the notice via the suppression list. The tag is owned by the
+/// caller: the cache state it is read from is freed on the way out.
+pub fn pendingNotice(
+    io: std.Io,
+    environ: std.process.Environ,
+    offline: bool,
+    allocator: std.mem.Allocator,
+    current_version: []const u8,
+    cmd_str: []const u8,
+    gates: Gates,
+) ?[]const u8 {
+    if (suppressed(io, environ, cmd_str, gates)) return null;
+    return runNotify(io, environ, offline, allocator, current_version) catch null;
 }
 
-fn runNotify(ctx: *const AppCtx, allocator: std.mem.Allocator, current_version: []const u8) !void {
+fn runNotify(
+    io: std.Io,
+    environ: std.process.Environ,
+    offline: bool,
+    allocator: std.mem.Allocator,
+    current_version: []const u8,
+) !?[]const u8 {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = cachePath(ctx.environ, &path_buf) orelse return;
+    const path = cachePath(environ, &path_buf) orelse return null;
 
-    var state: ?State = readCache(ctx.io, allocator, path) catch null;
+    var state: ?State = readCache(io, allocator, path) catch null;
     defer if (state) |s| freeState(allocator, s);
 
-    const now = std.Io.Clock.real.now(ctx.io).toSeconds();
+    const now = std.Io.Clock.real.now(io).toSeconds();
 
     // Whether the cached view already says the user is behind. Computed
     // first so a behind state can shorten the refresh window below — a
@@ -194,23 +176,25 @@ fn runNotify(ctx: *const AppCtx, allocator: std.mem.Allocator, current_version: 
     // The 33%-savings clause: cache fresh + no notice due → return without
     // touching `executablePath`/`realpath`. The dominant path on a healthy
     // workstation between refresh windows.
-    if (!need_refresh and !wants_print) return;
+    if (!need_refresh and !wants_print) return null;
 
     // Brew installs are owned by `brew upgrade --cask malt`; refresh and
     // print both make no sense for them. Origin check is a 2-syscall
     // executablePath + realpath, paid only on this rare-action path.
-    if (originIsHomebrew(ctx.io)) return;
+    if (originIsHomebrew(io)) return null;
 
     if (need_refresh) {
         // Don't make the user wait out a 1.5s HTTP timeout after Ctrl-C.
         // Same convention as `cli/install.zig` and `cli/migrate.zig`.
-        if (signals.isInterrupted()) return;
-        refreshOnce(ctx, allocator, path, &state, now, current_version) catch {};
+        if (signals.isInterrupted()) return null;
+        refreshOnce(io, environ, offline, allocator, path, &state, now, current_version) catch {};
     }
 
-    const s = state orelse return;
-    if (!shouldNotify(current_version, s.latest_tag, s.current_seen)) return;
-    printNotice(s.latest_tag, current_version);
+    const s = state orelse return null;
+    if (!shouldNotify(current_version, s.latest_tag, s.current_seen)) return null;
+    // Duped rather than borrowed: `state` is freed on the way out, and a
+    // length cap here would silently drop a notice the old code printed.
+    return try allocator.dupe(u8, s.latest_tag);
 }
 
 /// On network failure `state` is left untouched so the caller's old
@@ -218,15 +202,17 @@ fn runNotify(ctx: *const AppCtx, allocator: std.mem.Allocator, current_version: 
 /// `last_attempt` marker so the next invocation skips the probe until
 /// `failure_backoff_secs` has elapsed.
 fn refreshOnce(
-    ctx: *const AppCtx,
+    io: std.Io,
+    environ: std.process.Environ,
+    offline: bool,
     allocator: std.mem.Allocator,
     path: []const u8,
     state: *?State,
     now: i64,
     current_version: []const u8,
 ) !void {
-    const tag = fetchLatestTag(ctx, allocator) catch |err| {
-        writeFailureMarker(ctx.io, path, state.*, now, current_version);
+    const tag = fetchLatestTag(io, environ, offline, allocator) catch |err| {
+        writeFailureMarker(io, path, state.*, now, current_version);
         return err;
     };
     errdefer allocator.free(tag);
@@ -237,7 +223,7 @@ fn refreshOnce(
     const seen_dup = try allocator.dupe(u8, prior_seen);
     errdefer allocator.free(seen_dup);
 
-    writeCache(ctx.io, path, .{
+    writeCache(io, path, .{
         .checked_at = now,
         .latest_tag = tag,
         .current_seen = prior_seen,
@@ -296,50 +282,6 @@ test "applyProbeBudget: the probe does not retry" {
     applyProbeBudget(&http);
 
     try std.testing.expectEqual(@as(usize, 0), http.retry_backoff_ms.len);
-}
-
-// Pins the heads-up layout: blank-line separator + flush-left prefixes
-// in both palettes. The blank line keeps the notice from sticking to a
-// subcommand's last line of output; the flush margin keeps the glyphs
-// aligned with the user's prompt regardless of which subcommand ran.
-test "printNotice: blank-line + flush-left layout, color + emoji on (dark + basic)" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    color.setForTest(true, true);
-    color.setBackgroundForTest(color.Background.dark);
-    color.setTruecolorForTest(false);
-    output.beginStderrCapture(std.testing.allocator, &buf);
-    defer {
-        output.endStderrCapture();
-        color.setForTest(null, null);
-        color.setBackgroundForTest(null);
-        color.setTruecolorForTest(null);
-    }
-
-    printNotice("v0.11.6", "0.11.0");
-
-    const want = "\n" ++
-        "\x1b[35mⓘ \x1b[0mA newer malt is available: 0.11.6 (you're on 0.11.0).\n" ++
-        "\x1b[2m▸ Run 'mt version update' to upgrade, or set MALT_NO_VERSION_NOTIFIER=1 to silence this.\x1b[0m\n";
-    try std.testing.expectEqualStrings(want, buf.items);
-}
-
-test "printNotice: no color, no emoji → flush-left ASCII layout" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    color.setForTest(false, false);
-    output.beginStderrCapture(std.testing.allocator, &buf);
-    defer {
-        output.endStderrCapture();
-        color.setForTest(null, null);
-    }
-
-    printNotice("v0.11.6", "0.11.0");
-
-    const want = "\n" ++
-        "i A newer malt is available: 0.11.6 (you're on 0.11.0).\n" ++
-        "> Run 'mt version update' to upgrade, or set MALT_NO_VERSION_NOTIFIER=1 to silence this.\n";
-    try std.testing.expectEqualStrings(want, buf.items);
 }
 
 // Submodules carry their own inline tests; pulling them in here keeps the
