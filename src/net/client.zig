@@ -1296,6 +1296,29 @@ pub const HttpClient = struct {
         req.deinit();
     }
 
+    /// Release a redirect hop. Its body is never read, and stdlib's `deinit`
+    /// drains an unread one - with no framing headers that ends only when the
+    /// peer closes, and no watchdog covers a redirect hop. A declared body
+    /// drains cheaply and keeps the connection poolable, so only the unframed
+    /// case is retired.
+    fn finishRedirect(req: *std.http.Client.Request, hop_head: *const std.http.Client.Response.Head) void {
+        if (bodyIsCloseDelimited(hop_head.content_length, hop_head.transfer_encoding)) {
+            finishBodiless(req);
+            return;
+        }
+        req.deinit();
+    }
+
+    /// A body with neither a length nor a chunked encoding ends only when the
+    /// peer closes, so draining one is unbounded. Anything else terminates on
+    /// its own and is cheaper to read than to re-handshake.
+    fn bodyIsCloseDelimited(
+        content_length: ?u64,
+        transfer_encoding: std.http.TransferEncoding,
+    ) bool {
+        return content_length == null and transfer_encoding == .none;
+    }
+
     /// GET that follows redirects manually so credential/validator headers are
     /// stripped before leaving the origin's scope. In Zig 0.16 stdlib,
     /// `extra_headers` ride every redirect and `privileged_headers` are never
@@ -1365,7 +1388,7 @@ pub const HttpClient = struct {
                 if (!credsSurviveRedirect(current, next)) live_creds = &.{};
                 // Hop committed: no fallible op past here, so the errdefers
                 // stay dormant while we hand `req`/`current` off cleanly.
-                req.deinit();
+                finishRedirect(&req, &response.head);
                 self.allocator.free(current);
                 current = next;
                 continue;
@@ -1527,7 +1550,7 @@ pub const HttpClient = struct {
             if (hop) |next| {
                 errdefer self.allocator.free(next);
                 if (!credsSurviveRedirect(current, next)) live_creds = &.{};
-                req.deinit();
+                finishRedirect(&req, &response.head);
                 self.allocator.free(current);
                 current = next;
                 continue;
@@ -2311,6 +2334,19 @@ test "shouldFireIdleWatchdog: cancellation fires regardless of elapsed time" {
     // deadline has elapsed yet — otherwise Ctrl-C waits out the read.
     try std.testing.expect(shouldFireIdleWatchdog(0, 0, 30, 600, true));
     try std.testing.expect(shouldFireIdleWatchdog(1, 1, 999_999, 999_999, true));
+}
+
+test "bodyIsCloseDelimited: only an unframed body waits on the peer to close" {
+    try std.testing.expect(HttpClient.bodyIsCloseDelimited(null, .none));
+    try std.testing.expect(!HttpClient.bodyIsCloseDelimited(12, .none));
+    try std.testing.expect(!HttpClient.bodyIsCloseDelimited(null, .chunked));
+}
+
+test "bodyIsCloseDelimited: a declared empty body is framed, not missing" {
+    // `Content-Length: 0` and no header at all read the same on a redirect
+    // whose body nobody wants. Conflating them would retire a connection per
+    // hop of a healthy chain.
+    try std.testing.expect(!HttpClient.bodyIsCloseDelimited(0, .none));
 }
 
 test "remainingBudgetNs: the head read gets what the connect left" {
