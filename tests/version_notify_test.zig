@@ -246,8 +246,7 @@ test "markUpdatedTo bumps current_seen so a manual --check stops the nag" {
     });
 
     // Snapshot the live env so cachePath sees MALT_CACHE.
-    const ctx: app_ctx.AppCtx = .{ .io = io, .environ = app_ctx.processEnviron() };
-    notifier.markUpdatedTo(&ctx, "v0.10.1", "0.10.1");
+    notifier.markUpdatedTo(io, app_ctx.processEnviron(), "v0.10.1", "0.10.1");
 
     const got = (try notifier.readCache(io, allocator, path)) orelse return error.TestExpectedNonNull;
     defer notifier.freeState(allocator, got);

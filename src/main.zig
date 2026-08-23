@@ -42,6 +42,7 @@ const theme_file = @import("fs/theme_file.zig");
 const output_mod = @import("ui/output.zig");
 const progress_mod = @import("ui/progress.zig");
 const notifier = @import("update/notifier.zig");
+const version_notice = @import("cli/version_notice.zig");
 const version_mod = @import("version.zig");
 const version = version_mod.value;
 
@@ -665,7 +666,23 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // Best-effort passive notice on successful subcommands. Owns its
         // own suppression list (CI, --quiet/--json/ndjson/--dry-run, env
         // opt-out, non-TTY, brew origin, version/help meta-commands).
-        notifier.maybeNotify(&ctx, allocator, version, cmd_str);
+        var notice_tag_buf: [notifier.max_tag_len]u8 = undefined;
+        const gates: notifier.Gates = .{
+            .quiet = output_mod.isQuiet(),
+            .json = output_mod.isJson(),
+            .ndjson = output_mod.isNdjson(),
+            .dry_run = output_mod.isDryRun(),
+        };
+        if (notifier.pendingNotice(
+            ctx.io,
+            ctx.environ,
+            ctx.offline,
+            allocator,
+            version,
+            cmd_str,
+            gates,
+            &notice_tag_buf,
+        )) |latest_tag| version_notice.print(latest_tag, version);
     } else {
         // Unknown command — slug-shaped inputs (`user/repo`,
         // `user/repo/formula`) exit with a malt-native verb hint;

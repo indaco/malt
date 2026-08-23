@@ -136,7 +136,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // Nothing strictly newer to install — equal, or an ahead-of-latest
         // dev build. Freshen the passive notifier cache so a manual `--check`
         // stops the next invocation from nagging about an installed release.
-        notifier.markUpdatedTo(ctx, tag, current_version);
+        notifier.markUpdatedTo(ctx.io, ctx.environ, tag, current_version);
         output.info("Already up to date ({s})", .{current_version});
         return;
     }
@@ -288,7 +288,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.info("Finish manually: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, tp });
             output.info("Updated to {s} (previous {s} kept at {s}.old)", .{ latest, std.fs.path.basename(self_exe), self_exe });
             // Self is on the new version even though twin lagged — dismiss the nag.
-            notifier.markUpdatedTo(ctx, tag, latest);
+            notifier.markUpdatedTo(ctx.io, ctx.environ, tag, latest);
             return;
         };
         // Collapse the legacy dual-binary layout into the symlink layout
@@ -299,12 +299,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         };
 
         output.info("Updated {s} and {s} to {s} (previous kept at *.old)", .{ self_exe, tp, latest });
-        notifier.markUpdatedTo(ctx, tag, latest);
+        notifier.markUpdatedTo(ctx.io, ctx.environ, tag, latest);
         return;
     }
 
     output.info("Updated to {s} (previous kept at {s}.old)", .{ latest, self_exe });
-    notifier.markUpdatedTo(ctx, tag, latest);
+    notifier.markUpdatedTo(ctx.io, ctx.environ, tag, latest);
 }
 
 /// How the previous swap was carried out. Threaded through twin handling

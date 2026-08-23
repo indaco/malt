@@ -7,7 +7,7 @@ const std = @import("std");
 
 const atomic = @import("../../fs/atomic.zig");
 const read = @import("../../fs/read.zig");
-const output = @import("../../ui/output.zig");
+const json_escape = @import("../../core/json_escape.zig");
 
 const cache_filename = "version-notify.json";
 
@@ -71,9 +71,9 @@ pub fn encodeState(buf: []u8, state: State) ![]u8 {
     const num = try std.fmt.bufPrint(&num_buf, "{d}", .{state.checked_at});
     try w.writeAll(num);
     try w.writeAll(",\"latest_tag\":");
-    try output.jsonStr(&w, state.latest_tag);
+    try json_escape.jsonStr(&w, state.latest_tag);
     try w.writeAll(",\"current_seen\":");
-    try output.jsonStr(&w, state.current_seen);
+    try json_escape.jsonStr(&w, state.current_seen);
     try w.writeAll(",\"last_attempt\":");
     const att = try std.fmt.bufPrint(&num_buf, "{d}", .{state.last_attempt});
     try w.writeAll(att);
