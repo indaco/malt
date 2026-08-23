@@ -598,8 +598,12 @@ fn downloadBottle(
         .func = &migrateBarBridge,
     } else null;
 
-    _ = bottle_mod.download(ctx.io, allocator, ghcr, http, repo, digest, sha256, tmp_dir, progress_cb, null) catch {
-        output.err("    Download failed: {s}", .{name});
+    _ = bottle_mod.download(ctx.io, allocator, ghcr, http, repo, digest, sha256, tmp_dir, progress_cb, null) catch |e| {
+        if (e == bottle_mod.BottleError.DownloadLocalResourceExhausted) {
+            output.err("    Out of local threads or file descriptors: {s}", .{name});
+        } else {
+            output.err("    Download failed: {s}", .{name});
+        }
         atomic.cleanupTempDir(ctx.io, tmp_dir);
         allocator.free(tmp_dir);
         return false;

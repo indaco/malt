@@ -1003,6 +1003,7 @@ fn materializeTapCask(
             sink.err("Failed to download cask {s}: {s}", .{ cask.token, @errorName(e) });
             return switch (e) {
                 error.DownloadFailed, error.Sha256Mismatch, error.Sha256Missing => InstallError.DownloadFailed,
+                error.DownloadLocalResourceExhausted => InstallError.LocalResourceExhausted,
                 error.OutOfMemory => InstallError.RecordFailed,
                 else => InstallError.CaskNotFound,
             };
@@ -1019,6 +1020,7 @@ fn materializeTapCask(
         sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
         return switch (e) {
             error.DownloadFailed, error.Sha256Mismatch, error.Sha256Missing => InstallError.DownloadFailed,
+            error.DownloadLocalResourceExhausted => InstallError.LocalResourceExhausted,
             error.OutOfMemory => InstallError.RecordFailed,
             else => InstallError.CaskNotFound,
         };
