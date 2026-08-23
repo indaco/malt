@@ -46,6 +46,16 @@ regressions-static:
 test: regressions-static
     zig build test --summary all
 
+# Loopback-only regression guards: no network, no GitHub API, no rate limit,
+# so they are safe to gate every PR on. The full pool (`just regressions`)
+# needs a token and live installs, which is why it stays manual.
+[group('test')]
+regressions-hermetic:
+    @./scripts/regressions/head-read-deadline-response-head-reads-have-no-deadline.sh
+    @./scripts/regressions/no-deadline-on-connect-tls-response-head.sh
+    @./scripts/regressions/redirect-response-released-with-draining-deinit.sh
+    @./scripts/regressions/notifier-probe-unbounded-by-client-retry-backoff.sh
+
 # Run the full regression pool (token + built binary + per-script timeout).
 # Pass script names to run a subset; MALT_REGRESSION_TIMEOUT overrides the cap.
 [group('test')]
