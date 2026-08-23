@@ -1379,6 +1379,8 @@ fn mapHeadResolveError(e: client_mod.HeadResolveError) ?InstallError {
         error.TooManyHttpRedirects,
         error.HeadTimeout,
         => InstallError.NetworkError,
+        // Local exhaustion, not the peer: retrying the network cannot help.
+        error.WatchdogSpawnFailed => InstallError.LocalResourceExhausted,
         // One is malt running out of memory, the other the user stopping.
         error.OutOfMemory, error.Canceled => null,
     };
@@ -1477,6 +1479,14 @@ fn installCask(
     // resolve via HEAD to discover the final URL and Content-Disposition.
     if (artifact_type == .unknown) {
         artifact_type = resolveCaskArtifactViaHead(ctx, allocator, cask.url) catch |e| {
+            // Names the machine, not the network: the peer was never reached.
+            if (e == error.WatchdogSpawnFailed) {
+                sink.err(
+                    "Ran out of local threads or file descriptors while resolving '{s}' — close other processes or retry with fewer workers.",
+                    .{cask.token},
+                );
+                return InstallError.LocalResourceExhausted;
+            }
             if (mapHeadResolveError(e)) |classified| {
                 // Report the walk's own error — "NetworkError" would say less
                 // than the message already does.
@@ -1718,6 +1728,15 @@ test "mapHeadResolveError reports a dead walk as a network failure, not a format
     try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.HttpRedirectLocationInvalid).?);
     try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.HttpRedirectLocationOversize).?);
     try std.testing.expectEqual(InstallError.NetworkError, mapHeadResolveError(error.TooManyHttpRedirects).?);
+}
+
+test "mapHeadResolveError blames the machine, not the network, when it runs out of local resources" {
+    // A walk that never reached the peer must not send the user off to debug
+    // their connection - no amount of retrying the network frees a thread.
+    try std.testing.expectEqual(
+        InstallError.LocalResourceExhausted,
+        mapHeadResolveError(error.WatchdogSpawnFailed).?,
+    );
 }
 
 test "mapHeadResolveError keeps a cleartext artifact URL distinct from a network failure" {

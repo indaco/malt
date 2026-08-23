@@ -117,7 +117,17 @@ pub fn isDeterministicDownloadError(err: bottle_mod.BottleError) bool {
         bottle_mod.BottleError.PathTooLong,
         bottle_mod.BottleError.OutOfMemory,
         => true,
-        else => false,
+
+        // Exhaustive rather than `else`: a new tag defaulting silently into
+        // "retriable" is how a fault that cannot be retried gets retried
+        // three times under the install lock.
+        bottle_mod.BottleError.DownloadFailed,
+        bottle_mod.BottleError.DownloadPermanent,
+        bottle_mod.BottleError.DownloadRateLimited,
+        bottle_mod.BottleError.DownloadLocalResourceExhausted,
+        bottle_mod.BottleError.Sha256Mismatch,
+        bottle_mod.BottleError.IoError,
+        => false,
     };
 }
 
@@ -709,6 +719,10 @@ pub fn downloadBottleToStore(
             deps.sink.err("  {s}: {s} (after {d} attempts)", .{ formula.name, @errorName(last_err), max_download_attempts });
         }
         allocator.free(tmp_dir);
+        // Exhausting local threads or descriptors is this machine's fault, and
+        // the user's next move differs from a dead registry's.
+        if (last_err == bottle_mod.BottleError.DownloadLocalResourceExhausted)
+            return InstallError.LocalResourceExhausted;
         return InstallError.DownloadFailed;
     }
     if (deps.bar) |bar| bar.finish();
@@ -1016,6 +1030,14 @@ test "isDeterministicDownloadError: DownloadFailed IS retried" {
     try std.testing.expect(!isDeterministicDownloadError(bottle_mod.BottleError.DownloadFailed));
 }
 
+test "isDeterministicDownloadError: local exhaustion IS retried" {
+    // A sibling worker finishing frees the thread or descriptor this one
+    // could not get, so the second attempt can genuinely succeed.
+    try std.testing.expect(!isDeterministicDownloadError(
+        bottle_mod.BottleError.DownloadLocalResourceExhausted,
+    ));
+}
+
 test "isDeterministicDownloadError: DownloadRateLimited IS retried" {
     // Rate limits are time-based, not deterministic — backoff gets a
     // shot at the next request.
@@ -1037,10 +1059,9 @@ test "isDeterministicDownloadError: IoError IS retried" {
 }
 
 test "isDeterministicDownloadError: every BottleError variant has an explicit verdict" {
-    // Comptime sweep: if a future BottleError tag is added without a
-    // classification, this test fails to compile (the switch is
-    // exhaustive inside the helper). The walk here is the runtime
-    // mirror — every tag returns either true or false, never panics.
+    // Comptime sweep: the helper's switch is exhaustive, so a future
+    // BottleError tag added without a classification fails to compile there.
+    // The walk here is the runtime mirror — every tag returns true or false.
     inline for (@typeInfo(bottle_mod.BottleError).error_set.?) |err| {
         const tag = @field(bottle_mod.BottleError, err.name);
         _ = isDeterministicDownloadError(tag);

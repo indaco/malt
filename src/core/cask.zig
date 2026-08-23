@@ -29,6 +29,10 @@ pub const CaskError = error{
     // Also never succeeds on a retry: the manifest asked for a cleartext
     // origin for an artifact it declined to pin.
     InsecureOrigin,
+    // This machine ran out of threads or descriptors; the origin was never
+    // reached, so reporting it as a download failure sends the user to the
+    // wrong place.
+    DownloadLocalResourceExhausted,
     OutOfMemory,
 };
 
@@ -622,6 +626,7 @@ pub const CaskInstaller = struct {
             // A retry re-fetches the same manifest and refuses identically, so
             // this must not reach the user wearing a transient error's name.
             error.InsecureUrlScheme => return CaskError.InsecureOrigin,
+            error.WatchdogSpawnFailed => return CaskError.DownloadLocalResourceExhausted,
             else => return CaskError.DownloadFailed,
         };
         errdefer {

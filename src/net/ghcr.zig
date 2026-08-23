@@ -15,6 +15,10 @@ pub const GhcrError = error{
     DownloadHttpClientError,
     DownloadHttpServerError,
     DownloadRateLimited,
+    /// This machine, not the registry: no thread or pipe was free to arm the
+    /// download's deadline. Distinct so a retry-the-network suggestion is not
+    /// offered for a fault the network cannot fix.
+    DownloadLocalResourceExhausted,
     Unauthorized,
     InvalidResponse,
     OutOfMemory,
@@ -285,10 +289,10 @@ pub const GhcrClient = struct {
                 error.HttpRedirectInvalid,
                 error.ResponseTooLarge,
                 error.ReadFailed,
-                error.WatchdogSpawnFailed,
                 error.HeadTimeout,
                 error.Canceled,
                 => return GhcrError.DownloadFailed,
+                error.WatchdogSpawnFailed => return GhcrError.DownloadLocalResourceExhausted,
             };
 
             if (status == 401) {

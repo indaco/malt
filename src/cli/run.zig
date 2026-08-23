@@ -264,8 +264,12 @@ fn ephemeralRun(
     }
 
     output.info("Downloading {s} {s}...", .{ pkg_name, formula.version });
-    _ = bottle_mod.download(ctx.io, allocator, &ghcr, &http, repo, digest, bottle.sha256, dest_dir, null, null) catch {
-        output.err("Failed to download {s}", .{pkg_name});
+    _ = bottle_mod.download(ctx.io, allocator, &ghcr, &http, repo, digest, bottle.sha256, dest_dir, null, null) catch |e| {
+        if (e == bottle_mod.BottleError.DownloadLocalResourceExhausted) {
+            output.err("Out of local threads or file descriptors while downloading {s} — close other processes and retry.", .{pkg_name});
+        } else {
+            output.err("Failed to download {s}", .{pkg_name});
+        }
         return error.Aborted;
     };
 

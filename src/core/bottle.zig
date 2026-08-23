@@ -12,12 +12,45 @@ pub const BottleError = error{
     DownloadFailed,
     DownloadPermanent,
     DownloadRateLimited,
+    /// Local threads or file descriptors, not the registry. Retriable, since
+    /// a busy sibling worker freeing capacity is the usual cause.
+    DownloadLocalResourceExhausted,
     Sha256Mismatch,
     ExtractionFailed,
     OutOfMemory,
     PathTooLong,
     IoError,
 };
+
+test "a registry download that ran out of local resources keeps its own name" {
+    // The arm this pins sits in front of an `else => DownloadFailed`, which is
+    // exactly how the distinction was lost before: nothing downstream can tell
+    // the machine's fault from the registry's once it collapses.
+    try std.testing.expectEqual(
+        BottleError.DownloadLocalResourceExhausted,
+        bottleErrorFromGhcr(ghcr_mod.GhcrError.DownloadLocalResourceExhausted),
+    );
+    try std.testing.expectEqual(
+        BottleError.DownloadRateLimited,
+        bottleErrorFromGhcr(ghcr_mod.GhcrError.DownloadRateLimited),
+    );
+    try std.testing.expectEqual(
+        BottleError.DownloadFailed,
+        bottleErrorFromGhcr(ghcr_mod.GhcrError.InvalidResponse),
+    );
+}
+
+/// Which registry faults keep their own name on the way up. Everything else
+/// is an ordinary download failure; the named ones each drive a different
+/// decision (no retry, back off, or blame the machine rather than the peer).
+fn bottleErrorFromGhcr(e: ghcr_mod.GhcrError) BottleError {
+    return switch (e) {
+        ghcr_mod.GhcrError.DownloadHttpClientError => BottleError.DownloadPermanent,
+        ghcr_mod.GhcrError.DownloadRateLimited => BottleError.DownloadRateLimited,
+        ghcr_mod.GhcrError.DownloadLocalResourceExhausted => BottleError.DownloadLocalResourceExhausted,
+        else => BottleError.DownloadFailed,
+    };
+}
 
 /// Formats `<dest_dir>/bottle.tar.gz` into `buf`; distinguishes path overflow
 /// from allocation failure so callers can surface a precise message.
@@ -166,11 +199,7 @@ pub fn download(
     var sink = HashingFileSink.init(io, tmp_file);
     const dl = ghcr.downloadBlob(http, repo, digest, &sink.writer, progress);
     tmp_file.close(io); // fd no longer needed; extract reopens by path
-    dl catch |e| return switch (e) {
-        ghcr_mod.GhcrError.DownloadHttpClientError => BottleError.DownloadPermanent,
-        ghcr_mod.GhcrError.DownloadRateLimited => BottleError.DownloadRateLimited,
-        else => BottleError.DownloadFailed,
-    };
+    dl catch |e| return bottleErrorFromGhcr(e);
 
     var raw: [32]u8 = undefined;
     sink.hasher.final(&raw);

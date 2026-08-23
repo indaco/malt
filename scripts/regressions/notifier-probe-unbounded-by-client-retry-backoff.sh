@@ -48,7 +48,11 @@ zig build test-bin >/dev/null 2>&1 || fail "could not build the test binaries"
 WORK=$(mktemp -d -t probe-budget)
 SERVER_PID=""
 cleanup() {
-  [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null
+  # `[[ ... ]] && kill` as a bare statement aborts the trap under `errexit`
+  # when the server is already gone, stranding the key in $WORK.
+  if [[ -n "$SERVER_PID" ]]; then
+    kill "$SERVER_PID" 2>/dev/null || true
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
