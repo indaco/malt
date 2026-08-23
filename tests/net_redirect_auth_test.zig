@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const client = @import("malt").client;
+const notifier = @import("malt").update_notifier;
 const net = std.Io.net;
 
 const auth_value = "token SECRET-PAT";
@@ -1486,4 +1487,75 @@ test "a framed redirect still drains, so its connection stays poolable" {
     var resp = try result;
     defer resp.deinit();
     try std.testing.expectEqualStrings(blob_body, resp.body);
+}
+
+test "the version probe's budget spends one attempt on a peer that keeps failing" {
+    // The behavioural half of the probe's contract, over plaintext so it runs
+    // on every unit-test pass rather than only when the https fixture is up.
+    // Asserting the field alone would still pass if the retry loop stopped
+    // reading it - the attempt count is what the user actually waits through.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    // 503 is transient, so the stock schedule would re-dial three more times.
+    var hop1 = Hop{ .io = io, .listener = &l1, .status = .service_unavailable };
+    const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, 4 });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/releases/latest", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    notifier.applyProbeBudget(&http);
+
+    const result = http.get(url);
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    if (result) |resp| {
+        var owned = resp;
+        owned.deinit();
+    } else |_| {}
+    try std.testing.expectEqual(@as(usize, 1), hop1.requests);
+}
+
+test "the stock client still retries a failing peer" {
+    // The no-retry budget is the notifier's choice, not a new client default.
+    // An install quietly losing its retries would be a worse regression than
+    // the latency the probe's budget fixes.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var hop1 = Hop{ .io = io, .listener = &l1, .status = .service_unavailable };
+    const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, 4 });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    // Zeroed delays: the count is the assertion, not the wall-clock.
+    http.retry_backoff_ms = &.{ 0, 0, 0 };
+
+    const result = http.get(url);
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    if (result) |resp| {
+        var owned = resp;
+        owned.deinit();
+    } else |_| {}
+    try std.testing.expectEqual(@as(usize, 4), hop1.requests);
 }
