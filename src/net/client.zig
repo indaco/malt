@@ -202,6 +202,15 @@ const Wake = struct {
     }
 };
 
+/// Clock every deadline in this file measures elapsed time against. `.awake`
+/// rather than `.real` because the wall clock steps backwards under NTP or a
+/// laptop waking, and an elapsed time that goes negative underflows into an
+/// effectively unbounded budget - the stall these deadlines exist to prevent.
+/// It also stops a suspend from being counted as time the peer was silent.
+fn nowNs(io: std.Io) u64 {
+    return @intCast(std.Io.Clock.awake.now(io).toNanoseconds());
+}
+
 /// Watchdog tick loop, pure of any `std.http` coupling so it's testable
 /// without a live request. Returns true iff a deadline (or cancel) tripped
 /// and the caller should shut the connection down; false iff `wake_fd`
@@ -214,7 +223,7 @@ fn watchdogLoop(
     total_timeout_ns: u64,
     cancel: ?*const fn () bool,
 ) bool {
-    const start_ns: u64 = @intCast(std.Io.Clock.real.now(io).toNanoseconds());
+    const start_ns: u64 = nowNs(io);
     var last_seen_bytes: u64 = bytes_progress.load(.acquire);
     var last_progress_ns: u64 = start_ns;
     // Quarter of the smallest deadline, capped at 5 s, floored at
@@ -238,7 +247,7 @@ fn watchdogLoop(
         if (n > 0) return false; // POLLIN or POLLHUP both clear revents
 
         const cur_bytes = bytes_progress.load(.acquire);
-        const now_ns: u64 = @intCast(std.Io.Clock.real.now(io).toNanoseconds());
+        const now_ns: u64 = nowNs(io);
         if (cur_bytes > last_seen_bytes) {
             last_seen_bytes = cur_bytes;
             last_progress_ns = now_ns;
@@ -619,7 +628,7 @@ pub const HttpClient = struct {
         const uri = std.Uri.parse(url) catch return error.InvalidUrl;
 
         var fired = std.atomic.Value(bool).init(false);
-        const hop_start_ns: u64 = @intCast(std.Io.Clock.real.now(self.io).toNanoseconds());
+        const hop_start_ns: u64 = nowNs(self.io);
         var req = self.requestDeadlined(.HEAD, uri, .{
             .extra_headers = &.{},
             // Stdlib returns every HEAD response before its redirect branch,
@@ -739,7 +748,7 @@ pub const HttpClient = struct {
             const uri = std.Uri.parse(resolved.final_url) catch return error.InvalidUrl;
 
             var fired = std.atomic.Value(bool).init(false);
-            const hop_start_ns: u64 = @intCast(std.Io.Clock.real.now(self.io).toNanoseconds());
+            const hop_start_ns: u64 = nowNs(self.io);
             var req = self.requestDeadlined(.HEAD, uri, .{
                 .extra_headers = &.{},
                 // This walk follows Location itself; stdlib returns a HEAD
@@ -959,14 +968,14 @@ pub const HttpClient = struct {
     /// What is left of a hop's budget, given when it started and what the
     /// clock reads now. Connect and head share one budget, so a hop's worst
     /// case stays `head_timeout_ns` instead of doubling. Both subtractions
-    /// saturate: a hop can outrun its budget, and `Clock.real` can step
-    /// backwards under NTP or a laptop waking.
+    /// saturate: a hop can outrun its budget, and the elapsed guard holds even
+    /// if the clock behind `nowNs` is ever changed.
     fn remainingBudgetNs(budget_ns: u64, hop_start_ns: u64, now_ns: u64) u64 {
         return budget_ns -| (now_ns -| hop_start_ns);
     }
 
     fn remainingHopBudget(self: *HttpClient, hop_start_ns: u64) u64 {
-        const now_ns: u64 = @intCast(std.Io.Clock.real.now(self.io).toNanoseconds());
+        const now_ns: u64 = nowNs(self.io);
         return remainingBudgetNs(self.head_timeout_ns, hop_start_ns, now_ns);
     }
 
@@ -1370,7 +1379,7 @@ pub const HttpClient = struct {
             const uri = std.Uri.parse(current) catch return error.InvalidUrl;
 
             var fired = std.atomic.Value(bool).init(false);
-            const hop_start_ns: u64 = @intCast(std.Io.Clock.real.now(self.io).toNanoseconds());
+            const hop_start_ns: u64 = nowNs(self.io);
             var req = self.requestDeadlined(.GET, uri, .{
                 .extra_headers = live_creds,
                 .redirect_behavior = .unhandled,
@@ -1534,7 +1543,7 @@ pub const HttpClient = struct {
             const uri = std.Uri.parse(current) catch return error.InvalidUrl;
 
             var fired = std.atomic.Value(bool).init(false);
-            const hop_start_ns: u64 = @intCast(std.Io.Clock.real.now(self.io).toNanoseconds());
+            const hop_start_ns: u64 = nowNs(self.io);
             var req = self.requestDeadlined(.GET, uri, .{
                 .extra_headers = live_creds,
                 .redirect_behavior = .unhandled,
@@ -2363,11 +2372,11 @@ test "remainingBudgetNs: an overrun leaves nothing rather than wrapping" {
     try std.testing.expectEqual(@as(u64, 0), HttpClient.remainingBudgetNs(1000, 100, 9000));
 }
 
-test "remainingBudgetNs: a clock that steps backwards does not underflow" {
-    // `Clock.real` is the wall clock: NTP or a laptop waking can move it back
-    // mid-hop. An unsaturated subtraction panics in ReleaseSafe and wraps to
-    // an effectively infinite budget in ReleaseFast - the very stall the
-    // deadline exists to prevent.
+test "remainingBudgetNs: elapsed time that runs backwards does not underflow" {
+    // `nowNs` cannot go backwards, so this is the second line of defence: an
+    // unsaturated subtraction panics in ReleaseSafe and wraps to an
+    // effectively infinite budget in ReleaseFast, and the arithmetic should
+    // not be the thing that depends on the clock choice.
     try std.testing.expectEqual(@as(u64, 1000), HttpClient.remainingBudgetNs(1000, 500, 400));
     try std.testing.expectEqual(@as(u64, 1000), HttpClient.remainingBudgetNs(1000, 9000, 1));
 }
@@ -2468,9 +2477,9 @@ test "a connect that cannot be armed still winds down its running deadline" {
     defer http.deinit();
     http.head_timeout_ns = 30 * std.time.ns_per_s;
 
-    const started_ns: i128 = std.Io.Clock.real.now(io).toNanoseconds();
+    const started_ns = nowNs(io);
     const result = http.head("http://127.0.0.1:1/probe");
-    const elapsed_ns = std.Io.Clock.real.now(io).toNanoseconds() - started_ns;
+    const elapsed_ns = nowNs(io) - started_ns;
 
     try std.testing.expectError(error.WatchdogSpawnFailed, result);
     try std.testing.expectEqual(@as(usize, 2), ConcurrentFailProbe.calls);
