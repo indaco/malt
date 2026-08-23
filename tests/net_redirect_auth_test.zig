@@ -39,6 +39,9 @@ const Hop = struct {
     answer_delay_ns: u64 = 0,
     // Requests actually received, so a test can assert how many walks happened.
     requests: usize = 0,
+    // Mirrors `requests` for the cancel probes, which read it from the client
+    // thread while this one is still running.
+    served: std.atomic.Value(usize) = .init(0),
 };
 
 fn serveOne(hop: *Hop) void {
@@ -64,6 +67,7 @@ fn serveCount(hop: *Hop, count: usize) void {
             served_here = true;
             served += 1;
             hop.requests += 1;
+            _ = hop.served.fetchAdd(1, .release);
             if (hop.fail_first) {
                 hop.fail_first = false;
                 break; // close mid-request: the client sees a dead connection
@@ -172,6 +176,26 @@ fn closedPort(io: std.Io) !u16 {
 fn bindIp6(io: std.Io) !net.Server {
     var addr = try net.IpAddress.parseIp6("::1", 0);
     return try addr.listen(io, .{ .reuse_address = true });
+}
+
+// A peer that completes the TCP accept and then never speaks TLS. `Hop` cannot
+// stand in for it: the client parks inside `client.request` before any request
+// line is written, so an `http.Server` has nothing to read.
+const TlsSilentPeer = struct {
+    io: std.Io,
+    listener: *net.Server,
+    accepts: std.atomic.Value(usize) = .init(0),
+};
+
+fn acceptAndSayNothing(peer: *TlsSilentPeer) void {
+    const stream = peer.listener.accept(peer.io) catch return;
+    defer stream.close(peer.io);
+    _ = peer.accepts.fetchAdd(1, .release);
+    // Hold the connection until the client hangs up, so the handshake stalls
+    // instead of failing fast on a reset.
+    var rbuf: [64]u8 = undefined;
+    var reader = stream.reader(peer.io, &rbuf);
+    _ = reader.interface.discardRemaining() catch {};
 }
 
 test "auth headers stripped on redirect across a cross-domain hop" {
@@ -954,16 +978,20 @@ test "a download gives up on an origin that never answers" {
     try std.testing.expectEqual(@as(usize, 1), hop1.requests);
 }
 
+// The hop the probe below watches. Gating on a request the hop has actually
+// received keeps the Ctrl-C inside the head-read window rather than collapsing
+// the connect that precedes it.
+var cancel_after_served: ?*const Hop = null;
+
+fn cancelledOnceServed() bool {
+    const hop = cancel_after_served orelse return false;
+    return hop.served.load(.acquire) > 0;
+}
+
 test "Ctrl-C during a stalled head read is the answer, not a blip to retry" {
     // Without the cancel check the fix makes Ctrl-C slower: the watchdog's
     // socket shutdown looks like an ordinary transport fault, so the walk
     // would sleep off the whole backoff and re-dial while the flag stays set.
-    const Probe = struct {
-        fn cancelled() bool {
-            return true;
-        }
-    };
-
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -974,6 +1002,8 @@ test "Ctrl-C during a stalled head read is the answer, not a blip to retry" {
 
     var hop1 = Hop{ .io = io, .listener = &l1, .stall = true };
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+    cancel_after_served = &hop1;
+    defer cancel_after_served = null;
 
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
@@ -981,7 +1011,7 @@ test "Ctrl-C during a stalled head read is the answer, not a blip to retry" {
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
     http.head_timeout_ns = stall_budget_ns;
-    http.cancel = &Probe.cancelled;
+    http.cancel = &cancelledOnceServed;
     // A budget the retry loop could spend if it treated the cancel as a blip.
     http.retry_backoff_ms = &.{ 0, 0, 0 };
 
@@ -1135,4 +1165,145 @@ test "a hop that answers refreshes the budget for the next one" {
     var resolved = try result;
     defer resolved.deinit();
     try std.testing.expectEqualStrings(loc, resolved.final_url);
+}
+
+// Long enough that the connect is observably cut, short enough that a green
+// run costs nothing.
+const tls_silent_budget_ns: u64 = 500 * std.time.ns_per_ms;
+
+test "a bare HEAD gives up on a peer that never starts its TLS handshake" {
+    // Connect runs DNS, TCP and the whole TLS handshake before the head
+    // watchdog has a connection to shut down, so this window had no deadline
+    // at all - and `mt install` holds `db/malt.lock` across it.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var tls_silent = TlsSilentPeer{ .io = io, .listener = &l1 };
+    const t1 = try std.Thread.spawn(.{}, acceptAndSayNothing, .{&tls_silent});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/probe", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = tls_silent_budget_ns;
+
+    const result = http.head(url);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HeadTimeout, result);
+    try std.testing.expectEqual(@as(usize, 1), tls_silent.accepts.load(.acquire));
+}
+
+test "a download gives up on a peer that never starts its TLS handshake" {
+    // `followGet` opens its own connection, so the buffered walk needs its own
+    // fixture to prove the deadline is wired there too.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var tls_silent = TlsSilentPeer{ .io = io, .listener = &l1 };
+    const t1 = try std.Thread.spawn(.{}, acceptAndSayNothing, .{&tls_silent});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/blob", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = tls_silent_budget_ns;
+    http.retry_backoff_ms = &.{};
+
+    const result = http.getWithHeaders(url, &.{}, null, .transport_only);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HeadTimeout, result);
+    try std.testing.expectEqual(@as(usize, 1), tls_silent.accepts.load(.acquire));
+}
+
+test "a blob stream gives up on a peer that never starts its TLS handshake" {
+    // `followGetToWriter` wires its deadline separately from the buffered walk.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var tls_silent = TlsSilentPeer{ .io = io, .listener = &l1 };
+    const t1 = try std.Thread.spawn(.{}, acceptAndSayNothing, .{&tls_silent});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/bottle", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = tls_silent_budget_ns;
+    http.retry_backoff_ms = &.{};
+
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+    const result = http.getToWriter(url, &.{}, &sink.writer, null);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HeadTimeout, result);
+    try std.testing.expectEqual(@as(usize, 1), tls_silent.accepts.load(.acquire));
+}
+
+// The peer the cancel probe below watches. A Ctrl-C only counts once the
+// connection exists, so the assertion is about the handshake window rather
+// than a race with the dial.
+var cancel_watch: ?*const TlsSilentPeer = null;
+
+fn cancelledOnceAccepted() bool {
+    const peer = cancel_watch orelse return false;
+    return peer.accepts.load(.acquire) > 0;
+}
+
+test "Ctrl-C during a stalled TLS handshake is the answer, not a blip to retry" {
+    // Nothing sampled the cancel flag inside the handshake, so a Ctrl-C waited
+    // out the full budget - and, read as an ordinary transport fault, was then
+    // slept off and re-dialled.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var tls_silent = TlsSilentPeer{ .io = io, .listener = &l1 };
+    const t1 = try std.Thread.spawn(.{}, acceptAndSayNothing, .{&tls_silent});
+    cancel_watch = &tls_silent;
+    defer cancel_watch = null;
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/artifact", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    // A budget far past the point of the test: only the cancel can end this.
+    http.head_timeout_ns = 60 * std.time.ns_per_s;
+    http.cancel = &cancelledOnceAccepted;
+    // A budget the retry loop could spend if it read the cancel as a blip.
+    http.retry_backoff_ms = &.{ 0, 0, 0 };
+
+    const result = http.headResolved(url);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.Canceled, result);
+    try std.testing.expectEqual(@as(usize, 1), tls_silent.accepts.load(.acquire));
 }
