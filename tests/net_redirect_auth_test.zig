@@ -8,6 +8,7 @@ const std = @import("std");
 const client = @import("malt").client;
 const notifier = @import("malt").update_notifier;
 const net = std.Io.net;
+const test_io = @import("test_io");
 
 const auth_value = "token SECRET-PAT";
 const blob_body = "the-protected-blob";
@@ -186,6 +187,9 @@ const UnframedRedirectPeer = struct {
     io: std.Io,
     listener: *net.Server,
     location: []const u8,
+    // Frame the body with a chunked encoding instead of leaving it to end at
+    // close. Chunked terminates itself, so this hop must still be drained.
+    chunked: bool = false,
 };
 
 // Bounds a regression: the drain hits EOF here instead of hanging the suite,
@@ -209,10 +213,18 @@ fn serveUnframedRedirect(peer: *UnframedRedirectPeer) void {
     // single loopback segment.
     _ = reader.interface.peek(1) catch return;
 
-    writer.interface.print(
-        "HTTP/1.1 302 Found\r\nLocation: {s}\r\n\r\nredirecting\n",
-        .{peer.location},
-    ) catch return;
+    if (peer.chunked) {
+        writer.interface.print(
+            "HTTP/1.1 302 Found\r\nLocation: {s}\r\n" ++
+                "Transfer-Encoding: chunked\r\n\r\nc\r\nredirecting\n\r\n0\r\n\r\n",
+            .{peer.location},
+        ) catch return;
+    } else {
+        writer.interface.print(
+            "HTTP/1.1 302 Found\r\nLocation: {s}\r\n\r\nredirecting\n",
+            .{peer.location},
+        ) catch return;
+    }
     writer.interface.flush() catch return;
 
     // Hold it open: an undeclared body ends at close, which is the condition
@@ -1558,4 +1570,48 @@ test "the stock client still retries a failing peer" {
         owned.deinit();
     } else |_| {}
     try std.testing.expectEqual(@as(usize, 4), hop1.requests);
+}
+
+test "a chunked redirect is drained rather than retired" {
+    // Chunked framing ends at its own zero-chunk, so the drain terminates
+    // without the peer closing - which is why this hop keeps its connection
+    // instead of paying for a fresh handshake. The classifier says so; this
+    // proves it at the socket, against a peer that never closes.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l2 = try bindIp4(io);
+    defer l2.deinit(io);
+    const p2 = l2.socket.address.getPort();
+    var hop2 = Hop{ .io = io, .listener = &l2 };
+    const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var peer = UnframedRedirectPeer{ .io = io, .listener = &l1, .location = loc, .chunked = true };
+    const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{};
+
+    const started_ms = test_io.milliTimestamp(io);
+    const result = http.get(url);
+    const elapsed_ms = test_io.milliTimestamp(io) - started_ms;
+    http.deinit();
+    t1.join();
+    t2.join();
+
+    var resp = try result;
+    defer resp.deinit();
+    try std.testing.expectEqualStrings(blob_body, resp.body);
+    try std.testing.expect(elapsed_ms < drain_budget_ms);
 }
