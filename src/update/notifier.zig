@@ -53,7 +53,10 @@ pub const Gates = struct {
 };
 
 /// Bounded so a cache miss can't drag the user's hot path. Fires after
-/// dispatch, so the command's output is already on screen.
+/// dispatch, so the command's output is already on screen. Covers the whole
+/// hop - DNS, connect and TLS included - so a cold handshake on a slow link
+/// can spend it and drop the user into the failure backoff rather than
+/// stalling them.
 pub const network_timeout_ns: u64 = 1_500 * std.time.ns_per_ms;
 
 /// Hold every phase of the probe to the bound above. Connect, head read and
@@ -124,15 +127,10 @@ pub fn markUpdatedTo(io: std.Io, environ: std.process.Environ, latest_tag: []con
     }) catch {};
 }
 
-/// Longest tag the notice will carry back. Releases are short semver tags;
-/// anything longer is a malformed feed, and dropping the notice is the
-/// best-effort answer.
-pub const max_tag_len: usize = 64;
-
 /// Best-effort entrypoint: returns the tag to announce, or null when no
 /// notice is due. `cmd_str` is the canonical subcommand name; `version`/`help`
-/// aliases bypass the notice via the suppression list. The tag is copied into
-/// `tag_buf` because the cache state it comes from is freed on the way out.
+/// aliases bypass the notice via the suppression list. The tag is owned by the
+/// caller: the cache state it is read from is freed on the way out.
 pub fn pendingNotice(
     io: std.Io,
     environ: std.process.Environ,
@@ -141,10 +139,9 @@ pub fn pendingNotice(
     current_version: []const u8,
     cmd_str: []const u8,
     gates: Gates,
-    tag_buf: []u8,
 ) ?[]const u8 {
     if (suppressed(io, environ, cmd_str, gates)) return null;
-    return runNotify(io, environ, offline, allocator, current_version, tag_buf) catch null;
+    return runNotify(io, environ, offline, allocator, current_version) catch null;
 }
 
 fn runNotify(
@@ -153,7 +150,6 @@ fn runNotify(
     offline: bool,
     allocator: std.mem.Allocator,
     current_version: []const u8,
-    tag_buf: []u8,
 ) !?[]const u8 {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = cachePath(environ, &path_buf) orelse return null;
@@ -196,9 +192,9 @@ fn runNotify(
 
     const s = state orelse return null;
     if (!shouldNotify(current_version, s.latest_tag, s.current_seen)) return null;
-    if (s.latest_tag.len > tag_buf.len) return null;
-    @memcpy(tag_buf[0..s.latest_tag.len], s.latest_tag);
-    return tag_buf[0..s.latest_tag.len];
+    // Duped rather than borrowed: `state` is freed on the way out, and a
+    // length cap here would silently drop a notice the old code printed.
+    return try allocator.dupe(u8, s.latest_tag);
 }
 
 /// On network failure `state` is left untouched so the caller's old

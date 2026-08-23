@@ -367,3 +367,136 @@ test "readCache: corrupt file surfaces InvalidPayload (caller can choose to igno
 
     try testing.expectError(error.InvalidPayload, notifier.readCache(io, testing.allocator, path));
 }
+
+// `pendingNotice` is the seam the CLI actually calls, and nothing exercised it
+// before or after the rendering split. These drive it against a seeded cache
+// so the decision half is pinned without touching the network: the cache is
+// fresh, so no refresh is attempted.
+fn seedFreshCache(io: std.Io, path: []const u8, now: i64, latest: []const u8, seen: []const u8) !void {
+    try notifier.writeCache(io, path, .{
+        .checked_at = now,
+        .latest_tag = latest,
+        .current_seen = seen,
+        .last_attempt = now,
+    });
+}
+
+test "pendingNotice hands back the tag to announce when the user is behind" {
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+
+    const dir_base = try test_io.uniqueTempPath(allocator, "notify", "pending");
+    defer allocator.free(dir_base);
+    const dir = try std.fmt.allocPrintSentinel(allocator, "{s}", .{dir_base}, 0);
+    defer allocator.free(dir);
+    fs_compat.deleteTreeAbsolute(io, dir) catch {};
+    try fs_compat.makeDirAbsolute(io, dir);
+    defer fs_compat.deleteTreeAbsolute(io, dir) catch {};
+
+    _ = c_env.setenv("MALT_CACHE", dir.ptr, 1);
+    defer _ = c_env.unsetenv("MALT_CACHE");
+    // The notice is stderr-gated on a TTY, which a test run does not have.
+    _ = c_env.setenv("MALT_VERSION_NOTIFIER_ASSUME_TTY", "1", 1);
+    defer _ = c_env.unsetenv("MALT_VERSION_NOTIFIER_ASSUME_TTY");
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    try seedFreshCache(io, path, now, "v0.99.0", "0.10.0");
+
+    const tag = notifier.pendingNotice(
+        io,
+        app_ctx.processEnviron(),
+        false,
+        allocator,
+        "0.10.0",
+        "install",
+        .{},
+    ) orelse return error.TestExpectedNonNull;
+    defer allocator.free(tag);
+
+    try testing.expectEqualStrings("v0.99.0", tag);
+}
+
+test "pendingNotice stays silent when the output mode suppresses it" {
+    // `--json` and friends are machine-readable surfaces; a heads-up on stderr
+    // is noise there, and the gate now lives with the caller that owns it.
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+
+    const dir_base = try test_io.uniqueTempPath(allocator, "notify", "gated");
+    defer allocator.free(dir_base);
+    const dir = try std.fmt.allocPrintSentinel(allocator, "{s}", .{dir_base}, 0);
+    defer allocator.free(dir);
+    fs_compat.deleteTreeAbsolute(io, dir) catch {};
+    try fs_compat.makeDirAbsolute(io, dir);
+    defer fs_compat.deleteTreeAbsolute(io, dir) catch {};
+
+    _ = c_env.setenv("MALT_CACHE", dir.ptr, 1);
+    defer _ = c_env.unsetenv("MALT_CACHE");
+    _ = c_env.setenv("MALT_VERSION_NOTIFIER_ASSUME_TTY", "1", 1);
+    defer _ = c_env.unsetenv("MALT_VERSION_NOTIFIER_ASSUME_TTY");
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    try seedFreshCache(io, path, now, "v0.99.0", "0.10.0");
+
+    inline for (.{
+        notifier.Gates{ .json = true },
+        notifier.Gates{ .quiet = true },
+        notifier.Gates{ .ndjson = true },
+        notifier.Gates{ .dry_run = true },
+    }) |gates| {
+        const tag = notifier.pendingNotice(
+            io,
+            app_ctx.processEnviron(),
+            false,
+            allocator,
+            "0.10.0",
+            "install",
+            gates,
+        );
+        if (tag) |t| {
+            allocator.free(t);
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "pendingNotice stays silent on a command that never carries the notice" {
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+
+    const dir_base = try test_io.uniqueTempPath(allocator, "notify", "skipcmd");
+    defer allocator.free(dir_base);
+    const dir = try std.fmt.allocPrintSentinel(allocator, "{s}", .{dir_base}, 0);
+    defer allocator.free(dir);
+    fs_compat.deleteTreeAbsolute(io, dir) catch {};
+    try fs_compat.makeDirAbsolute(io, dir);
+    defer fs_compat.deleteTreeAbsolute(io, dir) catch {};
+
+    _ = c_env.setenv("MALT_CACHE", dir.ptr, 1);
+    defer _ = c_env.unsetenv("MALT_CACHE");
+    _ = c_env.setenv("MALT_VERSION_NOTIFIER_ASSUME_TTY", "1", 1);
+    defer _ = c_env.unsetenv("MALT_VERSION_NOTIFIER_ASSUME_TTY");
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    try seedFreshCache(io, path, now, "v0.99.0", "0.10.0");
+
+    const tag = notifier.pendingNotice(
+        io,
+        app_ctx.processEnviron(),
+        false,
+        allocator,
+        "0.10.0",
+        "version",
+        .{},
+    );
+    if (tag) |t| {
+        allocator.free(t);
+        return error.TestUnexpectedResult;
+    }
+}
