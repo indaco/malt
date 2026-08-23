@@ -381,6 +381,14 @@ fn seedFreshCache(io: std.Io, path: []const u8, now: i64, latest: []const u8, se
     });
 }
 
+/// `pendingNotice` reads every variable it consults through its `environ`
+/// argument, so these tests hand it one they own. The host's would carry `CI`
+/// on a runner, which the notifier treats as a hard suppressor — the notice
+/// would vanish for a reason none of these tests are about.
+fn fixtureEnviron(entries: [:null]const ?[*:0]const u8) std.process.Environ {
+    return .{ .block = .{ .slice = entries } };
+}
+
 test "pendingNotice hands back the tag to announce when the user is behind" {
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
@@ -393,11 +401,10 @@ test "pendingNotice hands back the tag to announce when the user is behind" {
     try fs_compat.makeDirAbsolute(io, dir);
     defer fs_compat.deleteTreeAbsolute(io, dir) catch {};
 
-    _ = c_env.setenv("MALT_CACHE", dir.ptr, 1);
-    defer _ = c_env.unsetenv("MALT_CACHE");
+    const cache_var = try std.fmt.allocPrintSentinel(allocator, "MALT_CACHE={s}", .{dir}, 0);
+    defer allocator.free(cache_var);
     // The notice is stderr-gated on a TTY, which a test run does not have.
-    _ = c_env.setenv("MALT_VERSION_NOTIFIER_ASSUME_TTY", "1", 1);
-    defer _ = c_env.unsetenv("MALT_VERSION_NOTIFIER_ASSUME_TTY");
+    const entries = [_:null]?[*:0]const u8{ cache_var.ptr, "MALT_VERSION_NOTIFIER_ASSUME_TTY=1" };
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
@@ -406,7 +413,7 @@ test "pendingNotice hands back the tag to announce when the user is behind" {
 
     const tag = notifier.pendingNotice(
         io,
-        app_ctx.processEnviron(),
+        fixtureEnviron(&entries),
         false,
         allocator,
         "0.10.0",
@@ -432,10 +439,9 @@ test "pendingNotice stays silent when the output mode suppresses it" {
     try fs_compat.makeDirAbsolute(io, dir);
     defer fs_compat.deleteTreeAbsolute(io, dir) catch {};
 
-    _ = c_env.setenv("MALT_CACHE", dir.ptr, 1);
-    defer _ = c_env.unsetenv("MALT_CACHE");
-    _ = c_env.setenv("MALT_VERSION_NOTIFIER_ASSUME_TTY", "1", 1);
-    defer _ = c_env.unsetenv("MALT_VERSION_NOTIFIER_ASSUME_TTY");
+    const cache_var = try std.fmt.allocPrintSentinel(allocator, "MALT_CACHE={s}", .{dir}, 0);
+    defer allocator.free(cache_var);
+    const entries = [_:null]?[*:0]const u8{ cache_var.ptr, "MALT_VERSION_NOTIFIER_ASSUME_TTY=1" };
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
@@ -450,7 +456,7 @@ test "pendingNotice stays silent when the output mode suppresses it" {
     }) |gates| {
         const tag = notifier.pendingNotice(
             io,
-            app_ctx.processEnviron(),
+            fixtureEnviron(&entries),
             false,
             allocator,
             "0.10.0",
@@ -476,10 +482,9 @@ test "pendingNotice stays silent on a command that never carries the notice" {
     try fs_compat.makeDirAbsolute(io, dir);
     defer fs_compat.deleteTreeAbsolute(io, dir) catch {};
 
-    _ = c_env.setenv("MALT_CACHE", dir.ptr, 1);
-    defer _ = c_env.unsetenv("MALT_CACHE");
-    _ = c_env.setenv("MALT_VERSION_NOTIFIER_ASSUME_TTY", "1", 1);
-    defer _ = c_env.unsetenv("MALT_VERSION_NOTIFIER_ASSUME_TTY");
+    const cache_var = try std.fmt.allocPrintSentinel(allocator, "MALT_CACHE={s}", .{dir}, 0);
+    defer allocator.free(cache_var);
+    const entries = [_:null]?[*:0]const u8{ cache_var.ptr, "MALT_VERSION_NOTIFIER_ASSUME_TTY=1" };
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
@@ -488,7 +493,7 @@ test "pendingNotice stays silent on a command that never carries the notice" {
 
     const tag = notifier.pendingNotice(
         io,
-        app_ctx.processEnviron(),
+        fixtureEnviron(&entries),
         false,
         allocator,
         "0.10.0",
