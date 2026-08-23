@@ -136,6 +136,10 @@ jobs:
         with:
           tool: just
 
+      # The guards bound themselves with `timeout`, which macOS does not ship.
+      - name: Install coreutils
+        run: brew install coreutils
+
       - name: Hermetic regression guards
         run: just regressions-hermetic
 
