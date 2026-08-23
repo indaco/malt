@@ -68,6 +68,14 @@ pub fn milliTimestamp(io: std.Io) i64 {
     return std.Io.Clock.real.now(io).toMilliseconds();
 }
 
+/// Elapsed-time clock for tests that assert a duration. `.awake`, not
+/// `.real`: a wall-clock step inside the measured window would otherwise
+/// decide the result, which is the same reason the deadlines under test
+/// stopped using `.real`.
+pub fn elapsedMillis(io: std.Io) i64 {
+    return std.Io.Clock.awake.now(io).toMilliseconds();
+}
+
 pub fn isatty(io: std.Io, fd: std.posix.fd_t) bool {
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
     return file.isTty(io) catch false;

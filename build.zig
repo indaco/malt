@@ -179,6 +179,7 @@ pub fn build(b: *std.Build) void {
         "tests/net_client_test.zig",
         "tests/net_client_pool_test.zig",
         "tests/net_redirect_auth_test.zig",
+        "tests/notifier_probe_budget_test.zig",
         "tests/http_inject_test.zig",
         "tests/term_sanitize_test.zig",
         "tests/perms_test.zig",

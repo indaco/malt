@@ -202,6 +202,15 @@ const Wake = struct {
     }
 };
 
+/// Clock every deadline in this file measures elapsed time against. `.awake`
+/// rather than `.real` because the wall clock steps backwards under NTP or a
+/// laptop waking, and an elapsed time that goes negative underflows into an
+/// effectively unbounded budget - the stall these deadlines exist to prevent.
+/// It also stops a suspend from being counted as time the peer was silent.
+fn nowNs(io: std.Io) u64 {
+    return @intCast(std.Io.Clock.awake.now(io).toNanoseconds());
+}
+
 /// Watchdog tick loop, pure of any `std.http` coupling so it's testable
 /// without a live request. Returns true iff a deadline (or cancel) tripped
 /// and the caller should shut the connection down; false iff `wake_fd`
@@ -214,7 +223,7 @@ fn watchdogLoop(
     total_timeout_ns: u64,
     cancel: ?*const fn () bool,
 ) bool {
-    const start_ns: u64 = @intCast(std.Io.Clock.real.now(io).toNanoseconds());
+    const start_ns: u64 = nowNs(io);
     var last_seen_bytes: u64 = bytes_progress.load(.acquire);
     var last_progress_ns: u64 = start_ns;
     // Quarter of the smallest deadline, capped at 5 s, floored at
@@ -238,7 +247,7 @@ fn watchdogLoop(
         if (n > 0) return false; // POLLIN or POLLHUP both clear revents
 
         const cur_bytes = bytes_progress.load(.acquire);
-        const now_ns: u64 = @intCast(std.Io.Clock.real.now(io).toNanoseconds());
+        const now_ns: u64 = nowNs(io);
         if (cur_bytes > last_seen_bytes) {
             last_seen_bytes = cur_bytes;
             last_progress_ns = now_ns;
@@ -618,21 +627,22 @@ pub const HttpClient = struct {
         try requireSecureOrigin(url, .transport_only);
         const uri = std.Uri.parse(url) catch return error.InvalidUrl;
 
-        var req = self.client.request(.HEAD, uri, .{
+        var fired = std.atomic.Value(bool).init(false);
+        const hop_start_ns: u64 = nowNs(self.io);
+        var req = self.requestDeadlined(.HEAD, uri, .{
             .extra_headers = &.{},
             // Stdlib returns every HEAD response before its redirect branch,
             // so this is already the effective behaviour; pinning it keeps the
             // watchdog's connection stable by contract, not by stdlib branch
             // order.
             .redirect_behavior = .unhandled,
-        }) catch |e| return walkTransportError(e);
+        }, self.head_timeout_ns, &fired) catch |e| return self.headWalkError(&fired, e);
         defer req.deinit();
 
         // 32 KiB — GHCR's multi-scope token + signed-URL redirects exceed
         // the 8 KiB default and tripped `HeaderBufferTooSmall`.
         var redirect_buf: [32 * 1024]u8 = undefined;
-        var fired = std.atomic.Value(bool).init(false);
-        const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.head_timeout_ns, &fired) catch |e|
+        const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired) catch |e|
             return self.headWalkError(&fired, e);
 
         return @intFromEnum(response.head.status);
@@ -737,19 +747,23 @@ pub const HttpClient = struct {
         while (true) : (hops += 1) {
             const uri = std.Uri.parse(resolved.final_url) catch return error.InvalidUrl;
 
-            var req = self.client.request(.HEAD, uri, .{
+            var fired = std.atomic.Value(bool).init(false);
+            const hop_start_ns: u64 = nowNs(self.io);
+            var req = self.requestDeadlined(.HEAD, uri, .{
                 .extra_headers = &.{},
                 // This walk follows Location itself; stdlib returns a HEAD
                 // before its redirect branch anyway, so pinning it keeps the
                 // watchdog's connection stable by contract, not by stdlib
                 // branch order.
                 .redirect_behavior = .unhandled,
-            }) catch |e| return walkTransportError(e);
+            }, self.head_timeout_ns, &fired) catch |e| switch (self.headWalkError(&fired, e)) {
+                error.WatchdogSpawnFailed => return error.RequestFailed,
+                else => |mapped| return mapped,
+            };
             defer req.deinit();
 
             var redirect_buf: [32 * 1024]u8 = undefined;
-            var fired = std.atomic.Value(bool).init(false);
-            const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.head_timeout_ns, &fired) catch |e| switch (self.headWalkError(&fired, e)) {
+            const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired) catch |e| switch (self.headWalkError(&fired, e)) {
                 // `HeadResolveError` stays closed: a watchdog that could not
                 // start is one more way the request failed.
                 error.WatchdogSpawnFailed => return error.RequestFailed,
@@ -862,12 +876,114 @@ pub const HttpClient = struct {
         return self.doGetWithRetry(url, extra_headers, max_metadata_bytes, null);
     }
 
+    /// The two arms of the connect race: whichever finishes first decides
+    /// whether the hop got a connection or spent its budget.
+    const ConnectRace = union(enum) {
+        req: std.http.Client.RequestError!std.http.Client.Request,
+        deadline: void,
+    };
+
+    /// Open the connection under the hop's deadline. Stdlib resolves DNS,
+    /// connects the socket and runs the whole TLS handshake inside
+    /// `client.request`, and the head watchdog's only lever is a socket
+    /// reachable through `req.connection` - which that call has not returned
+    /// yet. So the connect is raced against a deadline instead, and the loser
+    /// is cancelled.
+    fn requestDeadlined(
+        self: *HttpClient,
+        method: std.http.Method,
+        uri: std.Uri,
+        options: std.http.Client.RequestOptions,
+        budget_ns: u64,
+        fired: *std.atomic.Value(bool),
+    ) !std.http.Client.Request {
+        const Task = struct {
+            fn connect(
+                client: *std.http.Client,
+                m: std.http.Method,
+                u: std.Uri,
+                o: std.http.Client.RequestOptions,
+            ) std.http.Client.RequestError!std.http.Client.Request {
+                return client.request(m, u, o);
+            }
+            /// The same tick loop the head and body phases run, so the connect
+            /// gets one clock and one `cancel` poll rather than a second set.
+            /// A connect has no byte progress, so idle and total coincide.
+            fn deadline(http: *HttpClient, wake_fd: std.posix.fd_t, budget: u64) void {
+                var no_progress = std.atomic.Value(u64).init(0);
+                _ = watchdogLoop(http.io, wake_fd, &no_progress, budget, budget, http.cancel);
+            }
+        };
+
+        var wake = Wake.init() catch return error.WatchdogSpawnFailed;
+        defer wake.deinit();
+
+        var slots: [2]ConnectRace = undefined;
+        var sel: std.Io.Select(ConnectRace) = .init(self.io, &slots);
+        // Deadline first: with nothing else armed yet, its failure needs no
+        // unwind.
+        sel.concurrent(.deadline, Task.deadline, .{ self, wake.read_fd, budget_ns }) catch
+            return error.WatchdogSpawnFailed;
+        sel.concurrent(.req, Task.connect, .{ &self.client, method, uri, options }) catch {
+            wake.signal();
+            sel.cancelDiscard();
+            return error.WatchdogSpawnFailed;
+        };
+
+        const winner = sel.await() catch |e| {
+            wake.signal();
+            drainRacers(&sel);
+            return e;
+        };
+        // The loser can still finish first and hand back a live `Request`, so
+        // both arms drain rather than discard.
+        switch (winner) {
+            .req => |result| {
+                // Ends the tick loop now instead of at its next tick.
+                wake.signal();
+                drainRacers(&sel);
+                return result;
+            },
+            .deadline => {
+                // Ordered before the drain so the caller's classification sees it.
+                fired.store(true, .release);
+                drainRacers(&sel);
+                return error.HeadTimeout;
+            },
+        }
+    }
+
+    /// Cancels the outstanding connect race and closes any `Request` it still
+    /// managed to produce.
+    fn drainRacers(sel: *std.Io.Select(ConnectRace)) void {
+        while (sel.cancel()) |left| switch (left) {
+            .req => |result| if (result) |req| {
+                var owned = req;
+                owned.deinit();
+            } else |_| {},
+            .deadline => {},
+        };
+    }
+
+    /// What is left of a hop's budget, given when it started and what the
+    /// clock reads now. Connect and head share one budget, so a hop's worst
+    /// case stays `head_timeout_ns` instead of doubling. Both subtractions
+    /// saturate: a hop can outrun its budget, and the elapsed guard holds even
+    /// if the clock behind `nowNs` is ever changed.
+    fn remainingBudgetNs(budget_ns: u64, hop_start_ns: u64, now_ns: u64) u64 {
+        return budget_ns -| (now_ns -| hop_start_ns);
+    }
+
+    fn remainingHopBudget(self: *HttpClient, hop_start_ns: u64) u64 {
+        const now_ns: u64 = nowNs(self.io);
+        return remainingBudgetNs(self.head_timeout_ns, hop_start_ns, now_ns);
+    }
+
     /// Send the request and read its head under the same watchdog the body
     /// gets: without one a connected-but-silent origin parks the walk forever
     /// and nothing polls `cancel`. Idle and total share a clock because a head
-    /// read has no byte progress to measure. A stall inside `client.request`
-    /// stays uncovered - the watchdog needs a connection that call has not
-    /// returned yet.
+    /// read has no byte progress to measure. Callers pass what
+    /// `requestDeadlined` left of the hop's budget, not a fresh copy.
     fn receiveHeadDeadlined(
         self: *HttpClient,
         req: *std.http.Client.Request,
@@ -1189,6 +1305,47 @@ pub const HttpClient = struct {
         req.deinit();
     }
 
+    /// Release a redirect hop. Its body is never read, and stdlib's `deinit`
+    /// drains an unread one. Two different hazards live there, so two answers:
+    /// a body that can only end at close is skipped outright, and any other is
+    /// drained under a watchdog, because framing is a promise the peer can
+    /// simply not keep. Draining when it is cheap keeps the connection
+    /// poolable, which a same-host redirect chain would otherwise pay for.
+    fn finishRedirect(
+        self: *HttpClient,
+        req: *std.http.Client.Request,
+        hop_head: *const std.http.Client.Response.Head,
+    ) void {
+        if (bodyIsCloseDelimited(hop_head.content_length, hop_head.transfer_encoding)) {
+            finishBodiless(req);
+            return;
+        }
+        var no_progress = std.atomic.Value(u64).init(0);
+        var wake = Wake.init() catch return finishBodiless(req);
+        const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
+            self.io,              wake.read_fd, &no_progress, self.head_timeout_ns,
+            self.head_timeout_ns, req,          self.cancel,  null,
+        }) catch {
+            wake.deinit();
+            return finishBodiless(req);
+        };
+        defer {
+            wake.signal();
+            watchdog.join();
+            wake.deinit();
+        }
+        req.deinit();
+    }
+
+    /// A body with neither a length nor a chunked encoding ends only when the
+    /// peer closes, so draining one can never finish on its own.
+    fn bodyIsCloseDelimited(
+        content_length: ?u64,
+        transfer_encoding: std.http.TransferEncoding,
+    ) bool {
+        return content_length == null and transfer_encoding == .none;
+    }
+
     /// GET that follows redirects manually so credential/validator headers are
     /// stripped before leaving the origin's scope. In Zig 0.16 stdlib,
     /// `extra_headers` ride every redirect and `privileged_headers` are never
@@ -1239,15 +1396,18 @@ pub const HttpClient = struct {
         while (true) : (hops += 1) {
             const uri = std.Uri.parse(current) catch return error.InvalidUrl;
 
-            var req = self.client.request(.GET, uri, .{
+            var fired = std.atomic.Value(bool).init(false);
+            const hop_start_ns: u64 = nowNs(self.io);
+            var req = self.requestDeadlined(.GET, uri, .{
                 .extra_headers = live_creds,
                 .redirect_behavior = .unhandled,
-            }) catch |e| return walkTransportError(e);
-            errdefer req.deinit();
+            }, self.head_timeout_ns, &fired) catch |e| return self.headWalkError(&fired, e);
+            // Drains on a plain deinit, and no watchdog covers a redirect hop:
+            // a peer that stops mid-body parks the walk here too.
+            errdefer finishBodiless(&req);
 
             var redirect_buf: [32 * 1024]u8 = undefined;
-            var fired = std.atomic.Value(bool).init(false);
-            var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.head_timeout_ns, &fired) catch |e|
+            var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired) catch |e|
                 return self.headWalkError(&fired, e);
             const status: u16 = @intFromEnum(response.head.status);
 
@@ -1257,7 +1417,7 @@ pub const HttpClient = struct {
                 if (!credsSurviveRedirect(current, next)) live_creds = &.{};
                 // Hop committed: no fallible op past here, so the errdefers
                 // stay dormant while we hand `req`/`current` off cleanly.
-                req.deinit();
+                self.finishRedirect(&req, &response.head);
                 self.allocator.free(current);
                 current = next;
                 continue;
@@ -1402,15 +1562,18 @@ pub const HttpClient = struct {
         while (true) : (hops += 1) {
             const uri = std.Uri.parse(current) catch return error.InvalidUrl;
 
-            var req = self.client.request(.GET, uri, .{
+            var fired = std.atomic.Value(bool).init(false);
+            const hop_start_ns: u64 = nowNs(self.io);
+            var req = self.requestDeadlined(.GET, uri, .{
                 .extra_headers = live_creds,
                 .redirect_behavior = .unhandled,
-            }) catch |e| return walkTransportError(e);
-            errdefer req.deinit();
+            }, self.head_timeout_ns, &fired) catch |e| return self.headWalkError(&fired, e);
+            // Drains on a plain deinit, and no watchdog covers a redirect hop:
+            // a peer that stops mid-body parks the walk here too.
+            errdefer finishBodiless(&req);
 
             var redirect_buf: [32 * 1024]u8 = undefined;
-            var fired = std.atomic.Value(bool).init(false);
-            var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.head_timeout_ns, &fired) catch |e|
+            var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired) catch |e|
                 return self.headWalkError(&fired, e);
             const status: u16 = @intFromEnum(response.head.status);
 
@@ -1418,7 +1581,7 @@ pub const HttpClient = struct {
             if (hop) |next| {
                 errdefer self.allocator.free(next);
                 if (!credsSurviveRedirect(current, next)) live_creds = &.{};
-                req.deinit();
+                self.finishRedirect(&req, &response.head);
                 self.allocator.free(current);
                 current = next;
                 continue;
@@ -2204,6 +2367,43 @@ test "shouldFireIdleWatchdog: cancellation fires regardless of elapsed time" {
     try std.testing.expect(shouldFireIdleWatchdog(1, 1, 999_999, 999_999, true));
 }
 
+test "bodyIsCloseDelimited: only an unframed body can never end on its own" {
+    // The one shape where draining is pointless rather than merely risky: it
+    // is skipped outright, while framed bodies get a bounded drain instead.
+    try std.testing.expect(HttpClient.bodyIsCloseDelimited(null, .none));
+    try std.testing.expect(!HttpClient.bodyIsCloseDelimited(12, .none));
+    try std.testing.expect(!HttpClient.bodyIsCloseDelimited(null, .chunked));
+}
+
+test "bodyIsCloseDelimited: a declared empty body is framed, not missing" {
+    // `Content-Length: 0` is a complete answer; draining it is a no-op, so
+    // there is nothing to skip and the connection stays poolable.
+    try std.testing.expect(!HttpClient.bodyIsCloseDelimited(0, .none));
+}
+
+test "remainingBudgetNs: the head read gets what the connect left" {
+    // One budget per hop, not one each: reusing the full budget for the head
+    // read would double a hop's worst case.
+    try std.testing.expectEqual(@as(u64, 700), HttpClient.remainingBudgetNs(1000, 100, 400));
+    try std.testing.expectEqual(@as(u64, 1000), HttpClient.remainingBudgetNs(1000, 100, 100));
+}
+
+test "remainingBudgetNs: an overrun leaves nothing rather than wrapping" {
+    // A connect that raced the deadline to a photo finish can spend more than
+    // the budget; wrapping would hand the head read ~584 years.
+    try std.testing.expectEqual(@as(u64, 0), HttpClient.remainingBudgetNs(1000, 100, 1100));
+    try std.testing.expectEqual(@as(u64, 0), HttpClient.remainingBudgetNs(1000, 100, 9000));
+}
+
+test "remainingBudgetNs: elapsed time that runs backwards does not underflow" {
+    // `nowNs` cannot go backwards, so this is the second line of defence: an
+    // unsaturated subtraction panics in ReleaseSafe and wraps to an
+    // effectively infinite budget in ReleaseFast, and the arithmetic should
+    // not be the thing that depends on the clock choice.
+    try std.testing.expectEqual(@as(u64, 1000), HttpClient.remainingBudgetNs(1000, 500, 400));
+    try std.testing.expectEqual(@as(u64, 1000), HttpClient.remainingBudgetNs(1000, 9000, 1));
+}
+
 test "the head phase is bounded by the same threshold as every other read" {
     // Its own knob so a test can shorten the head phase alone, but no number
     // of its own to justify: a third figure for "too quiet" is a third thing
@@ -2238,6 +2438,76 @@ const CancelSleepProbe = struct {
         if (sleep_calls >= cancel_at) return error.Canceled;
     }
 };
+
+// Patches an inner Io's vtable so `groupConcurrent` refuses from the given
+// call onwards. Nothing else in a walk spawns a group task, so the count is
+// the connect race's own arming sequence: 1 is the deadline, 2 is the request.
+const ConcurrentFailProbe = struct {
+    var vtable: std.Io.VTable = undefined;
+    var inner: *const std.Io.VTable = undefined;
+    var calls: usize = 0;
+    var fail_at: usize = 1;
+
+    fn wrap(io: std.Io, fail_at_call: usize) std.Io {
+        inner = io.vtable;
+        vtable = io.vtable.*;
+        vtable.groupConcurrent = groupConcurrentMaybeUnavailable;
+        calls = 0;
+        fail_at = fail_at_call;
+        return .{ .userdata = io.userdata, .vtable = &vtable };
+    }
+
+    fn groupConcurrentMaybeUnavailable(
+        userdata: ?*anyopaque,
+        group: *std.Io.Group,
+        context: []const u8,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (context: *const anyopaque) void,
+    ) std.Io.ConcurrentError!void {
+        calls += 1;
+        if (calls >= fail_at) return error.ConcurrencyUnavailable;
+        return inner.groupConcurrent(userdata, group, context, context_alignment, start);
+    }
+};
+
+test "a connect refuses to dial when its deadline cannot be armed" {
+    // Nothing else can cut a silent handshake, so an unarmed deadline has to
+    // fail the walk rather than dial and hope. Retriable, because a unit of
+    // concurrency is a resource that frees up.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = ConcurrentFailProbe.wrap(threaded.io(), 1);
+
+    var http = HttpClient.init(io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    // Nothing listens on port 1, so a walk that dialled anyway fails
+    // differently instead of passing this by accident.
+    try std.testing.expectError(error.WatchdogSpawnFailed, http.head("http://127.0.0.1:1/probe"));
+    try std.testing.expect(HttpClient.isRetriableWalkError(error.WatchdogSpawnFailed));
+}
+
+test "a connect that cannot be armed still winds down its running deadline" {
+    // The one arming order with something to clean up: the deadline is already
+    // polling when the request fails to spawn. Dropping the wind-down does not
+    // change the error - it just makes the caller wait out the whole budget
+    // first - so the budget is long here and the clock is the assertion.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = ConcurrentFailProbe.wrap(threaded.io(), 2);
+
+    var http = HttpClient.init(io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.head_timeout_ns = 30 * std.time.ns_per_s;
+
+    const started_ns = nowNs(io);
+    const result = http.head("http://127.0.0.1:1/probe");
+    const elapsed_ns = nowNs(io) - started_ns;
+
+    try std.testing.expectError(error.WatchdogSpawnFailed, result);
+    try std.testing.expectEqual(@as(usize, 2), ConcurrentFailProbe.calls);
+    try std.testing.expect(elapsed_ns < std.time.ns_per_s);
+}
 
 test "doGetWithRetry surfaces sleep cancellation on the first backoff" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});

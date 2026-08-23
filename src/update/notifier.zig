@@ -45,9 +45,19 @@ pub const writeCache = cache.writeCache;
 /// dispatch, so the command's output is already on screen.
 pub const network_timeout_ns: u64 = 1_500 * std.time.ns_per_ms;
 
+/// Hold every phase of the probe to the bound above. Connect, head read and
+/// body each carry their own knob, and the retry schedule sits outside all
+/// three - a transient failure otherwise costs four attempts plus seven
+/// seconds of backoff, on the hot path of every command.
+pub fn applyProbeBudget(http: *client_mod.HttpClient) void {
+    http.timeout_ns = network_timeout_ns;
+    http.head_timeout_ns = network_timeout_ns;
+    http.retry_backoff_ms = &.{};
+}
+
 fn fetchLatestTag(ctx: *const AppCtx, allocator: std.mem.Allocator) ![]u8 {
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
-    http.timeout_ns = network_timeout_ns;
+    applyProbeBudget(&http);
     // SIGINT on the prompt-after-success window collapses the probe
     // instead of stalling the user behind the 1.5 s deadline.
     http.cancel = signals.isInterrupted;
@@ -258,6 +268,35 @@ pub fn writeFailureMarker(io: std.Io, path: []const u8, prior: ?State, now: i64,
 }
 
 // --- inline tests --------------------------------------------------------
+
+test "applyProbeBudget: every phase of the probe shares the advertised bound" {
+    // The connect, the head read and the body each have their own knob, and
+    // any one left at the 30 s default makes the bound above a claim the
+    // probe cannot keep.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var http = client_mod.HttpClient.init(threaded.io(), std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    applyProbeBudget(&http);
+
+    try std.testing.expectEqual(network_timeout_ns, http.timeout_ns);
+    try std.testing.expectEqual(network_timeout_ns, http.head_timeout_ns);
+}
+
+test "applyProbeBudget: the probe does not retry" {
+    // The retry schedule is the probe's real worst case: four attempts plus
+    // seven seconds of backoff is what held every command through a brownout.
+    // A passive notice is not worth a second attempt the user waits through.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var http = client_mod.HttpClient.init(threaded.io(), std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    applyProbeBudget(&http);
+
+    try std.testing.expectEqual(@as(usize, 0), http.retry_backoff_ms.len);
+}
 
 // Pins the heads-up layout: blank-line separator + flush-left prefixes
 // in both palettes. The blank line keeps the notice from sticking to a

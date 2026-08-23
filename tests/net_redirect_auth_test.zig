@@ -6,7 +6,9 @@
 
 const std = @import("std");
 const client = @import("malt").client;
+const notifier = @import("malt").update_notifier;
 const net = std.Io.net;
+const test_io = @import("test_io");
 
 const auth_value = "token SECRET-PAT";
 const blob_body = "the-protected-blob";
@@ -39,6 +41,9 @@ const Hop = struct {
     answer_delay_ns: u64 = 0,
     // Requests actually received, so a test can assert how many walks happened.
     requests: usize = 0,
+    // Mirrors `requests` for the cancel probes, which read it from the client
+    // thread while this one is still running.
+    served: std.atomic.Value(usize) = .init(0),
 };
 
 fn serveOne(hop: *Hop) void {
@@ -64,6 +69,7 @@ fn serveCount(hop: *Hop, count: usize) void {
             served_here = true;
             served += 1;
             hop.requests += 1;
+            _ = hop.served.fetchAdd(1, .release);
             if (hop.fail_first) {
                 hop.fail_first = false;
                 break; // close mid-request: the client sees a dead connection
@@ -172,6 +178,98 @@ fn closedPort(io: std.Io) !u16 {
 fn bindIp6(io: std.Io) !net.Server {
     var addr = try net.IpAddress.parseIp6("::1", 0);
     return try addr.listen(io, .{ .reuse_address = true });
+}
+
+// A hop that answers a redirect carrying neither `Content-Length` nor a
+// transfer encoding, then holds the socket open. The body is close-delimited,
+// so the drain a plain release performs has no end.
+const UnframedRedirectPeer = struct {
+    io: std.Io,
+    listener: *net.Server,
+    location: []const u8,
+    // How the 3xx frames its body. Framing does not make a drain bounded: a
+    // peer that announces a body and never sends it parks the reader just as
+    // an unframed one does.
+    framing: enum { none, chunked, oversize_length } = .none,
+    // Omit `Location` so the walk unwinds through its error path, which
+    // releases the hop somewhere else entirely.
+    omit_location: bool = false,
+};
+
+// Bounds a regression: the drain hits EOF here instead of hanging the suite,
+// so the wall-clock assertion fails cleanly.
+const hold_open_ms: i32 = 6_000;
+
+// A healthy release returns in milliseconds; a draining one waits out
+// `hold_open_ms`. The budget sits between the two.
+const drain_budget_ms: i64 = 3_000;
+
+fn serveUnframedRedirect(peer: *UnframedRedirectPeer) void {
+    const stream = peer.listener.accept(peer.io) catch return;
+    defer stream.close(peer.io);
+
+    var rbuf: [8 * 1024]u8 = undefined;
+    var wbuf: [1024]u8 = undefined;
+    var reader = stream.reader(peer.io, &rbuf);
+    var writer = stream.writer(peer.io, &wbuf);
+
+    // One blocking read is enough: the client's whole GET head arrives in a
+    // single loopback segment.
+    _ = reader.interface.peek(1) catch return;
+
+    if (peer.omit_location) {
+        // No Location and no framing: the walk errors out, and the hop is
+        // released on the unwind path rather than the committed-hop one.
+        writer.interface.writeAll("HTTP/1.1 302 Found\r\n\r\nredirecting\n") catch return;
+    } else switch (peer.framing) {
+        // Chunked, but the terminating zero-chunk never arrives.
+        .chunked => writer.interface.print(
+            "HTTP/1.1 302 Found\r\nLocation: {s}\r\n" ++
+                "Transfer-Encoding: chunked\r\n\r\nc\r\nredirecting\n",
+            .{peer.location},
+        ) catch return,
+        // A declared length far larger than anything that follows.
+        .oversize_length => writer.interface.print(
+            "HTTP/1.1 302 Found\r\nLocation: {s}\r\n" ++
+                "Content-Length: 4294967296\r\n\r\nredirecting\n",
+            .{peer.location},
+        ) catch return,
+        .none => writer.interface.print(
+            "HTTP/1.1 302 Found\r\nLocation: {s}\r\n\r\nredirecting\n",
+            .{peer.location},
+        ) catch return,
+    }
+    writer.interface.flush() catch return;
+
+    // Hold it open: an undeclared body ends at close, which is the condition
+    // the bug needs. A healthy client hangs up at once and `poll` returns
+    // immediately.
+    var pfds = [_]std.posix.pollfd{.{
+        .fd = stream.socket.handle,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    _ = std.posix.poll(&pfds, hold_open_ms) catch {};
+}
+
+// A peer that completes the TCP accept and then never speaks TLS. `Hop` cannot
+// stand in for it: the client parks inside `client.request` before any request
+// line is written, so an `http.Server` has nothing to read.
+const TlsSilentPeer = struct {
+    io: std.Io,
+    listener: *net.Server,
+    accepts: std.atomic.Value(usize) = .init(0),
+};
+
+fn acceptAndSayNothing(peer: *TlsSilentPeer) void {
+    const stream = peer.listener.accept(peer.io) catch return;
+    defer stream.close(peer.io);
+    _ = peer.accepts.fetchAdd(1, .release);
+    // Hold the connection until the client hangs up, so the handshake stalls
+    // instead of failing fast on a reset.
+    var rbuf: [64]u8 = undefined;
+    var reader = stream.reader(peer.io, &rbuf);
+    _ = reader.interface.discardRemaining() catch {};
 }
 
 test "auth headers stripped on redirect across a cross-domain hop" {
@@ -954,16 +1052,20 @@ test "a download gives up on an origin that never answers" {
     try std.testing.expectEqual(@as(usize, 1), hop1.requests);
 }
 
+// The hop the probe below watches. Gating on a request the hop has actually
+// received keeps the Ctrl-C inside the head-read window rather than collapsing
+// the connect that precedes it.
+var cancel_after_served: ?*const Hop = null;
+
+fn cancelledOnceServed() bool {
+    const hop = cancel_after_served orelse return false;
+    return hop.served.load(.acquire) > 0;
+}
+
 test "Ctrl-C during a stalled head read is the answer, not a blip to retry" {
     // Without the cancel check the fix makes Ctrl-C slower: the watchdog's
     // socket shutdown looks like an ordinary transport fault, so the walk
     // would sleep off the whole backoff and re-dial while the flag stays set.
-    const Probe = struct {
-        fn cancelled() bool {
-            return true;
-        }
-    };
-
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -974,6 +1076,8 @@ test "Ctrl-C during a stalled head read is the answer, not a blip to retry" {
 
     var hop1 = Hop{ .io = io, .listener = &l1, .stall = true };
     const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+    cancel_after_served = &hop1;
+    defer cancel_after_served = null;
 
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
@@ -981,7 +1085,7 @@ test "Ctrl-C during a stalled head read is the answer, not a blip to retry" {
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
     http.head_timeout_ns = stall_budget_ns;
-    http.cancel = &Probe.cancelled;
+    http.cancel = &cancelledOnceServed;
     // A budget the retry loop could spend if it treated the cancel as a blip.
     http.retry_backoff_ms = &.{ 0, 0, 0 };
 
@@ -1135,4 +1239,424 @@ test "a hop that answers refreshes the budget for the next one" {
     var resolved = try result;
     defer resolved.deinit();
     try std.testing.expectEqualStrings(loc, resolved.final_url);
+}
+
+// Long enough that the connect is observably cut, short enough that a green
+// run costs nothing.
+const tls_silent_budget_ns: u64 = 500 * std.time.ns_per_ms;
+
+test "a bare HEAD gives up on a peer that never starts its TLS handshake" {
+    // Connect runs DNS, TCP and the whole TLS handshake before the head
+    // watchdog has a connection to shut down, so this window had no deadline
+    // at all - and `mt install` holds `db/malt.lock` across it.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var tls_silent = TlsSilentPeer{ .io = io, .listener = &l1 };
+    const t1 = try std.Thread.spawn(.{}, acceptAndSayNothing, .{&tls_silent});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/probe", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = tls_silent_budget_ns;
+
+    const result = http.head(url);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HeadTimeout, result);
+    try std.testing.expectEqual(@as(usize, 1), tls_silent.accepts.load(.acquire));
+}
+
+test "a download gives up on a peer that never starts its TLS handshake" {
+    // `followGet` opens its own connection, so the buffered walk needs its own
+    // fixture to prove the deadline is wired there too.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var tls_silent = TlsSilentPeer{ .io = io, .listener = &l1 };
+    const t1 = try std.Thread.spawn(.{}, acceptAndSayNothing, .{&tls_silent});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/blob", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = tls_silent_budget_ns;
+    http.retry_backoff_ms = &.{};
+
+    const result = http.getWithHeaders(url, &.{}, null, .transport_only);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HeadTimeout, result);
+    try std.testing.expectEqual(@as(usize, 1), tls_silent.accepts.load(.acquire));
+}
+
+test "a blob stream gives up on a peer that never starts its TLS handshake" {
+    // `followGetToWriter` wires its deadline separately from the buffered walk.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var tls_silent = TlsSilentPeer{ .io = io, .listener = &l1 };
+    const t1 = try std.Thread.spawn(.{}, acceptAndSayNothing, .{&tls_silent});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/bottle", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.head_timeout_ns = tls_silent_budget_ns;
+    http.retry_backoff_ms = &.{};
+
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+    const result = http.getToWriter(url, &.{}, &sink.writer, null);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HeadTimeout, result);
+    try std.testing.expectEqual(@as(usize, 1), tls_silent.accepts.load(.acquire));
+}
+
+// The peer the cancel probe below watches. A Ctrl-C only counts once the
+// connection exists, so the assertion is about the handshake window rather
+// than a race with the dial.
+var cancel_watch: ?*const TlsSilentPeer = null;
+
+fn cancelledOnceAccepted() bool {
+    const peer = cancel_watch orelse return false;
+    return peer.accepts.load(.acquire) > 0;
+}
+
+test "Ctrl-C during a stalled TLS handshake is the answer, not a blip to retry" {
+    // Nothing sampled the cancel flag inside the handshake, so a Ctrl-C waited
+    // out the full budget - and, read as an ordinary transport fault, was then
+    // slept off and re-dialled.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var tls_silent = TlsSilentPeer{ .io = io, .listener = &l1 };
+    const t1 = try std.Thread.spawn(.{}, acceptAndSayNothing, .{&tls_silent});
+    cancel_watch = &tls_silent;
+    defer cancel_watch = null;
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/artifact", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    // A budget far past the point of the test: only the cancel can end this.
+    http.head_timeout_ns = 60 * std.time.ns_per_s;
+    http.cancel = &cancelledOnceAccepted;
+    // A budget the retry loop could spend if it read the cancel as a blip.
+    http.retry_backoff_ms = &.{ 0, 0, 0 };
+
+    const result = http.headResolved(url);
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.Canceled, result);
+    try std.testing.expectEqual(@as(usize, 1), tls_silent.accepts.load(.acquire));
+}
+
+test "an unframed redirect is released without draining until the peer closes" {
+    // The 3xx body is never read and the stdlib release drains it; with no
+    // framing headers that drain ends only when the peer closes, and no
+    // watchdog runs across a redirect hop.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l2 = try bindIp4(io);
+    defer l2.deinit(io);
+    const p2 = l2.socket.address.getPort();
+    var hop2 = Hop{ .io = io, .listener = &l2 };
+    const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var peer = UnframedRedirectPeer{ .io = io, .listener = &l1, .location = loc };
+    const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{};
+
+    const started_ms = test_io.elapsedMillis(io);
+    const result = http.get(url);
+    const elapsed_ms = test_io.elapsedMillis(io) - started_ms;
+    http.deinit();
+    t1.join();
+    t2.join();
+
+    var resp = try result;
+    defer resp.deinit();
+    try std.testing.expectEqualStrings(blob_body, resp.body);
+    try std.testing.expect(elapsed_ms < drain_budget_ms);
+}
+
+test "a streamed walk releases an unframed redirect without draining it" {
+    // `followGetToWriter` releases its hops on its own code path.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l2 = try bindIp4(io);
+    defer l2.deinit(io);
+    const p2 = l2.socket.address.getPort();
+    var hop2 = Hop{ .io = io, .listener = &l2 };
+    const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/bottle", .{p2});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var peer = UnframedRedirectPeer{ .io = io, .listener = &l1, .location = loc };
+    const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{};
+
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+
+    const started_ms = test_io.elapsedMillis(io);
+    const result = http.getToWriter(url, &.{}, &sink.writer, null);
+    const elapsed_ms = test_io.elapsedMillis(io) - started_ms;
+    http.deinit();
+    t1.join();
+    t2.join();
+
+    try std.testing.expectEqual(@as(u16, 200), try result);
+    try std.testing.expectEqualStrings(blob_body, sink.written());
+    try std.testing.expect(elapsed_ms < drain_budget_ms);
+}
+
+test "the version probe's budget spends one attempt on a peer that keeps failing" {
+    // The behavioural half of the probe's contract, over plaintext so it runs
+    // on every unit-test pass rather than only when the https fixture is up.
+    // Asserting the field alone would still pass if the retry loop stopped
+    // reading it - the attempt count is what the user actually waits through.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    // 503 is transient, so the stock schedule would re-dial three more times.
+    var hop1 = Hop{ .io = io, .listener = &l1, .status = .service_unavailable };
+    const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, 4 });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/releases/latest", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    notifier.applyProbeBudget(&http);
+
+    const result = http.get(url);
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    if (result) |resp| {
+        var owned = resp;
+        owned.deinit();
+    } else |_| {}
+    try std.testing.expectEqual(@as(usize, 1), hop1.requests);
+}
+
+test "the stock client still retries a failing peer" {
+    // The no-retry budget is the notifier's choice, not a new client default.
+    // An install quietly losing its retries would be a worse regression than
+    // the latency the probe's budget fixes.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+
+    var hop1 = Hop{ .io = io, .listener = &l1, .status = .service_unavailable };
+    const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, 4 });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/artifact", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    // Zeroed delays: the count is the assertion, not the wall-clock.
+    http.retry_backoff_ms = &.{ 0, 0, 0 };
+
+    const result = http.get(url);
+    http.deinit();
+    knock(io, p1);
+    t1.join();
+
+    if (result) |resp| {
+        var owned = resp;
+        owned.deinit();
+    } else |_| {}
+    try std.testing.expectEqual(@as(usize, 4), hop1.requests);
+}
+
+test "a chunked redirect whose zero-chunk never arrives is still released" {
+    // Framing was the old reason to drain a redirect. It is not a guarantee:
+    // a peer that opens a chunked body and stops parks the drain exactly like
+    // an unframed one, so the hop is retired regardless of how it is framed.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l2 = try bindIp4(io);
+    defer l2.deinit(io);
+    const p2 = l2.socket.address.getPort();
+    var hop2 = Hop{ .io = io, .listener = &l2 };
+    const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var peer = UnframedRedirectPeer{ .io = io, .listener = &l1, .location = loc, .framing = .chunked };
+    const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{};
+    // Bounds the drain of a framed body the peer never finishes sending.
+    http.head_timeout_ns = stall_budget_ns;
+
+    const started_ms = test_io.elapsedMillis(io);
+    const result = http.get(url);
+    const elapsed_ms = test_io.elapsedMillis(io) - started_ms;
+    http.deinit();
+    t1.join();
+    t2.join();
+
+    var resp = try result;
+    defer resp.deinit();
+    try std.testing.expectEqualStrings(blob_body, resp.body);
+    try std.testing.expect(elapsed_ms < drain_budget_ms);
+}
+
+test "a redirect that declares a body it never sends is still released" {
+    // `Content-Length` was the strongest framing signal, and it is the easiest
+    // to lie about: the drain waits for bytes that never come.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l2 = try bindIp4(io);
+    defer l2.deinit(io);
+    const p2 = l2.socket.address.getPort();
+    var hop2 = Hop{ .io = io, .listener = &l2 };
+    const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/blob", .{p2});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var peer = UnframedRedirectPeer{ .io = io, .listener = &l1, .location = loc, .framing = .oversize_length };
+    const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{};
+    // Bounds the drain of a framed body the peer never finishes sending.
+    http.head_timeout_ns = stall_budget_ns;
+
+    const started_ms = test_io.elapsedMillis(io);
+    const result = http.get(url);
+    const elapsed_ms = test_io.elapsedMillis(io) - started_ms;
+    http.deinit();
+    t1.join();
+    t2.join();
+
+    var resp = try result;
+    defer resp.deinit();
+    try std.testing.expectEqualStrings(blob_body, resp.body);
+    try std.testing.expect(elapsed_ms < drain_budget_ms);
+}
+
+test "a redirect the walk refuses is released on the way out, not drained" {
+    // The unwind path had its own release. A malformed `Location`, an
+    // exhausted budget, or a refused https downgrade all land there, so a
+    // hostile peer could park the walk on the very error that rejected it.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var peer = UnframedRedirectPeer{ .io = io, .listener = &l1, .location = "", .omit_location = true };
+    const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{};
+    // Bounds the drain of a framed body the peer never finishes sending.
+    http.head_timeout_ns = stall_budget_ns;
+
+    const started_ms = test_io.elapsedMillis(io);
+    const result = http.get(url);
+    const elapsed_ms = test_io.elapsedMillis(io) - started_ms;
+    http.deinit();
+    t1.join();
+
+    try std.testing.expectError(error.HttpRedirectInvalid, result);
+    try std.testing.expect(elapsed_ms < drain_budget_ms);
 }
