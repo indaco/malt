@@ -98,6 +98,13 @@ pub fn buildFrom(
     var blocks: std.ArrayList([]const u8) = .empty;
     defer blocks.deinit(gpa);
 
+    // A wedged trust daemon answers "no" to everything, which would read as
+    // "no root is trusted" and write a bundle missing all of them. One "yes"
+    // proves the store is answering, and that holds whatever reason codes a
+    // given macOS version happens to use.
+    var consulted: usize = 0;
+    var trusted: usize = 0;
+
     for (sources) |source| {
         blocks.clearRetainingCapacity();
         var it: PemIter = .{ .src = source.pem };
@@ -128,10 +135,11 @@ pub fn buildFrom(
                     .not_ca => continue,
                     .ca => {},
                 }
+                consulted += 1;
                 switch (verifier.call(verifier.ctx, der_bytes, purpose)) {
                     .rejected => continue,
                     .undetermined => return error.TrustEvaluationFailed,
-                    .trusted => {},
+                    .trusted => trusted += 1,
                 }
             }
 
@@ -142,6 +150,8 @@ pub fn buildFrom(
             try out.append(gpa, '\n');
         }
     }
+    // Asked, and never once told yes: the store is not answering.
+    if (consulted > 0 and trusted == 0) return error.TrustEvaluationFailed;
     return out.toOwnedSlice(gpa);
 }
 
@@ -537,12 +547,6 @@ extern "c" fn SecTrustCreateWithCertificates(certs: ?*SecCertificate, policies: 
 extern "c" fn SecTrustSetOptions(trust: ?*SecTrust, options: usize) i32;
 extern "c" fn SecTrustSetNetworkFetchAllowed(trust: ?*SecTrust, allow: u8) i32;
 extern "c" fn SecTrustEvaluateWithError(trust: ?*SecTrust, err: *?*CFError) u8;
-extern "c" fn CFErrorGetCode(err: ?*CFError) isize;
-extern "c" fn CFErrorGetDomain(err: ?*CFError) ?*CFString;
-extern "c" fn CFEqual(a: ?*anyopaque, b: ?*anyopaque) u8;
-/// The domain the codes above are numbered in. A code from any other domain
-/// means something else entirely, however familiar the number looks.
-extern const kCFErrorDomainOSStatus: ?*CFString;
 
 /// `CFRelease` takes any CoreFoundation handle; binding it once and casting
 /// here keeps the distinct pointer types at every other call site. Null is
@@ -560,21 +564,6 @@ fn cfRelease(handle: anytype) void {
 /// leaf-must-not-be-a-CA rule any more, so this changes no verdict today -
 /// it is set to keep the two invocations aligned if that ever returns.
 const leaf_is_ca: usize = 0x02;
-
-/// Codes the trust store returns when it has actually judged a certificate and
-/// said no. Observed across every root on a real machine under both policies,
-/// then checked against `Security/SecBase.h` for what each one means.
-///
-/// Deliberately an allowlist, and only within the OSStatus error domain.
-/// Anything else — a wedged trust daemon, an unreachable keychain — is the
-/// question going unanswered, and reading that as "untrusted" would write a
-/// bundle missing roots. An unlisted genuine rejection only costs speed: the
-/// build aborts and the shipped script runs.
-const rejection_codes = [_]isize{
-    -67843, // errSecNotTrusted
-    -67901, // errSecCertificateValidityPeriodTooLong
-    -67609, // errSecInvalidExtendedKeyUsage
-};
 
 /// Evaluate `der_bytes` against the system trust store, mirroring
 /// `verify-cert -l -L -p <policy> -R offline`. Anything that stops the
@@ -604,21 +593,13 @@ fn evaluateTrust(der_bytes: []const u8, purpose: Purpose) Verdict {
     if (SecTrustSetNetworkFetchAllowed(trust, 0) != 0) return .undetermined;
 
     var err: ?*CFError = null;
-    if (SecTrustEvaluateWithError(trust, &err) != 0) {
-        if (err) |e| cfRelease(e);
-        return .trusted;
-    }
-    // A `false` with no error, or with any other code, means the evaluation
-    // did not reach a verdict — a wedged trust daemon would otherwise read as
-    // "every root is untrusted" and write a bundle missing all of them.
-    const e = err orelse return .undetermined;
-    defer cfRelease(e);
-    if (CFEqual(CFErrorGetDomain(e), kCFErrorDomainOSStatus) == 0) return .undetermined;
-    const code = CFErrorGetCode(e);
-    return if (std.mem.indexOfScalar(isize, &rejection_codes, code) != null)
-        .rejected
-    else
-        .undetermined;
+    const ok = SecTrustEvaluateWithError(trust, &err) != 0;
+    if (err) |e| cfRelease(e);
+    // The reason for a "no" is not classified here: the codes vary by macOS
+    // version and keychain contents, so an allowlist of them silently turns
+    // the whole build off on any machine outside the set it was measured on.
+    // `buildFrom` decides instead, from whether the store answered at all.
+    return if (ok) .trusted else .rejected;
 }
 
 /// Production verifier. Holds no state: the trust store is the system's.
@@ -998,15 +979,52 @@ test "a certificate past its notAfter is dropped without consulting trust" {
     try testing.expectEqualStrings("", out);
 }
 
+/// Trusts the first certificate it is asked about and rejects the rest, so a
+/// rejection can be tested while the store is demonstrably still answering.
+const TrustFirstOnly = struct {
+    calls: usize = 0,
+
+    fn call(ctx: ?*anyopaque, _: []const u8, _: Purpose) Verdict {
+        const self: *TrustFirstOnly = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+        return if (self.calls == 1) .trusted else .rejected;
+    }
+};
+
 test "a keychain certificate the trust store rejects is left out" {
+    var stub: TrustFirstOnly = .{};
     const out = try buildFrom(
+        testing.allocator,
+        &.{
+            .{ .pem = ca_pem, .purpose = .basic },
+            .{ .pem = ca_pem_rewrapped, .purpose = .basic },
+        },
+        .{ .ctx = &stub, .call = TrustFirstOnly.call },
+        now_valid,
+    );
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 2), stub.calls);
+    // The rejected one is dropped; the trusted one stays.
+    try testing.expectEqualStrings(ca_pem ++ "\n", out);
+}
+
+// The reason codes behind a "no" vary by macOS version and keychain, so they
+// cannot be enumerated. What can be relied on is that a store which has said
+// yes even once is answering — and one that never does is not.
+test "a store that never says yes aborts instead of emptying the bundle" {
+    try testing.expectError(error.TrustEvaluationFailed, buildFrom(
         testing.allocator,
         &.{.{ .pem = ca_pem, .purpose = .basic }},
         .{ .call = denyAll },
         now_valid,
-    );
+    ));
+}
+
+test "a source with nothing to ask about does not trip the health check" {
+    // No purpose means no trust evaluation, so there is no "yes" to expect.
+    const out = try buildFrom(testing.allocator, &.{.{ .pem = ca_pem }}, .{ .call = denyAll }, now_valid);
     defer testing.allocator.free(out);
-    try testing.expectEqualStrings("", out);
+    try testing.expectEqualStrings(ca_pem ++ "\n", out);
 }
 
 test "a non-CA keychain certificate is dropped before the trust evaluation" {

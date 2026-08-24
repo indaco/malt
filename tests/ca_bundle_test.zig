@@ -210,3 +210,127 @@ fn readWholeFile(io: std.Io, a: std.mem.Allocator, dir: std.Io.Dir, name: []cons
     }
     return list.items;
 }
+
+/// `security verify-cert` with the flags upstream's script uses. This is the
+/// tool the in-process evaluation replaces, so it is the oracle for it.
+fn verifyCertSaysTrusted(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    dir: []const u8,
+    pem: []const u8,
+    n: usize,
+    purpose: ca_bundle.Purpose,
+) !bool {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&buf, "{s}/t{d}.pem", .{ dir, n });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = pem });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    var report = try malt.child.run(io, gpa, &.{
+        "/usr/bin/security", "verify-cert", "-l", "-L",
+        "-c",                path,          "-p", @tagName(purpose),
+        "-R",                "offline",
+    });
+    defer report.deinit(gpa);
+    return report.code == 0;
+}
+
+// The trust decision moved from a `security verify-cert` child into
+// Security.framework. Same question, same daemon, no fork - but only a
+// verdict-for-verdict comparison against the tool proves it. Both outcomes
+// are represented: the machine's own roots are trusted, and the synthetic
+// fixtures (self-signed, in nobody's trust store) are not, so an
+// implementation that simply always agreed could not pass.
+test "in-process trust evaluation agrees with security verify-cert" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &dir_buf)];
+
+    var trusted: usize = 0;
+    var fixture_rejected: usize = 0;
+    var live_rejected: usize = 0;
+    var disagreements: usize = 0;
+    var n: usize = 0;
+
+    for ([_]ca_bundle.Purpose{ .basic, .ssl }) |purpose| {
+        // Both keychains the builder reads. The system one is where an admin
+        // or MDM adds trust overrides, which is where the tool and the
+        // framework are most likely to disagree.
+        for ([_][]const u8{ ca_bundle.root_keychain, ca_bundle.system_keychain }) |keychain| {
+            const pem = ca_bundle.dumpKeychain(io, testing.allocator, keychain) catch |e|
+                switch (e) {
+                    error.KeychainUnreadable => return error.SkipZigTest,
+                    else => return e,
+                };
+            defer testing.allocator.free(pem);
+
+            var it = ca_bundle.eachCertificate(pem);
+            while (it.next()) |block| {
+                n += 1;
+                const theirs = try verifyCertSaysTrusted(io, testing.allocator, dir, block, n, purpose);
+                const ours = ca_bundle.wouldTrust(block, purpose);
+                if ((ours == .trusted) != theirs) {
+                    disagreements += 1;
+                    std.debug.print(
+                        "{s} #{d} under {s}: malt says {s}, verify-cert says {}\n",
+                        .{ keychain, n, @tagName(purpose), @tagName(ours), theirs },
+                    );
+                }
+                if (theirs) trusted += 1 else live_rejected += 1;
+            }
+        }
+
+        // Certificates nobody trusts: the rejected side.
+        var fixtures = try std.Io.Dir.cwd().openDir(io, "tests/fixtures/ca_classify", .{ .iterate = true });
+        defer fixtures.close(io);
+        var fit = fixtures.iterate();
+        while (try fit.next(io)) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".pem")) continue;
+            n += 1;
+            const block = try readWholeFile(io, a, fixtures, entry.name);
+            const theirs = try verifyCertSaysTrusted(io, testing.allocator, dir, block, n, purpose);
+            const ours = ca_bundle.wouldTrust(block, purpose);
+            if ((ours == .trusted) != theirs) {
+                disagreements += 1;
+                std.debug.print(
+                    "{s} under {s}: malt says {s}, verify-cert says {}\n",
+                    .{ entry.name, @tagName(purpose), @tagName(ours), theirs },
+                );
+            }
+            if (theirs) trusted += 1 else fixture_rejected += 1;
+        }
+    }
+
+    try testing.expectEqual(@as(usize, 0), disagreements);
+    // Every outcome must be genuinely present, counted apart so neither
+    // source can stand in for the other: the machine's own roots supply the
+    // trusted and rejected verdicts, the fixtures supply rejections nobody
+    // could mistake for trust.
+    try testing.expect(trusted > 100);
+    try testing.expect(live_rejected > 10);
+    try testing.expect(fixture_rejected > 10);
+}
+
+// Input the trust store cannot be asked about at all must not read as a
+// rejection: one drops a certificate, the other is a question never answered.
+test "input that is not a certificate is undetermined, never rejected" {
+    const not_a_cert = "-----BEGIN CERTIFICATE-----\nQUJDREVGR0g=\n-----END CERTIFICATE-----\n";
+    try testing.expectEqual(ca_bundle.Verdict.undetermined, ca_bundle.wouldTrust(not_a_cert, .basic));
+
+    const empty_body = "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n";
+    try testing.expectEqual(ca_bundle.Verdict.undetermined, ca_bundle.wouldTrust(empty_body, .basic));
+    try testing.expectEqual(ca_bundle.Verdict.undetermined, ca_bundle.wouldTrust("", .ssl));
+
+    // A real certificate nobody trusts is a verdict, not a failure to ask.
+    const untrusted = @embedFile("fixtures/ca_classify/ca-plain.pem");
+    try testing.expectEqual(ca_bundle.Verdict.rejected, ca_bundle.wouldTrust(untrusted, .basic));
+}

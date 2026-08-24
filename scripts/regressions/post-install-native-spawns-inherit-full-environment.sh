@@ -27,7 +27,7 @@ STUBS=$(mktemp -d)
 # The harness imports the executor via a repo-relative path, so it must sit at
 # the repo root: the module's sibling imports (`dsl/sandbox.zig`,
 # `../fs/atomic.zig`) only resolve from inside the source tree.
-HARNESS="$ROOT/.post-install-env-scrub-regression.zig"
+HARNESS="$ROOT/.post-install-env-scrub-regression.$$.zig"
 trap 'rm -rf "$STUBS" "$HARNESS"' EXIT
 
 # The executor's module graph reaches the clonefile/statfs bindings that
@@ -131,7 +131,9 @@ test "a run step's child cannot see malt's own environment" {
 ZIG
 
 run_harness() {
-  (cd "$ROOT" && zig test -lc \
+  # ca_bundle.zig evaluates trust in-process; the module graph needs the
+  # same frameworks build.zig links.
+  (cd "$ROOT" && zig test -lc -framework Security -framework CoreFoundation \
     --dep c_clonefile --dep c_mount \
     -Mroot="$HARNESS" \
     -Mc_clonefile="$STUBS/c_clonefile.zig" \

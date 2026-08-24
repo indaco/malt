@@ -1678,12 +1678,15 @@ fn buildCaBundle(ctx: StepsCtx, argv: []const []const u8) !void {
     // own linker points `{prefix}/share/<name>` entries into the keg, and the
     // real source is one of them. Resolve first, then confine where it landed.
     try sandbox.validatePath(argv[1], ctx.keg_path, ctx.prefix);
-    try sandbox.validateResolvedPath(ctx.io, argv[1], ctx.keg_path, ctx.prefix);
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    // Read the resolved path, not the one handed in: opening the link again
+    // would follow whatever it points at now, not what was just confined.
+    const source_path = try sandbox.resolveConfined(ctx.io, &real_buf, argv[1], ctx.keg_path, ctx.prefix);
 
     // Cap generously but refuse a truncated read: a short source silently
     // drops trusted roots. Upstream's bundle is a few hundred KB.
     const max_source = 8 * 1024 * 1024;
-    const source = try fs_read.readFileAllAbsolute(ctx.io, ctx.allocator, argv[1], max_source);
+    const source = try fs_read.readFileAllAbsolute(ctx.io, ctx.allocator, source_path, max_source);
     if (source.len == max_source) return error.SourceTruncated;
 
     const now: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(ctx.io, .real).nanoseconds, std.time.ns_per_s));

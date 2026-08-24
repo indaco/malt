@@ -175,27 +175,33 @@ pub fn validateWriteDir(
     try resolvedDirWithinBoundary(io, std.fs.path.dirname(target_path), cellar_path, malt_prefix);
 }
 
-/// Confine a path that may legitimately be a symlink. `validatePath` is
-/// lexical and `openSourceNoFollow` refuses links outright — neither fits a
-/// read whose target malt's own linker points into the keg. Resolve the path
-/// and judge where it landed, against a boundary resolved the same way
-/// (macOS `/tmp` is itself a symlink, so both sides must be canonical).
-pub fn validateResolvedPath(
+/// Resolve a path that may legitimately be a symlink and confine where it
+/// lands. `validatePath` is lexical and `openSourceNoFollow` refuses links
+/// outright — neither fits a read whose target malt's own linker points into
+/// the keg. The boundary is resolved too: macOS `/tmp` is itself a symlink,
+/// so both sides must be canonical to compare.
+///
+/// Returns the resolved path rather than just approving the original, so the
+/// caller acts on what was actually checked. Handing back a verdict alone
+/// would leave the caller re-opening a link that can change in between.
+pub fn resolveConfined(
     io: std.Io,
+    buf: []u8,
     target_path: []const u8,
     cellar_path: []const u8,
     malt_prefix: []const u8,
-) SandboxError!void {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = std.Io.Dir.cwd().realPathFile(io, target_path, &buf) catch
+) SandboxError![]const u8 {
+    const n = std.Io.Dir.cwd().realPathFile(io, target_path, buf) catch
         return SandboxError.PathSandboxViolation;
     const real = buf[0..n];
+    // realpath already collapses `..`, so this cannot currently fire; it
+    // mirrors `resolvedDirWithinBoundary` so both agree if that ever changes.
     if (containsDotDot(real)) return SandboxError.PathSandboxViolation;
 
     var cbuf: [std.fs.max_path_bytes]u8 = undefined;
     var xbuf: [std.fs.max_path_bytes]u8 = undefined;
-    if (pathHasPrefix(real, realPathOr(io, cellar_path, &cbuf, cellar_path))) return;
-    if (pathHasPrefix(real, realPathOr(io, malt_prefix, &xbuf, malt_prefix))) return;
+    if (pathHasPrefix(real, realPathOr(io, cellar_path, &cbuf, cellar_path))) return real;
+    if (pathHasPrefix(real, realPathOr(io, malt_prefix, &xbuf, malt_prefix))) return real;
     return SandboxError.PathSandboxViolation;
 }
 
@@ -512,4 +518,161 @@ pub fn pathHasPrefix(path: []const u8, prefix: []const u8) bool {
     // Next char in path must be the separator; otherwise it's a substring,
     // not a path-component prefix.
     return path[prefix.len] == '/';
+}
+
+// --- resolveConfined -------------------------------------------------------
+//
+// The read side of the CA-bundle substitution leans on this: the source is a
+// symlink malt's own linker planted, so links must be followed, and following
+// them is exactly how a hostile formula would reach outside the keg.
+
+/// Prefix/keg pair plus a file and the links used to probe the boundary.
+const ConfineFixture = struct {
+    scratch: Scratch,
+    prefix: [:0]const u8,
+    keg: [:0]const u8,
+
+    fn init() !ConfineFixture {
+        var s = try Scratch.init("confine");
+        errdefer s.deinit();
+        const prefix = s.p("/prefix");
+        const keg = s.p("/prefix/Cellar/pkg/1.0");
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, keg);
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/prefix/share"));
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/outside"));
+        try writeEmpty(s.p("/prefix/Cellar/pkg/1.0/real.pem"));
+        try writeEmpty(s.p("/outside/secret.pem"));
+        return .{ .scratch = s, .prefix = prefix, .keg = keg };
+    }
+
+    fn deinit(self: *ConfineFixture) void {
+        self.scratch.deinit();
+    }
+
+    fn confine(self: *ConfineFixture, path: []const u8, buf: []u8) SandboxError![]const u8 {
+        return resolveConfined(fs_test_io, buf, path, self.keg, self.prefix);
+    }
+};
+
+fn writeEmpty(path: []const u8) !void {
+    const f = try std.Io.Dir.createFileAbsolute(fs_test_io, path, .{});
+    f.close(fs_test_io);
+}
+
+test "a real file inside the keg resolves and is allowed" {
+    var fx = try ConfineFixture.init();
+    defer fx.deinit();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const got = try fx.confine(fx.scratch.p("/prefix/Cellar/pkg/1.0/real.pem"), &buf);
+    try std.testing.expectEqualStrings(fx.scratch.p("/prefix/Cellar/pkg/1.0/real.pem"), got);
+}
+
+test "a symlink into the keg is followed, and the target's path comes back" {
+    var fx = try ConfineFixture.init();
+    defer fx.deinit();
+    // This is malt's own layout: the linker points share/ at the keg.
+    const link = fx.scratch.p("/prefix/share/cacert.pem");
+    try std.Io.Dir.symLinkAbsolute(fs_test_io, fx.scratch.p("/prefix/Cellar/pkg/1.0/real.pem"), link, .{});
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const got = try fx.confine(link, &buf);
+    // The resolved target, not the link handed in - the caller reads this.
+    try std.testing.expectEqualStrings(fx.scratch.p("/prefix/Cellar/pkg/1.0/real.pem"), got);
+    try std.testing.expect(!std.mem.eql(u8, link, got));
+}
+
+test "a symlink inside the keg pointing outside it is refused" {
+    var fx = try ConfineFixture.init();
+    defer fx.deinit();
+    const link = fx.scratch.p("/prefix/Cellar/pkg/1.0/smuggled.pem");
+    try std.Io.Dir.symLinkAbsolute(fs_test_io, fx.scratch.p("/outside/secret.pem"), link, .{});
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectError(SandboxError.PathSandboxViolation, fx.confine(link, &buf));
+}
+
+test "a chain of symlinks is followed to its end, and judged there" {
+    var fx = try ConfineFixture.init();
+    defer fx.deinit();
+    const mid = fx.scratch.p("/prefix/share/mid.pem");
+    const outer = fx.scratch.p("/prefix/share/outer.pem");
+    try std.Io.Dir.symLinkAbsolute(fs_test_io, fx.scratch.p("/outside/secret.pem"), mid, .{});
+    try std.Io.Dir.symLinkAbsolute(fs_test_io, mid, outer, .{});
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    // Only the last hop leaves the boundary; a one-level check would miss it.
+    try std.testing.expectError(SandboxError.PathSandboxViolation, fx.confine(outer, &buf));
+}
+
+test "a path outside the boundary is refused even with no symlink involved" {
+    var fx = try ConfineFixture.init();
+    defer fx.deinit();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectError(
+        SandboxError.PathSandboxViolation,
+        fx.confine(fx.scratch.p("/outside/secret.pem"), &buf),
+    );
+}
+
+test "dot-dot that climbs out is refused; dot-dot that stays inside is not" {
+    var fx = try ConfineFixture.init();
+    defer fx.deinit();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    try std.testing.expectError(
+        SandboxError.PathSandboxViolation,
+        fx.confine(fx.scratch.p("/prefix/Cellar/pkg/1.0/../../../../outside/secret.pem"), &buf),
+    );
+    // Resolution collapses the climb, so a path that never leaves is fine.
+    const got = try fx.confine(fx.scratch.p("/prefix/Cellar/pkg/1.0/../1.0/real.pem"), &buf);
+    try std.testing.expectEqualStrings(fx.scratch.p("/prefix/Cellar/pkg/1.0/real.pem"), got);
+}
+
+test "a sibling directory sharing the prefix's name is not inside it" {
+    var fx = try ConfineFixture.init();
+    defer fx.deinit();
+    // `/prefix-evil` starts with `/prefix` as a string but is a different tree.
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, fx.scratch.p("/prefix-evil"));
+    try writeEmpty(fx.scratch.p("/prefix-evil/secret.pem"));
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectError(
+        SandboxError.PathSandboxViolation,
+        fx.confine(fx.scratch.p("/prefix-evil/secret.pem"), &buf),
+    );
+}
+
+test "a boundary reached through a symlink still contains the file" {
+    var fx = try ConfineFixture.init();
+    defer fx.deinit();
+    // The boundary handed in is a link to the real prefix. macOS does this to
+    // every path under /tmp, and comparing the two literally is what once made
+    // the builder refuse its own source.
+    const prefix_link = fx.scratch.p("/prefix-via-link");
+    try std.Io.Dir.symLinkAbsolute(fs_test_io, fx.prefix, prefix_link, .{});
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    // An unrelated keg, so only the prefix branch can accept this.
+    const got = try resolveConfined(
+        fs_test_io,
+        &buf,
+        fx.scratch.p("/prefix/Cellar/pkg/1.0/real.pem"),
+        fx.scratch.p("/prefix/Cellar/other/9.9"),
+        prefix_link,
+    );
+    try std.testing.expectEqualStrings(fx.scratch.p("/prefix/Cellar/pkg/1.0/real.pem"), got);
+}
+
+test "a path that does not exist is refused rather than assumed safe" {
+    var fx = try ConfineFixture.init();
+    defer fx.deinit();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectError(
+        SandboxError.PathSandboxViolation,
+        fx.confine(fx.scratch.p("/prefix/Cellar/pkg/1.0/missing.pem"), &buf),
+    );
+    // A dangling link resolves to nothing, which is the same answer.
+    const dangling = fx.scratch.p("/prefix/share/dangling.pem");
+    try std.Io.Dir.symLinkAbsolute(fs_test_io, fx.scratch.p("/prefix/nowhere.pem"), dangling, .{});
+    try std.testing.expectError(SandboxError.PathSandboxViolation, fx.confine(dangling, &buf));
 }
