@@ -79,6 +79,7 @@ comptime {
     _ = @import("install_parse_cache_test.zig");
     _ = @import("install_pool_test.zig");
     _ = @import("install_pure_test.zig");
+    _ = @import("ca_bundle_test.zig");
     _ = @import("install_sink_test.zig");
     _ = @import("install_test.zig");
     _ = @import("install_warm_path_test.zig");
