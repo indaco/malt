@@ -159,7 +159,20 @@ const default_sync_ops: DefaultSyncOps = .{};
 /// arbitrary user-supplied path that may need parents created, use
 /// `fs/path_write.zig` instead (non-atomic).
 pub fn atomicWriteFile(io: std.Io, dst_path: []const u8, data: []const u8) !void {
-    return atomicWriteFileImpl(io, dst_path, data, default_sync_ops, .default_file);
+    return atomicWriteFileImpl(io, dst_path, data, default_sync_ops, .default_file, .umask);
+}
+
+/// Atomic write that publishes `data` under an explicit mode, for content
+/// whose permissions are part of its contract rather than inherited from
+/// whatever was there before or from the caller's umask. Set at create time
+/// so the rename stays the only observable transition.
+pub fn atomicWriteFileMode(
+    io: std.Io,
+    dst_path: []const u8,
+    data: []const u8,
+    permissions: std.Io.File.Permissions,
+) !void {
+    return atomicWriteFileImpl(io, dst_path, data, default_sync_ops, permissions, .exact);
 }
 
 /// Atomic write that publishes `data` under the existing file's
@@ -177,7 +190,7 @@ pub fn atomicReplaceFile(io: std.Io, dst_path: []const u8, data: []const u8) !vo
         const s = existing.stat(io) catch break :blk .default_file;
         break :blk s.permissions;
     };
-    return atomicWriteFileImpl(io, dst_path, data, default_sync_ops, perms);
+    return atomicWriteFileImpl(io, dst_path, data, default_sync_ops, perms, .umask);
 }
 
 fn atomicWriteFileImpl(
@@ -186,6 +199,11 @@ fn atomicWriteFileImpl(
     data: []const u8,
     sync_ops: anytype,
     permissions: std.Io.File.Permissions,
+    /// `open(2)` masks the requested mode with the caller's umask. `.exact`
+    /// chmods it back before the rename publishes the file, for content whose
+    /// permissions are a contract; `.umask` keeps the platform behaviour every
+    /// other caller expects.
+    mode_policy: enum { umask, exact },
 ) !void {
     var rand_bytes: [4]u8 = undefined;
     std.c.arc4random_buf(&rand_bytes, rand_bytes.len);
@@ -203,6 +221,7 @@ fn atomicWriteFileImpl(
         defer f.close(io);
         // Drop the tempfile on any failure before rename publishes it.
         errdefer std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
+        if (mode_policy == .exact) try f.setPermissions(io, permissions);
         try f.writeStreamingAll(io, data);
         // fsync before close so the bytes are durable BEFORE rename publishes them.
         try sync_ops.syncFile(io, f);
@@ -344,13 +363,50 @@ const TestSyncOps = struct {
     }
 };
 
+test "an exact-mode atomic write survives a restrictive umask" {
+    var s = try Scratch.init("atomic_mode");
+    defer s.deinit();
+    const io = std.Options.debug_io;
+
+    // open(2) masks the requested mode; content whose permissions are a
+    // contract must land on the right bits anyway.
+    const prev = std.c.umask(0o077);
+    defer _ = std.c.umask(prev);
+
+    const path = s.p("/bundle.pem");
+    try atomicWriteFileMode(io, path, "data", @enumFromInt(0o644));
+
+    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    const st = try f.stat(io);
+    try std.testing.expectEqual(@as(u32, 0o644), @intFromEnum(st.permissions) & 0o777);
+}
+
+test "a default-mode atomic write still honours the umask" {
+    var s = try Scratch.init("atomic_umask");
+    defer s.deinit();
+    const io = std.Options.debug_io;
+
+    const prev = std.c.umask(0o077);
+    defer _ = std.c.umask(prev);
+
+    const path = s.p("/plain.bin");
+    try atomicWriteFile(io, path, "data");
+
+    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    const st = try f.stat(io);
+    // Widening this for every caller would be a security change, not a fix.
+    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(st.permissions) & 0o077);
+}
+
 test "atomicWriteFileImpl fsyncs the tempfile via the injected sync ops" {
     const io = std.Options.debug_io;
     var s = try Scratch.init("atomic_inline_sync_file");
     defer s.deinit();
 
     test_sync_counters = .{};
-    try atomicWriteFileImpl(io, s.p("/data.bin"), "abc", TestSyncOps{}, .default_file);
+    try atomicWriteFileImpl(io, s.p("/data.bin"), "abc", TestSyncOps{}, .default_file, .umask);
     try std.testing.expectEqual(@as(usize, 1), test_sync_counters.file);
 }
 
@@ -360,7 +416,7 @@ test "atomicWriteFileImpl fsyncs the parent directory via the injected sync ops"
     defer s.deinit();
 
     test_sync_counters = .{};
-    try atomicWriteFileImpl(io, s.p("/data.bin"), "abc", TestSyncOps{}, .default_file);
+    try atomicWriteFileImpl(io, s.p("/data.bin"), "abc", TestSyncOps{}, .default_file, .umask);
     try std.testing.expectEqual(@as(usize, 1), test_sync_counters.dir);
 }
 
@@ -373,7 +429,7 @@ test "atomicWriteFileImpl propagates syncFile errors and removes the tempfile" {
     const dst = s.p("/data.bin");
     try std.testing.expectError(
         error.AccessDenied,
-        atomicWriteFileImpl(io, dst, "abc", TestSyncOps{ .fail_file = true }, .default_file),
+        atomicWriteFileImpl(io, dst, "abc", TestSyncOps{ .fail_file = true }, .default_file, .umask),
     );
 
     // dst was never renamed in; tempfiles must not accumulate either.
@@ -392,7 +448,7 @@ test "atomicWriteFileImpl propagates syncDir errors but leaves the renamed file 
     const dst = s.p("/data.bin");
     try std.testing.expectError(
         error.AccessDenied,
-        atomicWriteFileImpl(io, dst, "abc", TestSyncOps{ .fail_dir = true }, .default_file),
+        atomicWriteFileImpl(io, dst, "abc", TestSyncOps{ .fail_dir = true }, .default_file, .umask),
     );
 
     // syncDir runs after rename, so dst_path must hold the durable bytes.
