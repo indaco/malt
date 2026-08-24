@@ -49,12 +49,40 @@ test: regressions-static
 # Loopback-only regression guards: no network, no GitHub API, no rate limit,
 # so they are safe to gate every PR on. The full pool (`just regressions`)
 # needs a token and live installs, which is why it stays manual.
+#
+# These are deadline tests - they spend most of their time waiting on purpose,
+# about 22 minutes on a CI runner. Keep that in mind before adding to them.
 [group('test')]
 regressions-hermetic:
     @./scripts/regressions/head-read-deadline-response-head-reads-have-no-deadline.sh
     @./scripts/regressions/no-deadline-on-connect-tls-response-head.sh
     @./scripts/regressions/redirect-response-released-with-draining-deinit.sh
     @./scripts/regressions/notifier-probe-unbounded-by-client-retry-backoff.sh
+
+# Guards that build a standalone `zig test` harness. Those duplicate build.zig's
+# module wiring by hand, so they stop compiling when it changes - and a guard
+# that no longer compiles is a guard that no longer guards, which is how the
+# progress-counter one sat broken unnoticed. Compile-bound rather than
+# deadline-bound, so they run as their own job instead of lengthening the
+# slowest one.
+[group('test')]
+regressions-harness:
+    @./scripts/regressions/cached-outdated-drops-revision-bumped-packages.sh
+    @./scripts/regressions/child-run-sequential-pipe-drain-deadlock.sh
+    @./scripts/regressions/cosign-guard-fails-open-and-spawn-not-pinned.sh
+    @./scripts/regressions/csi-whitelist-ignores-private-parameter-bytes.sh
+    @./scripts/regressions/dsl-chmod-mode-cast-panic-large-literal.sh
+    @./scripts/regressions/frame-putcontent-passes-lone-c1-bytes.sh
+    @./scripts/regressions/post-install-run-step-gh804.sh
+    @./scripts/regressions/progress-shared-counters-atomic-progressbar-update-lock-free-data-race.sh
+    @./scripts/regressions/scaled-timeout-clamp-scaled-timeout-overflow-on-content-length.sh
+    @./scripts/regressions/term-sanitize-anti-injection-guarantee.sh
+    @./scripts/regressions/tui-startup-outdated-network-freeze.sh
+    @./scripts/regressions/tui-wrap-rune-boundary-tui-text-wrap-splits-utf8-sequence.sh
+    @./scripts/regressions/tui_tab_chrome_separator_and_headings.sh
+    @./scripts/regressions/unbounded-relative-cursor-motion-enables-spoofing.sh
+    @./scripts/regressions/upgrade-prunes-outdated-snapshot-upgrade-does-not-update-outdated-json.sh
+    @./scripts/regressions/utf8-lead-byte-smuggles-c1-introducer.sh
 
 # Run the full regression pool (token + built binary + per-script timeout).
 # Pass script names to run a subset; MALT_REGRESSION_TIMEOUT overrides the cap.

@@ -22,7 +22,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 
 # The harness imports the sanitizer via a repo-relative path, so it must sit at
 # the repo root for the source tree's module boundary to resolve.
-HARNESS="$ROOT/.term-sanitize-anti-injection-regression.zig"
+HARNESS="$ROOT/.term-sanitize-anti-injection-regression.$$.zig"
 trap 'rm -f "$HARNESS"' EXIT
 
 cat >"$HARNESS" <<'ZIG'

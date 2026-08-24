@@ -21,7 +21,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # The harness imports the builtin via a repo-relative path, so it must sit at the
 # repo root: the builtin's sibling imports (`../values.zig`, `../sandbox.zig`)
 # only resolve from inside the source tree's module boundary.
-HARNESS="$ROOT/.chmod-mode-cast-regression.zig"
+HARNESS="$ROOT/.chmod-mode-cast-regression.$$.zig"
 trap 'rm -f "$HARNESS"' EXIT
 
 cat >"$HARNESS" <<'ZIG'
