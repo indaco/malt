@@ -1649,34 +1649,57 @@ fn nativeCaBundle(ctx: StepsCtx, argv: []const []const u8, cmd: []const u8) ?voi
     if (argv.len != 3) return null;
     if (!ca_bundle.isKnownScript(ctx.io, cmd)) return null;
 
+    buildCaBundle(ctx, argv) catch |err| {
+        // The script was recognised but the work could not be done, so the
+        // shipped script runs instead - correct, seconds slower. Say so:
+        // silence here is how a lost fast path, or a trust store that stopped
+        // answering, goes unnoticed on a user's machine.
+        // Name the reason: a code that recurs on every install is a systemic
+        // problem, and a bare "declined" cannot be told apart from a one-off.
+        ctx.flog.note(std.fmt.allocPrint(
+            ctx.allocator,
+            "ca-certificates: native trust-store build declined ({s}), running the shipped script",
+            .{@errorName(err)},
+        ) catch "ca-certificates: native trust-store build declined, running the shipped script");
+        return null;
+    };
+    return {};
+}
+
+fn buildCaBundle(ctx: StepsCtx, argv: []const []const u8) !void {
     // Recognising the script's bytes says nothing about its arguments, and any
     // formula can name this script. Running in-process skips the sandbox that
     // confined the spawned one, so the read and the write are confined here
     // instead — declining hands the step back to the fenced spawn.
-    sandbox.validatePath(argv[1], ctx.keg_path, ctx.prefix) catch return null;
-    sandbox.validatePath(argv[2], ctx.keg_path, ctx.prefix) catch return null;
+    try sandbox.validatePath(argv[2], ctx.keg_path, ctx.prefix);
+
+    // A lexical prefix check would let a link planted inside the keg read
+    // whatever it points at, but refusing links outright is wrong too: malt's
+    // own linker points `{prefix}/share/<name>` entries into the keg, and the
+    // real source is one of them. Resolve first, then confine where it landed.
+    try sandbox.validatePath(argv[1], ctx.keg_path, ctx.prefix);
+    try sandbox.validateResolvedPath(ctx.io, argv[1], ctx.keg_path, ctx.prefix);
 
     // Cap generously but refuse a truncated read: a short source silently
     // drops trusted roots. Upstream's bundle is a few hundred KB.
     const max_source = 8 * 1024 * 1024;
-    const source = fs_read.readFileAllAbsolute(ctx.io, ctx.allocator, argv[1], max_source) catch return null;
-    if (source.len == max_source) return null;
+    const source = try fs_read.readFileAllAbsolute(ctx.io, ctx.allocator, argv[1], max_source);
+    if (source.len == max_source) return error.SourceTruncated;
 
     const now: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(ctx.io, .real).nanoseconds, std.time.ns_per_s));
-    const bundle = ca_bundle.build(ctx.io, ctx.allocator, source, now, .{
+    const bundle = try ca_bundle.build(ctx.io, ctx.allocator, source, now, .{
         .keg_path = ctx.keg_path,
         .prefix = ctx.prefix,
-    }) catch return null;
+    });
 
-    const dir = std.fs.path.dirname(argv[2]) orelse return null;
-    std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch return null;
+    const dir = std.fs.path.dirname(argv[2]) orelse return error.NoParentDirectory;
+    try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
     // Re-check with the parent resolved: a symlinked destination directory is
     // the escape a path-prefix test alone cannot see.
-    sandbox.validateWriteDir(ctx.io, argv[2], ctx.keg_path, ctx.prefix) catch return null;
+    try sandbox.validateWriteDir(ctx.io, argv[2], ctx.keg_path, ctx.prefix);
     // 0644 explicitly: the script chmods it, and a restrictive umask would
     // otherwise leave the trust store unreadable to every other user.
-    atomic.atomicWriteFileMode(ctx.io, argv[2], bundle, @enumFromInt(0o644)) catch return null;
-    return {};
+    try atomic.atomicWriteFileMode(ctx.io, argv[2], bundle, @enumFromInt(0o644));
 }
 
 // --- data-dir initialisers ---------------------------------------------------

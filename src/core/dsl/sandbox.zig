@@ -175,6 +175,30 @@ pub fn validateWriteDir(
     try resolvedDirWithinBoundary(io, std.fs.path.dirname(target_path), cellar_path, malt_prefix);
 }
 
+/// Confine a path that may legitimately be a symlink. `validatePath` is
+/// lexical and `openSourceNoFollow` refuses links outright — neither fits a
+/// read whose target malt's own linker points into the keg. Resolve the path
+/// and judge where it landed, against a boundary resolved the same way
+/// (macOS `/tmp` is itself a symlink, so both sides must be canonical).
+pub fn validateResolvedPath(
+    io: std.Io,
+    target_path: []const u8,
+    cellar_path: []const u8,
+    malt_prefix: []const u8,
+) SandboxError!void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.Io.Dir.cwd().realPathFile(io, target_path, &buf) catch
+        return SandboxError.PathSandboxViolation;
+    const real = buf[0..n];
+    if (containsDotDot(real)) return SandboxError.PathSandboxViolation;
+
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var xbuf: [std.fs.max_path_bytes]u8 = undefined;
+    if (pathHasPrefix(real, realPathOr(io, cellar_path, &cbuf, cellar_path))) return;
+    if (pathHasPrefix(real, realPathOr(io, malt_prefix, &xbuf, malt_prefix))) return;
+    return SandboxError.PathSandboxViolation;
+}
+
 /// Validate a *directory* that will be written into (cp / cp_r dest). Unlike
 /// `validateWriteDir`, the directory itself is resolved: when copying into `D`, a
 /// symlinked `D` pointing out of the keg is the escape, not a safe replace

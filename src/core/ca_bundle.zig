@@ -1,26 +1,23 @@
 //! malt — native build of the merged CA trust bundle.
 //!
-//! `ca-certificates` ships a `post-install` script that merges the live
-//! macOS keychains with the Mozilla roots it carries. It is correct, and it
-//! forks `openssl` and `security` once per certificate — roughly 800
-//! processes, ~5 s — which lands on every cold install whose closure reaches
-//! `openssl@3`. Everything but the trust evaluation is certificate parsing
-//! and hashing that `std.crypto` does in-process in milliseconds.
+//! `ca-certificates` ships a `post-install` script that merges the live macOS
+//! keychains with the Mozilla roots it carries. It is correct, and it forks
+//! `openssl` and `security` once per certificate — roughly 800 processes,
+//! several seconds on every cold install whose closure reaches `openssl@3`.
+//! The same work is `std.crypto` parsing plus one Security.framework call per
+//! certificate, all in-process.
 //!
-//! This builds the same bundle natively. The contract is the trusted set:
+//! The contract is the trusted *set*, not the bytes:
 //! `scripts/regressions/native-ca-bundle-matches-upstream.sh` runs the real
-//! script on the real machine and fails if the two disagree about which
-//! certificates to trust. Anything this builder cannot classify with
-//! certainty aborts it, so the script runs rather than a subtly-wrong trust
-//! store being written, and substitution only happens for a script whose
-//! bytes it recognises.
+//! script on the real machine and fails if the two disagree about what to
+//! trust. Byte layout cannot be part of it — macOS ships LibreSSL, whose
+//! `-checkend` misreads a GeneralizedTime validity, so the script drops such a
+//! certificate from the keychain pass and recovers it from the Mozilla bundle
+//! lower down. Same set, different order.
 //!
-//! Byte layout is not part of the contract, and cannot be: macOS ships
-//! LibreSSL as `/usr/bin/openssl`, whose `-checkend` misreads a validity
-//! encoded as GeneralizedTime. The script therefore drops such a certificate
-//! from the keychain pass and recovers it from the Mozilla bundle further
-//! down. The set is unchanged; the ordering is not. malt reads the date
-//! correctly rather than reproducing that.
+//! Substitution only happens for a script whose bytes this recognises, and
+//! anything it cannot decide aborts the whole attempt, so the shipped script
+//! runs rather than a subtly-wrong trust store being written.
 
 const std = @import("std");
 
@@ -29,7 +26,6 @@ const der = Certificate.der;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const child = @import("child.zig");
-const atomic = @import("../fs/atomic.zig");
 const sandbox = @import("dsl/sandbox.zig");
 
 pub const BuildError = error{
@@ -79,10 +75,10 @@ pub const Fence = struct {
 pub const Verdict = enum { trusted, rejected, undetermined };
 
 /// Injected so unit tests can drive classification without the machine's
-/// real trust store. Production wiring forks `security verify-cert`.
+/// real trust store. Production asks Security.framework in-process.
 pub const Verifier = struct {
     ctx: ?*anyopaque = null,
-    call: *const fn (ctx: ?*anyopaque, pem: []const u8, purpose: Purpose) Verdict,
+    call: *const fn (ctx: ?*anyopaque, der_bytes: []const u8, purpose: Purpose) Verdict,
 };
 
 const Fingerprint = [Sha256.digest_length]u8;
@@ -132,7 +128,7 @@ pub fn buildFrom(
                     .not_ca => continue,
                     .ca => {},
                 }
-                switch (verifier.call(verifier.ctx, block, purpose)) {
+                switch (verifier.call(verifier.ctx, der_bytes, purpose)) {
                     .rejected => continue,
                     .undetermined => return error.TrustEvaluationFailed,
                     .trusted => {},
@@ -166,6 +162,14 @@ pub fn wouldTrustAsCa(pem_block: []const u8) BuildError!bool {
     return (try classify(cert)) == .ca;
 }
 
+/// The trust verdict this builder would reach for one PEM block. Public so
+/// the equivalence test can hold it against `security verify-cert`.
+pub fn wouldTrust(pem_block: []const u8, purpose: Purpose) Verdict {
+    var buf: [max_der_bytes]u8 = undefined;
+    const der_bytes = derFromPem(&buf, pem_block) catch return .undetermined;
+    return evaluateTrust(der_bytes, purpose);
+}
+
 /// Split `pem` into its certificate blocks. Public for the same reason.
 pub fn eachCertificate(pem: []const u8) PemIter {
     return .{ .src = pem };
@@ -193,17 +197,11 @@ pub fn build(
     const roots = try readKeychain(io, gpa, root_keychain, fence);
     defer gpa.free(roots);
 
-    const dir = atomic.createTempDir(io, gpa, "ca-verify") catch return error.KeychainUnreadable;
-    defer {
-        atomic.cleanupTempDir(io, dir);
-        gpa.free(dir);
-    }
-    var fork_verifier: ForkVerifier = .{ .io = io, .gpa = gpa, .dir = dir, .fence = fence };
     return buildFrom(gpa, &.{
         .{ .pem = system, .purpose = .ssl },
         .{ .pem = roots, .purpose = .basic },
         .{ .pem = mozilla_pem },
-    }, fork_verifier.verifier(), now_sec);
+    }, SystemVerifier.verifier(), now_sec);
 }
 
 /// SHA-256 of the `ca-certificates` `libexec/post-install` this builder was
@@ -340,16 +338,36 @@ fn checkedElement(bytes: []const u8, pos: usize) !der.Element {
     return der.Element.parse(bytes, std.math.cast(u32, pos) orelse return error.MalformedDer);
 }
 
-/// Every nested TLV's declared length must stay inside its parent. Checking
-/// only the outer SEQUENCE is not enough: a truncated certificate whose outer
-/// length is patched to match still crashes the parser from within.
+/// DER gives these a minimum content length, and `std`'s reader trusts it: it
+/// indexes a BIT STRING's first byte without checking there is one, so an
+/// empty one panics rather than erroring. Structural nesting alone does not
+/// catch that — an empty TLV nests perfectly well.
+fn primitiveContentOk(tag: u8, len: usize) bool {
+    // Universal class only; a context-specific primitive carries opaque bytes.
+    if (tag & 0xC0 != 0) return true;
+    return switch (tag & 0x1F) {
+        0x01 => len == 1, // BOOLEAN
+        0x02, 0x03, 0x06 => len >= 1, // INTEGER, BIT STRING, OBJECT IDENTIFIER
+        else => true,
+    };
+}
+
+/// Every nested TLV's declared length must stay inside its parent, and every
+/// primitive must carry the content its tag requires. Checking only the outer
+/// SEQUENCE is not enough: a truncated certificate whose outer length is
+/// patched to match still crashes the parser from within.
 fn derStructureOk(bytes: []const u8, depth: u8) bool {
-    if (depth == 0) return false;
     var pos: usize = 0;
     while (pos < bytes.len) {
         const h = readHeader(bytes, pos) orelse return false;
-        if (h.constructed and !derStructureOk(bytes[h.content_start..h.content_end], depth - 1))
+        if (h.constructed) {
+            // Spend a level only on real nesting, so the cap counts what a
+            // reader would call depth rather than being quietly one short.
+            if (depth == 0) return false;
+            if (!derStructureOk(bytes[h.content_start..h.content_end], depth - 1)) return false;
+        } else if (!primitiveContentOk(bytes[pos], h.content_end - h.content_start)) {
             return false;
+        }
         pos = h.content_end;
     }
     return true;
@@ -357,8 +375,10 @@ fn derStructureOk(bytes: []const u8, depth: u8) bool {
 
 /// Whether `bytes` is exactly one well-formed DER certificate envelope.
 fn wellFormedCertificate(bytes: []const u8) bool {
+    // A certificate is a SEQUENCE, not merely something constructed.
+    if (bytes.len == 0 or bytes[0] != 0x30) return false;
     const h = readHeader(bytes, 0) orelse return false;
-    if (!h.constructed or h.content_end != bytes.len) return false;
+    if (h.content_end != bytes.len) return false;
     return derStructureOk(bytes[h.content_start..h.content_end], 32);
 }
 
@@ -490,48 +510,127 @@ fn fenced(a: std.mem.Allocator, fence: ?Fence, argv: []const []const u8) ?[]cons
     return sandbox.fenceArgv(a, argv, f.keg_path, f.prefix, .{}) catch null;
 }
 
-/// Production verifier: one `security verify-cert` per candidate. This is the
-/// whole remaining cost, and what an in-process trust evaluation would remove.
-const ForkVerifier = struct {
-    io: std.Io,
-    gpa: std.mem.Allocator,
-    /// Randomly named, inside the malt prefix rather than shared /tmp, so a
-    /// local attacker cannot pre-place a symlink on the path malt writes.
-    dir: []const u8,
-    fence: ?Fence,
+// --- Security.framework -----------------------------------------------
+//
+// The trust decision is the one part of upstream's script that genuinely
+// needs macOS. Asking `security(1)` meant a process per certificate; asking
+// the framework directly is the same question to the same daemon, minus the
+// fork, and it removes the temp file each answer used to need.
+//
+// Distinct opaque types rather than one `?*anyopaque` alias: these all look
+// alike to C, and a swapped certificate/policy argument in a trust path
+// should not compile.
 
-    fn verifier(self: *ForkVerifier) Verifier {
-        return .{ .ctx = self, .call = call };
-    }
+const CFAllocator = opaque {};
+const CFData = opaque {};
+const CFError = opaque {};
+const CFString = opaque {};
+const SecCertificate = opaque {};
+const SecPolicy = opaque {};
+const SecTrust = opaque {};
 
-    fn call(ctx: ?*anyopaque, pem: []const u8, purpose: Purpose) Verdict {
-        const self: *ForkVerifier = @ptrCast(@alignCast(ctx));
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "{s}/{d}.pem", .{
-            self.dir, verify_seq.fetchAdd(1, .monotonic),
-        }) catch return .undetermined;
-        std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = pem }) catch
-            return .undetermined;
-        defer std.Io.Dir.cwd().deleteFile(self.io, path) catch {};
+extern "c" fn CFDataCreate(allocator: ?*CFAllocator, bytes: [*]const u8, length: isize) ?*CFData;
+extern "c" fn SecCertificateCreateWithData(allocator: ?*CFAllocator, data: ?*CFData) ?*SecCertificate;
+extern "c" fn SecPolicyCreateBasicX509() ?*SecPolicy;
+extern "c" fn SecPolicyCreateSSL(server: u8, hostname: ?*CFString) ?*SecPolicy;
+extern "c" fn SecTrustCreateWithCertificates(certs: ?*SecCertificate, policies: ?*SecPolicy, trust: *?*SecTrust) i32;
+extern "c" fn SecTrustSetOptions(trust: ?*SecTrust, options: usize) i32;
+extern "c" fn SecTrustSetNetworkFetchAllowed(trust: ?*SecTrust, allow: u8) i32;
+extern "c" fn SecTrustEvaluateWithError(trust: ?*SecTrust, err: *?*CFError) u8;
+extern "c" fn CFErrorGetCode(err: ?*CFError) isize;
+extern "c" fn CFErrorGetDomain(err: ?*CFError) ?*CFString;
+extern "c" fn CFEqual(a: ?*anyopaque, b: ?*anyopaque) u8;
+/// The domain the codes above are numbered in. A code from any other domain
+/// means something else entirely, however familiar the number looks.
+extern const kCFErrorDomainOSStatus: ?*CFString;
 
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const argv = fenced(arena.allocator(), self.fence, &.{
-            "/usr/bin/security", "verify-cert", "-l", "-L",
-            "-c",                path,          "-p", purpose.flag(),
-            "-R",                "offline",
-        }) orelse return .undetermined;
+/// `CFRelease` takes any CoreFoundation handle; binding it once and casting
+/// here keeps the distinct pointer types at every other call site. Null is
+/// dropped rather than passed on — `CFRelease(NULL)` is a crash, not a no-op,
+/// and a handle only reaches here behind an `OSStatus` we did not set.
+fn cfRelease(handle: anytype) void {
+    const opaque_handle: ?*anyopaque = @ptrCast(handle);
+    if (opaque_handle == null) return;
+    const release = @extern(*const fn (?*anyopaque) callconv(.c) void, .{ .name = "CFRelease" });
+    release(opaque_handle);
+}
 
-        // Only a clean run answers the question. A spawn or wait failure -
-        // fd exhaustion during a wide parallel install, say - is not a "no".
-        var report = child.run(self.io, self.gpa, argv) catch return .undetermined;
-        defer report.deinit(self.gpa);
-        return if (report.code == 0) .trusted else .rejected;
-    }
+/// `kSecTrustOptionLeafIsCA`, mirroring upstream's `verify-cert -l`. Neither
+/// the tool nor `SecTrustEvaluateWithError` appears to enforce the old
+/// leaf-must-not-be-a-CA rule any more, so this changes no verdict today -
+/// it is set to keep the two invocations aligned if that ever returns.
+const leaf_is_ca: usize = 0x02;
+
+/// Codes the trust store returns when it has actually judged a certificate and
+/// said no. Observed across every root on a real machine under both policies,
+/// then checked against `Security/SecBase.h` for what each one means.
+///
+/// Deliberately an allowlist, and only within the OSStatus error domain.
+/// Anything else — a wedged trust daemon, an unreachable keychain — is the
+/// question going unanswered, and reading that as "untrusted" would write a
+/// bundle missing roots. An unlisted genuine rejection only costs speed: the
+/// build aborts and the shipped script runs.
+const rejection_codes = [_]isize{
+    -67843, // errSecNotTrusted
+    -67901, // errSecCertificateValidityPeriodTooLong
+    -67609, // errSecInvalidExtendedKeyUsage
 };
 
-/// Distinguishes the temp files concurrent hooks hand to `verify-cert`.
-var verify_seq: std.atomic.Value(u32) = .init(0);
+/// Evaluate `der_bytes` against the system trust store, mirroring
+/// `verify-cert -l -L -p <policy> -R offline`. Anything that stops the
+/// question being asked is `undetermined`, never a rejection.
+fn evaluateTrust(der_bytes: []const u8, purpose: Purpose) Verdict {
+    const data = CFDataCreate(null, der_bytes.ptr, @intCast(der_bytes.len)) orelse
+        return .undetermined;
+    defer cfRelease(data);
+    const cert = SecCertificateCreateWithData(null, data) orelse return .undetermined;
+    defer cfRelease(cert);
+
+    const policy = switch (purpose) {
+        // `true`: evaluate as a TLS *server* certificate, matching `-p ssl`.
+        .ssl => SecPolicyCreateSSL(1, null),
+        .basic => SecPolicyCreateBasicX509(),
+    } orelse return .undetermined;
+    defer cfRelease(policy);
+
+    var trust: ?*SecTrust = null;
+    if (SecTrustCreateWithCertificates(cert, policy, &trust) != 0) return .undetermined;
+    defer cfRelease(trust);
+
+    _ = SecTrustSetOptions(trust, leaf_is_ca);
+    // `-L` and `-R offline`: the evaluation must never reach the network. If
+    // that cannot be guaranteed, do not ask the question at all — an online
+    // evaluation can block for as long as the network takes to time out.
+    if (SecTrustSetNetworkFetchAllowed(trust, 0) != 0) return .undetermined;
+
+    var err: ?*CFError = null;
+    if (SecTrustEvaluateWithError(trust, &err) != 0) {
+        if (err) |e| cfRelease(e);
+        return .trusted;
+    }
+    // A `false` with no error, or with any other code, means the evaluation
+    // did not reach a verdict — a wedged trust daemon would otherwise read as
+    // "every root is untrusted" and write a bundle missing all of them.
+    const e = err orelse return .undetermined;
+    defer cfRelease(e);
+    if (CFEqual(CFErrorGetDomain(e), kCFErrorDomainOSStatus) == 0) return .undetermined;
+    const code = CFErrorGetCode(e);
+    return if (std.mem.indexOfScalar(isize, &rejection_codes, code) != null)
+        .rejected
+    else
+        .undetermined;
+}
+
+/// Production verifier. Holds no state: the trust store is the system's.
+const SystemVerifier = struct {
+    fn verifier() Verifier {
+        return .{ .call = call };
+    }
+
+    fn call(_: ?*anyopaque, der_bytes: []const u8, purpose: Purpose) Verdict {
+        return evaluateTrust(der_bytes, purpose);
+    }
+};
 
 // --- tests -----------------------------------------------------------
 
@@ -664,6 +763,33 @@ test "a nested length overrunning its parent is rejected, not handed to the pars
         // Must be refused; reaching Certificate.parse here aborts the process.
         try testing.expect(!wellFormedCertificate(probe[0..n]));
     }
+}
+
+test "an empty BIT STRING is refused before it reaches the parser" {
+    // Structurally flawless, and it panics std's reader: the whole reason the
+    // validator checks primitive content and not just nesting.
+    const empty_bitstring = [_]u8{ 0x30, 0x02, 0x03, 0x00 };
+    try testing.expect(!wellFormedCertificate(&empty_bitstring));
+    // One content byte is the minimum DER allows, and is accepted.
+    const minimal = [_]u8{ 0x30, 0x03, 0x03, 0x01, 0x00 };
+    try testing.expect(wellFormedCertificate(&minimal));
+}
+
+test "a top-level element that is not a SEQUENCE is refused" {
+    // Constructed, well-nested, but a SET - not a certificate.
+    try testing.expect(!wellFormedCertificate(&.{ 0x31, 0x03, 0x02, 0x01, 0x00 }));
+}
+
+test "the nesting cap counts levels exactly, and refuses one past it" {
+    // Each SEQUENCE wraps the next, innermost empty.
+    var deep: [66]u8 = undefined;
+    for (0..33) |i| {
+        deep[i * 2] = 0x30;
+        deep[i * 2 + 1] = @intCast((32 - i) * 2);
+    }
+    try testing.expect(!derStructureOk(&deep, 32)); // 33 levels
+    try testing.expect(derStructureOk(deep[2..], 32)); // 32 levels
+    try testing.expect(!derStructureOk(deep[2..], 31)); // ...but not under 31
 }
 
 test "every prefix of a real certificate is refused without crashing" {
