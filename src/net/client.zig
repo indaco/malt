@@ -130,11 +130,14 @@ pub fn isTransientError(err: DownloadError) bool {
 }
 
 /// Read-timeout in ns scaled by Content-Length; floor 30 s at 64 KiB/s.
+/// Content-Length is peer-supplied and clamped to the blob cap: a larger
+/// transfer is refused mid-stream, so a longer deadline only serves a liar.
 pub fn scaledTimeoutNs(content_length: ?u64) u64 {
     const floor_ns: u64 = 30 * std.time.ns_per_s;
     const cl = content_length orelse return floor_ns;
     const min_bandwidth: u64 = 64 * 1024; // 64 KiB/s
-    const transfer_ns = (cl / min_bandwidth) * std.time.ns_per_s;
+    const capped = @min(cl, HttpClient.max_blob_bytes);
+    const transfer_ns = (capped / min_bandwidth) *| std.time.ns_per_s;
     return @max(floor_ns, transfer_ns);
 }
 

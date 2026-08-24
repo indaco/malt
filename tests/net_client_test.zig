@@ -237,6 +237,39 @@ test "scaledTimeoutNs: 0-length file returns floor" {
     try testing.expectEqual(@as(u64, 30 * std.time.ns_per_s), client.scaledTimeoutNs(0));
 }
 
+// The ceiling: 2 GiB (the mid-stream blob cap) at 64 KiB/s.
+const clamp_ceiling_ns: u64 = 32768 * std.time.ns_per_s;
+
+test "scaledTimeoutNs: maxInt content_length clamps instead of overflowing" {
+    try testing.expectEqual(clamp_ceiling_ns, client.scaledTimeoutNs(std.math.maxInt(u64)));
+}
+
+test "scaledTimeoutNs: pre-clamp overflow threshold returns the ceiling" {
+    // The exact value the old unchecked multiply wrapped just past.
+    try testing.expectEqual(clamp_ceiling_ns, client.scaledTimeoutNs(1_208_925_819_568_128));
+}
+
+test "scaledTimeoutNs: a hostile Content-Length buys no extra deadline" {
+    try testing.expectEqual(clamp_ceiling_ns, client.scaledTimeoutNs(2_000_000_000_000_000));
+}
+
+test "scaledTimeoutNs: honest sizes below the cap still scale linearly" {
+    const cl: u64 = 1024 * 1024 * 1024; // 1 GiB at 64 KiB/s = 16384 s
+    const result = client.scaledTimeoutNs(cl);
+    try testing.expectEqual(@as(u64, 16384 * std.time.ns_per_s), result);
+    try testing.expect(result < clamp_ceiling_ns);
+}
+
+test "scaledTimeoutNs: the blob cap itself lands exactly on the ceiling" {
+    try testing.expectEqual(clamp_ceiling_ns, client.scaledTimeoutNs(2 * 1024 * 1024 * 1024));
+}
+
+test "scaledTimeoutNs: one byte past the blob cap is already clamped" {
+    // The boundary the clamp introduces; anything past the cap is refused
+    // mid-stream, so it must not buy a longer deadline.
+    try testing.expectEqual(clamp_ceiling_ns, client.scaledTimeoutNs(2 * 1024 * 1024 * 1024 + 1));
+}
+
 test "scaledTimeoutNs: null combined with blob_timeout_ns keeps 10-min minimum" {
     // Blob downloads use @max(blob_timeout_ns, scaledTimeoutNs(cl)).
     // When Content-Length is null (chunked), scaledTimeoutNs returns 30s,
