@@ -18,7 +18,7 @@
 #
 # Presenting a real https origin needs a TLS fixture, so the guard is judged
 # through the colocated inline unit tests (`lib_tests`). This script builds and
-# runs only that binary: no network, well under 30s.
+# runs only that binary: no network, about a minute.
 
 set -euo pipefail
 

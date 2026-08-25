@@ -16,7 +16,7 @@
 # so the behaviour is pinned by the colocated unit test in the inline suite
 # (lib_tests). This script asserts the predicate, the gate, both call sites,
 # and the user-facing message are all present (so the suite cannot go green
-# vacuously), then builds and runs that binary. Offline, well under 30s.
+# vacuously), then builds and runs that binary. Offline, about a minute.
 
 set -euo pipefail
 

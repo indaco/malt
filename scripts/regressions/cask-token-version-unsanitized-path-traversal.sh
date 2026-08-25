@@ -19,7 +19,7 @@
 # No CLI surface drives parseCask offline without standing up a local tap, and
 # the guard fires before any download, so it is exercised by the colocated unit
 # tests in the inline suite (`lib_tests`). This script builds and runs only that
-# binary: it stays well under 30s and needs no network. A pass means every
+# binary: it takes about a minute and needs no network. A pass means every
 # inline test — including the traversal-rejection guard — held; a regression
 # flips that binary to a non-zero exit.
 

@@ -17,8 +17,8 @@
 #
 # No CLI surface drives validate offline without standing up launchd, and the
 # guard fires before any write, so it is exercised by the colocated inline unit
-# tests (`lib_tests`). This script builds and runs only that binary: it stays
-# well under 30s and needs no network. A pass means every inline test —
+# tests (`lib_tests`). This script builds and runs only that binary: it takes
+# about a minute and needs no network. A pass means every inline test —
 # including the label-rejection guard — held; a regression flips that binary to
 # a non-zero exit.
 

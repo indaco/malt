@@ -18,7 +18,7 @@
 # regresses or a test goes missing.
 #
 # Exits 0 when the bug is absent, non-zero (with a clear message) when present.
-# No network required; finishes well under 30s once the test binary is built.
+# No network required; finishes in about a minute once the test binary is built.
 
 set -euo pipefail
 

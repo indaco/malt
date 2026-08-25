@@ -15,7 +15,7 @@
 #
 # Exits 0 when the bugs are absent, non-zero (with a message naming
 # the failing assertion) when present. No network required; finishes
-# well under 30s once the test binary is built.
+# in about a minute once the test binary is built.
 
 set -euo pipefail
 

@@ -20,7 +20,7 @@
 # No CLI surface drives parseFormula or the tap extraction offline without
 # standing up a live tap, so the behaviour is pinned by colocated inline unit
 # tests (`lib_tests`). This script asserts the load-bearing code and its tests
-# are present, then builds and runs that binary: well under 30s, no network.
+# are present, then builds and runs that binary: about a minute, no network.
 
 set -euo pipefail
 
