@@ -29,6 +29,14 @@ test "extractTokenField returns InvalidResponse when token field is not a string
     try testing.expectError(error.InvalidResponse, ghcr.extractTokenField(testing.allocator, json));
 }
 
+// A registry answering 200 with a non-object body must stay reportable:
+// mid-install it has to surface as an error, never abort the process.
+test "extractTokenField returns InvalidResponse when the root is not an object" {
+    for ([_][]const u8{ "[]", "\"x\"", "42", "null", "true" }) |body| {
+        try testing.expectError(error.InvalidResponse, ghcr.extractTokenField(testing.allocator, body));
+    }
+}
+
 test "GhcrClient.init/deinit does not leak and starts without cached token" {
     var pool = try pool_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();

@@ -328,7 +328,12 @@ pub fn extractTokenField(allocator: std.mem.Allocator, json_bytes: []const u8) !
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
 
-    const obj = parsed.value.object;
+    // A registry can answer 200 with any JSON root; reaching into an
+    // inactive union field would abort instead of failing the install.
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.InvalidResponse,
+    };
     const token_val = obj.get("token") orelse return error.InvalidResponse;
     const token_str = switch (token_val) {
         .string => |s| s,
