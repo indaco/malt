@@ -12,7 +12,7 @@
 # No CLI surface round-trips a quoted identifier offline without standing up a
 # tap or seeding the DB with an adversarial name, so the guarantee is pinned by
 # the colocated inline tests (`lib_tests`). This script builds and runs only
-# that binary: it stays well under 30s and needs no network. Pre-fix, the three
+# that binary: it takes about a minute and needs no network. Pre-fix, the three
 # round-trip tests fail and the binary exits non-zero; the fix flips it green.
 
 set -euo pipefail

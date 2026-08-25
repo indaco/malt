@@ -14,7 +14,7 @@
 # Driving a hostile `desc` end to end would need a local HTTP fixture server the
 # repo does not have, so the guarantee is pinned by colocated inline tests that
 # assert against the real writers. This script builds and runs only that unit
-# binary: no network, no state outside zig-cache/zig-out, well under 30s.
+# binary: no network, no state outside zig-cache/zig-out, about a minute.
 
 set -euo pipefail
 

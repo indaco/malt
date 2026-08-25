@@ -19,7 +19,7 @@
 # goes missing.
 #
 # Exits 0 when the guards hold, non-zero (with a clear message) when the bug is
-# present. No network required; finishes well under 30s once the binary builds.
+# present. No network required; finishes in about a minute once the binary builds.
 
 set -euo pipefail
 

@@ -18,7 +18,7 @@
 # guard regresses or the test goes missing.
 #
 # Exits 0 when the bug is absent, non-zero (with a clear message) when present.
-# No network required (loopback-only); finishes well under 30s once built.
+# No network required (loopback-only); finishes in about a minute once built.
 
 set -euo pipefail
 
