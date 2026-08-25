@@ -72,6 +72,7 @@ regressions-harness:
     @./scripts/regressions/cosign-guard-fails-open-and-spawn-not-pinned.sh
     @./scripts/regressions/csi-whitelist-ignores-private-parameter-bytes.sh
     @./scripts/regressions/dsl-chmod-mode-cast-panic-large-literal.sh
+    @./scripts/regressions/extract-token-field-panics-on-non-object-json.sh
     @./scripts/regressions/frame-putcontent-passes-lone-c1-bytes.sh
     @./scripts/regressions/post-install-run-step-gh804.sh
     @./scripts/regressions/progress-shared-counters-atomic-progressbar-update-lock-free-data-race.sh
