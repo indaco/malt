@@ -72,7 +72,12 @@ pub fn parseCask(allocator: std.mem.Allocator, json_bytes: []const u8) !Cask {
         return CaskError.ParseFailed;
     errdefer parsed.deinit();
 
-    const obj = parsed.value.object;
+    // A non-object root is an inactive union field: reading a field off it
+    // aborts the process instead of failing the command.
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return CaskError.ParseFailed,
+    };
 
     const token = getStr(obj, "token") orelse return CaskError.ParseFailed;
     const version = getStr(obj, "version") orelse "unknown";
@@ -1721,6 +1726,16 @@ test "isAppRunning ignores a PATH-resident pgrep shim" {
     defer threaded.deinit();
 
     try std.testing.expect(!isAppRunning(threaded.io(), "/nonexistent/Malt-test-never-running.app"));
+}
+
+test "parseCask rejects a JSON root that is not an object" {
+    const a = std.testing.allocator;
+    // A mirror or a corrupted cache file can hand us any root shape. One entry
+    // per `std.json.Value` tag: each was its own abort before the guard landed.
+    const roots = [_][]const u8{ "[]", "\"x\"", "42", "1.5", "null", "true", "[{\"token\":\"ok\"}]" };
+    for (roots) |json| {
+        try std.testing.expectError(error.ParseFailed, parseCask(a, json));
+    }
 }
 
 test "parseCask rejects path-traversal in token or version" {
