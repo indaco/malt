@@ -19,7 +19,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 
 # The harness imports the client via a repo-relative path, so it must sit at the
 # repo root for that path to resolve.
-HARNESS="$ROOT/.scaled-timeout-clamp-regression.zig"
+HARNESS="$ROOT/.scaled-timeout-clamp-regression.$$.zig"
 trap 'rm -f "$HARNESS"' EXIT
 
 cat >"$HARNESS" <<'ZIG'

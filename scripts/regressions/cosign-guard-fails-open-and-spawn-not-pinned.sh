@@ -27,21 +27,21 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 
 # Source-shape pin for the fail-open arm: no resolution error may leave the
 # guard on its success path.
-if rg -q 'realPathFile\(.*\) catch return;' "$ROOT/src/update/verify.zig"; then
+if grep -qE 'realPathFile\(.*\) catch return;' "$ROOT/src/update/verify.zig"; then
   echo "FAIL: the cosign resolver still treats a realpath error as trusted" >&2
   exit 1
 fi
 
 # Pin the defect itself: argv[0] must come from the resolver, never from the
 # caller-supplied name, or the spawn resolves PATH a second time.
-if rg -q '^\s+args\.cosign_bin,$' "$ROOT/src/update/verify.zig"; then
+if grep -qE '^[[:space:]]+args\.cosign_bin,$' "$ROOT/src/update/verify.zig"; then
   echo "FAIL: the cosign spawn takes argv[0] from the unresolved input again" >&2
   exit 1
 fi
 
 # The harness cannot notice the in-tree tests being deleted, so guard them too.
 while IFS= read -r name; do
-  if ! rg -Fq -- "$name" "$ROOT/src/update/verify.zig" "$ROOT/tests/verify_test.zig"; then
+  if ! grep -qF -- "$name" "$ROOT/src/update/verify.zig" "$ROOT/tests/verify_test.zig"; then
     echo "FAIL: a cosign pinning test is missing: $name" >&2
     exit 1
   fi
@@ -122,7 +122,7 @@ ZIG
 
 if OUT=$(cd "$ROOT" && MALT_COSIGN_PIN_TMP="$TMP" zig test -lc -OReleaseSafe "$HARNESS" 2>&1); then
   echo "PASS: the cosign spawn is pinned to the vetted resolution"
-elif printf '%s' "$OUT" | rg -q 'UnvettedCosignRan'; then
+elif printf '%s' "$OUT" | grep -q 'UnvettedCosignRan'; then
   echo "FAIL: the guard vetted a PATH entry the spawn did not run; a prefix-resident cosign rubber-stamped the update" >&2
   exit 1
 else

@@ -120,6 +120,10 @@ jobs:
   regressions-hermetic:
     name: Regression guards (hermetic)
     runs-on: macos-14
+    # Deliberate waiting dominates these: ~22 min of run time, 31 min observed
+    # worst case. Bound generously so a genuine hang fails in an hour rather
+    # than sitting for GitHub's six.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -142,6 +146,36 @@ jobs:
 
       - name: Hermetic regression guards
         run: just regressions-hermetic
+
+  # Split from the job above rather than appended to it: those guards are
+  # already the longest pole at ~22 min, and these are compile-bound, so as
+  # their own job they cost nothing on the critical path.
+  regressions-harness:
+    name: Regression guards (harness)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: false
+
+      - name: Install just
+        uses: taiki-e/install-action@v2.85.4
+        with:
+          tool: just
+
+      # The guards bound themselves with `timeout`, which macOS does not ship.
+      - name: Install coreutils
+        run: brew install coreutils
+
+      - name: Harness regression guards
+        run: just regressions-harness
 
   # Drift guard: verify every committed manifest entry's hash against the
   # committed pin on every PR. Catches "bumped pins.zig, forgot to

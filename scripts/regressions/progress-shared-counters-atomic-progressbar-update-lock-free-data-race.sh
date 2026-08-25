@@ -8,8 +8,10 @@
 # ThreadSanitizer cannot be the oracle here (a -fsanitize-thread hello-world
 # segfaults on the target toolchain), so the synchronization discipline is
 # pinned structurally at compile time, plus a two-thread smoke run that must
-# survive a resize-repaint storm. progress.zig compiles as a standalone
-# module with its relative sibling imports — no malt build, no network.
+# survive a resize-repaint storm. The driver reaches progress.zig through the
+# `malt` module root: rooting a module at src/ui/progress.zig stops resolving
+# as soon as anything under src/ui/ imports a sibling outside it, which is how
+# this guard silently stopped compiling. No network.
 #
 # Exits 0 when the counters are atomic and the storm run is clean; non-zero
 # with a clear message otherwise.
@@ -22,7 +24,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 cat >"$TMP/driver.zig" <<'ZIG'
 const std = @import("std");
-const progress = @import("progress");
+const progress = @import("malt").progress;
 
 comptime {
     // The group mutex only guards draws; the counters cross threads on their own.
@@ -75,9 +77,22 @@ pub fn main() !void {
 }
 ZIG
 
-if ! zig build-exe -femit-bin="$TMP/driver" \
-  --dep progress -Mmain="$TMP/driver.zig" \
-  -Mprogress="$ROOT/src/ui/progress.zig" 2>"$TMP/build_err.txt"; then
+zig translate-c -I "$ROOT/vendor/" "$ROOT/c/sqlite.h" >"$TMP/c_sqlite.zig" 2>/dev/null
+zig translate-c "$ROOT/c/clonefile.h" >"$TMP/c_clonefile.zig" 2>/dev/null
+zig translate-c "$ROOT/c/mount.h" >"$TMP/c_mount.zig" 2>/dev/null
+
+# ca_bundle.zig evaluates trust in-process; the module graph needs the same
+# frameworks build.zig links.
+if ! zig build-exe -femit-bin="$TMP/driver" -lc \
+  -I "$ROOT/vendor/" -I "$ROOT/c/" \
+  -framework Security -framework CoreFoundation \
+  --dep malt -Mmain="$TMP/driver.zig" \
+  --dep c_sqlite --dep c_clonefile --dep c_mount \
+  -Mmalt="$ROOT/src/lib.zig" \
+  -cflags -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=1 -DSQLITE_DQS=0 -- "$ROOT/vendor/sqlite3.c" \
+  -Mc_sqlite="$TMP/c_sqlite.zig" \
+  -Mc_clonefile="$TMP/c_clonefile.zig" \
+  -Mc_mount="$TMP/c_mount.zig" 2>"$TMP/build_err.txt"; then
   if grep -q "must be atomic" "$TMP/build_err.txt"; then
     echo "FAIL: shared progress counters are not atomic" >&2
   else

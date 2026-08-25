@@ -38,7 +38,7 @@ command -v zig >/dev/null 2>&1 || fail 'zig not found on PATH'
 WORK=$(mktemp -d -t mt_tui_async.XXXXXX)
 # The check file must sit at the repo root so its `src/...` imports stay inside
 # the module path. Both temp artifacts are removed on exit.
-CHECK="$ROOT/.tui_async_outdated_check.zig"
+CHECK="$ROOT/.tui_async_outdated_check.$$.zig"
 trap 'rm -rf "$WORK" "$CHECK"' EXIT
 
 cat >"$CHECK" <<'ZIG'
@@ -99,7 +99,10 @@ test "a fetch is reported ready by index on its EOF, among several" {
 }
 ZIG
 
-if ! zig test "$CHECK" 2>"$WORK/err.txt"; then
+# Hard bound: the check polls a pipe deliberately held open with no data, so
+# the regression it guards against is precisely a hang. Unbounded, that would
+# stall CI for hours instead of failing.
+if ! timeout 120 zig test "$CHECK" 2>"$WORK/err.txt"; then
   sed 's/^/  /' "$WORK/err.txt" >&2
   fail 'tui async-fetch multiplex check failed — the input loop does not multiplex the tty with the background tab audits'
 fi

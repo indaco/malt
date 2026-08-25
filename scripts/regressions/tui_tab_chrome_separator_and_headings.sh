@@ -33,7 +33,7 @@ WORK=$(mktemp -d -t mt_tui_chrome.XXXXXX)
 # The check file must sit at the repo root so its imports stay inside the
 # module path (the tui render modules reach into src/ui/). Both temp artifacts
 # are removed on exit.
-CHECK="$ROOT/.tui_chrome_check.zig"
+CHECK="$ROOT/.tui_chrome_check.$$.zig"
 trap 'rm -rf "$WORK" "$CHECK"' EXIT
 
 cat >"$CHECK" <<ZIG
