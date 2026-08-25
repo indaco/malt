@@ -86,6 +86,26 @@ const dependency_placeholders = [_]struct {
 /// this is for paths without one, where the DB rows describe a different
 /// version than the keg on disk.
 pub fn declaredDependencies(out: [][]const u8, rb_source: []const u8) []const []const u8 {
+    return declaredDepsExcluding(out, rb_source, &.{":build"});
+}
+
+/// The deps an installer must actually pull in. Also drops `:optional`,
+/// which Homebrew installs only when asked — so a plain install that pulled
+/// them would exceed what the user requested.
+///
+/// Separate from `declaredDependencies` on purpose: that one answers "what
+/// does this keg link at runtime" for a keg already on disk, and its answer
+/// is baked into relocated bytes. Widening it would invalidate every cached
+/// relocation to serve a caller that is not asking the same question.
+pub fn declaredInstallDependencies(out: [][]const u8, rb_source: []const u8) []const []const u8 {
+    return declaredDepsExcluding(out, rb_source, &.{ ":build", ":optional" });
+}
+
+fn declaredDepsExcluding(
+    out: [][]const u8,
+    rb_source: []const u8,
+    exclude: []const []const u8,
+) []const []const u8 {
     const decl = "depends_on ";
     var n: usize = 0;
     var lines = std.mem.tokenizeScalar(u8, rb_source, '\n');
@@ -99,10 +119,14 @@ pub fn declaredDependencies(out: [][]const u8, rb_source: []const u8) []const []
         const rest = trimmed[decl.len..];
         if (rest.len == 0 or rest[0] != '"') continue;
         const close = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse continue;
-        if (std.mem.indexOf(u8, rest[close..], ":build") != null) continue;
 
-        out[n] = rest[1..close];
-        n += 1;
+        const tail = rest[close..];
+        for (exclude) |tag| {
+            if (std.mem.indexOf(u8, tail, tag) != null) break;
+        } else {
+            out[n] = rest[1..close];
+            n += 1;
+        }
     }
     return out[0..n];
 }
@@ -1174,6 +1198,34 @@ test "declaredDependencies skips build-only dependencies" {
     );
     try testing.expectEqual(@as(usize, 1), got.len);
     try testing.expectEqualStrings("openjdk", got[0]);
+}
+
+test "declaredInstallDependencies keeps recommended deps but drops optional ones" {
+    // Homebrew installs `:recommended` by default and `:optional` only on
+    // request; an installer that pulled the latter would exceed the ask.
+    var out: [8][]const u8 = undefined;
+    const got = declaredInstallDependencies(&out,
+        \\  depends_on "ffmpeg" => :recommended
+        \\  depends_on "lua" => :optional
+        \\  depends_on "cmake" => :build
+        \\  depends_on "flac"
+    );
+    try testing.expectEqual(@as(usize, 2), got.len);
+    try testing.expectEqualStrings("ffmpeg", got[0]);
+    try testing.expectEqualStrings("flac", got[1]);
+}
+
+test "declaredDependencies still reports an optional dep as a runtime one" {
+    // Its answer is baked into relocated bytes via the perl placeholder, so
+    // narrowing it would invalidate every cached relocation. An optional dep
+    // that IS installed is a runtime dep of the keg on disk.
+    var out: [8][]const u8 = undefined;
+    const got = declaredDependencies(&out,
+        \\  depends_on "lua" => :optional
+        \\  depends_on "cmake" => :build
+    );
+    try testing.expectEqual(@as(usize, 1), got.len);
+    try testing.expectEqualStrings("lua", got[0]);
 }
 
 test "declaredDependencies ignores commented and symbol forms" {

@@ -1264,3 +1264,153 @@ test "materializeRubyFormula truncated body on the raw-binary path is refused" {
     ));
     try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
 }
+
+test "materializeRubyFormula records the declared dependencies of a tap formula" {
+    // Tap formulas name their deps in the `.rb`, not the API. Without these
+    // rows `mt cleanup` reads the libraries this keg links against as
+    // orphans and reaps them out from under it.
+    const prefix = try setupPrefix("rawbindeps");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha = "5e" ** 32;
+    const cache_path = try seedRawBinaryCache(prefix, sha, &macho_stub);
+    defer testing.allocator.free(cache_path);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    // Pre-seed the deps as installed kegs so the install step is a no-op and
+    // the test stays offline; the rows are what this pins.
+    for ([_][]const u8{ "flac", "libogg" }) |dep| {
+        const dep_cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/1.0", .{ prefix, dep });
+        defer testing.allocator.free(dep_cellar);
+        try test_io.cwd().createDirPath(std.Options.debug_io, dep_cellar);
+        _ = malt.install_record.recordKegFields(&db, .{
+            .name = dep,
+            .full_name = dep,
+            .version = "1.0",
+            .revision = 0,
+            .tap = "homebrew/core",
+            .store_sha256 = "00" ** 32,
+            .cellar_path = dep_cellar,
+            .install_reason = "dependency",
+            .bin_isolated = false,
+        }, .{}) catch return error.SeedFailed;
+    }
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "deppkg",
+        .full_name = "user/repo/deppkg",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-rawbin-test.invalid/releases/download/v1.0/deppkg-darwin-arm64",
+        .sha256 = sha,
+        .dependencies = &.{ "flac", "libogg" },
+    };
+
+    try malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        false, // force
+        false, // download_only
+        malt.install_sink.terminal,
+    );
+
+    var stmt = try db.prepare(
+        \\SELECT COUNT(*) FROM dependencies d
+        \\JOIN kegs k ON k.id = d.keg_id
+        \\WHERE k.name = 'deppkg' AND d.dep_type = 'runtime';
+    );
+    defer stmt.finalize();
+    _ = try stmt.step();
+    try testing.expectEqual(@as(i64, 2), stmt.columnInt(0));
+}
+
+test "materializeRubyFormula --dry-run names the dependencies it would pull in" {
+    // The plan is only useful if it shows the deps: a tap formula can drag in
+    // several core kegs the user never named.
+    const prefix = try setupPrefix("rawbindepdry");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "drypkg",
+        .full_name = "user/repo/drypkg",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-rawbin-test.invalid/releases/download/v1.0/drypkg-darwin-arm64",
+        .sha256 = "6f" ** 32,
+        .dependencies = &.{"libvorbis"},
+    };
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    try malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        true, // dry_run
+        false, // force
+        false, // download_only
+        malt.install_sink.terminal,
+    );
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "libvorbis") != null);
+    // A plan must stay a plan: nothing recorded.
+    try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
+}
