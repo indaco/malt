@@ -37,6 +37,13 @@ test "extractTokenField returns InvalidResponse when the root is not an object" 
     }
 }
 
+// An empty token is well-formed JSON but useless: accepting it sends a
+// credential-less "Bearer " and reports the resulting 401 as Unauthorized,
+// hiding the fact that the registry never handed one over.
+test "extractTokenField returns InvalidResponse when the token field is empty" {
+    try testing.expectError(error.InvalidResponse, ghcr.extractTokenField(testing.allocator, "{\"token\":\"\"}"));
+}
+
 test "GhcrClient.init/deinit does not leak and starts without cached token" {
     var pool = try pool_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();

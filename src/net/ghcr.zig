@@ -341,6 +341,9 @@ pub fn extractTokenField(allocator: std.mem.Allocator, json_bytes: []const u8) !
         .string => |s| s,
         else => return error.InvalidResponse,
     };
+    // An empty token would ride out as a credential-less "Bearer ", buying
+    // two 401s and a misleading Unauthorized instead of naming the real fault.
+    if (token_str.len == 0) return error.InvalidResponse;
 
     return allocator.dupe(u8, token_str);
 }
