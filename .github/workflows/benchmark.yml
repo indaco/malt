@@ -81,6 +81,28 @@ jobs:
       - name: Stress-test malt cold install (ffmpeg ×20)
         run: BENCH_STRESS=20 SKIP_BUILD=1 SKIP_OTHERS=1 SKIP_BREW=1 ./scripts/bench.sh ffmpeg
 
+      # --- Trust-store equivalence -------------------------------------------
+      #
+      # malt builds ca-certificates' merged trust bundle natively instead of
+      # running the shipped script, which forks openssl and security once per
+      # certificate. The classifier is held against openssl on every PR, but
+      # only here is the whole substitution held against the real script on a
+      # real machine - it needs the keg, so it cannot be hermetic.
+      #
+      # It also catches the script changing upstream: the digest stops
+      # matching, malt falls back to running it, and the cold numbers below
+      # quietly lose their headroom. Runs before the README update for the
+      # same reason as the stress step - neither a wrong trust store nor a
+      # silently slower one should publish numbers to `main`.
+
+      - name: Trust-store equivalence (native CA bundle vs upstream script)
+        env:
+          MALT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          zig build
+          ./scripts/regressions/native-ca-bundle-matches-upstream.sh
+          ./scripts/regressions/native-ca-bundle-argv-confinement.sh
+
       # --- Summary ---
 
       - name: Summary

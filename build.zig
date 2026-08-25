@@ -168,6 +168,7 @@ pub fn build(b: *std.Build) void {
         "tests/linker_core_test.zig",
         "tests/supervisor_pure_test.zig",
         "tests/install_pure_test.zig",
+        "tests/ca_bundle_test.zig",
         "tests/dsl_builtins_test.zig",
         "tests/ruby_subprocess_test.zig",
         "tests/ruby_module_boundaries_test.zig",

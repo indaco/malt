@@ -56,6 +56,7 @@ pub const cask = @import("core/cask.zig");
 pub const cask_font = @import("core/cask_font.zig");
 pub const cellar = @import("core/cellar.zig");
 pub const child = @import("core/child.zig");
+pub const ca_bundle = @import("core/ca_bundle.zig");
 pub const deps = @import("core/deps.zig");
 pub const dsl = @import("core/dsl/root.zig");
 pub const formula = @import("core/formula.zig");

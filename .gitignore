@@ -10,3 +10,8 @@ coverage/
 .mcp.json
 
 /docs
+
+# Test certificate fixtures. A user-level gitignore commonly excludes *.pem;
+# these are committed inputs the CA-classifier tests embed and iterate, so
+# re-include them explicitly or the suite will not compile on a clean clone.
+!tests/fixtures/**/*.pem

@@ -80,3 +80,50 @@ if [ -n "$bare" ]; then
 fi
 
 printf '✓ platform helpers are named by absolute path\n'
+
+# The CA bundle builder replaced a script that ran under sandbox-exec, so its
+# own children must stay inside that fence. Every spawn there routes an argv
+# through `fenced()`; a new one built from an inline literal would run
+# unconfined, and nothing at runtime would say so.
+#
+# Structural because the unit tests can only pin what `fenced` does, not that
+# every call site remembers to use it. Only the module body is judged - the
+# tests below the marker build argvs of their own on purpose.
+CA_BUNDLE="src/core/ca_bundle.zig"
+TEST_MARKER='^// --- tests'
+
+grep -qE "$TEST_MARKER" "$CA_BUNDLE" || {
+  printf '✗ %s lost its test marker — this check cannot tell body from tests.\n' \
+    "$CA_BUNDLE" >&2
+  exit 1
+}
+body=$(awk -v m="$TEST_MARKER" '$0 ~ m { exit } { print }' "$CA_BUNDLE")
+
+spawns=$(printf '%s\n' "$body" | grep -cE 'child\.run(Capped)?\(' || true)
+if [ "$spawns" -eq 0 ]; then
+  printf '✗ %s no longer spawns anything — drop this check or fix the pattern.\n' \
+    "$CA_BUNDLE" >&2
+  exit 1
+fi
+
+unfenced=$(printf '%s\n' "$body" | grep -nE 'child\.run(Capped)?\(' | grep -v 'argv' || true)
+if [ -n "$unfenced" ]; then
+  printf '✗ CA bundle child spawned outside the sandbox fence:\n\n' >&2
+  printf '%s\n' "$unfenced" >&2
+  printf '\nBuild the argv with fenced() and pass it; never an inline literal.\n' >&2
+  exit 1
+fi
+
+# ...and every argv the body binds must come from the fence, so a bare literal
+# bound to a variable that happens to be called argv cannot slip past.
+bindings=$(printf '%s\n' "$body" | grep -cE 'const argv = ' || true)
+fenced_argvs=$(printf '%s\n' "$body" | grep -cE 'const argv = fenced\(' || true)
+if [ "$bindings" -ne "$fenced_argvs" ] || [ "$fenced_argvs" -ne "$spawns" ]; then
+  printf '✗ %s: %s spawn(s), %s argv binding(s), %s of them fenced:\n' \
+    "$CA_BUNDLE" "$spawns" "$bindings" "$fenced_argvs" >&2
+  printf '%s\n' "$body" | grep -nE 'child\.run(Capped)?\(|const argv = ' >&2
+  printf '\nEvery spawn needs its own fenced() argv binding.\n' >&2
+  exit 1
+fi
+
+printf '✓ CA bundle children stay inside the sandbox fence\n'
