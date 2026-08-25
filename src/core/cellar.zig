@@ -497,6 +497,61 @@ fn perlFromFormulaSource(
     return formula.perlPlaceholder(buf, prefix, name, formula.declaredDependencies(&dep_buf, src));
 }
 
+/// Relocate a keg malt staged from a bare release binary rather than a
+/// bottle. Only the Mach-O half of `relocateKegTree` applies: such an asset
+/// carries no `@@HOMEBREW_*@@` placeholders (those are a bottling artefact),
+/// no text tree, and no `.bottle/etc` overlay — just the absolute build
+/// prefix its author linked against, which is not where malt puts anything.
+///
+/// Patching invalidates the asset's signature, so every file this touches is
+/// re-signed. A keg with nothing to patch comes back byte-identical and skips
+/// the codesign subprocess entirely.
+pub fn relocateBinaryKeg(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    cellar_path: []const u8,
+) CellarError!void {
+    const new_prefix = atomic.maltPrefixOrAbort();
+
+    const reps = [_]patch.Replacement{
+        .{ .old = "/opt/homebrew", .new = new_prefix },
+        .{ .old = "/usr/local", .new = new_prefix },
+    };
+
+    var modified: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (modified.items) |m| allocator.free(m);
+        modified.deinit(allocator);
+    }
+
+    var unrelocatable: u32 = 0;
+    walkMachOAndPatch(io, allocator, cellar_path, &reps, &modified, &unrelocatable) catch |e| switch (e) {
+        CellarError.PathTooLong => return CellarError.PathTooLong,
+        CellarError.InsufficientHeaderPad => return CellarError.InsufficientHeaderPad,
+        CellarError.InstallNameToolMissing => return CellarError.InstallNameToolMissing,
+        else => return CellarError.PatchFailed,
+    };
+
+    if (unrelocatable > 0) {
+        std.log.warn(
+            "{s}: {d} embedded path(s) still point at the build prefix — the malt prefix ({d} bytes) is longer than the one baked into the binary; a shorter prefix relocates them",
+            .{ cellar_path, unrelocatable, new_prefix.len },
+        );
+        writeUnrelocatedMarker(io, allocator, cellar_path, unrelocatable);
+    }
+
+    if (codesign.isArm64() and modified.items.len > 0) {
+        codesign.adHocSignAll(io, allocator, modified.items) catch |e| switch (e) {
+            error.SpawnFailed => {},
+            else => std.log.warn("codesigning failed for {s}: {s}", .{ cellar_path, @errorName(e) }),
+        };
+    }
+
+    try walkMachOAndVerify(io, allocator, cellar_path);
+
+    writeRelocStamp(io, allocator, cellar_path, .{ .version = relocated_store.RELOC_LOGIC_VERSION });
+}
+
 fn relocateKegTree(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -887,6 +942,118 @@ pub fn remove(io: std.Io, prefix: []const u8, name: []const u8, version: []const
 
 // Pins the describeError split: only the user-actionable mappings carry
 // prose; every other tag falls through to @errorName.
+/// One LC_LOAD_DYLIB carrying `dylib_path`. Enough for the relocation walk,
+/// which only reads the header and the load-command path slots.
+fn buildLoadDylibMachO(allocator: std.mem.Allocator, dylib_path: []const u8, cmdsize: u32) ![]u8 {
+    const macho_mod = std.macho;
+    const header_size = @sizeOf(macho_mod.mach_header_64);
+    const path_off: u32 = @sizeOf(macho_mod.dylib_command);
+
+    const buf = try allocator.alloc(u8, header_size + cmdsize);
+    @memset(buf, 0);
+
+    const hdr = std.mem.bytesAsValue(macho_mod.mach_header_64, buf[0..header_size]);
+    hdr.* = .{ .magic = macho_mod.MH_MAGIC_64, .ncmds = 1, .sizeofcmds = cmdsize };
+
+    const cmd = std.mem.bytesAsValue(macho_mod.dylib_command, buf[header_size..][0..path_off]);
+    cmd.* = .{
+        .cmd = .LOAD_DYLIB,
+        .cmdsize = cmdsize,
+        .dylib = .{ .name = path_off, .timestamp = 0, .current_version = 0, .compatibility_version = 0 },
+    };
+    std.debug.assert(dylib_path.len + 1 <= cmdsize - path_off);
+    @memcpy(buf[header_size + path_off ..][0..dylib_path.len], dylib_path);
+
+    return buf;
+}
+
+fn relocatedDylibPath(allocator: std.mem.Allocator, io: std.Io, bin_path: []const u8) ![]u8 {
+    const parser_mod = @import("../macho/parser.zig");
+    const f = try std.Io.Dir.openFileAbsolute(io, bin_path, .{});
+    defer f.close(io);
+    const st = try f.stat(io);
+    const bytes = try allocator.alloc(u8, @intCast(st.size));
+    defer allocator.free(bytes);
+    _ = try f.readPositionalAll(io, bytes, 0);
+
+    var parsed = try parser_mod.parse(allocator, bytes);
+    defer parsed.deinit();
+    return allocator.dupe(u8, parsed.paths[0].path);
+}
+
+test "relocateBinaryKeg rewrites a build-prefix dylib reference to the malt prefix" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // A GoReleaser asset links the prefix its author built on. malt owns a
+    // different one, so an unpatched binary resolves nothing at runtime.
+    var s = try Scratch.init("reloc_binary_keg");
+    defer s.deinit();
+    const keg = s.p("/Cellar/tool/1.0");
+    const bin_dir = s.p("/Cellar/tool/1.0/bin");
+    try std.Io.Dir.cwd().createDirPath(io, bin_dir);
+
+    const bytes = try buildLoadDylibMachO(
+        testing.allocator,
+        "/opt/homebrew/opt/flac/lib/libFLAC.14.dylib",
+        128,
+    );
+    defer testing.allocator.free(bytes);
+    const bin = s.p("/Cellar/tool/1.0/bin/tool");
+    try atomic.atomicWriteFile(io, bin, bytes);
+
+    try relocateBinaryKeg(io, testing.allocator, keg);
+
+    const got = try relocatedDylibPath(testing.allocator, io, bin);
+    defer testing.allocator.free(got);
+
+    const prefix = atomic.maltPrefixOrAbort();
+    try testing.expect(std.mem.startsWith(u8, got, prefix));
+    try testing.expect(std.mem.endsWith(u8, got, "/opt/flac/lib/libFLAC.14.dylib"));
+    try testing.expect(std.mem.indexOf(u8, got, "/opt/homebrew") == null);
+
+    // Relocation ran, so a future logic bump must be able to name this keg —
+    // `not_applicable` would exempt it forever.
+    try testing.expectEqual(
+        RelocStamp{ .version = relocated_store.RELOC_LOGIC_VERSION },
+        readRelocStamp(io, keg).?,
+    );
+}
+
+test "relocateBinaryKeg leaves a binary with no build-prefix reference untouched" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // Most single-file taps are static. Rewriting nothing means the asset's
+    // signature stays valid, so it must come back byte-identical.
+    var s = try Scratch.init("reloc_binary_noop");
+    defer s.deinit();
+    const keg = s.p("/Cellar/tool/1.0");
+    const bin_dir = s.p("/Cellar/tool/1.0/bin");
+    try std.Io.Dir.cwd().createDirPath(io, bin_dir);
+
+    const bytes = try buildLoadDylibMachO(testing.allocator, "@rpath/libself.dylib", 128);
+    defer testing.allocator.free(bytes);
+    const bin = s.p("/Cellar/tool/1.0/bin/tool");
+    try atomic.atomicWriteFile(io, bin, bytes);
+
+    try relocateBinaryKeg(io, testing.allocator, keg);
+
+    const f = try std.Io.Dir.openFileAbsolute(io, bin, .{});
+    defer f.close(io);
+    const st = try f.stat(io);
+    const after = try testing.allocator.alloc(u8, @intCast(st.size));
+    defer testing.allocator.free(after);
+    _ = try f.readPositionalAll(io, after, 0);
+    try testing.expectEqualSlices(u8, bytes, after);
+
+    // Still stamped: the logic ran, it simply had nothing to do.
+    try testing.expectEqual(
+        RelocStamp{ .version = relocated_store.RELOC_LOGIC_VERSION },
+        readRelocStamp(io, keg).?,
+    );
+}
+
 test "reloc stamp round-trips both states; anything unreadable is absent" {
     const testing = std.testing;
     const io = std.Options.debug_io;
