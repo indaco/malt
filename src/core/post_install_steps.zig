@@ -1696,10 +1696,13 @@ fn buildCaBundle(ctx: StepsCtx, argv: []const []const u8) !void {
     });
 
     const dir = std.fs.path.dirname(argv[2]) orelse return error.NoParentDirectory;
-    try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
-    // Re-check with the parent resolved: a symlinked destination directory is
-    // the escape a path-prefix test alone cannot see.
+    // Confine before creating, not after: `validatePath` above is lexical, so
+    // a destination under a symlinked directory inside the keg passes it, and
+    // creating the tree first would plant directories wherever that link
+    // points before the resolved check refuses. `validateWriteDir` resolves
+    // the nearest ancestor that already exists, so it sees the link.
     try sandbox.validateWriteDir(ctx.io, argv[2], ctx.keg_path, ctx.prefix);
+    try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
     // 0644 explicitly: the script chmods it, and a restrictive umask would
     // otherwise leave the trust store unreadable to every other user.
     try atomic.atomicWriteFileMode(ctx.io, argv[2], bundle, @enumFromInt(0o644));
