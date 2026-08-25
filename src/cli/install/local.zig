@@ -17,6 +17,7 @@ const forge = @import("../../core/forge.zig");
 const tap_cache = @import("../../core/tap_cache.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const atomic = @import("../../fs/atomic.zig");
+const macho_parser = @import("../../macho/parser.zig");
 const client_mod = @import("../../net/client.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
@@ -95,6 +96,11 @@ const TapArchiveKind = enum {
     tar_gz,
     tar_xz,
     zip,
+    /// Uncompressed release binary — the GoReleaser / `bin.install <asset>
+    /// => <name>` shape, which carries no archive suffix at all. Never
+    /// returned by `fromUrl`; the call site falls back to it and confirms
+    /// with a content sniff.
+    raw_binary,
 
     /// Canonical suffix used when staging the downloaded archive on
     /// disk. The `.tgz` alias is accepted on input via `fromUrl` but
@@ -105,6 +111,7 @@ const TapArchiveKind = enum {
             .tar_gz => ".tar.gz",
             .tar_xz => ".tar.xz",
             .zip => ".zip",
+            .raw_binary => ".bin",
         };
     }
 
@@ -553,6 +560,17 @@ fn fstatRisk(f: std.Io.File) ?LocalPermissionRisk {
     return describeLocalPermissionRisk(@intCast(raw.mode), @intCast(raw.uid), @intCast(effective));
 }
 
+/// Does the staged file open with Mach-O magic? The only signal available
+/// once a URL's suffix has told us nothing — a truncated or unreadable file
+/// answers no, so the caller refuses rather than guessing.
+fn stagedIsMachO(io: std.Io, path: []const u8) bool {
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    defer file.close(io);
+    var magic: [4]u8 = undefined;
+    const n = file.readPositional(io, &.{&magic}, 0) catch return false;
+    return macho_parser.isMachO(magic[0..n]);
+}
+
 /// Compose the staging-archive path used by the tap/local install
 /// flow. The pid suffix prevents two concurrent invocations from
 /// racing on a shared `tap_download.<ext>` filename — without it,
@@ -617,13 +635,10 @@ pub fn materializeRubyFormula(
 
     // Pick the archive kind early so the cache-or-fetch step below
     // can compose `<prefix>/cache/Tap/<sha>.<ext>` before any HTTP
-    // work. Unknown formats fail fast — no point fetching bytes we
-    // can't extract.
-    const archive_kind = TapArchiveKind.fromUrl(resolved.url) orelse {
-        sink.err("Unsupported archive format for {s}: {s}", .{ resolved.name, resolved.url });
-        sink.err("Supported formats: .tar.gz, .tar.xz, .zip.", .{});
-        return InstallError.DownloadFailed;
-    };
+    // work. An unrecognised suffix is not a rejection: many taps ship a
+    // bare release binary. It provisionally takes the raw path and the
+    // staged bytes decide, once they exist.
+    const archive_kind = TapArchiveKind.fromUrl(resolved.url) orelse .raw_binary;
     const archive_ext = archive_kind.extension();
 
     // Same ndjson event shape as the bottle + cask paths so CI
@@ -716,6 +731,15 @@ pub fn materializeRubyFormula(
         ) catch return InstallError.DownloadFailed;
     };
 
+    // The URL suffix said nothing, so the bytes must. Sniff `cache_path`
+    // rather than the freshly fetched body: a warm hit re-verifies nothing,
+    // and would otherwise walk straight past this check.
+    if (archive_kind == .raw_binary and !stagedIsMachO(ctx.io, cache_path)) {
+        sink.err("Unsupported archive format for {s}: {s}", .{ resolved.name, resolved.url });
+        sink.err("Supported formats: .tar.gz, .tar.xz, .zip, or an uncompressed Mach-O binary.", .{});
+        return InstallError.DownloadFailed;
+    }
+
     // `--download-only` stops once the cache holds the SHA-verified
     // bytes — no Cellar writes, no DB inserts. A follow-up
     // `mt install` consumes the warmed entry above.
@@ -766,6 +790,12 @@ pub fn materializeRubyFormula(
         else => return InstallError.CellarFailed,
     };
 
+    // For casks that declare `binary "<x>"`, the shipped file is named
+    // `<x>` while the keg is named by the cask token; match on the
+    // declared binary so a tap cask like `longbridge-terminal` lands its
+    // `longbridge` executable.
+    const target_binary = resolved.binary_name orelse resolved.name;
+
     const archive_mod = @import("../../fs/archive.zig");
     switch (archive_kind) {
         .tar_gz => archive_mod.extractTarGz(ctx.io, cache_path, cellar_path) catch {
@@ -780,6 +810,24 @@ pub fn materializeRubyFormula(
             sink.err("Failed to extract .zip archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
+        // Nothing to unpack: the asset *is* the artifact. Copy it under the
+        // name the formula declared — the staged basename is the SHA, and
+        // upstream's is `<tool>-<os>-<arch>`, so neither ever matches.
+        .raw_binary => {
+            var dest_buf: [512]u8 = undefined;
+            const dest = std.fmt.bufPrint(&dest_buf, "{s}/{s}", .{ bin_path, target_binary }) catch
+                return InstallError.CellarFailed;
+            // Copied verbatim: the asset is usually adhoc/linker-signed and
+            // any edit makes an arm64 binary unrunnable. The cache entry is
+            // 0644, so the mode is set on create rather than chmod'd after —
+            // the file is never briefly present and unexecutable.
+            std.Io.Dir.copyFileAbsolute(cache_path, dest, ctx.io, .{
+                .permissions = std.Io.File.Permissions.fromMode(0o755),
+            }) catch {
+                sink.err("Failed to stage binary for {s}", .{resolved.name});
+                return InstallError.CellarFailed;
+            };
+        },
     }
 
     // This path never relocates, so nothing overwrites a marker the archive
@@ -789,13 +837,10 @@ pub fn materializeRubyFormula(
     cellar_mod.writeRelocStamp(ctx.io, allocator, cellar_path, .not_applicable);
 
     // Promote the binary to bin/ (GoReleaser may extract directly or
-    // into a subdirectory — walk to handle both). For casks that
-    // declare `binary "<x>"`, the archive file is named `<x>` while
-    // the keg is named by the cask token; match on the declared
-    // binary so a tap cask like `longbridge-terminal` lands its
-    // `longbridge` executable.
-    const target_binary = resolved.binary_name orelse resolved.name;
-    {
+    // into a subdirectory — walk to handle both). The raw path already
+    // wrote bin/<target_binary>; re-running the walk would copy that file
+    // onto itself.
+    if (archive_kind != .raw_binary) {
         var cellar_dir = std.Io.Dir.openDirAbsolute(ctx.io, cellar_path, .{ .iterate = true }) catch return InstallError.CellarFailed;
         defer cellar_dir.close(ctx.io);
 
@@ -1132,6 +1177,33 @@ fn finalizeTapCaskInstall(
             tap_mod.add(db, tap_label, pair.owner, pair.repo, t.commit_sha) catch {};
             if (t.head_etag) |et| tap_mod.updateHead(db, tap_label, t.commit_sha, et) catch {};
         } else |_| {}
+    }
+}
+
+test "fromUrl leaves a bare release binary unclassified" {
+    // The classifier stays a positive archive-suffix match; the
+    // raw-binary fallback is the call site's decision, taken only
+    // after the staged bytes have been sniffed.
+    try std.testing.expectEqual(@as(?TapArchiveKind, null), TapArchiveKind.fromUrl(
+        "https://example.invalid/releases/download/v1.0/tool-darwin-arm64",
+    ));
+    try std.testing.expectEqual(@as(?TapArchiveKind, null), TapArchiveKind.fromUrl("https://example.invalid/tool"));
+    try std.testing.expectEqual(@as(?TapArchiveKind, null), TapArchiveKind.fromUrl("https://example.invalid/tool.bin"));
+}
+
+test "fromUrl still classifies every extractable suffix" {
+    try std.testing.expectEqual(TapArchiveKind.tar_gz, TapArchiveKind.fromUrl("https://e.invalid/a.tar.gz").?);
+    try std.testing.expectEqual(TapArchiveKind.tar_gz, TapArchiveKind.fromUrl("https://e.invalid/a.tgz").?);
+    try std.testing.expectEqual(TapArchiveKind.tar_xz, TapArchiveKind.fromUrl("https://e.invalid/a.tar.xz").?);
+    try std.testing.expectEqual(TapArchiveKind.zip, TapArchiveKind.fromUrl("https://e.invalid/a.zip").?);
+}
+
+test "raw_binary stages under a distinct, stable cache suffix" {
+    // The suffix is the cache key's tail, so it must not collide with an
+    // archive kind and must not drift.
+    try std.testing.expectEqualStrings(".bin", TapArchiveKind.raw_binary.extension());
+    for ([_]TapArchiveKind{ .tar_gz, .tar_xz, .zip }) |kind| {
+        try std.testing.expect(!std.mem.eql(u8, ".bin", kind.extension()));
     }
 }
 
