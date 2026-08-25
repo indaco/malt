@@ -497,16 +497,17 @@ fn perlFromFormulaSource(
     return formula.perlPlaceholder(buf, prefix, name, formula.declaredDependencies(&dep_buf, src));
 }
 
-/// Relocate a keg malt staged from a bare release binary rather than a
-/// bottle. Only the Mach-O half of `relocateKegTree` applies: such an asset
-/// carries no `@@HOMEBREW_*@@` placeholders (those are a bottling artefact),
-/// no text tree, and no `.bottle/etc` overlay — just the absolute build
-/// prefix its author linked against, which is not where malt puts anything.
+/// Relocate a keg malt staged itself — a tap or `--local` formula's archive or
+/// bare release binary — rather than one poured from a bottle. Only the Mach-O
+/// half of `relocateKegTree` applies: such an artefact carries no
+/// `@@HOMEBREW_*@@` placeholders (those are a bottling artefact), no text tree
+/// and no `.bottle/etc` overlay — just the absolute build prefix its author
+/// linked against, which is not where malt puts anything.
 ///
-/// Patching invalidates the asset's signature, so every file this touches is
+/// Patching invalidates the artefact's signature, so every file this touches is
 /// re-signed. A keg with nothing to patch comes back byte-identical and skips
 /// the codesign subprocess entirely.
-pub fn relocateBinaryKeg(
+pub fn relocateUnbottledKeg(
     io: std.Io,
     allocator: std.mem.Allocator,
     cellar_path: []const u8,
@@ -981,11 +982,11 @@ fn relocatedDylibPath(allocator: std.mem.Allocator, io: std.Io, bin_path: []cons
     return allocator.dupe(u8, parsed.paths[0].path);
 }
 
-test "relocateBinaryKeg rewrites a build-prefix dylib reference to the malt prefix" {
+test "relocateUnbottledKeg rewrites a build-prefix dylib reference to the malt prefix" {
     const testing = std.testing;
     const io = std.Options.debug_io;
 
-    // A GoReleaser asset links the prefix its author built on. malt owns a
+    // A third-party build links the prefix its author used. malt owns a
     // different one, so an unpatched binary resolves nothing at runtime.
     var s = try Scratch.init("reloc_binary_keg");
     defer s.deinit();
@@ -1002,7 +1003,7 @@ test "relocateBinaryKeg rewrites a build-prefix dylib reference to the malt pref
     const bin = s.p("/Cellar/tool/1.0/bin/tool");
     try atomic.atomicWriteFile(io, bin, bytes);
 
-    try relocateBinaryKeg(io, testing.allocator, keg);
+    try relocateUnbottledKeg(io, testing.allocator, keg);
 
     const got = try relocatedDylibPath(testing.allocator, io, bin);
     defer testing.allocator.free(got);
@@ -1020,12 +1021,12 @@ test "relocateBinaryKeg rewrites a build-prefix dylib reference to the malt pref
     );
 }
 
-test "relocateBinaryKeg leaves a binary with no build-prefix reference untouched" {
+test "relocateUnbottledKeg leaves a binary with no build-prefix reference untouched" {
     const testing = std.testing;
     const io = std.Options.debug_io;
 
-    // Most single-file taps are static. Rewriting nothing means the asset's
-    // signature stays valid, so it must come back byte-identical.
+    // Many tap artefacts are static. Rewriting nothing means the signature
+    // they shipped stays valid, so the bytes must come back untouched.
     var s = try Scratch.init("reloc_binary_noop");
     defer s.deinit();
     const keg = s.p("/Cellar/tool/1.0");
@@ -1037,7 +1038,7 @@ test "relocateBinaryKeg leaves a binary with no build-prefix reference untouched
     const bin = s.p("/Cellar/tool/1.0/bin/tool");
     try atomic.atomicWriteFile(io, bin, bytes);
 
-    try relocateBinaryKeg(io, testing.allocator, keg);
+    try relocateUnbottledKeg(io, testing.allocator, keg);
 
     const f = try std.Io.Dir.openFileAbsolute(io, bin, .{});
     defer f.close(io);

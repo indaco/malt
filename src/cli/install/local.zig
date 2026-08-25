@@ -879,20 +879,16 @@ pub fn materializeRubyFormula(
     // Strip first: a forged marker would otherwise let the archive's author
     // drive doctor's verdict, and the stamp written below must be ours.
     cellar_mod.stripKegMarkers(ctx.io, cellar_path);
-    switch (archive_kind) {
-        // A bare release asset is linked against whatever prefix its author
-        // built on — usually `/opt/homebrew`, which malt does not own. Patch
-        // those load commands and re-sign, or the binary loads the wrong
-        // libraries (or none) at runtime. Writes its own stamp.
-        .raw_binary => cellar_mod.relocateBinaryKeg(ctx.io, allocator, cellar_path) catch {
-            sink.err("Failed to relocate {s} to the malt prefix", .{resolved.name});
-            std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};
-            return InstallError.CellarFailed;
-        },
-        // Extracted, never relocated — positively so, which keeps a future
-        // logic bump from naming this keg.
-        else => cellar_mod.writeRelocStamp(ctx.io, allocator, cellar_path, .not_applicable),
-    }
+    // Whatever malt just staged is linked against the prefix its author built
+    // on — usually `/opt/homebrew`, which malt does not own. An archive is no
+    // different from a bare asset here: patch those load commands and re-sign,
+    // or the binary loads the wrong libraries (or none) at runtime. Writes its
+    // own stamp, so a future relocation fix can name this keg.
+    cellar_mod.relocateUnbottledKeg(ctx.io, allocator, cellar_path) catch {
+        sink.err("Failed to relocate {s} to the malt prefix", .{resolved.name});
+        std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};
+        return InstallError.CellarFailed;
+    };
 
     // Promote the binary to bin/ (GoReleaser may extract directly or
     // into a subdirectory — walk to handle both). The raw path already

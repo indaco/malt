@@ -1414,3 +1414,87 @@ test "materializeRubyFormula --dry-run names the dependencies it would pull in" 
     // A plan must stay a plan: nothing recorded.
     try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
 }
+
+test "materializeRubyFormula stamps an extracted tap archive as relocated, not exempt" {
+    // A tap tarball's binary is linked against its author's prefix exactly
+    // like a bare asset is, so the archive path relocates too. The stamp is
+    // the observable: `n/a` would exempt the keg from every future relocation
+    // fix, which is how a broken keg used to survive reinstall forever.
+    const prefix = try setupPrefix("tarreloc");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha = "7a" ** 32;
+
+    // Keg-shaped archive: top-level bin/ holding the formula's binary.
+    const work = try std.fmt.allocPrint(testing.allocator, "{s}/tarwork", .{prefix});
+    defer testing.allocator.free(work);
+    {
+        const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{work});
+        defer testing.allocator.free(bin_dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
+        const tool = try std.fmt.allocPrint(testing.allocator, "{s}/tarpkg", .{bin_dir});
+        defer testing.allocator.free(tool);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, tool, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, &macho_stub);
+    }
+
+    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache/Tap", .{prefix});
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_parent);
+    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    try runTar(&.{ "tar", "czf", cache_path, "-C", work, "bin" });
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "tarpkg",
+        .full_name = "user/repo/tarpkg",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-tarreloc-test.invalid/tarpkg-1.0.tar.gz",
+        .sha256 = sha,
+    };
+
+    try malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        false, // force
+        false, // download_only
+        malt.install_sink.terminal,
+    );
+
+    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/tarpkg/1.0", .{prefix});
+    defer testing.allocator.free(keg);
+    const stamp = malt.cellar.readRelocStamp(ctx.io, keg).?;
+    try testing.expectEqual(
+        malt.cellar.RelocStamp{ .version = malt.relocated_store.RELOC_LOGIC_VERSION },
+        stamp,
+    );
+}
