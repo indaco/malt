@@ -104,6 +104,15 @@ pub fn buildFrom(
     // given macOS version happens to use.
     var consulted: usize = 0;
     var trusted: usize = 0;
+    // A store that stops answering part-way through still leaves `trusted`
+    // above zero, so the count alone cannot see it. Keep the first
+    // certificate it accepted and put the same question again at the end: a
+    // different answer means the store was restarted or replaced mid-build,
+    // and what got written is short of roots rather than legitimately
+    // excluding them.
+    var canary: [max_der_bytes]u8 = undefined;
+    var canary_len: usize = 0;
+    var canary_purpose: Purpose = .basic;
 
     for (sources) |source| {
         blocks.clearRetainingCapacity();
@@ -139,7 +148,14 @@ pub fn buildFrom(
                 switch (verifier.call(verifier.ctx, der_bytes, purpose)) {
                     .rejected => continue,
                     .undetermined => return error.TrustEvaluationFailed,
-                    .trusted => trusted += 1,
+                    .trusted => {
+                        trusted += 1;
+                        if (canary_len == 0) {
+                            @memcpy(canary[0..der_bytes.len], der_bytes);
+                            canary_len = der_bytes.len;
+                            canary_purpose = purpose;
+                        }
+                    },
                 }
             }
 
@@ -152,6 +168,9 @@ pub fn buildFrom(
     }
     // Asked, and never once told yes: the store is not answering.
     if (consulted > 0 and trusted == 0) return error.TrustEvaluationFailed;
+    if (canary_len > 0 and
+        verifier.call(verifier.ctx, canary[0..canary_len], canary_purpose) != .trusted)
+        return error.TrustEvaluationFailed;
     return out.toOwnedSlice(gpa);
 }
 
@@ -348,6 +367,16 @@ fn checkedElement(bytes: []const u8, pos: usize) !der.Element {
     return der.Element.parse(bytes, std.math.cast(u32, pos) orelse return error.MalformedDer);
 }
 
+/// `checkedElement`, but refusing an element whose content runs past `end`.
+/// An extension payload is an OCTET STRING and `derStructureOk` never
+/// descends into a primitive, so the DER nested inside one reaches here
+/// unvalidated. Bounding each element to its container keeps a declared
+/// length from being read out of the certificate bytes that follow it.
+fn checkedElementWithin(bytes: []const u8, pos: usize, end: usize) !der.Element {
+    if (end > bytes.len or pos >= end) return error.MalformedDer;
+    return checkedElement(bytes[0..end], pos);
+}
+
 /// DER gives these a minimum content length, and `std`'s reader trusts it: it
 /// indexes a BIT STRING's first byte without checking there is one, so an
 /// empty one panics rather than erroring. Structural nesting alone does not
@@ -394,6 +423,8 @@ fn wellFormedCertificate(bytes: []const u8) bool {
 
 const Class = enum { ca, not_ca };
 
+/// Context-specific, constructed, number 3: TBSCertificate's `extensions`.
+const extensions_tag: u8 = 0xa3;
 const oid_basic_constraints = [_]u8{ 0x55, 0x1D, 0x13 };
 const oid_key_usage = [_]u8{ 0x55, 0x1D, 0x0F };
 const oid_ext_key_usage = [_]u8{ 0x55, 0x1D, 0x25 };
@@ -444,37 +475,50 @@ fn readExtensions(cert: Certificate) !Extensions {
     const validity = try checkedElement(bytes, issuer.slice.end);
     const subject = try checkedElement(bytes, validity.slice.end);
     const pub_key_info = try checkedElement(bytes, subject.slice.end);
-    if (pub_key_info.slice.end >= tbs.slice.end) return out;
 
-    const outer = try checkedElement(bytes, pub_key_info.slice.end);
-    if (outer.identifier.tag != .bitstring) return out;
-    const extensions = try checkedElement(bytes, outer.slice.start);
+    // issuerUniqueID [1] and subjectUniqueID [2] may sit between the public
+    // key and the extensions, so walk past whatever is there rather than
+    // giving up on the first element that is not [3] - a certificate carrying
+    // one would otherwise report no extensions at all, and `classify` turns
+    // that into `Unclassifiable`, which aborts the whole build. Match on the
+    // entire identifier byte too: as a tag *number*, 3 is also BIT STRING.
+    var pos = pub_key_info.slice.end;
+    const outer = while (pos < tbs.slice.end) {
+        const elem = try checkedElementWithin(bytes, pos, tbs.slice.end);
+        if (@as(u8, @bitCast(elem.identifier)) == extensions_tag) break elem;
+        pos = elem.slice.end;
+    } else return out;
+    const extensions = try checkedElementWithin(bytes, outer.slice.start, outer.slice.end);
 
     var i = extensions.slice.start;
     while (i < extensions.slice.end) {
-        const extension = try checkedElement(bytes, i);
+        const extension = try checkedElementWithin(bytes, i, extensions.slice.end);
         i = extension.slice.end;
-        const oid = try checkedElement(bytes, extension.slice.start);
-        const critical = try checkedElement(bytes, oid.slice.end);
+        const oid = try checkedElementWithin(bytes, extension.slice.start, extension.slice.end);
+        const critical = try checkedElementWithin(bytes, oid.slice.end, extension.slice.end);
         const payload = if (critical.identifier.tag != .boolean)
             critical
         else
-            try checkedElement(bytes, critical.slice.end);
+            try checkedElementWithin(bytes, critical.slice.end, extension.slice.end);
         const oid_bytes = bytes[oid.slice.start..oid.slice.end];
+        const payload_end = payload.slice.end;
 
         if (std.mem.eql(u8, oid_bytes, &oid_basic_constraints)) {
             out.basic_constraints_present = true;
-            const constraints = try checkedElement(bytes, payload.slice.start);
+            const constraints = try checkedElementWithin(bytes, payload.slice.start, payload_end);
             if (constraints.slice.start < constraints.slice.end) {
-                const ca = try checkedElement(bytes, constraints.slice.start);
-                if (ca.identifier.tag == .boolean) out.is_ca = bytes[ca.slice.start] != 0;
+                const ca = try checkedElementWithin(bytes, constraints.slice.start, constraints.slice.end);
+                // A zero-length BOOLEAN carries no byte to read; without the
+                // emptiness test this would take the one after the element.
+                if (ca.identifier.tag == .boolean and ca.slice.start < ca.slice.end)
+                    out.is_ca = bytes[ca.slice.start] != 0;
             }
         } else if (std.mem.eql(u8, oid_bytes, &oid_ext_key_usage)) {
             out.ext_key_usage_present = true;
-            const usages = try checkedElement(bytes, payload.slice.start);
+            const usages = try checkedElementWithin(bytes, payload.slice.start, payload_end);
             var u = usages.slice.start;
             while (u < usages.slice.end) {
-                const usage = try checkedElement(bytes, u);
+                const usage = try checkedElementWithin(bytes, u, usages.slice.end);
                 u = usage.slice.end;
                 const id = bytes[usage.slice.start..usage.slice.end];
                 if (std.mem.eql(u8, id, &oid_server_auth) or
@@ -483,7 +527,7 @@ fn readExtensions(cert: Certificate) !Extensions {
             }
         } else if (std.mem.eql(u8, oid_bytes, &oid_key_usage)) {
             out.key_usage_present = true;
-            const bits = try checkedElement(bytes, payload.slice.start);
+            const bits = try checkedElementWithin(bytes, payload.slice.start, payload_end);
             const data = bytes[bits.slice.start..bits.slice.end];
             // BIT STRING content leads with the unused-bit count; keyCertSign
             // is bit 5, i.e. 0x04 of the first data byte.
@@ -614,6 +658,203 @@ const SystemVerifier = struct {
 };
 
 // --- tests -----------------------------------------------------------
+
+/// Minimal DER writer, enough to shape a TBSCertificate for the extension
+/// walk. Lengths stay short-form, which every element these tests build fits.
+const DerBuf = struct {
+    bytes: std.ArrayList(u8) = .empty,
+
+    fn deinit(self: *DerBuf, gpa: std.mem.Allocator) void {
+        self.bytes.deinit(gpa);
+    }
+    fn prim(self: *DerBuf, gpa: std.mem.Allocator, tag: u8, content: []const u8) !void {
+        try self.bytes.appendSlice(gpa, &.{ tag, @intCast(content.len) });
+        try self.bytes.appendSlice(gpa, content);
+    }
+    fn wrap(gpa: std.mem.Allocator, tag: u8, content: []const u8) ![]u8 {
+        var o: std.ArrayList(u8) = .empty;
+        try o.appendSlice(gpa, &.{ tag, @intCast(content.len) });
+        try o.appendSlice(gpa, content);
+        return o.toOwnedSlice(gpa);
+    }
+};
+
+/// The seven TBSCertificate fields ahead of the unique IDs and extensions.
+fn tbsPreamble(gpa: std.mem.Allocator) ![]u8 {
+    var b: DerBuf = .{};
+    defer b.deinit(gpa);
+    try b.prim(gpa, 0xa0, &.{ 0x02, 0x01, 0x02 }); // [0] version v3
+    try b.prim(gpa, 0x02, &.{0x01}); // serialNumber
+    try b.prim(gpa, 0x30, &.{}); // signature
+    try b.prim(gpa, 0x30, &.{}); // issuer
+    try b.prim(gpa, 0x30, &.{}); // validity
+    try b.prim(gpa, 0x30, &.{}); // subject
+    try b.prim(gpa, 0x30, &.{}); // subjectPublicKeyInfo
+    return gpa.dupe(u8, b.bytes.items);
+}
+
+/// A certificate whose only extension is basicConstraints with `cA` set,
+/// preceded by whatever `before_extensions` puts after the public key.
+fn certWithBasicConstraints(gpa: std.mem.Allocator, before_extensions: []const u8) ![]u8 {
+    const bc_payload = try DerBuf.wrap(gpa, 0x30, &.{ 0x01, 0x01, 0xff }); // SEQUENCE { BOOLEAN TRUE }
+    defer gpa.free(bc_payload);
+    const octets = try DerBuf.wrap(gpa, 0x04, bc_payload);
+    defer gpa.free(octets);
+
+    var ext: std.ArrayList(u8) = .empty;
+    defer ext.deinit(gpa);
+    try ext.appendSlice(gpa, &.{ 0x06, oid_basic_constraints.len });
+    try ext.appendSlice(gpa, &oid_basic_constraints);
+    try ext.appendSlice(gpa, octets);
+
+    const one = try DerBuf.wrap(gpa, 0x30, ext.items);
+    defer gpa.free(one);
+    const seq = try DerBuf.wrap(gpa, 0x30, one);
+    defer gpa.free(seq);
+    const tagged = try DerBuf.wrap(gpa, extensions_tag, seq);
+    defer gpa.free(tagged);
+
+    const preamble = try tbsPreamble(gpa);
+    defer gpa.free(preamble);
+    var tbs_body: std.ArrayList(u8) = .empty;
+    defer tbs_body.deinit(gpa);
+    try tbs_body.appendSlice(gpa, preamble);
+    try tbs_body.appendSlice(gpa, before_extensions);
+    try tbs_body.appendSlice(gpa, tagged);
+
+    const tbs = try DerBuf.wrap(gpa, 0x30, tbs_body.items);
+    defer gpa.free(tbs);
+    return DerBuf.wrap(gpa, 0x30, tbs);
+}
+
+test "a store that stops answering part-way aborts the build" {
+    // The health check on its own only sees a store that never said yes.
+    // This one says yes once and then goes away, which leaves `trusted`
+    // above zero while every root after the first is dropped - the silent
+    // half-bundle the closing re-ask exists to catch.
+    var stub: TrustThenQuit = .{ .fail_after = 1 };
+    try testing.expectError(error.TrustEvaluationFailed, buildFrom(
+        testing.allocator,
+        &.{
+            .{ .pem = ca_pem, .purpose = .basic },
+            .{ .pem = ca_pem_rewrapped, .purpose = .basic },
+        },
+        .{ .ctx = &stub, .call = TrustThenQuit.call },
+        now_valid,
+    ));
+}
+
+test "extensions are found past an issuerUniqueID" {
+    const gpa = testing.allocator;
+    // [1] IMPLICIT UniqueIdentifier, the field RFC 5280 allows between the
+    // public key and the extensions. Stopping here would report no
+    // extensions, and no basicConstraints aborts the entire build.
+    const issuer_unique_id = [_]u8{ 0x81, 0x02, 0x00, 0x01 };
+    const cert = try certWithBasicConstraints(gpa, &issuer_unique_id);
+    defer gpa.free(cert);
+
+    try testing.expect(wellFormedCertificate(cert));
+    const exts = try readExtensions(.{ .buffer = cert, .index = 0 });
+    try testing.expect(exts.basic_constraints_present);
+    try testing.expect(exts.is_ca);
+}
+
+test "extensions are found past both unique IDs" {
+    const gpa = testing.allocator;
+    const both = [_]u8{ 0x81, 0x02, 0x00, 0x01, 0x82, 0x02, 0x00, 0x02 };
+    const cert = try certWithBasicConstraints(gpa, &both);
+    defer gpa.free(cert);
+
+    const exts = try readExtensions(.{ .buffer = cert, .index = 0 });
+    try testing.expect(exts.basic_constraints_present);
+    try testing.expect(exts.is_ca);
+}
+
+test "a universal BIT STRING is not mistaken for the extensions tag" {
+    const gpa = testing.allocator;
+    // Tag *number* 3 in the universal class. Comparing the number alone would
+    // take this for `extensions [3]` and walk its contents as extensions.
+    const bit_string = [_]u8{ 0x03, 0x02, 0x00, 0x7f };
+    const cert = try certWithBasicConstraints(gpa, &bit_string);
+    defer gpa.free(cert);
+
+    const exts = try readExtensions(.{ .buffer = cert, .index = 0 });
+    try testing.expect(exts.basic_constraints_present);
+    try testing.expect(exts.is_ca);
+}
+
+test "an extension payload cannot reach past itself" {
+    const gpa = testing.allocator;
+    // basicConstraints whose OCTET STRING holds a SEQUENCE declaring three
+    // bytes of content it does not contain. The three bytes that follow it in
+    // the certificate are a well-formed BOOLEAN TRUE, so an unbounded walk
+    // reads them and calls this a CA; bounded, the SEQUENCE is malformed.
+    var ext: std.ArrayList(u8) = .empty;
+    defer ext.deinit(gpa);
+    try ext.appendSlice(gpa, &.{ 0x06, oid_basic_constraints.len });
+    try ext.appendSlice(gpa, &oid_basic_constraints);
+    try ext.appendSlice(gpa, &.{ 0x04, 0x02, 0x30, 0x03 });
+    try ext.appendSlice(gpa, &.{ 0x01, 0x01, 0xff });
+
+    const one = try DerBuf.wrap(gpa, 0x30, ext.items);
+    defer gpa.free(one);
+    const seq = try DerBuf.wrap(gpa, 0x30, one);
+    defer gpa.free(seq);
+    const tagged = try DerBuf.wrap(gpa, extensions_tag, seq);
+    defer gpa.free(tagged);
+    const preamble = try tbsPreamble(gpa);
+    defer gpa.free(preamble);
+
+    var tbs_body: std.ArrayList(u8) = .empty;
+    defer tbs_body.deinit(gpa);
+    try tbs_body.appendSlice(gpa, preamble);
+    try tbs_body.appendSlice(gpa, tagged);
+    const tbs = try DerBuf.wrap(gpa, 0x30, tbs_body.items);
+    defer gpa.free(tbs);
+    const cert = try DerBuf.wrap(gpa, 0x30, tbs);
+    defer gpa.free(cert);
+
+    try testing.expect(wellFormedCertificate(cert));
+    try testing.expectError(error.MalformedDer, readExtensions(.{ .buffer = cert, .index = 0 }));
+}
+
+test "a zero-length cA BOOLEAN does not read the byte after it" {
+    const gpa = testing.allocator;
+    // BOOLEAN with no content byte. Reading `bytes[start]` regardless would
+    // take whatever follows the element and call the certificate a CA.
+    const bc_payload = try DerBuf.wrap(gpa, 0x30, &.{ 0x01, 0x00 });
+    defer gpa.free(bc_payload);
+    const octets = try DerBuf.wrap(gpa, 0x04, bc_payload);
+    defer gpa.free(octets);
+
+    var ext: std.ArrayList(u8) = .empty;
+    defer ext.deinit(gpa);
+    try ext.appendSlice(gpa, &.{ 0x06, oid_basic_constraints.len });
+    try ext.appendSlice(gpa, &oid_basic_constraints);
+    try ext.appendSlice(gpa, octets);
+
+    const one = try DerBuf.wrap(gpa, 0x30, ext.items);
+    defer gpa.free(one);
+    const seq = try DerBuf.wrap(gpa, 0x30, one);
+    defer gpa.free(seq);
+    const tagged = try DerBuf.wrap(gpa, extensions_tag, seq);
+    defer gpa.free(tagged);
+    const preamble = try tbsPreamble(gpa);
+    defer gpa.free(preamble);
+
+    var tbs_body: std.ArrayList(u8) = .empty;
+    defer tbs_body.deinit(gpa);
+    try tbs_body.appendSlice(gpa, preamble);
+    try tbs_body.appendSlice(gpa, tagged);
+    const tbs = try DerBuf.wrap(gpa, 0x30, tbs_body.items);
+    defer gpa.free(tbs);
+    const cert = try DerBuf.wrap(gpa, 0x30, tbs);
+    defer gpa.free(cert);
+
+    const exts = try readExtensions(.{ .buffer = cert, .index = 0 });
+    try testing.expect(exts.basic_constraints_present);
+    try testing.expect(!exts.is_ca);
+}
 
 const testing = std.testing;
 
@@ -981,13 +1222,33 @@ test "a certificate past its notAfter is dropped without consulting trust" {
 
 /// Trusts the first certificate it is asked about and rejects the rest, so a
 /// rejection can be tested while the store is demonstrably still answering.
+/// Trusts the first certificate it is shown and nothing else, keyed on the
+/// certificate rather than the call count - a real store answers the same
+/// question the same way twice, and `buildFrom` asks one of them twice.
 const TrustFirstOnly = struct {
+    first: ?Fingerprint = null,
+    calls: usize = 0,
+
+    fn call(ctx: ?*anyopaque, der_bytes: []const u8, _: Purpose) Verdict {
+        const self: *TrustFirstOnly = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+        var fp: Fingerprint = undefined;
+        Sha256.hash(der_bytes, &fp, .{});
+        if (self.first == null) self.first = fp;
+        return if (std.mem.eql(u8, &self.first.?, &fp)) .trusted else .rejected;
+    }
+};
+
+/// Answers yes until `fail_after` certificates have been accepted, then no -
+/// a trust daemon that goes away part-way through the build.
+const TrustThenQuit = struct {
+    fail_after: usize,
     calls: usize = 0,
 
     fn call(ctx: ?*anyopaque, _: []const u8, _: Purpose) Verdict {
-        const self: *TrustFirstOnly = @ptrCast(@alignCast(ctx));
+        const self: *TrustThenQuit = @ptrCast(@alignCast(ctx));
         self.calls += 1;
-        return if (self.calls == 1) .trusted else .rejected;
+        return if (self.calls <= self.fail_after) .trusted else .rejected;
     }
 };
 
@@ -1003,7 +1264,8 @@ test "a keychain certificate the trust store rejects is left out" {
         now_valid,
     );
     defer testing.allocator.free(out);
-    try testing.expectEqual(@as(usize, 2), stub.calls);
+    // two certificates, plus the closing re-ask of the accepted one
+    try testing.expectEqual(@as(usize, 3), stub.calls);
     // The rejected one is dropped; the trusted one stays.
     try testing.expectEqualStrings(ca_pem ++ "\n", out);
 }
