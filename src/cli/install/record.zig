@@ -43,6 +43,10 @@ pub const InstallError = error{
     /// run build blocks, so it unwinds the half-extracted keg and records
     /// nothing — the user is pointed at `brew install` instead.
     BuildFromSourceUnsupported,
+    /// A tap/local formula's declared `depends_on` could not be installed.
+    /// Distinct from `FormulaNotFound`: the formula itself resolved fine,
+    /// so the user is told which layer failed rather than doubting the tap.
+    DependencyFailed,
     /// `--use-system-ruby` used with multiple formulas and no explicit
     /// scope list. The flag widens the trust boundary (runs full Ruby
     /// with only OS-level sandboxing), so malt requires the user to
@@ -100,6 +104,9 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
         // Raise site prints the actionable "builds from source" line, so
         // the generic dispatch summary stays suppressed.
         InstallError.BuildFromSourceUnsupported,
+        // Raise site names the formula whose deps failed; the inner
+        // install already printed which dep and why.
+        InstallError.DependencyFailed,
         => true,
 
         InstallError.NoPackages,
@@ -260,7 +267,13 @@ pub fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
 /// failure we skip and continue so a partial dep table is preferred to
 /// the install being rolled back wholesale.
 pub fn recordDeps(db: *sqlite.Database, keg_id: i64, formula: *const formula_mod.Formula) void {
-    for (formula.dependencies) |dep_name| {
+    recordDepNames(db, keg_id, formula.dependencies);
+}
+
+/// Same rows from a bare name list — tap formulas have no `Formula`, their
+/// deps come straight off the `.rb`. One SQL site so the two cannot drift.
+pub fn recordDepNames(db: *sqlite.Database, keg_id: i64, dep_names: []const []const u8) void {
+    for (dep_names) |dep_name| {
         var stmt = db.prepare(
             "INSERT OR IGNORE INTO dependencies (keg_id, dep_name, dep_type) VALUES (?1, ?2, 'runtime');",
         ) catch continue;

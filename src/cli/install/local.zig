@@ -9,6 +9,7 @@ const std = @import("std");
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const cask_mod = @import("../../core/cask.zig");
 const cellar_mod = @import("../../core/cellar.zig");
+const formula_mod = @import("../../core/formula.zig");
 const hash = @import("../../core/hash.zig");
 const linker_mod = @import("../../core/linker.zig");
 const tap_mod = @import("../../core/tap.zig");
@@ -71,6 +72,10 @@ pub const ResolvedRubyFormula = struct {
     /// (which ship a bundle) from formula bottles (which ship a binary
     /// tree). Null for formulas and for casks that omit the directive.
     app_name: ?[]const u8 = null,
+    /// Runtime dependencies declared by the `.rb`, already filtered of
+    /// `:build`/`:optional`. Borrowed from the formula source, which
+    /// outlives the install. Empty when the formula declares none.
+    dependencies: []const []const u8 = &.{},
     /// When set, the tap is registered in the DB (mirrors the original
     /// tap install behaviour). Local installs leave this null so they
     /// never pollute the tap list.
@@ -377,6 +382,9 @@ fn installTapRb(
         return InstallError.FormulaNotFound;
     };
 
+    // Borrows from `resp.body`, which outlives the materialise call below.
+    var dep_buf: [64][]const u8 = undefined;
+
     // Substitute #{version} and #{arch} so the SHA-verified fetch
     // hits the right per-platform asset.
     var final_url_buf: [512]u8 = undefined;
@@ -391,6 +399,7 @@ fn installTapRb(
         .sha256 = rb.sha256,
         .binary_name = parseCaskBinary(resp.body),
         .app_name = parseCaskApp(resp.body),
+        .dependencies = formula_mod.declaredInstallDependencies(&dep_buf, resp.body),
         .tap_registration = .{
             .url = urls.repo_url,
             .commit_sha = commit_sha,
@@ -512,6 +521,8 @@ pub fn installLocalFormula(
     var final_url_buf: [512]u8 = undefined;
     const final_url = args.interpolateUrl(&final_url_buf, rb.url, rb.version, rb.arch_token);
 
+    var dep_buf: [64][]const u8 = undefined;
+
     const resolved = ResolvedRubyFormula{
         .name = name,
         .full_name = realpath,
@@ -519,6 +530,8 @@ pub fn installLocalFormula(
         .version = rb.version,
         .url = final_url,
         .sha256 = rb.sha256,
+        // Borrows from `body`, which outlives the materialise call below.
+        .dependencies = formula_mod.declaredInstallDependencies(&dep_buf, body),
         // No tap_registration — never pollute `mt tap` with a local path.
     };
 
@@ -558,6 +571,30 @@ fn fstatRisk(f: std.Io.File) ?LocalPermissionRisk {
     if (std.c.fstat(f.handle, &raw) != 0) return null;
     const effective = std.c.geteuid();
     return describeLocalPermissionRisk(@intCast(raw.mode), @intCast(raw.uid), @intCast(effective));
+}
+
+/// Install a tap/local formula's declared runtime dependencies through the
+/// ordinary API pipeline. `skip_lock` because the caller already holds
+/// `malt.lock` — BSD flock is per-fd, so re-entering would EAGAIN against
+/// our own hold. A dependency that cannot be installed fails the install:
+/// landing a binary against libraries that are not there is worse than
+/// refusing.
+fn installDeclaredDeps(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    resolved: ResolvedRubyFormula,
+    sink: OutputSink,
+) InstallError!void {
+    if (resolved.dependencies.len == 0) return;
+
+    sink.info("Installing {d} dependencies for {s}...", .{ resolved.dependencies.len, resolved.name });
+    install_mod.installAll(ctx, allocator, resolved.dependencies, .{
+        .skip_lock = true,
+        .sink = sink,
+    }) catch {
+        sink.err("Failed to install dependencies for {s}", .{resolved.name});
+        return InstallError.DependencyFailed;
+    };
 }
 
 /// Does the staged file open with Mach-O magic? The only signal available
@@ -623,6 +660,7 @@ pub fn materializeRubyFormula(
 
     if (dry_run) {
         sink.info("Dry run: would install {s} {s} from {s}", .{ resolved.name, resolved.version, resolved.url });
+        for (resolved.dependencies) |dep| sink.info("Dry run: would install dependency {s}", .{dep});
         return;
     }
 
@@ -632,6 +670,14 @@ pub fn materializeRubyFormula(
         sink.info("{s} is already installed", .{resolved.name});
         return;
     }
+
+    // Dependencies first, like `brew`: a tap formula names them in the `.rb`
+    // rather than the API, so nothing else on this path would install them
+    // and the binary would land linked against libraries that are absent.
+    // Ahead of the fetch so a missing dep costs nothing to discover.
+    // `--download-only` skips it — that mode warms a cache, it installs
+    // nothing, and pulling deps would exceed what the user asked for.
+    if (!download_only) try installDeclaredDeps(ctx, allocator, resolved, sink);
 
     // Pick the archive kind early so the cache-or-fetch step below
     // can compose `<prefix>/cache/Tap/<sha>.<ext>` before any HTTP
@@ -932,6 +978,10 @@ pub fn materializeRubyFormula(
             .install_reason = "direct",
             .bin_isolated = false,
         }, .{ .in_transaction = true }) catch return InstallError.RecordFailed;
+
+        // Without these rows `mt cleanup` sees the deps as orphans and
+        // reaps the libraries this keg links against.
+        record.recordDepNames(db, keg_id, resolved.dependencies);
 
         if (resolved.tap_registration) |t| {
             // `COALESCE` in tap_mod.add pins the commit on first install
