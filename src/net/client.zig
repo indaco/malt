@@ -991,18 +991,26 @@ pub const HttpClient = struct {
         budget_ns: u64,
         fired: *std.atomic.Value(bool),
     ) !std.http.Client.Response {
+        // The fd snapshot is only valid because stdlib cannot swap the
+        // connection out from under it mid-flight.
+        std.debug.assert(req.redirect_behavior == .unhandled);
         var no_progress = std.atomic.Value(u64).init(0);
-        var wake = try Wake.init();
+        const sock_fd = try dupRequestSocket(req);
+        var wake = Wake.init() catch {
+            _ = std.c.close(sock_fd);
+            return error.WatchdogSpawnFailed;
+        };
         const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
             self.io,
             wake.read_fd,
             &no_progress,
             budget_ns,
             budget_ns,
-            req,
+            sock_fd,
             self.cancel,
             fired,
         }) catch {
+            _ = std.c.close(sock_fd);
             wake.deinit();
             return error.WatchdogSpawnFailed;
         };
@@ -1010,6 +1018,7 @@ pub const HttpClient = struct {
             wake.signal();
             watchdog.join();
             wake.deinit();
+            retireIfFired(req, fired);
         }
 
         try req.sendBodiless();
@@ -1075,17 +1084,24 @@ pub const HttpClient = struct {
         const idle_timeout = idleTimeoutNsFromEnv(
             std.process.Environ.getPosix(self.environ, "MALT_HTTP_IDLE_TIMEOUT_SECS"),
         );
-        var wake = try Wake.init();
+        const sock_fd = try dupRequestSocket(req);
+        // Local to this hop: the caller's retry classification must not see it.
+        var fired = std.atomic.Value(bool).init(false);
+        var wake = Wake.init() catch {
+            _ = std.c.close(sock_fd);
+            return error.WatchdogSpawnFailed;
+        };
         const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
             self.io,
             wake.read_fd,
             &counting.bytes_written,
             idle_timeout,
             total_timeout_ns,
-            req,
+            sock_fd,
             self.cancel,
-            null,
+            &fired,
         }) catch {
+            _ = std.c.close(sock_fd);
             wake.deinit();
             return error.WatchdogSpawnFailed;
         };
@@ -1093,6 +1109,7 @@ pub const HttpClient = struct {
             wake.signal();
             watchdog.join();
             wake.deinit();
+            retireIfFired(req, &fired);
         }
         _ = body_reader.streamRemaining(&counting.writer) catch |e| switch (e) {
             error.WriteFailed => {
@@ -1321,11 +1338,16 @@ pub const HttpClient = struct {
             return;
         }
         var no_progress = std.atomic.Value(u64).init(0);
-        var wake = Wake.init() catch return finishBodiless(req);
+        const sock_fd = dupRequestSocket(req) catch return finishBodiless(req);
+        var wake = Wake.init() catch {
+            _ = std.c.close(sock_fd);
+            return finishBodiless(req);
+        };
         const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
             self.io,              wake.read_fd, &no_progress, self.head_timeout_ns,
-            self.head_timeout_ns, req,          self.cancel,  null,
+            self.head_timeout_ns, sock_fd,      self.cancel,  null,
         }) catch {
+            _ = std.c.close(sock_fd);
             wake.deinit();
             return finishBodiless(req);
         };
@@ -1334,6 +1356,12 @@ pub const HttpClient = struct {
             watchdog.join();
             wake.deinit();
         }
+        // ponytail: the drain lives inside `deinit`, so the watchdog has to
+        // outlive it and the connection is gone by the time we could mark it
+        // closing. A fire that loses the race to a completing drain shuts down
+        // a socket already back in the pool - which another request may have
+        // borrowed, so it pays for the retry. Pre-existing, and bounding the
+        // drain is still worth it.
         req.deinit();
     }
 
@@ -1618,33 +1646,70 @@ pub const HttpClient = struct {
         }
     }
 
-    /// On a fired deadline (or cancellation), shuts down the request's
-    /// socket so a kernel-parked `readv` returns. Both `conn.closing` AND
-    /// `shutdown(.both)` because setting closing alone does not wake a
-    /// parked read - stalled TLS reads hung the previous single-deadline
-    /// implementation.
+    /// On a fired deadline (or cancellation), shuts the socket down so a
+    /// kernel-parked `readv` returns; setting the connection's `closing` flag
+    /// alone does not wake a parked read.
     ///
-    /// `fired` lets a caller tell its own shutdown from an unrelated transport
-    /// fault, which decides whether the failure is worth retrying. The body
-    /// path retries on neither, so it passes null.
+    /// `sock_fd` is a dup the watchdog owns outright. It borrows nothing from
+    /// the owning thread because the redirect drain releases its request while
+    /// this thread is still live, and the dup keeps the fd *number* from being
+    /// recycled onto an unrelated socket in that window.
+    ///
+    /// It deliberately does not write `Connection.closing`: that is a plain
+    /// bool the owner writes from seven sites, and racing them is the bug this
+    /// signature exists to prevent. The owner marks the connection closing
+    /// itself once it has joined this thread. Do not restore the write.
+    ///
+    /// `fired` reports back that this thread, not the peer, ended the transfer.
+    /// The head path hands in the caller's flag because retry classification
+    /// turns on it; the body path keeps its own, which never reaches that
+    /// decision. Either way the owner reads it only after joining.
     fn watchdogFn(
         io: std.Io,
         wake_fd: std.posix.fd_t,
         bytes_progress: *std.atomic.Value(u64),
         idle_timeout_ns: u64,
         total_timeout_ns: u64,
-        req: *std.http.Client.Request,
+        sock_fd: std.posix.fd_t,
         cancel: ?*const fn () bool,
         fired: ?*std.atomic.Value(bool),
     ) void {
+        defer _ = std.c.close(sock_fd);
         if (!watchdogLoop(io, wake_fd, bytes_progress, idle_timeout_ns, total_timeout_ns, cancel)) return;
         // Ordered before the shutdown so the woken reader always sees it set.
         if (fired) |f| f.store(true, .release);
-        if (req.connection) |conn| {
-            conn.closing = true;
-            const fd = conn.stream_reader.stream.socket.handle;
-            _ = std.c.shutdown(fd, std.posix.SHUT.RDWR);
+        // ponytail: a fire this late can target a socket whose original handle
+        // is already gone - a no-op by construction, not a leak.
+        _ = std.c.shutdown(sock_fd, std.posix.SHUT.RDWR);
+    }
+
+    // The watchdog runs on its own thread; anything it borrows must be
+    // synchronised or owned. Request and Connection are neither.
+    comptime {
+        for (@typeInfo(@TypeOf(watchdogFn)).@"fn".params) |p| {
+            const T = p.type.?;
+            if (T == *std.http.Client.Request) @compileError("watchdogFn must not borrow the request");
+            if (T == *std.http.Client.Connection) @compileError("watchdogFn must not borrow the connection");
         }
+    }
+
+    /// Retire a connection the watchdog shut down, so stdlib cannot pool a dead
+    /// socket. Callers must have joined the watchdog first, which makes this a
+    /// same-thread write. stdlib otherwise infers `closing` from the reader
+    /// state, and that stays `.ready` when the shutdown lands on the send
+    /// rather than on a read.
+    fn retireIfFired(req: *std.http.Client.Request, fired: *const std.atomic.Value(bool)) void {
+        if (!fired.load(.acquire)) return;
+        if (req.connection) |conn| conn.closing = true;
+    }
+
+    /// dup(2) the request's socket for the watchdog to own. `std.posix` has no
+    /// `dup` in this toolchain, hence `std.c`.
+    fn dupRequestSocket(req: *std.http.Client.Request) error{WatchdogSpawnFailed}!std.posix.fd_t {
+        const conn = req.connection orelse return error.WatchdogSpawnFailed;
+        const fd = std.c.dup(conn.stream_reader.stream.socket.handle);
+        if (fd < 0) return error.WatchdogSpawnFailed;
+        return fd;
     }
 };
 
@@ -2671,6 +2736,124 @@ test "watchdogLoop: fires on cancellation predicate" {
     };
     const fired = watchdogLoop(io, wake.read_fd, &bytes, 10 * std.time.ns_per_s, 10 * std.time.ns_per_s, &Stub.cancel);
     try std.testing.expect(fired);
+}
+
+// ── watchdogFn: the thread owns its socket handle ──────────────────
+
+/// socketpair(2) helper: the watchdog's only job is shutting a socket down,
+/// so the tests need a real one with a peer that can observe the FIN.
+fn testSocketPair() ![2]std.posix.fd_t {
+    var fds: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0) {
+        return error.SocketPairFailed;
+    }
+    return fds;
+}
+
+test "watchdogFn: a fired deadline shuts the socket down" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const fds = try testSocketPair();
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    const sock_fd = std.c.dup(fds[0]);
+    try std.testing.expect(sock_fd >= 0);
+
+    var wake = try Wake.init();
+    defer wake.deinit();
+    var bytes = std.atomic.Value(u64).init(0);
+    var fired = std.atomic.Value(bool).init(false);
+    const Stub = struct {
+        fn cancel() bool {
+            return true;
+        }
+    };
+    const watchdog = try std.Thread.spawn(.{}, HttpClient.watchdogFn, .{
+        threaded.io(),          wake.read_fd, &bytes,       10 * std.time.ns_per_s,
+        10 * std.time.ns_per_s, sock_fd,      &Stub.cancel, &fired,
+    });
+    watchdog.join();
+
+    try std.testing.expect(fired.load(.acquire));
+    // The peer sees the FIN, so a parked read returns instead of hanging.
+    var buf: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.read(fds[1], &buf));
+}
+
+test "watchdogFn: no fire leaves the socket alone" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const fds = try testSocketPair();
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    const sock_fd = std.c.dup(fds[0]);
+    try std.testing.expect(sock_fd >= 0);
+
+    var wake = try Wake.init();
+    defer wake.deinit();
+    wake.signal(); // completes before the first tick: no deadline fires
+    var bytes = std.atomic.Value(u64).init(0);
+    var fired = std.atomic.Value(bool).init(false);
+    const watchdog = try std.Thread.spawn(.{}, HttpClient.watchdogFn, .{
+        threaded.io(),          wake.read_fd, &bytes, 10 * std.time.ns_per_s,
+        10 * std.time.ns_per_s, sock_fd,      null,   &fired,
+    });
+    watchdog.join();
+
+    try std.testing.expect(!fired.load(.acquire));
+    // Not shut down: the original still carries bytes end to end.
+    try std.testing.expect(std.c.write(fds[0], "x", 1) == 1);
+    var buf: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try std.posix.read(fds[1], &buf));
+}
+
+// ── retireIfFired: a socket the watchdog killed must not be pooled ──
+
+/// stdlib's Request/Connection are large and own a live socket, but the
+/// retirement decision reads only `connection` and writes only `closing`.
+fn testRequestOn(conn: *std.http.Client.Connection) std.http.Client.Request {
+    var req: std.http.Client.Request = undefined;
+    req.connection = conn;
+    return req;
+}
+
+test "retireIfFired: a fired watchdog retires the connection" {
+    var conn: std.http.Client.Connection = undefined;
+    conn.closing = false;
+    var req = testRequestOn(&conn);
+    var fired = std.atomic.Value(bool).init(true);
+    HttpClient.retireIfFired(&req, &fired);
+    // Without this, stdlib pools a socket the watchdog already shut down.
+    try std.testing.expect(conn.closing);
+}
+
+test "retireIfFired: no fire leaves the connection poolable" {
+    var conn: std.http.Client.Connection = undefined;
+    conn.closing = false;
+    var req = testRequestOn(&conn);
+    var fired = std.atomic.Value(bool).init(false);
+    HttpClient.retireIfFired(&req, &fired);
+    try std.testing.expect(!conn.closing);
+}
+
+test "retireIfFired: never clears a closing stdlib already decided on" {
+    var conn: std.http.Client.Connection = undefined;
+    conn.closing = true;
+    var req = testRequestOn(&conn);
+    var fired = std.atomic.Value(bool).init(false);
+    HttpClient.retireIfFired(&req, &fired);
+    try std.testing.expect(conn.closing);
+}
+
+test "retireIfFired: a released connection is not dereferenced" {
+    var req: std.http.Client.Request = undefined;
+    req.connection = null;
+    var fired = std.atomic.Value(bool).init(true);
+    HttpClient.retireIfFired(&req, &fired); // must not crash
 }
 
 // --- credential strip across redirects (keep_privileged_headers parity) ---
