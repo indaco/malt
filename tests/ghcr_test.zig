@@ -80,8 +80,8 @@ test "GhcrClient honours a base_url override across token and blob URLs" {
         token_url,
     );
 
-    var blob_buf: [256]u8 = undefined;
-    const blob_url = try ghcr.GhcrClient.buildBlobUrl(&blob_buf, g.base_url, "homebrew/core/wget", "sha256:deadbeef");
+    const blob_url = try ghcr.GhcrClient.buildBlobUrl(testing.allocator, g.base_url, "homebrew/core/wget", "sha256:deadbeef");
+    defer testing.allocator.free(blob_url);
     try testing.expectEqualStrings(
         "https://reg.example.com/v2/homebrew/core/wget/blobs/sha256:deadbeef",
         blob_url,
