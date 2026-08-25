@@ -29,12 +29,19 @@ PIN="$ROOT/scripts/regressions/relocated-store-logic-version.pin"
 STORE="$ROOT/src/core/relocated_store.zig"
 
 # Everything whose output is captured in a `store-relocated` snapshot: the
-# keg relocation walk, the Mach-O patcher it drives, and the ad-hoc codesign
-# applied on the way out. relocated_store.zig itself is deliberately absent -
-# it carries the version constant, so including it would make every bump
-# invalidate its own pin.
+# keg relocation walk, the Mach-O patcher it drives, the ad-hoc codesign
+# applied on the way out, and the formula reader that computes two of the
+# text replacements the walk applies (the perl and dependency placeholders -
+# their substituted values are literally the bytes on disk).
+# relocated_store.zig itself is deliberately absent - it carries the version
+# constant, so including it would make every bump invalidate its own pin.
+#
+# The boundary is "code that decides a replacement's value". Call sites that
+# merely pass one along (cli/install/download.zig) stay out; widening to them
+# would pin most of the install path to the relocation cache.
 SOURCES=(
   src/core/cellar.zig
+  src/core/formula.zig
   src/core/patch.zig
   src/macho/patcher.zig
   src/macho/parser.zig
