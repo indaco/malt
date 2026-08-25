@@ -384,6 +384,10 @@ fn installTapRb(
 
     // Borrows from `resp.body`, which outlives the materialise call below.
     var dep_buf: [64][]const u8 = undefined;
+    const deps = formula_mod.declaredInstallDependencies(&dep_buf, resp.body) catch {
+        sink.err("{s} declares more than {d} dependencies", .{ parts.formula, dep_buf.len });
+        return InstallError.DependencyFailed;
+    };
 
     // Substitute #{version} and #{arch} so the SHA-verified fetch
     // hits the right per-platform asset.
@@ -399,7 +403,7 @@ fn installTapRb(
         .sha256 = rb.sha256,
         .binary_name = parseCaskBinary(resp.body),
         .app_name = parseCaskApp(resp.body),
-        .dependencies = formula_mod.declaredInstallDependencies(&dep_buf, resp.body),
+        .dependencies = deps,
         .tap_registration = .{
             .url = urls.repo_url,
             .commit_sha = commit_sha,
@@ -522,6 +526,10 @@ pub fn installLocalFormula(
     const final_url = args.interpolateUrl(&final_url_buf, rb.url, rb.version, rb.arch_token);
 
     var dep_buf: [64][]const u8 = undefined;
+    const deps = formula_mod.declaredInstallDependencies(&dep_buf, body) catch {
+        sink.err("{s} declares more than {d} dependencies", .{ name, dep_buf.len });
+        return InstallError.DependencyFailed;
+    };
 
     const resolved = ResolvedRubyFormula{
         .name = name,
@@ -531,7 +539,7 @@ pub fn installLocalFormula(
         .url = final_url,
         .sha256 = rb.sha256,
         // Borrows from `body`, which outlives the materialise call below.
-        .dependencies = formula_mod.declaredInstallDependencies(&dep_buf, body),
+        .dependencies = deps,
         // No tap_registration — never pollute `mt tap` with a local path.
     };
 
@@ -573,12 +581,10 @@ fn fstatRisk(f: std.Io.File) ?LocalPermissionRisk {
     return describeLocalPermissionRisk(@intCast(raw.mode), @intCast(raw.uid), @intCast(effective));
 }
 
-/// Install a tap/local formula's declared runtime dependencies through the
-/// ordinary API pipeline. `skip_lock` because the caller already holds
-/// `malt.lock` — BSD flock is per-fd, so re-entering would EAGAIN against
-/// our own hold. A dependency that cannot be installed fails the install:
-/// landing a binary against libraries that are not there is worse than
-/// refusing.
+/// Install a formula's declared runtime deps through the ordinary pipeline.
+/// `skip_lock` because the caller already holds `malt.lock`, and BSD flock is
+/// per-fd — re-entering would EAGAIN against our own hold. A dep that will not
+/// install fails the install: a binary missing its libraries is worse.
 fn installDeclaredDeps(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -587,7 +593,8 @@ fn installDeclaredDeps(
 ) InstallError!void {
     if (resolved.dependencies.len == 0) return;
 
-    sink.info("Installing {d} dependencies for {s}...", .{ resolved.dependencies.len, resolved.name });
+    const dep_word: []const u8 = if (resolved.dependencies.len == 1) "dependency" else "dependencies";
+    sink.info("Installing {d} {s} for {s}...", .{ resolved.dependencies.len, dep_word, resolved.name });
     install_mod.installAll(ctx, allocator, resolved.dependencies, .{
         .skip_lock = true,
         .sink = sink,
@@ -671,12 +678,9 @@ pub fn materializeRubyFormula(
         return;
     }
 
-    // Dependencies first, like `brew`: a tap formula names them in the `.rb`
-    // rather than the API, so nothing else on this path would install them
-    // and the binary would land linked against libraries that are absent.
-    // Ahead of the fetch so a missing dep costs nothing to discover.
-    // `--download-only` skips it — that mode warms a cache, it installs
-    // nothing, and pulling deps would exceed what the user asked for.
+    // A tap formula names its deps in the `.rb`, not the API, so nothing else
+    // would install them. Ahead of the fetch, like `brew`, so a missing one
+    // costs nothing to discover. `--download-only` warms a cache, so it opts out.
     if (!download_only) try installDeclaredDeps(ctx, allocator, resolved, sink);
 
     // Pick the archive kind early so the cache-or-fetch step below
@@ -863,10 +867,8 @@ pub fn materializeRubyFormula(
             var dest_buf: [512]u8 = undefined;
             const dest = std.fmt.bufPrint(&dest_buf, "{s}/{s}", .{ bin_path, target_binary }) catch
                 return InstallError.CellarFailed;
-            // Copied verbatim: the asset is usually adhoc/linker-signed and
-            // any edit makes an arm64 binary unrunnable. The cache entry is
-            // 0644, so the mode is set on create rather than chmod'd after —
-            // the file is never briefly present and unexecutable.
+            // Verbatim, and executable from the first byte on disk: the asset is
+            // usually signed, and any edit makes an arm64 binary unrunnable.
             std.Io.Dir.copyFileAbsolute(cache_path, dest, ctx.io, .{
                 .permissions = std.Io.File.Permissions.fromMode(0o755),
             }) catch {
@@ -879,11 +881,9 @@ pub fn materializeRubyFormula(
     // Strip first: a forged marker would otherwise let the archive's author
     // drive doctor's verdict, and the stamp written below must be ours.
     cellar_mod.stripKegMarkers(ctx.io, cellar_path);
-    // Whatever malt just staged is linked against the prefix its author built
-    // on — usually `/opt/homebrew`, which malt does not own. An archive is no
-    // different from a bare asset here: patch those load commands and re-sign,
-    // or the binary loads the wrong libraries (or none) at runtime. Writes its
-    // own stamp, so a future relocation fix can name this keg.
+    // Whatever malt staged is linked against its author's prefix, which malt
+    // does not own — an archive is no different from a bare asset here. Left
+    // alone, the binary loads the wrong libraries at runtime, or none.
     cellar_mod.relocateUnbottledKeg(ctx.io, allocator, cellar_path) catch {
         sink.err("Failed to relocate {s} to the malt prefix", .{resolved.name});
         std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};

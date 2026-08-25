@@ -941,8 +941,6 @@ pub fn remove(io: std.Io, prefix: []const u8, name: []const u8, version: []const
     std.Io.Dir.cwd().deleteTree(io, cellar_path) catch return CellarError.RemoveFailed;
 }
 
-// Pins the describeError split: only the user-actionable mappings carry
-// prose; every other tag falls through to @errorName.
 /// One LC_LOAD_DYLIB carrying `dylib_path`. Enough for the relocation walk,
 /// which only reads the header and the load-command path slots.
 fn buildLoadDylibMachO(allocator: std.mem.Allocator, dylib_path: []const u8, cmdsize: u32) ![]u8 {
@@ -970,12 +968,8 @@ fn buildLoadDylibMachO(allocator: std.mem.Allocator, dylib_path: []const u8, cmd
 
 fn relocatedDylibPath(allocator: std.mem.Allocator, io: std.Io, bin_path: []const u8) ![]u8 {
     const parser_mod = @import("../macho/parser.zig");
-    const f = try std.Io.Dir.openFileAbsolute(io, bin_path, .{});
-    defer f.close(io);
-    const st = try f.stat(io);
-    const bytes = try allocator.alloc(u8, @intCast(st.size));
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, bin_path, allocator, .unlimited);
     defer allocator.free(bytes);
-    _ = try f.readPositionalAll(io, bytes, 0);
 
     var parsed = try parser_mod.parse(allocator, bytes);
     defer parsed.deinit();
@@ -1021,6 +1015,38 @@ test "relocateUnbottledKeg rewrites a build-prefix dylib reference to the malt p
     );
 }
 
+test "relocateUnbottledKeg does not follow a symlink out of the keg" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // Tap archives are third-party. One shipping `lib -> /opt/homebrew/lib`
+    // must not turn relocation into a rewrite of files malt does not own.
+    var s = try Scratch.init("reloc_binary_symlink");
+    defer s.deinit();
+    const keg = s.p("/Cellar/tool/1.0");
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    const outside = s.p("/outside");
+    try std.Io.Dir.cwd().createDirPath(io, outside);
+
+    const bytes = try buildLoadDylibMachO(
+        testing.allocator,
+        "/opt/homebrew/opt/flac/lib/libFLAC.14.dylib",
+        128,
+    );
+    defer testing.allocator.free(bytes);
+    const victim = s.p("/outside/victim.dylib");
+    try atomic.atomicWriteFile(io, victim, bytes);
+
+    const link = s.p("/Cellar/tool/1.0/lib");
+    try std.Io.Dir.cwd().symLink(io, outside, link, .{});
+
+    try relocateUnbottledKeg(io, testing.allocator, keg);
+
+    const after = try std.Io.Dir.cwd().readFileAlloc(io, victim, testing.allocator, .unlimited);
+    defer testing.allocator.free(after);
+    try testing.expectEqualSlices(u8, bytes, after);
+}
+
 test "relocateUnbottledKeg leaves a binary with no build-prefix reference untouched" {
     const testing = std.testing;
     const io = std.Options.debug_io;
@@ -1040,12 +1066,8 @@ test "relocateUnbottledKeg leaves a binary with no build-prefix reference untouc
 
     try relocateUnbottledKeg(io, testing.allocator, keg);
 
-    const f = try std.Io.Dir.openFileAbsolute(io, bin, .{});
-    defer f.close(io);
-    const st = try f.stat(io);
-    const after = try testing.allocator.alloc(u8, @intCast(st.size));
+    const after = try std.Io.Dir.cwd().readFileAlloc(io, bin, testing.allocator, .unlimited);
     defer testing.allocator.free(after);
-    _ = try f.readPositionalAll(io, after, 0);
     try testing.expectEqualSlices(u8, bytes, after);
 
     // Still stamped: the logic ran, it simply had nothing to do.
@@ -1055,6 +1077,8 @@ test "relocateUnbottledKeg leaves a binary with no build-prefix reference untouc
     );
 }
 
+// Pins the describeError split: only the user-actionable mappings carry
+// prose; every other tag falls through to @errorName.
 test "reloc stamp round-trips both states; anything unreadable is absent" {
     const testing = std.testing;
     const io = std.Options.debug_io;
