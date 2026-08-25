@@ -86,7 +86,10 @@ const dependency_placeholders = [_]struct {
 /// this is for paths without one, where the DB rows describe a different
 /// version than the keg on disk.
 pub fn declaredDependencies(out: [][]const u8, rb_source: []const u8) []const []const u8 {
-    return declaredDepsExcluding(out, rb_source, &.{":build"});
+    const total = scanDeclaredDeps(out, rb_source, false);
+    // Truncates rather than fails: these callers describe a keg already on
+    // disk, where a short list costs a placeholder, not a broken install.
+    return out[0..@min(total, out.len)];
 }
 
 /// The deps an installer must actually pull in. Also drops `:optional`,
@@ -97,20 +100,24 @@ pub fn declaredDependencies(out: [][]const u8, rb_source: []const u8) []const []
 /// does this keg link at runtime" for a keg already on disk, and its answer
 /// is baked into relocated bytes. Widening it would invalidate every cached
 /// relocation to serve a caller that is not asking the same question.
-pub fn declaredInstallDependencies(out: [][]const u8, rb_source: []const u8) []const []const u8 {
-    return declaredDepsExcluding(out, rb_source, &.{ ":build", ":optional" });
-}
-
-fn declaredDepsExcluding(
+pub fn declaredInstallDependencies(
     out: [][]const u8,
     rb_source: []const u8,
-    exclude: []const []const u8,
-) []const []const u8 {
+) error{TooManyDependencies}![]const []const u8 {
+    const total = scanDeclaredDeps(out, rb_source, true);
+    // Refuses rather than truncates: silently installing a prefix of the list
+    // lands a keg missing libraries, which surfaces far from the cause.
+    if (total > out.len) return error.TooManyDependencies;
+    return out[0..total];
+}
+
+/// Fill `out` with dependency names. Returns how many were *found*, which may
+/// exceed `out.len` — the wrappers above differ only in what they do about that.
+fn scanDeclaredDeps(out: [][]const u8, rb_source: []const u8, drop_optional: bool) usize {
     const decl = "depends_on ";
     var n: usize = 0;
     var lines = std.mem.tokenizeScalar(u8, rb_source, '\n');
     while (lines.next()) |line| {
-        if (n == out.len) break;
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (!std.mem.startsWith(u8, trimmed, decl)) continue;
 
@@ -121,14 +128,13 @@ fn declaredDepsExcluding(
         const close = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse continue;
 
         const tail = rest[close..];
-        for (exclude) |tag| {
-            if (std.mem.indexOf(u8, tail, tag) != null) break;
-        } else {
-            out[n] = rest[1..close];
-            n += 1;
-        }
+        if (std.mem.indexOf(u8, tail, ":build") != null) continue;
+        if (drop_optional and std.mem.indexOf(u8, tail, ":optional") != null) continue;
+
+        if (n < out.len) out[n] = rest[1..close];
+        n += 1;
     }
-    return out[0..n];
+    return n;
 }
 
 /// A `.rb` past this is not a formula; real ones are a few KB.
@@ -1204,7 +1210,7 @@ test "declaredInstallDependencies keeps recommended deps but drops optional ones
     // Homebrew installs `:recommended` by default and `:optional` only on
     // request; an installer that pulled the latter would exceed the ask.
     var out: [8][]const u8 = undefined;
-    const got = declaredInstallDependencies(&out,
+    const got = try declaredInstallDependencies(&out,
         \\  depends_on "ffmpeg" => :recommended
         \\  depends_on "lua" => :optional
         \\  depends_on "cmake" => :build
@@ -1213,6 +1219,46 @@ test "declaredInstallDependencies keeps recommended deps but drops optional ones
     try testing.expectEqual(@as(usize, 2), got.len);
     try testing.expectEqualStrings("ffmpeg", got[0]);
     try testing.expectEqualStrings("flac", got[1]);
+}
+
+test "declaredInstallDependencies refuses a list longer than the buffer" {
+    // Installing a silent prefix of the list lands a keg missing libraries,
+    // and the failure then surfaces far from its cause.
+    const src =
+        \\  depends_on "dep0"
+        \\  depends_on "dep1"
+        \\  depends_on "dep2"
+        \\  depends_on "dep3"
+        \\  depends_on "dep4"
+    ;
+
+    var small: [4][]const u8 = undefined;
+    try testing.expectError(
+        error.TooManyDependencies,
+        declaredInstallDependencies(&small, src),
+    );
+
+    // Exactly at capacity still succeeds — the refusal is for overflow only.
+    var exact: [5][]const u8 = undefined;
+    const got = try declaredInstallDependencies(&exact, src);
+    try testing.expectEqual(@as(usize, 5), got.len);
+    try testing.expectEqualStrings("dep4", got[4]);
+}
+
+test "declaredDependencies truncates instead of refusing" {
+    // Deliberately the other policy: its callers read a keg already on disk,
+    // where a short list costs a placeholder rather than a broken install.
+    const src =
+        \\  depends_on "dep0"
+        \\  depends_on "dep1"
+        \\  depends_on "dep2"
+    ;
+
+    var out: [2][]const u8 = undefined;
+    const got = declaredDependencies(&out, src);
+    try testing.expectEqual(@as(usize, 2), got.len);
+    try testing.expectEqualStrings("dep0", got[0]);
+    try testing.expectEqualStrings("dep1", got[1]);
 }
 
 test "declaredDependencies still reports an optional dep as a runtime one" {
