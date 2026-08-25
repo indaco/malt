@@ -12,6 +12,10 @@ const net = std.Io.net;
 
 const blob_body = "BOTTLE-BYTES";
 
+// A batch install mints one token covering every repo, so token length grows
+// with batch size. Past any plausible fixed-size auth buffer.
+const big_token_len = 2100;
+
 const Stub = struct {
     io: std.Io,
     listener: *net.Server,
@@ -21,12 +25,17 @@ const Stub = struct {
     // When set, every blob GET answers this status (used to prove a non-401
     // error is NOT treated as the skew/revocation retry case).
     force_status: ?std.http.Status = null,
+    // When true `/token` answers with a `big_token_len`-byte token.
+    big_token: bool = false,
     token_count: usize = 0,
     blob_count: usize = 0,
     // Bearer value presented on each blob GET, copied out of the per-request
     // buffer so the test can compare token#1 vs token#2 after the join.
     blob_auth: [2][256]u8 = undefined,
     blob_auth_len: [2]usize = .{ 0, 0 },
+    // Untruncated length of each presented Bearer value, so an oversized
+    // token can be checked without widening the capture buffers.
+    blob_auth_full_len: [2]usize = .{ 0, 0 },
 };
 
 // Serves the whole token→blob→token→blob sequence on one keep-alive
@@ -46,8 +55,14 @@ fn serveStub(s: *Stub) void {
         const target = req.head.target;
         if (std.mem.indexOf(u8, target, "/token") != null) {
             s.token_count += 1;
-            var body_buf: [64]u8 = undefined;
-            const body = std.fmt.bufPrint(&body_buf, "{{\"token\":\"t{d}\"}}", .{s.token_count}) catch return;
+            var body_buf: [big_token_len + 64]u8 = undefined;
+            const body = if (s.big_token) blk: {
+                var tok: [big_token_len]u8 = undefined;
+                @memset(&tok, 'A');
+                // Keep each minted token distinct so a replayed one is visible.
+                tok[0] = '0' + @as(u8, @intCast(s.token_count % 10));
+                break :blk std.fmt.bufPrint(&body_buf, "{{\"token\":\"{s}\"}}", .{tok}) catch return;
+            } else std.fmt.bufPrint(&body_buf, "{{\"token\":\"t{d}\"}}", .{s.token_count}) catch return;
             req.respond(body, .{}) catch return;
         } else if (std.mem.indexOf(u8, target, "/blobs/") != null) {
             const idx = @min(s.blob_count, s.blob_auth.len - 1);
@@ -57,6 +72,7 @@ fn serveStub(s: *Stub) void {
                     const n = @min(h.value.len, s.blob_auth[idx].len);
                     @memcpy(s.blob_auth[idx][0..n], h.value[0..n]);
                     s.blob_auth_len[idx] = n;
+                    s.blob_auth_full_len[idx] = h.value.len;
                 }
             }
             s.blob_count += 1;
@@ -388,4 +404,45 @@ test "concurrent downloadBlob workers recover from 401 without cache corruption"
     // Each worker fetched, hit 401, invalidated, re-fetched: at least the two
     // initial fetches happened (the exact total races by design).
     try std.testing.expect(cs.token_count.load(.monotonic) >= 2);
+}
+
+test "downloadBlob presents an oversized multi-scope token in full" {
+    // The bearer must reach the wire whole however long the batch-wide token
+    // gets - on the first attempt and on the post-401 retry.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const port = listener.socket.address.getPort();
+
+    var stub = Stub{ .io = io, .listener = &listener, .big_token = true };
+    const server_thread = try std.Thread.spawn(.{}, serveStub, .{&stub});
+
+    var base_buf: [64]u8 = undefined;
+    const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+
+    var g = ghcr.GhcrClient.init(io, std.testing.allocator, &http);
+    defer g.deinit();
+    g.base_url = base;
+
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+
+    const result = g.downloadBlob(&http, "homebrew/core/tree", "sha256:abc", &sink.writer, null);
+
+    http.deinit();
+    server_thread.join();
+
+    try result;
+    try std.testing.expectEqualStrings(blob_body, sink.writer.buffered());
+    // "Bearer " + the whole token, both times - no truncation, no cliff.
+    const expected = "Bearer ".len + big_token_len;
+    try std.testing.expectEqual(expected, stub.blob_auth_full_len[0]);
+    try std.testing.expectEqual(expected, stub.blob_auth_full_len[1]);
 }

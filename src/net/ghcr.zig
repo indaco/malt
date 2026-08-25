@@ -260,9 +260,11 @@ pub const GhcrClient = struct {
             const token = self.fetchToken(http, repo) catch return GhcrError.TokenFetchFailed;
             defer self.allocator.free(token);
 
-            var auth_buf: [2048]u8 = undefined;
-            const auth_value = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token}) catch
+            // Sized exactly to the token: a batch-wide multi-scope token has
+            // no bounded length, so any fixed buffer just moves the cliff.
+            const auth_value = std.fmt.allocPrint(self.allocator, "Bearer {s}", .{token}) catch
                 return GhcrError.OutOfMemory;
+            defer self.allocator.free(auth_value);
 
             const headers = [_]std.http.Header{
                 .{ .name = "Authorization", .value = auth_value },
@@ -405,4 +407,35 @@ test "invalidateToken clears a seeded cache and is a no-op when already empty" {
     try testing.expect(g.cached_token == null);
     try testing.expectEqual(@as(usize, 0), g.cached_scopes.count());
     try testing.expect(!g.hasTokenFor("homebrew/core/tree"));
+}
+
+test "downloadBlob does not report an oversized token as OutOfMemory" {
+    // A fixed-size auth buffer used to fail long batch-wide tokens as
+    // OutOfMemory before any request left the process. Against a closed port a
+    // header that was built surfaces as a transport failure instead.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+
+    var g = GhcrClient.init(io, testing.allocator, &http);
+    defer g.deinit();
+    g.base_url = "http://127.0.0.1:1";
+
+    const big = try testing.allocator.alloc(u8, 2100);
+    @memset(big, 'A');
+    g.cached_token = big;
+    try g.cached_scopes.put(testing.allocator, try testing.allocator.dupe(u8, "homebrew/core/tree"), {});
+    g.token_expiry = std.math.maxInt(i64);
+
+    var sink: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer sink.deinit();
+
+    try testing.expectError(
+        GhcrError.DownloadFailed,
+        g.downloadBlob(&http, "homebrew/core/tree", "sha256:abc", &sink.writer, null),
+    );
 }
