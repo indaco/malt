@@ -138,7 +138,9 @@ zig translate-c -I "$ROOT/vendor/" "$ROOT/c/sqlite.h" >"$TMP/c_sqlite.zig" 2>/de
 zig translate-c "$ROOT/c/clonefile.h" >"$TMP/c_clonefile.zig" 2>/dev/null
 zig translate-c "$ROOT/c/mount.h" >"$TMP/c_mount.zig" 2>/dev/null
 
-(cd "$ROOT" && zig test -OReleaseSafe \
+# ca_bundle.zig evaluates trust in-process; the module graph needs the same
+# frameworks build.zig links.
+(cd "$ROOT" && zig test -OReleaseSafe -framework Security -framework CoreFoundation \
   --dep malt -Mroot="$HARNESS" \
   --dep c_sqlite --dep c_clonefile --dep c_mount \
   -Mmalt="$ROOT/src/lib.zig" -lc -I "$ROOT/vendor/" -I "$ROOT/c/" \

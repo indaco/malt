@@ -39,7 +39,36 @@ fn addTranslatedCModules(
     };
 }
 
+/// Security.framework backs the in-process trust evaluation in
+/// `core/ca_bundle.zig`; CoreFoundation carries its object types. Every
+/// artifact that compiles that file needs the link, so they all route here.
+fn linkTrustFrameworks(b: *std.Build, m: *std.Build.Module) void {
+    m.linkFramework("Security", .{});
+    m.linkFramework("CoreFoundation", .{});
+
+    // Named explicitly rather than left to the compiler's SDK detection,
+    // because the sysroot below suppresses that detection and the universal
+    // step's targets never had it: naming an arch makes a target cross even
+    // on macOS. Without this the link finds no frameworks at all.
+    m.addSystemFrameworkPath(.{
+        .cwd_relative = b.pathJoin(&.{ b.sysroot.?, "System", "Library", "Frameworks" }),
+    });
+}
+
 pub fn build(b: *std.Build) void {
+    // Whole-build setting, so it is decided here rather than wherever it is
+    // first needed. The cross-compiled halves of the universal binary link
+    // frameworks, and CoreFoundation re-exports /usr/lib/libobjc.A.dylib - an
+    // absolute path that is no longer a file on disk, it lives in the dyld
+    // shared cache. Only a sysroot makes the linker resolve that name inside
+    // the SDK. This is the SDK a native build picks by itself, so native
+    // builds see no change.
+    if (b.sysroot == null) b.sysroot = std.zig.system.darwin.getSdk(
+        b.allocator,
+        b.graph.io,
+        &b.graph.host.result,
+    ) orelse std.debug.panic("no macOS SDK found; install the Command Line Tools", .{});
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -69,6 +98,7 @@ pub fn build(b: *std.Build) void {
             .strip = strip,
         }),
     });
+    linkTrustFrameworks(b, exe.root_module);
     exe.root_module.addOptions("version_string", version_options);
     exe.root_module.addImport("c_sqlite", host_c_mods.c_sqlite);
     exe.root_module.addImport("c_clonefile", host_c_mods.c_clonefile);
@@ -287,6 +317,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    linkTrustFrameworks(b, malt_lib);
     malt_lib.addCSourceFile(.{
         .file = b.path("vendor/sqlite3.c"),
         .flags = &.{
@@ -330,6 +361,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    linkTrustFrameworks(b, lib_test_module);
     lib_test_module.addCSourceFile(.{
         .file = b.path("vendor/sqlite3.c"),
         .flags = &.{
@@ -475,6 +507,7 @@ pub fn build(b: *std.Build) void {
     arm64_exe.root_module.addIncludePath(b.path("vendor/"));
     arm64_exe.root_module.addIncludePath(b.path("c/"));
     arm64_exe.root_module.addOptions("version_string", version_options);
+    linkTrustFrameworks(b, arm64_exe.root_module);
     arm64_exe.root_module.addImport("c_sqlite", arm64_c_mods.c_sqlite);
     arm64_exe.root_module.addImport("c_clonefile", arm64_c_mods.c_clonefile);
     arm64_exe.root_module.addImport("c_mount", arm64_c_mods.c_mount);
@@ -496,6 +529,7 @@ pub fn build(b: *std.Build) void {
     x86_exe.root_module.addIncludePath(b.path("vendor/"));
     x86_exe.root_module.addIncludePath(b.path("c/"));
     x86_exe.root_module.addOptions("version_string", version_options);
+    linkTrustFrameworks(b, x86_exe.root_module);
     x86_exe.root_module.addImport("c_sqlite", x86_c_mods.c_sqlite);
     x86_exe.root_module.addImport("c_clonefile", x86_c_mods.c_clonefile);
     x86_exe.root_module.addImport("c_mount", x86_c_mods.c_mount);

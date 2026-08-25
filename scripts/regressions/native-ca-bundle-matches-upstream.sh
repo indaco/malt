@@ -59,7 +59,7 @@ SOURCE="$KEG/share/ca-certificates/cacert.pem"
 [[ -f "$SCRIPT" && -f "$SOURCE" ]] || fail "keg is missing the post-install script or its source bundle"
 
 # ── the recognition digest still matches the shipped script ───────────
-want=$(rg -o '"[0-9a-f]{64}"' "$ROOT/src/core/ca_bundle.zig" | head -1 | tr -d '"')
+want=$(grep -oE '"[0-9a-f]{64}"' "$ROOT/src/core/ca_bundle.zig" | head -1 | tr -d '"')
 got=$(shasum -a 256 "$SCRIPT" | cut -d' ' -f1)
 if [[ "$want" != "$got" ]]; then
   echo "  upstream script digest: $got" >&2
@@ -70,6 +70,16 @@ fi
 # ── malt's bundle, written by the install above ───────────────────────
 NATIVE="$PREFIX/etc/ca-certificates/cert.pem"
 [[ -s "$NATIVE" ]] || fail "install left no bundle at $NATIVE"
+
+# ── the native path must actually have been used ───────────────────────
+# Comparing the bundle against the script cannot show this: when the native
+# path declines, the script produced the bundle, so the two agree perfectly
+# and every other check here passes while the optimisation is silently gone.
+# The decline note is the only evidence, so its absence is the assertion.
+if grep -q "native trust-store build declined" "$WORK/install.log"; then
+  grep "native trust-store build declined" "$WORK/install.log" | sed 's/^/  /' >&2
+  fail "the native builder declined; the shipped script did the work"
+fi
 
 # ── the bundle must stay world-readable, as the script's chmod makes it ──
 # open(2) masks the mode with the caller's umask, so a native write that only
