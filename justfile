@@ -74,6 +74,7 @@ regressions-harness:
     @./scripts/regressions/dsl-chmod-mode-cast-panic-large-literal.sh
     @./scripts/regressions/extract-token-field-panics-on-non-object-json.sh
     @./scripts/regressions/frame-putcontent-passes-lone-c1-bytes.sh
+    @./scripts/regressions/ghcr-bearer-header-fixed-stack-buffer.sh
     @./scripts/regressions/post-install-run-step-gh804.sh
     @./scripts/regressions/progress-shared-counters-atomic-progressbar-update-lock-free-data-race.sh
     @./scripts/regressions/scaled-timeout-clamp-scaled-timeout-overflow-on-content-length.sh

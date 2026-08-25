@@ -111,10 +111,11 @@ pub const GhcrClient = struct {
     }
 
     /// Build the registry blob URL for `(repo, digest)`. Pure, `pub`
-    /// so tests can pin the override-honouring shape.
-    pub fn buildBlobUrl(buf: []u8, base: []const u8, repo: []const u8, digest: []const u8) GhcrError![]const u8 {
-        return std.fmt.bufPrint(buf, "{s}/v2/{s}/blobs/{s}", .{ base, repo, digest }) catch
-            GhcrError.OutOfMemory;
+    /// so tests can pin the override-honouring shape. A mirror base is
+    /// caller-supplied and unbounded, so the result is sized to its inputs.
+    /// Caller owns the result.
+    pub fn buildBlobUrl(allocator: std.mem.Allocator, base: []const u8, repo: []const u8, digest: []const u8) ![]u8 {
+        return std.fmt.allocPrint(allocator, "{s}/v2/{s}/blobs/{s}", .{ base, repo, digest });
     }
 
     /// Fetch one token covering every repo in `repos` with a single
@@ -243,8 +244,9 @@ pub const GhcrClient = struct {
         sink: *std.Io.Writer,
         progress: ?client_mod.ProgressCallback,
     ) GhcrError!void {
-        var url_buf: [512]u8 = undefined;
-        const url = try buildBlobUrl(&url_buf, self.base_url, repo, digest);
+        const url = buildBlobUrl(self.allocator, self.base_url, repo, digest) catch
+            return GhcrError.OutOfMemory;
+        defer self.allocator.free(url);
 
         // A 401 on a token the local clock still deems valid means the
         // registry rejected it (skew / early revocation / scope gap), so
@@ -260,9 +262,11 @@ pub const GhcrClient = struct {
             const token = self.fetchToken(http, repo) catch return GhcrError.TokenFetchFailed;
             defer self.allocator.free(token);
 
-            var auth_buf: [2048]u8 = undefined;
-            const auth_value = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token}) catch
+            // Sized exactly to the token: a batch-wide multi-scope token has
+            // no bounded length, so any fixed buffer just moves the cliff.
+            const auth_value = std.fmt.allocPrint(self.allocator, "Bearer {s}", .{token}) catch
                 return GhcrError.OutOfMemory;
+            defer self.allocator.free(auth_value);
 
             const headers = [_]std.http.Header{
                 .{ .name = "Authorization", .value = auth_value },
@@ -339,6 +343,9 @@ pub fn extractTokenField(allocator: std.mem.Allocator, json_bytes: []const u8) !
         .string => |s| s,
         else => return error.InvalidResponse,
     };
+    // An empty token would ride out as a credential-less "Bearer ", buying
+    // two 401s and a misleading Unauthorized instead of naming the real fault.
+    if (token_str.len == 0) return error.InvalidResponse;
 
     return allocator.dupe(u8, token_str);
 }
@@ -372,14 +379,17 @@ test "buildTokenUrl emits scope params against a mirror base URL" {
 }
 
 test "buildBlobUrl threads the override base into the blob path" {
-    var buf: [256]u8 = undefined;
-    const url = try GhcrClient.buildBlobUrl(&buf, "https://reg.example.com", "homebrew/core/wget", "sha256:abc");
+    const url = try GhcrClient.buildBlobUrl(testing.allocator, "https://reg.example.com", "homebrew/core/wget", "sha256:abc");
+    defer testing.allocator.free(url);
     try testing.expectEqualStrings("https://reg.example.com/v2/homebrew/core/wget/blobs/sha256:abc", url);
 }
 
-test "buildBlobUrl returns OutOfMemory when the buffer can't hold the URL" {
-    var tiny: [8]u8 = undefined;
-    try testing.expectError(GhcrError.OutOfMemory, GhcrClient.buildBlobUrl(&tiny, "https://reg.example.com", "homebrew/core/wget", "sha256:abc"));
+test "buildBlobUrl fits a mirror base far past any fixed path buffer" {
+    const long_base = "https://" ++ ("mirror." ** 90) ++ "example.com";
+    const url = try GhcrClient.buildBlobUrl(testing.allocator, long_base, "homebrew/core/wget", "sha256:abc");
+    defer testing.allocator.free(url);
+    try testing.expect(url.len > 512);
+    try testing.expectEqualStrings(long_base ++ "/v2/homebrew/core/wget/blobs/sha256:abc", url);
 }
 
 test "invalidateToken clears a seeded cache and is a no-op when already empty" {
@@ -405,4 +415,35 @@ test "invalidateToken clears a seeded cache and is a no-op when already empty" {
     try testing.expect(g.cached_token == null);
     try testing.expectEqual(@as(usize, 0), g.cached_scopes.count());
     try testing.expect(!g.hasTokenFor("homebrew/core/tree"));
+}
+
+test "downloadBlob does not report an oversized token as OutOfMemory" {
+    // A fixed-size auth buffer used to fail long batch-wide tokens as
+    // OutOfMemory before any request left the process. Against a closed port a
+    // header that was built surfaces as a transport failure instead.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+
+    var g = GhcrClient.init(io, testing.allocator, &http);
+    defer g.deinit();
+    g.base_url = "http://127.0.0.1:1";
+
+    const big = try testing.allocator.alloc(u8, 2100);
+    @memset(big, 'A');
+    g.cached_token = big;
+    try g.cached_scopes.put(testing.allocator, try testing.allocator.dupe(u8, "homebrew/core/tree"), {});
+    g.token_expiry = std.math.maxInt(i64);
+
+    var sink: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer sink.deinit();
+
+    try testing.expectError(
+        GhcrError.DownloadFailed,
+        g.downloadBlob(&http, "homebrew/core/tree", "sha256:abc", &sink.writer, null),
+    );
 }

@@ -37,6 +37,13 @@ test "extractTokenField returns InvalidResponse when the root is not an object" 
     }
 }
 
+// An empty token is well-formed JSON but useless: accepting it sends a
+// credential-less "Bearer " and reports the resulting 401 as Unauthorized,
+// hiding the fact that the registry never handed one over.
+test "extractTokenField returns InvalidResponse when the token field is empty" {
+    try testing.expectError(error.InvalidResponse, ghcr.extractTokenField(testing.allocator, "{\"token\":\"\"}"));
+}
+
 test "GhcrClient.init/deinit does not leak and starts without cached token" {
     var pool = try pool_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
@@ -73,8 +80,8 @@ test "GhcrClient honours a base_url override across token and blob URLs" {
         token_url,
     );
 
-    var blob_buf: [256]u8 = undefined;
-    const blob_url = try ghcr.GhcrClient.buildBlobUrl(&blob_buf, g.base_url, "homebrew/core/wget", "sha256:deadbeef");
+    const blob_url = try ghcr.GhcrClient.buildBlobUrl(testing.allocator, g.base_url, "homebrew/core/wget", "sha256:deadbeef");
+    defer testing.allocator.free(blob_url);
     try testing.expectEqualStrings(
         "https://reg.example.com/v2/homebrew/core/wget/blobs/sha256:deadbeef",
         blob_url,
