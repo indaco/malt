@@ -126,6 +126,30 @@ fn runTar(argv: []const []const u8) !void {
     }
 }
 
+/// Seed `<prefix>/cache/Tap/<sha>.bin` with `body` so `materializeRubyFormula`
+/// takes the warm-cache branch and never touches the network.
+fn seedRawBinaryCache(prefix: []const u8, sha: []const u8, body: []const u8) ![]const u8 {
+    var parent_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const parent = try std.fmt.bufPrint(&parent_buf, "{s}/cache/Tap", .{prefix});
+    try test_io.cwd().createDirPath(std.Options.debug_io, parent);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try malt.tap_cache.cachePath(&path_buf, prefix, sha, ".bin");
+    const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, body);
+    return testing.allocator.dupe(u8, path);
+}
+
+/// Minimal body that passes the Mach-O magic sniff. The install path only
+/// reads the magic, so a header-shaped stub stands in for a release asset.
+const macho_stub = blk: {
+    var bytes: [64]u8 = @splat(0);
+    std.mem.writeInt(u32, bytes[0..4], std.macho.MH_MAGIC_64, .little);
+    bytes[8] = 0xAB; // tail marker: proves the copy is byte-for-byte
+    break :blk bytes;
+};
+
 test "execute refuses --download-only combined with --only-dependencies" {
     // The two flags are semantically ambiguous: one says "don't touch the
     // requested package", the other says "don't materialise anything".
@@ -981,4 +1005,262 @@ test "--download-only reports a Ctrl-C as an interruption" {
     // Paired half of the same flag: a cancelled job must not also be listed
     // as a download failure.
     try testing.expect(std.mem.indexOf(u8, captured.items, "Download failed for") == null);
+}
+
+test "materializeRubyFormula installs a tap formula whose url is an uncompressed binary" {
+    // GoReleaser-style taps publish a bare release asset — no archive suffix
+    // at all. The suffix gate used to refuse these before fetching a byte, so
+    // a whole class of single-file taps was uninstallable. The asset must land
+    // at bin/<name> renamed (its own basename never matches) and byte-for-byte
+    // (any edit voids the adhoc signature an arm64 binary needs to run).
+    const prefix = try setupPrefix("rawbin");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha = "1a" ** 32;
+    const cache_path = try seedRawBinaryCache(prefix, sha, &macho_stub);
+    defer testing.allocator.free(cache_path);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    // `.invalid` host: any regression back to the fetch path surfaces as a
+    // network error instead of silently passing.
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "rawpkg",
+        .full_name = "user/repo/rawpkg",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-rawbin-test.invalid/releases/download/v1.0/rawpkg-darwin-arm64",
+        .sha256 = sha,
+    };
+
+    try malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        false, // force
+        false, // download_only
+        malt.install_sink.terminal,
+    );
+
+    const dest = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/rawpkg/1.0/bin/rawpkg", .{prefix});
+    defer testing.allocator.free(dest);
+    try testing.expect(pathExists(dest));
+
+    const st = try test_io.cwd().statFile(std.Options.debug_io, dest, .{});
+    try testing.expectEqual(@as(std.posix.mode_t, 0o755), st.permissions.toMode() & 0o777);
+
+    const got = try test_io.cwd().readFileAlloc(std.Options.debug_io, dest, testing.allocator, .unlimited);
+    defer testing.allocator.free(got);
+    try testing.expectEqualSlices(u8, &macho_stub, got);
+
+    // Recorded and linked like any other keg.
+    try testing.expectEqual(@as(i64, 1), try kegRowCount(prefix));
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/bin/rawpkg", .{prefix});
+    defer testing.allocator.free(link);
+    try testing.expect(pathExists(link));
+}
+
+test "materializeRubyFormula honours binary_name when staging an uncompressed binary" {
+    // The raw path is what makes `bin.install <asset> => <name>` work: the
+    // destination name comes from the DSL, never from the asset's basename.
+    const prefix = try setupPrefix("rawbinname");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha = "2b" ** 32;
+    const cache_path = try seedRawBinaryCache(prefix, sha, &macho_stub);
+    defer testing.allocator.free(cache_path);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "rawtoken",
+        .full_name = "user/repo/rawtoken",
+        .tap_label = "user/repo",
+        .version = "2.0",
+        .url = "https://malt-rawbin-test.invalid/releases/download/v2.0/rawtoken-linux-amd64",
+        .sha256 = sha,
+        .binary_name = "rawtool",
+    };
+
+    try malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        false, // force
+        false, // download_only
+        malt.install_sink.terminal,
+    );
+
+    const dest = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/rawtoken/2.0/bin/rawtool", .{prefix});
+    defer testing.allocator.free(dest);
+    try testing.expect(pathExists(dest));
+
+    const wrong = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/rawtoken/2.0/bin/rawtoken", .{prefix});
+    defer testing.allocator.free(wrong);
+    try testing.expect(!pathExists(wrong));
+}
+
+test "materializeRubyFormula refuses a compressed body arriving on the raw-binary path" {
+    // The fallback is a sniff, not a blanket accept: an unrecognised suffix
+    // hiding a gzip/bzip2/xz body must still be refused, and must not leave a
+    // keg behind.
+    const prefix = try setupPrefix("rawbinbz");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha = "3c" ** 32;
+    const cache_path = try seedRawBinaryCache(prefix, sha, "BZh91AY&SY");
+    defer testing.allocator.free(cache_path);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "bzpkg",
+        .full_name = "user/repo/bzpkg",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-rawbin-test.invalid/releases/download/v1.0/bzpkg-darwin-arm64",
+        .sha256 = sha,
+    };
+
+    try testing.expectError(install_record.InstallError.DownloadFailed, malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        false, // force
+        false, // download_only
+        malt.install_sink.terminal,
+    ));
+
+    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/bzpkg", .{prefix});
+    defer testing.allocator.free(keg);
+    try testing.expect(!pathExists(keg));
+    try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
+}
+
+test "materializeRubyFormula truncated body on the raw-binary path is refused" {
+    // A body shorter than the 4-byte magic must not read out of bounds or
+    // fall through to accept.
+    const prefix = try setupPrefix("rawbintrunc");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha = "4d" ** 32;
+    const cache_path = try seedRawBinaryCache(prefix, sha, "\xcf");
+    defer testing.allocator.free(cache_path);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "truncpkg",
+        .full_name = "user/repo/truncpkg",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-rawbin-test.invalid/releases/download/v1.0/truncpkg-darwin-arm64",
+        .sha256 = sha,
+    };
+
+    try testing.expectError(install_record.InstallError.DownloadFailed, malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        false, // force
+        false, // download_only
+        malt.install_sink.terminal,
+    ));
+    try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
 }
