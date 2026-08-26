@@ -430,6 +430,7 @@ pub fn buildInstallNameToolArgv(
     errdefer argv.deinit(allocator);
 
     argv.appendAssumeCapacity(external_tool_path);
+    var id_emitted = false;
     for (entries) |e| {
         if (e.delete) {
             // -delete_rpath <old> <file>: strip the collapsed duplicate.
@@ -450,7 +451,11 @@ pub fn buildInstallNameToolArgv(
             },
             .id => {
                 // -id takes only the new install name; the old one is
-                // implicit (LC_ID_DYLIB carries a single name).
+                // implicit (LC_ID_DYLIB carries a single name). A fat binary
+                // reports one per arch slice, but the tool accepts only one
+                // and applies it to every slice, so keep the first.
+                if (id_emitted) continue;
+                id_emitted = true;
                 argv.appendAssumeCapacity("-id");
                 argv.appendAssumeCapacity(e.new_path);
             },
@@ -581,6 +586,27 @@ const StderrCapture = struct {
         return buf;
     }
 };
+
+test "buildInstallNameToolArgv emits one -id for a fat binary" {
+    // The parser returns the union of every arch slice, so a universal dylib
+    // yields one LC_ID_DYLIB per slice. install_name_tool refuses a second
+    // -id, and one covers all slices anyway.
+    const a = std.testing.allocator;
+    const id_cmd = @intFromEnum(std.macho.LC.ID_DYLIB);
+    const entries = [_]OverflowEntry{
+        .{ .cmd = id_cmd, .old_path = "/old/lib.dylib", .new_path = "/new/lib.dylib" },
+        .{ .cmd = id_cmd, .old_path = "/old/lib.dylib", .new_path = "/new/lib.dylib" },
+    };
+    const argv = try buildInstallNameToolArgv(a, "/bin/thing", &entries);
+    defer a.free(argv);
+
+    var ids: usize = 0;
+    for (argv) |arg| if (std.mem.eql(u8, arg, "-id")) {
+        ids += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), ids);
+    try std.testing.expectEqualStrings("/bin/thing", argv[argv.len - 1]);
+}
 
 test "classifyInstallNameToolStderr keeps padding exhaustion distinct" {
     // Padding exhaustion has its own remediation - shorten the prefix or
