@@ -608,6 +608,98 @@ test "buildInstallNameToolArgv emits one -id for a fat binary" {
     try std.testing.expectEqualStrings("/bin/thing", argv[argv.len - 1]);
 }
 
+test "a relocation failure names the binary even when the tool says nothing" {
+    // The promise is that a failure is never silent. A tool that exits
+    // non-zero without a word must still leave the user something to act on.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var cap = try StderrCapture.start(a, io);
+    reportInstallNameToolFailure(io, "/some/keg/lib/thing.dylib", "");
+    const emitted = try cap.finish(a);
+
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "/some/keg/lib/thing.dylib") != null);
+}
+
+test "a relocation report ends in a newline whether or not the tool supplied one" {
+    // The message is replayed verbatim, so an unterminated one would run into
+    // whatever the installer prints next.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    for ([_][]const u8{ "boom", "boom\n" }) |body| {
+        var cap = try StderrCapture.start(a, io);
+        reportInstallNameToolFailure(io, "/keg/thing.dylib", body);
+        const emitted = try cap.finish(a);
+        try std.testing.expect(std.mem.endsWith(u8, emitted, "boom\n"));
+        try std.testing.expect(!std.mem.endsWith(u8, emitted, "\n\n"));
+    }
+}
+
+test "flushOverflow stays silent when install_name_tool succeeds" {
+    // Nothing to report on success: a spurious line here would make every
+    // ordinary install look like it had a problem.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var cap = try StderrCapture.start(a, io);
+    // No entries is the cheapest success: the tool is never spawned.
+    const res = flushOverflow(io, a, "/keg/thing.dylib", &.{});
+    const emitted = try cap.finish(a);
+    try res;
+    try std.testing.expectEqual(@as(usize, 0), emitted.len);
+}
+
+test "buildInstallNameToolArgv renders each load-command form" {
+    const a = std.testing.allocator;
+    const lc = std.macho.LC;
+    const entries = [_]OverflowEntry{
+        .{ .cmd = @intFromEnum(lc.LOAD_DYLIB), .old_path = "/old/dep", .new_path = "/new/dep" },
+        .{ .cmd = @intFromEnum(lc.RPATH), .old_path = "/old/rp", .new_path = "/new/rp" },
+        .{ .cmd = @intFromEnum(lc.RPATH), .old_path = "/dup/rp", .new_path = "", .delete = true },
+        .{ .cmd = @intFromEnum(lc.ID_DYLIB), .old_path = "/old/id", .new_path = "/new/id" },
+    };
+    const argv = try buildInstallNameToolArgv(a, "/keg/thing.dylib", &entries);
+    defer a.free(argv);
+
+    const want = [_][]const u8{
+        external_tool_path,
+        "-change",        "/old/dep", "/new/dep",
+        "-rpath",         "/old/rp",  "/new/rp",
+        "-delete_rpath",  "/dup/rp",
+        "-id",            "/new/id",
+        "/keg/thing.dylib",
+    };
+    try std.testing.expectEqual(want.len, argv.len);
+    for (want, argv) |w, got| try std.testing.expectEqualStrings(w, got);
+}
+
+test "buildInstallNameToolArgv reports allocation failure rather than a partial argv" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const entries = [_]OverflowEntry{
+        .{ .cmd = @intFromEnum(std.macho.LC.ID_DYLIB), .old_path = "/o", .new_path = "/n" },
+    };
+    try std.testing.expectError(
+        error.OutOfMemory,
+        buildInstallNameToolArgv(failing.allocator(), "/keg/thing.dylib", &entries),
+    );
+}
+
 test "classifyInstallNameToolStderr keeps padding exhaustion distinct" {
     // Padding exhaustion has its own remediation - shorten the prefix or
     // rebuild the bottle - so it must not collapse into the generic failure.
