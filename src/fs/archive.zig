@@ -182,6 +182,62 @@ fn applyHardLinks(io: std.Io, dir: std.Io.Dir, links: []const HardLink) !void {
     }
 }
 
+const IteratorScan = struct { entries: usize, hard_links: usize };
+
+/// Validate every entry using the extractor's own iterator. A second reading of
+/// the tar format can drift from `std.tar` over metadata records or entry
+/// lengths, and each divergence found so far was a way past the raw walk below.
+/// Sharing the iterator removes that whole class. Reports how many headers it
+/// accounted for, so the raw walk can be checked against it, and whether any
+/// hard links exist - the only reason to walk the archive a second time.
+fn scanEntriesWithIterator(
+    io: std.Io,
+    arena: std.mem.Allocator,
+    archive_path: []const u8,
+    symlinks: *std.StringHashMapUnmanaged(void),
+) !IteratorScan {
+    var file = std.Io.Dir.openFileAbsolute(io, archive_path, .{}) catch return error.ExtractionFailed;
+    defer file.close(io);
+
+    var file_buf: [16 * 1024]u8 = undefined;
+    var file_reader = file.reader(io, &file_buf);
+    const input: *std.Io.Reader = &file_reader.interface;
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompress = std.compress.flate.Decompress.init(input, .gzip, &window);
+
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var diags: std.tar.Diagnostics = .{ .allocator = arena };
+    defer diags.deinit();
+    var it = std.tar.Iterator.init(&decompress.reader, .{
+        .file_name_buffer = &name_buf,
+        .link_name_buffer = &link_buf,
+        .diagnostics = &diags,
+    });
+
+    var seen: usize = 0;
+    while (it.next() catch return error.ExtractionFailed) |entry| {
+        seen += 1;
+        if (!isSafeEntryPath(entry.name)) return error.ExtractionFailed;
+        const canon = try canonicalEntryName(arena, entry.name);
+        if (traversesSymlink(symlinks, canon)) return error.ExtractionFailed;
+        if (entry.kind == .sym_link) {
+            if (!isSafeSymlinkTarget(entry.name, entry.link_name)) return error.ExtractionFailed;
+            if (canon.len > 0) try symlinks.put(arena, canon, {});
+        }
+    }
+    // Extraction refuses these too, but only once the archive is already on
+    // disk. Hard links are the documented exception: malt re-applies them.
+    var hard_links: usize = 0;
+    for (diags.errors.items) |item| switch (item) {
+        .unsupported_file_type => |info| if (info.file_type == .hard_link) {
+            hard_links += 1;
+        } else return error.ExtractionFailed,
+        else => return error.ExtractionFailed,
+    };
+    return .{ .entries = seen + diags.errors.items.len, .hard_links = hard_links };
+}
+
 /// Walk the tar archive at raw 512-byte blocks to enforce path safety
 /// AND recover hard-link pairs the std iterator silently drops.
 /// Pax extended headers ('x') and GNU long-name/long-link records ('L'/'K')
@@ -218,6 +274,14 @@ fn preScanTarGz(
     // symlink the budget no longer describes the filesystem and repeated
     // "one level up" hops compose into an unbounded escape.
     var symlink_names: std.StringHashMapUnmanaged(void) = .empty;
+    // Authoritative pass first: whatever it refuses never reaches the walk
+    // below, and the symlinks it records are the ones extraction will create.
+    const scan = try scanEntriesWithIterator(io, arena, archive_path, &symlink_names);
+    // The walk below exists only to recover hard-link pairs, which the
+    // iterator drops. With none to recover there is nothing to find and
+    // nothing to cross-check, so skip a second pass over the whole archive.
+    if (scan.hard_links == 0) return &.{};
+    var raw_entries: usize = 0;
 
     // Metadata overrides apply to the next real entry. A pax header replaces
     // the whole pending record, while GNU L/K records replace one field. This
@@ -292,6 +356,7 @@ fn preScanTarGz(
         // No entry may be reached through a symlink this archive created —
         // that is the step that turns a bounded, dangling link into a write
         // outside the extraction root.
+        raw_entries += 1;
         const canon = try canonicalEntryName(arena, name);
         if (traversesSymlink(&symlink_names, canon)) return error.ExtractionFailed;
 
@@ -348,6 +413,11 @@ fn preScanTarGz(
         const canon_target = try canonicalEntryName(arena, hl.target);
         if (traversesSymlink(&symlink_names, canon_target)) return error.ExtractionFailed;
     }
+
+    // The two walks must have found the same entries. A mismatch means they
+    // parted company somewhere, so nothing below can be trusted to describe
+    // what extraction will do.
+    if (raw_entries != scan.entries) return error.ExtractionFailed;
 
     return hardlinks.toOwnedSlice(arena);
 }
@@ -725,6 +795,14 @@ const TestTar = struct {
     }
 
     /// Append a single 512-byte entry header (size 0 — links/dirs only).
+    /// Declares a payload size without appending one, so a test can control
+    /// how far each walk advances.
+    fn sizedEntry(self: *TestTar, name: []const u8, typeflag: u8, size: u64) void {
+        const h = testTarHeader(name, typeflag, "", size);
+        @memcpy(self.buf[self.len..][0..512], h[0..]);
+        self.len += 512;
+    }
+
     fn entry(self: *TestTar, name: []const u8, typeflag: u8, link: []const u8) void {
         const h = testTarHeader(name, typeflag, link, 0);
         @memcpy(self.buf[self.len..][0..512], h[0..]);
@@ -1083,6 +1161,64 @@ test "extractTarGz refuses a sparse entry that hides nothing" {
             std.Io.Dir.accessAbsolute(io, s.p("/dest/plain"), .{}),
         );
     }
+}
+
+test "extractTarGz refuses an archive whose pax size hides an entry from the scan" {
+    // std.tar takes an entry's length from a pax `size` record; a walk reading
+    // the ustar field advances differently and loses its place from there on.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("pax_size_desync");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+    try s.dir.createDirPath(io, "outside");
+
+    var raw: [8192]u8 = @splat(0);
+    var t = TestTar.init(&raw);
+    t.pax('x', "size", "512");
+    t.entry("victim", '0', "");
+    t.sizedEntry("filler", '0', 512);
+    t.entry("door", '2', "../outside");
+    t.file("door/escaped", "owned");
+
+    const result = testExtract(io, &s, t.bytes());
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/outside/escaped"), .{}),
+    );
+    try std.testing.expectError(error.ExtractionFailed, result);
+}
+
+test "extractTarGz refuses an archive the two walks read differently" {
+    // Nothing here escapes; the walks simply disagree about how many entries
+    // exist. That disagreement is the signal - it means one of them is no
+    // longer describing the archive extraction will write.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("walk_disagreement");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    // The pax size swallows the next two headers as file data, so the
+    // iterator sees one entry where the raw walk sees three. Both finish
+    // cleanly; only the count betrays them.
+    var raw: [8192]u8 = @splat(0);
+    var t = TestTar.init(&raw);
+    t.file("target", "data");
+    t.entry("keep", '1', "target");
+    t.pax('x', "size", "1024");
+    t.entry("victim", '0', "");
+    t.entry("a", '0', "");
+    t.entry("b", '0', "");
+
+    try std.testing.expectError(
+        error.ExtractionFailed,
+        testExtract(io, &s, t.bytes()),
+    );
 }
 
 test "extractTarGz accepts safe GNU long-name and long-link metadata" {
