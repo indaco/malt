@@ -261,6 +261,10 @@ fn preScanTarGz(
             if (kind_byte == 'L') override_name = value else override_link = value;
             continue;
         }
+        // A sparse entry carries extra headers std.tar consumes and this walk
+        // cannot see, desyncing the two for every later entry. Extraction
+        // rejects these anyway, so refuse before anything reaches disk.
+        if (kind_byte == 'S') return error.ExtractionFailed;
         // Global pax header is never applied to later entries (std.tar
         // discards it); skip its payload and keep any pending overrides.
         if (kind_byte == 'g') {
@@ -672,6 +676,20 @@ fn testTarHeader(name: []const u8, typeflag: u8, link: []const u8, size: u64) [5
     return h;
 }
 
+/// A GNU sparse header with the "extended sparse headers follow" bit set.
+/// `std.tar` then consumes further blocks that a raw walk does not expect.
+fn testGnuSparseHeader() [512]u8 {
+    var h = testTarHeader("sparse", 'S', "", 0);
+    h[482] = 1;
+    @memset(h[148..156], ' ');
+    var sum: u64 = 0;
+    for (h) |b| sum += b;
+    _ = std.fmt.bufPrint(h[148..154], "{o:0>6}", .{sum}) catch unreachable;
+    h[154] = 0;
+    h[155] = ' ';
+    return h;
+}
+
 /// Format a pax record `"<len> KEY=VALUE\n"` where `<len>` counts the whole
 /// record including its own digits.
 fn testPaxRecord(out: []u8, key: []const u8, value: []const u8) []const u8 {
@@ -997,6 +1015,74 @@ test "extractTarGz lets a directory entry consume a GNU long name" {
 
     try testExtract(io, &s, t.bytes());
     try std.Io.Dir.accessAbsolute(io, s.p("/dest/safe/inside"), .{});
+}
+
+test "extractTarGz rejects a sparse entry before its extra headers desync the scan" {
+    // Once the two disagree about where entries begin, the scan stops
+    // describing what extraction actually writes.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("gnu_sparse_desync");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+    try s.dir.createDirPath(io, "outside");
+
+    var raw: [8192]u8 = @splat(0);
+    var n: usize = 0;
+    @memcpy(raw[n..][0..512], &testGnuSparseHeader());
+    n += 512;
+    // Swallowed by std.tar as the sparse extension; read as a header by the
+    // scan, whose declared payload then hides the next block from it.
+    @memcpy(raw[n..][0..512], &testTarHeader("filler", '0', "", 512));
+    n += 512;
+    @memcpy(raw[n..][0..512], &testTarHeader("door", '2', "../outside", 0));
+    n += 512;
+    @memcpy(raw[n..][0..512], &testTarHeader("door/escaped", '0', "", 5));
+    n += 512;
+    @memcpy(raw[n..][0..5], "owned");
+    n += 512;
+
+    const result = testExtract(io, &s, raw[0 .. n + 1024]);
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/outside/escaped"), .{}),
+    );
+    try std.testing.expectError(error.ExtractionFailed, result);
+}
+
+test "extractTarGz refuses a sparse entry that hides nothing" {
+    // Extraction already refused these via its diagnostics, so refusing in the
+    // scan only moves the outcome ahead of the writes. Both header shapes are
+    // covered: only the extended one desyncs, but neither may reach extraction.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    inline for (.{ "gnu_sparse_ext", "gnu_sparse_plain" }, 0..) |tag, i| {
+        const header = if (i == 0) testGnuSparseHeader() else testTarHeader("sparse", 'S', "", 0);
+        var s = try Scratch.init(tag);
+        defer s.deinit();
+        try s.dir.createDirPath(io, "dest");
+
+        var raw: [8192]u8 = @splat(0);
+        var n: usize = 0;
+        @memcpy(raw[n..][0..512], &header);
+        n += 512;
+        @memcpy(raw[n..][0..512], &testTarHeader("plain", '0', "", 0));
+        n += 512;
+
+        try std.testing.expectError(
+            error.ExtractionFailed,
+            testExtract(io, &s, raw[0 .. n + 1024]),
+        );
+        // The point of refusing in the scan: the archive never reaches disk.
+        try std.testing.expectError(
+            error.FileNotFound,
+            std.Io.Dir.accessAbsolute(io, s.p("/dest/plain"), .{}),
+        );
+    }
 }
 
 test "extractTarGz accepts safe GNU long-name and long-link metadata" {
