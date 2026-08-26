@@ -192,14 +192,22 @@ pub fn renderRubyProfile(
         return SandboxError.ProfileBuildFailed;
     w.writeAll(")\n(allow file-read-data") catch return SandboxError.ProfileBuildFailed;
     for ([_][]const u8{
-        "/Library/Apple",
-        "/private/var/db/timezone",
         "/dev/null",
         "/dev/random",
         "/dev/urandom",
         "/dev/zero",
         "/dev/tty",
     }) |path| w.print("\n  (literal \"{s}\")", .{path}) catch
+        return SandboxError.ProfileBuildFailed;
+    // Directories, so they need the contents too: a literal rule matches only
+    // the directory node and the denies above take everything inside. Without
+    // the timezone tree a fenced child silently reports UTC, and LibreSSL
+    // reads its config under /private/etc/ssl before it will run at all.
+    for ([_][]const u8{
+        "/Library/Apple",
+        "/private/var/db/timezone",
+        "/private/etc/ssl",
+    }) |path| w.print("\n  (subpath \"{s}\")", .{path}) catch
         return SandboxError.ProfileBuildFailed;
     w.writeAll("\n  (subpath \"/Library/Fonts\")") catch return SandboxError.ProfileBuildFailed;
     var cellar_real_buf: [std.fs.max_path_bytes]u8 = undefined;
