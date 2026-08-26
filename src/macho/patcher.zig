@@ -479,6 +479,18 @@ fn installNameToolForm(cmd: u32) InstallNameToolForm {
 /// across Xcode releases and is the only one users have a remediation
 /// for, so it gets its own variant; everything else collapses to a
 /// generic failure that surfaces the raw stderr to the user upstream.
+/// Replay a failed `install_name_tool` run to the user. Best-effort: a broken
+/// stderr must not mask the relocation error being returned.
+fn reportInstallNameToolFailure(io: std.Io, file_path: []const u8, stderr_bytes: []const u8) void {
+    const err = std.Io.File.stderr();
+    err.writeStreamingAll(io, "  relocation failed for ") catch return;
+    err.writeStreamingAll(io, file_path) catch return;
+    err.writeStreamingAll(io, "\n") catch return;
+    if (stderr_bytes.len == 0) return;
+    err.writeStreamingAll(io, stderr_bytes) catch return;
+    if (stderr_bytes[stderr_bytes.len - 1] != '\n') err.writeStreamingAll(io, "\n") catch return;
+}
+
 pub fn classifyInstallNameToolStderr(stderr: []const u8) FallbackError {
     if (std.mem.indexOf(u8, stderr, "larger updated load commands do not fit") != null)
         return FallbackError.InsufficientHeaderPad;
@@ -525,10 +537,94 @@ pub fn flushOverflow(
     const term = child.wait(io) catch return FallbackError.InstallNameToolFailed;
     switch (term) {
         .exited => |code| {
-            if (code != 0) return classifyInstallNameToolStderr(stderr_bytes);
+            if (code != 0) {
+                // The classified error drives remediation, but only the tool's
+                // own words say which binary failed and why, so replay them
+                // rather than reduce the whole failure to an error name.
+                reportInstallNameToolFailure(io, file_path, stderr_bytes);
+                return classifyInstallNameToolStderr(stderr_bytes);
+            }
         },
-        else => return FallbackError.InstallNameToolFailed,
+        else => {
+            reportInstallNameToolFailure(io, file_path, stderr_bytes);
+            return FallbackError.InstallNameToolFailed;
+        },
     }
+}
+
+/// Capture a terminal fd so a test can read what a child wrote to it. stderr
+/// is safe to redirect here; the test runner's protocol lives on stdout.
+const StderrCapture = struct {
+    saved: c_int,
+    path: [:0]const u8,
+    io: std.Io,
+
+    fn start(alloc: std.mem.Allocator, io: std.Io) !StderrCapture {
+        const path = try std.fmt.allocPrintSentinel(alloc, "/tmp/malt_patcher_err_{d}", .{std.c.getpid()}, 0);
+        const saved = std.c.dup(std.c.STDERR_FILENO);
+        const cap = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+        if (saved < 0 or cap < 0) return error.CaptureFailed;
+        _ = std.c.dup2(cap, std.c.STDERR_FILENO);
+        _ = std.c.close(cap);
+        return .{ .saved = saved, .path = path, .io = io };
+    }
+
+    fn finish(self: *StderrCapture, alloc: std.mem.Allocator) ![]const u8 {
+        _ = std.c.dup2(self.saved, std.c.STDERR_FILENO);
+        _ = std.c.close(self.saved);
+        defer std.Io.Dir.cwd().deleteFile(self.io, self.path) catch {};
+        const f = try std.Io.Dir.openFileAbsolute(self.io, self.path, .{});
+        defer f.close(self.io);
+        const st = try f.stat(self.io);
+        const buf = try alloc.alloc(u8, @intCast(st.size));
+        _ = try f.readPositionalAll(self.io, buf, 0);
+        return buf;
+    }
+};
+
+test "classifyInstallNameToolStderr keeps padding exhaustion distinct" {
+    // Padding exhaustion has its own remediation - shorten the prefix or
+    // rebuild the bottle - so it must not collapse into the generic failure.
+    try std.testing.expectEqual(
+        FallbackError.InsufficientHeaderPad,
+        classifyInstallNameToolStderr("error: larger updated load commands do not fit"),
+    );
+    try std.testing.expectEqual(
+        FallbackError.InsufficientHeaderPad,
+        classifyInstallNameToolStderr("error: no room for new load commands"),
+    );
+    try std.testing.expectEqual(
+        FallbackError.InstallNameToolFailed,
+        classifyInstallNameToolStderr("error: input file: /x is not a Mach-O file"),
+    );
+}
+
+test "flushOverflow reports why install_name_tool refused the binary" {
+    // Without this the caller only sees a generic patch failure, and the one
+    // thing that says what went wrong has already been thrown away.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const path = try std.fmt.allocPrintSentinel(a, "/tmp/malt_patcher_notmacho_{d}", .{std.c.getpid()}, 0);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "not a mach-o");
+    }
+
+    const entries = [_]OverflowEntry{.{ .cmd = 12, .old_path = "/a/b", .new_path = "/c/d" }};
+    var cap = try StderrCapture.start(a, io);
+    const res = flushOverflow(io, a, path, &entries);
+    const emitted = try cap.finish(a);
+
+    try std.testing.expectError(FallbackError.InstallNameToolFailed, res);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "not a Mach-O file") != null);
 }
 
 test "flushOverflow does not execute a prefix-resident install_name_tool shim" {
