@@ -10,6 +10,7 @@
 //! router downgrades to the loud partial-skip envelope.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const sandbox = @import("dsl/sandbox.zig");
 const sandbox_macos = @import("sandbox/macos.zig");
 const fallback_log = @import("dsl/fallback_log.zig");
@@ -1892,7 +1893,9 @@ fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, extra_env: []const EnvVa
         logViolation(ctx, argv[0]);
         return false;
     };
-    const fenced = sandbox.fenceArgv(ctx.allocator, argv, ctx.keg_path, ctx.prefix, opts) catch {
+    var profile_opts = opts;
+    profile_opts.home = std.process.Environ.getPosix(ctx.environ, "HOME");
+    const fenced = sandbox.fenceArgv(ctx.allocator, argv, ctx.keg_path, ctx.prefix, profile_opts) catch {
         logViolation(ctx, argv[0]);
         return false;
     };
@@ -3516,6 +3519,53 @@ test "a tool step's own env vars layer onto the scrubbed base" {
     // the tool without a PATH; they now sit on top of the scrubbed base.
     try testing.expect(std.mem.indexOf(u8, dump, "PATH=" ++ sandbox_macos.sandbox_path ++ "\n") != null);
     try testing.expect(std.mem.indexOf(u8, dump, "sentinel-must-not-leak") == null);
+}
+
+test "run can read a standard user font without opening the rest of HOME" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.io = threaded.io();
+    const a = h.arena.allocator();
+
+    const home = try std.fmt.allocPrint(a, "{s}_home", .{h.prefix});
+    defer std.Io.Dir.cwd().deleteTree(h.io, home) catch {};
+    const fonts = try std.fmt.allocPrint(a, "{s}/Library/Fonts", .{home});
+    const source = try std.fmt.allocPrint(a, "{s}/Probe.ttf", .{fonts});
+    const copied = try std.fmt.allocPrint(a, "{s}/share/Probe.ttf", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, fonts);
+    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/share", .{h.prefix}));
+    {
+        const f = try std.Io.Dir.createFileAbsolute(h.io, source, .{});
+        defer f.close(h.io);
+        try f.writeStreamingAll(h.io, "FONT");
+    }
+
+    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, libexec);
+    try std.Io.Dir.symLinkAbsolute(h.io, "/bin/cp", try std.fmt.allocPrint(a, "{s}/copy-font", .{libexec}), .{});
+
+    const home_var = try std.fmt.allocPrintSentinel(a, "HOME={s}", .{home}, 0);
+    var env_entries = [_:null]?[*:0]const u8{home_var.ptr};
+    h.environ = .{ .block = .{ .slice = &env_entries } };
+
+    const steps = try std.fmt.allocPrint(
+        a,
+        \\[{{"type":"run","command":{{"base":"libexec","path":"copy-font"}},
+        \\  "args":["{s}","{s}"]}}]
+    ,
+        .{ source, copied },
+    );
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h, steps)));
+    try testing.expect(!h.flog.hasErrors());
+    const copied_file = try std.Io.Dir.openFileAbsolute(h.io, copied, .{});
+    defer copied_file.close(h.io);
+    var buf: [4]u8 = undefined;
+    const n = try copied_file.readPositionalAll(h.io, &buf, 0);
+    try testing.expectEqualStrings("FONT", buf[0..n]);
 }
 
 test "run refuses the execution fields malt does not honour" {

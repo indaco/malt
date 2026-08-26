@@ -43,6 +43,9 @@ test "renderRubyProfile deny-by-default, network denied, cellar + prefix subpath
     try testing.expect(std.mem.indexOf(u8, profile, "(deny default)") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(deny network*)") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(allow file-read*)") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(deny file-read-data") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/Users\")") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/System/Volumes/Data\")") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/Cellar/foo/1.0\")") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/etc\")") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/var\")") != null);
@@ -67,6 +70,21 @@ test "renderRubyProfile grants IPC only under allow_ipc" {
     try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-shm)") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-posix-shm)") != null);
     try testing.expect(std.mem.indexOf(u8, profile, "(allow ipc-sysv-sem)") != null);
+}
+
+test "renderRubyProfile grants standard font directories but not all of HOME" {
+    const profile = try sandbox.renderRubyProfile(
+        testing.allocator,
+        "/opt/malt/Cellar/fontconfig/2.18.3",
+        "/opt/malt",
+        .{ .home = "/test-home" },
+    );
+    defer testing.allocator.free(profile);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/Library/Fonts\")") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/test-home/Library/Fonts\")") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/test-home/.fonts\")") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/test-home/.local/share/fonts\")") != null);
+    try testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/test-home\")") == null);
 }
 
 test "renderRubyProfile refuses unsafe cellar path" {
@@ -98,6 +116,66 @@ test "ScrubbedEnv type smoke — only allowlisted keys" {
 test "sandbox_path restricts to system directories only" {
     // Nothing in the minimal PATH should be user-writable.
     try testing.expectEqualStrings("/usr/bin:/bin:/usr/sbin:/sbin", sandbox.sandbox_path);
+}
+
+test "sandbox profile refuses copying a source from outside the prefix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try test_io.skipIfNoSubprocess();
+
+    const root = try test_io.uniqueTempPath(testing.allocator, "sandbox_macos", "read_source");
+    defer testing.allocator.free(root);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+
+    const prefix = try std.fmt.allocPrint(testing.allocator, "{s}/prefix", .{root});
+    defer testing.allocator.free(prefix);
+    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix});
+    defer testing.allocator.free(keg);
+    const share = try std.fmt.allocPrint(testing.allocator, "{s}/share", .{prefix});
+    defer testing.allocator.free(share);
+    const home = try std.fmt.allocPrint(testing.allocator, "{s}/home", .{root});
+    defer testing.allocator.free(home);
+    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/private", .{home});
+    defer testing.allocator.free(victim);
+    const leaked = try std.fmt.allocPrint(testing.allocator, "{s}/leaked", .{share});
+    defer testing.allocator.free(leaked);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg);
+    try test_io.cwd().createDirPath(std.Options.debug_io, share);
+    try test_io.cwd().createDirPath(std.Options.debug_io, home);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, victim, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "PRIVATE");
+    }
+
+    const profile = try sandbox.renderRubyProfile(testing.allocator, keg, prefix, .{ .home = home });
+    defer testing.allocator.free(profile);
+    const argv = [_][]const u8{
+        "/usr/bin/sandbox-exec", "-p", profile, "/bin/cp", victim, leaked,
+    };
+    const argv_z = try sandbox.buildArgv(testing.allocator, &argv);
+    defer sandbox.freeArgv(testing.allocator, argv_z);
+    const envp = try sandbox.buildEnvp(testing.allocator, .{
+        .home = prefix,
+        .path = sandbox.sandbox_path,
+        .malt_prefix = prefix,
+        .tmpdir = prefix,
+    });
+    defer sandbox.freeEnvp(testing.allocator, envp);
+
+    const sink = test_io.testSink();
+    const exit_code = try sandbox.spawnFilteredWithHooks(
+        argv_z,
+        envp,
+        .{},
+        .{ .out = sink.handle, .err = sink.handle },
+        .{},
+    );
+    try testing.expectError(
+        error.FileNotFound,
+        test_io.accessAbsolute(std.Options.debug_io, leaked, .{}),
+    );
+    try testing.expect(exit_code != 0);
 }
 
 test "std.posix.rlimit_resource tags resolve on macOS for CPU/FSIZE/AS" {
@@ -223,4 +301,103 @@ test "spawnFilteredWithHooks routes child stderr to the configured fd" {
     const n = std.c.read(pipe_fds[0], &buf, buf.len);
     try testing.expect(n > 0);
     try testing.expectEqualStrings("err-via-fd", buf[0..@intCast(n)]);
+}
+
+/// Copy `src` to `dst` inside the rendered profile, returning the child's exit
+/// code. Reads that the profile denies fail here rather than in a substring.
+fn copyUnderProfile(profile: []const u8, prefix: []const u8, src: []const u8, dst: []const u8) !u8 {
+    const argv = [_][]const u8{ "/usr/bin/sandbox-exec", "-p", profile, "/bin/cp", src, dst };
+    const argv_z = try sandbox.buildArgv(testing.allocator, &argv);
+    defer sandbox.freeArgv(testing.allocator, argv_z);
+    const envp = try sandbox.buildEnvp(testing.allocator, .{
+        .home = prefix,
+        .path = sandbox.sandbox_path,
+        .malt_prefix = prefix,
+        .tmpdir = prefix,
+    });
+    defer sandbox.freeEnvp(testing.allocator, envp);
+    const sink = test_io.testSink();
+    return sandbox.spawnFilteredWithHooks(
+        argv_z,
+        envp,
+        .{},
+        .{ .out = sink.handle, .err = sink.handle },
+        .{},
+    );
+}
+
+test "sandbox profile grants reads inside the directories it names" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try test_io.skipIfNoSubprocess();
+
+    // The profile denies /private and /Library wholesale, so each read below
+    // depends on its grant covering directory *contents*. A rule matching only
+    // the directory node leaves local time and openssl silently broken, which
+    // no assertion on the rendered text can catch.
+    const root = try test_io.uniqueTempPath(testing.allocator, "sandbox_macos", "granted_reads");
+    defer testing.allocator.free(root);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+
+    const prefix = try std.fmt.allocPrint(testing.allocator, "{s}/prefix", .{root});
+    defer testing.allocator.free(prefix);
+    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix});
+    defer testing.allocator.free(keg);
+    const share = try std.fmt.allocPrint(testing.allocator, "{s}/share", .{prefix});
+    defer testing.allocator.free(share);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg);
+    try test_io.cwd().createDirPath(std.Options.debug_io, share);
+
+    const profile = try sandbox.renderRubyProfile(testing.allocator, keg, prefix, .{});
+    defer testing.allocator.free(profile);
+
+    const sources = [_][]const u8{
+        // Reading this is what makes a fenced child report local time.
+        "/private/var/db/timezone/zoneinfo/Europe/Rome",
+        // LibreSSL reads its config at startup, so openssl fails without it.
+        "/private/etc/ssl/openssl.cnf",
+    };
+    for (sources, 0..) |src, i| {
+        const dst = try std.fmt.allocPrint(testing.allocator, "{s}/copied{d}", .{ share, i });
+        defer testing.allocator.free(dst);
+        const code = try copyUnderProfile(profile, prefix, src, dst);
+        try testing.expect(code == 0);
+        try test_io.accessAbsolute(std.Options.debug_io, dst, .{});
+    }
+}
+
+test "sandbox profile grants ssl config without reopening the rest of /etc" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try test_io.skipIfNoSubprocess();
+
+    // The ssl grant is a subpath, so widening it to /private/etc would hand
+    // every fenced child the account and host databases as well.
+    const root = try test_io.uniqueTempPath(testing.allocator, "sandbox_macos", "etc_scope");
+    defer testing.allocator.free(root);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+
+    const prefix = try std.fmt.allocPrint(testing.allocator, "{s}/prefix", .{root});
+    defer testing.allocator.free(prefix);
+    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix});
+    defer testing.allocator.free(keg);
+    const share = try std.fmt.allocPrint(testing.allocator, "{s}/share", .{prefix});
+    defer testing.allocator.free(share);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg);
+    try test_io.cwd().createDirPath(std.Options.debug_io, share);
+
+    const profile = try sandbox.renderRubyProfile(testing.allocator, keg, prefix, .{});
+    defer testing.allocator.free(profile);
+
+    const denied = [_][]const u8{ "/private/etc/passwd", "/private/etc/hosts" };
+    for (denied, 0..) |src, i| {
+        const dst = try std.fmt.allocPrint(testing.allocator, "{s}/leaked{d}", .{ share, i });
+        defer testing.allocator.free(dst);
+        const code = try copyUnderProfile(profile, prefix, src, dst);
+        try testing.expect(code != 0);
+        try testing.expectError(
+            error.FileNotFound,
+            test_io.accessAbsolute(std.Options.debug_io, dst, .{}),
+        );
+    }
 }

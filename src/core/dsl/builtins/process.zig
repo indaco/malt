@@ -54,7 +54,9 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     // The lint above waves bare/system-dir argv0 through; the real write
     // containment is the sandbox-exec fence wrapping the spawn (parity with
     // the --use-system-ruby path).
-    const spawn_argv = sandbox.fenceArgv(ctx.allocator, argv_slice, ctx.cellar_path, ctx.malt_prefix, .{}) catch |e| switch (e) {
+    const spawn_argv = sandbox.fenceArgv(ctx.allocator, argv_slice, ctx.cellar_path, ctx.malt_prefix, .{
+        .home = std.process.Environ.getPosix(ctx.environ, "HOME"),
+    }) catch |e| switch (e) {
         error.OutOfMemory => return BuiltinError.OutOfMemory,
         error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
     };
@@ -268,7 +270,9 @@ pub fn safePopenRead(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!
     // capturing stdout must not be a way to spawn unconfined.
     sandbox.validateArgv(argv_slice, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
-    const spawn_argv = sandbox.fenceArgv(ctx.allocator, argv_slice, ctx.cellar_path, ctx.malt_prefix, .{}) catch |e| switch (e) {
+    const spawn_argv = sandbox.fenceArgv(ctx.allocator, argv_slice, ctx.cellar_path, ctx.malt_prefix, .{
+        .home = std.process.Environ.getPosix(ctx.environ, "HOME"),
+    }) catch |e| switch (e) {
         error.OutOfMemory => return BuiltinError.OutOfMemory,
         error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
     };
@@ -769,8 +773,12 @@ test "system drains child output larger than a pipe buffer" {
     var lio: std.Io.Threaded = .init(alloc, .{});
     defer lio.deinit();
 
-    const fixture = try std.fmt.allocPrint(alloc, "/tmp/malt_bigout_{d}", .{std.c.getpid()});
-    defer std.Io.Dir.cwd().deleteFile(lio.io(), fixture) catch {};
+    const root = try std.fmt.allocPrint(alloc, "/tmp/malt_bigout_{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(lio.io(), root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(lio.io(), root) catch {};
+    const cellar = try std.fmt.allocPrint(alloc, "{s}/Cellar/foo/1.0", .{root});
+    try std.Io.Dir.cwd().createDirPath(lio.io(), cellar);
+    const fixture = try std.fmt.allocPrint(alloc, "{s}/payload", .{root});
     {
         const f = try std.Io.Dir.createFileAbsolute(lio.io(), fixture, .{ .truncate = true });
         defer f.close(lio.io());
@@ -782,7 +790,10 @@ test "system drains child output larger than a pipe buffer" {
     }
 
     var cap = try FdCapture.start(alloc, lio.io(), std.c.STDOUT_FILENO, "big");
-    _ = system(sanitizeTestCtx(alloc, lio.io()), null, &.{
+    var ctx = sanitizeTestCtx(alloc, lio.io());
+    ctx.cellar_path = cellar;
+    ctx.malt_prefix = root;
+    _ = system(ctx, null, &.{
         .{ .string = "/bin/cat" },
         .{ .string = fixture },
     }) catch {};
