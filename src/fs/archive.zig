@@ -187,6 +187,10 @@ fn applyHardLinks(io: std.Io, dir: std.Io.Dir, links: []const HardLink) !void {
 /// Pax extended headers ('x') and GNU long-name/long-link records ('L'/'K')
 /// are interpreted so the pre-scan validates the *effective* name and symlink
 /// target the extractor will use, not stale placeholder fields.
+///
+/// This is the only defence, not a fast-fail: `pipeToFileSystem` writes the
+/// whole archive before its diagnostics are inspected, so anything this scan
+/// lets through is already on disk by the time extraction reports failure.
 fn preScanTarGz(
     io: std.Io,
     arena: std.mem.Allocator,
@@ -311,16 +315,16 @@ fn preScanTarGz(
             },
             else => {},
         }
-        // std.tar consumes a pending L/K record only when it returns an entry
-        // upstream: normal file, symlink or directory. Every other header
-        // leaves its File accumulator untouched, so clearing the record here
-        // for those kinds would bind it to a different entry than extraction
-        // binds it to, and the two views would then disagree about which
-        // paths are symlinks.
-        // Pending overrides are consumed by this entry whatever its kind;
-        // reset so they can never leak forward to an unrelated entry.
-        override_name = null;
-        override_link = null;
+        // Only the kinds std.tar returns upstream consume a pending record.
+        // Clearing it for any other header would bind it to a different entry
+        // than extraction does.
+        switch (kind_byte) {
+            0, '0', '2', '5' => {
+                override_name = null;
+                override_link = null;
+            },
+            else => {},
+        }
 
         // Advance past the data payload (rounded up to the next 512-byte
         // boundary). Symlinks/hardlinks/dirs report size 0 so this is a
@@ -890,6 +894,109 @@ test "extractTarGz rejects a write through a GNU long-named symlink" {
         std.Io.Dir.accessAbsolute(io, s.p("/outside/escaped"), .{}),
     );
     try std.testing.expectError(error.ExtractionFailed, result);
+}
+
+test "extractTarGz keeps a GNU long name pending across an unsupported entry" {
+    // An unsupported kind between the record and the real entry leaves the
+    // extractor naming the symlink "door" while a scan that dropped the record
+    // sees "placeholder", and then allows a write through it.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("gnu_carry_unsupported");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+    try s.dir.createDirPath(io, "outside");
+
+    var raw: [8192]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.gnuString('L', "door");
+    t.entry("decoy", '3', "");
+    t.entry("placeholder", '2', "../outside");
+    t.file("door/escaped", "owned");
+
+    const result = testExtract(io, &s, t.bytes());
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/outside/escaped"), .{}),
+    );
+    try std.testing.expectError(error.ExtractionFailed, result);
+}
+
+test "extractTarGz keeps a GNU long name pending across a hard link entry" {
+    // The practical form of the same gap: extraction tolerates hard links, so
+    // only this scan can stop one.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("gnu_carry_hardlink");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+    try s.dir.createDirPath(io, "outside");
+
+    var raw: [8192]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.file("victim", "payload");
+    t.gnuString('L', "door");
+    t.entry("decoy", '1', "victim");
+    t.entry("placeholder", '2', "../outside");
+    t.file("door/escaped", "owned");
+
+    const result = testExtract(io, &s, t.bytes());
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/outside/escaped"), .{}),
+    );
+    try std.testing.expectError(error.ExtractionFailed, result);
+}
+
+test "extractTarGz lets an old-style file entry consume a GNU long link" {
+    // std.tar folds the legacy 0 type byte into a normal file, so it consumes
+    // the record; carrying it forward would refuse a safe archive.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("gnu_alias_consumes");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [8192]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.file("benign", "payload");
+    t.gnuString('K', "../../../../../../tmp/malt-gnu-alias-escape");
+    t.entry("decoy", 0, "");
+    t.entry("alias", '2', "benign");
+
+    try testExtract(io, &s, t.bytes());
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.readLinkAbsolute(io, s.p("/dest/alias"), &link_buf);
+    try std.testing.expectEqualStrings("benign", link_buf[0..n]);
+}
+
+test "extractTarGz lets a directory entry consume a GNU long name" {
+    // The mirror of the carry-over cases: a returned kind must clear the
+    // record, or the scan refuses a safe archive.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("gnu_dir_consumes");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [8192]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.file("target", "payload");
+    t.gnuString('L', "safe");
+    t.entry("placeholder", '5', "");
+    t.entry("alias", '2', "target");
+    t.file("safe/inside", "data");
+
+    try testExtract(io, &s, t.bytes());
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/safe/inside"), .{});
 }
 
 test "extractTarGz accepts safe GNU long-name and long-link metadata" {
