@@ -515,6 +515,22 @@ pub fn flushOverflow(
     file_path: []const u8,
     entries: []const OverflowEntry,
 ) FallbackError!void {
+    return flushOverflowWithHooks(io, allocator, file_path, entries, .{});
+}
+
+/// Test seam mirroring `sandbox/macos.zig`: reaches the abnormal-exit path
+/// without signalling a real child.
+pub const FlushHooks = struct {
+    force_signalled: bool = false,
+};
+
+pub fn flushOverflowWithHooks(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    entries: []const OverflowEntry,
+    hooks: FlushHooks,
+) FallbackError!void {
     if (entries.len == 0) return;
 
     const argv = buildInstallNameToolArgv(allocator, file_path, entries) catch
@@ -539,7 +555,8 @@ pub fn flushOverflow(
         return FallbackError.IoError;
     defer allocator.free(stderr_bytes);
 
-    const term = child.wait(io) catch return FallbackError.InstallNameToolFailed;
+    const waited = child.wait(io) catch return FallbackError.InstallNameToolFailed;
+    const term: std.process.Child.Term = if (hooks.force_signalled) .{ .signal = std.posix.SIG.KILL } else waited;
     switch (term) {
         .exited => |code| {
             if (code != 0) {
@@ -679,10 +696,16 @@ test "buildInstallNameToolArgv renders each load-command form" {
 
     const want = [_][]const u8{
         external_tool_path,
-        "-change",        "/old/dep", "/new/dep",
-        "-rpath",         "/old/rp",  "/new/rp",
-        "-delete_rpath",  "/dup/rp",
-        "-id",            "/new/id",
+        "-change",
+        "/old/dep",
+        "/new/dep",
+        "-rpath",
+        "/old/rp",
+        "/new/rp",
+        "-delete_rpath",
+        "/dup/rp",
+        "-id",
+        "/new/id",
         "/keg/thing.dylib",
     };
     try std.testing.expectEqual(want.len, argv.len);
@@ -698,6 +721,34 @@ test "buildInstallNameToolArgv reports allocation failure rather than a partial 
         error.OutOfMemory,
         buildInstallNameToolArgv(failing.allocator(), "/keg/thing.dylib", &entries),
     );
+}
+
+test "a child that dies by signal is reported, not silently tolerated" {
+    // A killed rename tool leaves the binary half-rewritten, so it must fail
+    // loudly like any other bad outcome.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const path = try std.fmt.allocPrintSentinel(a, "/tmp/malt_patcher_signal_{d}", .{std.c.getpid()}, 0);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "not a mach-o");
+    }
+
+    const entries = [_]OverflowEntry{.{ .cmd = 12, .old_path = "/a/b", .new_path = "/c/d" }};
+    var cap = try StderrCapture.start(a, io);
+    const res = flushOverflowWithHooks(io, a, path, &entries, .{ .force_signalled = true });
+    const emitted = try cap.finish(a);
+
+    try std.testing.expectError(FallbackError.InstallNameToolFailed, res);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, path) != null);
 }
 
 test "classifyInstallNameToolStderr keeps padding exhaustion distinct" {
