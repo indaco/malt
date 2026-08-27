@@ -25,9 +25,8 @@ FIX_DIR="$ROOT/scripts/fixtures/local_formulae"
 }
 
 # MALT_PREFIX must be ≤ 13 bytes (Mach-O in-place patching budget).
-PREFIX="/tmp/mt_smoke"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
 export MALT_PREFIX="$PREFIX"
-rm -rf "$PREFIX"
 mkdir -p "$PREFIX"
 trap 'rm -rf "$PREFIX"' EXIT
 

@@ -39,8 +39,8 @@ fi
 
 # Throwaway prefix. 7 bytes, safely under malt's Mach-O patch budget (matches
 # scripts/record-demo.sh). The cache is a sibling so it survives the prefix wipe.
-PREFIX=/tmp/mt
-CACHE=/tmp/mt-cache
+PREFIX=/tmp/mt-tui
+CACHE=/tmp/mt-tui-cache
 
 export MALT_PREFIX="$PREFIX"
 export MALT_CACHE="$CACHE"

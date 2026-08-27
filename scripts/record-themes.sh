@@ -82,7 +82,7 @@ mkdir -p "$OUT_DIR"
 # survives the per-theme wipe (warm installs ~3s instead of cold).
 PREFIX=/tmp/mt-th
 export MALT_PREFIX="$PREFIX"
-export MALT_CACHE=/tmp/mt-cache
+export MALT_CACHE=/tmp/mt-th-cache
 export PATH="$PWD/zig-out/bin:$PATH"
 export COLORTERM=truecolor        # satisfy malt's truecolor gate so hex themes don't degrade
 export MALT_NO_VERSION_NOTIFIER=1 # keep the update notice out of the install output
