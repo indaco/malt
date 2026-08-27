@@ -31,8 +31,8 @@ BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
   exit 2
 }
 
-PREFIX="/tmp/mt_pin"
-CACHE="/tmp/mc_pin"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
+CACHE=$(mktemp -d /tmp/mc.XXX)
 export MALT_PREFIX="$PREFIX"
 export MALT_CACHE="$CACHE"
 export NO_COLOR=1

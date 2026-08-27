@@ -40,10 +40,11 @@ fail() {
   exit 1
 }
 
-# MALT_PREFIX must stay <= 13 bytes (Mach-O in-place patching budget), so use a
-# fixed short scratch path instead of mktemp's long one.
-PREFIX="/tmp/mt_msr"
-SCRATCH="/tmp/mt-msr-brew"
+# MALT_PREFIX must stay <= 13 bytes (Mach-O in-place patching budget), which
+# the template below respects.
+PREFIX=$(mktemp -d /tmp/mt.XXX)
+SCRATCH=$(mktemp -d /tmp/mt-msr.XXX)
+# Unlike its siblings $PREFIX is left absent on purpose: migrate must create it.
 rm -rf "$PREFIX" "$SCRATCH"
 trap 'rm -rf "$PREFIX" "$SCRATCH"' EXIT
 export MALT_PREFIX="$PREFIX"

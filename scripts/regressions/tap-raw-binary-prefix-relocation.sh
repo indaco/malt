@@ -35,11 +35,10 @@ BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
 
 # MALT_PREFIX must be ≤ 13 bytes (Mach-O in-place patching budget) — the
 # whole point of this guard is that a longer prefix cannot be patched in.
-PREFIX="/tmp/mt_reloc"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
 export MALT_PREFIX="$PREFIX"
 export NO_COLOR=1
 export MALT_NO_EMOJI=1
-rm -rf "$PREFIX"
 mkdir -p "$PREFIX/cache/Tap"
 trap 'rm -rf "$PREFIX"' EXIT
 

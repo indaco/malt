@@ -32,8 +32,8 @@ BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
 }
 
 # MALT_PREFIX must be ≤ 13 bytes (Mach-O in-place patching budget) so
-# keep the path tight. `/tmp/mt_cs` + per-target log dir fits.
-PREFIX_ROOT="/tmp/mt_cs"
+# keep the path tight: the root plus the per-target suffix must still fit.
+PREFIX_ROOT=$(mktemp -d /tmp/mt.XXX)
 # Preserve logs on failure so the user can see WHICH diagnostics fired.
 # Always-clean trap only when everything passes.
 LOG_DIR="$PREFIX_ROOT/logs"
@@ -107,13 +107,9 @@ for target in $TARGETS; do
   s=$(slug "$target")
   log="$LOG_DIR/${s}.log"
 
-  # Each install gets an isolated prefix (shorter than 13 bytes) so
-  # previous installs don't interact with subsequent ones and so we
-  # can baseline per-formula without cross-contamination. Use a small
-  # numeric suffix keyed by count so paths stay ≤ 13 bytes.
-  target_prefix="/tmp/mt_cs${total}"
-  rm -rf "$target_prefix"
-  mkdir -p "$target_prefix"
+  # Each install gets its own prefix so earlier ones cannot bleed into it.
+  # The template keeps it inside the 13-byte Mach-O patching budget.
+  target_prefix=$(mktemp -d /tmp/mt.XXX)
   export MALT_PREFIX="$target_prefix"
 
   printf '▸ %s\n' "$target"

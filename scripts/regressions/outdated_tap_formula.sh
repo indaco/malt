@@ -37,11 +37,10 @@ command -v sqlite3 >/dev/null 2>&1 || {
   exit 2
 }
 
-PREFIX="/tmp/mt_otf"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
 export MALT_PREFIX="$PREFIX"
 export NO_COLOR=1
 export MALT_NO_EMOJI=1
-rm -rf "$PREFIX"
 mkdir -p "$PREFIX/db"
 trap 'rm -rf "$PREFIX"' EXIT
 

@@ -42,13 +42,12 @@ fi
 
 # Short on purpose: a long prefix exceeds the Mach-O patch budget and every
 # install emits a relocation warning that has nothing to do with these steps.
-PREFIX="/tmp/mt_pis"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
 export MALT_PREFIX="$PREFIX"
 # Overridable so a warm cache can be reused; it lives outside PREFIX and
 # therefore survives the cleanup trap.
 export MALT_CACHE="${MALT_CACHE:-$PREFIX/cache}"
 export NO_COLOR=1 MALT_NO_EMOJI=1
-rm -rf "$PREFIX"
 mkdir -p "$PREFIX/bin"
 trap 'rm -rf "$PREFIX"' EXIT
 

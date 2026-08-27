@@ -36,12 +36,11 @@ if [[ -z "${MALT_GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
   export MALT_GITHUB_TOKEN
 fi
 
-PREFIX=/tmp/mt_cab
+PREFIX=$(mktemp -d /tmp/mt.XXX)
 WORK=$(mktemp -d)
 export MALT_PREFIX="$PREFIX"
 export MALT_CACHE="$PREFIX/cache"
 export NO_COLOR=1 MALT_NO_EMOJI=1
-rm -rf "$PREFIX"
 mkdir -p "$PREFIX"
 trap 'rm -rf "$PREFIX" "$WORK"' EXIT
 

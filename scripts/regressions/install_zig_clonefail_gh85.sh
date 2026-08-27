@@ -26,12 +26,11 @@ BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
   exit 2
 }
 
-PREFIX="/tmp/mt_gh85b"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
 export MALT_PREFIX="$PREFIX"
 # Deterministic output so `grep` matches plain strings, not ANSI/emoji.
 export NO_COLOR=1
 export MALT_NO_EMOJI=1
-rm -rf "$PREFIX"
 mkdir -p "$PREFIX"
 trap 'rm -rf "$PREFIX"' EXIT
 
