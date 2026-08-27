@@ -181,7 +181,38 @@ pub fn fileQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Valu
 
 /// atomic_write — write content atomically (sandbox-validated)
 pub fn atomicWrite(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Value {
-    return write(ctx, receiver, args);
+    const path = try receiverPath(ctx.allocator, receiver);
+    if (path.len == 0) return Value{ .nil = {} };
+
+    const content = if (args.len > 0) try args[0].asString(ctx.allocator) else "";
+
+    // Reuse `write`'s gate so atomicity cannot become a way around the
+    // no-follow rule: a keg-confined symlink leaf is refused, not renamed over.
+    if (sandbox.openTargetNoFollow(ctx.io, path, ctx.cellar_path, ctx.malt_prefix, .{ .write = false })) |probe| {
+        probe.close(ctx.io);
+    } else |e| switch (e) {
+        error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
+        else => {}, // usually no target yet; anything else fails again below
+    }
+
+    // The rename installs a new inode at the default mode, so carry the old one
+    // across. Read it with stat, which needs no read permission on the target -
+    // opening one that lacks it would silently widen the mode instead.
+    var permissions: std.Io.File.Permissions = .default_file;
+    if (std.Io.Dir.cwd().statFile(ctx.io, path, .{ .follow_symlinks = false })) |st| {
+        permissions = st.permissions;
+    } else |_| {}
+
+    // Temp-plus-rename: the original stays readable until the rename lands,
+    // which is what the name promises a formula author.
+    var atomic_file = std.Io.Dir.cwd().createFileAtomic(ctx.io, path, .{
+        .permissions = permissions,
+        .replace = true,
+    }) catch return Value{ .nil = {} };
+    defer atomic_file.deinit(ctx.io);
+    atomic_file.file.writeStreamingAll(ctx.io, content) catch return Value{ .nil = {} };
+    atomic_file.replace(ctx.io) catch return Value{ .nil = {} };
+    return Value{ .nil = {} };
 }
 
 /// opt_bin — receiver/"bin" (Formula accessor)
@@ -618,4 +649,149 @@ test "install_symlink hash form keeps a relative source under the given name" {
     const n = try std.Io.Dir.cwd().readLink(io, link, &buf);
     try std.testing.expectEqualStrings("../libexec/tool", buf[0..n]);
     try std.Io.Dir.cwd().access(io, link, .{});
+}
+
+test "atomic_write leaves the original readable until the new content lands" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+
+    var s = try Scratch.init("pathname_atomic_write_preserves");
+    defer s.deinit();
+    const keg = s.base;
+
+    const target = try std.fs.path.join(alloc, &.{ keg, "config" });
+    defer alloc.free(target);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, target, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "ORIGINAL");
+    }
+
+    // Held open across the write: a temp-plus-rename keeps this handle on the
+    // old inode, a truncate-in-place would pull the bytes out from under it.
+    const held = try std.Io.Dir.openFileAbsolute(io, target, .{});
+    defer held.close(io);
+
+    const ctx: ExecCtx = .{
+        .allocator = alloc,
+        .io = io,
+        .environ = undefined,
+        .cellar_path = keg,
+        .malt_prefix = keg,
+    };
+    _ = try atomicWrite(ctx, Value{ .pathname = target }, &.{Value{ .string = "REPLACED" }});
+
+    var old_buf: [16]u8 = undefined;
+    const old_n = try held.readPositionalAll(io, &old_buf, 0);
+    try std.testing.expectEqualStrings("ORIGINAL", old_buf[0..old_n]);
+
+    var new_buf: [16]u8 = undefined;
+    const nf = try std.Io.Dir.openFileAbsolute(io, target, .{});
+    defer nf.close(io);
+    const new_n = try nf.readPositionalAll(io, &new_buf, 0);
+    try std.testing.expectEqualStrings("REPLACED", new_buf[0..new_n]);
+}
+
+test "atomic_write refuses to follow a symlink out of the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+
+    var s = try Scratch.init("pathname_atomic_write_symlink_escape");
+    defer s.deinit();
+    const base = s.base;
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "Cellar", "foo", "1.0" });
+    defer alloc.free(keg);
+    const victim = try std.fs.path.join(alloc, &.{ base, "victim" });
+    defer alloc.free(victim);
+    const link = try std.fs.path.join(alloc, &.{ keg, "pwn" });
+    defer alloc.free(link);
+
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    {
+        const vf = try std.Io.Dir.createFileAbsolute(io, victim, .{});
+        defer vf.close(io);
+        try vf.writeStreamingAll(io, "PRECIOUS");
+    }
+    try std.Io.Dir.symLinkAbsolute(io, victim, link, .{});
+
+    const ctx: ExecCtx = .{
+        .allocator = alloc,
+        .io = io,
+        .environ = undefined,
+        .cellar_path = keg,
+        .malt_prefix = base,
+    };
+
+    // Atomicity must not become a way around the no-follow rule `write` keeps.
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        atomicWrite(ctx, Value{ .pathname = link }, &.{Value{ .string = "PWNED" }}),
+    );
+
+    var vb: [16]u8 = undefined;
+    const vf2 = try std.Io.Dir.openFileAbsolute(io, victim, .{});
+    defer vf2.close(io);
+    try std.testing.expectEqualStrings("PRECIOUS", vb[0..try vf2.readPositionalAll(io, &vb, 0)]);
+}
+
+test "atomic_write keeps the mode of a target it cannot open for reading" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+
+    var s = try Scratch.init("pathname_atomic_write_unreadable");
+    defer s.deinit();
+    const keg = s.base;
+
+    const target = try std.fs.path.join(alloc, &.{ keg, "writeonly" });
+    defer alloc.free(target);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, target, .{ .permissions = @enumFromInt(0o200) });
+        f.close(io);
+    }
+
+    const ctx: ExecCtx = .{
+        .allocator = alloc,
+        .io = io,
+        .environ = undefined,
+        .cellar_path = keg,
+        .malt_prefix = keg,
+    };
+    _ = try atomicWrite(ctx, Value{ .pathname = target }, &.{Value{ .string = "after" }});
+
+    // Reading the mode by opening the file fails here, and falling back to the
+    // default would hand a write-only file world-readable permissions.
+    const st = try std.Io.Dir.cwd().statFile(io, target, .{});
+    try std.testing.expectEqual(@as(u32, 0o200), @intFromEnum(st.permissions) & 0o777);
+}
+
+test "atomic_write keeps the target's existing mode instead of widening it" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+
+    var s = try Scratch.init("pathname_atomic_write_mode");
+    defer s.deinit();
+    const keg = s.base;
+
+    const target = try std.fs.path.join(alloc, &.{ keg, "secret" });
+    defer alloc.free(target);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, target, .{ .permissions = @enumFromInt(0o600) });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "before");
+    }
+
+    const ctx: ExecCtx = .{
+        .allocator = alloc,
+        .io = io,
+        .environ = undefined,
+        .cellar_path = keg,
+        .malt_prefix = keg,
+    };
+    _ = try atomicWrite(ctx, Value{ .pathname = target }, &.{Value{ .string = "after" }});
+
+    // Replacing by rename creates a new inode; a restrictive mode on a config
+    // file must not silently widen because of that.
+    const st = try std.Io.Dir.cwd().statFile(io, target, .{});
+    try std.testing.expectEqual(@as(u32, 0o600), @intFromEnum(st.permissions) & 0o777);
 }
