@@ -36,6 +36,38 @@ const tap_archive_suffixes = [_][]const u8{
     ".zip",
 };
 
+/// Ruby block keywords the arch scanner acts on. Matched against the whole
+/// trimmed line, so a modifier (`url "x" if cond`) can never trip them.
+const BlockKeyword = enum { else_branch, block_end };
+
+const block_keywords = std.StaticStringMap(BlockKeyword).initComptime(.{
+    .{ "else", .else_branch },
+    .{ "end", .block_end },
+});
+
+/// The only directives a two-arch branch carries. Anything else - a nested
+/// block, a `def`, a heredoc - can own an `else` or `end` of its own, and the
+/// scanner tracks no depth to tell whose it is.
+const arch_branch_directives = [_][]const u8{
+    "url ",
+    "sha256 ",
+    "mirror ",
+    "version ",
+    "revision ",
+};
+
+/// Whether `line` keeps an arch branch straight-line, so a following `else`
+/// is unambiguously the branch's own. Callers pass a trimmed, non-empty line.
+fn isArchBranchBody(line: []const u8) bool {
+    // A heredoc opener hides arbitrary text, including lines reading `else`.
+    if (std.mem.indexOf(u8, line, "<<") != null) return false;
+    if (line[0] == '#') return true;
+    for (arch_branch_directives) |directive| {
+        if (std.mem.startsWith(u8, line, directive)) return true;
+    }
+    return false;
+}
+
 /// Minimal Ruby formula parser for GoReleaser-style formulas plus the
 /// modern Homebrew cask DSL. Extracts version, URL, SHA256 — and, for
 /// casks that interpolate `#{arch}` into the URL, the per-platform arch
@@ -62,6 +94,9 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     // Formula is arch-segmented — disarms the arch-blind global fallback so it
     // can't resolve the other arch's self-consistent (checksum-passing) pair.
     var saw_arch_marker = false;
+    // An arch `if`/`elsif` is open, so a bare `else` completes it. Not armed by
+    // `on_arm do` / `on_intel do`: a Ruby block has no `else` branch.
+    var arch_if_open = false;
 
     var it = std.mem.splitScalar(u8, rb_content, '\n');
     while (it.next()) |raw| {
@@ -110,6 +145,21 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
         if (has_arm or has_intel) {
             saw_arch_marker = true;
             in_correct_section = (is_arm and has_arm) or (!is_arm and has_intel);
+            arch_if_open = std.mem.startsWith(u8, line, "if ") or
+                std.mem.startsWith(u8, line, "elsif ");
+        } else if (block_keywords.get(line)) |kw| switch (kw) {
+            // The unmarked half of an arch conditional is ours exactly when
+            // the marked half was not.
+            .else_branch => if (arch_if_open) {
+                in_correct_section = !in_correct_section;
+                arch_if_open = false;
+            },
+            .block_end => arch_if_open = false,
+        } else if (!isArchBranchBody(line)) {
+            // Anything unrecognised forfeits the flip. Giving up costs a parse
+            // refusal; guessing wrong installs the other arch's binary behind
+            // a checksum that matches it.
+            arch_if_open = false;
         }
 
         // arch directive — only meaningful inside on_macos.
@@ -750,6 +800,344 @@ test "parseRubyFormula: resolves the running arch even when the other arch block
         try std.testing.expectEqualStrings("https://example.com/foo-intel.tar.gz", got.url);
         try std.testing.expectEqualStrings("bbbbbbbb", got.sha256);
     }
+}
+
+test "parseRubyFormula: an arch if/else resolves the branch holding our arch, either side" {
+    // A bare `else` carries no arch marker, so the branch it opens is only
+    // reachable if the scanner flips the section on it.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const ours = "https://example.com/foo-ours.tar.gz";
+    const theirs = "https://example.com/foo-theirs.tar.gz";
+
+    // Gate names the other arch: `else` holds our pair.
+    const in_else = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.intel?
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  else
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.arm?
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  else
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    ;
+    const from_else = parseRubyFormula(in_else) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings(ours, from_else.url);
+    try std.testing.expectEqualStrings("aaaaaaaa", from_else.sha256);
+
+    // Mirror: gate names our arch, so the `if` branch wins and the flip
+    // must not invert.
+    const in_if = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.arm?
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  else
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.intel?
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  else
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  end
+        \\end
+    ;
+    const from_if = parseRubyFormula(in_if) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings(ours, from_if.url);
+    try std.testing.expectEqualStrings("aaaaaaaa", from_if.sha256);
+    try std.testing.expect(!std.mem.eql(u8, theirs, from_if.url));
+}
+
+test "parseRubyFormula: an elsif chain closed by else keeps the matching branch" {
+    // Each `elsif` carries its own marker; the trailing `else` must turn the
+    // section off after a branch already matched, not hand it the leftovers.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const src = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.arm?
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  elsif Hardware::CPU.intel?
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  else
+        \\    url "https://example.com/foo-generic.tar.gz"
+        \\    sha256 "cccccccc"
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.intel?
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  elsif Hardware::CPU.arm?
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  else
+        \\    url "https://example.com/foo-generic.tar.gz"
+        \\    sha256 "cccccccc"
+        \\  end
+        \\end
+    ;
+    const got = parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("https://example.com/foo-ours.tar.gz", got.url);
+    try std.testing.expectEqualStrings("aaaaaaaa", got.sha256);
+}
+
+test "parseRubyFormula: an else with no arch if before it flips nothing" {
+    // Only an arch `if`/`elsif` arms the flip, so an unrelated conditional
+    // cannot smuggle a non-matching block into our section.
+    const src =
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if build.head?
+        \\    url "https://example.com/foo-head.tar.gz"
+        \\  else
+        \\    url "https://example.com/foo-1.2.3.tar.gz"
+        \\  end
+        \\  sha256 "deadbeef"
+        \\end
+    ;
+    const got = parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    // Nothing matched a section, so the arch-blind fallback still applies.
+    try std.testing.expectEqualStrings("https://example.com/foo-head.tar.gz", got.url);
+    try std.testing.expectEqualStrings("deadbeef", got.sha256);
+}
+
+test "parseRubyFormula: an else after an arch block opener does not flip the section" {
+    // `on_arm do ... end` is a block, not a conditional — Ruby has no `else`
+    // to pair with it, so a stray one must leave the wrong-arch refusal alone.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const wrong = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_intel do
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  end
+        \\  else
+        \\  url "https://example.com/foo-stray.tar.gz"
+        \\  sha256 "cccccccc"
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  on_arm do
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  end
+        \\  else
+        \\  url "https://example.com/foo-stray.tar.gz"
+        \\  sha256 "cccccccc"
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(wrong) == null);
+}
+
+test "parseRubyFormula: a nested conditional inside an arch branch cancels the flip" {
+    // The inner `else` belongs to the inner `if`. Claiming it would resolve the
+    // other arch's url with the sha256 that matches it - a checksum-clean
+    // wrong-arch install. Refusing is the safe answer.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const src = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.intel?
+        \\    if build.head?
+        \\      url "https://example.com/foo-theirs-head.tar.gz"
+        \\    else
+        \\      url "https://example.com/foo-theirs.tar.gz"
+        \\      sha256 "bbbbbbbb"
+        \\    end
+        \\  else
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.arm?
+        \\    if build.head?
+        \\      url "https://example.com/foo-theirs-head.tar.gz"
+        \\    else
+        \\      url "https://example.com/foo-theirs.tar.gz"
+        \\      sha256 "bbbbbbbb"
+        \\    end
+        \\  else
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(src) == null);
+}
+
+test "parseRubyFormula: a heredoc inside an arch branch cannot forge the else" {
+    // Heredoc bodies hold arbitrary text. A line reading `else` in one is
+    // indistinguishable from real Ruby to a scanner with no depth tracking,
+    // and believing it would resolve the other arch's matching url+sha256.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const src = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.intel?
+        \\    caveats <<~EOS
+        \\      else
+        \\    EOS
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  else
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.arm?
+        \\    caveats <<~EOS
+        \\      else
+        \\    EOS
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  else
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    ;
+    const got = parseRubyFormula(src);
+    // Never the other arch. Refusing is the acceptable outcome here.
+    if (got) |info| {
+        try std.testing.expectEqualStrings("https://example.com/foo-ours.tar.gz", info.url);
+    }
+}
+
+test "parseRubyFormula: comments and a mirror keep an arch branch straight-line" {
+    // The branch body a real two-arch formula carries must still flip, or the
+    // straight-line rule would be too tight to be useful.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const src = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.intel?
+        \\    # the intel build
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    mirror "https://mirror.example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  else
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.arm?
+        \\    # the arm build
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    mirror "https://mirror.example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  else
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    ;
+    const got = parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("https://example.com/foo-ours.tar.gz", got.url);
+    try std.testing.expectEqualStrings("aaaaaaaa", got.sha256);
+}
+
+test "parseRubyFormula: a do block inside an arch branch cancels the flip" {
+    // Same reasoning as a nested conditional: the scanner tracks no depth, so
+    // anything that opens a scope makes the next `else` unattributable.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const src = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.intel?
+        \\    resource "extra" do
+        \\      url "https://example.com/extra.tar.gz"
+        \\    end
+        \\  else
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.arm?
+        \\    resource "extra" do
+        \\      url "https://example.com/extra.tar.gz"
+        \\    end
+        \\  else
+        \\    url "https://example.com/foo-ours.tar.gz"
+        \\    sha256 "aaaaaaaa"
+        \\  end
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(src) == null);
+}
+
+test "parseRubyFormula: a closed arch if disarms the flip for a later else" {
+    // The flip is spent at the matching `end`; a later `else` belongs to some
+    // other conditional and must not reopen the arch section.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const src = if (is_arm)
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.intel?
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  end
+        \\  if build.head?
+        \\    depends_on "git"
+        \\  else
+        \\    url "https://example.com/foo-stray.tar.gz"
+        \\    sha256 "cccccccc"
+        \\  end
+        \\end
+    else
+        \\class Foo < Formula
+        \\  version "1.2.3"
+        \\  if Hardware::CPU.arm?
+        \\    url "https://example.com/foo-theirs.tar.gz"
+        \\    sha256 "bbbbbbbb"
+        \\  end
+        \\  if build.head?
+        \\    depends_on "git"
+        \\  else
+        \\    url "https://example.com/foo-stray.tar.gz"
+        \\    sha256 "cccccccc"
+        \\  end
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(src) == null);
 }
 
 test "parseRubyFormula: a formula carrying a def install block still parses" {
