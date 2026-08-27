@@ -4,6 +4,90 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.23.1 - 2026-08-22
+
+### Highlights
+
+v0.23.1 is a fixes-only release, mostly post-install work, interruptible network calls, and hardening.
+
+- **Post-install work runs again.** Homebrew is moving formulas off Ruby onto declarative steps, and malt didn't run some of them. llvm, redis, nginx, ruby, python and gcc quietly skipped their setup; a malt-installed `clang` ended up with no config file. They now get it on the next install, upgrade, or `mt migrate`.
+- **Ctrl-C interrupts.** Downloads, retry backoffs and stalled network calls stop when you hit Ctrl-C. A silent origin can no longer hold a command open indefinitely.
+- **Formula and tap text can't drive your terminal.** Control sequences are stripped before anything is printed. Formula code also runs without your secrets in its environment, and every network hop stays on HTTPS.
+- **Taps resolve the way brew resolves them.** All spellings of a tap are one tap, so pins, `mt untap` and `--tap` filters stop disagreeing. And a failed `mt rollback` no longer leaves you with no working version of the package.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **post-install:** run the declarative steps upstream moved formulas onto ([07a0b92e](https://github.com/indaco/malt/commit/07a0b92e)) ([#893](https://github.com/indaco/malt/pull/893))
+- **net:** honor Ctrl-C during a retry backoff ([8aa4eaeb](https://github.com/indaco/malt/commit/8aa4eaeb)) ([#888](https://github.com/indaco/malt/pull/888))
+- **install:** honor Ctrl-C during a bottle download ([e55c94be](https://github.com/indaco/malt/commit/e55c94be)) ([#887](https://github.com/indaco/malt/pull/887))
+- **net:** stop a silent origin from parking a command with no timeout and no Ctrl-C ([43e1dd37](https://github.com/indaco/malt/commit/43e1dd37)) ([#886](https://github.com/indaco/malt/pull/886))
+- **tap:** treat every spelling of a tap as the one tap brew treats it as ([c375cf3b](https://github.com/indaco/malt/commit/c375cf3b)) ([#885](https://github.com/indaco/malt/pull/885))
+- **net:** stop a Ctrl-C during a network call from being slept off and retried ([31d85c41](https://github.com/indaco/malt/commit/31d85c41)) ([#883](https://github.com/indaco/malt/pull/883))
+- **net:** refuse a cleartext origin on a conditional GET ([a46bd6c8](https://github.com/indaco/malt/commit/a46bd6c8)) ([#882](https://github.com/indaco/malt/pull/882))
+- **net:** stop failing a cask install on a blip the download would have retried ([52850a33](https://github.com/indaco/malt/commit/52850a33)) ([#881](https://github.com/indaco/malt/pull/881))
+- **net:** stop classifying casks from redirect chains the download would reject ([f02477bd](https://github.com/indaco/malt/commit/f02477bd)) ([#880](https://github.com/indaco/malt/pull/880))
+- **net:** stop resolving a cask artifact from a redirect chain that never ended ([0935587d](https://github.com/indaco/malt/commit/0935587d)) ([#879](https://github.com/indaco/malt/pull/879))
+- **update:** run the exact cosign the trust guard approved ([f7e0c536](https://github.com/indaco/malt/commit/f7e0c536)) ([#878](https://github.com/indaco/malt/pull/878))
+- **net:** stop passing off a failed artifact-URL resolution as a successful one ([4622f952](https://github.com/indaco/malt/commit/4622f952)) ([#877](https://github.com/indaco/malt/pull/877))
+- **net:** refuse a cleartext hop when resolving a redirecting artifact URL ([99c20a52](https://github.com/indaco/malt/commit/99c20a52)) ([#876](https://github.com/indaco/malt/pull/876))
+- **post-install:** stop native post_install children from seeing malt's secrets ([84056ac7](https://github.com/indaco/malt/commit/84056ac7)) ([#875](https://github.com/indaco/malt/pull/875))
+- **tui:** drop 8-bit control bytes from row content before it reaches the terminal ([0bd61df3](https://github.com/indaco/malt/commit/0bd61df3)) ([#874](https://github.com/indaco/malt/pull/874))
+- **ui:** stop child output from repainting lines it never wrote ([6b2fe115](https://github.com/indaco/malt/commit/6b2fe115)) ([#872](https://github.com/indaco/malt/pull/872))
+- **ui:** reject ill-formed UTF-8 so no escape byte reaches the terminal ([b638de4d](https://github.com/indaco/malt/commit/b638de4d)) ([#871](https://github.com/indaco/malt/pull/871))
+- **ui:** drop CSI sequences whose parameters are not plain numeric ([abe8bbfe](https://github.com/indaco/malt/commit/abe8bbfe)) ([#870](https://github.com/indaco/malt/pull/870))
+- **ui:** strip terminal control sequences from formula and tap text ([bf8eeffa](https://github.com/indaco/malt/commit/bf8eeffa)) ([#869](https://github.com/indaco/malt/pull/869))
+- **rollback:** never leave a package broken by a failed rollback ([fb4c0cfe](https://github.com/indaco/malt/commit/fb4c0cfe)) ([#868](https://github.com/indaco/malt/pull/868))
+- **tap:** act on a prefix that has no database yet ([fd803418](https://github.com/indaco/malt/commit/fd803418)) ([#866](https://github.com/indaco/malt/pull/866))
+- **net:** stop stalling on responses that carry no body ([fc9992e1](https://github.com/indaco/malt/commit/fc9992e1)) ([#865](https://github.com/indaco/malt/pull/865))
+- **build:** restore the relocation-logic pin so the guard runs again ([1570de12](https://github.com/indaco/malt/commit/1570de12)) ([#864](https://github.com/indaco/malt/pull/864))
+- **tui:** refuse to start rather than re-exec through PATH ([4d2b9597](https://github.com/indaco/malt/commit/4d2b9597)) ([#863](https://github.com/indaco/malt/pull/863))
+- **cask:** give each DMG install a mount point it created ([e101fd75](https://github.com/indaco/malt/commit/e101fd75)) ([#862](https://github.com/indaco/malt/pull/862))
+- **dsl:** create symlinks with the target a formula wrote ([9c282876](https://github.com/indaco/malt/commit/9c282876)) ([#860](https://github.com/indaco/malt/pull/860))
+- **build:** run the integration suite in the fast test target ([a29696cf](https://github.com/indaco/malt/commit/a29696cf)) ([#858](https://github.com/indaco/malt/pull/858))
+- **dsl:** isolate formula environments ([f7e13feb](https://github.com/indaco/malt/commit/f7e13feb)) ([#842](https://github.com/indaco/malt/pull/842))
+- use trusted paths for macOS system tools ([08705a96](https://github.com/indaco/malt/commit/08705a96)) ([#845](https://github.com/indaco/malt/pull/845))
+- **cask:** confine artifact sources to extraction roots ([e7df474d](https://github.com/indaco/malt/commit/e7df474d)) ([#843](https://github.com/indaco/malt/pull/843))
+- **archive:** recheck deferred hardlinks ([014f1102](https://github.com/indaco/malt/commit/014f1102)) ([#837](https://github.com/indaco/malt/pull/837))
+- **dsl:** confine native read sources ([8279d263](https://github.com/indaco/malt/commit/8279d263)) ([#840](https://github.com/indaco/malt/pull/840))
+- **dsl:** confine mutation path variants ([75f39047](https://github.com/indaco/malt/commit/75f39047)) ([#836](https://github.com/indaco/malt/pull/836))
+
+### 📖 Documentation
+
+- add security policy for private vulnerability reports ([ae8b6d24](https://github.com/indaco/malt/commit/ae8b6d24)) ([#892](https://github.com/indaco/malt/pull/892))
+- **readme:** remove outdated example version note ([fdd694e5](https://github.com/indaco/malt/commit/fdd694e5)) ([#867](https://github.com/indaco/malt/pull/867))
+- add AGENTS.md for AI-assisted contributions ([1bc596af](https://github.com/indaco/malt/commit/1bc596af)) ([#857](https://github.com/indaco/malt/pull/857))
+- **changelog:** restore the 0.22 patch release notes ([4a3bda87](https://github.com/indaco/malt/commit/4a3bda87)) ([#835](https://github.com/indaco/malt/pull/835))
+
+### 🏡 Chores
+
+- **devbox:** update packages ([681722a6](https://github.com/indaco/malt/commit/681722a6)) ([#890](https://github.com/indaco/malt/pull/890))
+- **regressions:** re-pin relocation logic without a cache-version bump ([41b036c6](https://github.com/indaco/malt/commit/41b036c6))
+
+### 🤖 CI
+
+- **bench:** stop reporting an unconfigured peer as a benchmark failure ([fcca83c2](https://github.com/indaco/malt/commit/fcca83c2)) ([#891](https://github.com/indaco/malt/pull/891))
+- **bench:** restore the weekly benchmark after nanobrew's relocation change ([2c1ed31e](https://github.com/indaco/malt/commit/2c1ed31e)) ([#859](https://github.com/indaco/malt/pull/859))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@rustytrees](https://github.com/rustytrees)
+
 ## v0.23.0 - 2026-08-10
 
 ### Highlights
