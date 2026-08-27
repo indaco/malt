@@ -76,6 +76,9 @@ pub const ResolvedRubyFormula = struct {
     /// `:build`/`:optional`. Borrowed from the formula source, which
     /// outlives the install. Empty when the formula declares none.
     dependencies: []const []const u8 = &.{},
+    /// The `:recommended` subset of `dependencies` - the ones the formula
+    /// works without if malt cannot install them.
+    recommended: []const []const u8 = &.{},
     /// When set, the tap is registered in the DB (mirrors the original
     /// tap install behaviour). Local installs leave this null so they
     /// never pollute the tap list.
@@ -384,6 +387,8 @@ fn installTapRb(
 
     // Borrows from `resp.body`, which outlives the materialise call below.
     var dep_buf: [64][]const u8 = undefined;
+    var rec_buf: [64][]const u8 = undefined;
+    const recommended = formula_mod.declaredRecommendedDependencies(&rec_buf, resp.body) catch &.{};
     const deps = formula_mod.declaredInstallDependencies(&dep_buf, resp.body) catch {
         sink.err("{s} declares more than {d} dependencies", .{ parts.formula, dep_buf.len });
         return InstallError.DependencyFailed;
@@ -404,6 +409,7 @@ fn installTapRb(
         .binary_name = parseCaskBinary(resp.body),
         .app_name = parseCaskApp(resp.body),
         .dependencies = deps,
+        .recommended = recommended,
         .tap_registration = .{
             .url = urls.repo_url,
             .commit_sha = commit_sha,
@@ -526,6 +532,8 @@ pub fn installLocalFormula(
     const final_url = args.interpolateUrl(&final_url_buf, rb.url, rb.version, rb.arch_token);
 
     var dep_buf: [64][]const u8 = undefined;
+    var rec_buf: [64][]const u8 = undefined;
+    const recommended = formula_mod.declaredRecommendedDependencies(&rec_buf, body) catch &.{};
     const deps = formula_mod.declaredInstallDependencies(&dep_buf, body) catch {
         sink.err("{s} declares more than {d} dependencies", .{ name, dep_buf.len });
         return InstallError.DependencyFailed;
@@ -540,6 +548,7 @@ pub fn installLocalFormula(
         .sha256 = rb.sha256,
         // Borrows from `body`, which outlives the materialise call below.
         .dependencies = deps,
+        .recommended = recommended,
         // No tap_registration — never pollute `mt tap` with a local path.
     };
 
@@ -600,6 +609,7 @@ fn installDeclaredDeps(
         .sink = sink,
         // Only a real tap owns siblings; a `--local` .rb has none to search.
         .dep_tap = if (resolved.tap_registration != null) resolved.tap_label else null,
+        .recommended = resolved.recommended,
     }) catch {
         sink.err("Failed to install dependencies for {s}", .{resolved.name});
         return InstallError.DependencyFailed;

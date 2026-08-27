@@ -416,6 +416,9 @@ pub const InstallAllOpts = struct {
     /// Tap whose formula declared these packages as dependencies. Lets an
     /// unqualified sibling resolve inside that tap after core misses.
     dep_tap: ?[]const u8 = null,
+    /// Of `packages`, the ones the parent marked `:recommended`. Their absence
+    /// is survivable, so a source-build refusal on one is a warning.
+    recommended: []const []const u8 = &.{},
 };
 
 /// Non-argv primitive used by `core/bundle/runner.zig` via its injected
@@ -436,6 +439,7 @@ pub fn installAll(
         .skip_lock = opts.skip_lock,
         .sink = opts.sink,
         .dep_tap = opts.dep_tap,
+        .recommended = opts.recommended,
     });
 }
 
@@ -457,7 +461,21 @@ const ExecuteOpts = struct {
     /// See `InstallAllOpts.dep_tap`. Never set on the argv path: a name the
     /// user typed is theirs to qualify.
     dep_tap: ?[]const u8 = null,
+    /// See `InstallAllOpts.recommended`. Empty on the argv path: a package the
+    /// user asked for by name is never skipped on their behalf.
+    recommended: []const []const u8 = &.{},
 };
+
+/// A recommended dep malt cannot build is a warning, not a failure - refusing
+/// would make the parent uninstallable over a dependency it works without.
+/// Scoped to the source-build refusal: every other error still fails.
+fn skippableRecommended(recommended: []const []const u8, pkg_name: []const u8, e: anyerror) bool {
+    if (e != InstallError.BuildFromSourceUnsupported) return false;
+    for (recommended) |name| {
+        if (std.mem.eql(u8, name, pkg_name)) return true;
+    }
+    return false;
+}
 
 /// `allocator` must be an arena (see `installAll`).
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -731,10 +749,14 @@ fn runInstall(
                 // generic summary that just repeats the error enum name.
                 // (installTapFormula's error set is wider than InstallError,
                 // so this checks the one value rather than localErrorIsAnnounced.)
-                if (e != InstallError.BuildFromSourceUnsupported) {
-                    sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+                if (skippableRecommended(exec_opts.recommended, pkg_name, e)) {
+                    sink.warn("{s} is recommended, not required — continuing without it.", .{pkg_name});
+                } else {
+                    if (e != InstallError.BuildFromSourceUnsupported) {
+                        sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+                    }
+                    failed_count += 1;
                 }
-                failed_count += 1;
             };
             continue;
         }
@@ -768,8 +790,20 @@ fn runInstall(
                         var slug_buf: [256]u8 = undefined;
                         const slug = args_mod.tapSiblingSlug(&slug_buf, exec_opts.dep_tap orelse "", pkg_name) orelse
                             break :sibling;
-                        installTapFormula(ctx, allocator, slug, &db, &linker, prefix, flags.dry_run, flags.force, flags.download_only, sink) catch
-                            break :sibling;
+                        installTapFormula(ctx, allocator, slug, &db, &linker, prefix, flags.dry_run, flags.force, flags.download_only, sink) catch |tap_err| {
+                            if (skippableRecommended(exec_opts.recommended, pkg_name, tap_err)) {
+                                sink.warn("{s} is recommended, not required — continuing without it.", .{pkg_name});
+                                continue;
+                            }
+                            // The sibling is where it was actually found, so its
+                            // error is the useful one; the cask miss above is
+                            // just how we got here.
+                            if (tap_err != InstallError.BuildFromSourceUnsupported) {
+                                sink.err("Failed to install {s}: {s}", .{ slug, @errorName(tap_err) });
+                            }
+                            failed_count += 1;
+                            continue;
+                        };
                         continue;
                     }
                     if (e == api_mod.ApiError.OfflineRequired) {
@@ -2007,4 +2041,17 @@ test "pruneOtherCellarVersionsForReinstall tolerates keep_version absent on disk
 
     const stale_root = s.p("/Cellar/pcre2/10.47");
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(ctx.io, stale_root, .{}));
+}
+
+test "skippableRecommended only downgrades the source-build refusal" {
+    const rec = [_][]const u8{ "mongodb-database-tools", "mongosh" };
+    // The one tolerable failure, for a dep the parent called recommended.
+    try std.testing.expect(skippableRecommended(&rec, "mongodb-database-tools", InstallError.BuildFromSourceUnsupported));
+    // Any other failure still fails the parent - a bad checksum or a dead
+    // mirror is not something to install around.
+    try std.testing.expect(!skippableRecommended(&rec, "mongodb-database-tools", InstallError.CaskNotFound));
+    // A required dep is never skipped, whatever it failed with.
+    try std.testing.expect(!skippableRecommended(&rec, "openssl@3", InstallError.BuildFromSourceUnsupported));
+    // Empty list: the argv path, where nothing is skipped on the user's behalf.
+    try std.testing.expect(!skippableRecommended(&.{}, "mongosh", InstallError.BuildFromSourceUnsupported));
 }
