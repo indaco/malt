@@ -598,6 +598,8 @@ fn installDeclaredDeps(
     install_mod.installAll(ctx, allocator, resolved.dependencies, .{
         .skip_lock = true,
         .sink = sink,
+        // Only a real tap owns siblings; a `--local` .rb has none to search.
+        .dep_tap = if (resolved.tap_registration != null) resolved.tap_label else null,
     }) catch {
         sink.err("Failed to install dependencies for {s}", .{resolved.name});
         return InstallError.DependencyFailed;
