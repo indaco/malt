@@ -820,10 +820,13 @@ test "flushOverflow does not execute a prefix-resident install_name_tool shim" {
         .old_path = "/usr/local/lib/libx.dylib",
         .new_path = "/opt/malt/lib/libx.dylib",
     }};
-    try std.testing.expectError(
-        FallbackError.InstallNameToolFailed,
-        flushOverflow(threaded.io(), a, "/no/such/macho", &entries_to_flush),
-    );
+    // The failure path replays install_name_tool's stderr; capture it so a
+    // passing test does not emit `error:` lines that log scanners flag.
+    var cap = try StderrCapture.start(a, io);
+    const res = flushOverflow(threaded.io(), a, "/no/such/macho", &entries_to_flush);
+    _ = try cap.finish(a);
+
+    try std.testing.expectError(FallbackError.InstallNameToolFailed, res);
 }
 
 /// Patch text files in a directory tree with a batch of replacements.
