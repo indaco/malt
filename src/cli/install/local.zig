@@ -561,6 +561,112 @@ pub fn installLocalFormula(
     try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, false, sink);
 }
 
+/// Whether any linker-visible dir under `keg_path` holds an entry - the same
+/// dir set the linker links, so a bin-, lib-, or header-only keg all count.
+fn kegHasLinkableContent(io: std.Io, keg_path: []const u8) bool {
+    for (linker_mod.Linker.linkable_dirs) |sub| {
+        var buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ keg_path, sub }) catch continue;
+        var dir = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+        var it = dir.iterate();
+        if ((it.next(io) catch null) != null) return true;
+    }
+    return false;
+}
+
+fn isLinkableDirName(name: []const u8) bool {
+    for (linker_mod.Linker.linkable_dirs) |sub| {
+        if (std.mem.eql(u8, sub, name)) return true;
+    }
+    return false;
+}
+
+/// The keg's sole payload directory. Malt's own dotfile markers and the
+/// linkable dirs are skipped - the caller only calls this once those are known
+/// empty. Null unless exactly one candidate remains, or a stray file sits at
+/// the root, since neither is the single-wrapper layout.
+fn singlePayloadDir(io: std.Io, keg_path: []const u8, out: []u8) ?[]const u8 {
+    var dir = std.Io.Dir.openDirAbsolute(io, keg_path, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+    var it = dir.iterate();
+    var found: ?[]const u8 = null;
+    while (it.next(io) catch return null) |entry| {
+        if (entry.name.len == 0 or entry.name[0] == '.') continue;
+        if (entry.kind != .directory) return null;
+        if (isLinkableDirName(entry.name)) continue;
+        if (found != null or entry.name.len > out.len) return null;
+        @memcpy(out[0..entry.name.len], entry.name);
+        found = out[0..entry.name.len];
+    }
+    return found;
+}
+
+fn firstEntryName(io: std.Io, keg_path: []const u8, wrapper: []const u8, out: []u8) ?[]const u8 {
+    var path_buf: [1024]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ keg_path, wrapper }) catch return null;
+    var dir = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+    var it = dir.iterate();
+    const entry = (it.next(io) catch return null) orelse return null;
+    if (entry.name.len > out.len) return null;
+    @memcpy(out[0..entry.name.len], entry.name);
+    return out[0..entry.name.len];
+}
+
+/// Whether anything occupies `path` - a dangling symlink included, since
+/// `rename` would silently replace one. `deleteDir` clears an empty directory
+/// but no-ops on everything else, so existence is what decides a rename is safe.
+fn pathExists(io: std.Io, path: []const u8) bool {
+    if (std.Io.Dir.openDirAbsolute(io, path, .{})) |d| {
+        var dir = d;
+        dir.close(io);
+        return true;
+    } else |_| {}
+    if (std.Io.Dir.openFileAbsolute(io, path, .{})) |f| {
+        var file = f;
+        file.close(io);
+        return true;
+    } else |_| {}
+    // Both opens follow symlinks, so a dangling one reads as absent.
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    if (std.Io.Dir.readLinkAbsolute(io, path, &link_buf)) |_| return true else |_| {}
+    return false;
+}
+
+/// Flatten a keg whose entire payload sits in one wrapper directory. Returns
+/// false if anything was left behind: a half-flattened keg has payload nothing
+/// will link, so the caller must refuse it rather than accept what did land.
+fn hoistSingleWrapperDir(io: std.Io, keg_path: []const u8) bool {
+    var wrapper_buf: [std.Io.Dir.max_name_bytes]u8 = undefined;
+    const wrapper = singlePayloadDir(io, keg_path, &wrapper_buf) orelse return true;
+
+    // One entry per pass: renaming out of a directory invalidates an open
+    // iterator over it. The cap stops a rename that keeps failing from spinning.
+    var guard: usize = 0;
+    while (guard < 4096) : (guard += 1) {
+        var name_buf: [std.Io.Dir.max_name_bytes]u8 = undefined;
+        const name = firstEntryName(io, keg_path, wrapper, &name_buf) orelse break;
+        var from_buf: [1024]u8 = undefined;
+        var to_buf: [1024]u8 = undefined;
+        const from = std.fmt.bufPrint(&from_buf, "{s}/{s}/{s}", .{ keg_path, wrapper, name }) catch return false;
+        const to = std.fmt.bufPrint(&to_buf, "{s}/{s}", .{ keg_path, name }) catch return false;
+        // Extraction pre-creates an empty `bin`, and relocation drops its own
+        // markers here. Clear only an empty dir; anything still standing is
+        // something the archive must not be allowed to overwrite.
+        std.Io.Dir.cwd().deleteDir(io, to) catch {};
+        if (pathExists(io, to)) return false;
+        std.Io.Dir.renameAbsolute(from, to, io) catch return false;
+    }
+
+    var wrapper_path_buf: [1024]u8 = undefined;
+    const wrapper_path = std.fmt.bufPrint(&wrapper_path_buf, "{s}/{s}", .{ keg_path, wrapper }) catch return false;
+    // deleteDir, not deleteTree: a leftover entry means the hoist was partial
+    // and its bytes must not be thrown away silently.
+    std.Io.Dir.cwd().deleteDir(io, wrapper_path) catch return false;
+    return true;
+}
+
 /// Ordered set of advisory risk labels that may fire on a `.rb` file
 /// the user asked to install. `world_writable` dominates `other_owner`
 /// because any local account can win the TOCTOU race while only the
@@ -944,19 +1050,13 @@ pub fn materializeRubyFormula(
     // Unwind the half-extracted keg and return ahead of the DB
     // transaction — nothing is recorded.
     {
-        var produced_artifact = false;
-        for (linker_mod.Linker.linkable_dirs) |sub| {
-            var sub_buf: [512]u8 = undefined;
-            const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ cellar_path, sub }) catch continue;
-            var sub_dir = std.Io.Dir.openDirAbsolute(ctx.io, sub_path, .{ .iterate = true }) catch continue;
-            defer sub_dir.close(ctx.io);
-            var sub_it = sub_dir.iterate();
-            if ((sub_it.next(ctx.io) catch null) != null) {
-                produced_artifact = true;
-                break;
-            }
-        }
-        if (!produced_artifact) {
+        // Only when the keg root yielded nothing: a prebuilt archive may nest
+        // everything under one `<name>-<version>/` dir, which the formula DSL
+        // flattens with `prefix.install Dir["*"]`. Gated so a layout the
+        // promote walk already satisfied is never rearranged.
+        const intact = kegHasLinkableContent(ctx.io, cellar_path) or
+            hoistSingleWrapperDir(ctx.io, cellar_path);
+        if (!intact or !kegHasLinkableContent(ctx.io, cellar_path)) {
             sink.err("{s} ships no prebuilt files — its archive builds from source, which malt does not run.", .{resolved.name});
             sink.err("Install it with: brew install {s}", .{resolved.full_name});
             std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};
@@ -1545,4 +1645,185 @@ test "finalizeTapCaskInstall fails loud when the cask DB row cannot persist" {
     try std.testing.expect(std.mem.indexOf(u8, captured.items, "failed to record installed cask") != null);
     // Success line must never fire on a failed persist.
     try std.testing.expect(std.mem.indexOf(u8, captured.items, "deckclip 1.4.5 installed") == null);
+}
+
+const test_io = std.Options.debug_io;
+
+var hoist_seq: std.atomic.Value(u32) = .init(0);
+
+/// Stands in for std.testing.tmpDir, which builds under .zig-cache - a tree the
+/// build system rewrites underneath concurrent test runs.
+fn hoistScratch(comptime tag: []const u8, allocator: std.mem.Allocator) ![:0]const u8 {
+    const raw = try std.fmt.allocPrintSentinel(
+        allocator,
+        "/tmp/malt_hoist_" ++ tag ++ "_{d}_{d}",
+        .{ std.c.getpid(), hoist_seq.fetchAdd(1, .monotonic) },
+        0,
+    );
+    std.Io.Dir.cwd().deleteTree(test_io, raw) catch {};
+    try std.Io.Dir.cwd().createDirPath(test_io, raw);
+    return raw;
+}
+
+test "hoistSingleWrapperDir flattens a prebuilt archive nested under one dir" {
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("flatten", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var bin_buf: [512]u8 = undefined;
+    const nested_bin = try std.fmt.bufPrint(&bin_buf, "{s}/mongodb-macos-aarch64--8.3.7/bin", .{keg});
+    try std.Io.Dir.cwd().createDirPath(test_io, nested_bin);
+    var exe_buf: [512]u8 = undefined;
+    const nested_exe = try std.fmt.bufPrint(&exe_buf, "{s}/mongod", .{nested_bin});
+    (try std.Io.Dir.createFileAbsolute(test_io, nested_exe, .{})).close(test_io);
+
+    try std.testing.expect(!kegHasLinkableContent(test_io, keg));
+    _ = hoistSingleWrapperDir(test_io, keg);
+    try std.testing.expect(kegHasLinkableContent(test_io, keg));
+}
+
+test "hoistSingleWrapperDir flattens past malt's markers and a pre-created empty bin" {
+    // The real extracted shape: metadata dotfiles and an empty `bin` sit
+    // beside the wrapper, so a plain single-entry test would never fire.
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("markers", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var buf: [512]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/bin", .{keg}));
+    (try std.Io.Dir.createFileAbsolute(test_io, try std.fmt.bufPrint(&buf, "{s}/.malt-reloc-version", .{keg}), .{})).close(test_io);
+    const nested = try std.fmt.bufPrint(&buf, "{s}/mongodb-macos-aarch64--8.3.7/bin", .{keg});
+    try std.Io.Dir.cwd().createDirPath(test_io, nested);
+    var exe_buf: [512]u8 = undefined;
+    (try std.Io.Dir.createFileAbsolute(test_io, try std.fmt.bufPrint(&exe_buf, "{s}/mongod", .{nested}), .{})).close(test_io);
+
+    try std.testing.expect(!kegHasLinkableContent(test_io, keg));
+    _ = hoistSingleWrapperDir(test_io, keg);
+    try std.testing.expect(kegHasLinkableContent(test_io, keg));
+}
+
+test "hoistSingleWrapperDir leaves a keg whose payload is already at the root" {
+    // Rearranging a working layout is the one thing this must never do.
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("rooted", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var buf: [512]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/bin", .{keg}));
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/share", .{keg}));
+
+    _ = hoistSingleWrapperDir(test_io, keg);
+    var keg_dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{ .iterate = true });
+    defer keg_dir.close(test_io);
+    var n: usize = 0;
+    var it = keg_dir.iterate();
+    while (try it.next(test_io)) |_| n += 1;
+    try std.testing.expectEqual(@as(usize, 2), n);
+}
+
+test "hoistSingleWrapperDir leaves a source tree that flattens to nothing linkable" {
+    // A real source archive also nests under one dir; hoisting it is harmless
+    // but must not manufacture linkable content the caller would accept.
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("source", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var buf: [512]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/tool-1.0/src", .{keg}));
+
+    _ = hoistSingleWrapperDir(test_io, keg);
+    try std.testing.expect(!kegHasLinkableContent(test_io, keg));
+}
+
+test "hoistSingleWrapperDir leaves a keg holding two payload directories" {
+    // Two candidates means no single wrapper; guessing one would strand the
+    // other's files where nothing links them.
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("two", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var buf: [512]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/tool-a-1.0/bin", .{keg}));
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/tool-b-1.0/bin", .{keg}));
+
+    var name_buf: [std.Io.Dir.max_name_bytes]u8 = undefined;
+    try std.testing.expect(singlePayloadDir(test_io, keg, &name_buf) == null);
+}
+
+test "singlePayloadDir refuses a keg with a stray file beside the wrapper" {
+    // A loose file at the root is not the single-wrapper layout, and hoisting
+    // around it would leave the keg half-flattened.
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("stray", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var buf: [512]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(test_io, try std.fmt.bufPrint(&buf, "{s}/tool-1.0/bin", .{keg}));
+    (try std.Io.Dir.createFileAbsolute(test_io, try std.fmt.bufPrint(&buf, "{s}/README", .{keg}), .{})).close(test_io);
+
+    var name_buf: [std.Io.Dir.max_name_bytes]u8 = undefined;
+    try std.testing.expect(singlePayloadDir(test_io, keg, &name_buf) == null);
+}
+
+test "hoistSingleWrapperDir refuses to overwrite a file already at the keg root" {
+    // Relocation writes its markers at the keg root before the hoist runs. An
+    // archive entry of the same name must not be able to replace one.
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("collide", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var buf: [512]u8 = undefined;
+    const marker = try std.fmt.bufPrint(&buf, "{s}/.malt-reloc-version", .{keg});
+    var keg_dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{});
+    defer keg_dir.close(test_io);
+    try keg_dir.writeFile(test_io, .{ .sub_path = ".malt-reloc-version", .data = "7" });
+
+    var nest_buf: [512]u8 = undefined;
+    const nested = try std.fmt.bufPrint(&nest_buf, "{s}/tool-1.0", .{keg});
+    try std.Io.Dir.cwd().createDirPath(test_io, nested);
+    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/.malt-reloc-version", .data = "attacker" });
+
+    try std.testing.expect(!hoistSingleWrapperDir(test_io, keg));
+
+    // The original marker survived untouched.
+    var read_buf: [32]u8 = undefined;
+    var f = try std.Io.Dir.openFileAbsolute(test_io, marker, .{});
+    defer f.close(test_io);
+    const n = try f.readPositional(test_io, &.{&read_buf}, 0);
+    try std.testing.expectEqualStrings("7", read_buf[0..n]);
+}
+
+test "hoistSingleWrapperDir will not replace a dangling dotfile symlink at the keg root" {
+    // Dotfiles are the entries singlePayloadDir skips, so they are the ones
+    // that can still be sitting at a rename destination. Both opens follow a
+    // symlink, so a dangling one reads as absent and rename would replace it.
+    const allocator = std.testing.allocator;
+    const keg = try hoistScratch("dangling", allocator);
+    defer allocator.free(keg);
+    defer std.Io.Dir.cwd().deleteTree(test_io, keg) catch {};
+
+    var keg_dir = try std.Io.Dir.openDirAbsolute(test_io, keg, .{});
+    defer keg_dir.close(test_io);
+    try keg_dir.symLink(test_io, "nowhere", ".malt-reloc-version", .{});
+
+    var buf: [512]u8 = undefined;
+    const nested = try std.fmt.bufPrint(&buf, "{s}/tool-1.0", .{keg});
+    try std.Io.Dir.cwd().createDirPath(test_io, nested);
+    try keg_dir.writeFile(test_io, .{ .sub_path = "tool-1.0/.malt-reloc-version", .data = "attacker" });
+
+    try std.testing.expect(!hoistSingleWrapperDir(test_io, keg));
+
+    // The link is still a link, not the archive's file.
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var target_buf: [512]u8 = undefined;
+    const link_path = try std.fmt.bufPrint(&target_buf, "{s}/.malt-reloc-version", .{keg});
+    const n = try std.Io.Dir.readLinkAbsolute(test_io, link_path, &link_buf);
+    try std.testing.expectEqualStrings("nowhere", link_buf[0..n]);
 }
