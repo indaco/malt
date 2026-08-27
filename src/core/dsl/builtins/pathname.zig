@@ -181,7 +181,38 @@ pub fn fileQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Valu
 
 /// atomic_write — write content atomically (sandbox-validated)
 pub fn atomicWrite(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Value {
-    return write(ctx, receiver, args);
+    const path = try receiverPath(ctx.allocator, receiver);
+    if (path.len == 0) return Value{ .nil = {} };
+
+    const content = if (args.len > 0) try args[0].asString(ctx.allocator) else "";
+
+    // Reuse `write`'s gate so atomicity cannot become a way around the
+    // no-follow rule: a keg-confined symlink leaf is refused, not renamed over.
+    if (sandbox.openTargetNoFollow(ctx.io, path, ctx.cellar_path, ctx.malt_prefix, .{ .write = false })) |probe| {
+        probe.close(ctx.io);
+    } else |e| switch (e) {
+        error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
+        else => {}, // usually no target yet; anything else fails again below
+    }
+
+    // The rename installs a new inode at the default mode, so carry the old one
+    // across. Read it with stat, which needs no read permission on the target -
+    // opening one that lacks it would silently widen the mode instead.
+    var permissions: std.Io.File.Permissions = .default_file;
+    if (std.Io.Dir.cwd().statFile(ctx.io, path, .{ .follow_symlinks = false })) |st| {
+        permissions = st.permissions;
+    } else |_| {}
+
+    // Temp-plus-rename: the original stays readable until the rename lands,
+    // which is what the name promises a formula author.
+    var atomic_file = std.Io.Dir.cwd().createFileAtomic(ctx.io, path, .{
+        .permissions = permissions,
+        .replace = true,
+    }) catch return Value{ .nil = {} };
+    defer atomic_file.deinit(ctx.io);
+    atomic_file.file.writeStreamingAll(ctx.io, content) catch return Value{ .nil = {} };
+    atomic_file.replace(ctx.io) catch return Value{ .nil = {} };
+    return Value{ .nil = {} };
 }
 
 /// opt_bin — receiver/"bin" (Formula accessor)
