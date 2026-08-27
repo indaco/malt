@@ -36,14 +36,13 @@ BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
 }
 
 # MALT_PREFIX must be <= 13 bytes (Mach-O in-place patching budget).
-PREFIX="/tmp/mt_yabai"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
+trap 'rm -rf "$PREFIX"' EXIT
 export MALT_PREFIX="$PREFIX"
 export NO_COLOR=1
 export MALT_NO_EMOJI=1
 export MALT_GITHUB_TOKEN="${MALT_GITHUB_TOKEN:-$(gh auth token 2>/dev/null || true)}"
-rm -rf "$PREFIX"
 mkdir -p "$PREFIX"
-trap 'rm -rf "$PREFIX"' EXIT
 
 pass() { printf '  ✓ %s\n' "$*"; }
 fail() {

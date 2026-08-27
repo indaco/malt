@@ -233,6 +233,8 @@ fn scanEntriesWithIterator(
         .unsupported_file_type => |info| if (info.file_type == .hard_link) {
             hard_links += 1;
         } else return error.ExtractionFailed,
+        // A bare iterator only ever reports unsupported_file_type; the rest
+        // come from pipeToFileSystem. Refuse anything new rather than ignore it.
         else => return error.ExtractionFailed,
     };
     return .{ .entries = seen + diags.errors.items.len, .hard_links = hard_links };
@@ -301,6 +303,8 @@ fn preScanTarGz(
         if (!validChksum(&header)) return error.ExtractionFailed;
 
         const kind_byte = header[156];
+        // Deliberately the ustar field, not a pax `size` override: any
+        // divergence from std.tar is caught by the checks below.
         const size = parseHeaderOctal(header[124..136]) catch return error.ExtractionFailed;
 
         // Pax extended header: its payload can override the *next* entry's
@@ -325,9 +329,8 @@ fn preScanTarGz(
             if (kind_byte == 'L') override_name = value else override_link = value;
             continue;
         }
-        // A sparse entry carries extra headers std.tar consumes and this walk
-        // cannot see, desyncing the two for every later entry. Extraction
-        // rejects these anyway, so refuse before anything reaches disk.
+        // Unreachable today - the iterator pass refuses sparse entries first -
+        // but kept, because a sparse header desyncs every entry after it.
         if (kind_byte == 'S') return error.ExtractionFailed;
         // Global pax header is never applied to later entries (std.tar
         // discards it); skip its payload and keep any pending overrides.
@@ -993,9 +996,8 @@ test "extractTarGz rejects a write through a GNU long-named symlink" {
 }
 
 test "extractTarGz keeps a GNU long name pending across an unsupported entry" {
-    // An unsupported kind between the record and the real entry leaves the
-    // extractor naming the symlink "door" while a scan that dropped the record
-    // sees "placeholder", and then allows a write through it.
+    // The escape this once allowed is now refused by the iterator pass, which
+    // rejects any unsupported kind outright - the raw walk is never reached.
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1050,7 +1052,8 @@ test "extractTarGz keeps a GNU long name pending across a hard link entry" {
 
 test "extractTarGz lets an old-style file entry consume a GNU long link" {
     // std.tar folds the legacy 0 type byte into a normal file, so it consumes
-    // the record; carrying it forward would refuse a safe archive.
+    // the record; carrying it forward would refuse a safe archive. The hard
+    // link is what makes the walk run at all.
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1062,6 +1065,7 @@ test "extractTarGz lets an old-style file entry consume a GNU long link" {
     var raw: [8192]u8 = undefined;
     var t = TestTar.init(&raw);
     t.file("benign", "payload");
+    t.entry("keep", '1', "benign");
     t.gnuString('K', "../../../../../../tmp/malt-gnu-alias-escape");
     t.entry("decoy", 0, "");
     t.entry("alias", '2', "benign");
@@ -1070,11 +1074,14 @@ test "extractTarGz lets an old-style file entry consume a GNU long link" {
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.readLinkAbsolute(io, s.p("/dest/alias"), &link_buf);
     try std.testing.expectEqualStrings("benign", link_buf[0..n]);
+    // The walk only runs while this link is counted, so assert it survived.
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/keep"), .{});
 }
 
 test "extractTarGz lets a directory entry consume a GNU long name" {
     // The mirror of the carry-over cases: a returned kind must clear the
-    // record, or the scan refuses a safe archive.
+    // record, or the scan refuses a safe archive. The hard link is what makes
+    // the walk run at all.
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1086,6 +1093,7 @@ test "extractTarGz lets a directory entry consume a GNU long name" {
     var raw: [8192]u8 = undefined;
     var t = TestTar.init(&raw);
     t.file("target", "payload");
+    t.entry("keep", '1', "target");
     t.gnuString('L', "safe");
     t.entry("placeholder", '5', "");
     t.entry("alias", '2', "target");
@@ -1093,11 +1101,13 @@ test "extractTarGz lets a directory entry consume a GNU long name" {
 
     try testExtract(io, &s, t.bytes());
     try std.Io.Dir.accessAbsolute(io, s.p("/dest/safe/inside"), .{});
+    // The walk only runs while this link is counted, so assert it survived.
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/keep"), .{});
 }
 
-test "extractTarGz rejects a sparse entry before its extra headers desync the scan" {
-    // Once the two disagree about where entries begin, the scan stops
-    // describing what extraction actually writes.
+test "extractTarGz rejects a sparse entry before extraction writes anything" {
+    // The iterator pass refuses sparse entries outright, so the desync its
+    // extra headers would have caused in the raw walk never gets a chance.
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1164,8 +1174,9 @@ test "extractTarGz refuses a sparse entry that hides nothing" {
 }
 
 test "extractTarGz refuses an archive whose pax size hides an entry from the scan" {
-    // std.tar takes an entry's length from a pax `size` record; a walk reading
-    // the ustar field advances differently and loses its place from there on.
+    // Nothing here escapes on its own: the archive is refused only because a
+    // pax `size` record makes the two walks disagree. The hard link is
+    // load-bearing - without one the pre-scan skips the walk entirely.
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1173,22 +1184,49 @@ test "extractTarGz refuses an archive whose pax size hides an entry from the sca
     var s = try Scratch.init("pax_size_desync");
     defer s.deinit();
     try s.dir.createDirPath(io, "dest");
-    try s.dir.createDirPath(io, "outside");
 
     var raw: [8192]u8 = @splat(0);
     var t = TestTar.init(&raw);
+    t.file("target", "data");
+    t.entry("keep", '1', "target");
+    // The iterator gives victim a 512-byte payload and swallows filler's
+    // header; the walk reads victim's ustar size of 0 and sees both.
     t.pax('x', "size", "512");
     t.entry("victim", '0', "");
     t.sizedEntry("filler", '0', 512);
-    t.entry("door", '2', "../outside");
-    t.file("door/escaped", "owned");
 
-    const result = testExtract(io, &s, t.bytes());
+    try std.testing.expectError(
+        error.ExtractionFailed,
+        testExtract(io, &s, t.bytes()),
+    );
+    // Refused by the pre-scan, so not one byte of the archive reached disk.
     try std.testing.expectError(
         error.FileNotFound,
-        std.Io.Dir.accessAbsolute(io, s.p("/outside/escaped"), .{}),
+        std.Io.Dir.accessAbsolute(io, s.p("/dest/target"), .{}),
     );
-    try std.testing.expectError(error.ExtractionFailed, result);
+}
+
+test "extractTarGz accepts a pax size that agrees with the ustar field" {
+    // The counterweight to the refusal tests: the walk ignores pax `size`, so
+    // it must still accept the archives where honouring it would change nothing.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("pax_size_agrees");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [8192]u8 = @splat(0);
+    var t = TestTar.init(&raw);
+    t.file("target", "data");
+    t.entry("keep", '1', "target");
+    t.pax('x', "size", "4");
+    t.file("victim", "data");
+
+    try testExtract(io, &s, t.bytes());
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/victim"), .{});
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/keep"), .{});
 }
 
 test "extractTarGz refuses an archive the two walks read differently" {

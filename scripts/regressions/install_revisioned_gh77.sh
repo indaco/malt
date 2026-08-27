@@ -21,9 +21,8 @@ BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
 }
 
 # MALT_PREFIX must be ≤ 13 bytes (Mach-O in-place patching budget).
-PREFIX="/tmp/mt_rev"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
 export MALT_PREFIX="$PREFIX"
-rm -rf "$PREFIX"
 mkdir -p "$PREFIX"
 trap 'rm -rf "$PREFIX"' EXIT
 

@@ -39,11 +39,10 @@ BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
 # after our fixture, so the promote walk finds nothing to lift into bin/.
 URL="${SRC_ARCHIVE_URL:-https://github.com/sindresorhus/slugify/archive/refs/tags/v2.0.0.tar.gz}"
 
-PREFIX="/tmp/mt_srcbuild"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
 export MALT_PREFIX="$PREFIX"
 export NO_COLOR=1
 export MALT_NO_EMOJI=1
-rm -rf "$PREFIX"
 mkdir -p "$PREFIX"
 
 WORK=$(mktemp -d)

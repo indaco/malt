@@ -25,11 +25,10 @@ command -v sqlite3 >/dev/null || {
   exit 2
 }
 
-PREFIX="/tmp/mt_dlonly"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
 export MALT_PREFIX="$PREFIX"
 export NO_COLOR=1
 export MALT_NO_EMOJI=1
-rm -rf "$PREFIX"
 mkdir -p "$PREFIX"
 trap 'rm -rf "$PREFIX"' EXIT
 

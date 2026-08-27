@@ -65,6 +65,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: corpus-logs
-          path: /tmp/mt_cs/logs
+          path: /tmp/mt*/logs
           retention-days: 14
           if-no-files-found: ignore
