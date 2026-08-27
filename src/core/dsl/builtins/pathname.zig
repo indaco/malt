@@ -795,3 +795,36 @@ test "atomic_write keeps the target's existing mode instead of widening it" {
     const st = try std.Io.Dir.cwd().statFile(io, target, .{});
     try std.testing.expectEqual(@as(u32, 0o600), @intFromEnum(st.permissions) & 0o777);
 }
+
+test "glob matches wildcards and brace alternation" {
+    // Baseline for the expansion budget below: the shapes formula globs
+    // actually use must keep matching exactly as before.
+    try std.testing.expect(globMatch("*.h", "stdio.h"));
+    try std.testing.expect(!globMatch("*.h", "stdio.c"));
+    try std.testing.expect(globMatch("lib?.a", "libz.a"));
+    try std.testing.expect(globMatch("*.{h,hpp,hxx}", "vec.hpp"));
+    try std.testing.expect(!globMatch("*.{h,hpp,hxx}", "vec.cpp"));
+    try std.testing.expect(globMatch("{bin,sbin}/*", "bin/tool"));
+    try std.testing.expect(globMatch("a{b,c}d{e,f}", "acdf"));
+    try std.testing.expect(!globMatch("a{b,c}d{e,f}", "axdf"));
+}
+
+test "glob alternation cannot be driven into an unbounded expansion" {
+    // Each `{a,b}` group doubles the work, so a pattern only this long already
+    // costs 2^31 expansions unbounded - a hang, not a crash, since the depth
+    // stays shallow. The pattern comes from formula code, so it needs a bound.
+    var pattern: [30 * 5]u8 = undefined;
+    for (0..30) |i| @memcpy(pattern[i * 5 ..][0..5], "{a,b}");
+
+    try std.testing.expect(!globMatch(&pattern, "no-such-name"));
+}
+
+test "glob expansion budget refuses instead of exploring" {
+    // Exhausting the budget must degrade to "no match" rather than keep going;
+    // the surrounding builtin has no error channel to report a give-up on.
+    var spent: u32 = 3;
+    try std.testing.expect(!globMatchBudgeted("{a,b}{a,b}{a,b}{a,b}", "abab", &spent));
+
+    var ample: u32 = max_glob_expansions;
+    try std.testing.expect(globMatchBudgeted("{a,b}{a,b}{a,b}{a,b}", "abab", &ample));
+}
