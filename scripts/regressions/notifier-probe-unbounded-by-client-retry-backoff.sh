@@ -52,6 +52,9 @@ cleanup() {
   # when the server is already gone, stranding the key in $WORK.
   if [[ -n "$SERVER_PID" ]]; then
     kill "$SERVER_PID" 2>/dev/null || true
+    # Reap it here, otherwise the shell prints its own "Terminated: 15" notice
+    # after the PASS line and a green run reads like a failure in CI logs.
+    wait "$SERVER_PID" 2>/dev/null || true
   fi
   rm -rf "$WORK"
 }
