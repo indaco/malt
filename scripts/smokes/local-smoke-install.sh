@@ -38,8 +38,14 @@
 #                                 top-level is skipped, deps land marked
 #                                 `dependency`, and `mt purge --unused-deps`
 #                                 reclaims them with no direct retention.
+#   • third-party tap formulas    — see TAP_FORMULAS below. Every case
+#                                 above arrives as a core bottle; these
+#                                 pin the tap artifact path, where the
+#                                 archive is whatever upstream published
+#                                 and the prefix is rewritten after the
+#                                 fact.
 #
-# Time/bandwidth: ~20-30 min, ~3.5 GB downloaded fresh.
+# Time/bandwidth: ~30-40 min, ~4 GB downloaded fresh.
 #
 # Cleanup: on success (FAIL=0), every cask installed by this run is
 # `mt uninstall`-ed and every formula too — so /Applications and any
@@ -383,6 +389,88 @@ install_download_only_tap_reuse() {
   PASS=$((PASS + 1))
 }
 
+# Third-party tap formulas, each pinning a shape a core bottle never
+# produces:
+#
+#   cliamp   — a raw uncompressed binary, no archive at all, plus declared
+#              runtime deps: the artifact must be relocated and the tap
+#              formula's dep closure resolved.
+#   myx      — a tap slug that already carries `homebrew-`, which has to
+#              canonicalise to the same tap as the bare spelling. The
+#              matching regression only proves it resolves; this proves it
+#              installs. tar.gz artifact, formula defines its own methods.
+#   heroku   — tar.xz unpacked through a `Dir[]` glob and an `inreplace`,
+#              landing in libexec with completions, so relocation has to
+#              reach past bin/.
+#   bun      — a zip artifact, the one container format the other cases
+#              never exercise.
+#   pulumi   — a tar.gz carrying a whole directory of binaries rather than
+#              one, so relocation is proven across a multi-artifact payload.
+#
+# A tap that upstream retagged, took down, or rate-limited SKIPs — that is
+# state we do not control. Every other failure is ours. Same classification
+# as install_download_only_tap_reuse above.
+#
+# Fields: tag | slug | keg name | binary expected under $MALT_PREFIX/bin
+TAP_FORMULAS=(
+  "smoke.install.tap.cliamp|bjarneo/cliamp/cliamp|cliamp|cliamp"
+  "smoke.install.tap.myx|HaseebKhalid1507/homebrew-tap/myx|myx|myx"
+  "smoke.install.tap.heroku|heroku/brew/heroku|heroku|heroku"
+  "smoke.install.tap.bun|oven-sh/bun/bun|bun|bun"
+  "smoke.install.tap.pulumi|pulumi/tap/pulumi|pulumi|pulumi"
+  # Payload nested in one wrapper dir, plus a sibling dep from the same tap
+  # that the formula names unqualified - neither shape any other case covers.
+  "smoke.install.tap.mongodb|mongodb/brew/mongodb-community|mongodb-community|mongod"
+)
+
+# Install one tap formula. A clean exit is only half the contract: the
+# artifact also has to be reachable under the sandbox prefix, which is
+# what a botched relocation breaks while still exiting 0.
+install_tap_formula() {
+  local tag="$1" slug="$2" name="$3" bin_name="$4"
+  local log rc=0
+  log="$LOGDIR/$(printf '%s' "$tag" | tr -c 'A-Za-z0-9' _).log"
+  printf '  RUN   [%s] %s install %s\n' "$tag" "$MT_BIN" "$slug"
+  "$MT_BIN" install "$slug" >"$log" 2>&1 || rc=$?
+
+  if [[ "$rc" -ne 0 ]]; then
+    if grep -qE "rate limit|Network failure|Cannot fetch tap from GitHub|Tap formula/cask not found" "$log"; then
+      printf '  SKIP  [%s] %s: transient classified failure\n' "$tag" "$slug"
+      SKIP=$((SKIP + 1))
+      SKIPS+=("$tag")
+      return
+    fi
+    printf '  FAIL  [%s] rc=%s log=%s\n' "$tag" "$rc" "$log"
+    sed -n '1,30p' "$log" | sed 's/^/        | /'
+    printf '        --- tail ---\n'
+    tail -30 "$log" | sed 's/^/        | /'
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$tag")
+    return
+  fi
+
+  printf '  PASS  [%s]\n' "$tag"
+  PASS=$((PASS + 1))
+  INSTALLED_FORMULAS+=("$name")
+
+  if [[ -x "$PREFIX/bin/$bin_name" ]]; then
+    printf '  PASS  [%s.bin] %s relocated under the sandbox prefix\n' "$tag" "$bin_name"
+    PASS=$((PASS + 1))
+  else
+    printf '  FAIL  [%s.bin] %s missing from %s/bin\n' "$tag" "$bin_name" "$PREFIX"
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$tag.bin")
+  fi
+}
+
+install_tap_formulas() {
+  local entry tag slug name bin_name
+  for entry in "${TAP_FORMULAS[@]}"; do
+    IFS='|' read -r tag slug name bin_name <<<"$entry"
+    install_tap_formula "$tag" "$slug" "$name" "$bin_name"
+  done
+}
+
 # Reverse what we installed. Casks first because they touch /Applications;
 # formulas second (they live entirely under MALT_PREFIX, but uninstalling
 # also exercises the uninstall path). Best-effort: a stuck uninstall must
@@ -409,6 +497,7 @@ printf '  MT_BIN=%s\n\n' "$MT_BIN"
 
 run smoke.update "$MT_BIN" update
 install_download_only_tap_reuse
+install_tap_formulas
 install_formula smoke.install.node node
 install_formula smoke.install.zig zig
 install_formula smoke.install.rust rust
