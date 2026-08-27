@@ -361,8 +361,24 @@ pub fn glob(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Va
     return Value{ .array = slice };
 }
 
+/// Ceiling on how many expansions a single match may attempt. Each `{a,b}`
+/// group doubles the work, so a pattern short enough to fit the expansion
+/// buffer still reaches 2^200 combinations - and the pattern is formula code.
+/// Real globs use a handful of alternatives, so this sits far above them.
+const max_glob_expansions: u32 = 10_000;
+
 /// Glob pattern matching with `*`, `?`, and `{a,b,c}` brace expansion.
 fn globMatch(pattern: []const u8, name: []const u8) bool {
+    var budget: u32 = max_glob_expansions;
+    return globMatchBudgeted(pattern, name, &budget);
+}
+
+fn globMatchBudgeted(pattern: []const u8, name: []const u8, budget: *u32) bool {
+    // Out of budget degrades to "no match": the calling builtin has no error
+    // channel, and every other failure here returns the same way.
+    if (budget.* == 0) return false;
+    budget.* -= 1;
+
     // Check if pattern contains braces — if so, expand and try each alternative
     if (std.mem.findScalar(u8, pattern, '{')) |brace_start| {
         if (findMatchingBrace(pattern, brace_start)) |brace_end| {
@@ -380,7 +396,7 @@ fn globMatch(pattern: []const u8, name: []const u8) bool {
                 @memcpy(buf[0..prefix.len], prefix);
                 @memcpy(buf[prefix.len .. prefix.len + alt.len], alt);
                 @memcpy(buf[prefix.len + alt.len .. expanded_len], suffix);
-                if (globMatch(buf[0..expanded_len], name)) return true;
+                if (globMatchBudgeted(buf[0..expanded_len], name, budget)) return true;
             }
             return false;
         }
