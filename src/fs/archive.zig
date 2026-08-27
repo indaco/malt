@@ -72,6 +72,22 @@ fn sniffMagic(io: std.Io, absolute_path: []const u8, out: []u8) !usize {
     return file.readPositionalAll(io, out, 0) catch return error.ExtractionFailed;
 }
 
+/// A gzip stream expands up to ~1032:1, so capping the download caps nothing:
+/// on a tap formula the attacker supplies the archive and its digest alike.
+/// Cap what the archive declares instead - 16 GiB clears the largest real keg
+/// and cask payloads by a wide margin.
+const max_decompressed_bytes: u64 = 16 * 1024 * 1024 * 1024;
+const max_entries: usize = 1_000_000;
+
+/// Injectable: a fixture that merely *declared* 16 GiB would fail on
+/// end-of-stream and stay green with the cap deleted.
+const Limits = struct {
+    bytes: u64 = max_decompressed_bytes,
+    entries: usize = max_entries,
+
+    const default: Limits = .{};
+};
+
 /// Extract a tar.gz archive from `archive_path` into `dest_dir` using
 /// the native 0.16 `std.compress.flate` + `std.tar.pipeToFileSystem`
 /// pipeline — no `tar` subprocess. The 0.15 decompressor was known to
@@ -93,6 +109,16 @@ fn sniffMagic(io: std.Io, absolute_path: []const u8, out: []u8) !usize {
 /// are recovered via a raw header pre-scan and re-applied with
 /// `std.Io.Dir.hardLink` after `pipeToFileSystem` returns.
 pub fn extractTarGz(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !void {
+    return extractTarGzLimited(io, archive_path, dest_dir, .default);
+}
+
+/// `extractTarGz` with an explicit expansion budget.
+fn extractTarGzLimited(
+    io: std.Io,
+    archive_path: []const u8,
+    dest_dir: []const u8,
+    limits: Limits,
+) !void {
     var magic: [2]u8 = undefined;
     const n = try sniffMagic(io, archive_path, &magic);
     if (n < 2 or magic[0] != 0x1f or magic[1] != 0x8b) {
@@ -104,7 +130,7 @@ pub fn extractTarGz(io: std.Io, archive_path: []const u8, dest_dir: []const u8) 
     // hardlink pairs the std iterator silently drops.
     var pre_arena = std.heap.ArenaAllocator.init(child_allocator);
     defer pre_arena.deinit();
-    const hardlinks = try preScanTarGz(io, pre_arena.allocator(), archive_path);
+    const hardlinks = try preScanTarGz(io, pre_arena.allocator(), archive_path, limits);
 
     var file = std.Io.Dir.openFileAbsolute(io, archive_path, .{}) catch return error.ExtractionFailed;
     defer file.close(io);
@@ -195,6 +221,7 @@ fn scanEntriesWithIterator(
     arena: std.mem.Allocator,
     archive_path: []const u8,
     symlinks: *std.StringHashMapUnmanaged(void),
+    limits: Limits,
 ) !IteratorScan {
     var file = std.Io.Dir.openFileAbsolute(io, archive_path, .{}) catch return error.ExtractionFailed;
     defer file.close(io);
@@ -204,20 +231,32 @@ fn scanEntriesWithIterator(
     const input: *std.Io.Reader = &file_reader.interface;
     var window: [std.compress.flate.max_window_len]u8 = undefined;
     var decompress = std.compress.flate.Decompress.init(input, .gzip, &window);
+    // std.tar drains global, pax and unsupported headers inside `next()`, so
+    // their payloads never reach the loop below. Bounding the stream catches
+    // what summing `entry.size` cannot; the sum stays as the cheap refusal
+    // that costs no inflate at all.
+    var limit_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var limited = decompress.reader.limited(.limited64(limits.bytes), &limit_buf);
 
     var name_buf: [std.fs.max_path_bytes]u8 = undefined;
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     var diags: std.tar.Diagnostics = .{ .allocator = arena };
     defer diags.deinit();
-    var it = std.tar.Iterator.init(&decompress.reader, .{
+    var it = std.tar.Iterator.init(&limited.interface, .{
         .file_name_buffer = &name_buf,
         .link_name_buffer = &link_buf,
         .diagnostics = &diags,
     });
 
     var seen: usize = 0;
+    var declared: u64 = 0;
     while (it.next() catch return error.ExtractionFailed) |entry| {
         seen += 1;
+        // Judged on the header, so a bomb stops costing decompression at the
+        // entry that crosses. `entry.size` is what std.tar skips and what
+        // extraction writes - re-deriving it would drift from both.
+        declared +|= entry.size;
+        if (seen > limits.entries or declared > limits.bytes) return error.ExtractionFailed;
         if (!isSafeEntryPath(entry.name)) return error.ExtractionFailed;
         const canon = try canonicalEntryName(arena, entry.name);
         if (traversesSymlink(symlinks, canon)) return error.ExtractionFailed;
@@ -226,6 +265,10 @@ fn scanEntriesWithIterator(
             if (canon.len > 0) try symlinks.put(arena, canon, {});
         }
     }
+    // Hard links arrive as diagnostics, not entries, so the loop's count is
+    // short - and an all-hard-link archive never enters the loop at all.
+    if (seen + diags.errors.items.len > limits.entries) return error.ExtractionFailed;
+
     // Extraction refuses these too, but only once the archive is already on
     // disk. Hard links are the documented exception: malt re-applies them.
     var hard_links: usize = 0;
@@ -253,6 +296,7 @@ fn preScanTarGz(
     io: std.Io,
     arena: std.mem.Allocator,
     archive_path: []const u8,
+    limits: Limits,
 ) ![]const HardLink {
     var file = std.Io.Dir.openFileAbsolute(io, archive_path, .{}) catch return error.ExtractionFailed;
     defer file.close(io);
@@ -263,7 +307,11 @@ fn preScanTarGz(
 
     var window: [std.compress.flate.max_window_len]u8 = undefined;
     var decompress = std.compress.flate.Decompress.init(input, .gzip, &window);
-    const r: *std.Io.Reader = &decompress.reader;
+    // The walk reads the ustar size, which a pax override can disagree with,
+    // so it needs its own ceiling rather than inheriting the pass above.
+    var limit_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var limited = decompress.reader.limited(.limited64(limits.bytes), &limit_buf);
+    const r: *std.Io.Reader = &limited.interface;
 
     var hardlinks: std.ArrayList(HardLink) = .empty;
 
@@ -278,7 +326,7 @@ fn preScanTarGz(
     var symlink_names: std.StringHashMapUnmanaged(void) = .empty;
     // Authoritative pass first: whatever it refuses never reaches the walk
     // below, and the symlinks it records are the ones extraction will create.
-    const scan = try scanEntriesWithIterator(io, arena, archive_path, &symlink_names);
+    const scan = try scanEntriesWithIterator(io, arena, archive_path, &symlink_names, limits);
     // The walk below exists only to recover hard-link pairs, which the
     // iterator drops. With none to recover there is nothing to find and
     // nothing to cross-check, so skip a second pass over the whole archive.
@@ -865,6 +913,15 @@ fn testExtract(io: std.Io, s: *Scratch, raw: []const u8) !void {
     const gz = testGzip(&gz_buf, raw);
     try s.dir.writeFile(io, .{ .sub_path = "a.tar.gz", .data = gz });
     return extractTarGz(io, s.p("/a.tar.gz"), s.p("/dest"));
+}
+
+/// `testExtract` with an injected budget. The shipping ceiling is far past any
+/// fixture that could be built on the stack, so the budget tests inject one.
+fn testExtractLimited(io: std.Io, s: *Scratch, raw: []const u8, limits: Limits) !void {
+    var gz_buf: [8192]u8 = undefined;
+    const gz = testGzip(&gz_buf, raw);
+    try s.dir.writeFile(io, .{ .sub_path = "a.tar.gz", .data = gz });
+    return extractTarGzLimited(io, s.p("/a.tar.gz"), s.p("/dest"), limits);
 }
 
 test "extractZip ignores a PATH-resident unzip shim" {
@@ -1769,4 +1826,190 @@ test "rejectEscapingSymlinks does not follow symlinks while walking" {
     try s.dir.symLink(io, ".", "dest/self", .{});
 
     try rejectEscapingSymlinks(io, s.p("/dest"));
+}
+
+test "extractTarGz refuses an archive whose payload exceeds the byte budget" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("byte_budget_over");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [8192]u8 = @splat(0);
+    var t = TestTar.init(&raw);
+    const payload: [1024]u8 = @splat('a');
+    t.file("a", &payload);
+    t.file("b", &payload);
+
+    // One byte under what the archive declares: the refusal has to land on the
+    // header that crosses the line, not on the archive as a whole.
+    try std.testing.expectError(error.ExtractionFailed, testExtractLimited(
+        io,
+        &s,
+        t.bytes(),
+        .{ .bytes = 2047 },
+    ));
+    // The pre-scan runs before the destination is opened, so nothing landed.
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/dest/a"), .{}),
+    );
+}
+
+test "extractTarGz extracts an archive that fits the byte budget" {
+    // Counterweight: a budget of zero would pass the refusal tests trivially.
+    // The budget covers everything the scan must inflate - headers and block
+    // padding included - so it sits above the payload total, not at it.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("byte_budget_exact");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [8192]u8 = @splat(0);
+    var t = TestTar.init(&raw);
+    const payload: [1024]u8 = @splat('a');
+    t.file("a", &payload);
+    t.file("b", &payload);
+
+    try testExtractLimited(io, &s, t.bytes(), .{ .bytes = 4096 });
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/a"), .{});
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/b"), .{});
+}
+
+test "extractTarGz refuses an archive whose entry count exceeds the budget" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("entry_budget");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [8192]u8 = @splat(0);
+    var t = TestTar.init(&raw);
+    t.file("a", "x");
+    t.file("b", "x");
+    t.file("c", "x");
+
+    try std.testing.expectError(error.ExtractionFailed, testExtractLimited(
+        io,
+        &s,
+        t.bytes(),
+        .{ .entries = 2 },
+    ));
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/dest/a"), .{}),
+    );
+    try testExtractLimited(io, &s, t.bytes(), .{ .entries = 3 });
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/c"), .{});
+}
+
+test "extractTarGz applies the shipping decompression limits" {
+    // The injectable budget is only worth anything if the shipping entry point
+    // is wired to the module constants rather than a value of its own.
+    try std.testing.expectEqual(max_decompressed_bytes, Limits.default.bytes);
+    try std.testing.expectEqual(max_entries, Limits.default.entries);
+
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("shipping_limits");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [8192]u8 = @splat(0);
+    var t = TestTar.init(&raw);
+    t.file("a", "payload");
+
+    try std.testing.expectError(error.ExtractionFailed, testExtractLimited(
+        io,
+        &s,
+        t.bytes(),
+        .{ .bytes = 1 },
+    ));
+    try testExtract(io, &s, t.bytes());
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/a"), .{});
+}
+
+test "extractTarGz counts hard links against the entry budget" {
+    // Hard links never come back from the iterator, so a budget that counted
+    // only returned entries would be walked straight past by an archive of
+    // nothing but hard-link headers.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("entry_budget_hardlinks");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [8192]u8 = @splat(0);
+    var t = TestTar.init(&raw);
+    t.file("target", "x");
+    t.entry("l1", '1', "target");
+    t.entry("l2", '1', "target");
+    t.entry("l3", '1', "target");
+
+    try std.testing.expectError(error.ExtractionFailed, testExtractLimited(
+        io,
+        &s,
+        t.bytes(),
+        .{ .entries = 3 },
+    ));
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/dest/target"), .{}),
+    );
+    try testExtractLimited(io, &s, t.bytes(), .{ .entries = 4 });
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/l3"), .{});
+
+    // With no regular entry at all the iterator returns nothing, so the budget
+    // is only reachable once the drain is done.
+    var only_links: [4096]u8 = @splat(0);
+    var l = TestTar.init(&only_links);
+    l.entry("l1", '1', "target");
+    l.entry("l2", '1', "target");
+    try std.testing.expectError(error.ExtractionFailed, testExtractLimited(
+        io,
+        &s,
+        l.bytes(),
+        .{ .entries = 1 },
+    ));
+}
+
+test "extractTarGz refuses an archive that inflates past the budget without declaring it" {
+    // std.tar drains global, pax and unsupported headers inside `next()`, so
+    // their payloads never reach the loop that sums `entry.size`. Counting only
+    // what an entry declares would let a bomb ride in on one of those headers.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("undeclared_inflate");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [8192]u8 = @splat(0);
+    var t = TestTar.init(&raw);
+    const filler: [2048]u8 = @splat('z');
+    t.paxRecord('g', &filler);
+    t.file("a", "payload");
+
+    try std.testing.expectError(error.ExtractionFailed, testExtractLimited(
+        io,
+        &s,
+        t.bytes(),
+        .{ .bytes = 1024 },
+    ));
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/dest/a"), .{}),
+    );
 }
