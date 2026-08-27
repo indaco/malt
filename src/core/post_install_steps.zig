@@ -19,6 +19,7 @@ const ca_bundle = @import("ca_bundle.zig");
 const clonefile = @import("../fs/clonefile.zig");
 const fs_read = @import("../fs/read.zig");
 const text_replace = @import("../text_replace.zig");
+const glob_match = @import("../glob.zig");
 const patch = @import("patch.zig");
 const codesign = @import("../macho/codesign.zig");
 const system_tools = @import("../system_tools.zig");
@@ -650,7 +651,7 @@ fn symlinkGlob(ctx: StepsCtx, obj: std.json.ObjectMap, source: []const u8, targe
     const force = getFlag(obj, "force");
     var iter = dir.iterate();
     while (iter.next(ctx.io) catch null) |entry| {
-        if (!globMatch(ctx.allocator, pattern, entry.name)) continue;
+        if (!glob_match.match(pattern, entry.name)) continue;
         const child = std.fs.path.join(ctx.allocator, &.{ dir_path, entry.name }) catch continue;
         const link_path = std.fs.path.join(ctx.allocator, &.{ target, entry.name }) catch continue;
         // Each match is its own write: a planted symlink must not redirect
@@ -660,34 +661,6 @@ fn symlinkGlob(ctx: StepsCtx, obj: std.json.ObjectMap, source: []const u8, targe
         std.Io.Dir.symLinkAbsolute(ctx.io, child, link_path, .{}) catch {};
     }
     return true;
-}
-
-/// Shell-style match limited to what formula globs use: `*` and `{a,b}`.
-/// ponytail: no `?` or `[...]` — no formula in homebrew-core ships one.
-fn globMatch(a: std.mem.Allocator, pattern: []const u8, name: []const u8) bool {
-    const open = std.mem.indexOfScalar(u8, pattern, '{') orelse return starMatch(pattern, name);
-    const close = std.mem.indexOfScalarPos(u8, pattern, open + 1, '}') orelse return starMatch(pattern, name);
-    var alts = std.mem.splitScalar(u8, pattern[open + 1 .. close], ',');
-    while (alts.next()) |alt| {
-        const expanded = std.fmt.allocPrint(a, "{s}{s}{s}", .{
-            pattern[0..open], alt, pattern[close + 1 ..],
-        }) catch return false;
-        if (globMatch(a, expanded, name)) return true;
-    }
-    return false;
-}
-
-fn starMatch(pattern: []const u8, name: []const u8) bool {
-    if (pattern.len == 0) return name.len == 0;
-    if (pattern[0] == '*') {
-        var i: usize = 0;
-        while (true) : (i += 1) {
-            if (starMatch(pattern[1..], name[i..])) return true;
-            if (i == name.len) return false;
-        }
-    }
-    if (name.len == 0 or pattern[0] != name[0]) return false;
-    return starMatch(pattern[1..], name[1..]);
 }
 
 /// `guards` gate a step on a path's state. `unsupported` keeps a condition
@@ -1279,7 +1252,7 @@ fn collectMatches(
     var iter = dir.iterate();
     while (iter.next(ctx.io) catch null) |entry| {
         const child = std.fs.path.join(ctx.allocator, &.{ dir_path, entry.name }) catch continue;
-        if (globMatch(ctx.allocator, pattern, entry.name)) out.append(ctx.allocator, child) catch return;
+        if (glob_match.match(pattern, entry.name)) out.append(ctx.allocator, child) catch return;
         if (descend and entry.kind == .directory) collectMatches(ctx, child, pattern, true, out);
     }
 }
@@ -2837,21 +2810,6 @@ test "execute links every source_glob match into the target directory" {
     // A non-matching sibling must not be dragged along.
     const stray = try std.fmt.allocPrint(a, "{s}/unrelated.1", .{man_dst});
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, stray, .{}));
-}
-
-test "globMatch honours alternation and wildcards without matching neighbours" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    try testing.expect(globMatch(a, "{npm,npx,package-}*", "npm.1"));
-    try testing.expect(globMatch(a, "{npm,npx,package-}*", "package-json.5"));
-    try testing.expect(!globMatch(a, "{npm,npx,package-}*", "unrelated.1"));
-    // A leading wildcard must not swallow the anchor that follows it.
-    try testing.expect(globMatch(a, "*.1", "npm.1"));
-    try testing.expect(!globMatch(a, "*.1", "npm.5"));
-    try testing.expect(globMatch(a, "literal", "literal"));
-    try testing.expect(!globMatch(a, "literal", "literals"));
 }
 
 test "execute runs the filesystem tier natively and leaves the log clean" {

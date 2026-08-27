@@ -1,36 +1,32 @@
 #!/usr/bin/env bash
-# Regression: brace expansion in the glob builtin must stay bounded.
+# Regression: glob matching must stay bounded, and there must be only one of it.
 #
-# The reported bug was a stack overflow from deeply nested braces. That is not
-# reachable: the 1024-byte expansion buffer drops any pattern whose expansion
-# does not fit, so nesting tops out near 513 frames (~632 KB against an 8 MB
-# stack). A depth counter would be dead code.
+# Patterns come from formula and tap data, and two costs in the old matchers ran
+# away on them: brace alternation multiplies combinations, and a recursive star
+# matcher re-explores every suffix. Both hang rather than crash, which is why the
+# depth cap the original report asked for would not have caught either. Two
+# copies of the matcher also disagreed on nested groups, so a reintroduced
+# private copy is itself a regression.
 #
-# The reachable defect is the other axis. Each `{a,b}` group doubles the work,
-# so cost is exponential in the number of groups while the recursion stays
-# shallow - a hang rather than a crash, which is why a depth cap cannot see it.
-# Measured on the unbounded walk: a 150-byte pattern of 30 groups costs
-# 2,147,483,647 expansions and does not finish in a minute of ReleaseSafe. The
-# pattern is formula code, so it needs a ceiling. The fix caps total expansions
-# and degrades to "no match", matching how every other failure here returns.
-#
-# No CLI subcommand exposes the matcher in isolation, so the guard is exercised
-# by colocated `test {}` blocks: one pins the shapes real formula globs use, one
-# drives the exponential axis, one pins the give-up behaviour. This script
-# builds the colocated test binary and judges those tests' lines.
-#
-# Exits 0 when the bound holds, non-zero (with a clear message) when it does
-# not. No network required; finishes in about a minute.
+# No subcommand exposes the matcher, so the guard runs its colocated `test {}`
+# blocks. Exits 0 when the bounds hold, non-zero with a clear message when they
+# do not. No network; about a minute.
 
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-SRC="$ROOT/src/core/dsl/builtins/pathname.zig"
+SRC="$ROOT/src/glob.zig"
 
 FILTERS=(
-  "glob matches wildcards and brace alternation"
-  "glob alternation cannot be driven into an unbounded expansion"
-  "glob expansion budget refuses instead of exploring"
+  "matches literals and wildcards"
+  "matches a flat alternation"
+  "matches a nested alternation"
+  "alternation cannot be driven into an unbounded expansion"
+  "an exhausted budget refuses instead of exploring"
+  "an expansion longer than the buffer is dropped, not truncated"
+  "a wide pattern still matches its last combination"
+  "a pattern past the ceiling is refused whole, not part-way"
+  "repeated wildcards cost steps, not combinations"
 )
 
 # If a guard test is ever deleted the name filter would match nothing and
@@ -61,7 +57,7 @@ if [[ $RC -eq 124 ]]; then
 fi
 
 for F in "${FILTERS[@]}"; do
-  LINE=$(printf '%s\n' "$OUT" | grep -F -- "$F" || true)
+  LINE=$(printf '%s\n' "$OUT" | grep -F -- "glob.test.$F" || true)
   if [[ -z "$LINE" ]]; then
     echo "FAIL: glob expansion guard test did not run: $F" >&2
     exit 1
@@ -72,4 +68,13 @@ for F in "${FILTERS[@]}"; do
   fi
 done
 
-echo "PASS: glob brace expansion stays bounded on formula-controlled patterns"
+# One matcher, not two. A reintroduced private copy would silently escape every
+# guard above, which is exactly how the two implementations drifted apart.
+COPIES=$(grep -rl --include='*.zig' -e 'fn globMatch' -e 'fn starMatch' "$ROOT/src" || true)
+if [[ -n "$COPIES" ]]; then
+  echo "FAIL: a private glob matcher reappeared, bypassing the shared one:" >&2
+  echo "$COPIES" >&2
+  exit 1
+fi
+
+echo "PASS: glob matching is bounded, nesting-correct, and not duplicated"

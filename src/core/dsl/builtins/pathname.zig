@@ -11,6 +11,7 @@ const sandbox = @import("../sandbox.zig");
 const fs_read = @import("../../../fs/read.zig");
 const ast = @import("../ast.zig");
 const fallback_log = @import("../fallback_log.zig");
+const glob_match = @import("../../../glob.zig");
 
 const Value = values.Value;
 
@@ -351,7 +352,7 @@ pub fn glob(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Va
     var results: std.ArrayList(Value) = .empty;
     var iter = dir.iterate();
     while (iter.next(ctx.io) catch null) |entry| {
-        if (globMatch(pattern, entry.name)) {
+        if (glob_match.match(pattern, entry.name)) {
             const child_path = std.fs.path.join(ctx.allocator, &.{ base_dir, entry.name }) catch continue;
             results.append(ctx.allocator, Value{ .pathname = child_path }) catch continue;
         }
@@ -359,90 +360,6 @@ pub fn glob(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Va
 
     const slice = results.toOwnedSlice(ctx.allocator) catch return BuiltinError.OutOfMemory;
     return Value{ .array = slice };
-}
-
-/// Ceiling on how many expansions a single match may attempt. Each `{a,b}`
-/// group doubles the work, so a pattern short enough to fit the expansion
-/// buffer still reaches 2^200 combinations - and the pattern is formula code.
-/// Real globs use a handful of alternatives, so this sits far above them.
-const max_glob_expansions: u32 = 10_000;
-
-/// Glob pattern matching with `*`, `?`, and `{a,b,c}` brace expansion.
-fn globMatch(pattern: []const u8, name: []const u8) bool {
-    var budget: u32 = max_glob_expansions;
-    return globMatchBudgeted(pattern, name, &budget);
-}
-
-fn globMatchBudgeted(pattern: []const u8, name: []const u8, budget: *u32) bool {
-    // Out of budget degrades to "no match": the calling builtin has no error
-    // channel, and every other failure here returns the same way.
-    if (budget.* == 0) return false;
-    budget.* -= 1;
-
-    // Check if pattern contains braces — if so, expand and try each alternative
-    if (std.mem.findScalar(u8, pattern, '{')) |brace_start| {
-        if (findMatchingBrace(pattern, brace_start)) |brace_end| {
-            const prefix = pattern[0..brace_start];
-            const suffix = pattern[brace_end + 1 ..];
-            const alternatives = pattern[brace_start + 1 .. brace_end];
-
-            // Split alternatives by comma and try each
-            var iter = std.mem.splitScalar(u8, alternatives, ',');
-            while (iter.next()) |alt| {
-                // Build expanded pattern: prefix + alt + suffix
-                var buf: [1024]u8 = undefined;
-                const expanded_len = prefix.len + alt.len + suffix.len;
-                if (expanded_len > buf.len) continue;
-                @memcpy(buf[0..prefix.len], prefix);
-                @memcpy(buf[prefix.len .. prefix.len + alt.len], alt);
-                @memcpy(buf[prefix.len + alt.len .. expanded_len], suffix);
-                if (globMatchBudgeted(buf[0..expanded_len], name, budget)) return true;
-            }
-            return false;
-        }
-    }
-
-    // Standard glob matching without braces
-    var pi: usize = 0;
-    var ni: usize = 0;
-    var star_pi: ?usize = null;
-    var star_ni: usize = 0;
-
-    while (ni < name.len) {
-        if (pi < pattern.len and (pattern[pi] == name[ni] or pattern[pi] == '?')) {
-            pi += 1;
-            ni += 1;
-        } else if (pi < pattern.len and pattern[pi] == '*') {
-            star_pi = pi;
-            star_ni = ni;
-            pi += 1;
-        } else if (star_pi) |sp| {
-            pi = sp + 1;
-            star_ni += 1;
-            ni = star_ni;
-        } else {
-            return false;
-        }
-    }
-
-    // Consume trailing *'s in pattern
-    while (pi < pattern.len and pattern[pi] == '*') : (pi += 1) {}
-    return pi == pattern.len;
-}
-
-/// Find matching closing brace, accounting for nesting.
-fn findMatchingBrace(pattern: []const u8, start: usize) ?usize {
-    var depth: u32 = 0;
-    var i = start;
-    while (i < pattern.len) : (i += 1) {
-        if (pattern[i] == '{') {
-            depth += 1;
-        } else if (pattern[i] == '}') {
-            depth -= 1;
-            if (depth == 0) return i;
-        }
-    }
-    return null;
 }
 
 fn receiverPath(allocator: std.mem.Allocator, receiver: ?Value) BuiltinError![]const u8 {
@@ -810,37 +727,4 @@ test "atomic_write keeps the target's existing mode instead of widening it" {
     // file must not silently widen because of that.
     const st = try std.Io.Dir.cwd().statFile(io, target, .{});
     try std.testing.expectEqual(@as(u32, 0o600), @intFromEnum(st.permissions) & 0o777);
-}
-
-test "glob matches wildcards and brace alternation" {
-    // Baseline for the expansion budget below: the shapes formula globs
-    // actually use must keep matching exactly as before.
-    try std.testing.expect(globMatch("*.h", "stdio.h"));
-    try std.testing.expect(!globMatch("*.h", "stdio.c"));
-    try std.testing.expect(globMatch("lib?.a", "libz.a"));
-    try std.testing.expect(globMatch("*.{h,hpp,hxx}", "vec.hpp"));
-    try std.testing.expect(!globMatch("*.{h,hpp,hxx}", "vec.cpp"));
-    try std.testing.expect(globMatch("{bin,sbin}/*", "bin/tool"));
-    try std.testing.expect(globMatch("a{b,c}d{e,f}", "acdf"));
-    try std.testing.expect(!globMatch("a{b,c}d{e,f}", "axdf"));
-}
-
-test "glob alternation cannot be driven into an unbounded expansion" {
-    // Each `{a,b}` group doubles the work, so a pattern only this long already
-    // costs 2^31 expansions unbounded - a hang, not a crash, since the depth
-    // stays shallow. The pattern comes from formula code, so it needs a bound.
-    var pattern: [30 * 5]u8 = undefined;
-    for (0..30) |i| @memcpy(pattern[i * 5 ..][0..5], "{a,b}");
-
-    try std.testing.expect(!globMatch(&pattern, "no-such-name"));
-}
-
-test "glob expansion budget refuses instead of exploring" {
-    // Exhausting the budget must degrade to "no match" rather than keep going;
-    // the surrounding builtin has no error channel to report a give-up on.
-    var spent: u32 = 3;
-    try std.testing.expect(!globMatchBudgeted("{a,b}{a,b}{a,b}{a,b}", "abab", &spent));
-
-    var ample: u32 = max_glob_expansions;
-    try std.testing.expect(globMatchBudgeted("{a,b}{a,b}{a,b}{a,b}", "abab", &ample));
 }
