@@ -430,6 +430,7 @@ pub fn buildInstallNameToolArgv(
     errdefer argv.deinit(allocator);
 
     argv.appendAssumeCapacity(external_tool_path);
+    var id_emitted = false;
     for (entries) |e| {
         if (e.delete) {
             // -delete_rpath <old> <file>: strip the collapsed duplicate.
@@ -450,7 +451,11 @@ pub fn buildInstallNameToolArgv(
             },
             .id => {
                 // -id takes only the new install name; the old one is
-                // implicit (LC_ID_DYLIB carries a single name).
+                // implicit (LC_ID_DYLIB carries a single name). A fat binary
+                // reports one per arch slice, but the tool accepts only one
+                // and applies it to every slice, so keep the first.
+                if (id_emitted) continue;
+                id_emitted = true;
                 argv.appendAssumeCapacity("-id");
                 argv.appendAssumeCapacity(e.new_path);
             },
@@ -479,6 +484,18 @@ fn installNameToolForm(cmd: u32) InstallNameToolForm {
 /// across Xcode releases and is the only one users have a remediation
 /// for, so it gets its own variant; everything else collapses to a
 /// generic failure that surfaces the raw stderr to the user upstream.
+/// Replay a failed `install_name_tool` run to the user. Best-effort: a broken
+/// stderr must not mask the relocation error being returned.
+fn reportInstallNameToolFailure(io: std.Io, file_path: []const u8, stderr_bytes: []const u8) void {
+    const err = std.Io.File.stderr();
+    err.writeStreamingAll(io, "  relocation failed for ") catch return;
+    err.writeStreamingAll(io, file_path) catch return;
+    err.writeStreamingAll(io, "\n") catch return;
+    if (stderr_bytes.len == 0) return;
+    err.writeStreamingAll(io, stderr_bytes) catch return;
+    if (stderr_bytes[stderr_bytes.len - 1] != '\n') err.writeStreamingAll(io, "\n") catch return;
+}
+
 pub fn classifyInstallNameToolStderr(stderr: []const u8) FallbackError {
     if (std.mem.indexOf(u8, stderr, "larger updated load commands do not fit") != null)
         return FallbackError.InsufficientHeaderPad;
@@ -497,6 +514,22 @@ pub fn flushOverflow(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     entries: []const OverflowEntry,
+) FallbackError!void {
+    return flushOverflowWithHooks(io, allocator, file_path, entries, .{});
+}
+
+/// Test seam mirroring `sandbox/macos.zig`: reaches the abnormal-exit path
+/// without signalling a real child.
+pub const FlushHooks = struct {
+    force_signalled: bool = false,
+};
+
+pub fn flushOverflowWithHooks(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    entries: []const OverflowEntry,
+    hooks: FlushHooks,
 ) FallbackError!void {
     if (entries.len == 0) return;
 
@@ -522,13 +555,245 @@ pub fn flushOverflow(
         return FallbackError.IoError;
     defer allocator.free(stderr_bytes);
 
-    const term = child.wait(io) catch return FallbackError.InstallNameToolFailed;
+    const waited = child.wait(io) catch return FallbackError.InstallNameToolFailed;
+    const term: std.process.Child.Term = if (hooks.force_signalled) .{ .signal = std.posix.SIG.KILL } else waited;
     switch (term) {
         .exited => |code| {
-            if (code != 0) return classifyInstallNameToolStderr(stderr_bytes);
+            if (code != 0) {
+                // The classified error drives remediation, but only the tool's
+                // own words say which binary failed and why, so replay them
+                // rather than reduce the whole failure to an error name.
+                reportInstallNameToolFailure(io, file_path, stderr_bytes);
+                return classifyInstallNameToolStderr(stderr_bytes);
+            }
         },
-        else => return FallbackError.InstallNameToolFailed,
+        else => {
+            reportInstallNameToolFailure(io, file_path, stderr_bytes);
+            return FallbackError.InstallNameToolFailed;
+        },
     }
+}
+
+/// Capture a terminal fd so a test can read what a child wrote to it. stderr
+/// is safe to redirect here; the test runner's protocol lives on stdout.
+const StderrCapture = struct {
+    saved: c_int,
+    path: [:0]const u8,
+    io: std.Io,
+
+    fn start(alloc: std.mem.Allocator, io: std.Io) !StderrCapture {
+        const path = try std.fmt.allocPrintSentinel(alloc, "/tmp/malt_patcher_err_{d}", .{std.c.getpid()}, 0);
+        const saved = std.c.dup(std.c.STDERR_FILENO);
+        const cap = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+        if (saved < 0 or cap < 0) return error.CaptureFailed;
+        _ = std.c.dup2(cap, std.c.STDERR_FILENO);
+        _ = std.c.close(cap);
+        return .{ .saved = saved, .path = path, .io = io };
+    }
+
+    fn finish(self: *StderrCapture, alloc: std.mem.Allocator) ![]const u8 {
+        _ = std.c.dup2(self.saved, std.c.STDERR_FILENO);
+        _ = std.c.close(self.saved);
+        defer std.Io.Dir.cwd().deleteFile(self.io, self.path) catch {};
+        const f = try std.Io.Dir.openFileAbsolute(self.io, self.path, .{});
+        defer f.close(self.io);
+        const st = try f.stat(self.io);
+        const buf = try alloc.alloc(u8, @intCast(st.size));
+        _ = try f.readPositionalAll(self.io, buf, 0);
+        return buf;
+    }
+};
+
+test "buildInstallNameToolArgv emits one -id for a fat binary" {
+    // The parser returns the union of every arch slice, so a universal dylib
+    // yields one LC_ID_DYLIB per slice. install_name_tool refuses a second
+    // -id, and one covers all slices anyway.
+    const a = std.testing.allocator;
+    const id_cmd = @intFromEnum(std.macho.LC.ID_DYLIB);
+    const entries = [_]OverflowEntry{
+        .{ .cmd = id_cmd, .old_path = "/old/lib.dylib", .new_path = "/new/lib.dylib" },
+        .{ .cmd = id_cmd, .old_path = "/old/lib.dylib", .new_path = "/new/lib.dylib" },
+    };
+    const argv = try buildInstallNameToolArgv(a, "/bin/thing", &entries);
+    defer a.free(argv);
+
+    var ids: usize = 0;
+    for (argv) |arg| if (std.mem.eql(u8, arg, "-id")) {
+        ids += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), ids);
+    try std.testing.expectEqualStrings("/bin/thing", argv[argv.len - 1]);
+}
+
+test "a relocation failure names the binary even when the tool says nothing" {
+    // The promise is that a failure is never silent. A tool that exits
+    // non-zero without a word must still leave the user something to act on.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var cap = try StderrCapture.start(a, io);
+    reportInstallNameToolFailure(io, "/some/keg/lib/thing.dylib", "");
+    const emitted = try cap.finish(a);
+
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "/some/keg/lib/thing.dylib") != null);
+}
+
+test "a relocation report ends in a newline whether or not the tool supplied one" {
+    // The message is replayed verbatim, so an unterminated one would run into
+    // whatever the installer prints next.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    for ([_][]const u8{ "boom", "boom\n" }) |body| {
+        var cap = try StderrCapture.start(a, io);
+        reportInstallNameToolFailure(io, "/keg/thing.dylib", body);
+        const emitted = try cap.finish(a);
+        try std.testing.expect(std.mem.endsWith(u8, emitted, "boom\n"));
+        try std.testing.expect(!std.mem.endsWith(u8, emitted, "\n\n"));
+    }
+}
+
+test "flushOverflow stays silent when install_name_tool succeeds" {
+    // Nothing to report on success: a spurious line here would make every
+    // ordinary install look like it had a problem.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var cap = try StderrCapture.start(a, io);
+    // No entries is the cheapest success: the tool is never spawned.
+    const res = flushOverflow(io, a, "/keg/thing.dylib", &.{});
+    const emitted = try cap.finish(a);
+    try res;
+    try std.testing.expectEqual(@as(usize, 0), emitted.len);
+}
+
+test "buildInstallNameToolArgv renders each load-command form" {
+    const a = std.testing.allocator;
+    const lc = std.macho.LC;
+    const entries = [_]OverflowEntry{
+        .{ .cmd = @intFromEnum(lc.LOAD_DYLIB), .old_path = "/old/dep", .new_path = "/new/dep" },
+        .{ .cmd = @intFromEnum(lc.RPATH), .old_path = "/old/rp", .new_path = "/new/rp" },
+        .{ .cmd = @intFromEnum(lc.RPATH), .old_path = "/dup/rp", .new_path = "", .delete = true },
+        .{ .cmd = @intFromEnum(lc.ID_DYLIB), .old_path = "/old/id", .new_path = "/new/id" },
+    };
+    const argv = try buildInstallNameToolArgv(a, "/keg/thing.dylib", &entries);
+    defer a.free(argv);
+
+    const want = [_][]const u8{
+        external_tool_path,
+        "-change",
+        "/old/dep",
+        "/new/dep",
+        "-rpath",
+        "/old/rp",
+        "/new/rp",
+        "-delete_rpath",
+        "/dup/rp",
+        "-id",
+        "/new/id",
+        "/keg/thing.dylib",
+    };
+    try std.testing.expectEqual(want.len, argv.len);
+    for (want, argv) |w, got| try std.testing.expectEqualStrings(w, got);
+}
+
+test "buildInstallNameToolArgv reports allocation failure rather than a partial argv" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const entries = [_]OverflowEntry{
+        .{ .cmd = @intFromEnum(std.macho.LC.ID_DYLIB), .old_path = "/o", .new_path = "/n" },
+    };
+    try std.testing.expectError(
+        error.OutOfMemory,
+        buildInstallNameToolArgv(failing.allocator(), "/keg/thing.dylib", &entries),
+    );
+}
+
+test "a child that dies by signal is reported, not silently tolerated" {
+    // A killed rename tool leaves the binary half-rewritten, so it must fail
+    // loudly like any other bad outcome.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const path = try std.fmt.allocPrintSentinel(a, "/tmp/malt_patcher_signal_{d}", .{std.c.getpid()}, 0);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "not a mach-o");
+    }
+
+    const entries = [_]OverflowEntry{.{ .cmd = 12, .old_path = "/a/b", .new_path = "/c/d" }};
+    var cap = try StderrCapture.start(a, io);
+    const res = flushOverflowWithHooks(io, a, path, &entries, .{ .force_signalled = true });
+    const emitted = try cap.finish(a);
+
+    try std.testing.expectError(FallbackError.InstallNameToolFailed, res);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, path) != null);
+}
+
+test "classifyInstallNameToolStderr keeps padding exhaustion distinct" {
+    // Padding exhaustion has its own remediation - shorten the prefix or
+    // rebuild the bottle - so it must not collapse into the generic failure.
+    try std.testing.expectEqual(
+        FallbackError.InsufficientHeaderPad,
+        classifyInstallNameToolStderr("error: larger updated load commands do not fit"),
+    );
+    try std.testing.expectEqual(
+        FallbackError.InsufficientHeaderPad,
+        classifyInstallNameToolStderr("error: no room for new load commands"),
+    );
+    try std.testing.expectEqual(
+        FallbackError.InstallNameToolFailed,
+        classifyInstallNameToolStderr("error: input file: /x is not a Mach-O file"),
+    );
+}
+
+test "flushOverflow reports why install_name_tool refused the binary" {
+    // Without this the caller only sees a generic patch failure, and the one
+    // thing that says what went wrong has already been thrown away.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const path = try std.fmt.allocPrintSentinel(a, "/tmp/malt_patcher_notmacho_{d}", .{std.c.getpid()}, 0);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "not a mach-o");
+    }
+
+    const entries = [_]OverflowEntry{.{ .cmd = 12, .old_path = "/a/b", .new_path = "/c/d" }};
+    var cap = try StderrCapture.start(a, io);
+    const res = flushOverflow(io, a, path, &entries);
+    const emitted = try cap.finish(a);
+
+    try std.testing.expectError(FallbackError.InstallNameToolFailed, res);
+    try std.testing.expect(std.mem.indexOf(u8, emitted, "not a Mach-O file") != null);
 }
 
 test "flushOverflow does not execute a prefix-resident install_name_tool shim" {
