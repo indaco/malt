@@ -86,7 +86,7 @@ const dependency_placeholders = [_]struct {
 /// this is for paths without one, where the DB rows describe a different
 /// version than the keg on disk.
 pub fn declaredDependencies(out: [][]const u8, rb_source: []const u8) []const []const u8 {
-    const total = scanDeclaredDeps(out, rb_source, false);
+    const total = scanDeclaredDeps(out, rb_source, .runtime);
     // Truncates rather than fails: these callers describe a keg already on
     // disk, where a short list costs a placeholder, not a broken install.
     return out[0..@min(total, out.len)];
@@ -104,16 +104,38 @@ pub fn declaredInstallDependencies(
     out: [][]const u8,
     rb_source: []const u8,
 ) error{TooManyDependencies}![]const []const u8 {
-    const total = scanDeclaredDeps(out, rb_source, true);
+    const total = scanDeclaredDeps(out, rb_source, .install);
     // Refuses rather than truncates: silently installing a prefix of the list
     // lands a keg missing libraries, which surfaces far from the cause.
     if (total > out.len) return error.TooManyDependencies;
     return out[0..total];
 }
 
+/// The `:recommended` subset of `declaredInstallDependencies`. These still get
+/// installed; the list only tells the installer whose failure it may downgrade
+/// to a warning rather than fail the parent over.
+pub fn declaredRecommendedDependencies(
+    out: [][]const u8,
+    rb_source: []const u8,
+) error{TooManyDependencies}![]const []const u8 {
+    const total = scanDeclaredDeps(out, rb_source, .recommended);
+    if (total > out.len) return error.TooManyDependencies;
+    return out[0..total];
+}
+
 /// Fill `out` with dependency names. Returns how many were *found*, which may
 /// exceed `out.len` — the wrappers above differ only in what they do about that.
-fn scanDeclaredDeps(out: [][]const u8, rb_source: []const u8, drop_optional: bool) usize {
+/// Which subset of `depends_on` lines a scan keeps.
+const DepScan = enum {
+    /// Everything the keg links at runtime.
+    runtime,
+    /// What an installer must pull in; `:optional` is opt-in only.
+    install,
+    /// The `:recommended` subset - the deps whose absence is survivable.
+    recommended,
+};
+
+fn scanDeclaredDeps(out: [][]const u8, rb_source: []const u8, scan: DepScan) usize {
     const decl = "depends_on ";
     var n: usize = 0;
     var lines = std.mem.tokenizeScalar(u8, rb_source, '\n');
@@ -127,9 +149,16 @@ fn scanDeclaredDeps(out: [][]const u8, rb_source: []const u8, drop_optional: boo
         if (rest.len == 0 or rest[0] != '"') continue;
         const close = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse continue;
 
-        const tail = rest[close..];
+        // Trailing comments are prose, not markers - a `:recommended` mentioned
+        // there once made a required dep's failure look survivable.
+        const full_tail = rest[close..];
+        const tail = if (std.mem.indexOfScalar(u8, full_tail, '#')) |h| full_tail[0..h] else full_tail;
         if (std.mem.indexOf(u8, tail, ":build") != null) continue;
-        if (drop_optional and std.mem.indexOf(u8, tail, ":optional") != null) continue;
+        switch (scan) {
+            .runtime => {},
+            .install => if (std.mem.indexOf(u8, tail, ":optional") != null) continue,
+            .recommended => if (std.mem.indexOf(u8, tail, ":recommended") == null) continue,
+        }
 
         if (n < out.len) out[n] = rest[1..close];
         n += 1;
@@ -1330,4 +1359,72 @@ test "dependencyPlaceholder does not mistake a lookalike dependency name" {
     var buf: [256]u8 = undefined;
     const deps = [_][]const u8{"openjdk-doc"};
     try testing.expect(dependencyPlaceholder(&buf, "/opt/malt", &deps) == null);
+}
+
+test "declaredRecommendedDependencies returns only the recommended subset" {
+    const rb =
+        \\class Foo < Formula
+        \\  depends_on "required-one"
+        \\  depends_on "mongodb-database-tools" => :recommended
+        \\  depends_on "mongosh" => :recommended
+        \\  depends_on "cmake" => :build
+        \\  depends_on "extra" => :optional
+        \\end
+    ;
+    var buf: [8][]const u8 = undefined;
+    const got = try declaredRecommendedDependencies(&buf, rb);
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualStrings("mongodb-database-tools", got[0]);
+    try std.testing.expectEqualStrings("mongosh", got[1]);
+}
+
+test "declaredRecommendedDependencies is empty when nothing is recommended" {
+    const rb =
+        \\class Foo < Formula
+        \\  depends_on "required-one"
+        \\  depends_on "cmake" => :build
+        \\end
+    ;
+    var buf: [8][]const u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), (try declaredRecommendedDependencies(&buf, rb)).len);
+}
+
+test "declaredRecommendedDependencies refuses rather than truncate an overlong list" {
+    // A short list would silently mark a dep non-recommended, turning a
+    // survivable skip into a hard failure (or the reverse).
+    const rb =
+        \\class Foo < Formula
+        \\  depends_on "a" => :recommended
+        \\  depends_on "b" => :recommended
+        \\end
+    ;
+    var buf: [1][]const u8 = undefined;
+    try std.testing.expectError(error.TooManyDependencies, declaredRecommendedDependencies(&buf, rb));
+}
+
+test "declaredRecommendedDependencies ignores a marker mentioned in a comment" {
+    // Downgrading a required dep's failure to a warning would report a broken
+    // install as a success.
+    const rb =
+        \\class Foo < Formula
+        \\  depends_on "libfoo" # unlike the :recommended one, this is mandatory
+        \\  depends_on "libbar" => :recommended
+        \\end
+    ;
+    var buf: [8][]const u8 = undefined;
+    const got = try declaredRecommendedDependencies(&buf, rb);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("libbar", got[0]);
+}
+
+test "declaredInstallDependencies keeps a dep whose comment mentions :optional" {
+    const rb =
+        \\class Foo < Formula
+        \\  depends_on "libfoo" # not :optional despite the word
+        \\end
+    ;
+    var buf: [8][]const u8 = undefined;
+    const got = try declaredInstallDependencies(&buf, rb);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("libfoo", got[0]);
 }
