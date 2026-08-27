@@ -886,6 +886,53 @@ test "cp_r copies a directory tree within the keg" {
     try std.testing.expectEqualStrings("hello", rb[0..try df.readPositionalAll(io, &rb, 0)]);
 }
 
+test "cp_r on a tree deeper than PATH_MAX terminates instead of overflowing" {
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("fileutils_cpr_deep");
+    defer s.deinit();
+    const keg = s.base;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const src = try std.fs.path.join(alloc, &.{ keg, "src" });
+    const dst = try std.fs.path.join(alloc, &.{ keg, "dst" });
+
+    // 600 levels is 1200 path bytes, past what an absolute open can address.
+    // Descend by handle: createDirPath cannot build a tree it cannot name.
+    const depth = 600;
+    try std.Io.Dir.cwd().createDirPath(io, src);
+    {
+        var dir = try std.Io.Dir.cwd().openDir(io, src, .{});
+        defer dir.close(io);
+        for (0..depth) |_| {
+            try dir.createDir(io, "a", .default_dir);
+            const next = try dir.openDir(io, "a", .{});
+            dir.close(io);
+            dir = next;
+        }
+    }
+
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    // Reaching the next statement at all is half the guard: an unbounded walk
+    // would take the process down with it rather than return.
+    _ = try cpR(ctx, null, &.{ Value{ .string = src }, Value{ .string = dst } });
+
+    // The other half: the walk must stop short of the source depth. Copying the
+    // whole tree means the bound is gone and a real cap has to replace it.
+    var copied: usize = 0;
+    var dir = try std.Io.Dir.cwd().openDir(io, dst, .{});
+    defer dir.close(io);
+    while (dir.openDir(io, "a", .{})) |next| : (copied += 1) {
+        dir.close(io);
+        dir = next;
+    } else |_| {}
+
+    try std.testing.expect(copied > 0);
+    try std.testing.expect(copied < depth);
+}
+
 test "mv refuses a source under an intermediate-directory symlink out of the keg" {
     const io = std.Options.debug_io;
     const alloc = std.testing.allocator;
