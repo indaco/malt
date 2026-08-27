@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
+const path_component = @import("../../fs/path_component.zig");
 
 /// Upper bound on MALT_PREFIX byte length. This is a sanity cap, not a
 /// correctness gate: the Mach-O relocation pipeline (see
@@ -39,6 +40,31 @@ pub fn isTapFormula(name: []const u8) bool {
         if (ch == '/') slash_count += 1;
     }
     return slash_count == 2;
+}
+
+/// Qualify a tap formula's unqualified dependency with its own tap, the way
+/// Homebrew resolves a sibling once the core tap has missed. Returns null when
+/// the name is already qualified or the tap cannot own siblings (core, or a
+/// `--local` install), so the caller falls through to its existing error.
+/// Characters a Homebrew formula name is built from. `isPathComponent` is
+/// deliberately charset-agnostic - safe for a directory component, but this
+/// name is also spliced unescaped into a raw-file URL path, where a space or
+/// a CR would malform the request line.
+fn isFormulaNameCharset(name: []const u8) bool {
+    for (name) |c| switch (c) {
+        'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '+', '.', '@' => {},
+        else => return false,
+    };
+    return true;
+}
+
+pub fn tapSiblingSlug(buf: []u8, tap_label: []const u8, dep: []const u8) ?[]const u8 {
+    if (isCoreTap(tap_label) or std.mem.eql(u8, tap_label, "local")) return null;
+    // The dep name comes from the tap's own `.rb` and reaches both a Cellar
+    // path and a URL, so it has to clear both bars before we act on it.
+    if (!path_component.isPathComponent(dep)) return null;
+    if (!isFormulaNameCharset(dep)) return null;
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ tap_label, dep }) catch null;
 }
 
 /// True when `tap_label` represents one of Homebrew's core taps. Empty
@@ -615,4 +641,66 @@ test "isCoreTap is exact-match (not prefix)" {
     // `homebrew/core-staging` is a hypothetical fork; treat it as third-party.
     try std.testing.expect(!isCoreTap("homebrew/core-staging"));
     try std.testing.expect(!isCoreTap("homebrew/cask-fonts"));
+}
+
+test "tapSiblingSlug qualifies a bare dep with its owning tap" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "mongodb/brew/mongodb-database-tools",
+        tapSiblingSlug(&buf, "mongodb/brew", "mongodb-database-tools").?,
+    );
+}
+
+test "tapSiblingSlug refuses a dep name that would walk out of the prefix" {
+    // A tap controls this string; it reaches a Cellar path unvalidated below.
+    var buf: [128]u8 = undefined;
+    try std.testing.expect(tapSiblingSlug(&buf, "evil/tap", "..") == null);
+    try std.testing.expect(tapSiblingSlug(&buf, "evil/tap", "../../etc") == null);
+    try std.testing.expect(tapSiblingSlug(&buf, "evil/tap", ".") == null);
+    try std.testing.expect(tapSiblingSlug(&buf, "evil/tap", "") == null);
+    try std.testing.expect(tapSiblingSlug(&buf, "evil/tap", "a\x00b") == null);
+}
+
+test "tapSiblingSlug refuses a dep name that would malform a request line" {
+    // The name is spliced into a URL path with no escaping, so whitespace and
+    // control bytes have to be refused here rather than trusted downstream.
+    var buf: [128]u8 = undefined;
+    try std.testing.expect(tapSiblingSlug(&buf, "evil/tap", "evil dep") == null);
+    try std.testing.expect(tapSiblingSlug(&buf, "evil/tap", "evil\rdep") == null);
+    try std.testing.expect(tapSiblingSlug(&buf, "evil/tap", "evil\ndep") == null);
+    try std.testing.expect(tapSiblingSlug(&buf, "evil/tap", "evil?dep") == null);
+    try std.testing.expect(tapSiblingSlug(&buf, "evil/tap", "evil%2edep") == null);
+}
+
+test "tapSiblingSlug still qualifies the punctuation real formula names use" {
+    // Refusing a legitimate sibling would be its own bug.
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("a/b/openssl@3", tapSiblingSlug(&buf, "a/b", "openssl@3").?);
+    try std.testing.expectEqualStrings("a/b/python@3.14", tapSiblingSlug(&buf, "a/b", "python@3.14").?);
+    try std.testing.expectEqualStrings("a/b/c-ares", tapSiblingSlug(&buf, "a/b", "c-ares").?);
+    try std.testing.expectEqualStrings("a/b/libc++", tapSiblingSlug(&buf, "a/b", "libc++").?);
+    try std.testing.expectEqualStrings("a/b/mongodb_tools", tapSiblingSlug(&buf, "a/b", "mongodb_tools").?);
+}
+
+test "tapSiblingSlug leaves an already-qualified dep alone" {
+    // Re-qualifying would build `a/b/c/d/e` and 404 on a name nobody wrote.
+    var buf: [128]u8 = undefined;
+    try std.testing.expect(tapSiblingSlug(&buf, "mongodb/brew", "other/tap/thing") == null);
+    try std.testing.expect(tapSiblingSlug(&buf, "mongodb/brew", "half/qualified") == null);
+}
+
+test "tapSiblingSlug declines taps that cannot own siblings" {
+    // Core deps already resolve; `local` is the label a --local install wears
+    // and has no tap to search.
+    var buf: [128]u8 = undefined;
+    try std.testing.expect(tapSiblingSlug(&buf, "homebrew/core", "mongosh") == null);
+    try std.testing.expect(tapSiblingSlug(&buf, "", "mongosh") == null);
+    try std.testing.expect(tapSiblingSlug(&buf, "local", "mongosh") == null);
+}
+
+test "tapSiblingSlug declines rather than truncate when the name will not fit" {
+    // bufPrint failing must read as "no fallback", never as a short slug that
+    // would resolve to some other formula.
+    var buf: [8]u8 = undefined;
+    try std.testing.expect(tapSiblingSlug(&buf, "mongodb/brew", "mongodb-database-tools") == null);
 }

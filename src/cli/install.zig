@@ -413,6 +413,9 @@ pub const InstallAllOpts = struct {
     /// (behaviour identical to `mt install`); the bundle runner passes a
     /// silent sink so its `Report` is the only channel.
     sink: OutputSink = sink_mod.terminal,
+    /// Tap whose formula declared these packages as dependencies. Lets an
+    /// unqualified sibling resolve inside that tap after core misses.
+    dep_tap: ?[]const u8 = null,
 };
 
 /// Non-argv primitive used by `core/bundle/runner.zig` via its injected
@@ -429,7 +432,11 @@ pub fn installAll(
 ) !void {
     // Build the typed flags directly — the bundle callers pass validated
     // package names, so there is nothing to re-scan or refuse in `parse`.
-    return runInstall(ctx, allocator, packages, installFlagsFromOpts(opts), .{ .skip_lock = opts.skip_lock, .sink = opts.sink });
+    return runInstall(ctx, allocator, packages, installFlagsFromOpts(opts), .{
+        .skip_lock = opts.skip_lock,
+        .sink = opts.sink,
+        .dep_tap = opts.dep_tap,
+    });
 }
 
 /// Map the non-argv `InstallAllOpts` onto the typed flags the argv path
@@ -447,6 +454,9 @@ const ExecuteOpts = struct {
     /// Where per-keg human output goes. Terminal for the argv path; the
     /// bundle runner threads a silent sink in via `installAll`.
     sink: OutputSink = sink_mod.terminal,
+    /// See `InstallAllOpts.dep_tap`. Never set on the argv path: a name the
+    /// user typed is theirs to qualify.
+    dep_tap: ?[]const u8 = null,
 };
 
 /// `allocator` must be an arena (see `installAll`).
@@ -751,6 +761,17 @@ fn runInstall(
                 }
                 // Try cask
                 installCask(ctx, allocator, pkg_name, &db, &api, flags, sink) catch |e| {
+                    // Last resort: a tap formula's sibling dep, which is
+                    // unqualified in the `.rb` and lives in neither core nor
+                    // the cask index.
+                    sibling: {
+                        var slug_buf: [256]u8 = undefined;
+                        const slug = args_mod.tapSiblingSlug(&slug_buf, exec_opts.dep_tap orelse "", pkg_name) orelse
+                            break :sibling;
+                        installTapFormula(ctx, allocator, slug, &db, &linker, prefix, flags.dry_run, flags.force, flags.download_only, sink) catch
+                            break :sibling;
+                        continue;
+                    }
                     if (e == api_mod.ApiError.OfflineRequired) {
                         sink.err("offline mode: '{s}' not cached as formula or cask", .{pkg_name});
                     } else {
