@@ -29,9 +29,8 @@ BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
 
 # MALT_PREFIX must be ≤ 13 bytes (Mach-O in-place patching budget),
 # same constraint as smoke_install_local.sh.
-PREFIX="/tmp/mt_smoke_off"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
 export MALT_PREFIX="$PREFIX"
-rm -rf "$PREFIX"
 mkdir -p "$PREFIX/cache/api" "$PREFIX/db"
 trap 'rm -rf "$PREFIX"' EXIT
 

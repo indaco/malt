@@ -10,7 +10,7 @@
 # CLI, and a second `--output-format=ndjson` pass that asserts workers
 # actually fanned out (events from distinct kegs interleave).
 #
-# Working dirs live under /tmp/mt_mp / /tmp/mt_mp2 / /tmp/mt-mp-work so
+# Working dirs live under throwaway mktemp prefixes so
 # `just clean` (clean.sh /tmp/mt_* + /tmp/mt-* globs) reaps them.
 #
 # Usage:
@@ -49,9 +49,9 @@ command -v jq >/dev/null 2>&1 || {
 }
 
 # MALT_PREFIX must be <= 13 bytes (Mach-O in-place patching budget).
-PREFIX="/tmp/mt_mp"
-PREFIX_NDJSON="/tmp/mt_mp2"
-WORKDIR="/tmp/mt-mp-work"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
+PREFIX_NDJSON=$(mktemp -d /tmp/mt.XXX)
+WORKDIR=$(mktemp -d /tmp/mt-mp.XXX)
 REPORT="$WORKDIR/migrate_parallel_report.txt"
 STDOUT_LOG="$WORKDIR/migrate.stdout.json"
 # `migrate --json` emits a JSONL stream: one line per per-keg

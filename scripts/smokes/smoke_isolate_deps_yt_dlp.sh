@@ -39,9 +39,8 @@ BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
   exit 2
 }
 
-PREFIX="/tmp/mt_yt"
+PREFIX=$(mktemp -d /tmp/mt.XXX)
 export MALT_PREFIX="$PREFIX"
-rm -rf "$PREFIX"
 mkdir -p "$PREFIX"
 trap 'rm -rf "$PREFIX"' EXIT
 
