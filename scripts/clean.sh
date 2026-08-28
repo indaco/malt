@@ -2,12 +2,13 @@
 # scripts/clean.sh — remove Zig build artifacts and test scratch dirs.
 #
 # Clears `.zig-cache`, `zig-out`, and `coverage/`, plus any leftover
-# test / e2e / smoke / bench directories under `/tmp`. Covers every
-# variant used by the project:
+# test / e2e / smoke / bench directories under `/tmp` and `$TMPDIR`.
+# Covers every variant used by the project:
 #   malt_* / malt-*            Zig test scratch + bench work dir
 #   mt_* / mt-* / mt.*         CLI test dirs, bench prefix, smoke PREFIX
 #   ml_* / ml.*                LOGDIR (smoke + e2e security)
 #   mc_* / mc.*                CACHE  (smoke + e2e security)
+#   probe-budget.*             notifier probe-budget regression
 # and the bench peer-tool prefixes (/tmp/nb, /tmp/zb, /tmp/malt-bench),
 # honouring BENCH_WORK_DIR / MALT_BENCH_PREFIX / NB_BENCH_PREFIX /
 # ZB_BENCH_PREFIX env overrides so tweaked paths still get cleaned.
@@ -84,27 +85,41 @@ remove_tree .zig-cache
 remove_tree zig-out
 remove_tree coverage
 
-echo "▸ Test scratch under /tmp"
 # Patterns cover every mktemp/fixture prefix across tests + e2e + smoke +
 # bench. The underscore / dot / hyphen variants are intentional - smoke
 # uses `mktemp -d /tmp/mt.XXX`, e2e security uses `mt_sec.XXX`, bench
 # uses `/tmp/malt-bench`. Missing one variant leaks multi-GB Cellar or
 # cache dirs on every crashed run.
-for pattern in \
-  '/tmp/malt_*' \
-  '/tmp/malt-*' \
-  '/tmp/mt_*' \
-  '/tmp/mt-*' \
-  '/tmp/mt.*' \
-  '/tmp/ml_*' \
-  '/tmp/ml.*' \
-  '/tmp/mc_*' \
-  '/tmp/mc.*'; do
-  # Unquoted on purpose so the shell glob-expands the pattern.
+patterns='malt_* malt-* mt_* mt-* mt.* ml_* ml.* mc_* mc.* probe-budget.*'
+
+# `mktemp -d -t <prefix>` resolves against $TMPDIR, which on macOS is a
+# per-user dir under /var/folders - most of the shell suite lands there
+# rather than in /tmp, so sweeping /tmp alone leaves it to grow forever.
+# A bare `mktemp -d` lands there too, but as `tmp.XXXXXXXX`, a name shared
+# with every other app on the machine; it stays out of the sweep.
+roots=/tmp
+scratch_tmpdir=${TMPDIR:-}
+scratch_tmpdir=${scratch_tmpdir%/}
+case "$scratch_tmpdir" in
+# Already swept, or nothing to sweep.
+"" | /tmp) ;;
+# The patterns are malt-specific, but a $TMPDIR pointing at a home or the
+# root would still aim them at real work. Sweep only a genuine temp root.
+/tmp/* | /private/tmp/* | /var/* | /private/var/*) roots="$roots $scratch_tmpdir" ;;
+*) printf "  ⚠ refusing to sweep \$TMPDIR outside a temp root: %s\n" "$scratch_tmpdir" >&2 ;;
+esac
+
+# shellcheck disable=SC2086
+for root in $roots; do
+  echo "▸ Test scratch under $root"
   # shellcheck disable=SC2086
-  for path in $pattern; do
-    [ -e "$path" ] || continue
-    remove_tree "$path"
+  for pattern in $patterns; do
+    # Unquoted on purpose so the shell glob-expands the pattern.
+    # shellcheck disable=SC2086
+    for path in $root/$pattern; do
+      [ -e "$path" ] || continue
+      remove_tree "$path"
+    done
   done
 done
 
