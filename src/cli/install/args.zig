@@ -50,7 +50,7 @@ pub fn isTapFormula(name: []const u8) bool {
 /// deliberately charset-agnostic - safe for a directory component, but this
 /// name is also spliced unescaped into a raw-file URL path, where a space or
 /// a CR would malform the request line.
-fn isFormulaNameCharset(name: []const u8) bool {
+pub fn isFormulaNameCharset(name: []const u8) bool {
     for (name) |c| switch (c) {
         'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '+', '.', '@' => {},
         else => return false,
@@ -96,15 +96,21 @@ pub fn isLocalFormulaPath(arg: []const u8) bool {
     return false;
 }
 
-/// Parse a tap formula name into user, repo, formula components.
+/// Parse a tap formula name into user, repo, formula components. Null when
+/// the formula leaf is not safe to use as a path component or a URL segment.
 pub fn parseTapName(name: []const u8) ?struct { user: []const u8, repo: []const u8, formula: []const u8 } {
     const first_slash = std.mem.findScalar(u8, name, '/') orelse return null;
     const rest = name[first_slash + 1 ..];
     const second_slash = std.mem.findScalar(u8, rest, '/') orelse return null;
+    const formula = rest[second_slash + 1 ..];
+    // The leaf reaches both a Cellar path and an unescaped raw-file URL path,
+    // so it clears the same two bars `tapSiblingSlug` applies to a dep name.
+    if (!path_component.isPathComponent(formula)) return null;
+    if (!isFormulaNameCharset(formula)) return null;
     return .{
         .user = name[0..first_slash],
         .repo = rest[0..second_slash],
-        .formula = rest[second_slash + 1 ..],
+        .formula = formula,
     };
 }
 
@@ -703,4 +709,24 @@ test "tapSiblingSlug declines rather than truncate when the name will not fit" {
     // would resolve to some other formula.
     var buf: [8]u8 = undefined;
     try std.testing.expect(tapSiblingSlug(&buf, "mongodb/brew", "mongodb-database-tools") == null);
+}
+
+test "parseTapName keeps the punctuation real formula names use" {
+    try std.testing.expectEqualStrings("python@3.14", parseTapName("a/b/python@3.14").?.formula);
+    try std.testing.expectEqualStrings("libc++", parseTapName("a/b/libc++").?.formula);
+    try std.testing.expectEqualStrings("mongodb_tools", parseTapName("a/b/mongodb_tools").?.formula);
+}
+
+test "parseTapName refuses a formula segment that is not a safe leaf" {
+    // The leaf lands in `<prefix>/Cellar/<name>/...` and, unescaped, in a
+    // raw-file URL path, so it has to clear both bars.
+    try std.testing.expect(parseTapName("evil/tap/..") == null);
+    try std.testing.expect(parseTapName("evil/tap/../../etc") == null);
+    try std.testing.expect(parseTapName("evil/tap/.") == null);
+    try std.testing.expect(parseTapName("evil/tap/") == null);
+    try std.testing.expect(parseTapName("evil/tap/a\x00b") == null);
+    try std.testing.expect(parseTapName("evil/tap/evil dep") == null);
+    try std.testing.expect(parseTapName("evil/tap/evil\rdep") == null);
+    try std.testing.expect(parseTapName("evil/tap/evil?dep") == null);
+    try std.testing.expect(parseTapName("evil/tap/evil%2edep") == null);
 }

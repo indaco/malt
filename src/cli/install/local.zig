@@ -18,6 +18,7 @@ const forge = @import("../../core/forge.zig");
 const tap_cache = @import("../../core/tap_cache.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const atomic = @import("../../fs/atomic.zig");
+const path_component = @import("../../fs/path_component.zig");
 const macho_parser = @import("../../macho/parser.zig");
 const client_mod = @import("../../net/client.zig");
 const output = @import("../../ui/output.zig");
@@ -84,6 +85,21 @@ pub const ResolvedRubyFormula = struct {
     /// never pollute the tap list.
     tap_registration: ?TapRegistration = null,
 };
+
+/// The Ruby DSL is tap-controlled and both fields land raw in
+/// `<prefix>/Cellar/<name>/<version>` - and, under `--force`, in the
+/// `deleteTree` that prunes it. Screening at construction rather than at the
+/// path sites keeps the refusal next to the malformed input.
+fn screenRubyIdentity(sink: OutputSink, name: []const u8, version: []const u8) InstallError!void {
+    if (!path_component.isPathComponent(name)) {
+        sink.err("Formula declares an unsafe name: {s}", .{name});
+        return InstallError.FormulaNotFound;
+    }
+    if (!path_component.isPathComponent(version)) {
+        sink.err("Formula declares an unsafe version: {s}", .{version});
+        return InstallError.FormulaNotFound;
+    }
+}
 
 const TapRegistration = struct {
     url: []const u8,
@@ -394,6 +410,8 @@ fn installTapRb(
         return InstallError.DependencyFailed;
     };
 
+    try screenRubyIdentity(sink, parts.formula, rb.version);
+
     // Substitute #{version} and #{arch} so the SHA-verified fetch
     // hits the right per-platform asset.
     var final_url_buf: [512]u8 = undefined;
@@ -527,6 +545,8 @@ pub fn installLocalFormula(
         return InstallError.LocalFormulaNotReadable;
     }
     const name = base[0 .. base.len - 3];
+
+    try screenRubyIdentity(sink, name, rb.version);
 
     var final_url_buf: [512]u8 = undefined;
     const final_url = args.interpolateUrl(&final_url_buf, rb.url, rb.version, rb.arch_token);
@@ -1826,4 +1846,33 @@ test "hoistSingleWrapperDir will not replace a dangling dotfile symlink at the k
     const link_path = try std.fmt.bufPrint(&target_buf, "{s}/.malt-reloc-version", .{keg});
     const n = try std.Io.Dir.readLinkAbsolute(test_io, link_path, &link_buf);
     try std.testing.expectEqualStrings("nowhere", link_buf[0..n]);
+}
+
+test "screenRubyIdentity refuses a name or version that escapes the Cellar" {
+    // `isPathComponent` owns its own contract; this pins the wiring - both
+    // fields screened, both refusals tagged the same.
+    try std.testing.expectError(InstallError.FormulaNotFound, screenRubyIdentity(sink_mod.silent, "..", "1.0"));
+    try std.testing.expectError(InstallError.FormulaNotFound, screenRubyIdentity(sink_mod.silent, "probe", "../../../escaped"));
+}
+
+test "screenRubyIdentity also screens a version derived from the URL" {
+    // A formula with no `version` line still gets one, from a URL path
+    // segment that only has to start with a digit - so the screen has to sit
+    // at construction, not on the `version "..."` extractor.
+    const body =
+        \\class Probe < Formula
+        \\  url "https://example.invalid/r/releases/download/1../../../escaped/probe.tar.gz"
+        \\  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+        \\end
+    ;
+    const rb = parseRubyFormula(body).?;
+    try std.testing.expectEqualStrings("1..", rb.version);
+    try std.testing.expectError(InstallError.FormulaNotFound, screenRubyIdentity(sink_mod.silent, "probe", rb.version));
+}
+
+test "screenRubyIdentity accepts the shapes real formula versions take" {
+    // Refusing a legitimate version would be its own bug: the predicate is
+    // charset-agnostic on purpose.
+    try screenRubyIdentity(sink_mod.silent, "python@3.14", "3.14.0");
+    try screenRubyIdentity(sink_mod.silent, "probe", "3.2.1+dfsg");
 }
