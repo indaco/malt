@@ -81,8 +81,11 @@ ${fixed//$'\n'/$'\n'        }"
 
 # 4. a fixture root is only reclaimable if `just clean` sweeps its namespace,
 # and the corpus logs only survive CI if the artifact glob matches the root.
-mapfile -t swept < <(grep -oE "'/tmp/[^']+'" "$ROOT/scripts/clean.sh" | tr -d "'")
-((${#swept[@]} > 0)) || fail "no /tmp patterns found in clean.sh; this check is inert"
+# clean.sh holds one pattern list and sweeps it under every scratch root, so
+# re-attach the /tmp prefix the templates below are written with.
+mapfile -t swept < <(sed -nE "s/^patterns='(.*)'\$/\1/p" "$ROOT/scripts/clean.sh" |
+  tr ' ' '\n' | sed 's|^|/tmp/|')
+((${#swept[@]} > 0)) || fail "no scratch patterns found in clean.sh; this check is inert"
 while IFS= read -r tmpl; do
   [[ -n "$tmpl" ]] || continue
   sample=${tmpl//X/a}
