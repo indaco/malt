@@ -1022,6 +1022,7 @@ test "describeError returns a non-empty, distinct message for every CellarError"
         cellar_mod.CellarError.CodesignFailed,
         cellar_mod.CellarError.VerifyFailed,
         cellar_mod.CellarError.RemoveFailed,
+        cellar_mod.CellarError.UnsafePathComponent,
         cellar_mod.CellarError.OutOfMemory,
     };
     var seen: [cases.len][]const u8 = undefined;
