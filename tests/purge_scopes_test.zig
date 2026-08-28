@@ -343,6 +343,60 @@ test "--store-orphans --dry-run iterates store entries with refcount=0" {
     try purge.execute(&ctx, allocator, &.{"--store-orphans"});
 }
 
+test "--store-orphans skips a store_refs row whose key is not a store key" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "store_orphans_bad_key");
+    defer prefix.deinit(allocator);
+
+    const good = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    const legacy = "../../../etc";
+
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+
+        for ([_][]const u8{ good, legacy }) |key| {
+            var stmt = try db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES (?1, 0);");
+            defer stmt.finalize();
+            try stmt.bindText(1, key);
+            _ = try stmt.step();
+        }
+    }
+    try writeFileAt(allocator, &.{ prefix.path, "store", good, "marker" }, "x");
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.json);
+    output.setDryRun(true);
+    output.setNdjson(false);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    output.beginStdoutCapture(allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try purge.execute(&ctx, allocator, &.{"--store-orphans"});
+
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        std.mem.trim(u8, stdout_buf.items, " \r\n\t"),
+        .{},
+    );
+    defer parsed.deinit();
+
+    // The run completes and reaps the real orphan; the legacy row is skipped,
+    // not counted and not aborting the pass.
+    const scope = parsed.value.object.get("scopes").?.array.items[0].object;
+    try testing.expectEqualStrings("store-orphans", scope.get("name").?.string);
+    try testing.expectEqualStrings("ok", scope.get("status").?.string);
+    try testing.expectEqual(@as(i64, 1), scope.get("removed").?.integer);
+}
+
 // --- --unused-deps ------------------------------------------------------
 
 test "--unused-deps --dry-run iterates kegs whose install_reason is dep" {

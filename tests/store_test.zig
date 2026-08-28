@@ -9,6 +9,16 @@ const sqlite = @import("malt").sqlite;
 const schema = @import("malt").schema;
 const store_mod = @import("malt").store;
 
+// One distinct 64-hex key per fixture: collapsing them onto a shared constant
+// would quietly void the idempotent-commit and refcount assertions below.
+const sha_missing = "1" ** 64;
+const sha_commit_src = "2" ** 64;
+const sha_default_src = "3" ** 64;
+const sha_missing_src = "4" ** 64;
+const sha_dup = "5" ** 64;
+const sha_orphan = "6" ** 64;
+const sha_txn = "7" ** 64;
+
 fn setupTestStore(allocator: std.mem.Allocator) !struct { db: sqlite.Database, store: store_mod.Store, prefix: []const u8 } {
     // Create temp directory as prefix
     const prefix = try std.fmt.allocPrint(allocator, "/tmp/malt_test_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
@@ -35,7 +45,7 @@ test "exists returns false for missing entry" {
         testing.allocator.free(ctx.prefix);
     }
 
-    try testing.expect(!ctx.store.exists("nonexistent_sha256"));
+    try testing.expect(!ctx.store.exists(sha_missing));
 }
 
 test "commit moves directory to store and exists returns true" {
@@ -57,8 +67,8 @@ test "commit moves directory to store and exists returns true" {
     try f.writeStreamingAll(std.Options.debug_io, "hello");
     f.close(std.Options.debug_io);
 
-    try ctx.store.commitFrom("abc123sha", src);
-    try testing.expect(ctx.store.exists("abc123sha"));
+    try ctx.store.commitFrom(sha_commit_src, src);
+    try testing.expect(ctx.store.exists(sha_commit_src));
 }
 
 test "commitFrom with null src renames from {prefix}/tmp/{sha}" {
@@ -69,7 +79,7 @@ test "commitFrom with null src renames from {prefix}/tmp/{sha}" {
         testing.allocator.free(ctx.prefix);
     }
 
-    const sha = "default_src_sha";
+    const sha = sha_default_src;
 
     const tmp_dir = try std.fmt.allocPrint(testing.allocator, "{s}/tmp", .{ctx.prefix});
     defer testing.allocator.free(tmp_dir);
@@ -107,7 +117,7 @@ test "commitFrom with null src returns CommitFailed when default tmp path is mis
     // atomicRename surfaces the missing source as CommitFailed.
     try testing.expectError(
         store_mod.StoreError.CommitFailed,
-        ctx.store.commitFrom("missing_default_src_sha", null),
+        ctx.store.commitFrom(sha_missing_src, null),
     );
 }
 
@@ -124,10 +134,10 @@ test "duplicate commit is idempotent" {
     defer testing.allocator.free(src);
     test_io.makeDirAbsolute(std.Options.debug_io, src) catch {};
 
-    try ctx.store.commitFrom("dup_sha", src);
+    try ctx.store.commitFrom(sha_dup, src);
     // Second commit should succeed (idempotent)
-    try ctx.store.commitFrom("dup_sha", null);
-    try testing.expect(ctx.store.exists("dup_sha"));
+    try ctx.store.commitFrom(sha_dup, null);
+    try testing.expect(ctx.store.exists(sha_dup));
 }
 
 test "remove also drops the store_refs row so the orphan does not return" {
@@ -139,8 +149,8 @@ test "remove also drops the store_refs row so the orphan does not return" {
     }
     ctx.store.db = &ctx.db;
 
-    try ctx.store.incrementRef("orphan_sha");
-    try ctx.store.decrementRef("orphan_sha"); // refcount → 0
+    try ctx.store.incrementRef(sha_orphan);
+    try ctx.store.decrementRef(sha_orphan); // refcount → 0
 
     // Pre-condition: enumerate sees the orphan.
     {
@@ -154,7 +164,7 @@ test "remove also drops the store_refs row so the orphan does not return" {
 
     // remove() with no on-disk path must still clear the DB row — otherwise
     // the same row keeps reappearing on every purge run.
-    try ctx.store.remove("orphan_sha");
+    try ctx.store.remove(sha_orphan);
 
     var orphans = try ctx.store.orphans();
     defer {
@@ -173,7 +183,7 @@ test "remove drops FS path and store_refs row in one transactional pass" {
     }
     ctx.store.db = &ctx.db;
 
-    const sha = "txn_sha";
+    const sha = sha_txn;
     const dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ ctx.prefix, sha });
     defer testing.allocator.free(dir);
     test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
@@ -222,4 +232,107 @@ test "incrementRef and decrementRef update refcount" {
     for (orphans.items) |o| {
         try testing.expect(!std.mem.eql(u8, o, "ref_test"));
     }
+}
+
+// ── Key validation ─────────────────────────────────────────────────────────
+
+test "exists probes false for a key it cannot form a path from" {
+    var ctx = try setupTestStore(testing.allocator);
+    defer {
+        ctx.db.close();
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
+        testing.allocator.free(ctx.prefix);
+    }
+
+    // "" used to probe the store root itself and answer "already warm".
+    try testing.expect(!ctx.store.exists(""));
+    try testing.expect(!ctx.store.exists("../.."));
+    try testing.expect(!ctx.store.exists("A" ** 64));
+}
+
+test "terminal methods reject a malformed key loudly" {
+    var ctx = try setupTestStore(testing.allocator);
+    defer {
+        ctx.db.close();
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
+        testing.allocator.free(ctx.prefix);
+    }
+    ctx.store.db = &ctx.db;
+
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.commitFrom("", null));
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.commitFrom("A" ** 64, null));
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.remove("not-hex"));
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.remove("A" ** 64));
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.path("../etc"));
+}
+
+test "an explicit source path does not buy a caller past the key check" {
+    var ctx = try setupTestStore(testing.allocator);
+    defer {
+        ctx.db.close();
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
+        testing.allocator.free(ctx.prefix);
+    }
+
+    // Supplying src_path skips the tmp-path formation, which is the one way
+    // the destination check could plausibly be bypassed.
+    const src = try std.fmt.allocPrint(testing.allocator, "{s}/tmp/donor", .{ctx.prefix});
+    defer testing.allocator.free(src);
+    try test_io.cwd().createDirPath(std.Options.debug_io, src);
+
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.commitFrom("", src));
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.commitFrom("../evil", src));
+
+    // The donor is still where it was: nothing was renamed.
+    try test_io.accessAbsolute(std.Options.debug_io, src, .{});
+}
+
+test "path returns the store entry for a valid key" {
+    var ctx = try setupTestStore(testing.allocator);
+    defer {
+        ctx.db.close();
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
+        testing.allocator.free(ctx.prefix);
+    }
+
+    const p = try ctx.store.path(sha_txn);
+    defer testing.allocator.free(p);
+
+    const want = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ ctx.prefix, sha_txn });
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, p);
+}
+
+test "remove rejects a malformed key before it can delete or transact" {
+    var ctx = try setupTestStore(testing.allocator);
+    defer {
+        ctx.db.close();
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
+        testing.allocator.free(ctx.prefix);
+    }
+    ctx.store.db = &ctx.db;
+
+    // A hand-edited row: refcount 0, key not hex, entry present on disk.
+    const bad = "not-hex";
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ ctx.prefix, bad });
+    defer testing.allocator.free(dir);
+    test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
+    try ctx.store.incrementRef(bad);
+    try ctx.store.decrementRef(bad);
+
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.remove(bad));
+
+    // Neither side effect happened: the tree is intact and the row survives.
+    try test_io.accessAbsolute(std.Options.debug_io, dir, .{});
+
+    var orphans = try ctx.store.orphans();
+    defer {
+        for (orphans.items) |o| testing.allocator.free(o);
+        orphans.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 1), orphans.items.len);
+
+    // No transaction was left open.
+    try ctx.db.beginTransaction();
+    try ctx.db.commit();
 }

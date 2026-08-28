@@ -254,6 +254,8 @@ const reap_name_attempts: u8 = 16;
 /// iteration, same filesystem → no CrossDevice) and probed for a free slot so a
 /// prior stranded leftover cannot block an otherwise-deletable entry.
 fn removeEntry(io: std.Io, prefix: []const u8, db: *sqlite.Database, name: []const u8) bool {
+    // `name` is a dirent, not a caller-supplied key, so it stays hand-formatted:
+    // this sweep is what reaps an entry whose row `store.remove` now rejects.
     var entry_buf: [768]u8 = undefined;
     const entry_path = std.fmt.bufPrint(&entry_buf, "{s}/store/{s}", .{ prefix, name }) catch return false;
 
