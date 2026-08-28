@@ -175,8 +175,8 @@ pub fn migrateKeg(
         // a separate question from the placeholder.
         "",
         if (placeholder) |p| .{ .old = p.token, .new = p.value } else null,
-    ) catch {
-        output.err("    {s}: failed to materialize", .{keg_name});
+    ) catch |e| {
+        output.err("    {s}: failed to materialize ({s})", .{ keg_name, cellar_mod.describeError(e) });
         output.emitNdjsonEvent(.materialized, keg_name, "failed");
         return .failed_install;
     };
@@ -325,7 +325,7 @@ fn migrateFromLocalCellar(
         // bottle (full absolute-path rewrite + placeholder substitution).
         "",
     ) catch |e| {
-        output.err("    {s}: failed to materialize from local Cellar ({s})", .{ keg_name, @errorName(e) });
+        output.err("    {s}: failed to materialize from local Cellar ({s})", .{ keg_name, cellar_mod.describeError(e) });
         return .failed_install;
     };
 

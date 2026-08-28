@@ -371,3 +371,76 @@ test "execute drops the kegs row and decrements the store ref together" {
     try testing.expect(!try kegRowExists(prefix.path, "foo"));
     try testing.expectEqual(@as(?i64, 1), try refcountFor(prefix.path, sha));
 }
+
+test "execute clears a symlinked package dir instead of deleting through it" {
+    // The DB row goes away either way, so leaving the link in place would
+    // strand an un-removable Cellar entry. Unlinking it destroys no user data.
+    var prefix = try ScratchPrefix.init(testing.allocator, "pkg_link");
+    defer prefix.deinit(testing.allocator);
+
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+
+    const victim = try std.fmt.allocPrint(testing.allocator, "{s}-victim", .{prefix.path});
+    defer testing.allocator.free(victim);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
+
+    const canary = try std.fmt.allocPrint(testing.allocator, "{s}/1.0/SENTINEL", .{victim});
+    defer testing.allocator.free(canary);
+    {
+        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/1.0", .{victim});
+        defer testing.allocator.free(dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+        (try test_io.createFileAbsolute(std.Options.debug_io, canary, .{})).close(std.Options.debug_io);
+    }
+
+    // Swap the seeded package dir for a link pointing outside the prefix.
+    const pkg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo", .{prefix.path});
+    defer testing.allocator.free(pkg_dir);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, pkg_dir);
+    try test_io.symLinkAbsolute(std.Options.debug_io, victim, pkg_dir, .{ .is_directory = true });
+
+    quiet();
+    defer unquiet();
+
+    try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
+
+    try testing.expect(!try kegRowExists(prefix.path, "foo"));
+    try testing.expect(pathExists(canary));
+    // `accessAbsolute` follows links, so stat the entry itself to prove the
+    // link is gone rather than merely dangling.
+    try testing.expectError(
+        error.FileNotFound,
+        test_io.cwd().statFile(std.Options.debug_io, pkg_dir, .{ .follow_symlinks = false }),
+    );
+}
+
+test "execute keeps a symlinked package dir while another version is recorded" {
+    // A link cannot be half-removed: dropping it would cut the surviving
+    // version off from the prefix even though its row and files are intact.
+    var prefix = try ScratchPrefix.init(testing.allocator, "pkg_link_sibling");
+    defer prefix.deinit(testing.allocator);
+
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedKeg(testing.allocator, prefix.path, "foo", "2.0");
+
+    const victim = try std.fmt.allocPrint(testing.allocator, "{s}-victim", .{prefix.path});
+    defer testing.allocator.free(victim);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, victim);
+
+    const pkg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo", .{prefix.path});
+    defer testing.allocator.free(pkg_dir);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, pkg_dir);
+    try test_io.symLinkAbsolute(std.Options.debug_io, victim, pkg_dir, .{ .is_directory = true });
+
+    quiet();
+    defer unquiet();
+
+    try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
+
+    // 2.0's row survives, so the path it is reached through must too.
+    const st = try test_io.cwd().statFile(std.Options.debug_io, pkg_dir, .{ .follow_symlinks = false });
+    try testing.expectEqual(std.Io.File.Kind.sym_link, st.kind);
+}

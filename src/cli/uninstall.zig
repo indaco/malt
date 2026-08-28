@@ -6,6 +6,7 @@ const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
+const symlink = @import("../fs/symlink.zig");
 const output = @import("../ui/output.zig");
 const lock_mod = @import("../db/lock.zig");
 const linker = @import("../core/linker.zig");
@@ -139,14 +140,24 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Remove Cellar directory (dir name carries the _<revision> suffix
     // when the keg was installed with revision > 0).
-    cellar.remove(ctx.io, prefix, name, pkg_version) catch {
-        output.warn("Could not remove cellar entry for {s} {s}", .{ name, version });
+    cellar.remove(ctx.io, prefix, name, pkg_version) catch |e| {
+        output.warn("Could not remove cellar entry for {s} {s}: {s}", .{ name, version, cellar.describeError(e) });
     };
     // Also remove parent if empty (e.g. Cellar/jq/ after removing Cellar/jq/1.8.1/)
     {
         var parent_buf: [512]u8 = undefined;
         const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
-        if (parent_path.len > 0) std.Io.Dir.deleteDirAbsolute(ctx.io, parent_path) catch {}; // Only succeeds when empty; sibling versions keep the dir alive.
+        if (parent_path.len > 0) {
+            if (symlink.isSymlinkOrUnreadable(ctx.io, parent_path)) {
+                // A link is indivisible: unlinking it cuts off every version
+                // behind it, so the DB has to stand in for the emptiness
+                // check the directory branch gets for free.
+                if (!nameStillRecorded(&db, name))
+                    std.Io.Dir.cwd().deleteFile(ctx.io, parent_path) catch {};
+            } else {
+                std.Io.Dir.deleteDirAbsolute(ctx.io, parent_path) catch {}; // Only succeeds when empty; sibling versions keep the dir alive.
+            }
+        }
     }
     // Remove opt/ symlink
     {
@@ -156,6 +167,16 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 
     output.success("{s} uninstalled", .{name});
+}
+
+/// Whether any keg row for `name` survives this uninstall. Errors answer
+/// "yes" so an unreadable DB can never be the reason a Cellar entry is torn
+/// down.
+fn nameStillRecorded(db: *sqlite.Database, name: []const u8) bool {
+    var stmt = db.prepare("SELECT 1 FROM kegs WHERE name = ?1;") catch return true;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return true;
+    return stmt.step() catch true;
 }
 
 // Atomic DB-side teardown for an uninstall: the store-ref decrement and

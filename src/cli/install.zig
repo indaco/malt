@@ -26,6 +26,7 @@ const lock_report = @import("lock_report.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const symlink = @import("../fs/symlink.zig");
 const path_component = @import("../fs/path_component.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
@@ -82,6 +83,12 @@ const OutputSink = sink_mod.OutputSink;
 /// same way — the delete is unconditional, so it must stay in the Cellar.
 pub fn pruneCellarForReinstall(ctx: *const AppCtx, prefix: []const u8, name: []const u8, version: []const u8) void {
     if (!path_component.isPathComponent(name) or !path_component.isPathComponent(version)) return;
+
+    var pkg_buf: [512]u8 = undefined;
+    const pkg_path = std.fmt.bufPrint(&pkg_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return;
+    // Best-effort and silent: the materialize step that follows refuses the
+    // same link loudly, so the install still fails visibly.
+    if (symlink.isSymlinkOrUnreadable(ctx.io, pkg_path)) return;
 
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch return;
@@ -245,6 +252,10 @@ pub fn pruneOtherCellarVersionsForReinstall(
     var pkg_buf: [512]u8 = undefined;
     const pkg_path = std.fmt.bufPrint(&pkg_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return;
 
+    // Before the open: an iterate handle through a symlinked package dir is
+    // already inside whatever the link points at.
+    if (symlink.isSymlinkOrUnreadable(ctx.io, pkg_path)) return;
+
     var pkg_dir = std.Io.Dir.openDirAbsolute(ctx.io, pkg_path, .{ .iterate = true }) catch return;
     defer pkg_dir.close(ctx.io);
 
@@ -276,7 +287,7 @@ pub fn pruneOtherCellarVersionsForReinstall(
     }
 }
 
-/// Single-`stat` probe of `<prefix>/Cellar/<name>`. uninstall tears
+/// Probe of `<prefix>/Cellar/<name>`. uninstall tears
 /// down the parent when the last version goes; an orphan empty dir is
 /// `mt doctor --fix` territory rather than something to paper over.
 fn kegPresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) bool {
@@ -287,6 +298,10 @@ fn kegPresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) bool {
     api_mod.validateName(name) catch return false;
     var buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return false;
+    // `accessAbsolute` follows the link, so a symlinked package dir would
+    // report a keg malt never materialized and skip the install silently.
+    // Answering "absent" lets the pipeline run and refuse with a message.
+    if (symlink.isSymlinkOrUnreadable(ctx.io, cellar_path)) return false;
     std.Io.Dir.accessAbsolute(ctx.io, cellar_path, .{}) catch return false;
     return true;
 }
@@ -1856,6 +1871,12 @@ test "kegPresent returns true only when <prefix>/Cellar/<name> exists" {
 
     try testing.expect(kegPresent(&ctx, prefix, "ghost"));
     try testing.expect(!kegPresent(&ctx, prefix, "other"));
+
+    // See `kegPresent` for why a link must read as absent.
+    const victim = s.p("/victim");
+    try std.Io.Dir.cwd().createDirPath(ctx.io, victim);
+    try std.Io.Dir.symLinkAbsolute(ctx.io, victim, s.p("/Cellar/linked"), .{ .is_directory = true });
+    try testing.expect(!kegPresent(&ctx, prefix, "linked"));
 }
 
 // `--download-only` must never mutate the installed cellar. The bottle
@@ -2050,6 +2071,35 @@ test "pruneOtherCellarVersionsForReinstall tolerates keep_version absent on disk
 
     const stale_root = s.p("/Cellar/pcre2/10.47");
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(ctx.io, stale_root, .{}));
+}
+
+test "both prune helpers refuse a symlinked package dir" {
+    const testing = std.testing;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var s = try Scratch.init("prune_pkg_link");
+    defer s.deinit();
+    const prefix = s.base;
+    try std.Io.Dir.cwd().createDirPath(ctx.io, s.p("/Cellar"));
+
+    // Both helpers delete unconditionally, and the sweep additionally
+    // iterates the dir - through a link that is the widest sink of the set.
+    const victim = s.p("/victim");
+    try std.Io.Dir.cwd().createDirPath(ctx.io, s.p("/victim/1.0"));
+    try std.Io.Dir.cwd().createDirPath(ctx.io, s.p("/victim/2.0"));
+
+    try std.Io.Dir.symLinkAbsolute(ctx.io, victim, s.p("/Cellar/probe"), .{ .is_directory = true });
+
+    pruneCellarForReinstall(&ctx, prefix, "probe", "1.0");
+    pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "probe", "1.0");
+
+    try std.Io.Dir.accessAbsolute(ctx.io, s.p("/victim/1.0"), .{});
+    try std.Io.Dir.accessAbsolute(ctx.io, s.p("/victim/2.0"), .{});
+    // The link itself is a user artifact, not the helpers' to clean up.
+    try std.Io.Dir.accessAbsolute(ctx.io, s.p("/Cellar/probe"), .{});
 }
 
 test "skippableRecommended only downgrades the source-build refusal" {

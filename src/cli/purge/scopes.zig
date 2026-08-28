@@ -16,6 +16,7 @@ const cellar_mod = @import("../../core/cellar.zig");
 const formula_mod = @import("../../core/formula.zig");
 const cask_mod = @import("../../core/cask.zig");
 const relocated_store = @import("../../core/relocated_store.zig");
+const symlink = @import("../../fs/symlink.zig");
 const util = @import("util.zig");
 const report = @import("report.zig");
 
@@ -139,8 +140,15 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     var removable: std.ArrayList([]const u8) = .empty;
     defer removable.deinit(allocator);
     for (orphans) |name| {
+        var pkg_buf: [512]u8 = undefined;
+        const pkg_path = std.fmt.bufPrint(&pkg_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
         if (orphanStillLinked(io, allocator, &db, name)) {
             rep.note("keeping {s} — still linked by an installed package", .{name});
+        } else if (pkg_path.len == 0 or symlink.isSymlinkOrUnreadable(io, pkg_path)) {
+            // The teardown below refuses to delete through a link but would
+            // still drop the row, so the run would report a removal that
+            // never happened. Screen it out while the count is still honest.
+            rep.note("keeping {s} - its Cellar entry is a symlink", .{name});
         } else {
             removable.append(allocator, name) catch {};
         }
@@ -1516,6 +1524,61 @@ fn writeFakeDylibLinker(io: std.Io, path: []const u8, dylib: [:0]const u8) !void
     const f = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
     defer f.close(io);
     try f.writeStreamingAll(io, buf);
+}
+
+test "runUnusedDeps keeps an orphan whose Cellar entry is a symlink" {
+    // The teardown refuses to delete through the link, so reaping the row
+    // anyway would report a removal that never happened and leave the DB
+    // disagreeing with the disk.
+    const allocator = testing.allocator;
+
+    var s = try Scratch.init("unuseddeps_pkglink");
+    defer s.deinit();
+    const prefix = s.base;
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/Cellar"));
+
+    // The orphan's package dir points outside the prefix.
+    const victim = s.p("/victim");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/victim/6.9"));
+    const canary = s.p("/victim/6.9/SENTINEL");
+    (try std.Io.Dir.cwd().createFile(fs_test_io, canary, .{})).close(fs_test_io);
+    try std.Io.Dir.symLinkAbsolute(fs_test_io, victim, s.p("/Cellar/oniguruma"), .{ .is_directory = true });
+
+    {
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        const insert = try std.fmt.allocPrintSentinel(
+            allocator,
+            "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason) " ++
+                "VALUES ('oniguruma', 'oniguruma', '6.9', 'sha-onig', '{s}/Cellar/oniguruma/6.9', 'dependency');",
+            .{prefix},
+            0,
+        );
+        defer allocator.free(insert);
+        try db.exec(insert);
+    }
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runUnusedDeps(&ctx, allocator, prefix, false);
+
+    try testing.expectEqual(util.ScopeStatus.ok, result.status);
+    // Not counted as removed, row kept, and nothing crossed the link.
+    try testing.expectEqual(@as(u32, 0), result.removed);
+    try std.Io.Dir.accessAbsolute(fs_test_io, canary, .{});
+
+    var db = try sqlite.Database.open(s.p("/db/malt.db"));
+    defer db.close();
+    var stmt = try db.prepare("SELECT COUNT(*) FROM kegs WHERE name = 'oniguruma';");
+    defer stmt.finalize();
+    try testing.expect(stmt.step() catch false);
+    try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
 }
 
 test "runUnusedDeps keeps a dependency a still-installed keg's Mach-O links despite a missing edge" {
