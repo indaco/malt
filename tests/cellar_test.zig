@@ -1793,3 +1793,74 @@ test "installBottleEtcVar creates empty overlay directories hooks rely on" {
     var dir = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, poured_dir, .{});
     dir.close(std.Options.debug_io);
 }
+
+test "a symlinked package dir cannot redirect a keg write out of the prefix" {
+    // The `migrate` shape: a real source keg on disk, and a Cellar package
+    // dir the user pointed at another volume. Pre-fix the kernel followed the
+    // link, so migrate wiped and rewrote a directory outside MALT_PREFIX and
+    // reported success.
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, "linksha", "probe", "1.0");
+
+    const victim = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
+        testing.allocator.free(victim);
+    }
+    const canary = try std.fmt.allocPrint(testing.allocator, "{s}/1.0/SENTINEL", .{victim});
+    defer testing.allocator.free(canary);
+    {
+        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/1.0", .{victim});
+        defer testing.allocator.free(dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+        (try test_io.createFileAbsolute(std.Options.debug_io, canary, .{})).close(std.Options.debug_io);
+    }
+
+    const pkg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/probe", .{prefix});
+    defer testing.allocator.free(pkg_dir);
+    try test_io.symLinkAbsolute(std.Options.debug_io, victim, pkg_dir, .{ .is_directory = true });
+
+    const src_keg = try std.fmt.allocPrint(testing.allocator, "{s}/store/linksha/probe/1.0", .{prefix});
+    defer testing.allocator.free(src_keg);
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    try testing.expectError(error.UnsafeCellarLink, cellar_mod.materializeFromLocalCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        src_keg,
+        "probe",
+        "1.0",
+        "homebrew/core",
+        "",
+    ));
+    try testing.expectError(error.UnsafeCellarLink, cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        "linksha",
+        "probe",
+        "1.0",
+        "",
+        null,
+    ));
+    // A subsequent uninstall must not delete through the link either.
+    try testing.expectError(error.UnsafeCellarLink, cellar_mod.remove(
+        std.Options.debug_io,
+        prefix,
+        "probe",
+        "1.0",
+    ));
+
+    try test_io.accessAbsolute(std.Options.debug_io, canary, .{});
+    const leaked = try std.fmt.allocPrint(testing.allocator, "{s}/1.0/INSTALL_RECEIPT.json", .{victim});
+    defer testing.allocator.free(leaked);
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, leaked, .{}));
+}

@@ -18,6 +18,7 @@ const forge = @import("../../core/forge.zig");
 const tap_cache = @import("../../core/tap_cache.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const atomic = @import("../../fs/atomic.zig");
+const symlink = @import("../../fs/symlink.zig");
 const path_component = @import("../../fs/path_component.zig");
 const macho_parser = @import("../../macho/parser.zig");
 const client_mod = @import("../../net/client.zig");
@@ -946,6 +947,12 @@ pub fn materializeRubyFormula(
     var parent_buf: [512]u8 = undefined;
     const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, resolved.name }) catch
         return InstallError.CellarFailed;
+    // Extracting through a symlinked package dir writes the keg wherever the
+    // link points, so refuse instead of following it.
+    if (symlink.isSymlinkOrUnreadable(ctx.io, parent)) {
+        sink.err("Cellar entry for {s}: {s}", .{ resolved.name, cellar_mod.describeError(cellar_mod.CellarError.UnsafeCellarLink) });
+        return InstallError.CellarFailed;
+    }
     std.Io.Dir.createDirAbsolute(ctx.io, parent, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,

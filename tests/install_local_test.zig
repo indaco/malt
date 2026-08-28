@@ -863,3 +863,93 @@ test "execute --local rejects a directory path (not a regular file)" {
         install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", "--quiet", dir_path }),
     );
 }
+
+test "materializeRubyFormula refuses a symlinked package dir" {
+    // The only sink guard with no other behavioural coverage. A warm tap
+    // cache stands in for the download, so the guard is reached offline.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+
+    const sha = "cc" ** 32;
+
+    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache/Tap", .{prefix});
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_parent);
+
+    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    try writeFile(cache_path, "warm-archive-fixture\n");
+
+    // The keg would land here if the guard let the kernel follow the link.
+    const victim = try std.fmt.allocPrint(testing.allocator, "{s}-victim", .{prefix});
+    defer testing.allocator.free(victim);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, victim) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, victim);
+    const canary = try std.fmt.allocPrint(testing.allocator, "{s}/SENTINEL", .{victim});
+    defer testing.allocator.free(canary);
+    try writeFile(canary, "keep\n");
+
+    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar", .{prefix});
+    defer testing.allocator.free(cellar_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar_dir);
+
+    const pkg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/wget", .{prefix});
+    defer testing.allocator.free(pkg_dir);
+    try test_io.symLinkAbsolute(std.Options.debug_io, victim, pkg_dir, .{ .is_directory = true });
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(true);
+    defer malt.output.setQuiet(prior_quiet);
+
+    const resolved: install_local.ResolvedRubyFormula = .{
+        .name = "wget",
+        .full_name = "wget",
+        .tap_label = "local",
+        .version = "1.0",
+        .url = "https://example.invalid/wget-1.0.tar.gz",
+        .sha256 = sha,
+    };
+
+    try testing.expectError(install_record.InstallError.CellarFailed, install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false,
+        false,
+        false,
+        malt.install_sink.silent,
+    ));
+
+    // Nothing crossed the link.
+    try test_io.accessAbsolute(std.Options.debug_io, canary, .{});
+    const leaked = try std.fmt.allocPrint(testing.allocator, "{s}/1.0", .{victim});
+    defer testing.allocator.free(leaked);
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, leaked, .{}));
+}

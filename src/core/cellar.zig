@@ -10,6 +10,7 @@ const patch = @import("patch.zig");
 const formula = @import("formula.zig");
 const codesign = @import("../macho/codesign.zig");
 const atomic = @import("../fs/atomic.zig");
+const symlink = @import("../fs/symlink.zig");
 const path_component = @import("../fs/path_component.zig");
 const relocated_store = @import("relocated_store.zig");
 
@@ -37,6 +38,10 @@ pub const CellarError = error{
     /// the Cellar. Every sink that splices one into a path checks for
     /// itself, so the confinement holds even when a feeder forgets.
     UnsafePathComponent,
+    /// `<prefix>/Cellar/<name>` is a symlink. Every sink splices below it, so
+    /// the kernel would resolve the keg write or delete through the link and
+    /// land outside the prefix.
+    UnsafeCellarLink,
     OutOfMemory,
 };
 
@@ -50,6 +55,7 @@ pub fn describeError(err: CellarError) []const u8 {
         CellarError.InstallNameToolMissing => "install_name_tool not found on PATH (install Xcode Command Line Tools)",
         CellarError.VerifyFailed => "relocated keg ships a binary the loader would reject (re-run with --debug to name it)",
         CellarError.UnsafePathComponent => "formula name or version would place the keg outside the Cellar",
+        CellarError.UnsafeCellarLink => "<prefix>/Cellar/<name> is a symlink; remove or replace it with a real directory",
         else => @errorName(err),
     };
 }
@@ -67,6 +73,17 @@ fn confined(name: []const u8, version: []const u8, empty: EmptyVersion) bool {
     if (!path_component.isPathComponent(name)) return false;
     if (empty == .ok and version.len == 0) return true;
     return path_component.isPathComponent(version);
+}
+
+/// `confined` is lexical only; the kernel still follows a symlinked
+/// `<prefix>/Cellar/<name>` while resolving the version below it. A
+/// resolve-then-act check is proportionate here: planting the link already
+/// requires write access to the Cellar.
+fn packageDirIsLink(io: std.Io, prefix: []const u8, name: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    // Fail closed: a path we cannot format is not one we can clear.
+    const pkg_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return true;
+    return symlink.isSymlinkOrUnreadable(io, pkg_path);
 }
 
 pub const Keg = struct {
@@ -114,6 +131,7 @@ pub fn materializeWithCellar(
     extra_replacement: ?patch.Replacement,
 ) CellarError!Keg {
     if (!confined(name, version, .ok)) return CellarError.UnsafePathComponent;
+    if (packageDirIsLink(io, prefix, name)) return CellarError.UnsafeCellarLink;
 
     // Build paths
     var store_buf: [512]u8 = undefined;
@@ -804,6 +822,7 @@ pub fn materializeFromLocalCellar(
     cellar_type: []const u8,
 ) CellarError!Keg {
     if (!confined(name, version, .ok)) return CellarError.UnsafePathComponent;
+    if (packageDirIsLink(io, prefix, name)) return CellarError.UnsafeCellarLink;
 
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
@@ -961,6 +980,7 @@ pub fn writeInstallReceiptFull(
 /// Remove a keg from the Cellar.
 pub fn remove(io: std.Io, prefix: []const u8, name: []const u8, version: []const u8) CellarError!void {
     if (!confined(name, version, .refused)) return CellarError.UnsafePathComponent;
+    if (packageDirIsLink(io, prefix, name)) return CellarError.UnsafeCellarLink;
 
     var buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
@@ -1167,6 +1187,7 @@ test "stripKegMarkers clears a marker the extracted archive supplied" {
 test "describeError: action-hint tags keep prose, trivial tags fall back to @errorName" {
     try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.InsufficientHeaderPad), "-headerpad_max_install_names") != null);
     try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.InstallNameToolMissing), "install_name_tool not found on PATH") != null);
+    try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.UnsafeCellarLink), "symlink") != null);
 
     const fallback_tags = [_]CellarError{
         CellarError.CloneFailed,
@@ -1359,6 +1380,99 @@ test "the materialize sinks refuse a keg path that leaves the Cellar" {
     ));
 
     try std.Io.Dir.accessAbsolute(io, victim, .{});
+}
+
+test "every Cellar sink refuses a symlinked package dir" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("cellar_pkg_link");
+    defer s.deinit();
+    const prefix = s.p("/prefix");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/prefix/Cellar"));
+
+    // The keg the sinks would write to and wipe lives outside the prefix.
+    const victim = s.p("/victim");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/victim/1.0"));
+    const canary = s.p("/victim/1.0/SENTINEL");
+    (try std.Io.Dir.cwd().createFile(io, canary, .{})).close(io);
+
+    try std.Io.Dir.symLinkAbsolute(io, victim, s.p("/prefix/Cellar/probe"), .{ .is_directory = true });
+
+    try testing.expectError(CellarError.UnsafeCellarLink, remove(io, prefix, "probe", "1.0"));
+    try testing.expectError(CellarError.UnsafeCellarLink, materializeWithCellar(
+        io,
+        testing.allocator,
+        prefix,
+        "0" ** 64,
+        "probe",
+        "1.0",
+        "",
+        null,
+    ));
+    try testing.expectError(CellarError.UnsafeCellarLink, materializeFromLocalCellar(
+        io,
+        testing.allocator,
+        prefix,
+        s.p("/src"),
+        "probe",
+        "1.0",
+        "homebrew/core",
+        "",
+    ));
+
+    try std.Io.Dir.accessAbsolute(io, canary, .{});
+}
+
+test "the package-dir guard leaves a real directory and a first install alone" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("cellar_pkg_nolink");
+    defer s.deinit();
+    const prefix = s.p("/prefix");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/prefix/Cellar/probe"));
+
+    // A real package dir, and a name that has none yet, must both fail for
+    // some other reason than the link guard.
+    for ([_][]const u8{ "probe", "absent" }) |name| {
+        try testing.expect(materializeWithCellar(
+            io,
+            testing.allocator,
+            prefix,
+            "0" ** 64,
+            name,
+            "1.0",
+            "",
+            null,
+        ) catch |e| e != CellarError.UnsafeCellarLink);
+        // `deleteTree` is a no-op on a missing path, so a clean return is
+        // the expected outcome here - anything but the link refusal.
+        remove(io, prefix, name, "1.0") catch |e| try testing.expect(e != CellarError.UnsafeCellarLink);
+    }
+}
+
+test "a symlinked version leaf is unlinked, not followed" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("cellar_leaf_link");
+    defer s.deinit();
+    const prefix = s.p("/prefix");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/prefix/Cellar/probe"));
+
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/victim"));
+    const canary = s.p("/victim/SENTINEL");
+    (try std.Io.Dir.cwd().createFile(io, canary, .{})).close(io);
+
+    const leaf = s.p("/prefix/Cellar/probe/1.0");
+    try std.Io.Dir.symLinkAbsolute(io, s.p("/victim"), leaf, .{ .is_directory = true });
+
+    // The guard screens the intermediate only: `deleteTree` unlinks a leaf
+    // link rather than descending it, so removing here is safe.
+    try remove(io, prefix, "probe", "1.0");
+    try std.Io.Dir.accessAbsolute(io, canary, .{});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, leaf, .{}));
 }
 
 test "materialize tolerates the empty version a formula without versions.stable yields" {
