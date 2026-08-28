@@ -21,6 +21,7 @@ const sqlite = @import("../../db/sqlite.zig");
 const schema = @import("../../db/schema.zig");
 const lock_mod = @import("../../db/lock.zig");
 const atomic = @import("../../fs/atomic.zig");
+const path_component = @import("../../fs/path_component.zig");
 const signals = @import("../signals.zig");
 const manifest_mod = @import("manifest.zig");
 
@@ -33,6 +34,9 @@ pub const RunnerError = error{
     /// absence means the caller forgot to provide one and we refuse to
     /// silently do nothing.
     NoDispatcher,
+    /// The manifest name would leave the bundles directory once formatted
+    /// into the lock path.
+    UnsafeName,
 };
 
 /// Closed error set every dispatcher exit must land on. Kept in
@@ -59,6 +63,7 @@ pub fn describeError(err: RunnerError) []const u8 {
         RunnerError.IoFailed => "filesystem error during bundle install",
         RunnerError.OutOfMemory => "out of memory during bundle install",
         RunnerError.NoDispatcher => "bundle runner called without a dispatcher and without malt_bin",
+        RunnerError.UnsafeName => "bundle name is not a valid path component",
     };
 }
 
@@ -138,6 +143,9 @@ pub fn run(
     opts: Options,
 ) RunnerError!Report {
     const bundle_name = if (manifest.name.len > 0) manifest.name else "unnamed";
+    // Manifest-supplied, and it lands in the lock path below; refuse outright
+    // rather than sanitise, before createDirPath grants it any side effect.
+    if (!path_component.isPathComponent(bundle_name)) return RunnerError.UnsafeName;
 
     // Bundles directory + advisory lock for idempotency.
     const prefix: []const u8 = opts.prefix orelse atomic.maltPrefixOrAbort();
@@ -357,4 +365,17 @@ fn recordBundle(
     }
 
     try db.commit();
+}
+
+test "describeError gives every tag a distinct, non-empty message" {
+    const tags = [_]RunnerError{
+        RunnerError.DatabaseError, RunnerError.LockFailed,   RunnerError.IoFailed,
+        RunnerError.OutOfMemory,   RunnerError.NoDispatcher, RunnerError.UnsafeName,
+    };
+    for (tags, 0..) |a, i| {
+        try std.testing.expect(describeError(a).len > 0);
+        for (tags[i + 1 ..]) |b| {
+            try std.testing.expect(!std.mem.eql(u8, describeError(a), describeError(b)));
+        }
+    }
 }

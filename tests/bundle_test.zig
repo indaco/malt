@@ -568,3 +568,73 @@ test "silent-sink dispatcher: member failure surfaces via Report with no stderr 
     // ...while the per-keg lines never reach the global stderr channel.
     try testing.expectEqual(@as(usize, 0), out_buf.items.len);
 }
+
+/// Manifest with no members: `run` takes the lock before dispatching, so the
+/// name check is reached without any network or subprocess.
+fn buildNamedManifest(parent: std.mem.Allocator, name: []const u8) !manifest_mod.Manifest {
+    var m = manifest_mod.Manifest.init(parent);
+    m.name = try m.allocator().dupe(u8, name);
+    m.version = manifest_mod.schema_version;
+    return m;
+}
+
+fn lockCountOutsideBundlesDir(dir: []const u8) !usize {
+    var root = try std.Io.Dir.cwd().openDir(std.Options.debug_io, dir, .{ .iterate = true });
+    defer root.close(std.Options.debug_io);
+    var walker = try root.walk(testing.allocator);
+    defer walker.deinit();
+    var n: usize = 0;
+    while (try walker.next(std.Options.debug_io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.path, ".lock")) continue;
+        if (!std.mem.startsWith(u8, entry.path, "var/malt/bundles/")) n += 1;
+    }
+    return n;
+}
+
+test "runner rejects a manifest name that is not a single path component" {
+    // A Maltfile name is author-controlled, and it reaches disk as the lock
+    // path; anything that hops out of the bundles directory must be refused
+    // rather than sanitised, so a hostile manifest fails loudly.
+    const hostile = [_][]const u8{ "../../escape", "../../../../out/victim", "a/b", "..", ".", "a\x00b", "foo/" };
+    for (hostile) |name| {
+        var t = try TempDb.init("unsafe_name");
+        defer t.deinit();
+
+        var m = try buildNamedManifest(testing.allocator, name);
+        defer m.deinit();
+
+        // Dry run too: previewing a hostile bundle as installable would let it
+        // pass review before the real run ever takes the lock.
+        for ([_]bool{ false, true }) |dry| {
+            try testing.expectError(
+                runner.RunnerError.UnsafeName,
+                runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{
+                    .dry_run = dry,
+                    .prefix = t.dir,
+                }),
+            );
+        }
+        try testing.expectEqual(@as(usize, 0), try lockCountOutsideBundlesDir(t.dir));
+    }
+}
+
+test "runner still accepts legitimate names and the absent-name fallback" {
+    // The guard must not narrow the charset real bundle names use, and an
+    // absent name keeps falling back to "unnamed".
+    const ok = [_][]const u8{ "tiny", "devtools", "my bundle@2", "" };
+    for (ok) |name| {
+        var t = try TempDb.init("safe_name");
+        defer t.deinit();
+
+        var m = try buildNamedManifest(testing.allocator, name);
+        defer m.deinit();
+
+        var report = try runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{
+            .dry_run = false,
+            .prefix = t.dir,
+        });
+        defer report.deinit();
+        try testing.expect(!report.hasFailure());
+    }
+}

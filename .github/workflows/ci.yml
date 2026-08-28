@@ -72,6 +72,9 @@ jobs:
           SMOKE_SKIP_NETWORK: "1"
         run: ./scripts/smokes/smoke_test.sh
 
+      - name: Regression guard - bundle lock confinement
+        run: ./scripts/regressions/bundle-lock-name-guard-bundle-lock-path-from-unvalidated-manifest-name.sh
+
       # Security smoke: flag-scope enforcement, argv-only lint,
       # pins-manifest shape, install.sh fail-closed regression suite.
       # Subsumes the individual install.sh step that used to live in
