@@ -483,9 +483,10 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         };
         break :blk getString(versions_obj, "stable") orelse "";
     };
-    // version feeds pkg_version → the revision-tagged cellar/keg dir; an empty
-    // version is legitimate, but a present one must stay a single component.
-    if (version_str.len != 0 and !path_component.isPathComponent(version_str))
+    // version feeds pkg_version → the revision-tagged cellar/keg dir, so it
+    // must stay a single component. Empty included: it collapses the keg path
+    // to the package dir, which no `<name>/<version>` reader can resolve.
+    if (!path_component.isPathComponent(version_str))
         return FormulaError.UnsafePathComponent;
 
     // dependencies
@@ -969,14 +970,33 @@ test "parseFormula rejects path separators in embedded name or version" {
     var formula = try parseFormula(testing.allocator, ok);
     defer formula.deinit();
     try testing.expectEqualStrings("openssl@3", formula.name);
+}
 
-    // A formula with no stable version parses to an empty version, unchanged.
-    const nover =
+test "parseFormula refuses a formula with no stable version" {
+    // An empty version collapses the keg path to `Cellar/<name>/`, which the
+    // linker and every `<name>/<version>` reader then disagree about. Refuse
+    // it at the parser rather than materializing a keg nobody can resolve.
+    const bad = [_][]const u8{
         \\{"name":"nostable","versions":{}}
-    ;
-    var f2 = try parseFormula(testing.allocator, nover);
-    defer f2.deinit();
-    try testing.expectEqualStrings("", f2.version);
+        ,
+        \\{"name":"nostable"}
+        ,
+        \\{"name":"nostable","versions":{"stable":null}}
+        ,
+        \\{"name":"nostable","versions":{"stable":""}}
+        ,
+        \\{"name":"nostable","versions":[]}
+        ,
+        \\{"name":"nostable","versions":{"stable":123}}
+        ,
+        // A revision makes the empty version *look* safe: pkg_version becomes
+        // "_2", a legal path component. The screen has to sit on the version.
+        \\{"name":"nostable","versions":{},"revision":2}
+        ,
+    };
+    for (bad) |json| {
+        try testing.expectError(FormulaError.UnsafePathComponent, parseFormula(testing.allocator, json));
+    }
 }
 
 test "parseFormula flags a formula migrated to post_install_steps" {

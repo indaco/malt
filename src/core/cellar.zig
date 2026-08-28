@@ -60,19 +60,11 @@ pub fn describeError(err: CellarError) []const u8 {
     };
 }
 
-/// Whether a sink accepts the empty version `parseFormula` produces for a
-/// formula with no `versions.stable`. Materializing one is legitimate;
-/// deleting is not, because an empty version collapses the path to the whole
-/// package dir and would take every sibling version with it.
-const EmptyVersion = enum { ok, refused };
-
 /// Every Cellar sink splices `name`/`version` into
 /// `<prefix>/Cellar/<name>/<version>` and then writes or deletes there, so
 /// each one checks for itself rather than trusting its feeder.
-fn confined(name: []const u8, version: []const u8, empty: EmptyVersion) bool {
-    if (!path_component.isPathComponent(name)) return false;
-    if (empty == .ok and version.len == 0) return true;
-    return path_component.isPathComponent(version);
+fn confined(name: []const u8, version: []const u8) bool {
+    return path_component.isPathComponent(name) and path_component.isPathComponent(version);
 }
 
 /// `confined` is lexical only; the kernel still follows a symlinked
@@ -130,7 +122,7 @@ pub fn materializeWithCellar(
     cellar_type: []const u8,
     extra_replacement: ?patch.Replacement,
 ) CellarError!Keg {
-    if (!confined(name, version, .ok)) return CellarError.UnsafePathComponent;
+    if (!confined(name, version)) return CellarError.UnsafePathComponent;
     if (packageDirIsLink(io, prefix, name)) return CellarError.UnsafeCellarLink;
 
     // Build paths
@@ -821,7 +813,7 @@ pub fn materializeFromLocalCellar(
     tap: []const u8,
     cellar_type: []const u8,
 ) CellarError!Keg {
-    if (!confined(name, version, .ok)) return CellarError.UnsafePathComponent;
+    if (!confined(name, version)) return CellarError.UnsafePathComponent;
     if (packageDirIsLink(io, prefix, name)) return CellarError.UnsafeCellarLink;
 
     var cellar_buf: [512]u8 = undefined;
@@ -979,7 +971,7 @@ pub fn writeInstallReceiptFull(
 
 /// Remove a keg from the Cellar.
 pub fn remove(io: std.Io, prefix: []const u8, name: []const u8, version: []const u8) CellarError!void {
-    if (!confined(name, version, .refused)) return CellarError.UnsafePathComponent;
+    if (!confined(name, version)) return CellarError.UnsafePathComponent;
     if (packageDirIsLink(io, prefix, name)) return CellarError.UnsafeCellarLink;
 
     var buf: [512]u8 = undefined;
@@ -1341,7 +1333,8 @@ test "the materialize sinks refuse a keg path that leaves the Cellar" {
 
     // Both sinks build <prefix>/Cellar/<name>/<version> and wipe it on a
     // failed materialize, so an escaping component writes AND deletes outside.
-    const escaping = [_][]const u8{ "../../victim", "a/b", ".", "..", "a\x00b" };
+    // `""` is in the list because it collapses the path one level up.
+    const escaping = [_][]const u8{ "../../victim", "a/b", ".", "..", "a\x00b", "" };
     for (escaping) |bad| {
         for ([_][2][]const u8{ .{ bad, "keep" }, .{ "foo", bad } }) |pair| {
             try testing.expectError(CellarError.UnsafePathComponent, materializeWithCellar(
@@ -1366,18 +1359,6 @@ test "the materialize sinks refuse a keg path that leaves the Cellar" {
             ));
         }
     }
-
-    // An empty name is still refused — it collapses the path to the Cellar root.
-    try testing.expectError(CellarError.UnsafePathComponent, materializeWithCellar(
-        io,
-        testing.allocator,
-        prefix,
-        "0" ** 64,
-        "",
-        "1.0",
-        "",
-        null,
-    ));
 
     try std.Io.Dir.accessAbsolute(io, victim, .{});
 }
@@ -1473,41 +1454,6 @@ test "a symlinked version leaf is unlinked, not followed" {
     try remove(io, prefix, "probe", "1.0");
     try std.Io.Dir.accessAbsolute(io, canary, .{});
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, leaf, .{}));
-}
-
-test "materialize tolerates the empty version a formula without versions.stable yields" {
-    const testing = std.testing;
-    const io = std.Options.debug_io;
-
-    var s = try Scratch.init("materialize_empty_ver");
-    defer s.deinit();
-    const prefix = s.p("/prefix");
-    try std.Io.Dir.cwd().createDirPath(io, s.p("/prefix/Cellar"));
-
-    // `parseFormula` calls an absent `versions.stable` legitimate, so the
-    // materialize sinks must not turn that into a refusal. They still fail
-    // here — no store entry — just not as a confinement violation.
-    try testing.expect(materializeWithCellar(
-        io,
-        testing.allocator,
-        prefix,
-        "0" ** 64,
-        "foo",
-        "",
-        "",
-        null,
-    ) catch |e| e != CellarError.UnsafePathComponent);
-
-    try testing.expect(materializeFromLocalCellar(
-        io,
-        testing.allocator,
-        prefix,
-        s.p("/src"),
-        "foo",
-        "",
-        "homebrew/core",
-        "",
-    ) catch |e| e != CellarError.UnsafePathComponent);
 }
 
 test "remove deletes the keg it names" {

@@ -91,6 +91,9 @@ jobs:
       - name: Regression guard - Cellar symlink confinement
         run: ./scripts/regressions/cellar-sinks-follow-a-symlinked-package-dir.sh
 
+      - name: Regression guard - versionless keg
+        run: ./scripts/regressions/versionless-keg-empty-stable-version-installs-a-versionless-keg.sh
+
       - name: Build universal binary
         run: just build-universal
 
