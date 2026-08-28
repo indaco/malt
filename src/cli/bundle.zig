@@ -189,7 +189,7 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
         .dry_run = dry_run,
         .dispatcher = &dispatcher,
     }) catch |e| {
-        output.err("bundle install failed: {s}", .{@errorName(e)});
+        output.err("bundle install failed: {s}", .{runner_mod.describeError(e)});
         return BundleError.RunnerFailed;
     };
     defer report.deinit();
