@@ -79,6 +79,9 @@ jobs:
       - name: Security smoke
         run: ./scripts/smokes/smoke_security.sh
 
+      - name: Regression guard - Ruby-DSL Cellar confinement
+        run: ./scripts/regressions/ruby-dsl-name-version-escape-cellar.sh
+
       - name: Build universal binary
         run: just build-universal
 
