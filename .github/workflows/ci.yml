@@ -88,6 +88,9 @@ jobs:
       - name: Regression guard - Cellar delete confinement
         run: ./scripts/regressions/formula-name-version-reach-deletetree-unguarded.sh
 
+      - name: Regression guard - Cellar symlink confinement
+        run: ./scripts/regressions/cellar-sinks-follow-a-symlinked-package-dir.sh
+
       - name: Build universal binary
         run: just build-universal
 
