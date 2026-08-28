@@ -26,6 +26,7 @@ const lock_report = @import("lock_report.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const path_component = @import("../fs/path_component.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const pool_mod = @import("../net/client_pool.zig");
@@ -77,7 +78,11 @@ const OutputSink = sink_mod.OutputSink;
 /// re-materialize on top of it. No-op when the dir is missing or the
 /// path overflows the buffer; failures are best-effort because the
 /// follow-up materialize step surfaces real errors with full context.
+/// A name or version that is not a single path component is refused the
+/// same way — the delete is unconditional, so it must stay in the Cellar.
 pub fn pruneCellarForReinstall(ctx: *const AppCtx, prefix: []const u8, name: []const u8, version: []const u8) void {
+    if (!path_component.isPathComponent(name) or !path_component.isPathComponent(version)) return;
+
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch return;
     std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};
@@ -233,6 +238,10 @@ pub fn pruneOtherCellarVersionsForReinstall(
     name: []const u8,
     keep_version: []const u8,
 ) void {
+    // Only `name` is caller-supplied; the entry names come from readdir and
+    // are single components by construction.
+    if (!path_component.isPathComponent(name)) return;
+
     var pkg_buf: [512]u8 = undefined;
     const pkg_path = std.fmt.bufPrint(&pkg_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return;
 
@@ -2054,4 +2063,31 @@ test "skippableRecommended only downgrades the source-build refusal" {
     try std.testing.expect(!skippableRecommended(&rec, "openssl@3", InstallError.BuildFromSourceUnsupported));
     // Empty list: the argv path, where nothing is skipped on the user's behalf.
     try std.testing.expect(!skippableRecommended(&.{}, "mongosh", InstallError.BuildFromSourceUnsupported));
+}
+
+test "the prune helpers refuse a name or version that leaves the Cellar" {
+    const testing = std.testing;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var s = try Scratch.init("prune_escape");
+    defer s.deinit();
+    const prefix = s.p("/prefix");
+    // The Cellar must exist or the kernel stops at the first missing
+    // component and `..` never resolves — the escape would look benign.
+    try std.Io.Dir.cwd().createDirPath(ctx.io, s.p("/prefix/Cellar"));
+
+    // Sits at <prefix>/Cellar/../../victim — what an escaping name resolves to.
+    const victim = s.p("/victim/keep");
+    try std.Io.Dir.cwd().createDirPath(ctx.io, victim);
+
+    const escaping = [_][]const u8{ "../../victim", "a/b", ".", "..", "a\x00b", "" };
+    for (escaping) |bad| {
+        pruneCellarForReinstall(&ctx, prefix, bad, "keep");
+        pruneCellarForReinstall(&ctx, prefix, "foo", bad);
+        pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, bad, "1.0");
+    }
+
+    try std.Io.Dir.accessAbsolute(ctx.io, victim, .{});
 }

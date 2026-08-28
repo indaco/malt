@@ -10,6 +10,7 @@ const patch = @import("patch.zig");
 const formula = @import("formula.zig");
 const codesign = @import("../macho/codesign.zig");
 const atomic = @import("../fs/atomic.zig");
+const path_component = @import("../fs/path_component.zig");
 const relocated_store = @import("relocated_store.zig");
 
 pub const CellarError = error{
@@ -32,6 +33,10 @@ pub const CellarError = error{
     /// recorded, because dyld would refuse to load it.
     VerifyFailed,
     RemoveFailed,
+    /// A `name` or `version` that would not stay a single directory under
+    /// the Cellar. Every sink that splices one into a path checks for
+    /// itself, so the confinement holds even when a feeder forgets.
+    UnsafePathComponent,
     OutOfMemory,
 };
 
@@ -44,8 +49,24 @@ pub fn describeError(err: CellarError) []const u8 {
         CellarError.InsufficientHeaderPad => "install_name_tool: bottle built without -headerpad_max_install_names",
         CellarError.InstallNameToolMissing => "install_name_tool not found on PATH (install Xcode Command Line Tools)",
         CellarError.VerifyFailed => "relocated keg ships a binary the loader would reject (re-run with --debug to name it)",
+        CellarError.UnsafePathComponent => "formula name or version would place the keg outside the Cellar",
         else => @errorName(err),
     };
+}
+
+/// Whether a sink accepts the empty version `parseFormula` produces for a
+/// formula with no `versions.stable`. Materializing one is legitimate;
+/// deleting is not, because an empty version collapses the path to the whole
+/// package dir and would take every sibling version with it.
+const EmptyVersion = enum { ok, refused };
+
+/// Every Cellar sink splices `name`/`version` into
+/// `<prefix>/Cellar/<name>/<version>` and then writes or deletes there, so
+/// each one checks for itself rather than trusting its feeder.
+fn confined(name: []const u8, version: []const u8, empty: EmptyVersion) bool {
+    if (!path_component.isPathComponent(name)) return false;
+    if (empty == .ok and version.len == 0) return true;
+    return path_component.isPathComponent(version);
 }
 
 pub const Keg = struct {
@@ -92,6 +113,8 @@ pub fn materializeWithCellar(
     cellar_type: []const u8,
     extra_replacement: ?patch.Replacement,
 ) CellarError!Keg {
+    if (!confined(name, version, .ok)) return CellarError.UnsafePathComponent;
+
     // Build paths
     var store_buf: [512]u8 = undefined;
     const store_path = std.fmt.bufPrint(&store_buf, "{s}/store/{s}", .{ prefix, store_sha256 }) catch
@@ -780,6 +803,8 @@ pub fn materializeFromLocalCellar(
     tap: []const u8,
     cellar_type: []const u8,
 ) CellarError!Keg {
+    if (!confined(name, version, .ok)) return CellarError.UnsafePathComponent;
+
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
         return CellarError.OutOfMemory;
@@ -935,6 +960,8 @@ pub fn writeInstallReceiptFull(
 
 /// Remove a keg from the Cellar.
 pub fn remove(io: std.Io, prefix: []const u8, name: []const u8, version: []const u8) CellarError!void {
+    if (!confined(name, version, .refused)) return CellarError.UnsafePathComponent;
+
     var buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
         return CellarError.OutOfMemory;
@@ -1251,4 +1278,135 @@ test "install receipt with an over-long value degrades without crashing" {
     defer testing.allocator.free(bytes);
     // Nothing was written; the empty receipt is the graceful degradation.
     try testing.expectEqual(@as(usize, 0), bytes.len);
+}
+
+test "remove refuses a keg path that leaves the Cellar" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("remove_escape");
+    defer s.deinit();
+    const prefix = s.p("/prefix");
+    // The Cellar must exist or the kernel stops at the first missing
+    // component and `..` never resolves — the escape would look benign.
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/prefix/Cellar"));
+
+    // <prefix>/Cellar/../../victim — where an escaping name lands.
+    const victim = s.p("/victim/keep");
+    try std.Io.Dir.cwd().createDirPath(io, victim);
+
+    // An empty version collapses the path to the whole package dir, so it is
+    // barred alongside the traversal shapes.
+    const escaping = [_][]const u8{ "../../victim", "a/b", ".", "..", "a\x00b", "" };
+    for (escaping) |bad| {
+        try testing.expectError(CellarError.UnsafePathComponent, remove(io, prefix, bad, "keep"));
+        try testing.expectError(CellarError.UnsafePathComponent, remove(io, prefix, "foo", bad));
+    }
+
+    try std.Io.Dir.accessAbsolute(io, victim, .{});
+}
+
+test "the materialize sinks refuse a keg path that leaves the Cellar" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("materialize_escape");
+    defer s.deinit();
+    const prefix = s.p("/prefix");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/prefix/Cellar"));
+
+    const victim = s.p("/victim/keep");
+    try std.Io.Dir.cwd().createDirPath(io, victim);
+
+    // Both sinks build <prefix>/Cellar/<name>/<version> and wipe it on a
+    // failed materialize, so an escaping component writes AND deletes outside.
+    const escaping = [_][]const u8{ "../../victim", "a/b", ".", "..", "a\x00b" };
+    for (escaping) |bad| {
+        for ([_][2][]const u8{ .{ bad, "keep" }, .{ "foo", bad } }) |pair| {
+            try testing.expectError(CellarError.UnsafePathComponent, materializeWithCellar(
+                io,
+                testing.allocator,
+                prefix,
+                "0" ** 64,
+                pair[0],
+                pair[1],
+                "",
+                null,
+            ));
+            try testing.expectError(CellarError.UnsafePathComponent, materializeFromLocalCellar(
+                io,
+                testing.allocator,
+                prefix,
+                s.p("/src"),
+                pair[0],
+                pair[1],
+                "homebrew/core",
+                "",
+            ));
+        }
+    }
+
+    // An empty name is still refused — it collapses the path to the Cellar root.
+    try testing.expectError(CellarError.UnsafePathComponent, materializeWithCellar(
+        io,
+        testing.allocator,
+        prefix,
+        "0" ** 64,
+        "",
+        "1.0",
+        "",
+        null,
+    ));
+
+    try std.Io.Dir.accessAbsolute(io, victim, .{});
+}
+
+test "materialize tolerates the empty version a formula without versions.stable yields" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("materialize_empty_ver");
+    defer s.deinit();
+    const prefix = s.p("/prefix");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/prefix/Cellar"));
+
+    // `parseFormula` calls an absent `versions.stable` legitimate, so the
+    // materialize sinks must not turn that into a refusal. They still fail
+    // here — no store entry — just not as a confinement violation.
+    try testing.expect(materializeWithCellar(
+        io,
+        testing.allocator,
+        prefix,
+        "0" ** 64,
+        "foo",
+        "",
+        "",
+        null,
+    ) catch |e| e != CellarError.UnsafePathComponent);
+
+    try testing.expect(materializeFromLocalCellar(
+        io,
+        testing.allocator,
+        prefix,
+        s.p("/src"),
+        "foo",
+        "",
+        "homebrew/core",
+        "",
+    ) catch |e| e != CellarError.UnsafePathComponent);
+}
+
+test "remove deletes the keg it names" {
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("remove_keg");
+    defer s.deinit();
+    const prefix = s.p("/prefix");
+    const keg = s.p("/prefix/Cellar/openssl@3/3.2.1+dfsg/bin");
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+
+    try remove(io, prefix, "openssl@3", "3.2.1+dfsg");
+
+    const gone = s.p("/prefix/Cellar/openssl@3/3.2.1+dfsg");
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, gone, .{}));
 }

@@ -7,6 +7,7 @@
 //! omit fields we tolerate as null/absent.
 
 const std = @import("std");
+const path_component = @import("../fs/path_component.zig");
 
 pub const Receipt = struct {
     /// `"homebrew/core"` for stock formulae, `"<user>/<repo>"` for tap
@@ -88,6 +89,10 @@ pub fn parseInstallReceipt(parent: std.mem.Allocator, json_text: []const u8) Par
             else => break :blk "",
         }
     };
+
+    // A foreign tool writes this receipt and the version lands in a Cellar
+    // path. Absent stays tolerated; present must be a single component.
+    if (version.len != 0 and !path_component.isPathComponent(version)) return ParseError.InvalidReceipt;
 
     const source_path = blk: {
         const src = source_obj orelse break :blk "";
@@ -233,4 +238,38 @@ test "parseInstallReceipt rejects invalid JSON with InvalidReceipt" {
     try std.testing.expectError(ParseError.InvalidReceipt, parseInstallReceipt(std.testing.allocator, "not json"));
     try std.testing.expectError(ParseError.InvalidReceipt, parseInstallReceipt(std.testing.allocator, "[1,2,3]"));
     try std.testing.expectError(ParseError.InvalidReceipt, parseInstallReceipt(std.testing.allocator, ""));
+}
+
+test "parseInstallReceipt rejects a stable version that is not a path component" {
+    const bad = [_][]const u8{
+        \\{"source":{"versions":{"stable":"../../../canary"}}}
+        ,
+        \\{"source":{"versions":{"stable":"a/b"}}}
+        ,
+        \\{"source":{"versions":{"stable":"."}}}
+        ,
+        \\{"source":{"versions":{"stable":".."}}}
+        ,
+        // Escaped so the JSON itself is well-formed: the guard must be what
+        // rejects it, not the parser.
+        \\{"source":{"versions":{"stable":"a\u0000b"}}}
+        ,
+    };
+    for (bad) |json| {
+        try std.testing.expectError(
+            ParseError.InvalidReceipt,
+            parseInstallReceipt(std.testing.allocator, json),
+        );
+    }
+}
+
+test "parseInstallReceipt keeps the versions real formulae ship" {
+    const ok = [_][]const u8{ "3.2.1", "1.2.3_1", "3.0.16", "2024-01-02" };
+    for (ok) |v| {
+        var buf: [128]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buf, "{{\"source\":{{\"versions\":{{\"stable\":\"{s}\"}}}}}}", .{v});
+        var r = try parseInstallReceipt(std.testing.allocator, json);
+        defer r.deinit();
+        try std.testing.expectEqualStrings(v, r.version);
+    }
 }

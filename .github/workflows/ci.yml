@@ -85,6 +85,9 @@ jobs:
       - name: Regression guard - Ruby-DSL Cellar confinement
         run: ./scripts/regressions/ruby-dsl-name-version-escape-cellar.sh
 
+      - name: Regression guard - Cellar delete confinement
+        run: ./scripts/regressions/formula-name-version-reach-deletetree-unguarded.sh
+
       - name: Build universal binary
         run: just build-universal
 
