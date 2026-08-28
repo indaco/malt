@@ -49,6 +49,21 @@ while IFS= read -r s; do
   # mktemp is the repo's idiom: unguessable, created 0700, and short enough
   # here because the template pins the path to /tmp.
   tmpl=$(sed -nE 's/^\$\(mktemp -d ([^ )]+)\)$/\1/p' <<<"$pfx")
+  # A prefix may nest inside a dir mktemp'd earlier in the script; resolve that
+  # root so the budget measures the path that lands on disk, not the `$VAR` text.
+  if [[ -z "$tmpl" ]]; then
+    root_var=$(sed -nE 's|^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(/.*)?$|\1|p' <<<"$pfx")
+    leaf=$(sed -nE 's|^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?(/.*)?$|\1|p' <<<"$pfx")
+    if [[ -n "$root_var" ]]; then
+      # Read the assignment the prefix line actually sees: a var mktemp'd once
+      # and then repointed at a fixed path is not safe, so the last one wins.
+      pfx_ln=$(grep -nE '^(PREFIX|PREFIX_ROOT)=' "$s" | head -1 | cut -d: -f1)
+      last=$(awk -v v="$root_var=" -v n="$pfx_ln" \
+        'NR < n && index($0, v) == 1 {a = $0} END {print a}' "$s")
+      root=$(sed -nE 's|^[A-Za-z_][A-Za-z0-9_]*=\$\(mktemp -d ([^ )]+)\)$|\1|p' <<<"$last")
+      [[ -n "$root" ]] && tmpl="${root}${leaf}"
+    fi
+  fi
   [[ -n "$tmpl" ]] ||
     fail "$(basename "$s"): prefix $pfx is not from mktemp, so concurrent sessions collide"
   ((${#tmpl} <= BUDGET)) ||
