@@ -20,13 +20,6 @@ pub const Store = struct {
         return .{ .allocator = allocator, .io = io, .db = db, .prefix = prefix, .mutex = .init };
     }
 
-    /// Atomic rename from tmp/{sha256} to store/{sha256}. Idempotent.
-    /// Atomic rename from a source path to store/{sha256}. Idempotent.
-    /// If src_path is null, defaults to {prefix}/tmp/{sha256}.
-    pub fn commit(self: *Store, sha256: []const u8) StoreError!void {
-        return self.commitFrom(sha256, null);
-    }
-
     /// Atomic rename from a specific source path to store/{sha256}. Idempotent.
     /// Thread-safe: serialized by internal mutex.
     pub fn commitFrom(self: *Store, sha256: []const u8, src_path: ?[]const u8) StoreError!void {
@@ -57,12 +50,6 @@ pub const Store = struct {
         const p = store_path.entry(&buf, self.prefix, sha256) catch return false;
         std.Io.Dir.cwd().access(self.io, p, .{}) catch return false;
         return true;
-    }
-
-    pub fn path(self: *Store, sha256: []const u8) StoreError![]const u8 {
-        var buf: [store_path.entry_buf_len]u8 = undefined;
-        const p = try store_path.entry(&buf, self.prefix, sha256);
-        return self.allocator.dupe(u8, p) catch return StoreError.OutOfMemory;
     }
 
     /// Removes both the on-disk path AND the store_refs row.  Without the

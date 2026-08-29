@@ -264,7 +264,6 @@ test "terminal methods reject a malformed key loudly" {
     try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.commitFrom("A" ** 64, null));
     try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.remove("not-hex"));
     try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.remove("A" ** 64));
-    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.path("../etc"));
 }
 
 test "an explicit source path does not buy a caller past the key check" {
@@ -286,22 +285,6 @@ test "an explicit source path does not buy a caller past the key check" {
 
     // The donor is still where it was: nothing was renamed.
     try test_io.accessAbsolute(std.Options.debug_io, src, .{});
-}
-
-test "path returns the store entry for a valid key" {
-    var ctx = try setupTestStore(testing.allocator);
-    defer {
-        ctx.db.close();
-        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
-        testing.allocator.free(ctx.prefix);
-    }
-
-    const p = try ctx.store.path(sha_txn);
-    defer testing.allocator.free(p);
-
-    const want = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ ctx.prefix, sha_txn });
-    defer testing.allocator.free(want);
-    try testing.expectEqualStrings(want, p);
 }
 
 test "incrementRef refuses to create a row a store key could never name" {
