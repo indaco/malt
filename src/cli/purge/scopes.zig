@@ -17,6 +17,7 @@ const formula_mod = @import("../../core/formula.zig");
 const cask_mod = @import("../../core/cask.zig");
 const relocated_store = @import("../../core/relocated_store.zig");
 const symlink = @import("../../fs/symlink.zig");
+const store_path = @import("../../fs/store_path.zig");
 const util = @import("util.zig");
 const report = @import("report.zig");
 
@@ -73,9 +74,11 @@ pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix:
     // Stat the entry before remove() so we can credit freed bytes — the
     // path disappears as soon as `store.remove` returns.
     for (orphans_list.items) |sha| {
-        var path_buf: [512]u8 = undefined;
-        const store_path = std.fmt.bufPrint(&path_buf, "{s}/store/{s}", .{ prefix, sha }) catch continue;
-        const sz = util.pathSize(io, allocator, store_path);
+        var path_buf: [store_path.entry_buf_len]u8 = undefined;
+        // A row whose key is not a store key is skipped, not fatal: the run
+        // still reaps its neighbours, and doctor --fix sweeps the disk side.
+        const entry_path = store_path.entry(&path_buf, prefix, sha) catch continue;
+        const sz = util.pathSize(io, allocator, entry_path);
 
         rep.item(sha);
         if (!dry_run) {

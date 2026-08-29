@@ -1,10 +1,11 @@
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const store_path = @import("../fs/store_path.zig");
 const testing = std.testing;
 const schema = @import("../db/schema.zig");
 
-pub const StoreError = error{ CommitFailed, RemoveFailed, NotFound, OutOfMemory, RefCountError };
+pub const StoreError = error{ CommitFailed, RemoveFailed, NotFound, OutOfMemory, RefCountError, InvalidSha256, PathTooLong };
 
 pub const Store = struct {
     allocator: std.mem.Allocator,
@@ -19,13 +20,6 @@ pub const Store = struct {
         return .{ .allocator = allocator, .io = io, .db = db, .prefix = prefix, .mutex = .init };
     }
 
-    /// Atomic rename from tmp/{sha256} to store/{sha256}. Idempotent.
-    /// Atomic rename from a source path to store/{sha256}. Idempotent.
-    /// If src_path is null, defaults to {prefix}/tmp/{sha256}.
-    pub fn commit(self: *Store, sha256: []const u8) StoreError!void {
-        return self.commitFrom(sha256, null);
-    }
-
     /// Atomic rename from a specific source path to store/{sha256}. Idempotent.
     /// Thread-safe: serialized by internal mutex.
     pub fn commitFrom(self: *Store, sha256: []const u8, src_path: ?[]const u8) StoreError!void {
@@ -34,10 +28,10 @@ pub const Store = struct {
         // src_buf must outlive any subsequent stack-buf write below — if a
         // future optimizer overlays it with dst_buf, the rename target
         // could be clobbered.
-        var src_buf: [512]u8 = undefined;
-        var dst_buf: [512]u8 = undefined;
-        const src = src_path orelse std.fmt.bufPrint(&src_buf, "{s}/tmp/{s}", .{ self.prefix, sha256 }) catch return StoreError.OutOfMemory;
-        const dst = std.fmt.bufPrint(&dst_buf, "{s}/store/{s}", .{ self.prefix, sha256 }) catch return StoreError.OutOfMemory;
+        var src_buf: [store_path.entry_buf_len]u8 = undefined;
+        var dst_buf: [store_path.entry_buf_len]u8 = undefined;
+        const src = src_path orelse try store_path.tmpEntry(&src_buf, self.prefix, sha256);
+        const dst = try store_path.entry(&dst_buf, self.prefix, sha256);
 
         // Check if already committed (idempotent)
         std.Io.Dir.cwd().access(self.io, dst, .{}) catch {
@@ -48,15 +42,14 @@ pub const Store = struct {
         // Already exists — idempotent success
     }
 
+    /// A probe, not a validator: a key that cannot form a path is simply not
+    /// in the store, so the caller downloads instead of failing here. The
+    /// terminal methods below are where a bad key must be loud.
     pub fn exists(self: *Store, sha256: []const u8) bool {
-        var buf: [512]u8 = undefined;
-        const p = std.fmt.bufPrint(&buf, "{s}/store/{s}", .{ self.prefix, sha256 }) catch return false;
+        var buf: [store_path.entry_buf_len]u8 = undefined;
+        const p = store_path.entry(&buf, self.prefix, sha256) catch return false;
         std.Io.Dir.cwd().access(self.io, p, .{}) catch return false;
         return true;
-    }
-
-    pub fn path(self: *Store, sha256: []const u8) StoreError![]const u8 {
-        return std.fmt.allocPrint(self.allocator, "{s}/store/{s}", .{ self.prefix, sha256 }) catch return StoreError.OutOfMemory;
     }
 
     /// Removes both the on-disk path AND the store_refs row.  Without the
@@ -69,8 +62,10 @@ pub const Store = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        var buf: [512]u8 = undefined;
-        const p = std.fmt.bufPrint(&buf, "{s}/store/{s}", .{ self.prefix, sha256 }) catch return StoreError.OutOfMemory;
+        // Built before the transaction opens so a bad key can never reach
+        // deleteTree or leave a transaction behind.
+        var buf: [store_path.entry_buf_len]u8 = undefined;
+        const p = try store_path.entry(&buf, self.prefix, sha256);
 
         self.db.beginTransaction() catch return StoreError.RefCountError;
         errdefer self.db.rollback();
@@ -85,7 +80,14 @@ pub const Store = struct {
         self.db.commit() catch return StoreError.RefCountError;
     }
 
+    /// The sole ingress for a store key. A row whose key names no
+    /// constructible store path is one `remove` could never reap, so it is
+    /// refused at birth rather than stranded. `decrementRef` stays permissive
+    /// on purpose: rejecting there would strand a legacy row, not protect it.
     pub fn incrementRef(self: *Store, sha256: []const u8) StoreError!void {
+        var buf: [store_path.entry_buf_len]u8 = undefined;
+        _ = try store_path.entry(&buf, self.prefix, sha256);
+
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         var stmt = self.db.prepare(

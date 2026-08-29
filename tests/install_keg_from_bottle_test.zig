@@ -87,7 +87,7 @@ test "installKegFromBottle skips the download branch when the store already hold
     // expects clonefile-copied into Cellar. The bottle declares
     // `cellar = ":any"` so the Mach-O patcher + codesign step both skip,
     // letting a plain text file through without faking a real binary.
-    const sha = "warm" ** 16; // 64 chars
+    const sha = "ba5e" ** 16; // 64 hex chars
     const inner_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/warmpkg/1.0", .{ prefix, sha });
     defer testing.allocator.free(inner_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, inner_dir);
