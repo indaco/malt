@@ -1038,8 +1038,8 @@ test "incrementRef under db_mu keeps each worker's keg_id bound to its own kegs 
             var i: usize = 0;
             while (i < 2_000_000 and !c.done.load(.acquire)) : (i += 1) {
                 const n = c.ref_seq.fetchAdd(1, .monotonic);
-                var sha_buf: [32]u8 = undefined;
-                const sha = std.fmt.bufPrint(&sha_buf, "ref-{d}", .{n}) catch unreachable;
+                var sha_buf: [64]u8 = undefined;
+                const sha = std.fmt.bufPrint(&sha_buf, "{x:0>64}", .{n}) catch unreachable;
                 incrementRefLocked(c.io, c.store, c.db_mu, sha, "race");
             }
         }
@@ -1065,11 +1065,12 @@ test "incrementRefLocked on the serial path (db_mu null) still bumps the refcoun
 
     var store = store_mod.Store.init(io, std.testing.allocator, &db, "");
     // Serial callers pass db_mu == null: no lock, no deadlock, ref still lands.
-    incrementRefLocked(io, &store, null, "deadbeef", "solo");
+    const sha = "deadbeef" ** 8;
+    incrementRefLocked(io, &store, null, sha, "solo");
 
     var stmt = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;");
     defer stmt.finalize();
-    try stmt.bindText(1, "deadbeef");
+    try stmt.bindText(1, sha);
     try std.testing.expect(try stmt.step());
     try std.testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
 }

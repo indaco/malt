@@ -93,7 +93,14 @@ pub const Store = struct {
         self.db.commit() catch return StoreError.RefCountError;
     }
 
+    /// The sole ingress for a store key. A row whose key names no
+    /// constructible store path is one `remove` could never reap, so it is
+    /// refused at birth rather than stranded. `decrementRef` stays permissive
+    /// on purpose: rejecting there would strand a legacy row, not protect it.
     pub fn incrementRef(self: *Store, sha256: []const u8) StoreError!void {
+        var buf: [store_path.entry_buf_len]u8 = undefined;
+        _ = try store_path.entry(&buf, self.prefix, sha256);
+
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         var stmt = self.db.prepare(

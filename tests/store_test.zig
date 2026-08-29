@@ -18,6 +18,7 @@ const sha_missing_src = "4" ** 64;
 const sha_dup = "5" ** 64;
 const sha_orphan = "6" ** 64;
 const sha_txn = "7" ** 64;
+const sha_ref = "8" ** 64;
 
 fn setupTestStore(allocator: std.mem.Allocator) !struct { db: sqlite.Database, store: store_mod.Store, prefix: []const u8 } {
     // Create temp directory as prefix
@@ -218,9 +219,9 @@ test "incrementRef and decrementRef update refcount" {
     // a freed frame.
     ctx.store.db = &ctx.db;
 
-    try ctx.store.incrementRef("ref_test");
-    try ctx.store.incrementRef("ref_test");
-    try ctx.store.decrementRef("ref_test");
+    try ctx.store.incrementRef(sha_ref);
+    try ctx.store.incrementRef(sha_ref);
+    try ctx.store.decrementRef(sha_ref);
 
     // After 2 increments and 1 decrement, refcount should be 1
     // Verify via orphans — should NOT be an orphan
@@ -230,7 +231,7 @@ test "incrementRef and decrementRef update refcount" {
         orphans.deinit(testing.allocator);
     }
     for (orphans.items) |o| {
-        try testing.expect(!std.mem.eql(u8, o, "ref_test"));
+        try testing.expect(!std.mem.eql(u8, o, sha_ref));
     }
 }
 
@@ -303,6 +304,54 @@ test "path returns the store entry for a valid key" {
     try testing.expectEqualStrings(want, p);
 }
 
+test "incrementRef refuses to create a row a store key could never name" {
+    var ctx = try setupTestStore(testing.allocator);
+    defer {
+        ctx.db.close();
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
+        testing.allocator.free(ctx.prefix);
+    }
+    ctx.store.db = &ctx.db;
+
+    // The sole DB ingress for a store key. A row born here that `remove`
+    // would later refuse is a row nothing can reap.
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.incrementRef("not-hex"));
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.incrementRef(""));
+    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.incrementRef("A" ** 64));
+
+    var stmt = try ctx.db.prepare("SELECT count(*) FROM store_refs;");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
+}
+
+test "decrementRef stays permissive so a legacy row can still be wound down" {
+    var ctx = try setupTestStore(testing.allocator);
+    defer {
+        ctx.db.close();
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
+        testing.allocator.free(ctx.prefix);
+    }
+    ctx.store.db = &ctx.db;
+
+    // Seed the way a legacy or hand-edited row got there, bypassing the guard.
+    {
+        var ins = try ctx.db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES ('legacy-row', 1);");
+        defer ins.finalize();
+        _ = try ins.step();
+    }
+
+    // Rejecting here would strand the row instead of protecting anything.
+    try ctx.store.decrementRef("legacy-row");
+
+    var orphans = try ctx.store.orphans();
+    defer {
+        for (orphans.items) |o| testing.allocator.free(o);
+        orphans.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 1), orphans.items.len);
+}
+
 test "remove rejects a malformed key before it can delete or transact" {
     var ctx = try setupTestStore(testing.allocator);
     defer {
@@ -317,8 +366,11 @@ test "remove rejects a malformed key before it can delete or transact" {
     const dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ ctx.prefix, bad });
     defer testing.allocator.free(dir);
     test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
-    try ctx.store.incrementRef(bad);
-    try ctx.store.decrementRef(bad);
+    {
+        var ins = try ctx.db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES ('not-hex', 0);");
+        defer ins.finalize();
+        _ = try ins.step();
+    }
 
     try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.remove(bad));
 
