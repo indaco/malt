@@ -241,3 +241,180 @@ test "installKegFromBottle stamps the specific CellarError variant into cellar_d
         cellar_diag,
     );
 }
+
+// ── cold-path store claim ──────────────────────────────────────────────────
+//
+// The refcount bump is the store's "these bytes are claimed" marker, and it
+// is only reachable on a cold commit — the warm path skips it by contract.
+// So this arm serves a real bottle over a loopback registry, the same
+// offline transport `bottle_download_test.zig` uses.
+
+const net = std.Io.net;
+
+const BottleStub = struct { io: std.Io, listener: *net.Server, body: []const u8 };
+
+fn serveBottle(s: *BottleStub) void {
+    const stream = s.listener.accept(s.io) catch return;
+    defer stream.close(s.io);
+    var rbuf: [16 * 1024]u8 = undefined;
+    var wbuf: [16 * 1024]u8 = undefined;
+    var reader = stream.reader(s.io, &rbuf);
+    var writer = stream.writer(s.io, &wbuf);
+    var srv = std.http.Server.init(&reader.interface, &writer.interface);
+    while (true) {
+        var req = srv.receiveHead() catch return;
+        if (std.mem.indexOf(u8, req.head.target, "/token") != null) {
+            req.respond("{\"token\":\"t1\"}", .{}) catch return;
+        } else if (std.mem.indexOf(u8, req.head.target, "/blobs/") != null) {
+            req.respond(s.body, .{}) catch return;
+        } else {
+            req.respond("not found\n", .{ .status = .not_found }) catch return;
+        }
+    }
+}
+
+// `std.Options.debug_io`'s failing allocator cannot back a child spawn.
+fn tarCzf(argv: []const []const u8) !void {
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{ .environ = malt.app_ctx.processEnviron() });
+    defer threaded.deinit();
+    var child = try std.process.spawn(threaded.io(), .{ .argv = argv, .stdout = .ignore, .stderr = .ignore });
+    switch (try child.wait(threaded.io())) {
+        .exited => |code| if (code != 0) return error.TarFailed,
+        else => return error.TarFailed,
+    }
+}
+
+fn refRows(db: *sqlite.Database, sha: []const u8) !i64 {
+    var stmt = try db.prepare("SELECT count(*) FROM store_refs WHERE store_sha256 = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, sha);
+    _ = try stmt.step();
+    return stmt.columnInt(0);
+}
+
+fn claimedRefs(db: *sqlite.Database, sha: []const u8) !i64 {
+    var stmt = try db.prepare("SELECT count(*) FROM store_refs WHERE store_sha256 = ?1 AND refcount > 0;");
+    defer stmt.finalize();
+    try stmt.bindText(1, sha);
+    _ = try stmt.step();
+    return stmt.columnInt(0);
+}
+
+test "installKegFromBottle claims no store bytes when the materialise is refused" {
+    try test_io.skipIfNoSubprocess();
+
+    const prefix = try setupPrefix("coldrefused");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Mint a real bottle: `<name>/<version>/README`, the layout the store
+    // commit and the cellar clone both expect.
+    const payload = try std.fmt.allocPrint(testing.allocator, "{s}/work/coldpkg/1.0", .{prefix});
+    defer testing.allocator.free(payload);
+    try test_io.cwd().createDirPath(io, payload);
+    const readme = try std.fmt.allocPrint(testing.allocator, "{s}/README", .{payload});
+    defer testing.allocator.free(readme);
+    {
+        const f = try test_io.createFileAbsolute(io, readme, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "cold bottle fixture\n");
+    }
+    const work = try std.fmt.allocPrint(testing.allocator, "{s}/work", .{prefix});
+    defer testing.allocator.free(work);
+    const archive = try std.fmt.allocPrint(testing.allocator, "{s}/bottle.tar.gz", .{prefix});
+    defer testing.allocator.free(archive);
+    try tarCzf(&.{ "tar", "czf", archive, "-C", work, "coldpkg" });
+
+    const body = try test_io.readFileAbsoluteAlloc(io, testing.allocator, archive, 1 << 20);
+    defer testing.allocator.free(body);
+    var raw: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(body, &raw, .{});
+    const sha = std.fmt.bytesToHex(raw, .lower);
+
+    // A symlinked package dir is the cheapest deterministic refusal.
+    const victim = try std.fmt.allocPrint(testing.allocator, "{s}/victim", .{prefix});
+    defer testing.allocator.free(victim);
+    try test_io.cwd().createDirPath(io, victim);
+    const pkg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/coldpkg", .{prefix});
+    defer testing.allocator.free(pkg_dir);
+    try test_io.symLinkAbsolute(io, victim, pkg_dir, .{ .is_directory = true });
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var stub = BottleStub{ .io = io, .listener = &listener, .body = body };
+    const server_thread = try std.Thread.spawn(.{}, serveBottle, .{&stub});
+
+    var base_buf: [64]u8 = undefined;
+    const base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const formula_json = try std.fmt.allocPrint(
+        arena.allocator(),
+        \\{{
+        \\  "name": "coldpkg",
+        \\  "full_name": "coldpkg",
+        \\  "tap": "homebrew/core",
+        \\  "desc": "",
+        \\  "homepage": "",
+        \\  "versions": {{"stable": "1.0"}},
+        \\  "revision": 0,
+        \\  "dependencies": [],
+        \\  "keg_only": false,
+        \\  "post_install_defined": false,
+        \\  "oldnames": [],
+        \\  "bottle": {{"stable": {{"files": {{"all": {{"cellar": ":any", "url": "https://ghcr.io/v2/homebrew/core/coldpkg/blobs/sha256:{s}", "sha256": "{s}"}}}}}}}}
+        \\}}
+    ,
+        .{ &sha, &sha },
+    );
+    var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
+    defer formula.deinit();
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = malt.client.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    var ghcr = malt.ghcr.GhcrClient.init(io, testing.allocator, &http);
+    defer ghcr.deinit();
+    ghcr.base_url = base_url;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var store = malt.store.Store.init(io, testing.allocator, &db, prefix);
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty };
+    var cellar_diag: ?malt.cellar.CellarError = null;
+    const result = malt.install_download.installKegFromBottle(
+        &ctx,
+        testing.allocator,
+        .{ .ghcr = &ghcr, .http = &http, .store = &store, .cellar_diag = &cellar_diag },
+        &formula,
+        prefix,
+    );
+
+    http.deinit();
+    server_thread.join();
+
+    try testing.expectError(malt.install_record.InstallError.CellarFailed, result);
+    try testing.expectEqual(
+        @as(?malt.cellar.CellarError, malt.cellar.CellarError.UnsafeCellarLink),
+        cellar_diag,
+    );
+
+    // Without this the assertion below would also hold for a download that
+    // never happened, i.e. the cold path was really taken.
+    try testing.expect(store.exists(&sha));
+
+    // No keg row references these bytes, so nothing may claim them. Note
+    // this leaves NO row, which is not the same as reclaimable: purge
+    // defines an orphan as a row at refcount <= 0, and a rowless entry is
+    // deliberately invisible to it. What this pins is that the refcount
+    // never lies about a keg that does not exist.
+    try testing.expectEqual(@as(i64, 0), try claimedRefs(&db, &sha));
+    try testing.expectEqual(@as(i64, 0), try refRows(&db, &sha));
+}
