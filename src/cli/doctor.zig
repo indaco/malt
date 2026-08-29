@@ -627,6 +627,16 @@ fn writeVerboseList(entries: []const []const u8) void {
     for (entries) |e| writeStyledDetail(e);
 }
 
+/// Is a path recorded in the DB absent from disk? A row can carry a relative
+/// path (legacy or hand-edited), which `accessAbsolute` asserts on rather than
+/// rejecting — and such a path names no real keg anyway, so it counts as
+/// absent instead of killing the check.
+fn absentOnDisk(io: std.Io, path: []const u8) bool {
+    if (!std.fs.path.isAbsolute(path)) return true;
+    std.Io.Dir.accessAbsolute(io, path, .{}) catch return true;
+    return false;
+}
+
 fn freeOwnedStringList(allocator: std.mem.Allocator, list: *std.ArrayList([]u8)) void {
     for (list.items) |s| allocator.free(s);
     list.deinit(allocator);
@@ -999,14 +1009,13 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
     while (stmt.step() catch false) {
         const cellar_raw = stmt.columnText(2) orelse continue;
         const cellar_path = std.mem.sliceTo(cellar_raw, 0);
-        std.Io.Dir.accessAbsolute(ctx.io, cellar_path, .{}) catch {
-            const k_name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
-            const k_ver = std.mem.sliceTo(stmt.columnText(1) orelse continue, 0);
-            const row = std.fmt.allocPrint(ctx.allocator, "{s} {s}", .{ k_name, k_ver }) catch continue;
-            offenders.append(ctx.allocator, row) catch {
-                ctx.allocator.free(row);
-                continue;
-            };
+        if (!absentOnDisk(ctx.io, cellar_path)) continue;
+        const k_name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
+        const k_ver = std.mem.sliceTo(stmt.columnText(1) orelse continue, 0);
+        const row = std.fmt.allocPrint(ctx.allocator, "{s} {s}", .{ k_name, k_ver }) catch continue;
+        offenders.append(ctx.allocator, row) catch {
+            ctx.allocator.free(row);
+            continue;
         };
     }
 
@@ -1635,9 +1644,7 @@ pub fn countMissingLocalSources(
         const path_ptr = stmt.columnText(0) orelse continue;
         const path = std.mem.sliceTo(path_ptr, 0);
         census.total += 1;
-        std.Io.Dir.accessAbsolute(io, path, .{}) catch {
-            census.stale += 1;
-        };
+        if (absentOnDisk(io, path)) census.stale += 1;
     }
     return census;
 }
@@ -2083,6 +2090,63 @@ test "checkOrphanedStore: a store with no refcount<=0 row is ok" {
 
     const ctx: CheckCtx = .{ .allocator = allocator, .prefix = prefix, .io = io, .environ = .empty };
     try testing.expectEqual(CheckResult.ok, checkOrphanedStore(ctx, "Orphaned store entries"));
+}
+
+test "absentOnDisk: a relative path is absent, an existing absolute one is not" {
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("doctor_absent_probe");
+    defer s.deinit();
+
+    try testing.expect(absentOnDisk(io, "Cellar/probe/1.0"));
+    try testing.expect(absentOnDisk(io, ""));
+    try testing.expect(absentOnDisk(io, "/no/such/keg/anywhere"));
+    try testing.expect(!absentOnDisk(io, s.base));
+}
+
+test "checkMissingKegs: a relative cellar_path counts as missing instead of aborting" {
+    // `accessAbsolute` asserts its argument is absolute, so a legacy or
+    // hand-edited row with a relative path used to kill the whole run.
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("doctor_relative_keg");
+    defer s.deinit();
+    const prefix = s.base;
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&buf, "{s}/db", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, db_dir);
+    var db_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    try schema.initSchema(&db);
+    try db.exec(
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)" ++
+            " VALUES ('probe', 'probe', '1.0', 'aa', 'Cellar/probe/1.0');",
+    );
+    db.close();
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    output.beginStderrCapture(allocator, &out);
+    defer output.endStderrCapture();
+
+    const ctx: CheckCtx = .{ .allocator = allocator, .prefix = prefix, .io = io, .environ = .empty };
+    try testing.expectEqual(CheckResult.err_status, checkMissingKegs(ctx, "Missing keg directories"));
+}
+
+test "countMissingLocalSources: a relative source path is stale, not a crash" {
+    const io = std.Options.debug_io;
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap)" ++
+            " VALUES ('probe', 'relative/path.rb', '1.0', 'aa', '/tmp/probe', 'local');",
+    );
+
+    const census = countMissingLocalSources(io, &db);
+    try testing.expectEqual(@as(u32, 1), census.total);
+    try testing.expectEqual(@as(u32, 1), census.stale);
 }
 
 test "checks table includes the mirror-overrides row" {
