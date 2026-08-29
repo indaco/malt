@@ -13,6 +13,7 @@ const atomic = @import("../fs/atomic.zig");
 const symlink = @import("../fs/symlink.zig");
 const path_component = @import("../fs/path_component.zig");
 const relocated_store = @import("relocated_store.zig");
+const store_path = @import("../fs/store_path.zig");
 
 pub const CellarError = error{
     CloneFailed,
@@ -42,6 +43,10 @@ pub const CellarError = error{
     /// the kernel would resolve the keg write or delete through the link and
     /// land outside the prefix.
     UnsafeCellarLink,
+    /// The bottle key is not the 64 lowercase hex the store names entries
+    /// with. It arrives from tap JSON, so an empty or malformed one would
+    /// otherwise format into a path that names the store root itself.
+    InvalidSha256,
     OutOfMemory,
 };
 
@@ -56,6 +61,7 @@ pub fn describeError(err: CellarError) []const u8 {
         CellarError.VerifyFailed => "relocated keg ships a binary the loader would reject (re-run with --debug to name it)",
         CellarError.UnsafePathComponent => "formula name or version would place the keg outside the Cellar",
         CellarError.UnsafeCellarLink => "<prefix>/Cellar/<name> is a symlink; remove or replace it with a real directory",
+        CellarError.InvalidSha256 => "bottle sha256 is not 64 lowercase hex; refusing to build a store path from it",
         else => @errorName(err),
     };
 }
@@ -122,13 +128,13 @@ pub fn materializeWithCellar(
     cellar_type: []const u8,
     extra_replacement: ?patch.Replacement,
 ) CellarError!Keg {
+    // Before any filesystem work: this path is the clone source, and an
+    // unvalidated key names the store root rather than one entry in it.
+    var store_buf: [store_path.entry_buf_len]u8 = undefined;
+    const store_entry = try store_path.entry(&store_buf, prefix, store_sha256);
+
     if (!confined(name, version)) return CellarError.UnsafePathComponent;
     if (packageDirIsLink(io, prefix, name)) return CellarError.UnsafeCellarLink;
-
-    // Build paths
-    var store_buf: [512]u8 = undefined;
-    const store_path = std.fmt.bufPrint(&store_buf, "{s}/store/{s}", .{ prefix, store_sha256 }) catch
-        return CellarError.OutOfMemory;
 
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
@@ -173,7 +179,7 @@ pub fn materializeWithCellar(
     // formula version "10.47"). We first try an exact match, then scan for
     // a directory that starts with the version string followed by "_".
     var keg_src_buf: [512]u8 = undefined;
-    const keg_src = std.fmt.bufPrint(&keg_src_buf, "{s}/{s}/{s}", .{ store_path, name, version }) catch
+    const keg_src = std.fmt.bufPrint(&keg_src_buf, "{s}/{s}/{s}", .{ store_entry, name, version }) catch
         return CellarError.OutOfMemory;
 
     // Ensure parent dir exists
@@ -189,15 +195,15 @@ pub fn materializeWithCellar(
     };
 
     // Try keg_src first (exact version match), then scan for a revision
-    // suffix variant (e.g. "10.47_1"), fall back to store_path.
+    // suffix variant (e.g. "10.47_1"), fall back to store_entry.
     var keg_rev_buf: [512]u8 = undefined;
     const src = blk: {
         // 1. Exact match: {store}/{name}/{version}
         std.Io.Dir.accessAbsolute(io, keg_src, .{}) catch {
             // 2. Scan {store}/{name}/ for a dir starting with "{version}_"
             var name_dir_buf: [512]u8 = undefined;
-            const name_dir_path = std.fmt.bufPrint(&name_dir_buf, "{s}/{s}", .{ store_path, name }) catch break :blk store_path;
-            var name_dir = std.Io.Dir.openDirAbsolute(io, name_dir_path, .{ .iterate = true }) catch break :blk store_path;
+            const name_dir_path = std.fmt.bufPrint(&name_dir_buf, "{s}/{s}", .{ store_entry, name }) catch break :blk store_entry;
+            var name_dir = std.Io.Dir.openDirAbsolute(io, name_dir_path, .{ .iterate = true }) catch break :blk store_entry;
             defer name_dir.close(io);
             var it = name_dir.iterate();
             while (it.next(io) catch null) |entry| {
@@ -207,11 +213,11 @@ pub fn materializeWithCellar(
                     std.mem.eql(u8, entry.name[0..version.len], version) and
                     entry.name[version.len] == '_')
                 {
-                    const rev_path = std.fmt.bufPrint(&keg_rev_buf, "{s}/{s}", .{ name_dir_path, entry.name }) catch break :blk store_path;
+                    const rev_path = std.fmt.bufPrint(&keg_rev_buf, "{s}/{s}", .{ name_dir_path, entry.name }) catch break :blk store_entry;
                     break :blk rev_path;
                 }
             }
-            break :blk store_path;
+            break :blk store_entry;
         };
         break :blk keg_src;
     };
@@ -1180,6 +1186,7 @@ test "describeError: action-hint tags keep prose, trivial tags fall back to @err
     try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.InsufficientHeaderPad), "-headerpad_max_install_names") != null);
     try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.InstallNameToolMissing), "install_name_tool not found on PATH") != null);
     try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.UnsafeCellarLink), "symlink") != null);
+    try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.InvalidSha256), "64 lowercase hex") != null);
 
     const fallback_tags = [_]CellarError{
         CellarError.CloneFailed,
@@ -1361,6 +1368,91 @@ test "the materialize sinks refuse a keg path that leaves the Cellar" {
     }
 
     try std.Io.Dir.accessAbsolute(io, victim, .{});
+}
+
+test "an empty bottle key cannot make the store root a clone source" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("materialize_empty_sha");
+    defer s.deinit();
+    const prefix = s.p("/prefix");
+    // The decoy stands in for every other package's content: an empty key
+    // formats to the store root, so the clone would take the whole store.
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/prefix/store/decoy"));
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/prefix/Cellar"));
+
+    try testing.expectError(error.InvalidSha256, materializeWithCellar(
+        io,
+        testing.allocator,
+        prefix,
+        "",
+        "victim",
+        "1.0",
+        "",
+        null,
+    ));
+
+    // Absent, not cleaned up afterwards: the rejection precedes every write.
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/prefix/Cellar/victim"), .{}),
+    );
+}
+
+test "materializeWithCellar refuses a bottle key outside the store charset" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("materialize_bad_sha");
+    defer s.deinit();
+    const prefix = s.p("/prefix");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/prefix/store"));
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/prefix/Cellar"));
+
+    const bad = [_][]const u8{
+        "abc123", // a short placeholder, the shape tap JSON drift produces
+        "../../victim" ++ "a" ** 52, // 64 chars, still hops out
+        "a" ** 32 ++ "/" ++ "a" ** 31, // 64 chars, splits into two components
+        "A" ** 64, // uppercase hex: the store names entries in lowercase
+        "a" ** 63 ++ "\x00", // a NUL truncates the path the kernel sees
+    };
+    for (bad) |sha| {
+        try testing.expectError(error.InvalidSha256, materializeWithCellar(
+            io,
+            testing.allocator,
+            prefix,
+            sha,
+            "victim",
+            "1.0",
+            "",
+            null,
+        ));
+    }
+
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(io, s.p("/prefix/Cellar/victim"), .{}),
+    );
+}
+
+test "a store path that will not fit reports PathTooLong, not an allocation failure" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // Nothing on this path allocates, so OutOfMemory would send the caller
+    // hunting for memory pressure that does not exist.
+    const too_long = "/" ++ "p" ** store_path.entry_buf_len;
+    try testing.expectError(CellarError.PathTooLong, materializeWithCellar(
+        io,
+        testing.allocator,
+        too_long,
+        "0" ** 64,
+        "pkg",
+        "1.0",
+        "",
+        null,
+    ));
 }
 
 test "every Cellar sink refuses a symlinked package dir" {
