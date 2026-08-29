@@ -12,7 +12,9 @@ pub const Error = error{ InvalidSha256, PathTooLong };
 /// (`/store/` + 64 hex). The one buffer size every call site reserves.
 pub const entry_buf_len: usize = prefix_path.max_prefix_len + "/store/".len + 64;
 
-fn isValidSha256(sha: []const u8) bool {
+/// Exported so ingestion sites can reject an unusable digest at the source
+/// rather than open-code a second charset loop.
+pub fn isValidSha256(sha: []const u8) bool {
     if (sha.len != 64) return false;
     for (sha) |ch| {
         const ok = (ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f');

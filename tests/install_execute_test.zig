@@ -69,14 +69,14 @@ test "execute --dry-run prints a plan for a cached formula" {
         \\ "keg_only":false,"post_install_defined":false,
         \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
         \\   "files":{
-        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"}
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"}
         \\   }}}}
     ;
     try seedFormulaCache(prefix, "alpha", json);
@@ -207,14 +207,14 @@ test "execute --dry-run with one cached + one 404 package exits PartialFailure" 
         \\ "keg_only":false,"post_install_defined":false,
         \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
         \\   "files":{
-        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"}
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"}
         \\   }}}}
     ;
     try seedFormulaCache(prefix, "alpha", json);
@@ -260,14 +260,14 @@ test "Ctrl-C between pool and link sweeps !job.succeeded and exits PartialFailur
         \\ "keg_only":false,"post_install_defined":false,
         \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
         \\   "files":{
-        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"}
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"}
         \\   }}}}
     ;
     try seedFormulaCache(prefix_z, "alpha", json);
@@ -410,14 +410,14 @@ test "execute --only-dependencies on a leaf formula plans nothing" {
         \\ "keg_only":false,"post_install_defined":false,
         \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/leaf/blobs",
         \\   "files":{
-        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"}
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"}
         \\   }}}}
     ;
     try seedFormulaCache(prefix_z, "leaf", json);
@@ -459,14 +459,14 @@ test "execute --only-deps --dry-run plans deps but skips the requested formula" 
         \\ "keg_only":false,"post_install_defined":false,
         \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/beta/blobs",
         \\   "files":{
-        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
-        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
-        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
-        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
-        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"},
-        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"},
-        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"},
-        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"}
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"4444444444444444444444444444444444444444444444444444444444444444"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"4444444444444444444444444444444444444444444444444444444444444444"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"4444444444444444444444444444444444444444444444444444444444444444"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"4444444444444444444444444444444444444444444444444444444444444444"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"5555555555555555555555555555555555555555555555555555555555555555"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"5555555555555555555555555555555555555555555555555555555555555555"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"5555555555555555555555555555555555555555555555555555555555555555"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"5555555555555555555555555555555555555555555555555555555555555555"}
         \\   }}}}
     ;
     try seedFormulaCache(prefix_z, "beta", dep_json);
@@ -477,14 +477,14 @@ test "execute --only-deps --dry-run plans deps but skips the requested formula" 
         \\ "keg_only":false,"post_install_defined":false,
         \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
         \\   "files":{
-        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"},
-        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"},
-        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"},
-        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"}
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"3333333333333333333333333333333333333333333333333333333333333333"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"3333333333333333333333333333333333333333333333333333333333333333"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"3333333333333333333333333333333333333333333333333333333333333333"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"3333333333333333333333333333333333333333333333333333333333333333"}
         \\   }}}}
     ;
     try seedFormulaCache(prefix_z, "alpha", root_json);
@@ -534,14 +534,14 @@ test "execute --dry-run routes a revisioned formula through the install pipeline
         \\ "keg_only":false,"post_install_defined":false,
         \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/rev1/blobs",
         \\   "files":{
-        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"}
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"}
         \\   }}}}
     ;
     try seedFormulaCache(prefix_z, "rev1", json);
@@ -562,14 +562,14 @@ const beta_json =
     \\ "keg_only":false,"post_install_defined":false,
     \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/beta/blobs",
     \\   "files":{
-    \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
-    \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
-    \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
-    \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
-    \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"},
-    \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"},
-    \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"},
-    \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"}
+    \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"4444444444444444444444444444444444444444444444444444444444444444"},
+    \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"4444444444444444444444444444444444444444444444444444444444444444"},
+    \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"4444444444444444444444444444444444444444444444444444444444444444"},
+    \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"4444444444444444444444444444444444444444444444444444444444444444"},
+    \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"5555555555555555555555555555555555555555555555555555555555555555"},
+    \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"5555555555555555555555555555555555555555555555555555555555555555"},
+    \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"5555555555555555555555555555555555555555555555555555555555555555"},
+    \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"5555555555555555555555555555555555555555555555555555555555555555"}
     \\   }}}}
 ;
 
@@ -579,14 +579,14 @@ const alpha_json =
     \\ "keg_only":false,"post_install_defined":false,
     \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
     \\   "files":{
-    \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-    \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-    \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-    \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-    \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"},
-    \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"},
-    \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"},
-    \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"}
+    \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+    \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+    \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+    \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+    \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"3333333333333333333333333333333333333333333333333333333333333333"},
+    \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"3333333333333333333333333333333333333333333333333333333333333333"},
+    \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"3333333333333333333333333333333333333333333333333333333333333333"},
+    \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"3333333333333333333333333333333333333333333333333333333333333333"}
     \\   }}}}
 ;
 

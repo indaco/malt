@@ -30,8 +30,8 @@ const minimal_json =
     \\    "stable": {
     \\      "root_url": "https://ghcr.io/v2/homebrew/core/wget/blobs",
     \\      "files": {
-    \\        "arm64_sequoia": { "cellar": ":any", "url": "https://ghcr.io/v2/homebrew/core/wget/blobs/sha256:abc123", "sha256": "abc123" },
-    \\        "x86_64": { "cellar": ":any", "url": "https://ghcr.io/v2/homebrew/core/wget/blobs/sha256:def456", "sha256": "def456" }
+    \\        "arm64_sequoia": { "cellar": ":any", "url": "https://ghcr.io/v2/homebrew/core/wget/blobs/sha256:abc123", "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+    \\        "x86_64": { "cellar": ":any", "url": "https://ghcr.io/v2/homebrew/core/wget/blobs/sha256:def456", "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
     \\      }
     \\    }
     \\  }
@@ -106,7 +106,7 @@ test "handle missing bottle for platform" {
         \\  "versions": { "stable": "1.0" },
         \\  "dependencies": [],
         \\  "oldnames": [],
-        \\  "bottle": { "stable": { "files": { "linux_x86_64": { "url": "x", "sha256": "y", "cellar": "z" } } } }
+        \\  "bottle": { "stable": { "files": { "linux_x86_64": { "url": "x", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "cellar": "z" } } } }
         \\}
     ;
     var formula = try formula_mod.parseFormula(alloc, json);
@@ -141,10 +141,10 @@ test "resolveBottle prefers tahoe over sequoia on current arch" {
         \\    "stable": {
         \\      "root_url": "https://example.com",
         \\      "files": {
-        \\        "arm64_tahoe":   { "cellar": ":any", "url": "u1", "sha256": "arm64_tahoe_sha" },
-        \\        "arm64_sequoia": { "cellar": ":any", "url": "u2", "sha256": "arm64_sequoia_sha" },
-        \\        "tahoe":         { "cellar": ":any", "url": "u3", "sha256": "tahoe_sha" },
-        \\        "sequoia":       { "cellar": ":any", "url": "u4", "sha256": "sequoia_sha" }
+        \\        "arm64_tahoe":   { "cellar": ":any", "url": "u1", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        \\        "arm64_sequoia": { "cellar": ":any", "url": "u2", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+        \\        "tahoe":         { "cellar": ":any", "url": "u3", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" },
+        \\        "sequoia":       { "cellar": ":any", "url": "u4", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
         \\      }
         \\    }
         \\  }
@@ -156,9 +156,9 @@ test "resolveBottle prefers tahoe over sequoia on current arch" {
     const bottle = try formula_mod.resolveBottle(&formula);
 
     const expected_sha = switch (builtin.cpu.arch) {
-        .aarch64 => "arm64_tahoe_sha",
-        .x86_64 => "tahoe_sha",
-        else => "arm64_tahoe_sha",
+        .aarch64 => "a" ** 64,
+        .x86_64 => "c" ** 64,
+        else => "a" ** 64,
     };
     try testing.expectEqualStrings(expected_sha, bottle.sha256);
 }

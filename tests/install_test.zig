@@ -33,14 +33,14 @@ fn postInstallFormulaJson() []const u8 {
         "\"dependencies\":[],\"oldnames\":[]," ++
         "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/needs-ruby/blobs\"," ++
         "\"files\":{" ++
-        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
-        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
-        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
-        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
-        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
-        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
-        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
-        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}" ++
+        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"7777777777777777777777777777777777777777777777777777777777777777\"}," ++
+        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"7777777777777777777777777777777777777777777777777777777777777777\"}," ++
+        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"7777777777777777777777777777777777777777777777777777777777777777\"}," ++
+        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"7777777777777777777777777777777777777777777777777777777777777777\"}," ++
+        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"7777777777777777777777777777777777777777777777777777777777777777\"}," ++
+        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"7777777777777777777777777777777777777777777777777777777777777777\"}," ++
+        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"7777777777777777777777777777777777777777777777777777777777777777\"}," ++
+        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"7777777777777777777777777777777777777777777777777777777777777777\"}" ++
         "}}}}";
 }
 
@@ -120,7 +120,7 @@ test "collectFormulaJobs queues a steps-migrated formula despite post_install_de
         "\"post_install_steps\":[{\"type\":\"mkdir_p\",\"path\":{\"base\":\"var\",\"path\":\"glowsteps\"}}]," ++
         "\"versions\":{\"stable\":\"1.0\"},\"dependencies\":[],\"oldnames\":[]," ++
         "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/glowsteps/blobs\"," ++
-        "\"files\":{\"all\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/glowsteps\",\"sha256\":\"deadbeef\"}}}}}";
+        "\"files\":{\"all\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/glowsteps\",\"sha256\":\"8888888888888888888888888888888888888888888888888888888888888888\"}}}}}";
 
     var cache_fx = try TempDir.init("postinstall_steps_cache");
     defer cache_fx.deinit();
@@ -381,14 +381,14 @@ fn bottleJsonWithoutDeps(comptime name: []const u8) []const u8 {
         "\"dependencies\":[],\"oldnames\":[]," ++
         "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/" ++ name ++ "/blobs\"," ++
         "\"files\":{" ++
-        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"aa\"}," ++
-        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"aa\"}," ++
-        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"aa\"}," ++
-        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"aa\"}," ++
-        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"xx\"}," ++
-        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"xx\"}," ++
-        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"xx\"}," ++
-        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"xx\"}" ++
+        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"9999999999999999999999999999999999999999999999999999999999999999\"}," ++
+        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"9999999999999999999999999999999999999999999999999999999999999999\"}," ++
+        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"9999999999999999999999999999999999999999999999999999999999999999\"}," ++
+        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"9999999999999999999999999999999999999999999999999999999999999999\"}," ++
+        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}," ++
+        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}," ++
+        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}," ++
+        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}" ++
         "}}}}";
 }
 
@@ -546,14 +546,14 @@ fn formulaJsonWithDep(comptime name: []const u8, comptime dep: []const u8) []con
         "\"dependencies\":[\"" ++ dep ++ "\"],\"oldnames\":[]," ++
         "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/" ++ name ++ "/blobs\"," ++
         "\"files\":{" ++
-        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"aa\"}," ++
-        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"aa\"}," ++
-        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"aa\"}," ++
-        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"aa\"}," ++
-        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"xx\"}," ++
-        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"xx\"}," ++
-        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"xx\"}," ++
-        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"xx\"}" ++
+        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"9999999999999999999999999999999999999999999999999999999999999999\"}," ++
+        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"9999999999999999999999999999999999999999999999999999999999999999\"}," ++
+        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"9999999999999999999999999999999999999999999999999999999999999999\"}," ++
+        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/arm\",\"sha256\":\"9999999999999999999999999999999999999999999999999999999999999999\"}," ++
+        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}," ++
+        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}," ++
+        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}," ++
+        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/x86\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}" ++
         "}}}}";
 }
 
@@ -795,14 +795,14 @@ test "collectFormulaJobs carries the _<revision> suffix in version_str" {
         \\ "versions":{"stable":"10.47"},"revision":1,"dependencies":[],"oldnames":[],
         \\ "keg_only":false,"post_install_defined":false,
         \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/rev/blobs","files":{
-        \\   "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"a"},
-        \\   "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"a"},
-        \\   "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"a"},
-        \\   "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"a"},
-        \\   "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"b"},
-        \\   "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"b"},
-        \\   "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"b"},
-        \\   "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"b"}
+        \\   "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"abababababababababababababababababababababababababababababababab"},
+        \\   "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"abababababababababababababababababababababababababababababababab"},
+        \\   "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"abababababababababababababababababababababababababababababababab"},
+        \\   "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"abababababababababababababababababababababababababababababababab"},
+        \\   "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"},
+        \\   "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"},
+        \\   "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"},
+        \\   "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"}
         \\ }}}}
     ;
 
@@ -884,7 +884,7 @@ fn formulaJsonWithThreeDeps(
     comptime b: []const u8,
     comptime c: []const u8,
 ) []const u8 {
-    return "{\"name\":\"" ++ name ++ "\"," ++
+    return comptime "{\"name\":\"" ++ name ++ "\"," ++
         "\"full_name\":\"" ++ name ++ "\"," ++
         "\"tap\":\"homebrew/core\"," ++
         "\"desc\":\"\",\"homepage\":\"\",\"revision\":0," ++
@@ -894,21 +894,30 @@ fn formulaJsonWithThreeDeps(
         "\"oldnames\":[]," ++
         "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/" ++ name ++ "/blobs\"," ++
         "\"files\":{" ++
-        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"r0\"}," ++
-        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"r0\"}," ++
-        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"r0\"}," ++
-        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"r0\"}," ++
-        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"r1\"}," ++
-        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"r1\"}," ++
-        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"r1\"}," ++
-        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"r1\"}" ++
+        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"" ++ storeKey("b0") ++ "\"}," ++
+        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"" ++ storeKey("b0") ++ "\"}," ++
+        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"" ++ storeKey("b0") ++ "\"}," ++
+        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"" ++ storeKey("b0") ++ "\"}," ++
+        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"" ++ storeKey("b1") ++ "\"}," ++
+        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"" ++ storeKey("b1") ++ "\"}," ++
+        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"" ++ storeKey("b1") ++ "\"}," ++
+        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"" ++ storeKey("b1") ++ "\"}" ++
         "}}}}";
+}
+
+/// A fixture digest has to be 64 lowercase hex or the parser drops the
+/// bottle entry outright. Callers must keep the `comptime` on their `++`
+/// chain: without it the concat lands in a stack temporary and the fixture
+/// hands back a dangling slice.
+fn storeKey(comptime seed: []const u8) *const [64]u8 {
+    const padded = seed ++ "0" ** 64;
+    return padded[0..64];
 }
 
 /// Dep fixture with a caller-supplied unique sha prefix so each dep's
 /// bottle is distinguishable from its siblings.
 fn bottleJsonUniqueSha(comptime name: []const u8, comptime tag: []const u8) []const u8 {
-    return "{\"name\":\"" ++ name ++ "\"," ++
+    return comptime "{\"name\":\"" ++ name ++ "\"," ++
         "\"full_name\":\"" ++ name ++ "\"," ++
         "\"tap\":\"homebrew/core\"," ++
         "\"desc\":\"\",\"homepage\":\"\",\"revision\":0," ++
@@ -917,14 +926,14 @@ fn bottleJsonUniqueSha(comptime name: []const u8, comptime tag: []const u8) []co
         "\"dependencies\":[],\"oldnames\":[]," ++
         "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/" ++ name ++ "/blobs\"," ++
         "\"files\":{" ++
-        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ tag ++ "a\"}," ++
-        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ tag ++ "a\"}," ++
-        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ tag ++ "a\"}," ++
-        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ tag ++ "a\"}," ++
-        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ tag ++ "x\"}," ++
-        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ tag ++ "x\"}," ++
-        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ tag ++ "x\"}," ++
-        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ tag ++ "x\"}" ++
+        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ storeKey(tag ++ "a") ++ "\"}," ++
+        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ storeKey(tag ++ "a") ++ "\"}," ++
+        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ storeKey(tag ++ "a") ++ "\"}," ++
+        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ storeKey(tag ++ "a") ++ "\"}," ++
+        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ storeKey(tag ++ "e") ++ "\"}," ++
+        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ storeKey(tag ++ "e") ++ "\"}," ++
+        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ storeKey(tag ++ "e") ++ "\"}," ++
+        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ storeKey(tag ++ "e") ++ "\"}" ++
         "}}}}";
 }
 

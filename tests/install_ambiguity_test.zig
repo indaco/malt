@@ -25,14 +25,14 @@ const formula_wget_json =
     \\ "keg_only":false,"post_install_defined":false,
     \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/wget/blobs",
     \\   "files":{
-    \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-    \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-    \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-    \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
-    \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-    \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-    \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
-    \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"}
+    \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"},
+    \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"},
+    \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"},
+    \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"},
+    \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"1212121212121212121212121212121212121212121212121212121212121212"},
+    \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"1212121212121212121212121212121212121212121212121212121212121212"},
+    \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"1212121212121212121212121212121212121212121212121212121212121212"},
+    \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"1212121212121212121212121212121212121212121212121212121212121212"}
     \\   }}}}
 ;
 
