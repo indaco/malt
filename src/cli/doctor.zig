@@ -15,6 +15,7 @@ const lock_mod = @import("../db/lock.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const symlink = @import("../fs/symlink.zig");
 const tap_cache_mod = @import("../core/tap_cache.zig");
 const tap_mod = @import("../core/tap.zig");
 const clonefile = @import("../fs/clonefile.zig");
@@ -125,6 +126,7 @@ pub const checks = [_]Check{
     .{ .name = "API reachable", .run = checkApiReachable },
     .{ .name = "Orphaned store entries", .run = checkOrphanedStore },
     .{ .name = "Missing kegs", .run = checkMissingKegs },
+    .{ .name = "Cellar package directories", .run = checkCellarPackageDirs },
     .{ .name = "Broken symlinks", .run = checkBrokenSymlinks },
     .{ .name = "Relocation placeholders", .run = checkMachOPlaceholders },
     .{ .name = "Relocated prefix paths", .run = checkUnrelocatedPrefix },
@@ -1028,6 +1030,60 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
     return .err_status;
 }
 
+/// A symlinked `<prefix>/Cellar/<name>` is refused by every cellar sink, so
+/// installs into it fail with no other diagnosis on the machine. `doctor` is
+/// where the user is sent after that refusal, so it has to name the link.
+/// No `--fix` hint: unlinking a package dir the user planted is their call.
+fn checkCellarPackageDirs(ctx: CheckCtx, name: []const u8) CheckResult {
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cellar_root = std.fmt.bufPrint(&root_buf, "{s}/Cellar", .{ctx.prefix}) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    // A prefix with no Cellar yet is a fresh install, not a fault.
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, cellar_root, .{ .iterate = true }) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer dir.close(ctx.io);
+
+    var offenders: std.ArrayList([]u8) = .empty;
+    defer freeOwnedStringList(ctx.allocator, &offenders);
+
+    var iter = dir.iterate();
+    while (iter.next(ctx.io) catch null) |entry| {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ cellar_root, entry.name }) catch continue;
+        // The same predicate the cellar guard refuses on, so report and
+        // refusal can never disagree.
+        if (!symlink.isSymlinkOrUnreadable(ctx.io, path)) continue;
+        const row = ctx.allocator.dupe(u8, entry.name) catch continue;
+        offenders.append(ctx.allocator, row) catch {
+            ctx.allocator.free(row);
+            continue;
+        };
+    }
+
+    if (offenders.items.len == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    if (ctx.op_in_flight) {
+        printCheck(name, .info_status, op_in_flight_note);
+        return .info_status;
+    }
+    var msg_buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "{d} symlinked package dir(s) under Cellar; installs are refused. Replace with a real directory. First: {s}",
+        .{ offenders.items.len, offenders.items[0] },
+    ) catch "Symlinked package dir(s) under Cellar; installs are refused. Replace with a real directory";
+    printCheck(name, .warn_status, msg);
+    armVerboseHint();
+    writeVerboseList(offenders.items);
+    return .warn_status;
+}
+
 fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
     var offenders: std.ArrayList([]u8) = .empty;
     defer freeOwnedStringList(ctx.allocator, &offenders);
@@ -1859,6 +1915,94 @@ test "checkBrokenSymlinks: an intact link with an inaccessible target is not rep
 
     const ctx: CheckCtx = .{ .allocator = allocator, .prefix = prefix, .io = io, .environ = .empty };
     try testing.expectEqual(CheckResult.ok, checkBrokenSymlinks(ctx, "Broken symlinks"));
+}
+
+test "checkCellarPackageDirs: real package dirs and a missing Cellar are clean" {
+    // Without this half the guard cannot fail — a check that always warns
+    // would satisfy the symlink case below on its own.
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("doctor_cellar_pkgdirs_ok");
+    defer s.deinit();
+
+    const ctx: CheckCtx = .{ .allocator = allocator, .prefix = s.base, .io = io, .environ = .empty };
+    defer resetVerboseHint();
+
+    try testing.expectEqual(CheckResult.ok, checkCellarPackageDirs(ctx, "Cellar package directories"));
+
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/real/1.0"));
+    try testing.expectEqual(CheckResult.ok, checkCellarPackageDirs(ctx, "Cellar package directories"));
+}
+
+test "checkCellarPackageDirs: a symlinked package dir warns and names the offender" {
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("doctor_cellar_pkgdirs_link");
+    defer s.deinit();
+
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/real/1.0"));
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/victim"));
+    try std.Io.Dir.symLinkAbsolute(io, s.p("/victim"), s.p("/Cellar/planted"), .{});
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    output.beginStderrCapture(allocator, &out);
+    defer output.endStderrCapture();
+
+    const ctx: CheckCtx = .{ .allocator = allocator, .prefix = s.base, .io = io, .environ = .empty };
+    defer resetVerboseHint();
+
+    try testing.expectEqual(CheckResult.warn_status, checkCellarPackageDirs(ctx, "Cellar package directories"));
+    try testing.expect(std.mem.indexOf(u8, out.items, "planted") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "refused") != null);
+    // Every sibling check names a remedy; a row that only says "broken"
+    // leaves the user with nowhere to go.
+    try testing.expect(std.mem.indexOf(u8, out.items, "Replace with a real directory") != null);
+}
+
+test "checkCellarPackageDirs: a dangling package-dir symlink is still reported" {
+    // The guard refuses on the link itself, not on what it resolves to, so a
+    // probe that followed the link would call this prefix healthy.
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("doctor_cellar_pkgdirs_dangling");
+    defer s.deinit();
+
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar"));
+    try std.Io.Dir.symLinkAbsolute(io, s.p("/gone"), s.p("/Cellar/dangling"), .{});
+
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+    const ctx: CheckCtx = .{ .allocator = allocator, .prefix = s.base, .io = io, .environ = .empty };
+    defer resetVerboseHint();
+
+    try testing.expectEqual(CheckResult.warn_status, checkCellarPackageDirs(ctx, "Cellar package directories"));
+}
+
+test "checkCellarPackageDirs: a live operation downgrades the finding, never hides it" {
+    // Mid-install the Cellar is in flux; blaming the user for a transient
+    // is the same mistake the other filesystem-vs-DB checks avoid.
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("doctor_cellar_pkgdirs_inflight");
+    defer s.deinit();
+
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar"));
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/victim"));
+    try std.Io.Dir.symLinkAbsolute(io, s.p("/victim"), s.p("/Cellar/planted"), .{});
+
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+    const ctx: CheckCtx = .{
+        .allocator = allocator,
+        .prefix = s.base,
+        .io = io,
+        .environ = .empty,
+        .op_in_flight = true,
+    };
+    defer resetVerboseHint();
+
+    try testing.expectEqual(CheckResult.info_status, checkCellarPackageDirs(ctx, "Cellar package directories"));
 }
 
 test "checkOrphanedStore: counts only refcount<=0 rows across store entries" {

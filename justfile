@@ -70,6 +70,7 @@ regressions-hermetic:
 [group('test')]
 regressions-harness:
     @./scripts/regressions/cached-outdated-drops-revision-bumped-packages.sh
+    @./scripts/regressions/cellar-symlink-followups-3-follow-up.sh
     @./scripts/regressions/child-run-sequential-pipe-drain-deadlock.sh
     @./scripts/regressions/cosign-guard-fails-open-and-spawn-not-pinned.sh
     @./scripts/regressions/csi-whitelist-ignores-private-parameter-bytes.sh

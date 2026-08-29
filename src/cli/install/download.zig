@@ -580,8 +580,8 @@ pub const InstallKegResult = struct {
 /// Materialise a keg from a formula's bottle URL.
 ///
 /// Composes the install pipeline's per-keg work — bottle resolve, GHCR
-/// download with bounded retry, store commit + refcount, cellar
-/// materialize — so the install pool worker and the upgrade per-keg
+/// download with bounded retry, store commit, cellar materialize +
+/// refcount — so the install pool worker and the upgrade per-keg
 /// loop share one implementation instead of drifting in two places.
 ///
 /// On a warm store the download branch is skipped entirely and the
@@ -601,13 +601,6 @@ pub fn installKegFromBottle(
     const bottle = formula_mod.resolveBottle(formula) catch return InstallError.NoBottle;
 
     const committed = try downloadBottleToStore(ctx, allocator, deps, formula, bottle);
-    if (committed) {
-        // Advisory refcount: commit succeeded so the bytes are ours; a
-        // bumped warning is not a failure of the materialize.
-        deps.store.incrementRef(bottle.sha256) catch |e| {
-            std.log.warn("refcount increment failed for {s}: {s}", .{ bottle.sha256, @errorName(e) });
-        };
-    }
 
     // Some bottles carry placeholder tokens whose value is a path inside a
     // *declared dependency's* keg rather than the prefix. Only here is the
@@ -634,6 +627,15 @@ pub fn installKegFromBottle(
         if (deps.cellar_diag) |out| out.* = err;
         return InstallError.CellarFailed;
     };
+
+    // Claim the bytes only once a keg exists: a bump taken before a refused
+    // materialize can never be undone, because no `kegs` row will ever
+    // reference it. Still advisory, still gated on `committed`.
+    if (committed) {
+        deps.store.incrementRef(bottle.sha256) catch |e| {
+            std.log.warn("refcount increment failed for {s}: {s}", .{ bottle.sha256, @errorName(e) });
+        };
+    }
 
     return .{ .sha256 = bottle.sha256, .keg = keg };
 }

@@ -1663,7 +1663,7 @@ fn installCask(
 // (where describeError == @errorName) drop the parenthetical so the
 // message reads `Failed to materialize X: CloneFailed` instead of
 // `Failed to materialize X: CloneFailed (CloneFailed)`.
-fn formatMaterializeFailure(buf: []u8, name: []const u8, err: cellar_mod.CellarError) []const u8 {
+pub fn formatMaterializeFailure(buf: []u8, name: []const u8, err: cellar_mod.CellarError) []const u8 {
     const tag = @errorName(err);
     const desc = cellar_mod.describeError(err);
     const result = if (std.mem.eql(u8, tag, desc))
@@ -1850,6 +1850,21 @@ test "formatMaterializeFailure: action-hint tag keeps the parenthetical prose" {
     try std.testing.expect(std.mem.startsWith(u8, msg, "Failed to materialize pkg: InstallNameToolMissing ("));
     try std.testing.expect(std.mem.endsWith(u8, msg, ")"));
     try std.testing.expect(std.mem.indexOf(u8, msg, "install_name_tool not found on PATH") != null);
+}
+
+test "formatMaterializeFailure: a symlinked package dir names the cause and the remedy" {
+    // Both install and upgrade render their cellar refusal through here, so
+    // this is the line a user gets after the guard fires.
+    var buf: [256]u8 = undefined;
+    const msg = formatMaterializeFailure(&buf, "jq", cellar_mod.CellarError.UnsafeCellarLink);
+    try std.testing.expect(std.mem.startsWith(u8, msg, "Failed to materialize jq: UnsafeCellarLink ("));
+    try std.testing.expect(std.mem.indexOf(u8, msg, "is a symlink") != null);
+}
+
+test "formatMaterializeFailure: a name that overflows the buffer still reports a failure" {
+    var buf: [32]u8 = undefined;
+    const msg = formatMaterializeFailure(&buf, "n" ** 64, cellar_mod.CellarError.CloneFailed);
+    try std.testing.expectEqualStrings("Failed to materialize <truncated>", msg);
 }
 
 test "kegPresent returns true only when <prefix>/Cellar/<name> exists" {
