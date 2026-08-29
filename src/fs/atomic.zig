@@ -2,79 +2,9 @@ const std = @import("std");
 const clonefile = @import("clonefile.zig");
 const prefix_path = @import("prefix_path.zig");
 
-/// Re-exported from `fs/prefix_path.zig`, which owns the bound alongside the
-/// path-join buffer size so the two stay in lockstep.
+/// Re-exported from `fs/prefix_path.zig`, which owns the prefix bound, its
+/// charset and its validator alongside the path-join buffer size.
 pub const max_prefix_len = prefix_path.max_prefix_len;
-
-pub const PrefixError = error{
-    Empty,
-    NotAbsolute,
-    DotDotComponent,
-    EmbeddedNul,
-    TooLong,
-    EmptyComponent,
-    DisallowedByte,
-};
-
-/// Single source of truth for the prefix charset. Matches
-/// `validatePathForProfile` in `core/sandbox/macos.zig` so anything that
-/// passes here is safe to interpolate into a Ruby single-quoted literal,
-/// a sandbox-profile path string, or a shell argv.
-pub fn isAllowedPrefixByte(b: u8) bool {
-    return switch (b) {
-        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '+', '-', '/' => true,
-        else => false,
-    };
-}
-
-/// Charset for a formula `name` or `version`. Same alphabet as the prefix
-/// minus `/` (a name with `/` would pierce a `{prefix}/Cellar/{name}/...`
-/// path) plus `@` (versioned formulae like `llvm@21`, `python@3.12`).
-pub fn isAllowedNameByte(b: u8) bool {
-    return switch (b) {
-        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '+', '-', '@' => true,
-        else => false,
-    };
-}
-
-/// Validate a candidate install prefix. Called at the env boundary so
-/// downstream code can assume absolute, NUL-free, traversal-free.
-pub fn validatePrefix(prefix: []const u8) PrefixError!void {
-    if (prefix.len == 0) return PrefixError.Empty;
-    if (prefix.len > max_prefix_len) return PrefixError.TooLong;
-    if (prefix[0] != '/') return PrefixError.NotAbsolute;
-    if (std.mem.indexOfScalar(u8, prefix, 0) != null) return PrefixError.EmbeddedNul;
-    // Tight charset closes the BUG-007/BUG-019 injection class — quotes,
-    // backslashes, control bytes, parens etc. flow into single-quoted
-    // Ruby literals and sandbox-profile strings unchanged.
-    for (prefix) |b| if (!isAllowedPrefixByte(b)) return PrefixError.DisallowedByte;
-
-    // Strip one trailing slash; `/opt/malt/` is fine, `//` inside is not.
-    const trimmed = if (prefix.len > 1 and prefix[prefix.len - 1] == '/')
-        prefix[0 .. prefix.len - 1]
-    else
-        prefix;
-    if (trimmed.len == 1) return; // just "/" — no components to scan
-
-    var it = std.mem.splitScalar(u8, trimmed, '/');
-    _ = it.next(); // leading "/" yields an empty first slice
-    while (it.next()) |comp| {
-        if (comp.len == 0) return PrefixError.EmptyComponent;
-        if (std.mem.eql(u8, comp, "..")) return PrefixError.DotDotComponent;
-    }
-}
-
-pub fn describePrefixError(e: PrefixError) []const u8 {
-    return switch (e) {
-        PrefixError.Empty => "empty",
-        PrefixError.NotAbsolute => "not an absolute path",
-        PrefixError.DotDotComponent => "contains '..' component",
-        PrefixError.EmbeddedNul => "contains NUL byte",
-        PrefixError.TooLong => "exceeds 512 bytes",
-        PrefixError.EmptyComponent => "contains empty path component ('//')",
-        PrefixError.DisallowedByte => "contains a byte outside [a-zA-Z0-9._+-/]",
-    };
-}
 
 /// Direct getenv from `std.c.environ`; the prefix/cache helpers are read at
 /// process startup so tying them to the parent block keeps the API
@@ -89,9 +19,9 @@ fn getenvLocal(name: []const u8) ?[:0]const u8 {
 
 /// Validated form of `maltPrefixOrAbort`, returns an error on bad env so tests
 /// can inspect the failure without the process exiting.
-pub fn maltPrefixChecked() PrefixError![:0]const u8 {
+pub fn maltPrefixChecked() prefix_path.PrefixError![:0]const u8 {
     const raw = getenvLocal("MALT_PREFIX") orelse return "/opt/malt";
-    try validatePrefix(raw);
+    try prefix_path.validatePrefix(raw);
     return raw;
 }
 
@@ -107,7 +37,7 @@ pub fn maltPrefixOrAbort() [:0]const u8 {
         const msg = std.fmt.bufPrint(
             &buf,
             "malt: refusing to use MALT_PREFIX='{s}': {s}\n",
-            .{ raw, describePrefixError(e) },
+            .{ raw, prefix_path.describePrefixError(e) },
         ) catch "malt: MALT_PREFIX rejected; refusing to proceed\n";
         _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
         std.process.exit(78); // EX_CONFIG

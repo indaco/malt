@@ -213,7 +213,7 @@ test "long-but-valid MALT_PREFIX reaches the real db failure instead of exiting 
     // directory — and must surface Aborted.
     const prefix = try buildLongPrefix(testing.allocator, base, 512);
     defer testing.allocator.free(prefix);
-    try malt.atomic.validatePrefix(prefix); // precondition: this prefix is valid
+    try malt.prefix_path.validatePrefix(prefix); // precondition: this prefix is valid
     const db_as_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
     defer testing.allocator.free(db_as_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_as_dir);

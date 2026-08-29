@@ -4,6 +4,17 @@
 
 const std = @import("std");
 
+/// Charset for a formula `name` or `version`. Same alphabet as
+/// `prefix_path.isAllowedPrefixByte` minus `/` (a name with `/` would pierce a
+/// `{prefix}/Cellar/{name}/...` path) plus `@` (versioned formulae like
+/// `llvm@21`, `python@3.12`).
+pub fn isAllowedNameByte(b: u8) bool {
+    return switch (b) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '+', '-', '@' => true,
+        else => false,
+    };
+}
+
 /// True when `s` is a usable single path component. Charset-agnostic so real
 /// names/versions (`@`, `+`, `,`, `:`, dots) pass — it bars only what hops out
 /// of a component: empty, `.`, an embedded `..`, a `/`, or a NUL.
@@ -62,4 +73,17 @@ test "isPathComponent rejects component-hopping shapes" {
 test "isPathComponent accepts real names and versions" {
     const ok = [_][]const u8{ "com.malt.redis", "openssl@3", "gtk+", "3.2.1+dfsg", "1.2,340:5", "a b" };
     for (ok) |s| try std.testing.expect(isPathComponent(s));
+}
+
+test "isAllowedNameByte: name/version charset extends prefix with @" {
+    // Cellar dir names embed the formula name + version (e.g. `llvm@21`,
+    // `gcc@13`, `python@3.12`) — `@` must pass for those, but `/` must
+    // not (it would let a hostile name pierce the Cellar path).
+    const allowed = "abcXYZ0123456789._+-@";
+    for (allowed) |b| try std.testing.expect(isAllowedNameByte(b));
+    const denied = "/'\"\\\n\t (){}[]$|;&<>*?#";
+    for (denied) |b| try std.testing.expect(!isAllowedNameByte(b));
+    var b: u8 = 0;
+    while (b < 0x20) : (b += 1) try std.testing.expect(!isAllowedNameByte(b));
+    try std.testing.expect(!isAllowedNameByte(0x7f));
 }
