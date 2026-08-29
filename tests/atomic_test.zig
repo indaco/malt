@@ -70,19 +70,6 @@ test "maltPrefixOrAbort honours MALT_PREFIX env var" {
     try testing.expectEqualStrings("/tmp/malt_atomic_prefix_env", got);
 }
 
-test "isAllowedNameByte: name/version charset extends prefix with @" {
-    // Cellar dir names embed the formula name + version (e.g. `llvm@21`,
-    // `gcc@13`, `python@3.12`) — `@` must pass for those, but `/` must
-    // not (it would let a hostile name pierce the Cellar path).
-    const allowed = "abcXYZ0123456789._+-@";
-    for (allowed) |b| try testing.expect(atomic.isAllowedNameByte(b));
-    const denied = "/'\"\\\n\t (){}[]$|;&<>*?#";
-    for (denied) |b| try testing.expect(!atomic.isAllowedNameByte(b));
-    var b: u8 = 0;
-    while (b < 0x20) : (b += 1) try testing.expect(!atomic.isAllowedNameByte(b));
-    try testing.expect(!atomic.isAllowedNameByte(0x7f));
-}
-
 test "maltPrefixChecked: empty MALT_PREFIX returns Empty error" {
     setPrefix("");
     defer unsetPrefix();

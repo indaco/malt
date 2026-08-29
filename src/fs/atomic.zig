@@ -6,17 +6,6 @@ const prefix_path = @import("prefix_path.zig");
 /// charset and its validator alongside the path-join buffer size.
 pub const max_prefix_len = prefix_path.max_prefix_len;
 
-/// Charset for a formula `name` or `version`. Same alphabet as
-/// `prefix_path.isAllowedPrefixByte`
-/// minus `/` (a name with `/` would pierce a `{prefix}/Cellar/{name}/...`
-/// path) plus `@` (versioned formulae like `llvm@21`, `python@3.12`).
-pub fn isAllowedNameByte(b: u8) bool {
-    return switch (b) {
-        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '+', '-', '@' => true,
-        else => false,
-    };
-}
-
 /// Direct getenv from `std.c.environ`; the prefix/cache helpers are read at
 /// process startup so tying them to the parent block keeps the API
 /// arg-free without re-introducing a `fs/compat` shim dep.
