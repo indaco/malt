@@ -64,9 +64,18 @@ fn seedCache(cache_dir: []const u8, name: []const u8, json: []const u8) !void {
     try f.writeStreamingAll(std.Options.debug_io, json);
 }
 
+/// A fixture digest has to be 64 lowercase hex or the parser drops the
+/// bottle entry outright. Callers must keep the `comptime` on their `++`
+/// chain: without it the concat lands in a stack temporary and the fixture
+/// hands back a dangling slice.
+fn storeKey(comptime seed: []const u8) *const [64]u8 {
+    const padded = seed ++ "0" ** 64;
+    return padded[0..64];
+}
+
 /// Unique sha per dep so the dedup branch can't collapse jobs.
 fn bottleJsonUniqueSha(comptime name: []const u8, comptime tag: []const u8) []const u8 {
-    return "{\"name\":\"" ++ name ++ "\"," ++
+    return comptime "{\"name\":\"" ++ name ++ "\"," ++
         "\"full_name\":\"" ++ name ++ "\"," ++
         "\"tap\":\"homebrew/core\"," ++
         "\"desc\":\"\",\"homepage\":\"\",\"revision\":0," ++
@@ -75,19 +84,19 @@ fn bottleJsonUniqueSha(comptime name: []const u8, comptime tag: []const u8) []co
         "\"dependencies\":[],\"oldnames\":[]," ++
         "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/" ++ name ++ "/blobs\"," ++
         "\"files\":{" ++
-        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ tag ++ "a\"}," ++
-        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ tag ++ "a\"}," ++
-        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ tag ++ "a\"}," ++
-        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ tag ++ "a\"}," ++
-        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ tag ++ "x\"}," ++
-        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ tag ++ "x\"}," ++
-        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ tag ++ "x\"}," ++
-        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ tag ++ "x\"}" ++
+        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ storeKey(tag ++ "a") ++ "\"}," ++
+        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ storeKey(tag ++ "a") ++ "\"}," ++
+        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ storeKey(tag ++ "a") ++ "\"}," ++
+        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ storeKey(tag ++ "a") ++ "\"}," ++
+        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ storeKey(tag ++ "e") ++ "\"}," ++
+        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ storeKey(tag ++ "e") ++ "\"}," ++
+        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ storeKey(tag ++ "e") ++ "\"}," ++
+        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ storeKey(tag ++ "e") ++ "\"}" ++
         "}}}}";
 }
 
 fn rootJsonWithFiveDeps() []const u8 {
-    return "{\"name\":\"root\"," ++
+    return comptime "{\"name\":\"root\"," ++
         "\"full_name\":\"root\"," ++
         "\"tap\":\"homebrew/core\"," ++
         "\"desc\":\"\",\"homepage\":\"\",\"revision\":0," ++
@@ -97,14 +106,14 @@ fn rootJsonWithFiveDeps() []const u8 {
         "\"oldnames\":[]," ++
         "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/root/blobs\"," ++
         "\"files\":{" ++
-        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"r0\"}," ++
-        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"r0\"}," ++
-        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"r0\"}," ++
-        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"r0\"}," ++
-        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"r1\"}," ++
-        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"r1\"}," ++
-        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"r1\"}," ++
-        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"r1\"}" ++
+        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"" ++ storeKey("b0") ++ "\"}," ++
+        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"" ++ storeKey("b0") ++ "\"}," ++
+        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"" ++ storeKey("b0") ++ "\"}," ++
+        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"" ++ storeKey("b0") ++ "\"}," ++
+        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"" ++ storeKey("b1") ++ "\"}," ++
+        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"" ++ storeKey("b1") ++ "\"}," ++
+        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"" ++ storeKey("b1") ++ "\"}," ++
+        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"" ++ storeKey("b1") ++ "\"}" ++
         "}}}}";
 }
 
@@ -352,37 +361,37 @@ test "shared deps across multi-package install collapse to one parse" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
 
     // Two roots ("alpha", "omega") that share one dep ("shared_lib").
-    const alpha_json = "{\"name\":\"alpha\"," ++
+    const alpha_json = comptime "{\"name\":\"alpha\"," ++
         "\"versions\":{\"stable\":\"1.0\"}," ++
         "\"dependencies\":[\"shared_lib\"]," ++
         "\"oldnames\":[]," ++
         "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/alpha/blobs\",\"files\":{" ++
-        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-arm\",\"sha256\":\"a0\"}," ++
-        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-arm\",\"sha256\":\"a0\"}," ++
-        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-arm\",\"sha256\":\"a0\"}," ++
-        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-arm\",\"sha256\":\"a0\"}," ++
-        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-x86\",\"sha256\":\"a1\"}," ++
-        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-x86\",\"sha256\":\"a1\"}," ++
-        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-x86\",\"sha256\":\"a1\"}," ++
-        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-x86\",\"sha256\":\"a1\"}" ++
+        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-arm\",\"sha256\":\"" ++ storeKey("a0") ++ "\"}," ++
+        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-arm\",\"sha256\":\"" ++ storeKey("a0") ++ "\"}," ++
+        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-arm\",\"sha256\":\"" ++ storeKey("a0") ++ "\"}," ++
+        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-arm\",\"sha256\":\"" ++ storeKey("a0") ++ "\"}," ++
+        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-x86\",\"sha256\":\"" ++ storeKey("a1") ++ "\"}," ++
+        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-x86\",\"sha256\":\"" ++ storeKey("a1") ++ "\"}," ++
+        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-x86\",\"sha256\":\"" ++ storeKey("a1") ++ "\"}," ++
+        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/alpha-x86\",\"sha256\":\"" ++ storeKey("a1") ++ "\"}" ++
         "}}}}";
-    const omega_json = "{\"name\":\"omega\"," ++
+    const omega_json = comptime "{\"name\":\"omega\"," ++
         "\"versions\":{\"stable\":\"1.0\"}," ++
         "\"dependencies\":[\"shared_lib\"]," ++
         "\"oldnames\":[]," ++
         "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/omega/blobs\",\"files\":{" ++
-        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-arm\",\"sha256\":\"o0\"}," ++
-        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-arm\",\"sha256\":\"o0\"}," ++
-        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-arm\",\"sha256\":\"o0\"}," ++
-        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-arm\",\"sha256\":\"o0\"}," ++
-        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-x86\",\"sha256\":\"o1\"}," ++
-        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-x86\",\"sha256\":\"o1\"}," ++
-        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-x86\",\"sha256\":\"o1\"}," ++
-        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-x86\",\"sha256\":\"o1\"}" ++
+        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-arm\",\"sha256\":\"" ++ storeKey("c0") ++ "\"}," ++
+        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-arm\",\"sha256\":\"" ++ storeKey("c0") ++ "\"}," ++
+        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-arm\",\"sha256\":\"" ++ storeKey("c0") ++ "\"}," ++
+        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-arm\",\"sha256\":\"" ++ storeKey("c0") ++ "\"}," ++
+        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-x86\",\"sha256\":\"" ++ storeKey("c1") ++ "\"}," ++
+        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-x86\",\"sha256\":\"" ++ storeKey("c1") ++ "\"}," ++
+        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-x86\",\"sha256\":\"" ++ storeKey("c1") ++ "\"}," ++
+        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/omega-x86\",\"sha256\":\"" ++ storeKey("c1") ++ "\"}" ++
         "}}}}";
     try seedCache(cache_dir, "alpha", alpha_json);
     try seedCache(cache_dir, "omega", omega_json);
-    try seedCache(cache_dir, "shared_lib", bottleJsonUniqueSha("shared_lib", "ss"));
+    try seedCache(cache_dir, "shared_lib", bottleJsonUniqueSha("shared_lib", "0a"));
 
     var http_pool = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();

@@ -8,6 +8,7 @@ const builtin = @import("builtin");
 const service_types = @import("services/types.zig");
 const cron = @import("services/cron.zig");
 const path_component = @import("../fs/path_component.zig");
+const store_path = @import("../fs/store_path.zig");
 pub const Schedule = service_types.Schedule;
 
 pub const FormulaError = error{
@@ -561,10 +562,15 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
                                     .object => |o| o,
                                     else => continue,
                                 };
+                                // A digest that cannot name a store entry makes the
+                                // entry unusable; drop it so the platform reads
+                                // as un-bottled rather than fail far downstream.
+                                const sha = getString(file_obj, "sha256") orelse continue;
+                                if (!store_path.isValidSha256(sha)) continue;
                                 const bf = BottleFile{
                                     .cellar = getString(file_obj, "cellar") orelse "",
                                     .url = getString(file_obj, "url") orelse continue,
-                                    .sha256 = getString(file_obj, "sha256") orelse "",
+                                    .sha256 = sha,
                                 };
                                 map.map.put(arena, platform_name, bf) catch continue;
                             }
@@ -999,6 +1005,99 @@ test "parseFormula refuses a formula with no stable version" {
     }
 }
 
+// A digest that is a usable store key; the tests below vary it.
+const store_key_sha = "0123456789abcdef" ** 4;
+
+fn bottleFormulaJson(files_json: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        testing.allocator,
+        \\{{"name":"bottled","versions":{{"stable":"1.0"}},"bottle":{{"stable":{{"root_url":"https://example.test","files":{s}}}}}}}
+    ,
+        .{files_json},
+    );
+}
+
+fn oneBottleJson(sha_value_json: []const u8) ![]u8 {
+    const files = try std.fmt.allocPrint(
+        testing.allocator,
+        \\{{"all":{{"cellar":":any","url":"https://example.test/a","sha256":{s}}}}}
+    ,
+        .{sha_value_json},
+    );
+    defer testing.allocator.free(files);
+    return bottleFormulaJson(files);
+}
+
+test "parseFormula drops a bottle entry whose sha256 is not a store key" {
+    // An unusable digest used to parse as "", which reads as a legal path
+    // component and only failed layers down. Dropping the entry leaves the
+    // platform un-bottled - a state every caller already handles.
+    const bad = [_][]const u8{
+        "null",
+        "42",
+        "\"\"",
+        "\"" ++ "a" ** 63 ++ "\"",
+        "\"" ++ "a" ** 65 ++ "\"",
+        "\"" ++ "g" ** 64 ++ "\"",
+        "\"" ++ "A" ** 64 ++ "\"",
+    };
+    for (bad) |sha_value| {
+        const json = try oneBottleJson(sha_value);
+        defer testing.allocator.free(json);
+        var formula = try parseFormula(testing.allocator, json);
+        defer formula.deinit();
+        try testing.expectEqual(@as(usize, 0), formula.bottle_files.?.map.count());
+        try testing.expectError(FormulaError.NoBottleAvailable, resolveBottle(&formula));
+    }
+
+    // An absent key is the same case, and so is a formula that publishes
+    // nothing: all of them land on the existing no-bottle path.
+    const absent =
+        \\{"all":{"cellar":":any","url":"https://example.test/a"}}
+    ;
+    for ([_][]const u8{ absent, "{}" }) |files| {
+        const json = try bottleFormulaJson(files);
+        defer testing.allocator.free(json);
+        var formula = try parseFormula(testing.allocator, json);
+        defer formula.deinit();
+        try testing.expectEqual(@as(usize, 0), formula.bottle_files.?.map.count());
+        try testing.expectError(FormulaError.NoBottleAvailable, resolveBottle(&formula));
+    }
+}
+
+test "parseFormula keeps a bottle entry whose sha256 is a store key" {
+    const json = try oneBottleJson("\"" ++ store_key_sha ++ "\"");
+    defer testing.allocator.free(json);
+    var formula = try parseFormula(testing.allocator, json);
+    defer formula.deinit();
+
+    const bottle = try resolveBottle(&formula);
+    try testing.expectEqualStrings(store_key_sha, bottle.sha256);
+    try testing.expectEqualStrings("https://example.test/a", bottle.url);
+    try testing.expectEqualStrings(":any", bottle.cellar);
+}
+
+test "parseFormula drops only the malformed platform entry" {
+    // One broken platform must not cost the formula its other bottles, nor
+    // take it out of the listings entirely.
+    const files = try std.fmt.allocPrint(
+        testing.allocator,
+        \\{{"arm64_sequoia":{{"cellar":":any","url":"u1","sha256":""}},"sequoia":{{"cellar":":any","url":"u2","sha256":"nope"}},"all":{{"cellar":":any","url":"u3","sha256":"{s}"}}}}
+    ,
+        .{store_key_sha},
+    );
+    defer testing.allocator.free(files);
+    const json = try bottleFormulaJson(files);
+    defer testing.allocator.free(json);
+    var formula = try parseFormula(testing.allocator, json);
+    defer formula.deinit();
+
+    try testing.expectEqual(@as(usize, 1), formula.bottle_files.?.map.count());
+    const bottle = try resolveBottle(&formula);
+    try testing.expectEqualStrings(store_key_sha, bottle.sha256);
+    try testing.expectEqualStrings("u3", bottle.url);
+}
+
 test "parseFormula flags a formula migrated to post_install_steps" {
     // Migrated formulas report post_install_defined=false and carry the
     // hook in a declarative steps array; the steps are what must keep the
@@ -1040,7 +1139,7 @@ test "parseFormula releases every auxiliary allocation through deinit" {
     // that escapes _parsed: dependencies, oldnames, service.run,
     // bottle_files map storage, and the revision-bumped pkg_version.
     const json =
-        \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":2,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":["beta","gamma"],"oldnames":["alpha-old"],"service":{"run":["/usr/bin/alpha","--daemon"]},"bottle":{"stable":{"root_url":"https://example.test","files":{"arm64_sequoia":{"cellar":"/opt","url":"https://example.test/a","sha256":"deadbeef"}}}}}
+        \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":2,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":["beta","gamma"],"oldnames":["alpha-old"],"service":{"run":["/usr/bin/alpha","--daemon"]},"bottle":{"stable":{"root_url":"https://example.test","files":{"arm64_sequoia":{"cellar":"/opt","url":"https://example.test/a","sha256":"3434343434343434343434343434343434343434343434343434343434343434"}}}}}
     ;
     var formula = try parseFormula(testing.allocator, json);
     defer formula.deinit();
