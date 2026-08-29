@@ -1880,8 +1880,14 @@ fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, extra_env: []const EnvVa
     defer env_map.deinit();
 
     const raw = sandbox_macos.rawPassthroughEnabled(ctx.environ);
+    // Run the step in its own keg. An inherited cwd is wherever the user
+    // invoked malt from, which the sandbox profile does not grant: anything
+    // resolving it fails, and a relative path in a step is unusable.
+    const cwd: std.process.Child.Cwd =
+        if (ctx.keg_path.len > 0) .{ .path = ctx.keg_path } else .inherit;
     var child = std.process.spawn(ctx.io, .{
         .argv = fenced,
+        .cwd = cwd,
         .stdout = sandbox_macos.childStdioMode(ctx.suppress_child_stdout, raw),
         .stderr = sandbox_macos.childStdioMode(false, raw),
         .environ_map = &env_map,
@@ -3385,6 +3391,30 @@ const test_secret_environ: std.process.Environ = .{ .block = .{ .slice = &[_:nul
     "LANG=en_US.UTF-8",
     "PATH=/attacker/bin:/usr/bin:/bin",
 } } };
+
+test "run pins the child's working directory to the keg" {
+    // An inherited cwd is wherever the user happened to run `mt` from: outside
+    // the sandbox profile, so anything resolving it fails noisily, and a
+    // relative path in a step lands somewhere unpredictable.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.io = threaded.io();
+    const a = h.arena.allocator();
+
+    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, libexec);
+    try std.Io.Dir.symLinkAbsolute(h.io, "/bin/mkdir", try std.fmt.allocPrint(a, "{s}/post-install", .{libexec}), .{});
+
+    // A relative argument resolves against the child's cwd, so where the
+    // directory lands is the assertion.
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"run","command":{"base":"libexec","path":"post-install"},
+        \\  "args":["cwd-probe"]}]
+    )));
+    try testing.expect(dirExists(h.io, try std.fmt.allocPrint(a, "{s}/cwd-probe", .{h.keg})));
+}
 
 test "run hands the child a scrubbed environment, not malt's own" {
     // Seed the Io from the same environ main.zig seeds it from: with the
