@@ -147,6 +147,25 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     return buf[0..n];
 }
 
+// One distinct 64-hex key per fixture. The cellar refuses anything else, and
+// the relocated-cache test needs its seed key to differ from the cached one.
+const sha_revision_suffix = "ab" ** 32;
+const sha_stale_keg = "cd" ** 32;
+const sha_exact_version = "ef" ** 32;
+const sha_relocatable = "01" ** 32;
+const sha_dep_placeholder = "23" ** 32;
+const sha_dep_unresolved = "45" ** 32;
+const sha_perl_shebang = "67" ** 32;
+const sha_repo_library = "89" ** 32;
+const sha_perl_fallback = "ba" ** 32;
+const sha_multi_token = "dc" ** 32;
+const sha_no_placeholder = "fe" ** 32;
+const sha_binary_skip = "10" ** 32;
+const sha_cache_seed = "32" ** 32;
+const sha_absent_source = "54" ** 32;
+const sha_absent_sibling = "76" ** 32;
+const sha_symlinked_pkg = "98" ** 32;
+
 // ---------------------------------------------------------------------------
 // Keg directory flattening (revision suffix handling)
 // ---------------------------------------------------------------------------
@@ -159,7 +178,7 @@ test "materialize handles version with revision suffix" {
     }
 
     try setupMaltDirs(testing.allocator, prefix);
-    try createBottleFixture(testing.allocator, prefix, "abc123", "pcre2", "10.47_1");
+    try createBottleFixture(testing.allocator, prefix, sha_revision_suffix, "pcre2", "10.47_1");
 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
@@ -168,7 +187,7 @@ test "materialize handles version with revision suffix" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "abc123",
+        sha_revision_suffix,
         "pcre2",
         "10.47",
         ":any",
@@ -205,7 +224,7 @@ test "materialize replaces a pre-existing Cellar/{name}/{version} directory (gh#
     }
 
     try setupMaltDirs(testing.allocator, prefix);
-    try createBottleFixture(testing.allocator, prefix, "stale123", "lld@21", "21.1.8_1");
+    try createBottleFixture(testing.allocator, prefix, sha_stale_keg, "lld@21", "21.1.8_1");
 
     // Plant a stale keg at the exact destination malt is about to write.
     const stale_keg = try std.fmt.allocPrint(
@@ -230,7 +249,7 @@ test "materialize replaces a pre-existing Cellar/{name}/{version} directory (gh#
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "stale123",
+        sha_stale_keg,
         "lld@21",
         "21.1.8_1",
         ":any",
@@ -255,7 +274,7 @@ test "materialize handles exact version match (no revision)" {
     }
 
     try setupMaltDirs(testing.allocator, prefix);
-    try createBottleFixture(testing.allocator, prefix, "def456", "jq", "1.7.1");
+    try createBottleFixture(testing.allocator, prefix, sha_exact_version, "jq", "1.7.1");
 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
@@ -264,7 +283,7 @@ test "materialize handles exact version match (no revision)" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "def456",
+        sha_exact_version,
         "jq",
         "1.7.1",
         ":any",
@@ -289,7 +308,7 @@ test "placeholder substitution runs for relocatable bottles" {
     }
 
     try setupMaltDirs(testing.allocator, prefix);
-    try createBottleFixture(testing.allocator, prefix, "rel123", "stow", "2.4.1");
+    try createBottleFixture(testing.allocator, prefix, sha_relocatable, "stow", "2.4.1");
 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
@@ -298,7 +317,7 @@ test "placeholder substitution runs for relocatable bottles" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "rel123",
+        sha_relocatable,
         "stow",
         "2.4.1",
         ":any", // relocatable — the bug scenario,
@@ -329,7 +348,7 @@ test "relocation substitutes the caller-resolved dependency placeholder" {
     }
 
     try setupMaltDirs(testing.allocator, prefix);
-    try createPlaceholderBottleFixture(testing.allocator, prefix, "dep123", "pkg", "1.0");
+    try createPlaceholderBottleFixture(testing.allocator, prefix, sha_dep_placeholder, "pkg", "1.0");
 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
@@ -345,7 +364,7 @@ test "relocation substitutes the caller-resolved dependency placeholder" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "dep123",
+        sha_dep_placeholder,
         "pkg",
         "1.0",
         ":any",
@@ -372,7 +391,7 @@ test "relocation leaves an unresolved dependency placeholder in place" {
     }
 
     try setupMaltDirs(testing.allocator, prefix);
-    try createPlaceholderBottleFixture(testing.allocator, prefix, "dep456", "pkg", "1.0");
+    try createPlaceholderBottleFixture(testing.allocator, prefix, sha_dep_unresolved, "pkg", "1.0");
 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
@@ -381,7 +400,7 @@ test "relocation leaves an unresolved dependency placeholder in place" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "dep456",
+        sha_dep_unresolved,
         "pkg",
         "1.0",
         ":any",
@@ -412,7 +431,7 @@ test "relocation substitutes the perl shebang placeholder" {
     try createPerlBottleFixture(
         testing.allocator,
         prefix,
-        "perl123",
+        sha_perl_shebang,
         "pkg",
         "class Pkg < Formula\n  depends_on \"perl\"\nend\n",
     );
@@ -424,7 +443,7 @@ test "relocation substitutes the perl shebang placeholder" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "perl123",
+        sha_perl_shebang,
         "pkg",
         "1.0",
         ":any",
@@ -459,7 +478,7 @@ test "relocation substitutes the repository and library placeholders" {
 
     try setupMaltDirs(testing.allocator, prefix);
 
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/repo123/pkg/1.0/lib", .{prefix});
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/pkg/1.0/lib", .{ prefix, sha_repo_library });
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
 
@@ -481,7 +500,7 @@ test "relocation substitutes the repository and library placeholders" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "repo123",
+        sha_repo_library,
         "pkg",
         "1.0",
         ":any",
@@ -518,7 +537,7 @@ test "relocation falls back to the system perl when no perl is brewed" {
     try createPerlBottleFixture(
         testing.allocator,
         prefix,
-        "perl456",
+        sha_perl_fallback,
         "imgtool",
         "class Imgtool < Formula\n  depends_on \"cmake\" => :build\n  uses_from_macos \"perl\"\nend\n",
     );
@@ -530,7 +549,7 @@ test "relocation falls back to the system perl when no perl is brewed" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "perl456",
+        sha_perl_fallback,
         "imgtool",
         "1.0",
         ":any",
@@ -555,7 +574,7 @@ test "placeholder substitution replaces multiple tokens in single file" {
     }
 
     try setupMaltDirs(testing.allocator, prefix);
-    try createBottleFixture(testing.allocator, prefix, "multi123", "pkg", "1.0");
+    try createBottleFixture(testing.allocator, prefix, sha_multi_token, "pkg", "1.0");
 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
@@ -564,7 +583,7 @@ test "placeholder substitution replaces multiple tokens in single file" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "multi123",
+        sha_multi_token,
         "pkg",
         "1.0",
         "",
@@ -594,7 +613,7 @@ test "files with no placeholders are left unchanged" {
 
     try setupMaltDirs(testing.allocator, prefix);
 
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/clean123/noop/1.0", .{prefix});
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/noop/1.0", .{ prefix, sha_no_placeholder });
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
 
@@ -617,7 +636,7 @@ test "files with no placeholders are left unchanged" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "clean123",
+        sha_no_placeholder,
         "noop",
         "1.0",
         ":any",
@@ -642,7 +661,7 @@ test "binary files are skipped by text patching without error" {
 
     try setupMaltDirs(testing.allocator, prefix);
 
-    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/bin123/binpkg/1.0", .{prefix});
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/binpkg/1.0", .{ prefix, sha_binary_skip });
     defer testing.allocator.free(keg_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
 
@@ -665,7 +684,7 @@ test "binary files are skipped by text patching without error" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "bin123",
+        sha_binary_skip,
         "binpkg",
         "1.0",
         ":any",
@@ -728,12 +747,12 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
 
     // Pre-stage the relocated cache: write a fixture keg directly under
     // store-relocated/<sha>/ via a temp Cellar entry + relocated.save.
-    try createBottleFixture(testing.allocator, prefix, "stub-store", "cached", "1.0");
+    try createBottleFixture(testing.allocator, prefix, sha_cache_seed, "cached", "1.0");
     const keg_pre = try cellar_mod.materializeWithCellar(
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "stub-store",
+        sha_cache_seed,
         "cached",
         "1.0",
         ":any",
@@ -1059,7 +1078,7 @@ test "failed materialize cleans up empty Cellar/{name}/ parent dir" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "no-such-sha",
+        sha_absent_source,
         "ghost",
         "0.0.1",
         ":any",
@@ -1099,7 +1118,7 @@ test "failed materialize leaves sibling versions untouched" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "missing-sha",
+        sha_absent_sibling,
         "keeper",
         "2.0",
         ":any",
@@ -1224,7 +1243,7 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
     try setupMaltDirs(testing.allocator, prefix);
 
     // Place a synthetic Mach-O inside the store tree.
-    const sha = "p1test";
+    const sha = "ac" ** 32;
     const name = "relfake";
     const version = "1.0";
     const keg_bin_dir = try std.fmt.allocPrint(
@@ -1410,7 +1429,7 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
     try setupMaltDirs(testing.allocator, prefix);
 
     // Drop a fat Mach-O fixture into the store.
-    const sha = "p9fat";
+    const sha = "bd" ** 32;
     const name = "fatfake";
     const version = "1.0";
     const keg_bin_dir = try std.fmt.allocPrint(
@@ -1502,7 +1521,7 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
     try test_io.makeDirAbsolute(std.Options.debug_io, prefix);
     try setupMaltDirs(testing.allocator, prefix);
 
-    const sha = "p1cellar";
+    const sha = "ce" ** 32;
     const name = "cellarfake";
     const version = "2.0";
     const keg_bin_dir = try std.fmt.allocPrint(
@@ -1805,7 +1824,7 @@ test "a symlinked package dir cannot redirect a keg write out of the prefix" {
         testing.allocator.free(prefix);
     }
     try setupMaltDirs(testing.allocator, prefix);
-    try createBottleFixture(testing.allocator, prefix, "linksha", "probe", "1.0");
+    try createBottleFixture(testing.allocator, prefix, sha_symlinked_pkg, "probe", "1.0");
 
     const victim = try createTestDir(testing.allocator);
     defer {
@@ -1825,7 +1844,7 @@ test "a symlinked package dir cannot redirect a keg write out of the prefix" {
     defer testing.allocator.free(pkg_dir);
     try test_io.symLinkAbsolute(std.Options.debug_io, victim, pkg_dir, .{ .is_directory = true });
 
-    const src_keg = try std.fmt.allocPrint(testing.allocator, "{s}/store/linksha/probe/1.0", .{prefix});
+    const src_keg = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/probe/1.0", .{ prefix, sha_symlinked_pkg });
     defer testing.allocator.free(src_keg);
 
     const old_env = setMaltPrefix(prefix);
@@ -1845,7 +1864,7 @@ test "a symlinked package dir cannot redirect a keg write out of the prefix" {
         std.Options.debug_io,
         testing.allocator,
         prefix,
-        "linksha",
+        sha_symlinked_pkg,
         "probe",
         "1.0",
         "",

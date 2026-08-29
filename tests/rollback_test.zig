@@ -202,6 +202,14 @@ fn insertCurrentKeg(prefix: [:0]const u8, name: []const u8, version: []const u8)
     _ = try stmt.step();
 }
 
+// One distinct 64-hex key per store entry: the store names its entries with
+// the bottle sha, and the materialize path refuses anything else.
+const sha_older = "1a" ** 32;
+const sha_newer = "2b" ** 32;
+const sha_installed = "3c" ** 32;
+const sha_current = "4d" ** 32;
+const sha_previous = "5e" ** 32;
+
 /// Seed a store entry tree `<prefix>/store/<sha>/<name>/<pkg_version>/` and
 /// optionally sleep afterwards so two seeds get distinct mtimes on
 /// second-resolution filesystems.
@@ -235,9 +243,9 @@ test "rollback --list prints every store entry available for the package" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     try insertCurrentKeg(prefix, "wget", "1.22");
-    try seedStoreEntry(prefix, "sha_a", "wget", "1.20", 1100);
-    try seedStoreEntry(prefix, "sha_b", "wget", "1.21", 1100);
-    try seedStoreEntry(prefix, "sha_c", "wget", "1.22", 0); // current — must be excluded
+    try seedStoreEntry(prefix, sha_older, "wget", "1.20", 1100);
+    try seedStoreEntry(prefix, sha_newer, "wget", "1.21", 1100);
+    try seedStoreEntry(prefix, sha_installed, "wget", "1.22", 0); // current — must be excluded
 
     setPrefix(prefix);
     defer unsetPrefix();
@@ -260,7 +268,7 @@ test "rollback --list prints every store entry available for the package" {
     // Current version is excluded from the listing.
     try testing.expect(std.mem.indexOf(u8, out, "1.22") == null);
 
-    // Newest entry (sha_b/1.21) precedes the older one (sha_a/1.20).
+    // Newest entry (sha_newer/1.21) precedes the older one (sha_older/1.20).
     const v21 = std.mem.indexOf(u8, out, "1.21").?;
     const v20 = std.mem.indexOf(u8, out, "1.20").?;
     try testing.expect(v21 < v20);
@@ -273,8 +281,8 @@ test "rollback --list --json emits the documented JSON shape" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     try insertCurrentKeg(prefix, "wget", "1.22");
-    try seedStoreEntry(prefix, "sha_a", "wget", "1.20", 1100);
-    try seedStoreEntry(prefix, "sha_b", "wget", "1.21", 0);
+    try seedStoreEntry(prefix, sha_older, "wget", "1.20", 1100);
+    try seedStoreEntry(prefix, sha_newer, "wget", "1.21", 0);
 
     setPrefix(prefix);
     defer unsetPrefix();
@@ -320,8 +328,8 @@ test "rollback --to <current_version> is a clean no-op, not a confusing refusal"
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     try insertCurrentKeg(prefix, "wget", "1.22");
-    try seedStoreEntry(prefix, "sha_a", "wget", "1.20", 1100);
-    try seedStoreEntry(prefix, "sha_cur", "wget", "1.22", 0);
+    try seedStoreEntry(prefix, sha_older, "wget", "1.20", 1100);
+    try seedStoreEntry(prefix, sha_current, "wget", "1.22", 0);
 
     setPrefix(prefix);
     defer unsetPrefix();
@@ -352,8 +360,8 @@ test "rollback --to <version> refuses with the listing when the version is absen
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     try insertCurrentKeg(prefix, "wget", "1.22");
-    try seedStoreEntry(prefix, "sha_a", "wget", "1.20", 1100);
-    try seedStoreEntry(prefix, "sha_b", "wget", "1.21", 0);
+    try seedStoreEntry(prefix, sha_older, "wget", "1.20", 1100);
+    try seedStoreEntry(prefix, sha_newer, "wget", "1.21", 0);
 
     setPrefix(prefix);
     defer unsetPrefix();
@@ -682,13 +690,13 @@ test "a rollback that cannot materialize leaves the current version installed" {
     const prefix = rbPrefix(&pbuf, "materialize_fail");
     try makeSandbox(prefix);
     defer {
-        denyAccess(prefix, "sha_old", "wget", "1.20", 0o755);
+        denyAccess(prefix, sha_previous, "wget", "1.20", 0o755);
         test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     }
 
     try installKeg(prefix, "wget", "1.22");
-    try seedStoreEntry(prefix, "sha_old", "wget", "1.20", 0);
-    denyAccess(prefix, "sha_old", "wget", "1.20", 0o000);
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
+    denyAccess(prefix, sha_previous, "wget", "1.20", 0o000);
 
     setPrefix(prefix);
     defer unsetPrefix();
@@ -750,7 +758,7 @@ test "a completed rollback preserves bin isolation and the hold" {
         defer db.close();
         try db.exec("UPDATE kegs SET pinned = 1 WHERE name = 'wget';");
     }
-    try seedStoreEntry(prefix, "sha_old", "wget", "1.20", 0);
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
 
     setPrefix(prefix);
     defer unsetPrefix();
@@ -810,7 +818,7 @@ test "rolling back a dependency keeps it marked as a dependency" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     try installKegAs(prefix, "pcre2", "10.45", false, "dependency");
-    try seedStoreEntry(prefix, "sha_old", "pcre2", "10.44", 0);
+    try seedStoreEntry(prefix, sha_previous, "pcre2", "10.44", 0);
 
     setPrefix(prefix);
     defer unsetPrefix();
@@ -880,7 +888,7 @@ test "a completed rollback keeps the keg's dependency edges" {
     try installKeg(prefix, "wget", "1.22");
     try addDep(prefix, "wget", "openssl@3");
     try addDep(prefix, "wget", "libidn2");
-    try seedStoreEntry(prefix, "sha_old", "wget", "1.20", 0);
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
 
     setPrefix(prefix);
     defer unsetPrefix();
@@ -929,7 +937,7 @@ test "a rollback that fails mid-swap restores the current version's links" {
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     try installKeg(prefix, "wget", "1.22");
-    try seedStoreEntry(prefix, "sha_old", "wget", "1.20", 0);
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
     try seedColliding(prefix, "wget", "1.20");
 
     setPrefix(prefix);
@@ -1003,7 +1011,7 @@ test "a rollback still succeeds when the old cellar dir cannot be removed" {
     }
 
     try installKeg(prefix, "wget", "1.22");
-    try seedStoreEntry(prefix, "sha_old", "wget", "1.20", 0);
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
     freezeKegDir(prefix, "wget", "1.22", 0o500);
 
     setPrefix(prefix);
