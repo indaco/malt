@@ -768,10 +768,14 @@ fn upgradeFormula(
         }
     }
 
+    // Release the old bytes first, then reconcile the new: when both versions
+    // share a bottle sha, a decrement applied afterwards would zero an entry
+    // the fresh keg still holds. refcount is advisory; upgrade is already
+    // complete on disk.
     if (old.sha256.len > 0) {
-        // refcount is advisory; upgrade is already complete on disk.
         store.decrementRef(old.sha256) catch {};
     }
+    store.syncRef(fetch.sha256) catch {};
 
     // Same post-install contract as `mt install`: the fresh keg's hook
     // (declarative steps or Ruby body) runs against the new version, and

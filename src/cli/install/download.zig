@@ -600,7 +600,7 @@ pub fn installKegFromBottle(
 ) InstallError!InstallKegResult {
     const bottle = formula_mod.resolveBottle(formula) catch return InstallError.NoBottle;
 
-    const committed = try downloadBottleToStore(ctx, allocator, deps, formula, bottle);
+    _ = try downloadBottleToStore(ctx, allocator, deps, formula, bottle);
 
     // Some bottles carry placeholder tokens whose value is a path inside a
     // *declared dependency's* keg rather than the prefix. Only here is the
@@ -628,15 +628,8 @@ pub fn installKegFromBottle(
         return InstallError.CellarFailed;
     };
 
-    // Claim the bytes only once a keg exists: a bump taken before a refused
-    // materialize can never be undone, because no `kegs` row will ever
-    // reference it. Still advisory, still gated on `committed`.
-    if (committed) {
-        deps.store.incrementRef(bottle.sha256) catch |e| {
-            std.log.warn("refcount increment failed for {s}: {s}", .{ bottle.sha256, @errorName(e) });
-        };
-    }
-
+    // The store ref belongs to the keg row, not to this download: the caller
+    // claims it with `Store.syncRef` once `recordKeg` has run.
     return .{ .sha256 = bottle.sha256, .keg = keg };
 }
 
@@ -1142,9 +1135,8 @@ test "installKegFromBottle returns NoBottle before reaching ghcr/store when no p
 }
 
 // `downloadBottleToStore` returning `false` on the warm-store path is
-// the contract `installKegFromBottle` relies on to skip the refcount
-// bump, and that the `--download-only` pool worker relies on to keep
-// the warm fast path zero-I/O.
+// the contract the `--download-only` pool worker relies on to keep the
+// warm fast path zero-I/O.
 test "downloadBottleToStore returns false when the store already holds the bottle" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
