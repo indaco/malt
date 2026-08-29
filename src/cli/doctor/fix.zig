@@ -281,14 +281,13 @@ fn removeEntry(io: std.Io, prefix: []const u8, db: *sqlite.Database, name: []con
     return true;
 }
 
-/// A store entry is a purgeable orphan iff its `store_refs` row exists and
-/// its refcount has dropped to <= 0 — the predicate `Store.orphans()` /
-/// `purge --store-orphans` use. A *missing* row is a warm / in-flight commit
-/// (`--download-only`, or an install interrupted before the ref is taken);
-/// purge cannot clear it, so it is not an orphan. Detection and remediation
-/// share this single definition.
-pub fn isPurgeableOrphan(has_row: bool, refcount: i64) bool {
-    return has_row and refcount <= 0;
+/// The one definition detection and remediation share with
+/// `Store.orphans()` / `purge --store-orphans`. `has_row` false is a warm /
+/// in-flight commit (`--download-only`, or an install interrupted before the
+/// ref is taken) that purge cannot clear; `referenced` outranks the counter,
+/// which can under-count a live keg.
+pub fn isPurgeableOrphan(has_row: bool, refcount: i64, referenced: bool) bool {
+    return has_row and refcount <= 0 and !referenced;
 }
 
 /// Owns the orphan-classification statement so a sweep prepares it once and
@@ -299,7 +298,10 @@ pub const OrphanProbe = struct {
     stmt: sqlite.Statement,
 
     pub fn init(db: *sqlite.Database) sqlite.SqliteError!OrphanProbe {
-        return .{ .stmt = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;") };
+        return .{ .stmt = try db.prepare(
+            "SELECT refcount, EXISTS (SELECT 1 FROM kegs WHERE kegs.store_sha256 = store_refs.store_sha256)" ++
+                " FROM store_refs WHERE store_sha256 = ?1;",
+        ) };
     }
 
     pub fn deinit(self: *OrphanProbe) void {
@@ -313,7 +315,8 @@ pub const OrphanProbe = struct {
         self.stmt.bindText(1, sha) catch return false;
         const has_row = self.stmt.step() catch return false;
         const refcount: i64 = if (has_row) self.stmt.columnInt(0) else 0;
-        return isPurgeableOrphan(has_row, refcount);
+        const referenced = has_row and self.stmt.columnInt(1) != 0;
+        return isPurgeableOrphan(has_row, refcount, referenced);
     }
 };
 
@@ -823,18 +826,23 @@ test "pidAlive: non-positive PIDs are dead, not process groups" {
     try std.testing.expect(!pidAlive(-1));
 }
 
-test "isPurgeableOrphan: only a refcount<=0 row is an orphan" {
-    // Matches `Store.orphans()` (WHERE refcount <= 0) so detection and
-    // remediation share one definition.
-    try std.testing.expect(isPurgeableOrphan(true, 0));
-    try std.testing.expect(isPurgeableOrphan(true, -1));
-    try std.testing.expect(!isPurgeableOrphan(true, 1));
+test "isPurgeableOrphan: only an unreferenced refcount<=0 row is an orphan" {
+    // Matches `Store.orphans()` so detection and remediation share one
+    // definition.
+    try std.testing.expect(isPurgeableOrphan(true, 0, false));
+    try std.testing.expect(isPurgeableOrphan(true, -1, false));
+    try std.testing.expect(!isPurgeableOrphan(true, 1, false));
     // No ref row: a warm / in-flight commit purge cannot clear — not an orphan.
-    try std.testing.expect(!isPurgeableOrphan(false, 0));
+    try std.testing.expect(!isPurgeableOrphan(false, 0, false));
+    // A live keg outranks the counter: an under-counted row is still owned.
+    try std.testing.expect(!isPurgeableOrphan(true, 0, true));
+    try std.testing.expect(!isPurgeableOrphan(true, -1, true));
+    try std.testing.expect(!isPurgeableOrphan(true, 1, true));
+    try std.testing.expect(!isPurgeableOrphan(false, 0, true));
 }
 
-test "OrphanProbe: one probe reset-drives orphan / live-ref / no-row shas in sequence" {
-    // Driving all three shas through a single probe is the point: it proves
+test "OrphanProbe: one probe reset-drives orphan / live-ref / no-row / held shas in sequence" {
+    // Driving every sha through a single probe is the point: it proves
     // reset-then-rebind works across rows — the lifecycle the old per-call
     // prepare/finalize never exercised.
     var s = try Scratch.init("fix_orphan_probe");
@@ -847,15 +855,19 @@ test "OrphanProbe: one probe reset-drives orphan / live-ref / no-row shas in seq
     defer db.close();
     try db.exec(
         \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY, refcount INTEGER NOT NULL DEFAULT 1);
+        \\CREATE TABLE kegs (id INTEGER PRIMARY KEY, store_sha256 TEXT);
         \\INSERT INTO store_refs VALUES ('orphan', 0);
         \\INSERT INTO store_refs VALUES ('live', 2);
+        \\INSERT INTO store_refs VALUES ('held', 0);
+        \\INSERT INTO kegs (store_sha256) VALUES ('held');
     );
 
     var probe = try OrphanProbe.init(&db);
     defer probe.deinit();
-    try std.testing.expect(probe.isOrphan("orphan")); // row, refcount <= 0
+    try std.testing.expect(probe.isOrphan("orphan")); // row, refcount <= 0, no keg
     try std.testing.expect(!probe.isOrphan("live")); // row, refcount >= 1
     try std.testing.expect(!probe.isOrphan("missing")); // no row
+    try std.testing.expect(!probe.isOrphan("held")); // under-counted, keg still holds it
     // Reusable after a positive hit: same probe instance, sha reused.
     try std.testing.expect(probe.isOrphan("orphan"));
 }

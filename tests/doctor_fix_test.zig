@@ -714,6 +714,62 @@ test "fixOrphanedStore: a stranded reap dir does not block reaping a fresh same-
     try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(io, prefix));
 }
 
+test "orphan parity: an entry a live keg holds is invisible to both doctor and purge" {
+    // The shape a warm materialize after an uninstall leaves behind: the
+    // counter is back at 0 but a `kegs` row still holds the bytes. Reaping it
+    // costs the user a re-download of a package they have installed, so both
+    // the sweep and the probe must consult `kegs`, not just the counter.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "heldkeg");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_dir_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+
+    var store_dir_buf: [256]u8 = undefined;
+    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
+
+    var db_path_buf: [256]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const sha = "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe";
+    var entry_dir_buf: [320]u8 = undefined;
+    const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, entry_dir);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
+    try store.incrementRef(sha); // cold install
+    try store.decrementRef(sha); // uninstall drops the counter, keeps the bytes
+    try db.exec(
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)" ++
+            " VALUES ('probe', 'probe', '1.0', '" ++ sha ++ "', '/probe/Cellar/probe/1.0');",
+    );
+
+    // Remediation side: purge enumerates nothing.
+    var orphans = try store.orphans();
+    defer {
+        for (orphans.items) |item| testing.allocator.free(item);
+        orphans.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 0), orphans.items.len);
+
+    // Detection side (shared by `--fix` and the inline doctor check) agrees,
+    // and the sweep leaves the bytes alone.
+    try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(io, prefix));
+    const sweep = fix.fixOrphanedStore(io, prefix);
+    try testing.expectEqual(@as(u32, 0), sweep.count);
+    try testing.expect(pathExists(entry_dir));
+}
+
 test "orphan parity: a no-row store entry is invisible to both doctor and purge" {
     // A store dir with no `store_refs` row is a warm / in-flight commit
     // (`--download-only`, or an install interrupted before `incrementRef`).

@@ -2005,10 +2005,11 @@ test "checkCellarPackageDirs: a live operation downgrades the finding, never hid
     try testing.expectEqual(CheckResult.info_status, checkCellarPackageDirs(ctx, "Cellar package directories"));
 }
 
-test "checkOrphanedStore: counts only refcount<=0 rows across store entries" {
+test "checkOrphanedStore: counts only unreferenced refcount<=0 rows across store entries" {
     // Parity guard for the shared-probe swap: one orphan, one live ref, one
-    // no-row entry must warn with exactly one orphan — a miscount (probe reuse
-    // or the count-vs-remove policy leaking) flips the outcome or the number.
+    // no-row entry and one keg-held under-counted entry must warn with exactly
+    // one orphan — a miscount (probe reuse or the count-vs-remove policy
+    // leaking) flips the outcome or the number.
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
     var s = try Scratch.init("doctor_orphan_store");
@@ -2023,12 +2024,15 @@ test "checkOrphanedStore: counts only refcount<=0 rows across store entries" {
     var db = try sqlite.Database.open(db_path);
     try db.exec(
         \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY, refcount INTEGER NOT NULL DEFAULT 1);
+        \\CREATE TABLE kegs (id INTEGER PRIMARY KEY, store_sha256 TEXT);
         \\INSERT INTO store_refs VALUES ('orphan', 0);
         \\INSERT INTO store_refs VALUES ('live', 2);
+        \\INSERT INTO store_refs VALUES ('held', 0);
+        \\INSERT INTO kegs (store_sha256) VALUES ('held');
     );
     db.close();
 
-    for ([_][]const u8{ "orphan", "live", "norow" }) |sha| {
+    for ([_][]const u8{ "orphan", "live", "norow", "held" }) |sha| {
         var eb: [std.fs.max_path_bytes]u8 = undefined;
         const entry = try std.fmt.bufPrint(&eb, "{s}/store/{s}", .{ prefix, sha });
         try std.Io.Dir.cwd().createDirPath(io, entry);
@@ -2061,6 +2065,7 @@ test "checkOrphanedStore: a store with no refcount<=0 row is ok" {
     var db = try sqlite.Database.open(db_path);
     try db.exec(
         \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY, refcount INTEGER NOT NULL DEFAULT 1);
+        \\CREATE TABLE kegs (id INTEGER PRIMARY KEY, store_sha256 TEXT);
         \\INSERT INTO store_refs VALUES ('live', 2);
     );
     db.close();

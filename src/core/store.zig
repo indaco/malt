@@ -99,6 +99,26 @@ pub const Store = struct {
         _ = stmt.step() catch return StoreError.RefCountError;
     }
 
+    /// Reconcile a store entry's refcount with the `kegs` rows that hold it.
+    /// Idempotent, so a forced reinstall (which replaces a `kegs` row rather
+    /// than adding one) cannot drift the counter the way an increment would.
+    /// Shares `incrementRef`'s key ingress check.
+    pub fn syncRef(self: *Store, sha256: []const u8) StoreError!void {
+        var buf: [store_path.entry_buf_len]u8 = undefined;
+        _ = try store_path.entry(&buf, self.prefix, sha256);
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = self.db.prepare(
+            "INSERT INTO store_refs (store_sha256, refcount)" ++
+                " VALUES (?1, (SELECT count(*) FROM kegs WHERE store_sha256 = ?1))" ++
+                " ON CONFLICT(store_sha256) DO UPDATE SET refcount = excluded.refcount;",
+        ) catch return StoreError.RefCountError;
+        defer stmt.finalize();
+        stmt.bindText(1, sha256) catch return StoreError.RefCountError;
+        _ = stmt.step() catch return StoreError.RefCountError;
+    }
+
     pub fn decrementRef(self: *Store, sha256: []const u8) StoreError!void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -110,7 +130,9 @@ pub const Store = struct {
         _ = stmt.step() catch return StoreError.RefCountError;
     }
 
-    /// Find store entries with refcount == 0.
+    /// Find reclaimable store entries. `kegs`, not the counter, is the
+    /// authority on whether the bytes are still owned: the counter can
+    /// under-count a live keg.
     pub fn orphans(self: *Store) StoreError!std.ArrayList([]const u8) {
         var list: std.ArrayList([]const u8) = .empty;
         errdefer {
@@ -118,7 +140,8 @@ pub const Store = struct {
             list.deinit(self.allocator);
         }
         var stmt = self.db.prepare(
-            "SELECT store_sha256 FROM store_refs WHERE refcount <= 0;",
+            "SELECT store_sha256 FROM store_refs WHERE refcount <= 0" ++
+                " AND NOT EXISTS (SELECT 1 FROM kegs WHERE kegs.store_sha256 = store_refs.store_sha256);",
         ) catch return StoreError.RefCountError;
         defer stmt.finalize();
 
@@ -207,4 +230,98 @@ test "orphans returns exactly the refcount-zero rows and skips referenced rows" 
         list.deinit(testing.allocator);
     }
     try testing.expectEqual(@as(usize, 2), list.items.len);
+}
+
+test "orphans excludes an entry a live keg still holds, whatever the counter says" {
+    var db = try openSchemaDb();
+    defer db.close();
+    try db.exec("INSERT INTO store_refs (store_sha256, refcount) VALUES ('loose', 0), ('held', 0);");
+    try db.exec(
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)" ++
+            " VALUES ('probe', 'probe', '1.0', 'held', '/prefix/Cellar/probe/1.0');",
+    );
+
+    var store = Store.init(std.Options.debug_io, testing.allocator, &db, "");
+    var list = try store.orphans();
+    defer {
+        for (list.items) |item| testing.allocator.free(item);
+        list.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 1), list.items.len);
+    try testing.expectEqualStrings("loose", list.items[0]);
+}
+
+fn refcountOf(db: *sqlite.Database, sha: []const u8) !?i64 {
+    var stmt = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, sha);
+    if (!try stmt.step()) return null;
+    return stmt.columnInt(0);
+}
+
+test "syncRef reconciles the counter with the kegs rows and stays idempotent" {
+    var db = try openSchemaDb();
+    defer db.close();
+    const sha = "a" ** 64;
+
+    var store = Store.init(std.Options.debug_io, testing.allocator, &db, "/prefix");
+
+    // Warm materialize after an uninstall: the row already sits at 0 while a
+    // keg holds the bytes, so the sync must lift it back to 1.
+    try db.exec("INSERT INTO store_refs (store_sha256, refcount) VALUES ('" ++ sha ++ "', 0);");
+    try db.exec(
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)" ++
+            " VALUES ('probe', 'probe', '1.0', '" ++ sha ++ "', '/prefix/Cellar/probe/1.0');",
+    );
+    try store.syncRef(sha);
+    try testing.expectEqual(@as(?i64, 1), try refcountOf(&db, sha));
+
+    // `--force` replaces the keg row rather than adding one: an increment
+    // would drift up here, a reconcile must not.
+    try store.syncRef(sha);
+    try testing.expectEqual(@as(?i64, 1), try refcountOf(&db, sha));
+}
+
+test "syncRef on a bottle no keg holds leaves the entry reclaimable" {
+    var db = try openSchemaDb();
+    defer db.close();
+    const sha = "b" ** 64;
+
+    var store = Store.init(std.Options.debug_io, testing.allocator, &db, "/prefix");
+    try store.syncRef(sha);
+    try testing.expectEqual(@as(?i64, 0), try refcountOf(&db, sha));
+}
+
+test "syncRef refuses a key a store path could never name" {
+    var db = try openSchemaDb();
+    defer db.close();
+
+    var store = Store.init(std.Options.debug_io, testing.allocator, &db, "/prefix");
+    try testing.expectError(StoreError.InvalidSha256, store.syncRef("not-hex"));
+    try testing.expectError(StoreError.InvalidSha256, store.syncRef(""));
+    try testing.expectError(StoreError.InvalidSha256, store.syncRef("A" ** 64));
+    // Refused at birth means no row was created either.
+    try testing.expectEqual(@as(?i64, null), try refcountOf(&db, "not-hex"));
+}
+
+test "syncRef restores the true count after a decrement against the same key" {
+    // Upgrade releases the old bottle then reconciles the new one. When both
+    // versions carry the same sha those are the same key, so the reconcile has
+    // to be able to undo the decrement — otherwise the fresh keg's entry is
+    // left at 0.
+    var db = try openSchemaDb();
+    defer db.close();
+    const sha = "c" ** 64;
+
+    var store = Store.init(std.Options.debug_io, testing.allocator, &db, "/prefix");
+    try db.exec(
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)" ++
+            " VALUES ('probe', 'probe', '2.0', '" ++ sha ++ "', '/prefix/Cellar/probe/2.0');",
+    );
+    try store.syncRef(sha);
+    try store.decrementRef(sha);
+    try testing.expectEqual(@as(?i64, 0), try refcountOf(&db, sha));
+
+    try store.syncRef(sha);
+    try testing.expectEqual(@as(?i64, 1), try refcountOf(&db, sha));
 }
