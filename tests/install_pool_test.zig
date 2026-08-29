@@ -282,7 +282,7 @@ test "installPoolWorker propagates the specific CellarError variant into result.
     // Pre-seed store/<sha>/ so installKegFromBottle skips download and
     // hits materializeWithCellar, whose 512-byte cellar-path buffer
     // overflows on a 230+230 char name+version. The helper captures
-    // the resulting CellarError.OutOfMemory through `cellar_diag`; the
+    // the resulting CellarError.PathTooLong through `cellar_diag`; the
     // pool worker must forward it into `result.err` instead of falling
     // back to the historical CloneFailed catch-all.
     const sha = "f00d" ** 16;
@@ -356,7 +356,7 @@ test "installPoolWorker propagates the specific CellarError variant into result.
     // into "Failed to materialize" rather than "Download failed".
     try testing.expect(!results[0].ok);
     try testing.expectEqual(
-        @as(?malt.cellar.CellarError, malt.cellar.CellarError.OutOfMemory),
+        @as(?malt.cellar.CellarError, malt.cellar.CellarError.PathTooLong),
         results[0].err,
     );
     try testing.expect(jobs[0].succeeded);

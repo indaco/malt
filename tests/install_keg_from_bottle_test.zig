@@ -179,7 +179,7 @@ test "installKegFromBottle stamps the specific CellarError variant into cellar_d
 
     // A 230 + 230 char name+version overflows the cellar-path 512-byte
     // stack buffer in `materializeWithCellar`, which surfaces as
-    // `CellarError.OutOfMemory`. We pin that specific variant to prove
+    // `CellarError.PathTooLong`. We pin that specific variant to prove
     // `cellar_diag` carries the real cause, not a generic catch-all.
     const long_name = "a" ** 230;
     const long_ver = "1" ** 230;
@@ -237,7 +237,7 @@ test "installKegFromBottle stamps the specific CellarError variant into cellar_d
         ),
     );
     try testing.expectEqual(
-        @as(?malt.cellar.CellarError, malt.cellar.CellarError.OutOfMemory),
+        @as(?malt.cellar.CellarError, malt.cellar.CellarError.PathTooLong),
         cellar_diag,
     );
 }

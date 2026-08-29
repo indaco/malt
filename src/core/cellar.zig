@@ -138,7 +138,7 @@ pub fn materializeWithCellar(
 
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
-        return CellarError.OutOfMemory;
+        return CellarError.PathTooLong;
 
     // Warm-reinstall fast path: a prior successful materialize for this
     // bottle sha is already on disk, fully relocated. Clonefile-restore
@@ -180,12 +180,12 @@ pub fn materializeWithCellar(
     // a directory that starts with the version string followed by "_".
     var keg_src_buf: [512]u8 = undefined;
     const keg_src = std.fmt.bufPrint(&keg_src_buf, "{s}/{s}/{s}", .{ store_entry, name, version }) catch
-        return CellarError.OutOfMemory;
+        return CellarError.PathTooLong;
 
     // Ensure parent dir exists
     var parent_buf: [512]u8 = undefined;
     const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch
-        return CellarError.OutOfMemory;
+        return CellarError.PathTooLong;
     std.Io.Dir.createDirAbsolute(io, parent, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => {
@@ -824,11 +824,11 @@ pub fn materializeFromLocalCellar(
 
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
-        return CellarError.OutOfMemory;
+        return CellarError.PathTooLong;
 
     var parent_buf: [512]u8 = undefined;
     const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch
-        return CellarError.OutOfMemory;
+        return CellarError.PathTooLong;
     std.Io.Dir.createDirAbsolute(io, parent, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => {
@@ -982,7 +982,7 @@ pub fn remove(io: std.Io, prefix: []const u8, name: []const u8, version: []const
 
     var buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
-        return CellarError.OutOfMemory;
+        return CellarError.PathTooLong;
     std.Io.Dir.cwd().deleteTree(io, cellar_path) catch return CellarError.RemoveFailed;
 }
 
@@ -1434,6 +1434,38 @@ test "materializeWithCellar refuses a bottle key outside the store charset" {
         error.FileNotFound,
         std.Io.Dir.accessAbsolute(io, s.p("/prefix/Cellar/victim"), .{}),
     );
+}
+
+test "every Cellar sink reports a path that will not fit as PathTooLong" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // Long enough that `<prefix>/Cellar/<name>` still fits but the
+    // `/<version>` below it does not, and split into components the kernel
+    // will still stat. Nothing here touches the filesystem.
+    const prefix = "/" ++ "p" ** 200 ++ "/" ++ "q" ** 200 ++ "/" ++ "r" ** 97;
+
+    try testing.expectError(CellarError.PathTooLong, materializeWithCellar(
+        io,
+        testing.allocator,
+        prefix,
+        "0" ** 64,
+        "pkg",
+        "1.0",
+        "",
+        null,
+    ));
+    try testing.expectError(CellarError.PathTooLong, materializeFromLocalCellar(
+        io,
+        testing.allocator,
+        prefix,
+        "/src",
+        "pkg",
+        "1.0",
+        "homebrew/core",
+        "",
+    ));
+    try testing.expectError(CellarError.PathTooLong, remove(io, prefix, "pkg", "1.0"));
 }
 
 test "a store path that will not fit reports PathTooLong, not an allocation failure" {
