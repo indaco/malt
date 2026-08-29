@@ -150,10 +150,6 @@ pub fn migrateKeg(
         output.emitNdjsonEvent(.stored, keg_name, "ok");
     }
 
-    // Serialise the refcount bump on the shared connection's write lock
-    // before materialise (the expensive step stays parallel, lock-free).
-    incrementRefLocked(ctx.io, deps.store, deps.db_mu, bottle.sha256, keg_name);
-
     // Same bottle path as a fresh install, so it needs the same
     // dependency-scoped placeholder resolution.
     var placeholder_buf: [512]u8 = undefined;
@@ -226,6 +222,13 @@ pub fn migrateKeg(
         };
         recordDeps(deps.db, keg_id, &formula);
     }
+
+    // Claim only once a keg row references the bytes: bumping before
+    // materialise strands one claim per failed retry, and nothing can
+    // reclaim it. `db_mu` is already held here and is not recursive.
+    deps.store.incrementRef(bottle.sha256) catch |e| {
+        std.log.warn("refcount increment failed for {s}: {s}", .{ keg_name, @errorName(e) });
+    };
 
     if (formula.hasPostInstallHook()) {
         if (deps.post_install_queue) |q| {
@@ -638,7 +641,8 @@ fn releaseDbMuForOomFallback(io: std.Io, db_mu: ?*std.Io.Mutex) bool {
 /// worker's connection-global `last_insert_rowid()` read, handing the
 /// peer a foreign rowid. Taking `db_mu` makes it the single
 /// connection-wide write lock so no insert escapes it. Serial callers
-/// pass `db_mu == null` and pay no lock cost.
+/// pass `db_mu == null` and pay no lock cost. Not recursive: callers
+/// already holding `db_mu` must call `store.incrementRef` directly.
 fn incrementRefLocked(
     io: std.Io,
     store: *store_mod.Store,
@@ -966,9 +970,10 @@ test "releaseDbMuForOomFallback is a no-op on the serial path (db_mu null)" {
 // hammer `incrementRef` while one worker records kegs. Because
 // `last_insert_rowid()` is connection-global, an unguarded refcount
 // insert landing between a worker's `INSERT INTO kegs` and its rowid read
-// hands the worker a foreign keg_id. The fix routes the bump through
-// `incrementRefLocked` so it serialises on `db_mu`; with that lock no
-// connection write escapes and every keg_id resolves to its own row.
+// hands the worker a foreign keg_id. Holding `db_mu` over the bump is what
+// closes it — `migrateKeg` now bumps inside the region it already holds,
+// and `incrementRefLocked` gives callers outside that region the same
+// guarantee.
 test "incrementRef under db_mu keeps each worker's keg_id bound to its own kegs row" {
     const schema = @import("../../db/schema.zig");
 
