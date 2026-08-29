@@ -97,6 +97,9 @@ jobs:
       - name: Regression guard - store entries held by a live keg
         run: ./scripts/regressions/store-refcount-moment-does-not-match-a-reference.sh
 
+      - name: Regression guard - blocked migrate claims no store bytes
+        run: ./scripts/regressions/migrate-bump-precedes-materialize-961-follow-up.sh
+
       - name: Regression guard - doctor survives a relative keg path
         run: ./scripts/regressions/doctor-survives-a-relative-keg-path.sh
 
