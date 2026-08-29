@@ -653,6 +653,56 @@ test "collectFormulaJobs deduplicates deps already queued by a prior call" {
     try testing.expectEqual(@as(usize, 3), jobs.items.len);
 }
 
+test "collectFormulaJobs promotes a queued dep that is later requested by name" {
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tdb = try TempDb.init("promote_dep");
+    defer tdb.deinit();
+
+    var cache_fx = try TempDir.init("promote_dep_cache");
+    defer cache_fx.deinit();
+    const cache_dir = cache_fx.path;
+
+    const dep_json = bottleJsonWithoutDeps("beta");
+    try seedCache(cache_dir, "beta", dep_json);
+    const root_json = formulaJsonWithDep("alpha", "beta");
+    try seedCache(cache_dir, "alpha", root_json);
+
+    var http_pool = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
+    defer http_pool.deinit();
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
+    defer real_http.deinit();
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
+
+    var store_inst: malt.store.Store = undefined;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
+    defer jobs.deinit(alloc);
+
+    var cache = malt.deps.FormulaCache.init(alloc);
+    defer cache.deinit();
+
+    const deps_ctx: install_download.InstallJobDeps = .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http_pool, .db = &tdb.db, .store = &store_inst, .cache = &cache, .worker_backing = alloc };
+    try install_download.collectFormulaJobs(deps_ctx, "alpha", root_json, false, &jobs);
+    try install_download.collectFormulaJobs(deps_ctx, "beta", dep_json, false, &jobs);
+
+    // Queueing beta twice would send two workers at one keg directory.
+    try testing.expectEqual(@as(usize, 2), jobs.items.len);
+
+    // `is_dep` is the flag the rest of the install reads: it decides
+    // `install_reason` (so `purge --unused-deps` cannot reclaim a package the
+    // user asked for), whether `--only-deps` drops it, and whether
+    // `--isolate-deps` withholds its binaries. A named request is not a dep.
+    for (jobs.items) |j| {
+        if (std.mem.eql(u8, j.name, "beta")) try testing.expect(!j.is_dep);
+    }
+
+    // Naming it a third time must still not grow the queue.
+    try install_download.collectFormulaJobs(deps_ctx, "beta", dep_json, false, &jobs);
+    try testing.expectEqual(@as(usize, 2), jobs.items.len);
+}
+
 test "collectFormulaJobs surfaces FormulaNotFound for unparseable JSON" {
     var arena = testArena();
     defer arena.deinit();

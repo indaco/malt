@@ -553,3 +553,103 @@ test "execute --dry-run routes a revisioned formula through the install pipeline
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "rev1" });
 }
+
+/// `beta` is a leaf; `alpha` depends on it. Distinct bottle checksums, because
+/// the job queue keys on identity and a shared placeholder would hide that.
+const beta_json =
+    \\{"name":"beta","full_name":"beta","tap":"homebrew/core","desc":"","homepage":"",
+    \\ "versions":{"stable":"1.0"},"revision":0,"dependencies":[],"oldnames":[],
+    \\ "keg_only":false,"post_install_defined":false,
+    \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/beta/blobs",
+    \\   "files":{
+    \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
+    \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
+    \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
+    \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
+    \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"},
+    \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"},
+    \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"},
+    \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"}
+    \\   }}}}
+;
+
+const alpha_json =
+    \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"",
+    \\ "versions":{"stable":"1.0"},"revision":0,"dependencies":["beta"],"oldnames":[],
+    \\ "keg_only":false,"post_install_defined":false,
+    \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
+    \\   "files":{
+    \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+    \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+    \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+    \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+    \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"},
+    \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"},
+    \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"},
+    \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"}
+    \\   }}}}
+;
+
+/// Seed both fixtures under a scratch prefix and run `execute` with `argv`,
+/// returning what reached stderr. Caller frees.
+fn planFor(suffix: []const u8, argv: []const []const u8) !std.ArrayList(u8) {
+    const prefix_z = try setupPrefix(suffix);
+    defer testing.allocator.free(prefix_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    try seedFormulaCache(prefix_z, "beta", beta_json);
+    try seedFormulaCache(prefix_z, "alpha", alpha_json);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // `output.quiet` is process-global and earlier tests leave it set.
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+
+    var captured: std.ArrayList(u8) = .empty;
+    errdefer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), argv);
+    return captured;
+}
+
+test "a package requested alongside its dependent is planned once, as a request" {
+    // `beta` arrives twice: as `alpha`'s dependency, then as its own request.
+    // A second job for the same keg would send two workers at one directory.
+    var out = try planFor("dup", &.{ "--dry-run", "alpha", "beta" });
+    defer out.deinit(testing.allocator);
+
+    try testing.expect(std.mem.indexOf(u8, out.items, "would install 2 package") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "would install 3 package") == null);
+    // Promoted: an explicit request is not a dependency, so `purge
+    // --unused-deps` must not reclaim it.
+    try testing.expect(std.mem.indexOf(u8, out.items, "beta 1.0 (dependency)") == null);
+}
+
+test "the plan does not depend on the order the two names were typed" {
+    // Requesting the dependency first takes the other branch - the dep loop
+    // skips an already-queued job instead of the request promoting one - so
+    // both orders have to agree on count and on dependency marking.
+    var out = try planFor("dup_rev", &.{ "--dry-run", "beta", "alpha" });
+    defer out.deinit(testing.allocator);
+
+    try testing.expect(std.mem.indexOf(u8, out.items, "would install 2 package") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "beta 1.0 (dependency)") == null);
+}
+
+test "only-deps skips a dependency the user also asked for by name" {
+    // Both names are explicit requests, so --only-deps has nothing left to
+    // install: `beta` is not a bystander dependency once it is typed out.
+    var out = try planFor("dup_od", &.{ "--dry-run", "--only-deps", "alpha", "beta" });
+    defer out.deinit(testing.allocator);
+
+    try testing.expect(std.mem.indexOf(u8, out.items, "Dry run: would install") == null);
+}
