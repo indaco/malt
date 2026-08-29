@@ -1075,9 +1075,9 @@ fn checkCellarPackageDirs(ctx: CheckCtx, name: []const u8) CheckResult {
     var msg_buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &msg_buf,
-        "{d} package dir(s) under Cellar are symlinks; installs into them are refused. First: {s}",
+        "{d} symlinked package dir(s) under Cellar; installs are refused. Replace with a real directory. First: {s}",
         .{ offenders.items.len, offenders.items[0] },
-    ) catch "Symlinked package dir(s) under Cellar; installs into them are refused";
+    ) catch "Symlinked package dir(s) under Cellar; installs are refused. Replace with a real directory";
     printCheck(name, .warn_status, msg);
     armVerboseHint();
     writeVerboseList(offenders.items);
@@ -1955,6 +1955,9 @@ test "checkCellarPackageDirs: a symlinked package dir warns and names the offend
     try testing.expectEqual(CheckResult.warn_status, checkCellarPackageDirs(ctx, "Cellar package directories"));
     try testing.expect(std.mem.indexOf(u8, out.items, "planted") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "refused") != null);
+    // Every sibling check names a remedy; a row that only says "broken"
+    // leaves the user with nowhere to go.
+    try testing.expect(std.mem.indexOf(u8, out.items, "Replace with a real directory") != null);
 }
 
 test "checkCellarPackageDirs: a dangling package-dir symlink is still reported" {
