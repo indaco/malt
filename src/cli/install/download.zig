@@ -432,28 +432,42 @@ pub fn collectFormulaJobs(
         return InstallError.NoBottle;
     };
 
-    const main_strs = dupeJobStrings(allocator, formula, bottle) catch return InstallError.DownloadFailed;
-    errdefer main_strs.freeAll(allocator);
+    // A package can arrive as another job's dependency and then as its own
+    // request. Keyed on name + version, the pair that is the keg path two
+    // materialise workers would collide on.
+    const queued: ?*DownloadJob = for (jobs.items) |*existing| {
+        if (std.mem.eql(u8, existing.name, formula.name) and
+            std.mem.eql(u8, existing.version_str, formula.pkg_version)) break existing;
+    } else null;
 
-    jobs.append(allocator, .{
-        .name = main_strs.name,
-        // Same reason as the dep branch above: the cellar dir name
-        // must carry the `_N` suffix when revision > 0.
-        .version_str = main_strs.version_str,
-        .sha256 = main_strs.sha256,
-        .bottle_url = main_strs.bottle_url,
-        .is_dep = false,
-        .keg_only = formula.keg_only,
-        .wants_post_install = formula.hasPostInstallHook(),
-        .formula_json = formula_json,
-        .cellar_type = main_strs.cellar_type,
-        .label_width = 0,
-        .line_index = 0,
-        .multi = null,
-        .bar = null,
-        .store_sha256 = "",
-        .succeeded = false,
-    }) catch return InstallError.DownloadFailed;
+    if (queued) |job| {
+        // Promote rather than queue a second job: one keg, one worker, and a
+        // package the user named is no longer reclaimable as an unused dep.
+        job.is_dep = false;
+    } else {
+        const main_strs = dupeJobStrings(allocator, formula, bottle) catch return InstallError.DownloadFailed;
+        errdefer main_strs.freeAll(allocator);
+
+        jobs.append(allocator, .{
+            .name = main_strs.name,
+            // Same reason as the dep branch above: the cellar dir name
+            // must carry the `_N` suffix when revision > 0.
+            .version_str = main_strs.version_str,
+            .sha256 = main_strs.sha256,
+            .bottle_url = main_strs.bottle_url,
+            .is_dep = false,
+            .keg_only = formula.keg_only,
+            .wants_post_install = formula.hasPostInstallHook(),
+            .formula_json = formula_json,
+            .cellar_type = main_strs.cellar_type,
+            .label_width = 0,
+            .line_index = 0,
+            .multi = null,
+            .bar = null,
+            .store_sha256 = "",
+            .succeeded = false,
+        }) catch return InstallError.DownloadFailed;
+    }
 
     const pkg_word: []const u8 = if (jobs.items.len == 1) "package" else "packages";
     ctx.sink.info("Resolved {s} {s} ({d} {s})", .{ formula.name, formula.version, jobs.items.len, pkg_word });
