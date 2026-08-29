@@ -4,6 +4,122 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.24.0 - 2026-08-29
+
+### Highlights
+
+v0.24.0 steadies third-party tap installs, cuts most of the time off a cold install, and tightens what a formula can touch.
+
+- **Tap installs you can trust.** A tap formula's declared dependencies are now installed and recorded, so nothing links against libraries `mt cleanup` later reaps as orphans - and sibling formulae, uncompressed binaries, and nested archives now resolve and relocate correctly.
+- **Cold installs finish far faster.** Anything reaching `openssl@3` used to pay for a trust-store rebuild that forked around 800 processes; malt now builds the same bundle in-process.
+- **Universal binaries install instead of failing.** `llvm` and everything depending on it work again, and a relocation that does fail says which binary and why.
+- **A tighter fence around formulae.** Post-install steps run inside their own keg with reads confined to what a formula needs, keg and archive paths can't escape the Cellar, and a malformed payload is reported rather than aborting the command.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🚀 Enhancements
+
+- **install:** install the dependencies a tap formula declares ([ee48285d](https://github.com/indaco/malt/commit/ee48285d)) ([#906](https://github.com/indaco/malt/pull/906))
+- **install:** cut the trust-store rebuild that dominated cold installs ([d631540f](https://github.com/indaco/malt/commit/d631540f)) ([#901](https://github.com/indaco/malt/pull/901))
+
+### 🩹 Fixes
+
+- **migrate:** stop a blocked migrate from claiming store bytes on every retry ([a87336b1](https://github.com/indaco/malt/commit/a87336b1)) ([#966](https://github.com/indaco/malt/pull/966))
+- **post-install:** run a formula's install steps inside its own keg ([285ce84e](https://github.com/indaco/malt/commit/285ce84e)) ([#965](https://github.com/indaco/malt/pull/965))
+- **doctor:** keep the health report alive when a keg path is not absolute ([f79147b7](https://github.com/indaco/malt/commit/f79147b7)) ([#963](https://github.com/indaco/malt/pull/963))
+- **store:** stop reclaiming bottle bytes a live keg still holds ([9c9c6d84](https://github.com/indaco/malt/commit/9c9c6d84)) ([#962](https://github.com/indaco/malt/pull/962))
+- **cellar:** explain a refused keg write and stop it claiming store bytes ([25ad3472](https://github.com/indaco/malt/commit/25ad3472)) ([#961](https://github.com/indaco/malt/pull/961))
+- **formula:** drop a bottle entry that carries no usable sha256 ([c1e9411f](https://github.com/indaco/malt/commit/c1e9411f)) ([#959](https://github.com/indaco/malt/pull/959))
+- **install:** stop a package requested alongside its dependent from installing twice ([0895632e](https://github.com/indaco/malt/commit/0895632e)) ([#958](https://github.com/indaco/malt/pull/958))
+- **cellar:** stop reporting a too-long keg path as an out-of-memory failure ([2acd3983](https://github.com/indaco/malt/commit/2acd3983)) ([#956](https://github.com/indaco/malt/pull/956))
+- **cellar:** reject an invalid bottle key before it becomes a clone source ([5c1c1a5d](https://github.com/indaco/malt/commit/5c1c1a5d)) ([#954](https://github.com/indaco/malt/pull/954))
+- **formula:** refuse a formula with no stable version instead of installing a versionless keg ([d6c89f17](https://github.com/indaco/malt/commit/d6c89f17)) ([#950](https://github.com/indaco/malt/pull/950))
+- **cellar:** stop a symlinked package dir from redirecting a keg write or delete ([5a991d49](https://github.com/indaco/malt/commit/5a991d49)) ([#949](https://github.com/indaco/malt/pull/949))
+- **cellar:** refuse a keg path that leaves the Cellar ([625f06a7](https://github.com/indaco/malt/commit/625f06a7)) ([#948](https://github.com/indaco/malt/pull/948))
+- **bundle:** keep the bundle lock inside the bundles directory ([3ccad3a9](https://github.com/indaco/malt/commit/3ccad3a9)) ([#946](https://github.com/indaco/malt/pull/946))
+- **regressions:** keep the static regression guards trustworthy ([c83c0e12](https://github.com/indaco/malt/commit/c83c0e12)) ([#945](https://github.com/indaco/malt/pull/945))
+- **install:** keep a Ruby-DSL formula's keg inside the Cellar ([7e9769e3](https://github.com/indaco/malt/commit/7e9769e3)) ([#944](https://github.com/indaco/malt/pull/944))
+- **install:** install prebuilt archives that nest their payload in one directory ([4c17817b](https://github.com/indaco/malt/commit/4c17817b)) ([#941](https://github.com/indaco/malt/pull/941))
+- **install:** keep a formula installable when a recommended dependency cannot be built ([d39ee412](https://github.com/indaco/malt/commit/d39ee412)) ([#940](https://github.com/indaco/malt/pull/940))
+- **install:** resolve a tap formula's own sibling dependencies ([1472d353](https://github.com/indaco/malt/commit/1472d353)) ([#939](https://github.com/indaco/malt/pull/939))
+- **rb-parse:** resolve the arch whose assets live in a formula's else branch ([20372051](https://github.com/indaco/malt/commit/20372051)) ([#938](https://github.com/indaco/malt/pull/938))
+- **macho:** keep a passing relocation test from printing tool errors ([13fb70ec](https://github.com/indaco/malt/commit/13fb70ec)) ([#937](https://github.com/indaco/malt/pull/937))
+- **dsl:** stop a formula glob pattern from expanding without end ([d279a1bc](https://github.com/indaco/malt/commit/d279a1bc)) ([#934](https://github.com/indaco/malt/pull/934))
+- **dsl:** make atomic_write keep the original until the new content lands ([1e6be003](https://github.com/indaco/malt/commit/1e6be003)) ([#933](https://github.com/indaco/malt/pull/933))
+- **archive:** bound how far a downloaded archive may expand on disk ([f591b130](https://github.com/indaco/malt/commit/f591b130)) ([#930](https://github.com/indaco/malt/pull/930))
+- **archive:** stop the tar pre-scan guards from crediting coverage they do not have ([dcd2fb31](https://github.com/indaco/malt/commit/dcd2fb31)) ([#927](https://github.com/indaco/malt/pull/927))
+- **relocation:** install universal binaries instead of failing on them ([ddfa9e3b](https://github.com/indaco/malt/commit/ddfa9e3b)) ([#926](https://github.com/indaco/malt/pull/926))
+- **archive:** stop the safety scan from disagreeing with the extractor ([13f8c0bc](https://github.com/indaco/malt/commit/13f8c0bc)) ([#925](https://github.com/indaco/malt/pull/925))
+- **archive:** refuse sparse archives before they can write outside the prefix ([054f9c93](https://github.com/indaco/malt/commit/054f9c93)) ([#924](https://github.com/indaco/malt/pull/924))
+- **sandbox:** confine child file reads ([d8b43ead](https://github.com/indaco/malt/commit/d8b43ead)) ([#923](https://github.com/indaco/malt/pull/923))
+- **archive:** validate GNU tar metadata ([b0918f8c](https://github.com/indaco/malt/commit/b0918f8c)) ([#921](https://github.com/indaco/malt/pull/921))
+- sanitize declarative post-install output ([2a418d4b](https://github.com/indaco/malt/commit/2a418d4b)) ([#920](https://github.com/indaco/malt/pull/920))
+- **cask:** anchor ZIP extraction to a fresh directory ([f6984dcc](https://github.com/indaco/malt/commit/f6984dcc)) ([#919](https://github.com/indaco/malt/pull/919))
+- **net:** stop the download watchdog from reaching into a request another thread owns ([1c57f8c7](https://github.com/indaco/malt/commit/1c57f8c7)) ([#917](https://github.com/indaco/malt/pull/917))
+- **ghcr:** stop oversized tokens and long mirror bases from failing downloads ([f0c8e406](https://github.com/indaco/malt/commit/f0c8e406)) ([#916](https://github.com/indaco/malt/pull/916))
+- **cask:** report a malformed cask payload instead of aborting ([be7b7d49](https://github.com/indaco/malt/commit/be7b7d49)) ([#915](https://github.com/indaco/malt/pull/915))
+- **net:** report a malformed registry token payload instead of aborting ([2459241c](https://github.com/indaco/malt/commit/2459241c)) ([#914](https://github.com/indaco/malt/pull/914))
+- **install:** relocate every tap artefact, not only bare binaries ([d5d6dc5b](https://github.com/indaco/malt/commit/d5d6dc5b)) ([#910](https://github.com/indaco/malt/pull/910))
+- **install:** make a tap's bare binary run against malt's own prefix ([fd96c5e4](https://github.com/indaco/malt/commit/fd96c5e4)) ([#908](https://github.com/indaco/malt/pull/908))
+- **install:** install tap formulas that ship an uncompressed binary ([95928444](https://github.com/indaco/malt/commit/95928444)) ([#905](https://github.com/indaco/malt/pull/905))
+- **net:** survive a peer that lies about its download size ([f0a299e8](https://github.com/indaco/malt/commit/f0a299e8)) ([#900](https://github.com/indaco/malt/pull/900))
+- **install:** blame the machine, not the network, when local resources run out ([6ab79f41](https://github.com/indaco/malt/commit/6ab79f41)) ([#897](https://github.com/indaco/malt/pull/897))
+- **net:** stop a silent or unframed peer from parking a command ([b3b22712](https://github.com/indaco/malt/commit/b3b22712)) ([#894](https://github.com/indaco/malt/pull/894))
+
+### 💅 Refactors
+
+- **store:** fold the relocated cache onto the shared path constructor ([551c28c1](https://github.com/indaco/malt/commit/551c28c1)) ([#957](https://github.com/indaco/malt/pull/957))
+- **store:** build every store path through one validating constructor ([d3a68d01](https://github.com/indaco/malt/commit/d3a68d01)) ([#952](https://github.com/indaco/malt/pull/952))
+- **fs:** keep the prefix rule in the module that owns the bound ([004c36e0](https://github.com/indaco/malt/commit/004c36e0)) ([#953](https://github.com/indaco/malt/pull/953))
+- **glob:** match formula and step globs through one correct matcher ([39d97b0d](https://github.com/indaco/malt/commit/39d97b0d)) ([#936](https://github.com/indaco/malt/pull/936))
+- **update:** keep the version notifier free of the UI layer ([418612c6](https://github.com/indaco/malt/commit/418612c6)) ([#898](https://github.com/indaco/malt/pull/898))
+
+### 📖 Documentation
+
+- bring patch release notes to main and update CHANGELOG ([2748b7f5](https://github.com/indaco/malt/commit/2748b7f5)) ([#922](https://github.com/indaco/malt/pull/922))
+- **regressions:** give the whole-suite guards their real runtime ([18a93ed4](https://github.com/indaco/malt/commit/18a93ed4)) ([#918](https://github.com/indaco/malt/pull/918))
+
+### ⚡ Performance
+
+- **install:** ask the system trust store directly instead of once per process ([80197af5](https://github.com/indaco/malt/commit/80197af5)) ([#902](https://github.com/indaco/malt/pull/902))
+
+### ✅ Tests
+
+- **smokes:** cover the tap install path the core bottles never reach ([37da111b](https://github.com/indaco/malt/commit/37da111b)) ([#942](https://github.com/indaco/malt/pull/942))
+- **install:** let the relocation pin see the placeholder logic it depends on ([bd01f842](https://github.com/indaco/malt/commit/bd01f842)) ([#909](https://github.com/indaco/malt/pull/909))
+- run the regression guards that were silently never running ([90e85af1](https://github.com/indaco/malt/commit/90e85af1)) ([#904](https://github.com/indaco/malt/pull/904))
+
+### 🏡 Chores
+
+- update codecov.json ([32333c80](https://github.com/indaco/malt/commit/32333c80))
+- **clean:** reclaim test scratch that mktemp leaves outside /tmp ([d14d519b](https://github.com/indaco/malt/commit/d14d519b)) ([#951](https://github.com/indaco/malt/pull/951))
+- **dsl:** close the deep-copy stack-overflow risk with a standing guard ([9bbdf9f1](https://github.com/indaco/malt/commit/9bbdf9f1)) ([#932](https://github.com/indaco/malt/pull/932))
+- **regressions:** keep a passing probe guard's CI log free of teardown noise ([8cbc99f4](https://github.com/indaco/malt/commit/8cbc99f4)) ([#931](https://github.com/indaco/malt/pull/931))
+- **scripts:** give smoke and demo runs their own throwaway prefixes ([27351aed](https://github.com/indaco/malt/commit/27351aed)) ([#928](https://github.com/indaco/malt/pull/928))
+
+### 🤖 CI
+
+- run the tar pre-scan guard on every pull request ([f881d54d](https://github.com/indaco/malt/commit/f881d54d)) ([#929](https://github.com/indaco/malt/pull/929))
+- gate every PR on the loopback regression guards ([d0cc5733](https://github.com/indaco/malt/commit/d0cc5733)) ([#895](https://github.com/indaco/malt/pull/895))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@rustytrees](https://github.com/rustytrees)
+
 ## v0.23.1 - 2026-08-22
 
 ### Highlights
