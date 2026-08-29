@@ -16,13 +16,9 @@
 const std = @import("std");
 const clonefile = @import("../fs/clonefile.zig");
 const dirsize = @import("../fs/dirsize.zig");
+const store_path = @import("../fs/store_path.zig");
 
-pub const RelocatedStoreError = error{
-    InvalidSha256,
-    PathTooLong,
-    SaveFailed,
-    MaterializeFailed,
-};
+pub const RelocatedStoreError = store_path.Error || error{ SaveFailed, MaterializeFailed };
 
 /// Relocation-logic version, folded into the cache path as
 /// `store-relocated/v<N>/<sha>`. The cached bytes are the output of
@@ -57,19 +53,15 @@ pub const RelocatedStoreError = error{
 /// such a binary was cached with its install-prefix paths left unpatched.
 pub const RELOC_LOGIC_VERSION: u32 = 7;
 
-/// Reject anything that is not exactly 64 lowercase hex characters.
-/// Run this before forming any path so traversal sequences (`..`, `/`) and
-/// case variants never reach the filesystem.
-fn isValidSha256(sha: []const u8) bool {
-    if (sha.len != 64) return false;
-    for (sha) |c| {
-        const ok = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
-        if (!ok) return false;
-    }
-    return true;
+/// Borrow the store constructor's key rule rather than keep a second copy.
+/// Its path is shorter than ours for the same prefix, so any `buf` that fits
+/// the caller's path also fits the scratch write this throws away.
+fn checkSha(buf: []u8, prefix: []const u8, sha: []const u8) RelocatedStoreError!void {
+    _ = try store_path.entry(buf, prefix, sha);
 }
 
 fn cacheDir(buf: []u8, prefix: []const u8, version: u32, sha: []const u8) RelocatedStoreError![]u8 {
+    try checkSha(buf, prefix, sha);
     return std.fmt.bufPrint(buf, "{s}/store-relocated/v{d}/{s}", .{ prefix, version, sha }) catch
         return RelocatedStoreError.PathTooLong;
 }
@@ -89,7 +81,6 @@ fn cellarParentDir(buf: []u8, prefix: []const u8, name: []const u8) RelocatedSto
 /// probe, not a validator, and any caller that would mutate the cache
 /// (save / materialize / remove) re-validates and surfaces the error.
 pub fn has(io: std.Io, prefix: []const u8, sha: []const u8) bool {
-    if (!isValidSha256(sha)) return false;
     var buf: [512]u8 = undefined;
     const dir = cacheDir(&buf, prefix, RELOC_LOGIC_VERSION, sha) catch return false;
     std.Io.Dir.accessAbsolute(io, dir, .{}) catch return false;
@@ -108,8 +99,6 @@ pub fn save(
     name: []const u8,
     version: []const u8,
 ) RelocatedStoreError!void {
-    if (!isValidSha256(sha)) return RelocatedStoreError.InvalidSha256;
-
     var dst_buf: [512]u8 = undefined;
     const dst = try cacheDir(&dst_buf, prefix, RELOC_LOGIC_VERSION, sha);
 
@@ -188,8 +177,6 @@ pub fn materialize(
     name: []const u8,
     version: []const u8,
 ) RelocatedStoreError!void {
-    if (!isValidSha256(sha)) return RelocatedStoreError.InvalidSha256;
-
     var src_buf: [512]u8 = undefined;
     const src = try cacheDir(&src_buf, prefix, RELOC_LOGIC_VERSION, sha);
     std.Io.Dir.accessAbsolute(io, src, .{}) catch return RelocatedStoreError.MaterializeFailed;
@@ -211,7 +198,6 @@ pub fn materialize(
 /// Delete the cache entry for `sha`. Idempotent; a missing entry is a
 /// successful no-op so callers can purge speculatively.
 pub fn remove(io: std.Io, prefix: []const u8, sha: []const u8) RelocatedStoreError!void {
-    if (!isValidSha256(sha)) return RelocatedStoreError.InvalidSha256;
     var buf: [512]u8 = undefined;
     const dir = try cacheDir(&buf, prefix, RELOC_LOGIC_VERSION, sha);
 
@@ -229,6 +215,7 @@ pub fn remove(io: std.Io, prefix: []const u8, sha: []const u8) RelocatedStoreErr
 /// `<sha>.verified`, a sibling of the snapshot dir rather than a file inside
 /// it — anything inside would be cloned into the user's keg.
 fn verifiedMark(buf: []u8, prefix: []const u8, sha: []const u8) RelocatedStoreError![]u8 {
+    try checkSha(buf, prefix, sha);
     return std.fmt.bufPrint(buf, "{s}/store-relocated/v{d}/{s}.verified", .{ prefix, RELOC_LOGIC_VERSION, sha }) catch
         return RelocatedStoreError.PathTooLong;
 }
@@ -237,7 +224,6 @@ fn verifiedMark(buf: []u8, prefix: []const u8, sha: []const u8) RelocatedStoreEr
 /// it. Entries from a malt that never verified carry no mark, so they are the
 /// ones re-checked on restore.
 pub fn isVerified(io: std.Io, prefix: []const u8, sha: []const u8) bool {
-    if (!isValidSha256(sha)) return false;
     var buf: [512]u8 = undefined;
     const mark = verifiedMark(&buf, prefix, sha) catch return false;
     std.Io.Dir.accessAbsolute(io, mark, .{}) catch return false;
@@ -246,7 +232,6 @@ pub fn isVerified(io: std.Io, prefix: []const u8, sha: []const u8) bool {
 
 /// Best-effort: a lost mark costs one re-check, never correctness.
 pub fn markVerified(io: std.Io, prefix: []const u8, sha: []const u8) void {
-    if (!isValidSha256(sha)) return;
     var buf: [512]u8 = undefined;
     const mark = verifiedMark(&buf, prefix, sha) catch return;
     const f = std.Io.Dir.createFileAbsolute(io, mark, .{}) catch return;
@@ -436,6 +421,87 @@ test "remove rejects invalid sha" {
         testing.allocator.free(prefix);
     }
     try testing.expectError(RelocatedStoreError.InvalidSha256, remove(testIo(), prefix, ""));
+}
+
+test "the empty key never resolves to the version directory" {
+    // `""` formats to `store-relocated/v<N>` itself, so an unguarded call
+    // would probe, stamp, clone or delete every entry at once.
+    const prefix = try tmpPrefixForTests(testing.allocator, "empty_key_root");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try buildKegForTests(testing.allocator, prefix, "live", "1.0");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "live", "1.0");
+
+    try testing.expect(!has(testIo(), prefix, ""));
+    markVerified(testIo(), prefix, "");
+    try testing.expect(!isVerified(testIo(), prefix, ""));
+    try testing.expectError(
+        RelocatedStoreError.InvalidSha256,
+        materialize(testIo(), testing.allocator, prefix, "", "live", "1.0"),
+    );
+    try testing.expectError(RelocatedStoreError.InvalidSha256, remove(testIo(), prefix, ""));
+
+    // Nothing above may have touched the real entry.
+    try testing.expect(has(testIo(), prefix, valid_sha_for_tests));
+    try testing.expect(!isVerified(testIo(), prefix, valid_sha_for_tests));
+}
+
+test "the verified mark refuses out-of-charset keys" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "verified_charset");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    const upper = "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef";
+    for ([_][]const u8{ upper, "../../etc/passwd", valid_sha_for_tests[0..63] }) |bad| {
+        markVerified(testIo(), prefix, bad);
+        try testing.expect(!isVerified(testIo(), prefix, bad));
+    }
+}
+
+test "an overflowing prefix is refused by every entry point, not truncated" {
+    // The delegated key check formats a shorter path than ours, so it must not
+    // be what decides an overflow - every caller still has to see PathTooLong.
+    const long_prefix = "/tmp/" ++ ("p" ** 520);
+    try testing.expect(!has(testIo(), long_prefix, valid_sha_for_tests));
+    try testing.expectError(
+        RelocatedStoreError.PathTooLong,
+        remove(testIo(), long_prefix, valid_sha_for_tests),
+    );
+    try testing.expectError(
+        RelocatedStoreError.PathTooLong,
+        materialize(testIo(), testing.allocator, long_prefix, valid_sha_for_tests, "noop", "1.0"),
+    );
+    try testing.expectError(
+        RelocatedStoreError.PathTooLong,
+        save(testIo(), testing.allocator, long_prefix, valid_sha_for_tests, "noop", "1.0"),
+    );
+}
+
+test "the delegated key check does not narrow the path budget" {
+    // The check formats a shorter path than ours, so it must never be the thing
+    // that overflows: a prefix whose cache path exactly fills the buffer still
+    // has to format, and only one more byte may tip it over.
+    const ver = std.fmt.comptimePrint("{d}", .{RELOC_LOGIC_VERSION});
+    const shape = "/store-relocated/v".len + ver.len + 1 + 64;
+    const fits = "/" ++ ("p" ** (512 - shape - 1));
+    var buf: [512]u8 = undefined;
+    const formatted = try cacheDir(&buf, fits, RELOC_LOGIC_VERSION, valid_sha_for_tests);
+    try testing.expectEqual(@as(usize, 512), formatted.len);
+    try testing.expectError(
+        RelocatedStoreError.PathTooLong,
+        cacheDir(&buf, fits ++ "p", RELOC_LOGIC_VERSION, valid_sha_for_tests),
+    );
+}
+
+test "the cache path is the prefix, the versioned dir, then the bare sha" {
+    var buf: [512]u8 = undefined;
+    try testing.expectEqualStrings(
+        "/opt/malt/store-relocated/v9/" ++ valid_sha_for_tests,
+        try cacheDir(&buf, "/opt/malt", 9, valid_sha_for_tests),
+    );
 }
 
 test "has returns false for an unknown sha" {
