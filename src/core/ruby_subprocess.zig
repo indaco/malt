@@ -10,6 +10,7 @@
 const std = @import("std");
 const sandbox = @import("sandbox/macos.zig");
 const fs_atomic = @import("../fs/atomic.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const detect = @import("ruby/detect.zig");
 const source = @import("ruby/source.zig");
 
@@ -130,7 +131,7 @@ pub fn generateWrapper(
     post_install_body: []const u8,
 ) ![]const u8 {
     if (prefix.len == 0 or name.len == 0 or version.len == 0) return error.InvalidInput;
-    for (prefix) |b| if (!fs_atomic.isAllowedPrefixByte(b)) return error.InvalidInput;
+    for (prefix) |b| if (!prefix_path.isAllowedPrefixByte(b)) return error.InvalidInput;
     for (name) |b| if (!fs_atomic.isAllowedNameByte(b)) return error.InvalidInput;
     for (version) |b| if (!fs_atomic.isAllowedNameByte(b)) return error.InvalidInput;
 
@@ -274,7 +275,7 @@ pub fn runPostInstall(
 
 fn validateRunPostInstallInputs(name: []const u8, version: []const u8, prefix: []const u8) RubyError!void {
     if (prefix.len == 0 or name.len == 0 or version.len == 0) return RubyError.InvalidInput;
-    for (prefix) |b| if (!fs_atomic.isAllowedPrefixByte(b)) return RubyError.InvalidInput;
+    for (prefix) |b| if (!prefix_path.isAllowedPrefixByte(b)) return RubyError.InvalidInput;
     for (name) |b| if (!fs_atomic.isAllowedNameByte(b)) return RubyError.InvalidInput;
     for (version) |b| if (!fs_atomic.isAllowedNameByte(b)) return RubyError.InvalidInput;
 }

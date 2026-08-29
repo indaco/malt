@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const atomic = @import("atomic.zig");
+const prefix_path = @import("prefix_path.zig");
 
 const default_suffix = "/etc/malt/themes.json";
 
@@ -19,11 +20,11 @@ const default_suffix = "/etc/malt/themes.json";
 /// written into `buf`.
 fn resolvePath(environ: std.process.Environ, buf: []u8) ?[]const u8 {
     if (environ.getPosix("MALT_THEMES_FILE")) |f| {
-        atomic.validatePrefix(f) catch return null;
+        prefix_path.validatePrefix(f) catch return null;
         return f;
     }
     const prefix = environ.getPosix("MALT_PREFIX") orelse "/opt/malt";
-    atomic.validatePrefix(prefix) catch return null;
+    prefix_path.validatePrefix(prefix) catch return null;
     return std.fmt.bufPrint(buf, "{s}" ++ default_suffix, .{prefix}) catch return null;
 }
 
