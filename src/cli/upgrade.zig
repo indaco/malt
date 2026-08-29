@@ -670,17 +670,22 @@ fn upgradeFormula(
     // exit, instead of the old setup-free bar that stacked when over-width.
     var sp = progress_mod.SingleBar.init(name, 0);
     defer sp.finish();
+    // Without the sink the cellar cause is collapsed into `CellarFailed`
+    // at the call boundary and the user is told nothing actionable.
+    var cellar_diag: ?cellar_mod.CellarError = null;
     const fetch = install_download_mod.installKegFromBottle(
         ctx,
         allocator,
-        .{ .ghcr = &ghcr, .http = http, .store = &store, .bar = sp.bind() },
+        .{ .ghcr = &ghcr, .http = http, .store = &store, .bar = sp.bind(), .cellar_diag = &cellar_diag },
         &formula,
         prefix,
     ) catch |e| {
         if (e == InstallError.NoBottle) {
             output.err("No bottle available for {s} on this platform", .{name});
         } else if (e == InstallError.CellarFailed) {
-            output.err("Failed to materialize {s}", .{name});
+            var msg_buf: [256]u8 = undefined;
+            const cause = cellar_diag orelse cellar_mod.CellarError.CloneFailed;
+            output.err("{s}", .{install_mod.formatMaterializeFailure(&msg_buf, name, cause)});
             output.emitNdjsonEvent(.materialized, name, "failed");
         }
         return error.Aborted;
