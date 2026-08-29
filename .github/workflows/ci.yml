@@ -97,6 +97,9 @@ jobs:
       - name: Regression guard - store entries held by a live keg
         run: ./scripts/regressions/store-refcount-moment-does-not-match-a-reference.sh
 
+      - name: Regression guard - doctor survives a relative keg path
+        run: ./scripts/regressions/doctor-survives-a-relative-keg-path.sh
+
       - name: Build universal binary
         run: just build-universal
 
