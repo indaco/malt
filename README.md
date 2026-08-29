@@ -410,6 +410,7 @@ mt doctor --post-install-status          # check DSL support per installed formu
 | API reachable       | HEAD to `formulae.brew.sh` returns 2xx        | Warn: offline                            |
 | Orphaned store      | All store entries referenced by a keg         | Warn: suggest `mt purge --store-orphans` |
 | Missing kegs        | All DB keg paths exist on disk                | Error: suggest reinstall                 |
+| Cellar package dirs | No `Cellar/<name>` is a symlink               | Warn: installs there are refused         |
 | Broken symlinks     | All symlinks in bin/, lib/ etc. resolve       | Warn: suggest `mt cleanup`               |
 | Disk space          | > 1 GB free on prefix volume                  | Warn: low disk space                     |
 | Post-install DSL    | All installed post_install formulae parseable | Warn: unsupported construct              |
