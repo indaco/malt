@@ -40,7 +40,7 @@ jobs:
           use-cache: false
 
       - name: Install just
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.87.1
         with:
           tool: just
 
@@ -160,7 +160,7 @@ jobs:
           use-cache: false
 
       - name: Install just
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.87.1
         with:
           tool: just
 
@@ -190,7 +190,7 @@ jobs:
           use-cache: false
 
       - name: Install just
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.87.1
         with:
           tool: just
 
