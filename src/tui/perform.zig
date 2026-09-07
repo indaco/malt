@@ -305,6 +305,15 @@ test "the interpreter imports no tab module and no json parser" {
     try testing.expect(std.mem.indexOf(u8, src, "_tab.zig" ++ "\")") == null);
 }
 
+test "startBackground never waits after a kill" {
+    // Regression guard, not coverage: the pipe-less arm is unreachable today, so
+    // nothing at runtime can exercise it. `kill` already reaps and clears the pid,
+    // and a following `wait` would trip std's assert. The needle is split so this
+    // test's own bytes never contain the marker it searches for.
+    const src = @embedFile("perform.zig");
+    try testing.expect(std.mem.indexOf(u8, src, "." ++ "wait(") == null);
+}
+
 test "classify splits recoverable backend faults from fatal terminal/OOM faults" {
     // Child-process + parse faults: survivable — show a banner, keep the session.
     try testing.expectEqual(ErrorClass.recoverable, classify(error.SpawnFailed));
