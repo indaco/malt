@@ -684,3 +684,11 @@ fn ensureDirs(ctx: *const AppCtx, prefix: []const u8) !void {
         };
     }
 }
+
+const testing = std.testing;
+
+test "the scan error budget leaves room for transient failures" {
+    // A cap of 1 would abort on the first bad entry — exactly the
+    // truncating behaviour the log-and-skip arm exists to prevent.
+    try testing.expect(max_consecutive_scan_errors > 1);
+}
