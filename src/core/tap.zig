@@ -1087,7 +1087,10 @@ test "effectiveOwnerRepo rejects a slugless name instead of panicking" {
     const schema = @import("../db/schema.zig");
     try schema.initSchema(&db);
 
-    for ([_][]const u8{ "noslash", "" }) |slug| {
+    // `canon_buf` is deliberately smaller than `tap_slug.max_slug_len`, so an
+    // over-long slug must degrade to the same typed error, never truncate.
+    const long = "a" ** 100 ++ "/" ++ "b" ** 100;
+    for ([_][]const u8{ "noslash", "", long }) |slug| {
         try std.testing.expectError(
             error.ExplicitRepoRequired,
             effectiveOwnerRepo(std.testing.allocator, &db, slug, "github.com"),
