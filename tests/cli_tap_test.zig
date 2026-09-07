@@ -512,6 +512,10 @@ test "execute --host without an explicit repo fails with a hint, not a homebrew-
         tap_cli.execute(&ctx, testing.allocator, &.{ "grp/tap", "--host", "gitlab.com" }),
     );
     try testing.expect(std.mem.indexOf(u8, captured.items, "needs an explicit repo") != null);
+    // The same error also fires on github.com for a name that cannot be
+    // canonicalised, so the hint must qualify the default rather than
+    // claim it is a github.com-only rule.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "well-formed github.com tap name") != null);
 }
 
 test "execute rejects a --host that carries a scheme or path" {
