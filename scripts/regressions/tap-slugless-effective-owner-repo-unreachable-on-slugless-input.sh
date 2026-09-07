@@ -15,7 +15,8 @@
 #   2. Behavioural — a slugless name fails typed and never panics.
 #
 # Usage: scripts/regressions/tap-slugless-effective-owner-repo-unreachable-on-slugless-input.sh
-# Requirements: a built malt binary; POSIX grep/awk — no network.
+# Requirements: POSIX grep/awk — no network. Leg 2 needs a built binary and
+# skips without one, so leg 1 can gate the no-build lint job.
 
 set -euo pipefail
 
@@ -44,8 +45,10 @@ grep -q 'canonicalTapSlug(&canon_buf, slug) orelse return' <<<"$body" ||
 
 # (2) behavioural
 MALT_BIN=${MALT_BIN:-$ROOT/zig-out/bin/malt}
-[[ -x "$MALT_BIN" ]] ||
-  fail "malt binary not found at $MALT_BIN — run \"zig build\" first."
+if [[ ! -x "$MALT_BIN" ]]; then
+  printf 'OK (leg 1 only): no binary at %s — skipping the CLI leg.\n' "$MALT_BIN"
+  exit 0
+fi
 
 PREFIX=$(mktemp -d)
 trap 'rm -rf "$PREFIX"' EXIT
