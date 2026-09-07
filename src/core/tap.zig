@@ -1078,6 +1078,26 @@ test "effectiveOwnerRepo refuses to synthesize a repo for non-github hosts" {
     );
 }
 
+test "effectiveOwnerRepo rejects a slugless name instead of panicking" {
+    // The cold path splits `canonicalTapSlug`'s buffer, not the caller's
+    // slug, so a name with no `/` fails typed rather than tripping an
+    // `unreachable` on the split.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+
+    // `canon_buf` is deliberately smaller than `tap_slug.max_slug_len`, so an
+    // over-long slug must degrade to the same typed error, never truncate.
+    const long = "a" ** 100 ++ "/" ++ "b" ** 100;
+    for ([_][]const u8{ "noslash", "", long }) |slug| {
+        try std.testing.expectError(
+            error.ExplicitRepoRequired,
+            effectiveOwnerRepo(std.testing.allocator, &db, slug, "github.com"),
+        );
+    }
+}
+
 test "effectiveOwnerRepo reads the stored row regardless of the host hint" {
     // Once a row exists its persisted host wins; the hint only governs
     // the cold-path synthesis decision.

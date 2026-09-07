@@ -129,6 +129,12 @@ jobs:
       - name: Tap-resolution contract guard
         run: ./scripts/regressions/tap-resolution-contract.sh
 
+      # Static structural guard: the tap cold path derives its pair from the
+      # canonical slug buffer, never by splitting the caller's raw slug on a
+      # `/` it may not contain. Source scan only — no build, no network.
+      - name: Tap slugless cold-path guard
+        run: ./scripts/regressions/tap-slugless-effective-owner-repo-unreachable-on-slugless-input.sh
+
       # Static structural guard: the TUI interpreter reaps each background
       # audit exactly once. `kill` already reaps, so a following `wait` would
       # abort on the cleared pid. Source scan only — no build, no network.

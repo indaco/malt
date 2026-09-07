@@ -874,7 +874,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
                 };
                 break :pair tap_mod.effectiveOwnerRepo(allocator, &db, name, chosen_host) catch |e| switch (e) {
                     error.ExplicitRepoRequired => {
-                        output.err("Registering a {s} tap needs an explicit repo — add --repo <owner>/<repo> or use --url <repo-url>. The homebrew-<repo> default only applies to github.com.", .{chosen_host});
+                        output.err("Registering a {s} tap needs an explicit repo — add --repo <owner>/<repo> or use --url <repo-url>. The homebrew-<repo> default only applies to a well-formed github.com tap name.", .{chosen_host});
                         return error.Aborted;
                     },
                     else => return e,

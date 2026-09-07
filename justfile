@@ -36,6 +36,7 @@ install:
 [group('test')]
 regressions-static:
     @./scripts/regressions/tap-resolution-contract.sh
+    @./scripts/regressions/tap-slugless-effective-owner-repo-unreachable-on-slugless-input.sh
     @./scripts/regressions/relocated-store-logic-version-pin.sh
     @./scripts/regressions/clean-misses-tmpdir-test-scratch.sh
     @./scripts/regressions/post-install-native-spawns-inherit-full-environment.sh
