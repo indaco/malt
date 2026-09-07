@@ -129,6 +129,12 @@ jobs:
       - name: Tap-resolution contract guard
         run: ./scripts/regressions/tap-resolution-contract.sh
 
+      # Static structural guard: the TUI interpreter reaps each background
+      # audit exactly once. `kill` already reaps, so a following `wait` would
+      # abort on the cleared pid. Source scan only — no build, no network.
+      - name: TUI single-reap guard
+        run: ./scripts/regressions/tui-background-fetch-no-double-reap-start-background-waits-after-kill.sh
+
       - name: Install shell-lint tools
         run: brew install shellcheck shfmt
 
