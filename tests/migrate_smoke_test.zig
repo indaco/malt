@@ -1355,15 +1355,32 @@ const MockIter = struct {
     entries: []const MockDirEntry,
     idx: usize = 0,
     fail_after: ?usize = null,
+    /// Per-entry count of consecutive failures to emit before that entry
+    /// is yielded — a transient fault the iterator recovers from.
+    bursts: []const usize = &.{},
+    burst_done: usize = 0,
+    /// Fail at this index forever without advancing. Separate from
+    /// `fail_after`, whose advancing is load-bearing for the tests above.
+    stuck_at: ?usize = null,
+    calls: usize = 0,
 
     pub fn next(self: *MockIter, io: std.Io) !?MockDirEntry {
         _ = io;
+        self.calls += 1;
+        if (self.idx < self.bursts.len and self.burst_done < self.bursts[self.idx]) {
+            self.burst_done += 1;
+            return error.AccessDenied;
+        }
+        if (self.stuck_at) |n| if (self.idx == n) return error.Unexpected;
         if (self.fail_after) |n| if (self.idx == n) {
             self.idx += 1;
             return error.AccessDenied;
         };
         if (self.idx >= self.entries.len) return null;
-        defer self.idx += 1;
+        defer {
+            self.idx += 1;
+            self.burst_done = 0;
+        }
         return self.entries[self.idx];
     }
 };
@@ -1459,6 +1476,135 @@ test "scanCellarKegs continues past a mid-scan iterator error" {
     try testing.expectEqualStrings("tree", names.items[0]);
     try testing.expectEqualStrings("ffmpeg", names.items[1]);
     try testing.expect(containsLine(buf.items, "Cellar scan error"));
+}
+
+// ── Iterator-error surface: the skip arm is bounded ───────────────────
+//
+// Log-and-skip only terminates if the iterator advances, and `std.Io`
+// makes no such promise: a read that fails the same way every time
+// leaves the cursor untouched, so the scan would retry it forever.
+
+test "scanCellarKegs aborts instead of spinning on a non-advancing iterator error" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var names: std.ArrayList([]const u8) = .empty;
+    var mock = MockIter{
+        .entries = &.{.{ .name = "tree", .kind = .directory }},
+        .stuck_at = 0, // wedged before the first entry is ever read
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    try testing.expectError(
+        error.Aborted,
+        migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, MockDir{}, &names),
+    );
+    // Returning at all is the termination proof; the call count pins the
+    // bound so a wedged device is detected in a handful of syscalls.
+    try testing.expectEqual(migrate.max_consecutive_scan_errors, mock.calls);
+    try testing.expect(containsLine(buf.items, "Cellar scan aborted"));
+}
+
+test "scanCellarKegs tolerates consecutive errors below the cap" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var names: std.ArrayList([]const u8) = .empty;
+    // One short of the cap, then a good entry: the counter is consecutive,
+    // not cumulative, so a Cellar with scattered bad reads still scans out.
+    var mock = MockIter{
+        .entries = &.{.{ .name = "tree", .kind = .directory }},
+        .bursts = &.{migrate.max_consecutive_scan_errors - 1},
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, MockDir{}, &names);
+
+    try testing.expectEqual(@as(usize, 1), names.items.len);
+    try testing.expectEqualStrings("tree", names.items[0]);
+    try testing.expect(!containsLine(buf.items, "Cellar scan aborted"));
+}
+
+test "scanCellarKegs resets its error budget after a successful read" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var names: std.ArrayList([]const u8) = .empty;
+    // Two near-cap bursts split by a good read. Cumulative counting would
+    // abort here; a Cellar with scattered bad reads must still scan out.
+    const burst = migrate.max_consecutive_scan_errors - 1;
+    var mock = MockIter{
+        .entries = &.{
+            .{ .name = "tree", .kind = .directory },
+            .{ .name = "wget", .kind = .directory },
+        },
+        .bursts = &.{ burst, burst },
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, MockDir{}, &names);
+
+    try testing.expectEqual(@as(usize, 2), names.items.len);
+    try testing.expectEqualStrings("tree", names.items[0]);
+    try testing.expectEqualStrings("wget", names.items[1]);
+    try testing.expect(!containsLine(buf.items, "Cellar scan aborted"));
+}
+
+test "scanCellarKegs keeps the names gathered before the abort" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var names: std.ArrayList([]const u8) = .empty;
+    var mock = MockIter{
+        .entries = &.{
+            .{ .name = "tree", .kind = .directory },
+            .{ .name = "wget", .kind = .directory },
+        },
+        .stuck_at = 2, // wedges only after both kegs are collected
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    try testing.expectError(
+        error.Aborted,
+        migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, MockDir{}, &names),
+    );
+    // The arena-owned slice is not clobbered on the error path. No caller
+    // reads it today; this keeps partial-progress reporting available.
+    try testing.expectEqual(@as(usize, 2), names.items.len);
+    try testing.expectEqualStrings("tree", names.items[0]);
+    try testing.expectEqualStrings("wget", names.items[1]);
 }
 
 // ── Resume manifest ────────────────────────────────────────────────
