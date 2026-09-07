@@ -56,6 +56,10 @@ fn lockTimeoutMs(ctx: *const AppCtx) u32 {
     return 30_000;
 }
 
+/// `std.Io` promises no forward progress when `Dir.Iterator.next` fails,
+/// so a persistent errno would be retried forever. Bound the retries.
+pub const max_consecutive_scan_errors: usize = 16;
+
 /// Arena-own Cellar names and log + skip iterator errors instead of
 /// truncating the scan — `iter.next() catch null` used to hide every
 /// later keg behind the first bad entry. `anytype` for mock iterators
@@ -68,11 +72,20 @@ pub fn scanCellarKegs(
     dir: anytype,
     names: *std.ArrayList([]const u8),
 ) !void {
+    var consecutive_errors: usize = 0;
     while (true) {
         const entry = iter.next(io) catch |err| {
+            consecutive_errors += 1;
+            if (consecutive_errors >= max_consecutive_scan_errors) {
+                output.err("Cellar scan aborted after {d} consecutive read errors: {s}", .{ consecutive_errors, @errorName(err) });
+                return error.Aborted;
+            }
             output.warn("Cellar scan error: {s}; skipping entry, kept {d} so far", .{ @errorName(err), names.items.len });
             continue;
         } orelse break;
+        // Consecutive, not cumulative: scattered bad entries must not
+        // abort a Cellar the scan can still walk to the end.
+        consecutive_errors = 0;
         const accept = switch (entry.kind) {
             .directory => true,
             // Resolve the symlink target; dangling or non-dir links
@@ -670,4 +683,12 @@ fn ensureDirs(ctx: *const AppCtx, prefix: []const u8) !void {
             else => continue,
         };
     }
+}
+
+const testing = std.testing;
+
+test "the scan error budget leaves room for transient failures" {
+    // A cap of 1 would abort on the first bad entry — exactly the
+    // truncating behaviour the log-and-skip arm exists to prevent.
+    try testing.expect(max_consecutive_scan_errors > 1);
 }
