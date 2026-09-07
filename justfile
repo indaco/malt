@@ -40,6 +40,7 @@ regressions-static:
     @./scripts/regressions/clean-misses-tmpdir-test-scratch.sh
     @./scripts/regressions/post-install-native-spawns-inherit-full-environment.sh
     @./scripts/regressions/tar-prescan-followups-925-926-follow-up.sh
+    @./scripts/regressions/tui-background-fetch-no-double-reap-start-background-waits-after-kill.sh
     @MALT_STATIC_ONLY=1 ./scripts/regressions/post-install-steps-live-artefacts.sh
     @./scripts/test/bench_release_resolution_test.sh
 
