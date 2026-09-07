@@ -170,8 +170,7 @@ pub fn startBackground(io: std.Io, fetches: *Fetches, shared: *SharedModel, r: c
     if (fetches.getPtr(r.tag).* != null) return; // already auditing this tab
     var child = std.process.spawn(io, .{ .argv = r.argv, .stdout = .pipe, .stderr = .ignore }) catch return;
     const out = child.stdout orelse {
-        child.kill(io);
-        _ = child.wait(io) catch {}; // best-effort reap of a pipe-less child; there is nothing to drain
+        child.kill(io); // `kill` reaps and closes stdio; a second reap would abort on the cleared pid
         return;
     };
     shared.tab_loading.insert(r.tag);
