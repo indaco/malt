@@ -24,16 +24,14 @@
 #
 # Usage: scripts/regressions/post-install-steps-live-artefacts.sh
 #        MALT_REGRESSION_SLOW=1 scripts/regressions/post-install-steps-live-artefacts.sh
-# Requirements: built `mt` binary, network access to formulae.brew.sh + ghcr.io.
+# Requirements: built `mt` binary and network access to formulae.brew.sh +
+#               ghcr.io — both only for the install cases. MALT_STATIC_ONLY=1
+#               runs the ordering guards alone and needs neither.
 
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BIN="${MALT_BIN:-$ROOT/zig-out/bin/mt}"
-[[ -x "$BIN" ]] || {
-  echo "build malt first: zig build" >&2
-  exit 2
-}
 
 if [[ -z "${MALT_GITHUB_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
   MALT_GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
@@ -121,6 +119,13 @@ if [[ -n "${MALT_STATIC_ONLY:-}" ]]; then
   echo "OK: post_install ordering guards hold (static-only)"
   exit 0
 fi
+
+# Only the install cases below need a binary, so the check sits after the
+# static-only exit rather than before it.
+[[ -x "$BIN" ]] || {
+  echo "build malt first: zig build" >&2
+  exit 2
+}
 
 # ── set_permissions, applied through the prefix's link farm ──────────
 install_clean redis
