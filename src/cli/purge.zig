@@ -137,7 +137,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             wipe_result.status,
             wipe_result.error_kind,
         );
-        wipe_result = try wipe_mod.runWipe(ctx, allocator, opts, prefix, cache_dir, dry_run);
+        wipe_result = wipe_mod.runWipe(ctx, allocator, opts, prefix, cache_dir, dry_run) catch |e| {
+            wipe_result.status = .err;
+            // The only `Aborted` runWipe raises is the refused manifest;
+            // everything else (user abort, OOM) keeps a null kind.
+            if (e == error.Aborted) wipe_result.error_kind = "db_unreadable";
+            return e;
+        };
         return;
     }
 
@@ -153,7 +159,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         if (dry_run) {
             output.info("would write backup manifest to {s}", .{bp});
         } else {
-            try wipe_mod.writeManifest(ctx, allocator, bp);
+            wipe_mod.writeManifest(ctx, allocator, bp) catch |e| return if (e == Error.DatabaseError) error.Aborted else e;
             output.success("backup manifest written to {s}", .{bp});
         }
     }

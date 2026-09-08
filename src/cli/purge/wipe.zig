@@ -4,6 +4,7 @@
 const std = @import("std");
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const sqlite = @import("../../db/sqlite.zig");
+const schema = @import("../../db/schema.zig");
 const atomic = @import("../../fs/atomic.zig");
 const path_write = @import("../../fs/path_write.zig");
 const output = @import("../../ui/output.zig");
@@ -94,48 +95,64 @@ fn warnBanner() void {
     output.warnPlain("{s}", .{rule});
 }
 
+/// The caller deletes the prefix on the strength of this manifest, so a DB
+/// fault must be louder than an empty file. Only a prefix that never had a
+/// database is honestly empty.
 pub fn writeManifest(ctx: *const AppCtx, allocator: std.mem.Allocator, path: []const u8) Error!void {
     const prefix = atomic.maltPrefixOrAbort();
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return Error.DatabaseError;
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     const w = &aw.writer;
     backup_mod.writeHeader(w) catch return Error.WriteFailed;
 
-    if (sqlite.Database.open(db_path)) |*db_val| {
-        var db = db_val.*;
-        defer db.close();
-
-        var fstmt = db.prepare(
-            "SELECT name, version FROM kegs WHERE install_reason = 'direct' ORDER BY name;",
-        ) catch null;
-        if (fstmt) |*s| {
-            defer s.finalize();
-            while (s.step() catch false) {
-                const name_ptr = s.columnText(0) orelse continue;
-                const ver_ptr = s.columnText(1);
-                const name = std.mem.sliceTo(name_ptr, 0);
-                const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
-                backup_mod.writeEntry(w, .formula, name, version, true) catch return Error.WriteFailed;
-            }
-        }
-
-        var cstmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch null;
-        if (cstmt) |*s| {
-            defer s.finalize();
-            while (s.step() catch false) {
-                const name_ptr = s.columnText(0) orelse continue;
-                const ver_ptr = s.columnText(1);
-                const name = std.mem.sliceTo(name_ptr, 0);
-                const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
-                backup_mod.writeEntry(w, .cask, name, version, true) catch return Error.WriteFailed;
-            }
-        }
-    } else |_| {}
+    switch (util.openDbTri(ctx.io, prefix)) {
+        .absent => {},
+        .unreadable => |e| return refuseUnusableDb(prefix, e),
+        .opened => |db_val| {
+            var db = db_val;
+            defer db.close();
+            // Guarantees the tables exist, so a failing `prepare` below can
+            // only mean a genuinely broken database, never a fresh one.
+            schema.initSchema(&db) catch |e| return refuseUnusableDb(prefix, e);
+            try writeRows(
+                w,
+                &db,
+                .formula,
+                "SELECT name, version FROM kegs WHERE install_reason = 'direct' ORDER BY name;",
+            );
+            try writeRows(w, &db, .cask, "SELECT token, version FROM casks ORDER BY token;");
+        },
+    }
 
     try writeBytesToPath(ctx, path, aw.written());
+}
+
+/// Open and schema faults are the same story to the caller: no row source it
+/// can trust.
+fn refuseUnusableDb(prefix: []const u8, e: anyerror) Error {
+    output.err("cannot read database at {s}/db/malt.db ({s}) — refusing to wipe without a usable backup", .{ prefix, @errorName(e) });
+    return Error.DatabaseError;
+}
+
+/// Query failures abort rather than truncate — a short manifest reads as
+/// "fewer packages installed", which is exactly the lie to avoid here.
+fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, kind: backup_mod.Kind, sql: []const u8) Error!void {
+    var stmt = db.prepare(sql) catch |e| {
+        output.err("cannot read installed packages ({s}) — refusing to wipe without a usable backup", .{@errorName(e)});
+        return Error.DatabaseError;
+    };
+    defer stmt.finalize();
+    while (stmt.step() catch |e| {
+        output.err("database read failed mid-scan ({s}) — refusing to wipe with a partial backup", .{@errorName(e)});
+        return Error.DatabaseError;
+    }) {
+        const name_ptr = stmt.columnText(0) orelse continue;
+        const ver_ptr = stmt.columnText(1);
+        const name = std.mem.sliceTo(name_ptr, 0);
+        const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
+        backup_mod.writeEntry(w, kind, name, version, true) catch return Error.WriteFailed;
+    }
 }
 
 fn writeBytesToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8) Error!void {
@@ -236,7 +253,7 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
         if (dry_run) {
             output.info("would write backup manifest to {s}", .{bp});
         } else {
-            try writeManifest(ctx, allocator, bp);
+            writeManifest(ctx, allocator, bp) catch |e| return if (e == Error.DatabaseError) error.Aborted else e;
             output.success("backup manifest written to {s}", .{bp});
         }
     }
