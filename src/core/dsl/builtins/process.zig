@@ -182,8 +182,16 @@ pub fn macosVersion(ctx: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Valu
         .stdout = .pipe,
         .stderr = .ignore,
     }) catch return Value{ .string = "15.0" };
-    const stdout = child.stdout orelse return Value{ .string = "15.0" };
-    const ver = readPipeAll(stdout, ctx.allocator, 256) catch return Value{ .string = "15.0" };
+    // Same reap rule as safe_popen_read: an early return must not abandon
+    // a live child.
+    const stdout = child.stdout orelse {
+        child.kill(ctx.io);
+        return Value{ .string = "15.0" };
+    };
+    const ver = readPipeAll(stdout, ctx.allocator, 256) catch {
+        child.kill(ctx.io);
+        return Value{ .string = "15.0" };
+    };
     // Already captured stdout; wait is just for reaping the zombie.
     _ = child.wait(ctx.io) catch {};
     const trimmed = std.mem.trimEnd(u8, ver, "\n\r ");
@@ -286,8 +294,17 @@ pub fn safePopenRead(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!
         .environ_map = &env_map,
     }) catch return Value{ .string = "" };
 
-    const stdout = child.stdout orelse return Value{ .string = "" };
-    const content = readPipeAll(stdout, ctx.allocator, 1024 * 1024) catch return Value{ .string = "" };
+    // `kill`, not `wait`: overrunning the cap leaves the child blocked writing
+    // into a pipe malt still holds open, so waiting on it would never return.
+    // A child that traps SIGTERM and blocks there still wedges `kill` itself.
+    const stdout = child.stdout orelse {
+        child.kill(ctx.io);
+        return Value{ .string = "" };
+    };
+    const content = readPipeAll(stdout, ctx.allocator, 1024 * 1024) catch {
+        child.kill(ctx.io);
+        return Value{ .string = "" };
+    };
     // Already captured stdout; wait is just for reaping the zombie.
     _ = child.wait(ctx.io) catch {};
 
@@ -593,6 +610,83 @@ test "safe_popen_read runs under the sandbox-exec write fence" {
         error.FileNotFound,
         std.Io.Dir.accessAbsolute(lio.io(), outside, .{}),
     );
+}
+
+// A chatty command overruns the cap in normal use. malt holds the read end of
+// the pipe, so a child abandoned there never gets EPIPE — it blocks in write(2)
+// until malt exits.
+test "safe_popen_read reaps the child when output overruns the cap" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var lio: std.Io.Threaded = .init(alloc, .{});
+    defer lio.deinit();
+
+    const base = try std.fmt.allocPrint(alloc, "/tmp/malt_popen_overrun_{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(lio.io(), base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(lio.io(), base) catch {};
+    const keg = try std.fmt.allocPrint(alloc, "{s}/Cellar/foo/1.0", .{base});
+    try std.Io.Dir.cwd().createDirPath(lio.io(), keg);
+
+    const ctx = ExecCtx{
+        .allocator = alloc,
+        .io = lio.io(),
+        .environ = .empty,
+        .cellar_path = keg,
+        .malt_prefix = keg,
+    };
+
+    // Reap anything an earlier test left behind, so the check below can only
+    // see a child this call abandoned.
+    var status: c_int = undefined;
+    while (std.c.waitpid(-1, &status, std.posix.W.NOHANG) > 0) {}
+
+    // `yes` blows past the 1 MiB cap at once, so the read fails and the
+    // builtin takes its empty-string early return.
+    const out = try safePopenRead(ctx, null, &.{
+        .{ .string = "/usr/bin/yes" },
+        .{ .string = "overrun" },
+    });
+    try std.testing.expectEqualStrings("", out.string);
+
+    // -1 means ECHILD: no child of ours survives, alive or zombie.
+    try std.testing.expect(std.c.waitpid(-1, &status, std.posix.W.NOHANG) == -1);
+}
+
+// The reap fix must not cost the success path its exit status or its output:
+// a completed read still ends in `wait`, not `kill`.
+test "safe_popen_read still captures output and reaps on the success path" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var lio: std.Io.Threaded = .init(alloc, .{});
+    defer lio.deinit();
+
+    const base = try std.fmt.allocPrint(alloc, "/tmp/malt_popen_ok_{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(lio.io(), base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(lio.io(), base) catch {};
+    const keg = try std.fmt.allocPrint(alloc, "{s}/Cellar/foo/1.0", .{base});
+    try std.Io.Dir.cwd().createDirPath(lio.io(), keg);
+
+    const ctx = ExecCtx{
+        .allocator = alloc,
+        .io = lio.io(),
+        .environ = .empty,
+        .cellar_path = keg,
+        .malt_prefix = keg,
+    };
+
+    var status: c_int = undefined;
+    while (std.c.waitpid(-1, &status, std.posix.W.NOHANG) > 0) {}
+
+    const out = try safePopenRead(ctx, null, &.{
+        .{ .string = "/bin/echo" },
+        .{ .string = "under-cap" },
+    });
+    try std.testing.expectEqualStrings("under-cap", out.string);
+    try std.testing.expect(std.c.waitpid(-1, &status, std.posix.W.NOHANG) == -1);
 }
 
 test "system rejects an argv0 outside the sandbox roots before spawning" {
