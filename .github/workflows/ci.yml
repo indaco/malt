@@ -123,23 +123,16 @@ jobs:
       - name: Check Zig formatting
         run: zig fmt --check src/ tests/
 
-      # Static structural guard: every tap fetch URL, writeback URL,
-      # and MALT_GITHUB_TOKEN reach stays inside src/core/tap.zig.
-      # No build, no network — fast enough to live in lint.
-      - name: Tap-resolution contract guard
-        run: ./scripts/regressions/tap-resolution-contract.sh
+      - name: Install just
+        uses: taiki-e/install-action@v2.87.1
+        with:
+          tool: just
 
-      # Static structural guard: the tap cold path derives its pair from the
-      # canonical slug buffer, never by splitting the caller's raw slug on a
-      # `/` it may not contain. Source scan only — no build, no network.
-      - name: Tap slugless cold-path guard
-        run: ./scripts/regressions/tap-slugless-effective-owner-repo-unreachable-on-slugless-input.sh
-
-      # Static structural guard: the TUI interpreter reaps each background
-      # audit exactly once. `kill` already reaps, so a following `wait` would
-      # abort on the cleared pid. Source scan only — no build, no network.
-      - name: TUI single-reap guard
-        run: ./scripts/regressions/tui-background-fetch-no-double-reap-start-background-waits-after-kill.sh
+      # Source scans and fixture checks — no build, no network, fast enough
+      # to live in lint. The justfile recipe is the only list: a guard added
+      # there is gated here, so local `just test` and CI cannot drift apart.
+      - name: Static regression guards
+        run: just regressions-static
 
       - name: Install shell-lint tools
         run: brew install shellcheck shfmt
