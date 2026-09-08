@@ -91,6 +91,11 @@ jobs:
       - name: Regression guard - Cellar symlink confinement
         run: ./scripts/regressions/cellar-sinks-follow-a-symlinked-package-dir.sh
 
+      # Needs the integration test binaries, so it runs here off the warm
+      # cache rather than paying for a second full build in its own job.
+      - name: Regression guard - Cellar symlink refusal claims no store bytes
+        run: ./scripts/regressions/cellar-symlink-followups-3-follow-up.sh
+
       - name: Regression guard - versionless keg
         run: ./scripts/regressions/versionless-keg-empty-stable-version-installs-a-versionless-keg.sh
 

@@ -522,6 +522,8 @@ pub fn flushOverflow(
 /// without signalling a real child.
 pub const FlushHooks = struct {
     force_signalled: bool = false,
+    /// Lowered by tests to reach the over-cap read without 64 KiB of stderr.
+    stderr_limit: usize = 64 * 1024,
 };
 
 pub fn flushOverflowWithHooks(
@@ -548,11 +550,18 @@ pub fn flushOverflowWithHooks(
         else => return FallbackError.IoError,
     };
 
-    const stderr_file = child.stderr orelse return FallbackError.IoError;
+    // Reap before bailing: an early return here would strand the child, and
+    // `kill` is what closes the pipe `wait` would otherwise block on.
+    const stderr_file = child.stderr orelse {
+        child.kill(io);
+        return FallbackError.IoError;
+    };
     var read_buf: [4096]u8 = undefined;
     var reader = stderr_file.readerStreaming(io, &read_buf);
-    const stderr_bytes = reader.interface.allocRemaining(allocator, std.Io.Limit.limited(64 * 1024)) catch
+    const stderr_bytes = reader.interface.allocRemaining(allocator, std.Io.Limit.limited(hooks.stderr_limit)) catch {
+        child.kill(io);
         return FallbackError.IoError;
+    };
     defer allocator.free(stderr_bytes);
 
     const waited = child.wait(io) catch return FallbackError.InstallNameToolFailed;
@@ -749,6 +758,38 @@ test "a child that dies by signal is reported, not silently tolerated" {
 
     try std.testing.expectError(FallbackError.InstallNameToolFailed, res);
     try std.testing.expect(std.mem.indexOf(u8, emitted, path) != null);
+}
+
+// A stderr read that overruns the cap still leaves a child to reap; returning
+// past both `wait` and `kill` strands it as a zombie for the rest of the run.
+test "flushOverflow reaps the child when install_name_tool's stderr overruns the cap" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const path = try std.fmt.allocPrintSentinel(a, "/tmp/malt_patcher_overrun_{d}", .{std.c.getpid()}, 0);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "not a mach-o");
+    }
+
+    // Reap anything an earlier test left behind, so the check below can only
+    // see a child this call abandoned.
+    var status: c_int = undefined;
+    while (std.c.waitpid(-1, &status, std.posix.W.NOHANG) > 0) {}
+
+    const entries = [_]OverflowEntry{.{ .cmd = 12, .old_path = "/a/b", .new_path = "/c/d" }};
+    const res = flushOverflowWithHooks(io, a, path, &entries, .{ .stderr_limit = 1 });
+
+    try std.testing.expectError(FallbackError.IoError, res);
+    // -1 means ECHILD: no child of ours survives, alive or zombie.
+    try std.testing.expect(std.c.waitpid(-1, &status, std.posix.W.NOHANG) == -1);
 }
 
 test "classifyInstallNameToolStderr keeps padding exhaustion distinct" {

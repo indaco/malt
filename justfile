@@ -72,11 +72,11 @@ regressions-hermetic:
 [group('test')]
 regressions-harness:
     @./scripts/regressions/cached-outdated-drops-revision-bumped-packages.sh
-    @./scripts/regressions/cellar-symlink-followups-3-follow-up.sh
     @./scripts/regressions/child-run-sequential-pipe-drain-deadlock.sh
     @./scripts/regressions/cosign-guard-fails-open-and-spawn-not-pinned.sh
     @./scripts/regressions/csi-whitelist-ignores-private-parameter-bytes.sh
     @./scripts/regressions/dsl-chmod-mode-cast-panic-large-literal.sh
+    @./scripts/regressions/dsl-popen-early-returns-abandon-a-live-child.sh
     @./scripts/regressions/extract-token-field-panics-on-non-object-json.sh
     @./scripts/regressions/frame-putcontent-passes-lone-c1-bytes.sh
     @./scripts/regressions/ghcr-bearer-header-fixed-stack-buffer.sh
