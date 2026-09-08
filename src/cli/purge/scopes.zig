@@ -1106,10 +1106,8 @@ test "runStaleCasks removes a per-version artefact whose token is no longer inst
 }
 
 test "runStaleCasks matches a cache stem on the token boundary, not a bare prefix" {
-    // Tokens and versions both carry dashes, so the only sound rule is
-    // "token, then a literal `-`". `fluxbox` shares a prefix with `flux` but
-    // not a boundary and must go; `flux-2-1.0` is indistinguishable from
-    // `flux` at version `2-1.0`, so it is kept rather than risk the artefact.
+    // Tokens and versions both carry dashes, so the rule is "token, then a
+    // literal `-`" — and where that is still ambiguous, the file is kept.
     const allocator = testing.allocator;
 
     var s = try Scratch.init("runStaleCasks_boundary");
@@ -1136,6 +1134,37 @@ test "runStaleCasks matches a cache stem on the token boundary, not a bare prefi
     for (gone) |rel| try testing.expectError(
         error.FileNotFound,
         std.Io.Dir.accessAbsolute(fs_test_io, s.p(rel), .{}),
+    );
+}
+
+test "runStaleCasks keeps a dash-prefixed sibling's artefact on its own token" {
+    // `git-lfs` is installed, `git` is not. The sibling must be kept by its
+    // own row, and `git`'s leftover artefact must not ride along on it.
+    const allocator = testing.allocator;
+
+    var s = try Scratch.init("runStaleCasks_sibling");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/cache/Cask"));
+
+    {
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        try seedCurrentCask(&db, "git-lfs", "2.0");
+    }
+
+    try touchFile(fs_test_io, s.p("/cache/Cask/git-lfs-2.0.dmg"));
+    try touchFile(fs_test_io, s.p("/cache/Cask/git-2.39.0.dmg"));
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runStaleCasks(&ctx, allocator, s.base, false);
+
+    try testing.expectEqual(@as(u32, 1), result.removed);
+    try std.Io.Dir.accessAbsolute(fs_test_io, s.p("/cache/Cask/git-lfs-2.0.dmg"), .{});
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(fs_test_io, s.p("/cache/Cask/git-2.39.0.dmg"), .{}),
     );
 }
 
