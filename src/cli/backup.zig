@@ -85,8 +85,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return Error.DatabaseError;
     };
     defer db.close();
-    // Schema is idempotent; backup's SELECTs surface a real DB error if one exists.
-    schema.initSchema(&db) catch {};
+    // Guarantees the tables exist, so a failing `prepare` below can only mean
+    // a genuinely broken database — never a fresh one.
+    schema.initSchema(&db) catch |e| {
+        output.err("Failed to prepare database at {s} ({s})", .{ db_path, @errorName(e) });
+        return Error.DatabaseError;
+    };
 
     // ── Serialize into an in-memory buffer ───────────────────────────────
     var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -104,12 +108,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         "SELECT name, version FROM kegs " ++
         "WHERE install_reason = 'direct' " ++
         "ORDER BY name;";
-    var fstmt = db.prepare(formulae_sql) catch null;
-    if (fstmt) |*s| {
-        defer s.finalize();
-        while (s.step() catch false) {
-            const name_ptr = s.columnText(0) orelse continue;
-            const ver_ptr = s.columnText(1);
+    {
+        var fstmt = try prepareOrFail(&db, formulae_sql);
+        defer fstmt.finalize();
+        while (try stepOrFail(&fstmt)) {
+            const name_ptr = fstmt.columnText(0) orelse continue;
+            const ver_ptr = fstmt.columnText(1);
             const name = std.mem.sliceTo(name_ptr, 0);
             const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
             try writeEntry(w, .formula, name, version, include_versions);
@@ -122,10 +126,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // `<user>/<repo>/<token>`. Bare tokens 404 against the core API
     // on restore; the qualified form routes through
     // `installTapFormula` and re-installs from the owning tap.
-    var cstmt = db.prepare("SELECT token, version, tap FROM casks ORDER BY token;") catch null;
-    if (cstmt) |*s| {
+    {
+        var s = try prepareOrFail(&db, "SELECT token, version, tap FROM casks ORDER BY token;");
         defer s.finalize();
-        while (s.step() catch false) {
+        while (try stepOrFail(&s)) {
             const name_ptr = s.columnText(0) orelse continue;
             const ver_ptr = s.columnText(1);
             const tap_ptr = s.columnText(2);
@@ -157,10 +161,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // the same re-bootstrap invariant — presence of the line implies
     // auto_start, no extra token needed.
     if (include_services) {
-        var sstmt = db.prepare("SELECT name FROM services WHERE auto_start = 1 ORDER BY name;") catch null;
-        if (sstmt) |*st| {
+        {
+            var st = try prepareOrFail(&db, "SELECT name FROM services WHERE auto_start = 1 ORDER BY name;");
             defer st.finalize();
-            while (st.step() catch false) {
+            while (try stepOrFail(&st)) {
                 const name_ptr = st.columnText(0) orelse continue;
                 const name = std.mem.sliceTo(name_ptr, 0);
                 try writeEntry(w, .service, name, "", false);
@@ -188,6 +192,22 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     output.success("Backup written to {s} ({d} packages)", .{ default_path, count });
 }
 
+/// A backup that silently drops rows is worse than no backup — restore would
+/// quietly rebuild a smaller machine. Both faults abort instead.
+fn prepareOrFail(db: *sqlite.Database, sql: []const u8) Error!sqlite.Statement {
+    return db.prepare(sql) catch |e| {
+        output.err("Failed to read installed packages ({s})", .{@errorName(e)});
+        return Error.DatabaseError;
+    };
+}
+
+fn stepOrFail(stmt: *sqlite.Statement) Error!bool {
+    return stmt.step() catch |e| {
+        output.err("Database read failed mid-scan ({s})", .{@errorName(e)});
+        return Error.DatabaseError;
+    };
+}
+
 /// `--json` path: gather direct formulas + casks (with their `tap`
 /// field) and emit `{formulas:[...],casks:[...]}` to stdout, or to
 /// `--output <path>`. Plain-text contract is untouched so `mt restore`
@@ -209,14 +229,12 @@ fn executeJson(
     var casks: std.ArrayList(JsonCask) = .empty;
     var services: std.ArrayList(JsonService) = .empty;
 
-    var fstmt = db.prepare(
-        "SELECT name, version FROM kegs " ++
+    {
+        var s = try prepareOrFail(db, "SELECT name, version FROM kegs " ++
             "WHERE install_reason = 'direct' " ++
-            "ORDER BY name;",
-    ) catch null;
-    if (fstmt) |*s| {
+            "ORDER BY name;");
         defer s.finalize();
-        while (s.step() catch false) {
+        while (try stepOrFail(&s)) {
             const name_ptr = s.columnText(0) orelse continue;
             const ver_ptr = s.columnText(1);
             const name = a.dupe(u8, std.mem.sliceTo(name_ptr, 0)) catch return Error.WriteFailed;
@@ -227,10 +245,10 @@ fn executeJson(
         }
     }
 
-    var cstmt = db.prepare("SELECT token, version, tap FROM casks ORDER BY token;") catch null;
-    if (cstmt) |*s| {
+    {
+        var s = try prepareOrFail(db, "SELECT token, version, tap FROM casks ORDER BY token;");
         defer s.finalize();
-        while (s.step() catch false) {
+        while (try stepOrFail(&s)) {
             const name_ptr = s.columnText(0) orelse continue;
             const ver_ptr = s.columnText(1);
             const tap_ptr = s.columnText(2);
@@ -245,10 +263,10 @@ fn executeJson(
     }
 
     if (include_services) {
-        var sstmt = db.prepare("SELECT name FROM services WHERE auto_start = 1 ORDER BY name;") catch null;
-        if (sstmt) |*st| {
+        {
+            var st = try prepareOrFail(db, "SELECT name FROM services WHERE auto_start = 1 ORDER BY name;");
             defer st.finalize();
-            while (st.step() catch false) {
+            while (try stepOrFail(&st)) {
                 const name_ptr = st.columnText(0) orelse continue;
                 const name = a.dupe(u8, std.mem.sliceTo(name_ptr, 0)) catch return Error.WriteFailed;
                 services.append(a, .{ .name = name, .auto_start = true }) catch

@@ -734,7 +734,8 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         .run => try run_cmd.execute(ctx, allocator, cmd_args),
         .completions => try completions.execute(ctx, cmd_args),
         .shellenv => try shellenv.execute(ctx, allocator, cmd_args),
-        .backup => try backup.execute(ctx, allocator, cmd_args),
+        // Message already printed; `Aborted` exits 1 without a stack trace.
+        .backup => backup.execute(ctx, allocator, cmd_args) catch |e| return if (e == backup.Error.DatabaseError) error.Aborted else e,
         .restore => try restore.execute(ctx, allocator, cmd_args),
         .purge => try purge.execute(ctx, allocator, cmd_args),
         .cleanup => try purge.executeCleanup(ctx, allocator, cmd_args),
