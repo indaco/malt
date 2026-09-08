@@ -697,3 +697,151 @@ test "multi-scope dry-run renders the summary table when more than one scope ran
     const ctx = malt.app_ctx.debug_ctx;
     try purge.execute(&ctx, allocator, &.{"--housekeeping"});
 }
+
+test "--wipe --backup refuses an unreadable database and leaves the prefix intact" {
+    // The manifest is the wipe's only safety net: if it cannot be built from
+    // a real DB, deleting the prefix destroys the install record for good.
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "wipe_backup_corrupt");
+    defer prefix.deinit(allocator);
+
+    try writeFileAt(allocator, &.{ prefix.path, "Cellar", "marker" }, "x");
+    try writeFileAt(allocator, &.{ prefix.path, "db", "malt.db" }, "not a sqlite file\n");
+
+    const backup_base = try test_io.uniqueTempPath(allocator, "wipe", "corrupt");
+    defer allocator.free(backup_base);
+    const backup_path = try std.fmt.allocPrint(allocator, "{s}.txt", .{backup_base});
+    defer allocator.free(backup_path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, backup_path) catch {};
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(true);
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try testing.expectError(
+        error.Aborted,
+        purge.execute(&ctx, allocator, &.{ "--wipe", "--yes", "--backup", backup_path }),
+    );
+
+    // A zero-entry manifest on disk is worse than none — it reads as proof
+    // that nothing was installed.
+    try testing.expectError(
+        error.FileNotFound,
+        test_io.accessAbsolute(std.Options.debug_io, backup_path, .{}),
+    );
+
+    const marker = try std.fmt.allocPrint(allocator, "{s}/Cellar/marker", .{prefix.path});
+    defer allocator.free(marker);
+    try test_io.accessAbsolute(std.Options.debug_io, marker, .{});
+}
+
+test "--cache --backup refuses an unreadable database before any scope runs" {
+    // Same guard on the non-wipe backup call site.
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "cache_backup_corrupt");
+    defer prefix.deinit(allocator);
+
+    try writeFileAt(allocator, &.{ prefix.path, "db", "malt.db" }, "not a sqlite file\n");
+
+    const backup_base = try test_io.uniqueTempPath(allocator, "cache", "corrupt");
+    defer allocator.free(backup_base);
+    const backup_path = try std.fmt.allocPrint(allocator, "{s}.txt", .{backup_base});
+    defer allocator.free(backup_path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, backup_path) catch {};
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(true);
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try testing.expectError(
+        error.Aborted,
+        purge.execute(&ctx, allocator, &.{ "--cache", "--yes", "--backup", backup_path }),
+    );
+    try testing.expectError(
+        error.FileNotFound,
+        test_io.accessAbsolute(std.Options.debug_io, backup_path, .{}),
+    );
+}
+
+test "--wipe --backup refuses a database whose kegs table is unreadable" {
+    // Opens fine, schema is unusable: the manifest would silently claim the
+    // prefix held nothing.
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "wipe_backup_badtable");
+    defer prefix.deinit(allocator);
+
+    try writeFileAt(allocator, &.{ prefix.path, "Cellar", "marker" }, "x");
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        var st = try db.prepare("CREATE TABLE kegs(x);");
+        defer st.finalize();
+        _ = try st.step();
+    }
+
+    const backup_base = try test_io.uniqueTempPath(allocator, "wipe", "badtable");
+    defer allocator.free(backup_base);
+    const backup_path = try std.fmt.allocPrint(allocator, "{s}.txt", .{backup_base});
+    defer allocator.free(backup_path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, backup_path) catch {};
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(true);
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try testing.expectError(
+        error.Aborted,
+        purge.execute(&ctx, allocator, &.{ "--wipe", "--yes", "--backup", backup_path }),
+    );
+
+    const marker = try std.fmt.allocPrint(allocator, "{s}/Cellar/marker", .{prefix.path});
+    defer allocator.free(marker);
+    try test_io.accessAbsolute(std.Options.debug_io, marker, .{});
+}
+
+test "--wipe --backup writes an empty manifest when the prefix never had a database" {
+    // The `.absent` arm: no `db/` at all, so SQLite cannot even create a file.
+    // This is the one empty manifest that is honest, and the refusal above
+    // must not swallow it.
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "wipe_backup_nodb");
+    defer prefix.deinit(allocator);
+
+    const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{prefix.path});
+    defer allocator.free(db_dir);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, db_dir);
+
+    try writeFileAt(allocator, &.{ prefix.path, "Cellar", "marker" }, "x");
+
+    const backup_base = try test_io.uniqueTempPath(allocator, "wipe", "nodb");
+    defer allocator.free(backup_base);
+    const backup_path = try std.fmt.allocPrint(allocator, "{s}.txt", .{backup_base});
+    defer allocator.free(backup_path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, backup_path) catch {};
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(true);
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try purge.execute(&ctx, allocator, &.{ "--wipe", "--yes", "--backup", backup_path });
+
+    try test_io.accessAbsolute(std.Options.debug_io, backup_path, .{});
+}
