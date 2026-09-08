@@ -203,6 +203,60 @@ test "--stale-casks --dry-run iterates orphaned cache/Cask files and Caskroom di
     try purge.execute(&ctx, allocator, &.{"--stale-casks"});
 }
 
+test "--stale-casks --yes keeps an installed cask's artefacts and removes only orphans" {
+    // End-to-end through `purge.execute` — the path `mt cleanup` takes via
+    // `--housekeeping`. Vendor URLs are often latest-only, so deleting the
+    // installed version's artefact here is unrecoverable data loss.
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "stale_casks_keep");
+    defer prefix.deinit(allocator);
+
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+
+        var cask_stmt = try db.prepare(
+            \\INSERT INTO casks (token, name, version, url, sha256, app_path, auto_updates)
+            \\VALUES ('flux', 'flux', '2.0', 'https://example.invalid/dummy', NULL, NULL, 0);
+        );
+        defer cask_stmt.finalize();
+        _ = try cask_stmt.step();
+    }
+
+    const kept = [_][]const u8{ "flux-2.0.dmg", "flux-2.0.tar.gz", "flux-2.0.fonts", "flux.dmg" };
+    const gone = [_][]const u8{ "ghost-1.0.dmg", "fluxbox-1.0.dmg" };
+    for (kept ++ gone) |name| {
+        try writeFileAt(allocator, &.{ prefix.path, "cache", "Cask", name }, "x");
+    }
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(true);
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try purge.execute(&ctx, allocator, &.{ "--stale-casks", "--yes" });
+
+    for (kept) |name| {
+        const path = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/{s}", .{ prefix.path, name });
+        defer allocator.free(path);
+        try test_io.accessAbsolute(std.Options.debug_io, path, .{});
+    }
+    for (gone) |name| {
+        const path = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/{s}", .{ prefix.path, name });
+        defer allocator.free(path);
+        try testing.expectError(
+            error.FileNotFound,
+            test_io.accessAbsolute(std.Options.debug_io, path, .{}),
+        );
+    }
+}
+
 // --- --old-versions ------------------------------------------------------
 
 test "--old-versions --yes sweeps cask per-version cache + caskroom + history row" {
