@@ -432,9 +432,9 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
         return result;
     };
 
-    // Single reusable lookup for both passes — they ask the same
-    // question. A persistent prepare failure (schema drift, lock held)
-    // would otherwise empty the candidate set silently.
+    // Caskroom directories are bare tokens, so they match exactly. A
+    // persistent prepare failure (schema drift, lock held) would otherwise
+    // empty the candidate set silently.
     var lookup = db.prepare("SELECT token FROM casks WHERE token = ?1 LIMIT 1;") catch |e| {
         output.err("stale-casks: cannot prepare cask lookup ({s})", .{@errorName(e)});
         result.status = .err;
@@ -442,6 +442,19 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
         return result;
     };
     defer lookup.finalize();
+
+    // Cache files are named `<token>-<version><ext>`, so a stem belongs to a
+    // cask when it is the token or the token followed by a literal `-`.
+    // Matching from the token side is what keeps dashed tokens honest.
+    var cache_lookup = db.prepare(
+        "SELECT 1 FROM casks WHERE ?1 = token OR substr(?1, 1, length(token) + 1) = token || '-' LIMIT 1;",
+    ) catch |e| {
+        output.err("stale-casks: cannot prepare cask lookup ({s})", .{@errorName(e)});
+        result.status = .err;
+        result.error_kind = "db_prepare";
+        return result;
+    };
+    defer cache_lookup.finalize();
 
     // Collect candidates first so we can emit a single header line with
     // an accurate count before printing the per-item bullets.
@@ -467,8 +480,10 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
         while (iter.next(io) catch null) |entry| {
             if (entry.kind == .directory) continue;
             const name = entry.name;
-            const token = blk: {
-                for ([_][]const u8{ ".dmg", ".zip", ".pkg" }) |ext| {
+            // `.fonts` stays local: it is a manifest, not an artefact, so it
+            // has no place in the deletion-driving `cache_extensions`.
+            const stem = blk: {
+                for (cask_mod.cache_extensions ++ [_][]const u8{".fonts"}) |ext| {
                     if (std.mem.endsWith(u8, name, ext)) {
                         break :blk name[0 .. name.len - ext.len];
                     }
@@ -476,15 +491,15 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
                 break :blk name;
             };
 
-            const token_z = allocator.dupeZ(u8, token) catch continue;
-            defer allocator.free(token_z);
+            const stem_z = allocator.dupeZ(u8, stem) catch continue;
+            defer allocator.free(stem_z);
 
-            lookup.reset() catch {};
-            lookup.bindText(1, token_z) catch |e| {
-                output.warn("stale-casks: skipping {s}: bind failed ({s})", .{ token, @errorName(e) });
+            cache_lookup.reset() catch {};
+            cache_lookup.bindText(1, stem_z) catch |e| {
+                output.warn("stale-casks: skipping {s}: bind failed ({s})", .{ stem, @errorName(e) });
                 continue;
             };
-            if (lookup.step() catch false) continue; // still installed
+            if (cache_lookup.step() catch false) continue; // still installed
 
             const stat = dir.statFile(io, entry.name, .{}) catch continue;
             const dup = allocator.dupe(u8, entry.name) catch continue;
@@ -1020,6 +1035,108 @@ test "runStaleCasks self-heals a schema-less db rather than reporting it as a fa
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     try testing.expect(result.error_kind == null);
     try testing.expectEqual(@as(u32, 0), result.removed);
+}
+
+test "runStaleCasks keeps every cached artefact shape of an installed cask" {
+    // Artefacts are cached as `<token>-<version><ext>`, so a scope that only
+    // strips the extension asks the DB for `flux-2.0` and deletes the running
+    // version's download. Legacy bare `<token><ext>` files must keep working.
+    const allocator = testing.allocator;
+
+    var s = try Scratch.init("runStaleCasks_keep_installed");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/cache/Cask"));
+
+    {
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        try seedCurrentCask(&db, "flux", "2.0");
+    }
+
+    const kept = [_][]const u8{
+        "/cache/Cask/flux-2.0.dmg",
+        "/cache/Cask/flux-2.0.tar.gz",
+        "/cache/Cask/flux-2.0.tar.xz",
+        "/cache/Cask/flux-2.0.fonts",
+        "/cache/Cask/flux-1.0.zip", // history: --old-versions' job, not this scope's
+        "/cache/Cask/flux.dmg",
+    };
+    for (kept) |rel| try touchFile(fs_test_io, s.p(rel));
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runStaleCasks(&ctx, allocator, s.base, false);
+
+    try testing.expectEqual(util.ScopeStatus.ok, result.status);
+    try testing.expectEqual(@as(u32, 0), result.removed);
+    for (kept) |rel| try std.Io.Dir.accessAbsolute(fs_test_io, s.p(rel), .{});
+}
+
+test "runStaleCasks removes a per-version artefact whose token is no longer installed" {
+    const allocator = testing.allocator;
+
+    var s = try Scratch.init("runStaleCasks_drop_orphan");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/cache/Cask"));
+
+    {
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+    }
+
+    try touchFile(fs_test_io, s.p("/cache/Cask/ghost-1.0.dmg"));
+    try touchFile(fs_test_io, s.p("/cache/Cask/ghost.tar.gz"));
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runStaleCasks(&ctx, allocator, s.base, false);
+
+    try testing.expectEqual(util.ScopeStatus.ok, result.status);
+    try testing.expectEqual(@as(u32, 2), result.removed);
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(fs_test_io, s.p("/cache/Cask/ghost-1.0.dmg"), .{}),
+    );
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(fs_test_io, s.p("/cache/Cask/ghost.tar.gz"), .{}),
+    );
+}
+
+test "runStaleCasks matches a cache stem on the token boundary, not a bare prefix" {
+    // Tokens and versions both carry dashes, so the only sound rule is
+    // "token, then a literal `-`". `fluxbox` shares a prefix with `flux` but
+    // not a boundary and must go; `flux-2-1.0` is indistinguishable from
+    // `flux` at version `2-1.0`, so it is kept rather than risk the artefact.
+    const allocator = testing.allocator;
+
+    var s = try Scratch.init("runStaleCasks_boundary");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/cache/Cask"));
+
+    {
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        try seedCurrentCask(&db, "flux", "2.0");
+    }
+
+    const kept = [_][]const u8{ "/cache/Cask/flux-2.0.dmg", "/cache/Cask/flux-2-1.0.dmg" };
+    const gone = [_][]const u8{ "/cache/Cask/fluxbox-1.0.dmg", "/cache/Cask/flux2-1.0.dmg" };
+    for (kept ++ gone) |rel| try touchFile(fs_test_io, s.p(rel));
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runStaleCasks(&ctx, allocator, s.base, false);
+
+    try testing.expectEqual(@as(u32, gone.len), result.removed);
+    for (kept) |rel| try std.Io.Dir.accessAbsolute(fs_test_io, s.p(rel), .{});
+    for (gone) |rel| try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(fs_test_io, s.p(rel), .{}),
+    );
 }
 
 test "runCache reclaims relocated kegs orphaned by a past logic-version bump" {
