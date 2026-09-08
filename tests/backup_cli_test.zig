@@ -759,3 +759,74 @@ test "execute writes tap casks as <user>/<repo>/<token> so restore re-routes cor
     // attempt would 404 against the core API.
     try testing.expect(std.mem.indexOf(u8, body, "cask flux-markdown\n") == null);
 }
+
+test "execute fails when the kegs table cannot be read" {
+    // A DB that opens but whose tables are unusable must not be reported as
+    // an empty install — the backup would silently lose every package.
+    var s = try Scratch.init(testing.allocator, "bad_kegs");
+    defer s.deinit(testing.allocator);
+    try seedBrokenKegs(s.path);
+
+    quiet();
+    defer unquiet();
+
+    try testing.expectError(
+        backup.Error.DatabaseError,
+        backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", "/tmp/discard.txt" }),
+    );
+}
+
+test "execute --json fails when the kegs table cannot be read" {
+    var s = try Scratch.init(testing.allocator, "bad_kegs_json");
+    defer s.deinit(testing.allocator);
+    try seedBrokenKegs(s.path);
+
+    const prior = withJson();
+    defer restoreJson(prior);
+    quiet();
+    defer unquiet();
+
+    try testing.expectError(
+        backup.Error.DatabaseError,
+        backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", "/tmp/discard.json" }),
+    );
+}
+
+/// A `kegs` table with the wrong shape: `initSchema`'s CREATE IF NOT EXISTS
+/// is a no-op over it, so the column-selecting prepare is what fails.
+fn seedBrokenKegs(prefix: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var st = try db.prepare("CREATE TABLE kegs(x);");
+    defer st.finalize();
+    _ = try st.step();
+}
+
+test "execute --services fails when the services table cannot be read" {
+    // `--services` adds its own query, so it needs its own guard.
+    var s = try Scratch.init(testing.allocator, "bad_services");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        var st = try db.prepare("DROP TABLE services;");
+        defer st.finalize();
+        _ = try st.step();
+        var st2 = try db.prepare("CREATE TABLE services(x);");
+        defer st2.finalize();
+        _ = try st2.step();
+    }
+
+    quiet();
+    defer unquiet();
+
+    try testing.expectError(
+        backup.Error.DatabaseError,
+        backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--services", "--output", "/tmp/discard.txt" }),
+    );
+}
