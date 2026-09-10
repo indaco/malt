@@ -1449,7 +1449,10 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         );
         return error.Aborted;
     };
-    allocator.free(prefetched);
+    defer allocator.free(prefetched);
+    // Consumed by `install` below and spared by `uninstall`, so the bytes are
+    // fetched exactly once even when the cask pins no digest to revalidate.
+    installer.prefetched_artifact = prefetched;
 
     db.beginTransaction() catch |txn_err| {
         output.err(

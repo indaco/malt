@@ -298,10 +298,13 @@ pub fn artifactTypeTag(t: ArtifactType) []const u8 {
 /// (or none existed); false when an existing file could not be
 /// deleted — the caller uses that signal to gate the DB row delete
 /// so a read-only mount doesn't orphan history.
-pub fn deletePerVersionCacheFile(io: std.Io, prefix: []const u8, token: []const u8, version: []const u8) bool {
+/// `keep` spares one already-fetched artefact, so an upgrade's uninstall
+/// cannot wipe the bytes it is about to install.
+pub fn deletePerVersionCacheFile(io: std.Io, prefix: []const u8, token: []const u8, version: []const u8, keep: ?[]const u8) bool {
     for (cache_extensions) |ext| {
         var path_buf: [512]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/cache/Cask/{s}-{s}{s}", .{ prefix, token, version, ext }) catch continue;
+        if (keep) |k| if (std.mem.eql(u8, path, k)) continue;
         std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
         std.Io.Dir.cwd().deleteFile(io, path) catch return false;
     }
@@ -316,14 +319,16 @@ pub fn deletePerVersionCacheFile(io: std.Io, prefix: []const u8, token: []const 
 /// Enumerates every history row so stale rollback artefacts are swept too.
 /// Best-effort: a failed delete never gates uninstall. Call BEFORE the
 /// history rows are deleted, or the version list is already empty.
-pub fn sweepOwnedVersionCache(io: std.Io, db: *sqlite.Database, prefix: []const u8, token: []const u8) void {
+/// `keep` is an artefact an in-flight upgrade already fetched; wiping it would
+/// force a second download of bytes we are about to install.
+pub fn sweepOwnedVersionCache(io: std.Io, db: *sqlite.Database, prefix: []const u8, token: []const u8, keep: ?[]const u8) void {
     var stmt = db.prepare("SELECT version FROM cask_versions WHERE token = ?1;") catch return;
     defer stmt.finalize();
     stmt.bindText(1, token) catch return;
 
     while (stmt.step() catch false) {
         const ver_ptr = stmt.columnText(0) orelse continue;
-        _ = deletePerVersionCacheFile(io, prefix, token, std.mem.sliceTo(ver_ptr, 0));
+        _ = deletePerVersionCacheFile(io, prefix, token, std.mem.sliceTo(ver_ptr, 0), keep);
     }
 }
 
@@ -606,6 +611,11 @@ pub const CaskInstaller = struct {
     /// internal HttpClient so a download miss surfaces `OfflineRequired`
     /// instead of stalling on connect.
     offline: bool = false,
+    /// An artefact the caller already fetched and verified. `install`
+    /// consumes it instead of re-fetching and `uninstall` leaves it alone,
+    /// which is what lets an upgrade survive a failed download even for a
+    /// cask that pins no digest and so can never be validated from cache.
+    prefetched_artifact: ?[]const u8 = null,
 
     pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]const u8) CaskInstaller {
         return .{ .allocator = allocator, .io = io, .environ = environ, .db = db, .prefix = prefix, .progress = null };
@@ -656,7 +666,10 @@ pub const CaskInstaller = struct {
         const artifact_type = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
         if (artifact_type == .unknown) return CaskError.InstallFailed;
 
-        const cache_path = try self.downloadOnly(cask);
+        const cache_path = if (self.prefetched_artifact) |p|
+            try self.allocator.dupe(u8, p)
+        else
+            try self.downloadOnly(cask);
         errdefer {
             // A failed mount or copy says nothing about the bytes, and
             // `rollback --to` reads this exact file. An unpinned artefact
@@ -764,11 +777,12 @@ pub const CaskInstaller = struct {
         var cache_buf: [512]u8 = undefined;
         for (cache_extensions) |ext| {
             const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask/{s}{s}", .{ self.prefix, token, ext }) catch continue;
+            if (self.prefetched_artifact) |k| if (std.mem.eql(u8, k, cache_file)) continue;
             std.Io.Dir.cwd().deleteFile(self.io, cache_file) catch {};
         }
         // Must precede the history wipe below — the sweep reads the version
         // list from `cask_versions`, which the DELETE would otherwise empty.
-        sweepOwnedVersionCache(self.io, self.db, self.prefix, token);
+        sweepOwnedVersionCache(self.io, self.db, self.prefix, token, self.prefetched_artifact);
 
         // Drop every history row so a future install starts clean.
         if (self.db.prepare("DELETE FROM cask_versions WHERE token = ?1;")) |prepared| {

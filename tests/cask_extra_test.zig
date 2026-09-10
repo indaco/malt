@@ -430,3 +430,50 @@ test "a failed cask prefetch leaves the installed app and its row intact" {
     try std.Io.Dir.accessAbsolute(io, app_path_z, .{});
     try testing.expect(cask.isInstalled(&db, "prefetch-guard"));
 }
+
+test "an unpinned artefact fetched once survives uninstall and installs from the prefetch" {
+    // The `sha256 :no_check` case the cache reuse cannot cover: nothing can
+    // revalidate those bytes, so the only way an upgrade survives a failed
+    // download is to fetch before destroying, then consume that fetch.
+    var fx = try Fixture.init("prefetch_consume");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cache_dir = fx.p("cache/Cask");
+    try std.Io.Dir.cwd().createDirPath(io, cache_dir);
+    try std.Io.Dir.cwd().createDirPath(io, fx.p("Applications"));
+
+    const prefetched = fx.p("cache/Cask/rolling-latest.zip");
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, prefetched, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "not an archive");
+    }
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"rolling","name":["Rolling"],"version":"latest","url":"https://example.invalid/rolling.zip","sha256":"no_check","artifacts":[{"app":["Rolling.app"]}]}
+    );
+    defer c.deinit();
+
+    const app_path = fx.p("Applications/Rolling.app");
+    try std.Io.Dir.cwd().createDirPath(io, app_path);
+    try cask.recordInstall(&db, &c, app_path, null);
+
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    installer.offline = true; // any re-fetch would fail loudly instead of quietly working
+    installer.prefetched_artifact = prefetched;
+
+    // The upgrade's destructive step must leave the fetched bytes behind.
+    try installer.uninstall("rolling");
+    try std.Io.Dir.accessAbsolute(io, prefetched, .{});
+
+    // InstallFailed (extracting a non-archive), not DownloadFailed: the
+    // install consumed the prefetch instead of reaching for the network.
+    try testing.expectError(cask.CaskError.InstallFailed, installer.install(&c));
+}

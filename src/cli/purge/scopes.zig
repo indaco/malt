@@ -915,7 +915,7 @@ fn sweepCaskOldVersion(io: std.Io, prefix: []const u8, token: []const u8, versio
         } else |_| {}
     } else |_| {}
 
-    return cask_mod.deletePerVersionCacheFile(io, prefix, token, version);
+    return cask_mod.deletePerVersionCacheFile(io, prefix, token, version, null);
 }
 
 fn deleteCaskVersionRow(db: *sqlite.Database, token: []const u8, version: []const u8) void {
