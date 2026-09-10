@@ -477,16 +477,19 @@ install_tap_formulas() {
 # not block the script from completing.
 cleanup_installs() {
   printf '\n── Cleanup ───────────────────────────────────────\n'
-  local item
+  local item out
   for item in "${INSTALLED_CASKS[@]}"; do
     printf '  uninstall cask %s\n' "$item"
-    "$MT_BIN" uninstall --cask "$item" >/dev/null 2>&1 ||
-      printf '  WARN: uninstall --cask %s exited non-zero (continuing)\n' "$item"
+    out=$("$MT_BIN" uninstall --cask "$item" 2>&1) ||
+      printf '  WARN: uninstall --cask %s exited non-zero (continuing): %s\n' "$item" "$out"
   done
+  # Forced because only top-level installs are tracked: a dependency the
+  # script never named still holds a reference and would refuse an otherwise
+  # correct teardown (mongosh, pulled in by mongodb-community, pins node).
   for item in "${INSTALLED_FORMULAS[@]}"; do
     printf '  uninstall formula %s\n' "$item"
-    "$MT_BIN" uninstall "$item" >/dev/null 2>&1 ||
-      printf '  WARN: uninstall %s exited non-zero (continuing)\n' "$item"
+    out=$("$MT_BIN" uninstall --force "$item" 2>&1) ||
+      printf '  WARN: uninstall %s exited non-zero (continuing): %s\n' "$item" "$out"
   done
 }
 
