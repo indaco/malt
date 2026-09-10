@@ -1100,7 +1100,9 @@ fn upgradeRoutedTapCask(
     defer if (prefetched) |p| allocator.free(p);
     const download_only = true;
     install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, download_only, &prefetched, install_sink_mod.progress_only) catch |dl_err| {
-        output.err("Failed to download {s}: {s} (installed version left in place)", .{ full_name, @errorName(dl_err) });
+        // This pass also takes the PKG sudo confirmation, so a decline lands
+        // here having downloaded nothing — the wording has to cover both.
+        output.err("Could not upgrade {s}: {s} (installed version left in place)", .{ full_name, @errorName(dl_err) });
         return error.Aborted;
     };
 
