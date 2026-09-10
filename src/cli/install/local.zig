@@ -1174,6 +1174,38 @@ pub fn materializeRubyFormula(
     sink.success("{s} {s} installed", .{ resolved.name, resolved.version });
 }
 
+/// Whether a PKG cask's sudo confirmation is owed on this pass.
+///
+/// The upgrade route calls twice and only the first call runs before the old
+/// version is removed, so a refusal on the second destroys what nothing puts
+/// back. `prefetch_slot` already tells the two passes apart.
+fn pkgConfirmationDue(download_only: bool, prefetch_slot: ?*?[]const u8) bool {
+    // Outside an upgrade: `--download-only` never escalates, a real install does.
+    const slot = prefetch_slot orelse return !download_only;
+
+    // Upgrade: ask on the prefetch pass, reuse that answer on the install pass.
+    return slot.* == null;
+}
+
+test "pkgConfirmationDue asks once, on the pass that precedes the uninstall" {
+    // Plain install escalates, so it confirms.
+    try std.testing.expect(pkgConfirmationDue(false, null));
+    // `mt install --download-only` only fills the cache.
+    try std.testing.expect(!pkgConfirmationDue(true, null));
+
+    // Upgrade prefetch: nothing removed yet, so this is the only safe moment.
+    var empty: ?[]const u8 = null;
+    try std.testing.expect(pkgConfirmationDue(true, &empty));
+
+    // Upgrade install: the prefetch already asked.
+    var filled: ?[]const u8 = "/cache/Cask/tok-1.0.pkg";
+    try std.testing.expect(!pkgConfirmationDue(false, &filled));
+
+    // A slot that never got filled still confirms rather than silently
+    // escalating — the safe side of an unexpected call order.
+    try std.testing.expect(pkgConfirmationDue(false, &empty));
+}
+
 /// Hand a tap cask off to the shared `core/cask.zig` installer by
 /// minting a Homebrew-API-shaped JSON document from the parsed Ruby
 /// directives. Reuses every download/SHA/extract path the brew-API
@@ -1240,7 +1272,9 @@ fn materializeTapCask(
 
     if (kind == .pkg) {
         sink.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
-        if (!download_only and !install_mod.confirmPkgSudo(cask.token)) return InstallError.CaskNotFound;
+        if (pkgConfirmationDue(download_only, prefetch_slot) and !install_mod.confirmPkgSudo(cask.token)) {
+            return InstallError.CaskNotFound;
+        }
     }
 
     // `--download-only` for a cask-shaped tap entry reuses the cask
