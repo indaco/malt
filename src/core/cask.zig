@@ -934,10 +934,12 @@ pub const CaskInstaller = struct {
         // A pinned digest proves the cached file is this exact artefact, so an
         // upgrade's prefetch makes the install that follows it free. Casks that
         // pin nothing reuse one filename across releases and must re-fetch.
-        if (artifactIntegrity(cask.sha256) == .digest_pinned) {
-            if (verifyFileSha256(self.io, dest, cask.sha256)) |_| {
-                return .{ .path = dest, .verified = true };
-            } else |_| {}
+        if (artifactIntegrity(cask.sha256) == .digest_pinned) reuse: {
+            // A planted cache file must not let a `file://` or `data:`
+            // manifest install without ever facing the scheme check.
+            client_mod.HttpClient.requireSecureOrigin(cask.url, .digest_pinned) catch break :reuse;
+            verifyFileSha256(self.io, dest, cask.sha256) catch break :reuse;
+            return .{ .path = dest, .verified = true };
         }
 
         // Download via HTTP client
