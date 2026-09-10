@@ -392,3 +392,88 @@ test "downloadOnly reports a cleartext origin as its own error, not a download f
     var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
     try testing.expectError(error.InsecureOrigin, installer.downloadOnly(&c));
 }
+
+test "a failed cask prefetch leaves the installed app and its row intact" {
+    // Both upgrade routes now fetch the replacement before they uninstall, so
+    // the failure the network hands them has to be a no-op — the old app stays
+    // on disk and its row stays in the DB.
+    const prefetch_cask_json =
+        \\{"token":"prefetch-guard","name":["Prefetch"],"version":"2.0","desc":"","homepage":"",
+        \\ "url":"https://example.invalid/prefetch.dmg",
+        \\ "sha256":"00000000000000000000000000000000000000000000000000000000deadbeef",
+        \\ "auto_updates":false,"artifacts":[{"app":["Prefetch.app"]}]}
+    ;
+    var c = try cask.parseCask(testing.allocator, prefetch_cask_json);
+    defer c.deinit();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var bundle = try Fixture.init("prefetch_bundle");
+    defer bundle.deinit();
+    const app_path_z = bundle.p("Prefetch.app");
+    try test_io.makeDirAbsolute(std.Options.debug_io, app_path_z);
+    try cask.recordInstall(&db, &c, app_path_z, null);
+
+    var fx = try Fixture.init("prefetch_prefix");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+    try std.Io.Dir.cwd().createDirPath(io, fx.p("cache"));
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    installer.offline = true; // stands in for the dropped connection, hermetically
+
+    try testing.expectError(cask.CaskError.DownloadFailed, installer.downloadOnly(&c));
+
+    try std.Io.Dir.accessAbsolute(io, app_path_z, .{});
+    try testing.expect(cask.isInstalled(&db, "prefetch-guard"));
+}
+
+test "an unpinned artefact fetched once survives uninstall and installs from the prefetch" {
+    // The `sha256 :no_check` case the cache reuse cannot cover: nothing can
+    // revalidate those bytes, so the only way an upgrade survives a failed
+    // download is to fetch before destroying, then consume that fetch.
+    var fx = try Fixture.init("prefetch_consume");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cache_dir = fx.p("cache/Cask");
+    try std.Io.Dir.cwd().createDirPath(io, cache_dir);
+    try std.Io.Dir.cwd().createDirPath(io, fx.p("Applications"));
+
+    const prefetched = fx.p("cache/Cask/rolling-latest.zip");
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, prefetched, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "not an archive");
+    }
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"rolling","name":["Rolling"],"version":"latest","url":"https://example.invalid/rolling.zip","sha256":"no_check","artifacts":[{"app":["Rolling.app"]}]}
+    );
+    defer c.deinit();
+
+    const app_path = fx.p("Applications/Rolling.app");
+    try std.Io.Dir.cwd().createDirPath(io, app_path);
+    try cask.recordInstall(&db, &c, app_path, null);
+
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    installer.offline = true; // any re-fetch would fail loudly instead of quietly working
+    installer.prefetched_artifact = prefetched;
+
+    // The upgrade's destructive step must leave the fetched bytes behind.
+    try installer.uninstall("rolling");
+    try std.Io.Dir.accessAbsolute(io, prefetched, .{});
+
+    // InstallFailed (extracting a non-archive), not DownloadFailed: the
+    // install consumed the prefetch instead of reaching for the network.
+    try testing.expectError(cask.CaskError.InstallFailed, installer.install(&c));
+}

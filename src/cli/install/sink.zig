@@ -91,6 +91,25 @@ pub const silent: OutputSink = .{
     .show_progress = false,
 };
 
+/// Swallows every human line but keeps the progress bar. An upgrade's
+/// prefetch is the only real download of the run, so the bar has to survive
+/// even though the per-install narration around it would duplicate the
+/// upgrade's own output — and the upgrade reports its own failures.
+pub const progress_only: OutputSink = .{
+    .writeInfo = swallow,
+    .writeWarn = swallow,
+    .writeSuccess = swallow,
+    .writeErr = swallow,
+    .show_progress = true,
+};
+
+test "progress_only differs from silent only in keeping the bar" {
+    // The swallowing is `silent`'s test above; what matters here is that a
+    // long download still shows feedback.
+    try std.testing.expect(progress_only.show_progress);
+    try std.testing.expect(!silent.show_progress);
+}
+
 test "terminal sink forwards human lines to ui/output" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);

@@ -1064,7 +1064,7 @@ test "sweepOwnedVersionCache deletes only the token's own recorded versions" {
         try f.writeStreamingAll(io, "x");
     }
 
-    cask.sweepOwnedVersionCache(io, &db, fx.base, "git");
+    cask.sweepOwnedVersionCache(io, &db, fx.base, "git", null);
 
     // Recorded versions gone; the prefix sibling and legacy shape survive.
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, seeds[0], .{}));
@@ -1080,7 +1080,7 @@ test "sweepOwnedVersionCache is a no-op when the token has no history rows" {
     try schema.initSchema(&db);
 
     // No rows and an absent cache dir — the sweep must not error.
-    cask.sweepOwnedVersionCache(io, &db, "/tmp/malt_cask_sweep_missing", "git");
+    cask.sweepOwnedVersionCache(io, &db, "/tmp/malt_cask_sweep_missing", "git", null);
 }
 
 test "sweepOwnedVersionCache handles a dash-bearing version without touching siblings" {
@@ -1105,7 +1105,7 @@ test "sweepOwnedVersionCache handles a dash-bearing version without touching sib
         try f.writeStreamingAll(io, "x");
     }
 
-    cask.sweepOwnedVersionCache(io, &db, fx.base, "git");
+    cask.sweepOwnedVersionCache(io, &db, fx.base, "git", null);
 
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, owned, .{}));
     try test_io.accessAbsolute(io, sibling, .{});
@@ -1134,7 +1134,7 @@ test "sweepOwnedVersionCache sweeps a pre-v7 row with NULL artifact_type" {
         try f.writeStreamingAll(io, "x");
     }
 
-    cask.sweepOwnedVersionCache(io, &db, fx.base, "git");
+    cask.sweepOwnedVersionCache(io, &db, fx.base, "git", null);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, owned, .{}));
 }
 

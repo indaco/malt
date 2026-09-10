@@ -39,6 +39,7 @@ regressions-static:
     @./scripts/regressions/tap-slugless-effective-owner-repo-unreachable-on-slugless-input.sh
     @./scripts/regressions/relocated-store-logic-version-pin.sh
     @./scripts/regressions/clean-misses-tmpdir-test-scratch.sh
+    @./scripts/regressions/cask-upgrade-deletes-app-before-download.sh
     @./scripts/regressions/post-install-native-spawns-inherit-full-environment.sh
     @./scripts/regressions/tar-prescan-followups-925-926-follow-up.sh
     @./scripts/regressions/tui-background-fetch-no-double-reap-start-background-waits-after-kill.sh

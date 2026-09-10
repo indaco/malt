@@ -1085,6 +1085,23 @@ fn upgradeRoutedTapCask(
     // Snapshot the pin so a force-upgrade preserves the user's hold.
     const was_pinned = pin_mod.isPinned(db, token);
 
+    const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap_label, token }) catch return error.Aborted;
+    defer allocator.free(full_name);
+
+    // `installTapCask` (not `installTapFormula`) so the resolver
+    // never enters the Formula/ probe that would open a nested DB
+    // transaction inside our outer one.
+    var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
+
+    // Fetch and sha-verify the replacement before anything is destroyed: a
+    // dropped connection here must leave the installed app in place. Nothing
+    // has been opened yet, so there is nothing to roll back.
+    const download_only = true;
+    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, download_only, install_sink_mod.progress_only) catch |dl_err| {
+        output.err("Failed to download {s}: {s} (installed version left in place)", .{ full_name, @errorName(dl_err) });
+        return error.Aborted;
+    };
+
     // Single DB transaction across uninstall + install + recordInstall.
     // Mirrors the core-API path in `upgradeCask` so a partial failure
     // can't leave the casks row missing once the new app is on disk.
@@ -1105,17 +1122,8 @@ fn upgradeRoutedTapCask(
         return error.Aborted;
     };
 
-    const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap_label, token }) catch {
-        db.rollback();
-        return error.Aborted;
-    };
-    defer allocator.free(full_name);
-
-    // `installTapCask` (not `installTapFormula`) so the resolver
-    // never enters the Formula/ probe that would open a nested DB
-    // transaction inside our outer one.
-    var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
-    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, install_sink_mod.terminal) catch |in_err| {
+    // Cache hit off the prefetch above, so this does not re-download.
+    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, install_sink_mod.terminal) catch |in_err| {
         output.err("Failed to upgrade tap cask {s}: {s}", .{ full_name, @errorName(in_err) });
         db.rollback();
         return error.Aborted;
@@ -1430,6 +1438,22 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // (potentially slow) install is harmless to other connections.
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
     installer.offline = ctx.offline;
+
+    // Fetch before destroying, as in `upgradeRoutedTapCask` above.
+    const prefetched = installer.downloadOnly(&parsed_cask) catch |dl_err| {
+        // Distinct from the post-uninstall failure below: this one left the
+        // installed version in place, and the log has to say so.
+        output.err(
+            "Failed to download new version of {s}: {s} (installed version left in place)",
+            .{ token, @errorName(dl_err) },
+        );
+        return error.Aborted;
+    };
+    defer allocator.free(prefetched);
+    // Consumed by `install` below and spared by `uninstall`, so the bytes are
+    // fetched exactly once even when the cask pins no digest to revalidate.
+    installer.prefetched_artifact = prefetched;
+
     db.beginTransaction() catch |txn_err| {
         output.err(
             "Could not begin DB transaction for {s}: {s} ({s})",
