@@ -1097,7 +1097,7 @@ fn upgradeRoutedTapCask(
     // dropped connection here must leave the installed app in place. Nothing
     // has been opened yet, so there is nothing to roll back.
     const download_only = true;
-    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, download_only, install_sink_mod.terminal) catch |dl_err| {
+    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, download_only, install_sink_mod.progress_only) catch |dl_err| {
         output.err("Failed to download {s}: {s} (installed version left in place)", .{ full_name, @errorName(dl_err) });
         return error.Aborted;
     };
