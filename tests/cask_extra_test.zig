@@ -392,3 +392,41 @@ test "downloadOnly reports a cleartext origin as its own error, not a download f
     var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
     try testing.expectError(error.InsecureOrigin, installer.downloadOnly(&c));
 }
+
+test "a failed cask prefetch leaves the installed app and its row intact" {
+    // Both upgrade routes now fetch the replacement before they uninstall, so
+    // the failure the network hands them has to be a no-op — the old app stays
+    // on disk and its row stays in the DB.
+    const prefetch_cask_json =
+        \\{"token":"prefetch-guard","name":["Prefetch"],"version":"2.0","desc":"","homepage":"",
+        \\ "url":"https://example.invalid/prefetch.dmg",
+        \\ "sha256":"00000000000000000000000000000000000000000000000000000000deadbeef",
+        \\ "auto_updates":false,"artifacts":[{"app":["Prefetch.app"]}]}
+    ;
+    var c = try cask.parseCask(testing.allocator, prefetch_cask_json);
+    defer c.deinit();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var bundle = try Fixture.init("prefetch_bundle");
+    defer bundle.deinit();
+    const app_path_z = bundle.p("Prefetch.app");
+    try test_io.makeDirAbsolute(std.Options.debug_io, app_path_z);
+    try cask.recordInstall(&db, &c, app_path_z, null);
+
+    var fx = try Fixture.init("prefetch_prefix");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+    try std.Io.Dir.cwd().createDirPath(io, fx.p("cache"));
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    installer.offline = true; // stands in for the dropped connection, hermetically
+
+    try testing.expectError(cask.CaskError.DownloadFailed, installer.downloadOnly(&c));
+
+    try std.Io.Dir.accessAbsolute(io, app_path_z, .{});
+    try testing.expect(cask.isInstalled(&db, "prefetch-guard"));
+}

@@ -204,9 +204,9 @@ pub fn installTapFormula(
 /// Install a tap cask whose owning tap is already known. Skips the
 /// `Formula/` probe — safe to call from inside an open DB transaction
 /// because the formula branch of `materializeRubyFormula` (which
-/// begins its own transaction) is structurally unreachable. Upgrade
-/// callers never opt into `download_only`, so the legacy false is
-/// hard-wired here rather than forwarded.
+/// begins its own transaction) is structurally unreachable.
+/// `download_only` is what lets an upgrade warm the cache before it
+/// touches the installed app.
 pub fn installTapCask(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -216,9 +216,10 @@ pub fn installTapCask(
     prefix: []const u8,
     dry_run: bool,
     force: bool,
+    download_only: bool,
     sink: OutputSink,
 ) !void {
-    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, false, .cask_only, sink);
+    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, download_only, .cask_only, sink);
 }
 
 /// True when a row matching `(leaf, tap_slug)` exists. The tap match is what
