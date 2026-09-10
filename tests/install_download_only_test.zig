@@ -551,6 +551,7 @@ test "--download-only on tap formula with warm tap cache prints path + skips Cel
         false, // dry_run
         false, // force
         true, // download_only
+        null, // prefetch_slot
         malt.install_sink.terminal,
     );
 
@@ -638,6 +639,7 @@ test "--download-only --force on tap formula with warm cache is a no-op refresh"
         false, // dry_run
         true, // force
         true, // download_only
+        null, // prefetch_slot
         malt.install_sink.terminal,
     );
 
@@ -729,6 +731,7 @@ test "--download-only --ndjson on tap formula emits download_started + complete 
         false, // dry_run
         false, // force
         true, // download_only
+        null, // prefetch_slot
         malt.install_sink.terminal,
     );
 
@@ -866,6 +869,7 @@ test "materializeRubyFormula refuses a source archive that yields no linkable ar
         false, // dry_run
         false, // force
         false, // download_only
+        null, // prefetch_slot
         malt.install_sink.terminal,
     ));
 
@@ -950,6 +954,7 @@ test "materializeRubyFormula installs a lib-only keg that ships no binary" {
         false, // dry_run
         false, // force
         false, // download_only
+        null, // prefetch_slot
         malt.install_sink.terminal,
     );
 
@@ -1063,6 +1068,7 @@ test "materializeRubyFormula installs a tap formula whose url is an uncompressed
         false, // dry_run
         false, // force
         false, // download_only
+        null, // prefetch_slot
         malt.install_sink.terminal,
     );
 
@@ -1136,6 +1142,7 @@ test "materializeRubyFormula honours binary_name when staging an uncompressed bi
         false, // dry_run
         false, // force
         false, // download_only
+        null, // prefetch_slot
         malt.install_sink.terminal,
     );
 
@@ -1200,6 +1207,7 @@ test "materializeRubyFormula refuses a compressed body arriving on the raw-binar
         false, // dry_run
         false, // force
         false, // download_only
+        null, // prefetch_slot
         malt.install_sink.terminal,
     ));
 
@@ -1260,6 +1268,7 @@ test "materializeRubyFormula truncated body on the raw-binary path is refused" {
         false, // dry_run
         false, // force
         false, // download_only
+        null, // prefetch_slot
         malt.install_sink.terminal,
     ));
     try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
@@ -1337,6 +1346,7 @@ test "materializeRubyFormula records the declared dependencies of a tap formula"
         false, // dry_run
         false, // force
         false, // download_only
+        null, // prefetch_slot
         malt.install_sink.terminal,
     );
 
@@ -1407,6 +1417,7 @@ test "materializeRubyFormula --dry-run names the dependencies it would pull in" 
         true, // dry_run
         false, // force
         false, // download_only
+        null, // prefetch_slot
         malt.install_sink.terminal,
     );
 
@@ -1487,6 +1498,7 @@ test "materializeRubyFormula stamps an extracted tap archive as relocated, not e
         false, // dry_run
         false, // force
         false, // download_only
+        null, // prefetch_slot
         malt.install_sink.terminal,
     );
 
