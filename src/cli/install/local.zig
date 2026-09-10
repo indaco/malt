@@ -198,7 +198,7 @@ pub fn installTapFormula(
     download_only: bool,
     sink: OutputSink,
 ) !void {
-    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, download_only, .formula_or_cask, sink);
+    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, download_only, .formula_or_cask, null, sink);
 }
 
 /// Install a tap cask whose owning tap is already known. Skips the
@@ -207,6 +207,11 @@ pub fn installTapFormula(
 /// begins its own transaction) is structurally unreachable.
 /// `download_only` is what lets an upgrade warm the cache before it
 /// touches the installed app.
+///
+/// `prefetch_slot` carries that artefact between an upgrade's two passes:
+/// the download-only pass fills it and hands over ownership, the install
+/// pass consumes it instead of fetching again. Callers with a single pass
+/// pass null and keep today's behaviour.
 pub fn installTapCask(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -217,9 +222,10 @@ pub fn installTapCask(
     dry_run: bool,
     force: bool,
     download_only: bool,
+    prefetch_slot: ?*?[]const u8,
     sink: OutputSink,
 ) !void {
-    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, download_only, .cask_only, sink);
+    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, download_only, .cask_only, prefetch_slot, sink);
 }
 
 /// True when a row matching `(leaf, tap_slug)` exists. The tap match is what
@@ -253,6 +259,7 @@ fn installTapRb(
     force: bool,
     download_only: bool,
     kind: TapResolveKind,
+    prefetch_slot: ?*?[]const u8,
     sink: OutputSink,
 ) !void {
     const parts = args.parseTapName(pkg_name) orelse {
@@ -436,7 +443,7 @@ fn installTapRb(
             .head_etag = fresh_head_etag,
         },
     };
-    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, download_only, sink);
+    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, download_only, prefetch_slot, sink);
 }
 
 /// Install a formula from a local `.rb` file on disk. Gated by the
@@ -580,7 +587,7 @@ pub fn installLocalFormula(
     // `--local` is out of scope for `--download-only`: the user already
     // holds the archive on disk so warming a tap-cache entry adds no
     // value. Hard-wire false here rather than threading the flag.
-    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, false, sink);
+    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, false, null, sink);
 }
 
 /// Whether any linker-visible dir under `keg_path` holds an entry - the same
@@ -785,6 +792,7 @@ pub fn materializeRubyFormula(
     dry_run: bool,
     force: bool,
     download_only: bool,
+    prefetch_slot: ?*?[]const u8,
     sink: OutputSink,
 ) InstallError!void {
     sink.info("Found {s} {s}", .{ resolved.name, resolved.version });
@@ -802,7 +810,7 @@ pub fn materializeRubyFormula(
     // mounting, ditto, and `installer` live there. Tar.gz/tar.xz/zip
     // formula archives keep the simple-extract path below.
     if (tapCaskArtifactKind(resolved.url, resolved.app_name != null)) |kind| {
-        return materializeTapCask(ctx, allocator, resolved, db, kind, dry_run, force, download_only, sink);
+        return materializeTapCask(ctx, allocator, resolved, db, kind, dry_run, force, download_only, prefetch_slot, sink);
     }
 
     if (dry_run) {
@@ -1182,6 +1190,7 @@ fn materializeTapCask(
     dry_run: bool,
     force: bool,
     download_only: bool,
+    prefetch_slot: ?*?[]const u8,
     sink: OutputSink,
 ) InstallError!void {
     // `--download-only` deliberately ignores `isInstalled` so a user
@@ -1252,11 +1261,18 @@ fn materializeTapCask(
             };
         };
         if (sp) |*s| s.bar.finish();
-        defer allocator.free(cache_path);
         output.emitNdjsonEvent(.download_complete, cask.token, "ok");
         sink.success("{s} {s} downloaded to {s}", .{ cask.token, cask.version, cache_path });
+        if (prefetch_slot) |slot| {
+            slot.* = cache_path; // ownership moves to the caller
+        } else allocator.free(cache_path);
         return;
     }
+
+    // Bytes an upgrade's prefetch already fetched and verified; installing
+    // from them is what keeps a cask that pins no digest off the network
+    // once its old version is gone.
+    if (prefetch_slot) |slot| installer.prefetched_artifact = slot.*;
 
     const app_path = installer.install(&cask) catch |e| {
         if (sp) |*s| s.bar.finish();

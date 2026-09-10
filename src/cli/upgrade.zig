@@ -1096,8 +1096,10 @@ fn upgradeRoutedTapCask(
     // Fetch and sha-verify the replacement before anything is destroyed: a
     // dropped connection here must leave the installed app in place. Nothing
     // has been opened yet, so there is nothing to roll back.
+    var prefetched: ?[]const u8 = null;
+    defer if (prefetched) |p| allocator.free(p);
     const download_only = true;
-    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, download_only, install_sink_mod.progress_only) catch |dl_err| {
+    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, download_only, &prefetched, install_sink_mod.progress_only) catch |dl_err| {
         output.err("Failed to download {s}: {s} (installed version left in place)", .{ full_name, @errorName(dl_err) });
         return error.Aborted;
     };
@@ -1107,6 +1109,8 @@ fn upgradeRoutedTapCask(
     // can't leave the casks row missing once the new app is on disk.
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
     installer.offline = ctx.offline;
+    // Spares the prefetched artefact from the uninstall's cache sweep.
+    installer.prefetched_artifact = prefetched;
     db.beginTransaction() catch |txn_err| {
         output.err("Could not begin DB transaction for {s}: {s} ({s})", .{ token, @errorName(txn_err), db.errMsg() });
         return error.Aborted;
@@ -1122,8 +1126,8 @@ fn upgradeRoutedTapCask(
         return error.Aborted;
     };
 
-    // Cache hit off the prefetch above, so this does not re-download.
-    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, install_sink_mod.terminal) catch |in_err| {
+    // Installs the bytes the prefetch fetched, so this never re-downloads.
+    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, &prefetched, install_sink_mod.terminal) catch |in_err| {
         output.err("Failed to upgrade tap cask {s}: {s}", .{ full_name, @errorName(in_err) });
         db.rollback();
         return error.Aborted;
