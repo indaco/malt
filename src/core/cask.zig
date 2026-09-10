@@ -747,7 +747,14 @@ pub const CaskInstaller = struct {
             }
         }
 
-        if (app_path_len > 0) {
+        // A PKG cask records its cached artefact as `app_path`, so this can name
+        // the very file an upgrade prefetched for the install pass to read.
+        const spared = if (self.prefetched_artifact) |k|
+            std.mem.eql(u8, k, app_path_buf[0..app_path_len])
+        else
+            false;
+
+        if (app_path_len > 0 and !spared) {
             const app_path = app_path_buf[0..app_path_len];
 
             if (std.mem.eql(u8, std.fs.path.basename(app_path), cask_font.MANIFEST_NAME)) {

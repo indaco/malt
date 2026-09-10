@@ -477,3 +477,85 @@ test "an unpinned artefact fetched once survives uninstall and installs from the
     // install consumed the prefetch instead of reaching for the network.
     try testing.expectError(cask.CaskError.InstallFailed, installer.install(&c));
 }
+
+test "a PKG cask's cached artefact survives uninstall when the prefetch named it" {
+    // `installPkg` records the cached `.pkg` as `app_path`, so on a token whose
+    // cache name is reused across versions the upgrade's prefetch and the row's
+    // `app_path` are the same file. The spare has to cover this branch too, or
+    // the destructive step deletes the bytes the install pass is about to read.
+    var fx = try Fixture.init("prefetch_pkg_apppath");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.Io.Dir.cwd().createDirPath(io, fx.p("cache/Cask"));
+
+    const prefetched = fx.p("cache/Cask/pkgroll.pkg");
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, prefetched, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "pkg bytes the install pass needs");
+    }
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"pkgroll","name":["PkgRoll"],"version":"latest","url":"https://example.invalid/pkgroll.pkg","sha256":"no_check","artifacts":[{"pkg":["PkgRoll.pkg"]}]}
+    );
+    defer c.deinit();
+
+    // The install recorded the artefact itself, which is what a PKG cask does.
+    try cask.recordInstall(&db, &c, prefetched, null);
+
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    installer.offline = true;
+    installer.prefetched_artifact = prefetched;
+
+    try installer.uninstall("pkgroll");
+    try std.Io.Dir.accessAbsolute(io, prefetched, .{});
+    try testing.expect(!cask.isInstalled(&db, "pkgroll"));
+}
+
+test "uninstall still removes an app_path the prefetch does not name" {
+    // The spare must stay narrow: a bundle unrelated to the fetched artefact
+    // has to go, or an upgrade would leave the old version behind.
+    var fx = try Fixture.init("prefetch_pkg_unrelated");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.Io.Dir.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try std.Io.Dir.cwd().createDirPath(io, fx.p("Applications"));
+
+    const prefetched = fx.p("cache/Cask/other-2.0.zip");
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, prefetched, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "unrelated");
+    }
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"other","name":["Other"],"version":"1.0","url":"https://example.invalid/other.zip","sha256":"no_check","artifacts":[{"app":["Other.app"]}]}
+    );
+    defer c.deinit();
+
+    const app_path = fx.p("Applications/Other.app");
+    try std.Io.Dir.cwd().createDirPath(io, app_path);
+    try cask.recordInstall(&db, &c, app_path, null);
+
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    installer.offline = true;
+    installer.prefetched_artifact = prefetched;
+
+    try installer.uninstall("other");
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, app_path, .{}));
+    try std.Io.Dir.accessAbsolute(io, prefetched, .{});
+}
