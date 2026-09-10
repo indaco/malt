@@ -658,7 +658,12 @@ pub const CaskInstaller = struct {
 
         const cache_path = try self.downloadOnly(cask);
         errdefer {
-            std.Io.Dir.cwd().deleteFile(self.io, cache_path) catch {};
+            // A failed mount or copy says nothing about the bytes, and
+            // `rollback --to` reads this exact file. An unpinned artefact
+            // still goes: it can never be validated, so it is not reusable.
+            if (artifactIntegrity(cask.sha256) != .digest_pinned) {
+                std.Io.Dir.cwd().deleteFile(self.io, cache_path) catch {};
+            }
             self.allocator.free(cache_path);
         }
 
@@ -2306,4 +2311,51 @@ test "downloadToCache reuses a cached artifact only when its digest pins the byt
         defer c.deinit();
         try std.testing.expectError(error.OfflineRequired, installer.downloadToCache(&c, cache_dir, null));
     }
+}
+
+test "a failed install keeps a digest-pinned artefact in the cache" {
+    // The bytes were sha-verified before the install ran, so a failed mount or
+    // copy is no reason to throw them away — `rollback --to` reads this file,
+    // and re-fetching it is not always possible.
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const prefix = try std.fmt.allocPrintSentinel(a, "/tmp/malt_cask_keep_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    const cache_dir = try std.fmt.allocPrint(a, "{s}/cache/Cask", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, cache_dir);
+    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/Applications", .{prefix}));
+
+    // Not a zip, so the extraction below fails after the cache hit.
+    const dest = try std.fmt.allocPrint(a, "{s}/keeper-1.0.zip", .{cache_dir});
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, dest, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "not an archive");
+    }
+    const digest = try hashFileSha256(io, dest);
+
+    var json_buf: [512]u8 = undefined;
+    var cask = try parseCask(a, try std.fmt.bufPrint(&json_buf,
+        \\{{"token":"keeper","name":["Keeper"],"version":"1.0","url":"https://example.invalid/keeper.zip","sha256":"{s}","artifacts":[{{"app":["Keeper.app"]}}]}}
+    , .{digest[0..]}));
+    defer cask.deinit();
+
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .db = undefined,
+        .progress = null,
+    };
+    installer.offline = true; // proves the cache hit, not a re-download, fed the install
+
+    try std.testing.expectError(CaskError.InstallFailed, installer.install(&cask));
+    try std.Io.Dir.accessAbsolute(io, dest, .{});
 }
