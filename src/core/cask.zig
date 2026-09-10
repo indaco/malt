@@ -298,10 +298,13 @@ pub fn artifactTypeTag(t: ArtifactType) []const u8 {
 /// (or none existed); false when an existing file could not be
 /// deleted — the caller uses that signal to gate the DB row delete
 /// so a read-only mount doesn't orphan history.
-pub fn deletePerVersionCacheFile(io: std.Io, prefix: []const u8, token: []const u8, version: []const u8) bool {
+/// `keep` spares one already-fetched artefact, so an upgrade's uninstall
+/// cannot wipe the bytes it is about to install.
+pub fn deletePerVersionCacheFile(io: std.Io, prefix: []const u8, token: []const u8, version: []const u8, keep: ?[]const u8) bool {
     for (cache_extensions) |ext| {
         var path_buf: [512]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/cache/Cask/{s}-{s}{s}", .{ prefix, token, version, ext }) catch continue;
+        if (keep) |k| if (std.mem.eql(u8, path, k)) continue;
         std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
         std.Io.Dir.cwd().deleteFile(io, path) catch return false;
     }
@@ -316,14 +319,16 @@ pub fn deletePerVersionCacheFile(io: std.Io, prefix: []const u8, token: []const 
 /// Enumerates every history row so stale rollback artefacts are swept too.
 /// Best-effort: a failed delete never gates uninstall. Call BEFORE the
 /// history rows are deleted, or the version list is already empty.
-pub fn sweepOwnedVersionCache(io: std.Io, db: *sqlite.Database, prefix: []const u8, token: []const u8) void {
+/// `keep` is an artefact an in-flight upgrade already fetched; wiping it would
+/// force a second download of bytes we are about to install.
+pub fn sweepOwnedVersionCache(io: std.Io, db: *sqlite.Database, prefix: []const u8, token: []const u8, keep: ?[]const u8) void {
     var stmt = db.prepare("SELECT version FROM cask_versions WHERE token = ?1;") catch return;
     defer stmt.finalize();
     stmt.bindText(1, token) catch return;
 
     while (stmt.step() catch false) {
         const ver_ptr = stmt.columnText(0) orelse continue;
-        _ = deletePerVersionCacheFile(io, prefix, token, std.mem.sliceTo(ver_ptr, 0));
+        _ = deletePerVersionCacheFile(io, prefix, token, std.mem.sliceTo(ver_ptr, 0), keep);
     }
 }
 
@@ -606,6 +611,11 @@ pub const CaskInstaller = struct {
     /// internal HttpClient so a download miss surfaces `OfflineRequired`
     /// instead of stalling on connect.
     offline: bool = false,
+    /// An artefact the caller already fetched and verified. `install`
+    /// consumes it instead of re-fetching and `uninstall` leaves it alone,
+    /// which is what lets an upgrade survive a failed download even for a
+    /// cask that pins no digest and so can never be validated from cache.
+    prefetched_artifact: ?[]const u8 = null,
 
     pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]const u8) CaskInstaller {
         return .{ .allocator = allocator, .io = io, .environ = environ, .db = db, .prefix = prefix, .progress = null };
@@ -627,19 +637,20 @@ pub const CaskInstaller = struct {
             else => return CaskError.InstallFailed,
         };
 
-        const cache_path = self.downloadToCache(cask, cache_dir, self.progress) catch |e| switch (e) {
+        const fetched = self.downloadToCache(cask, cache_dir, self.progress) catch |e| switch (e) {
             // A retry re-fetches the same manifest and refuses identically, so
             // this must not reach the user wearing a transient error's name.
             error.InsecureUrlScheme => return CaskError.InsecureOrigin,
             error.WatchdogSpawnFailed => return CaskError.DownloadLocalResourceExhausted,
             else => return CaskError.DownloadFailed,
         };
+        const cache_path = fetched.path;
         errdefer {
             std.Io.Dir.cwd().deleteFile(self.io, cache_path) catch {};
             self.allocator.free(cache_path);
         }
 
-        self.verifySha256(cache_path, cask.sha256) catch |e| switch (e) {
+        if (!fetched.verified) self.verifySha256(cache_path, cask.sha256) catch |e| switch (e) {
             // A retry re-downloads and fails identically, so it must not
             // reach the caller wearing the transient error's name.
             error.Sha256Missing => return CaskError.Sha256Missing,
@@ -655,9 +666,17 @@ pub const CaskInstaller = struct {
         const artifact_type = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
         if (artifact_type == .unknown) return CaskError.InstallFailed;
 
-        const cache_path = try self.downloadOnly(cask);
+        const cache_path = if (self.prefetched_artifact) |p|
+            try self.allocator.dupe(u8, p)
+        else
+            try self.downloadOnly(cask);
         errdefer {
-            std.Io.Dir.cwd().deleteFile(self.io, cache_path) catch {};
+            // A failed mount or copy says nothing about the bytes, and
+            // `rollback --to` reads this exact file. An unpinned artefact
+            // still goes: it can never be validated, so it is not reusable.
+            if (artifactIntegrity(cask.sha256) != .digest_pinned) {
+                std.Io.Dir.cwd().deleteFile(self.io, cache_path) catch {};
+            }
             self.allocator.free(cache_path);
         }
 
@@ -758,11 +777,12 @@ pub const CaskInstaller = struct {
         var cache_buf: [512]u8 = undefined;
         for (cache_extensions) |ext| {
             const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask/{s}{s}", .{ self.prefix, token, ext }) catch continue;
+            if (self.prefetched_artifact) |k| if (std.mem.eql(u8, k, cache_file)) continue;
             std.Io.Dir.cwd().deleteFile(self.io, cache_file) catch {};
         }
         // Must precede the history wipe below — the sweep reads the version
         // list from `cask_versions`, which the DELETE would otherwise empty.
-        sweepOwnedVersionCache(self.io, self.db, self.prefix, token);
+        sweepOwnedVersionCache(self.io, self.db, self.prefix, token, self.prefetched_artifact);
 
         // Drop every history row so a future install starts clean.
         if (self.db.prepare("DELETE FROM cask_versions WHERE token = ?1;")) |prepared| {
@@ -897,7 +917,11 @@ pub const CaskInstaller = struct {
 
     // --- Private helpers ---
 
-    fn downloadToCache(self: *CaskInstaller, cask: *const Cask, cache_dir: []const u8, progress: ?client_mod.ProgressCallback) ![]const u8 {
+    /// `verified` marks a cache hit whose hash was already checked here, so
+    /// `downloadOnly` does not hash the same payload a second time.
+    const CachedArtifact = struct { path: []const u8, verified: bool };
+
+    fn downloadToCache(self: *CaskInstaller, cask: *const Cask, cache_dir: []const u8, progress: ?client_mod.ProgressCallback) !CachedArtifact {
         const resolved = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
         const ext_str = artifactExtension(resolved);
         // Per-version filename so older versions' artefacts survive a
@@ -906,6 +930,17 @@ pub const CaskInstaller = struct {
         // back to a fresh download.
         const dest = try std.fmt.allocPrint(self.allocator, "{s}/{s}-{s}{s}", .{ cache_dir, cask.token, cask.version, ext_str });
         errdefer self.allocator.free(dest);
+
+        // A pinned digest proves the cached file is this exact artefact, so an
+        // upgrade's prefetch makes the install that follows it free. Casks that
+        // pin nothing reuse one filename across releases and must re-fetch.
+        if (artifactIntegrity(cask.sha256) == .digest_pinned) reuse: {
+            // A planted cache file must not let a `file://` or `data:`
+            // manifest install without ever facing the scheme check.
+            client_mod.HttpClient.requireSecureOrigin(cask.url, .digest_pinned) catch break :reuse;
+            verifyFileSha256(self.io, dest, cask.sha256) catch break :reuse;
+            return .{ .path = dest, .verified = true };
+        }
 
         // Download via HTTP client
         var http = client_mod.HttpClient.init(self.io, self.environ, self.allocator);
@@ -922,7 +957,7 @@ pub const CaskInstaller = struct {
         defer file.close(self.io);
         try file.writeStreamingAll(self.io, resp.body);
 
-        return dest;
+        return .{ .path = dest, .verified = false };
     }
 
     fn verifySha256(self: *CaskInstaller, file_path: []const u8, expected: ?[]const u8) !void {
@@ -2217,4 +2252,126 @@ test "freshTempDir fails instead of creating a prefix tmp dir that is absent" {
     var buf: [512]u8 = undefined;
     // Creating the parent here would re-open the adoption hole it guards.
     try std.testing.expectError(error.InstallFailed, installer.freshTempDir(&buf, "mount", "tok"));
+}
+
+test "downloadToCache reuses a cached artifact only when its digest pins the bytes" {
+    // The upgrade routes prefetch, then install; without this reuse every cask
+    // upgrade would fetch its artifact twice. `offline` makes any real fetch a
+    // distinct error, so a returned path proves nothing went over the wire.
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const cache_dir = try std.fmt.allocPrintSentinel(a, "/tmp/malt_cask_cachehit_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, cache_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, cache_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, cache_dir);
+
+    const dest = try std.fmt.allocPrint(a, "{s}/cached-1.0.zip", .{cache_dir});
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, dest, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "artifact bytes");
+    }
+    const digest = try hashFileSha256(io, dest);
+
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = "/tmp/malt_cask_cachehit_prefix",
+        .db = undefined,
+        .progress = null,
+    };
+    installer.offline = true;
+
+    const json_fmt =
+        \\{{"token":"cached","name":["Cached"],"version":"{s}","url":"https://example.invalid/cached.zip","sha256":"{s}","artifacts":[{{"app":["Cached.app"]}}]}}
+    ;
+    var json_buf: [512]u8 = undefined;
+
+    {
+        // Pinned to the bytes already on disk: reused as-is.
+        var c = try parseCask(a, try std.fmt.bufPrint(&json_buf, json_fmt, .{ "1.0", digest[0..] }));
+        defer c.deinit();
+        const hit = try installer.downloadToCache(&c, cache_dir, null);
+        defer a.free(hit.path);
+        try std.testing.expectEqualStrings(dest, hit.path);
+        // Already hashed here, so `downloadOnly` must not hash it again.
+        try std.testing.expect(hit.verified);
+    }
+
+    {
+        // Same filename, different digest — the cached bytes are the wrong
+        // artifact and must not be handed back.
+        var c = try parseCask(a, try std.fmt.bufPrint(&json_buf, json_fmt, .{ "1.0", "a" ** 64 }));
+        defer c.deinit();
+        try std.testing.expectError(error.OfflineRequired, installer.downloadToCache(&c, cache_dir, null));
+    }
+
+    {
+        // `no_check` casks reuse one filename across releases, so a cached file
+        // is unverifiable and a stale hit would silently install an old version.
+        var c = try parseCask(a, try std.fmt.bufPrint(&json_buf, json_fmt, .{ "1.0", "no_check" }));
+        defer c.deinit();
+        try std.testing.expectError(error.OfflineRequired, installer.downloadToCache(&c, cache_dir, null));
+    }
+
+    {
+        // Nothing cached — every first install. An absent file must fall
+        // through to the download, never surface as the lookup's own error.
+        var c = try parseCask(a, try std.fmt.bufPrint(&json_buf, json_fmt, .{ "2.0", digest[0..] }));
+        defer c.deinit();
+        try std.testing.expectError(error.OfflineRequired, installer.downloadToCache(&c, cache_dir, null));
+    }
+}
+
+test "a failed install keeps a digest-pinned artefact in the cache" {
+    // The bytes were sha-verified before the install ran, so a failed mount or
+    // copy is no reason to throw them away — `rollback --to` reads this file,
+    // and re-fetching it is not always possible.
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const prefix = try std.fmt.allocPrintSentinel(a, "/tmp/malt_cask_keep_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    const cache_dir = try std.fmt.allocPrint(a, "{s}/cache/Cask", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, cache_dir);
+    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/Applications", .{prefix}));
+
+    // Not a zip, so the extraction below fails after the cache hit.
+    const dest = try std.fmt.allocPrint(a, "{s}/keeper-1.0.zip", .{cache_dir});
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, dest, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "not an archive");
+    }
+    const digest = try hashFileSha256(io, dest);
+
+    var json_buf: [512]u8 = undefined;
+    var cask = try parseCask(a, try std.fmt.bufPrint(&json_buf,
+        \\{{"token":"keeper","name":["Keeper"],"version":"1.0","url":"https://example.invalid/keeper.zip","sha256":"{s}","artifacts":[{{"app":["Keeper.app"]}}]}}
+    , .{digest[0..]}));
+    defer cask.deinit();
+
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .db = undefined,
+        .progress = null,
+    };
+    installer.offline = true; // proves the cache hit, not a re-download, fed the install
+
+    try std.testing.expectError(CaskError.InstallFailed, installer.install(&cask));
+    try std.Io.Dir.accessAbsolute(io, dest, .{});
 }
