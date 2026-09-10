@@ -1510,3 +1510,85 @@ test "materializeRubyFormula stamps an extracted tap archive as relocated, not e
         stamp,
     );
 }
+
+/// Seed `<prefix>/cache/Cask/<token>-<version>.pkg` and return its sha256, so a
+/// digest-pinned prefetch takes the warm-cache branch and never hits the network.
+fn seedCaskPkgCache(prefix: []const u8, token: []const u8, version: []const u8, body: []const u8) ![64]u8 {
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache/Cask", .{prefix});
+    defer testing.allocator.free(dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}-{s}.pkg", .{ dir, token, version });
+    defer testing.allocator.free(path);
+    const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, body);
+
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(body, &digest, .{});
+    var hex: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    return hex;
+}
+
+test "a tap PKG cask upgrade refuses before its prefetch fills the slot" {
+    // The upgrade route's prefetch pass runs before `installer.uninstall`, so a
+    // PKG cask must face the sudo confirmation there. Off a TTY that refusal is
+    // unconditional, which is exactly the state `zig build test` runs in — the
+    // slot must stay empty so the caller aborts with the old version untouched.
+    const prefix = try setupPrefix("pkgconfirm");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Warm cache: pre-fix this pass would succeed and fill the slot, so the
+    // failure below is the missing confirmation and not a network error.
+    const sha = try seedCaskPkgCache(prefix, "pkgcask", "2.0", "pkg fixture\n");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "pkgcask",
+        .full_name = "user/repo/pkgcask",
+        .tap_label = "user/repo",
+        .version = "2.0",
+        .url = "https://malt-pkgcask-test.invalid/releases/download/v2.0/pkgcask.pkg",
+        .sha256 = &sha,
+    };
+
+    var slot: ?[]const u8 = null;
+    defer if (slot) |p| allocator.free(p);
+
+    try testing.expectError(install_record.InstallError.CaskNotFound, malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        true, // force
+        true, // download_only — the upgrade route's prefetch pass
+        &slot,
+        malt.install_sink.progress_only,
+    ));
+    try testing.expect(slot == null);
+}
