@@ -44,6 +44,15 @@ fi
 check_order "tap route" "$TAP_LINE" "$API_LINE"
 check_order "API route" "$API_LINE" "$(wc -l <"$UP")"
 
+# 1b. The tap route must hand the artefact it fetched to its install pass.
+# Without that, the uninstall's cache sweep can drop those bytes and the
+# install goes back to the network with the old app already deleted.
+slots=$(awk -v a="$TAP_LINE" -v b="$API_LINE" 'NR>=a&&NR<=b&&/installTapCask\(/&&/&prefetched/{n++} END{print n+0}' "$UP")
+if [[ "$slots" -ne 2 ]]; then
+  echo "FAIL: tap route does not carry its prefetched artefact into the install pass" >&2
+  fail=1
+fi
+
 # 2. Behaviour. The test itself runs under `zig build test`; deleting it would
 # silently drop that coverage, so assert it is still there.
 if ! grep -Rqs -- "$FILTER" "$ROOT/tests/cask_extra_test.zig"; then

@@ -944,6 +944,7 @@ test "materializeRubyFormula refuses a symlinked package dir" {
         false,
         false,
         false,
+        null, // prefetch_slot
         malt.install_sink.silent,
     ));
 
