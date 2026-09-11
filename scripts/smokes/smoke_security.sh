@@ -136,8 +136,8 @@ run_ok s2.lint.argv -- "$ROOT/scripts/lint-spawn-invariants.sh"
 
 # Finding #1: pins_manifest.txt is the allowlist for the Ruby fetch
 # path. Entries here must have a 64-char lowercase hex SHA256, or the
-# runtime parser will reject them. This catches a botched gen-pins.sh
-# run before release rather than at install time.
+# runtime parser will reject them. This catches a hand-edited entry
+# before release rather than at install time.
 MANIFEST="$ROOT/src/core/pins_manifest.txt"
 if [[ ! -f "$MANIFEST" ]]; then
   manual_fail s2.manifest.exists "src/core/pins_manifest.txt missing"
@@ -170,7 +170,7 @@ else
     # An empty manifest is parser-valid but silently disables every
     # post_install fetch — the state that shipped before the seed was
     # populated. Guard against regressing back to it.
-    manual_fail s2.manifest.entries "pins_manifest.txt has no entries (run scripts/gen-pins.sh)"
+    manual_fail s2.manifest.entries "pins_manifest.txt has no entries"
   else
     manual_pass s2.manifest.shape "$entries entries, all well-formed (64-char lowercase hex SHA256)"
   fi
