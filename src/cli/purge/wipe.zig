@@ -115,13 +115,16 @@ pub fn writeManifest(ctx: *const AppCtx, allocator: std.mem.Allocator, path: []c
             // Guarantees the tables exist, so a failing `prepare` below can
             // only mean a genuinely broken database, never a fresh one.
             schema.initSchema(&db) catch |e| return refuseUnusableDb(prefix, e);
-            try writeRows(
-                w,
-                &db,
-                .formula,
-                "SELECT name, version FROM kegs WHERE install_reason = 'direct' ORDER BY name;",
-            );
-            try writeRows(w, &db, .cask, "SELECT token, version FROM casks ORDER BY token;");
+            // Versions always pinned and services always included: the
+            // wipe destroys the launchd plists, so this manifest is the
+            // only record of the auto-start set.
+            _ = backup_mod.writeRows(w, &db, true, true) catch |e| switch (e) {
+                error.DatabaseError => {
+                    output.err("cannot read installed packages — refusing to wipe without a usable backup", .{});
+                    return Error.DatabaseError;
+                },
+                error.WriteFailed => return Error.WriteFailed,
+            };
         },
     }
 
@@ -133,26 +136,6 @@ pub fn writeManifest(ctx: *const AppCtx, allocator: std.mem.Allocator, path: []c
 fn refuseUnusableDb(prefix: []const u8, e: anyerror) Error {
     output.err("cannot read database at {s}/db/malt.db ({s}) — refusing to wipe without a usable backup", .{ prefix, @errorName(e) });
     return Error.DatabaseError;
-}
-
-/// Query failures abort rather than truncate — a short manifest reads as
-/// "fewer packages installed", which is exactly the lie to avoid here.
-fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, kind: backup_mod.Kind, sql: []const u8) Error!void {
-    var stmt = db.prepare(sql) catch |e| {
-        output.err("cannot read installed packages ({s}) — refusing to wipe without a usable backup", .{@errorName(e)});
-        return Error.DatabaseError;
-    };
-    defer stmt.finalize();
-    while (stmt.step() catch |e| {
-        output.err("database read failed mid-scan ({s}) — refusing to wipe with a partial backup", .{@errorName(e)});
-        return Error.DatabaseError;
-    }) {
-        const name_ptr = stmt.columnText(0) orelse continue;
-        const ver_ptr = stmt.columnText(1);
-        const name = std.mem.sliceTo(name_ptr, 0);
-        const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
-        backup_mod.writeEntry(w, kind, name, version, true) catch return Error.WriteFailed;
-    }
 }
 
 fn writeBytesToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8) Error!void {
@@ -446,4 +429,85 @@ test "writeBytesToPath maps a path_write failure to OpenFileFailed" {
 
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
     try std.testing.expectError(Error.OpenFileFailed, writeBytesToPath(&ctx, dest, "formula git\n"));
+}
+
+/// Points MALT_PREFIX at a test prefix and puts the prior value back: the
+/// harness sets a throwaway, and unsetting it would send every later test
+/// at the real /opt/malt. The prior value is copied because setenv may free
+/// the environ string it replaces.
+const PrefixEnv = struct {
+    const c = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+        extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
+    };
+    prev: ?[:0]u8,
+
+    fn set(base: [:0]const u8) !PrefixEnv {
+        const prev: ?[:0]u8 = if (c.getenv("MALT_PREFIX")) |v| try std.testing.allocator.dupeZ(u8, std.mem.span(v)) else null;
+        _ = c.setenv("MALT_PREFIX", base.ptr, 1);
+        return .{ .prev = prev };
+    }
+
+    fn restore(self: *PrefixEnv) void {
+        if (self.prev) |v| {
+            _ = c.setenv("MALT_PREFIX", v.ptr, 1);
+            std.testing.allocator.free(v);
+        } else {
+            _ = c.unsetenv("MALT_PREFIX");
+        }
+    }
+};
+
+test "writeManifest writes the same tap-qualified cask and service rows as mt backup" {
+    // The wipe manifest is the only record left once the prefix is gone, so
+    // it must be restorable: third-party casks keep their tap and auto-start
+    // services are always included.
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("purge_manifest_rows");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/db"));
+
+    var db = try sqlite.Database.open(s.p("/db/malt.db"));
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO casks(token, name, version, url, tap) VALUES
+        \\  ('foo', 'Foo', '1.0', 'https://x/foo.dmg', 'acme/tools'),
+        \\  ('bar', 'Bar', '2.0', 'https://x/bar.dmg', 'homebrew/cask');
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start)
+        \\  VALUES ('svc', 'svc', '/svc.plist', 1);
+    );
+    db.close();
+
+    var env = try PrefixEnv.set(s.base);
+    defer env.restore();
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+    const dest = s.p("/manifest.txt");
+    try writeManifest(&ctx, std.testing.allocator, dest);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(io, dest, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(got);
+    try std.testing.expect(std.mem.indexOf(u8, got, "cask bar@2.0\ncask acme/tools/foo@1.0\nservice svc\n") != null);
+}
+
+test "writeManifest refuses a database whose tables cannot be read and leaves no manifest" {
+    // A bad table must abort like a bad file: a partial manifest followed
+    // by the wipe would be worse than no manifest at all.
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("purge_manifest_badtable");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/db"));
+
+    var db = try sqlite.Database.open(s.p("/db/malt.db"));
+    // `initSchema` is CREATE IF NOT EXISTS, so this shape survives it.
+    try db.exec("CREATE TABLE kegs(x);");
+    db.close();
+
+    var env = try PrefixEnv.set(s.base);
+    defer env.restore();
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+    const dest = s.p("/manifest.txt");
+
+    try std.testing.expectError(Error.DatabaseError, writeManifest(&ctx, std.testing.allocator, dest));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, dest, .{}));
 }
