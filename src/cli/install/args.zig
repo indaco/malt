@@ -231,6 +231,13 @@ pub const InstallFlags = struct {
             !self.dry_run and !self.only_deps and !self.download_only;
     }
 
+    /// Whether naming an installed dependency promotes it to on request.
+    /// Modes that do not install the named package must not claim the
+    /// user asked for it, and a cask token is not a keg name.
+    pub fn promotesNamed(self: InstallFlags) bool {
+        return !self.dry_run and !self.only_deps and !self.download_only and !self.force_cask;
+    }
+
     /// Whether the `--force` pre-materialize prune should run.
     /// `--download-only` stops before materialize, so pruning then would
     /// delete an installed keg with nothing to repopulate it — download-only
@@ -404,6 +411,18 @@ pub fn parse(arena: std.mem.Allocator, args: []const []const u8) error{OutOfMemo
 
     flags.system_ruby = system_ruby.items;
     return .{ .ok = .{ .flags = flags, .packages = packages.items, .quiet = quiet, .json = json } };
+}
+
+test "InstallFlags.promotesNamed: a plain or --force install promotes" {
+    try std.testing.expect((InstallFlags{}).promotesNamed());
+    try std.testing.expect((InstallFlags{ .force = true }).promotesNamed());
+}
+
+test "InstallFlags.promotesNamed: dry_run/only_deps/download_only/force_cask each veto it" {
+    try std.testing.expect(!(InstallFlags{ .dry_run = true }).promotesNamed());
+    try std.testing.expect(!(InstallFlags{ .only_deps = true }).promotesNamed());
+    try std.testing.expect(!(InstallFlags{ .download_only = true }).promotesNamed());
+    try std.testing.expect(!(InstallFlags{ .force_cask = true }).promotesNamed());
 }
 
 test "InstallFlags.fastpathEligible: clear when no semantic flag is set" {
