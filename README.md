@@ -4,12 +4,12 @@
 
 Installs to its own `/opt/malt` prefix; ~3 ms cold start. Designed by a human and implemented by AI.
 
-![Version](https://img.shields.io/github/v/tag/indaco/malt?label=version&sort=semver&color=4c1)
-![License](https://img.shields.io/badge/license-MIT-green)
-![macOS only](https://img.shields.io/badge/platform-macOS-blue)
+![Version](https://img.shields.io/github/v/tag/indaco/malt?label=version&sort=semver&color=4c1&logo=git&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green?logo=opensourceinitiative&logoColor=white)
+![macOS only](https://img.shields.io/badge/platform-macOS-blue?logo=apple&logoColor=white)
 ![Zig 0.16.x](https://img.shields.io/badge/zig-0.16.x-orange?logo=zig)
 [![codecov](https://codecov.io/gh/indaco/malt/branch/main/graph/badge.svg)](https://codecov.io/gh/indaco/malt)
-[![Signed by cosign](https://img.shields.io/badge/signed-cosign-brightgreen?logo=sigstore&logoColor=white)](#safety-and-security)
+[![Signed by cosign](https://img.shields.io/badge/signed-cosign-brightgreen?logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iI2ZmZiI+PHBhdGggZD0iTTEyIDFhNSA1IDAgMCAwLTUgNXYzSDZhMiAyIDAgMCAwLTIgMnYxMGEyIDIgMCAwIDAgMiAyaDEyYTIgMiAwIDAgMCAyLTJWMTFhMiAyIDAgMCAwLTItMmgtMVY2YTUgNSAwIDAgMC01LTV6bTAgMmEzIDMgMCAwIDEgMyAzdjNIOVY2YTMgMyAwIDAgMSAzLTN6bTAgMTBhMiAyIDAgMCAxIDEgMy43VjE5aC0ydi0yLjNBMiAyIDAgMCAxIDEyIDEzeiIvPjwvc3ZnPg==)](#safety-and-security)
 [![Built with Devbox](https://www.jetify.com/img/devbox/shield_galaxy.svg)](https://www.jetify.com/devbox/docs/contributor-quickstart/)
 
 <p align="center">
