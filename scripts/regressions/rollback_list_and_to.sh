@@ -77,18 +77,18 @@ LIST_OUT="$PREFIX/list.out"
 "$BIN" rollback --list wget >"$LIST_OUT" 2>&1 ||
   fail "mt rollback --list wget exited non-zero — see $LIST_OUT"
 
-grep -q '1.20' "$LIST_OUT" ||
+grep -qF '1.20' "$LIST_OUT" ||
   fail "--list missing 1.20 (see $LIST_OUT)"
-grep -q '1.21' "$LIST_OUT" ||
+grep -qF '1.21' "$LIST_OUT" ||
   fail "--list missing 1.21 (see $LIST_OUT)"
-if grep -q '1.22' "$LIST_OUT"; then
+if grep -qF '1.22' "$LIST_OUT"; then
   fail "--list must NOT include the current version 1.22 (see $LIST_OUT)"
 fi
 pass "mt rollback --list lists only non-current entries"
 
 # Newest-first ordering: 1.21 (newer mtime) before 1.20.
-POS_21=$(grep -n '1.21' "$LIST_OUT" | head -1 | cut -d: -f1)
-POS_20=$(grep -n '1.20' "$LIST_OUT" | head -1 | cut -d: -f1)
+POS_21=$(grep -nF '1.21' "$LIST_OUT" | head -1 | cut -d: -f1)
+POS_20=$(grep -nF '1.20' "$LIST_OUT" | head -1 | cut -d: -f1)
 [[ -n "$POS_21" && -n "$POS_20" && "$POS_21" -lt "$POS_20" ]] ||
   fail "--list order: 1.21 must appear before 1.20 (1.21@$POS_21, 1.20@$POS_20)"
 pass "mt rollback --list orders entries newest-first"
@@ -130,8 +130,8 @@ MISS_OUT="$PREFIX/miss.out"
 if "$BIN" rollback --to 9.9.9 wget >"$MISS_OUT" 2>&1; then
   fail "mt rollback --to 9.9.9 wget should have exited non-zero"
 fi
-grep -q '1.20' "$MISS_OUT" || fail "--to missing-version did not print the listing (see $MISS_OUT)"
-grep -q '1.21' "$MISS_OUT" || fail "--to missing-version did not print the listing (see $MISS_OUT)"
+grep -qF '1.20' "$MISS_OUT" || fail "--to missing-version did not print the listing (see $MISS_OUT)"
+grep -qF '1.21' "$MISS_OUT" || fail "--to missing-version did not print the listing (see $MISS_OUT)"
 pass "mt rollback --to <missing> refuses and prints the available entries"
 
 # --- 4. cask side: --list reads cask_versions history --------------------
@@ -149,16 +149,16 @@ CASK_LIST_OUT="$PREFIX/cask_list.out"
 "$BIN" rollback flux-markdown --list >"$CASK_LIST_OUT" 2>&1 ||
   fail "mt rollback flux-markdown --list exited non-zero (see $CASK_LIST_OUT)"
 
-grep -q '1.30.0' "$CASK_LIST_OUT" || fail "cask --list missing 1.30.0 (see $CASK_LIST_OUT)"
-grep -q '1.31.0' "$CASK_LIST_OUT" || fail "cask --list missing 1.31.0 (see $CASK_LIST_OUT)"
-if grep -q '1.32.427' "$CASK_LIST_OUT"; then
+grep -qF '1.30.0' "$CASK_LIST_OUT" || fail "cask --list missing 1.30.0 (see $CASK_LIST_OUT)"
+grep -qF '1.31.0' "$CASK_LIST_OUT" || fail "cask --list missing 1.31.0 (see $CASK_LIST_OUT)"
+if grep -qF '1.32.427' "$CASK_LIST_OUT"; then
   fail "cask --list must not include the current cask version (see $CASK_LIST_OUT)"
 fi
 pass "mt rollback <cask> --list lists every retained cask version"
 
 # Newest-first: 1.31.0 (2026-02) precedes 1.30.0 (2026-01).
-POS_31=$(grep -n '1.31.0' "$CASK_LIST_OUT" | head -1 | cut -d: -f1)
-POS_30=$(grep -n '1.30.0' "$CASK_LIST_OUT" | head -1 | cut -d: -f1)
+POS_31=$(grep -nF '1.31.0' "$CASK_LIST_OUT" | head -1 | cut -d: -f1)
+POS_30=$(grep -nF '1.30.0' "$CASK_LIST_OUT" | head -1 | cut -d: -f1)
 [[ -n "$POS_31" && -n "$POS_30" && "$POS_31" -lt "$POS_30" ]] ||
   fail "cask --list order: 1.31.0 must precede 1.30.0 (1.31.0@$POS_31, 1.30.0@$POS_30)"
 pass "mt rollback <cask> --list orders entries newest-first"
@@ -195,7 +195,7 @@ CASK_MISS_OUT="$PREFIX/cask_miss.out"
 if "$BIN" rollback flux-markdown --to 9.9.9 >"$CASK_MISS_OUT" 2>&1; then
   fail "mt rollback flux-markdown --to 9.9.9 should have exited non-zero"
 fi
-grep -q '1.31.0' "$CASK_MISS_OUT" || fail "cask --to <missing> did not print the listing (see $CASK_MISS_OUT)"
+grep -qF '1.31.0' "$CASK_MISS_OUT" || fail "cask --to <missing> did not print the listing (see $CASK_MISS_OUT)"
 pass "mt rollback <cask> --to <missing> refuses and prints the cask history"
 
 printf '\n\xe2\x9c\x94 rollback-list-and-to regression passed\n'

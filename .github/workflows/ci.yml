@@ -115,6 +115,9 @@ jobs:
       - name: Regression guard - bundle import records the canonical manifest path
         run: ./scripts/regressions/bundle-import-canonical-manifest-path-bundle-import-records-relative-manifest-path.sh
 
+      - name: Regression guard - INSTALL_RECEIPT.json mirrors the install reason
+        run: ./scripts/regressions/receipt-mirrors-install-reason-install-receipt-always-claims-installed-on-request.sh
+
       - name: Regression guard - store entry without the requested keg is refused
         run: ./scripts/regressions/materialize-refuses-store-entry-root-keg-source-falls-back-to-store-entry-root.sh
 

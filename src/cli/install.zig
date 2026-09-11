@@ -395,7 +395,7 @@ fn promoteIsolatedDepIfAny(
     name: []const u8,
 ) bool {
     var sel = db.prepare(
-        "SELECT id, cellar_path FROM kegs WHERE name=?1 AND install_reason='dependency' AND bin_isolated=1 LIMIT 1;",
+        "SELECT id, cellar_path, store_sha256, tap FROM kegs WHERE name=?1 AND install_reason='dependency' AND bin_isolated=1 LIMIT 1;",
     ) catch return false;
     defer sel.finalize();
     sel.bindText(1, name) catch return false;
@@ -404,6 +404,8 @@ fn promoteIsolatedDepIfAny(
     const keg_id = sel.columnInt(0);
     const cellar_ptr = sel.columnText(1) orelse return false;
     const cellar = std.mem.sliceTo(cellar_ptr, 0);
+    const store_sha256 = if (sel.columnText(2)) |s| std.mem.sliceTo(s, 0) else "";
+    const tap: ?[]const u8 = if (sel.columnText(3)) |t| std.mem.sliceTo(t, 0) else null;
 
     linker.link(cellar, name, keg_id, false) catch return false;
     // opt link already present on a promoted dep; best-effort refresh. The
@@ -417,6 +419,10 @@ fn promoteIsolatedDepIfAny(
     defer upd.finalize();
     upd.bindInt(1, keg_id) catch return false;
     _ = upd.step() catch return false;
+
+    // Keep the receipt in step with the row; best-effort like every other
+    // receipt write. The version slot is the cellar dir leaf (pkg_version).
+    cellar_mod.writeInstallReceiptFull(linker.io, cellar, name, std.fs.path.basename(cellar), store_sha256, tap, true);
 
     return true;
 }
@@ -1798,6 +1804,49 @@ test "promoteIsolatedDepIfAny opt-links the revisioned dir, not the raw version"
     try testing.expect(try row.step());
     try testing.expectEqualStrings("direct", std.mem.sliceTo(row.columnText(0).?, 0));
     try testing.expectEqual(@as(i64, 0), row.columnInt(1));
+}
+
+test "promoteIsolatedDepIfAny rewrites the receipt as installed on request" {
+    // The DB row flips to 'direct'; the keg's INSTALL_RECEIPT.json must
+    // follow, or receipt readers keep seeing a dependency.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("promote_receipt");
+    defer s.deinit();
+    const prefix = s.base;
+
+    const keg_dir = s.p("/Cellar/zlib/1.3_1");
+    try std.Io.Dir.cwd().createDirPath(io, keg_dir);
+    cellar_mod.writeInstallReceiptFull(io, keg_dir, "zlib", "1.3_1", "sha", null, false);
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/db"));
+
+    var db = try sqlite.Database.open(s.p("/db/malt.db"));
+    defer db.close();
+    try schema.initSchema(&db);
+    var ins_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
+    const insert = try std.fmt.bufPrintSentinel(
+        &ins_buf,
+        "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason,bin_isolated) " ++
+            "VALUES('zlib','zlib','1.3',1,'sha','{s}/Cellar/zlib/1.3_1','dependency',1);",
+        .{prefix},
+        0,
+    );
+    try db.exec(insert);
+
+    var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
+    try testing.expect(promoteIsolatedDepIfAny(&db, &linker, "zlib"));
+
+    const receipt = try std.Io.Dir.cwd().readFileAlloc(io, s.p("/Cellar/zlib/1.3_1/INSTALL_RECEIPT.json"), allocator, .limited(4096));
+    defer allocator.free(receipt);
+    try testing.expect(std.mem.indexOf(u8, receipt, "\"installed_on_request\": true") != null);
+    try testing.expect(std.mem.indexOf(u8, receipt, "\"installed_as_dependency\": false") != null);
+    // The receipt's version slot is the cellar dir leaf, not the raw column.
+    try testing.expect(std.mem.indexOf(u8, receipt, "\"stable\": \"1.3_1\"") != null);
 }
 
 test "mapApiFetchError surfaces ApiUnreachable as NetworkError" {

@@ -192,6 +192,7 @@ test "materialize handles version with revision suffix" {
         "10.47",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -254,6 +255,7 @@ test "materialize replaces a pre-existing Cellar/{name}/{version} directory (gh#
         "21.1.8_1",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -288,6 +290,7 @@ test "materialize handles exact version match (no revision)" {
         "1.7.1",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -322,6 +325,7 @@ test "placeholder substitution runs for relocatable bottles" {
         "2.4.1",
         ":any", // relocatable — the bug scenario,
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -369,6 +373,7 @@ test "relocation substitutes the caller-resolved dependency placeholder" {
         "1.0",
         ":any",
         .{ .old = "@@HOMEBREW_JAVA@@", .new = value },
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -405,6 +410,7 @@ test "relocation leaves an unresolved dependency placeholder in place" {
         "1.0",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -448,6 +454,7 @@ test "relocation substitutes the perl shebang placeholder" {
         "1.0",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -505,6 +512,7 @@ test "relocation substitutes the repository and library placeholders" {
         "1.0",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -554,6 +562,7 @@ test "relocation falls back to the system perl when no perl is brewed" {
         "1.0",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -588,6 +597,7 @@ test "placeholder substitution replaces multiple tokens in single file" {
         "1.0",
         "",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -641,6 +651,7 @@ test "files with no placeholders are left unchanged" {
         "1.0",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -689,6 +700,7 @@ test "binary files are skipped by text patching without error" {
         "1.0",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -757,6 +769,7 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
         "1.0",
         ":any",
         null,
+        true,
     );
     testing.allocator.free(keg_pre.path);
     try relocated_mod.save(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "cached", "1.0");
@@ -776,6 +789,7 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
         "1.0",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -811,6 +825,7 @@ test "materializeWithCellar populates the relocated cache after a cold install" 
         "0.1",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -842,6 +857,7 @@ fn expectKegSourceMissing(fixture_name: []const u8) !void {
         "9.9",
         ":any",
         null,
+        true,
     );
     try testing.expectError(cellar_mod.CellarError.KegSourceMissing, result);
 
@@ -880,6 +896,7 @@ test "materializeWithCellar refuses a warm hit under a label the snapshot was no
         "1.0",
         ":any",
         null,
+        true,
     );
     testing.allocator.free(first.path);
     try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
@@ -896,6 +913,7 @@ test "materializeWithCellar refuses a warm hit under a label the snapshot was no
         "9.9",
         ":any",
         null,
+        true,
     );
     try testing.expectError(cellar_mod.CellarError.KegSourceMissing, result);
     try testing.expect(!try fileExists(testing.allocator, "{s}/Cellar/pkg", .{prefix}));
@@ -911,9 +929,95 @@ test "materializeWithCellar refuses a warm hit under a label the snapshot was no
         "1.0",
         ":any",
         null,
+        true,
     );
     testing.allocator.free(again.path);
     try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
+/// Both receipt fields must flip together, so pin the pair as one check.
+fn expectDependencyReceipt(allocator: std.mem.Allocator, keg_path: []const u8) !void {
+    const receipt_path = try std.fmt.allocPrint(allocator, "{s}/INSTALL_RECEIPT.json", .{keg_path});
+    defer allocator.free(receipt_path);
+    const raw = try readFile(allocator, receipt_path);
+    defer allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"installed_on_request\": false") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"installed_as_dependency\": true") != null);
+}
+
+test "materializeWithCellar writes a dependency receipt when the keg is not on request" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "dep", "1.0");
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "dep",
+        "1.0",
+        ":any",
+        null,
+        false,
+    );
+    defer testing.allocator.free(keg.path);
+
+    try expectDependencyReceipt(testing.allocator, keg.path);
+}
+
+test "materializeWithCellar warm path rewrites the receipt with the current install reason" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "flip", "1.0");
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    // Cold install on request seeds the relocated cache with a `true` receipt.
+    const first = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "flip",
+        "1.0",
+        ":any",
+        null,
+        true,
+    );
+    testing.allocator.free(first.path);
+    try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+    const cellar_keg_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/flip/1.0", .{prefix});
+    defer testing.allocator.free(cellar_keg_path);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, cellar_keg_path);
+
+    // Reinstalled as a dependency: the snapshot's receipt must not win.
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "flip",
+        "1.0",
+        ":any",
+        null,
+        false,
+    );
+    defer testing.allocator.free(keg.path);
+
+    try expectDependencyReceipt(testing.allocator, keg.path);
 }
 
 // ---------------------------------------------------------------------------
@@ -986,6 +1090,7 @@ test "materializeWithCellar rebuilds a cached keg whose binary would abort dyld"
         "1.0",
         ":any",
         null,
+        true,
     );
     testing.allocator.free(first.path);
     try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
@@ -1019,6 +1124,7 @@ test "materializeWithCellar rebuilds a cached keg whose binary would abort dyld"
         "1.0",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -1050,6 +1156,7 @@ test "materializeWithCellar trusts a snapshot it already verified" {
         "1.0",
         ":any",
         null,
+        true,
     );
     testing.allocator.free(first.path);
     try testing.expect(relocated_mod.isVerified(std.Options.debug_io, prefix, valid_test_sha));
@@ -1076,6 +1183,7 @@ test "materializeWithCellar trusts a snapshot it already verified" {
         "1.0",
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -1122,6 +1230,7 @@ test "materializeWithCellar refuses a keg whose binary kept an unsubstituted pla
         "2.0",
         ":any",
         null,
+        true,
     ));
 
     // A keg that cannot load is not left installed, and never gets cached.
@@ -1185,6 +1294,7 @@ test "a missing keg source never creates the Cellar/{name}/ parent dir" {
         "0.0.1",
         ":any",
         null,
+        true,
     );
     try testing.expectError(cellar_mod.CellarError.KegSourceMissing, result);
 
@@ -1225,6 +1335,7 @@ test "failed materialize leaves sibling versions untouched" {
         "2.0",
         ":any",
         null,
+        true,
     );
     try testing.expectError(cellar_mod.CellarError.KegSourceMissing, result);
 
@@ -1388,6 +1499,7 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
         version,
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -1572,6 +1684,7 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
         version,
         ":any",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -1664,6 +1777,7 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
         version,
         ":any_skip_relocation",
         null,
+        true,
     );
     defer testing.allocator.free(keg.path);
 
@@ -1857,6 +1971,7 @@ test "warm cache-hit reinstall re-pours a wiped overlay config" {
         "1.0",
         ":any",
         null,
+        true,
     );
     testing.allocator.free(keg_cold.path);
     try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
@@ -1885,6 +2000,7 @@ test "warm cache-hit reinstall re-pours a wiped overlay config" {
         "1.0",
         ":any",
         null,
+        true,
     );
     testing.allocator.free(keg_warm.path);
 
@@ -1971,6 +2087,7 @@ test "a symlinked package dir cannot redirect a keg write out of the prefix" {
         "1.0",
         "",
         null,
+        true,
     ));
     // A subsequent uninstall must not delete through the link either.
     try testing.expectError(error.UnsafeCellarLink, cellar_mod.remove(
