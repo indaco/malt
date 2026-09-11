@@ -4,6 +4,7 @@
 const std = @import("std");
 const system_tools = @import("../system_tools.zig");
 const parser = @import("parser.zig");
+const codesign = @import("codesign.zig");
 const text_replace = @import("../text_replace.zig");
 const atomic = @import("../fs/atomic.zig");
 
@@ -1003,6 +1004,10 @@ pub const VerifyError = error{
     /// A load-command path still carries a token relocation was supposed to
     /// substitute — the reference cannot resolve at runtime.
     UnsubstitutedPlaceholder,
+    /// The bytes no longer hash to the embedded signature: the binary was
+    /// rewritten after signing and never re-signed, so the kernel kills it
+    /// at exec.
+    StaleCodeSignature,
 };
 
 /// The tokens `cellar.relocateKegTree` substitutes in load-command paths.
@@ -1022,8 +1027,9 @@ pub fn verifyFile(io: std.Io, allocator: std.mem.Allocator, file_path: []const u
     const stat = file.stat(io) catch return;
     if (stat.size == 0) return;
 
-    // Only the head is ever touched, so mapping beats reading a keg's worth of
-    // dylibs. Safe while the install lock keeps other writers out.
+    // Mapped rather than read: most files fail the cheap checks or carry no
+    // signature, and only signed ones get hashed end to end. Safe while the
+    // install lock keeps other writers out.
     const data = std.posix.mmap(
         null,
         stat.size,
@@ -1056,6 +1062,17 @@ pub fn verifyFile(io: std.Io, allocator: std.mem.Allocator, file_path: []const u
             if (seen.slice_offset != p.slice_offset) continue;
             if (std.mem.eql(u8, seen.path, p.path)) return VerifyError.DuplicateRpath;
         }
+    }
+
+    // Only an arm64 kernel enforces signatures, and only on the slice it
+    // runs. malt re-signs nowhere else, so a stale signature elsewhere is
+    // not a defect it caused.
+    if (!codesign.isArm64()) return;
+    for (macho.signatures) |sig| {
+        if (!sig.is_arm64) continue;
+        const slice = data[sig.slice_offset..][0..sig.slice_len];
+        if (codesign.codeDirectoryCoverage(slice, sig.dataoff, sig.datasize) == .stale)
+            return VerifyError.StaleCodeSignature;
     }
 }
 
@@ -1400,4 +1417,92 @@ test "verifyFile passes over a Mach-O it cannot parse" {
     defer s.deinit();
 
     try verifyFile(std.Options.debug_io, testing.allocator, try fixtureFile(&s, &bytes));
+}
+
+const fixtures = @import("test_fixtures.zig");
+
+/// One LC_LOAD_DYLIB plus an embedded ad-hoc signature, the way a bottle
+/// dylib ships.
+fn buildSignedDylibMachO(allocator: std.mem.Allocator, dylib_path: []const u8, cputype: std.macho.cpu_type_t) ![]u8 {
+    const image = try fixtures.loadDylibImage(allocator, dylib_path, cputype);
+    defer allocator.free(image);
+    return fixtures.appendAdHocSignature(allocator, image, std.macho.CS_HASHTYPE_SHA256);
+}
+
+/// Rewrite the build prefix in place without re-signing.
+fn relocateUnsigned(bytes: []u8) void {
+    const slot = std.mem.indexOf(u8, bytes, "/opt/homebrew").?;
+    @memcpy(bytes[slot..][0.."/opt/malt".len], "/opt/malt");
+}
+
+test "verifyFile rejects a signed binary whose bytes changed after signing" {
+    const testing = std.testing;
+    if (!codesign.isArm64()) return error.SkipZigTest;
+
+    const bytes = try buildSignedDylibMachO(testing.allocator, "/opt/homebrew/opt/x/lib/libx.dylib", std.macho.CPU_TYPE_ARM64);
+    defer testing.allocator.free(bytes);
+    // Relocated in place and never re-signed: the kernel kills this at exec.
+    relocateUnsigned(bytes);
+
+    var s = try Scratch.init("verify_stale_sig");
+    defer s.deinit();
+    try testing.expectError(
+        VerifyError.StaleCodeSignature,
+        verifyFile(std.Options.debug_io, testing.allocator, try fixtureFile(&s, bytes)),
+    );
+}
+
+test "verifyFile accepts a signed binary its signature still covers" {
+    const testing = std.testing;
+    if (!codesign.isArm64()) return error.SkipZigTest;
+
+    const bytes = try buildSignedDylibMachO(testing.allocator, "/opt/malt/opt/x/lib/libx.dylib", std.macho.CPU_TYPE_ARM64);
+    defer testing.allocator.free(bytes);
+
+    var s = try Scratch.init("verify_intact_sig");
+    defer s.deinit();
+    try verifyFile(std.Options.debug_io, testing.allocator, try fixtureFile(&s, bytes));
+}
+
+test "verifyFile judges only the slice this host would run" {
+    const testing = std.testing;
+    if (!codesign.isArm64()) return error.SkipZigTest;
+
+    // A stale x86_64 signature never reaches this kernel; failing the keg
+    // over it would reject a binary that works.
+    const bytes = try buildSignedDylibMachO(testing.allocator, "/opt/homebrew/opt/x/lib/libx.dylib", std.macho.CPU_TYPE_X86_64);
+    defer testing.allocator.free(bytes);
+    relocateUnsigned(bytes);
+
+    var s = try Scratch.init("verify_foreign_slice");
+    defer s.deinit();
+    try verifyFile(std.Options.debug_io, testing.allocator, try fixtureFile(&s, bytes));
+}
+
+test "verifyFile judges each slice of a fat binary against its own signature" {
+    const testing = std.testing;
+    if (!codesign.isArm64()) return error.SkipZigTest;
+
+    const arm = try buildSignedDylibMachO(testing.allocator, "/opt/homebrew/opt/x/lib/libx.dylib", std.macho.CPU_TYPE_ARM64);
+    defer testing.allocator.free(arm);
+    const x86 = try buildSignedDylibMachO(testing.allocator, "/opt/homebrew/opt/x/lib/libx.dylib", std.macho.CPU_TYPE_X86_64);
+    defer testing.allocator.free(x86);
+
+    var s = try Scratch.init("verify_fat_sig");
+    defer s.deinit();
+
+    // The foreign slice is stale, the arm64 one intact: accepted.
+    relocateUnsigned(x86);
+    const intact = try fixtures.fatOf(testing.allocator, &.{ x86, arm });
+    defer testing.allocator.free(intact);
+    try verifyFile(std.Options.debug_io, testing.allocator, try fixtureFile(&s, intact));
+
+    // The arm64 slice itself is stale: rejected, wherever it sits.
+    relocateUnsigned(arm);
+    const stale = try fixtures.fatOf(testing.allocator, &.{ x86, arm });
+    defer testing.allocator.free(stale);
+    try testing.expectError(
+        VerifyError.StaleCodeSignature,
+        verifyFile(std.Options.debug_io, testing.allocator, try fixtureFile(&s, stale)),
+    );
 }

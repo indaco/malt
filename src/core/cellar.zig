@@ -602,7 +602,9 @@ pub fn relocateUnbottledKeg(
 
     if (codesign.isArm64() and modified.items.len > 0) {
         codesign.adHocSignAll(io, allocator, modified.items) catch |e| switch (e) {
-            error.SpawnFailed => {},
+            // Debug, not warn: test io cannot spawn. Verification fails the
+            // keg either way; this names the cause under --debug.
+            error.SpawnFailed => std.log.debug("codesign could not be spawned for {s}; its patched binaries stay unsigned", .{cellar_path}),
             else => std.log.warn("codesigning failed for {s}: {s}", .{ cellar_path, @errorName(e) }),
         };
     }
@@ -711,7 +713,7 @@ fn relocateKegTree(
 
     if (codesign.isArm64() and modified_macho_paths.items.len > 0) {
         codesign.adHocSignAll(io, allocator, modified_macho_paths.items) catch |e| switch (e) {
-            error.SpawnFailed => {},
+            error.SpawnFailed => std.log.debug("codesign could not be spawned for {s}; its patched binaries stay unsigned", .{cellar_path}),
             else => std.log.warn("codesigning failed for {s}: {s}", .{ cellar_path, @errorName(e) }),
         };
     }
@@ -1141,6 +1143,70 @@ test "relocateUnbottledKeg leaves a binary with no build-prefix reference untouc
         RelocStamp{ .version = relocated_store.RELOC_LOGIC_VERSION },
         readRelocStamp(io, keg).?,
     );
+}
+
+test "walkMachOAndVerify fails the keg when a relocated binary was never re-signed" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    if (!codesign.isArm64()) return error.SkipZigTest;
+
+    // Whatever dropped a rewritten file from the re-sign list, the keg must
+    // not be recorded with a binary the kernel kills.
+    var s = try Scratch.init("reloc_verify_stale");
+    defer s.deinit();
+    const keg = s.p("/Cellar/tool/1.0");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/tool/1.0/bin"));
+    const bin = s.p("/Cellar/tool/1.0/bin/tool");
+
+    const image = try buildLoadDylibMachO(testing.allocator, "/opt/homebrew/opt/flac/lib/libFLAC.14.dylib", 128);
+    defer testing.allocator.free(image);
+    const signed = try signedArm64Keg(testing.allocator, image);
+    defer testing.allocator.free(signed);
+
+    try atomic.atomicWriteFile(io, bin, signed);
+    try walkMachOAndVerify(io, testing.allocator, keg);
+
+    const reps = [_]patch.Replacement{.{ .old = "/opt/homebrew", .new = "/opt/malt" }};
+    var modified: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (modified.items) |m| testing.allocator.free(m);
+        modified.deinit(testing.allocator);
+    }
+    var unrelocatable: u32 = 0;
+    try walkMachOAndPatch(io, testing.allocator, keg, &reps, &modified, &unrelocatable);
+    try testing.expectEqual(@as(usize, 1), modified.items.len);
+
+    try testing.expectError(CellarError.VerifyFailed, walkMachOAndVerify(io, testing.allocator, keg));
+}
+
+/// `buildLoadDylibMachO` output as an arm64 image carrying an embedded ad-hoc
+/// signature, the way a bottle binary ships.
+fn signedArm64Keg(allocator: std.mem.Allocator, image: []u8) ![]u8 {
+    const fixtures = @import("../macho/test_fixtures.zig");
+    const hdr = std.mem.bytesAsValue(std.macho.mach_header_64, image[0..@sizeOf(std.macho.mach_header_64)]);
+    hdr.cputype = std.macho.CPU_TYPE_ARM64;
+    return fixtures.appendAdHocSignature(allocator, image, std.macho.CS_HASHTYPE_SHA256);
+}
+
+test "relocateUnbottledKeg refuses a keg whose patched binary could not be re-signed" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    if (!codesign.isArm64()) return error.SkipZigTest;
+
+    // Test io cannot spawn codesign, so the rewrite lands and the re-sign
+    // does not: the walk must fail the keg rather than record it.
+    var s = try Scratch.init("reloc_unsigned_refused");
+    defer s.deinit();
+    const keg = s.p("/Cellar/tool/1.0");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/tool/1.0/bin"));
+
+    const image = try buildLoadDylibMachO(testing.allocator, "/opt/homebrew/opt/flac/lib/libFLAC.14.dylib", 128);
+    defer testing.allocator.free(image);
+    const signed = try signedArm64Keg(testing.allocator, image);
+    defer testing.allocator.free(signed);
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/bin/tool"), signed);
+
+    try testing.expectError(CellarError.VerifyFailed, relocateUnbottledKeg(io, testing.allocator, keg));
 }
 
 test "walkMachOAndPatch never returns success having mutated a file it did not queue for re-signing" {

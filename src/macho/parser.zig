@@ -39,16 +39,30 @@ pub const CstringRegion = struct {
     size: usize,
 };
 
+/// One arch slice's LC_CODE_SIGNATURE. Offsets are slice-relative, as the
+/// load command stores them; `slice_offset` anchors them in the file.
+pub const CodeSignature = struct {
+    slice_offset: usize,
+    slice_len: usize,
+    /// The arm64 kernel signature-checks only the arm64 slice at exec.
+    is_arm64: bool,
+    dataoff: u32,
+    datasize: u32,
+};
+
 pub const MachO = struct {
     /// All load command paths found in the binary
     paths: []LoadCommandPath,
     /// Every S_CSTRING_LITERALS section across all arch slices.
     cstrings: []CstringRegion,
+    /// Every slice's embedded signature, if it carries one.
+    signatures: []CodeSignature,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *MachO) void {
         self.allocator.free(self.paths);
         self.allocator.free(self.cstrings);
+        self.allocator.free(self.signatures);
     }
 };
 
@@ -148,6 +162,8 @@ fn parseFat(allocator: std.mem.Allocator, data: []const u8, is64: bool) ParseErr
     errdefer all_paths.deinit(allocator);
     var all_cstrings: std.ArrayList(CstringRegion) = .empty;
     errdefer all_cstrings.deinit(allocator);
+    var all_signatures: std.ArrayList(CodeSignature) = .empty;
+    errdefer all_signatures.deinit(allocator);
 
     var offset: usize = 8;
     var i: u32 = 0;
@@ -189,11 +205,13 @@ fn parseFat(allocator: std.mem.Allocator, data: []const u8, is64: bool) ParseErr
         defer slice_result.deinit();
         all_paths.appendSlice(allocator, slice_result.paths) catch return ParseError.OutOfMemory;
         all_cstrings.appendSlice(allocator, slice_result.cstrings) catch return ParseError.OutOfMemory;
+        all_signatures.appendSlice(allocator, slice_result.signatures) catch return ParseError.OutOfMemory;
     }
 
     return .{
         .paths = all_paths.toOwnedSlice(allocator) catch return ParseError.OutOfMemory,
         .cstrings = all_cstrings.toOwnedSlice(allocator) catch return ParseError.OutOfMemory,
+        .signatures = all_signatures.toOwnedSlice(allocator) catch return ParseError.OutOfMemory,
         .allocator = allocator,
     };
 }
@@ -209,6 +227,8 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
     errdefer paths.deinit(allocator);
     var cstrings: std.ArrayList(CstringRegion) = .empty;
     errdefer cstrings.deinit(allocator);
+    var signatures: std.ArrayList(CodeSignature) = .empty;
+    errdefer signatures.deinit(allocator);
 
     // Sanity check: reject obviously corrupt headers (ncmds > 10,000 is unreasonable)
     if (header.ncmds > 10_000) return ParseError.InvalidLoadCommand;
@@ -307,6 +327,23 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
                 // patcher can rewrite those literals too.
                 try collectCstringSections(allocator, data, cmd_offset, cmdsize, base_offset, &cstrings);
             },
+            .CODE_SIGNATURE => {
+                if (cmdsize < @sizeOf(macho.linkedit_data_command)) {
+                    cmd_offset += cmdsize;
+                    continue;
+                }
+                const sig = std.mem.bytesAsValue(
+                    macho.linkedit_data_command,
+                    data[cmd_offset..][0..@sizeOf(macho.linkedit_data_command)],
+                );
+                signatures.append(allocator, .{
+                    .slice_offset = base_offset,
+                    .slice_len = data.len,
+                    .is_arm64 = header.cputype == macho.CPU_TYPE_ARM64,
+                    .dataoff = sig.dataoff,
+                    .datasize = sig.datasize,
+                }) catch return ParseError.OutOfMemory;
+            },
             else => {},
         }
 
@@ -316,6 +353,7 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
     return .{
         .paths = paths.toOwnedSlice(allocator) catch return ParseError.OutOfMemory,
         .cstrings = cstrings.toOwnedSlice(allocator) catch return ParseError.OutOfMemory,
+        .signatures = signatures.toOwnedSlice(allocator) catch return ParseError.OutOfMemory,
         .allocator = allocator,
     };
 }
@@ -427,4 +465,54 @@ test "readFatArch decodes the 64-bit layout big-endian" {
     const arch = readFatArch(&entry, true);
     try testing.expectEqual(@as(u64, 0x0000_0001_0000_4000), arch.offset);
     try testing.expectEqual(@as(u64, 0x0000_0002_0001_2345), arch.size);
+}
+
+/// Thin Mach-O of `cputype` whose only load command is LC_CODE_SIGNATURE.
+fn signatureOnlyMachO(cputype: macho.cpu_type_t, dataoff: u32, datasize: u32) [@sizeOf(macho.mach_header_64) + @sizeOf(macho.linkedit_data_command)]u8 {
+    const hs = @sizeOf(macho.mach_header_64);
+    const cs = @sizeOf(macho.linkedit_data_command);
+    var buf: [hs + cs]u8 = @splat(0);
+    std.mem.bytesAsValue(macho.mach_header_64, buf[0..hs]).* = .{
+        .magic = macho.MH_MAGIC_64,
+        .cputype = cputype,
+        .ncmds = 1,
+        .sizeofcmds = cs,
+    };
+    std.mem.bytesAsValue(macho.linkedit_data_command, buf[hs..][0..cs]).* = .{
+        .cmd = .CODE_SIGNATURE,
+        .dataoff = dataoff,
+        .datasize = datasize,
+    };
+    return buf;
+}
+
+test "parse surfaces each slice's embedded code signature with its arch" {
+    const arm = signatureOnlyMachO(macho.CPU_TYPE_ARM64, 4096, 512);
+    var parsed = try parse(testing.allocator, &arm);
+    defer parsed.deinit();
+    try testing.expectEqualSlices(
+        CodeSignature,
+        &.{.{ .slice_offset = 0, .slice_len = arm.len, .is_arm64 = true, .dataoff = 4096, .datasize = 512 }},
+        parsed.signatures,
+    );
+
+    // A fat file carries one per slice, bounded to its own slice so the
+    // verifier never hashes a neighbour's bytes.
+    const x86 = signatureOnlyMachO(macho.CPU_TYPE_X86_64, 8192, 256);
+    var fat: [8 + 2 * 20 + arm.len + x86.len]u8 = @splat(0);
+    std.mem.writeInt(u32, fat[0..4], macho.FAT_MAGIC, .little);
+    std.mem.writeInt(u32, fat[4..8], 2, .big);
+    std.mem.writeInt(u32, fat[16..20], 48, .big); // slice 0 offset
+    std.mem.writeInt(u32, fat[20..24], arm.len, .big);
+    std.mem.writeInt(u32, fat[36..40], 48 + arm.len, .big); // slice 1 offset
+    std.mem.writeInt(u32, fat[40..44], x86.len, .big);
+    @memcpy(fat[48..][0..arm.len], &arm);
+    @memcpy(fat[48 + arm.len ..][0..x86.len], &x86);
+
+    var parsed_fat = try parse(testing.allocator, &fat);
+    defer parsed_fat.deinit();
+    try testing.expectEqualSlices(CodeSignature, &.{
+        .{ .slice_offset = 48, .slice_len = arm.len, .is_arm64 = true, .dataoff = 4096, .datasize = 512 },
+        .{ .slice_offset = 48 + arm.len, .slice_len = x86.len, .is_arm64 = false, .dataoff = 8192, .datasize = 256 },
+    }, parsed_fat.signatures);
 }
