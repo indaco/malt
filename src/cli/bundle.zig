@@ -486,11 +486,17 @@ fn lookupManifestPath(
         output.err("bundle not registered: {s}", .{name});
         return BundleError.BundlefileNotFound;
     }
-    const raw = stmt.columnText(0) orelse {
+    const raw = std.mem.sliceTo(stmt.columnText(0) orelse {
         output.err("bundle {s} has no recorded manifest path", .{name});
         return BundleError.BundlefileNotFound;
-    };
-    return allocator.dupe(u8, std.mem.sliceTo(raw, 0)) catch return BundleError.DatabaseError;
+    }, 0);
+    // Rows written before import canonicalised the path: resolving them
+    // against this process's cwd could purge from an unrelated file.
+    if (!std.fs.path.isAbsolute(raw)) {
+        output.err("bundle {s} was registered with a relative manifest path ({s}); re-import it", .{ name, raw });
+        return BundleError.BundlefileNotFound;
+    }
+    return allocator.dupe(u8, raw) catch return BundleError.DatabaseError;
 }
 
 const CreateArgs = struct { format: Format, out_path: []const u8, include_services: bool };
@@ -587,6 +593,12 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     defer manifest.deinit();
     for (diag.warnings.items) |w| output.warn("{s}", .{w});
 
+    // The row outlives this process, so a cwd-relative path would be
+    // re-resolved against whatever cwd `remove --purge` later runs from.
+    const canonical = std.Io.Dir.cwd().realPathFileAlloc(ctx.io, path, allocator) catch
+        return BundleError.BundlefileNotFound;
+    defer allocator.free(canonical);
+
     var db = try openDb(ctx);
     defer db.close();
 
@@ -598,7 +610,7 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     defer stmt.finalize();
     const name = if (manifest.name.len > 0) manifest.name else path;
     stmt.bindText(1, name) catch return BundleError.DatabaseError;
-    stmt.bindText(2, path) catch return BundleError.DatabaseError;
+    stmt.bindText(2, canonical) catch return BundleError.DatabaseError;
     stmt.bindInt(3, std.Io.Clock.real.now(ctx.io).toSeconds()) catch return BundleError.DatabaseError;
     stmt.bindInt(4, @intCast(manifest.version)) catch return BundleError.DatabaseError;
     _ = stmt.step() catch return BundleError.DatabaseError;
