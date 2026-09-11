@@ -297,6 +297,210 @@ test "import on a malformed Maltfile.json surfaces BundlefileParse" {
     );
 }
 
+// --- import: manifest_path canonicalisation ---------------------------
+
+fn writeFile(path: []const u8, body: []const u8) !void {
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, body);
+}
+
+/// A cwd-relative spelling of `path` without chdir: the runner is parallel
+/// and cwd is process-global.
+fn relativeToCwd(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var cwd_buf: [test_io.max_path_bytes]u8 = undefined;
+    const cwd = cwd_buf[0..try test_io.cwd().realPathFile(std.Options.debug_io, ".", &cwd_buf)];
+    return std.fs.path.relativePosix(allocator, cwd, cwd, path);
+}
+
+fn storedManifestPath(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) ![]u8 {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT manifest_path FROM bundles WHERE name = ?;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    try testing.expect(try stmt.step());
+    return allocator.dupe(u8, std.mem.sliceTo(stmt.columnText(0).?, 0));
+}
+
+test "import stores the canonical absolute path for a relative manifest argument" {
+    var s = try Scratch.init(testing.allocator, "import_relpath");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\{"name": "relpath", "version": 1, "formulas": []}
+    );
+
+    const rel = try relativeToCwd(testing.allocator, path);
+    defer testing.allocator.free(rel);
+    try testing.expect(!std.fs.path.isAbsolute(rel));
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", rel });
+
+    const want = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, path, testing.allocator);
+    defer testing.allocator.free(want);
+    const stored = try storedManifestPath(testing.allocator, s.path, "relpath");
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(want, stored);
+}
+
+test "import collapses dot-dot segments in an absolute manifest argument" {
+    var s = try Scratch.init(testing.allocator, "import_dotdot");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+
+    const sub = try std.fmt.allocPrint(testing.allocator, "{s}/sub", .{s.path});
+    defer testing.allocator.free(sub);
+    try test_io.cwd().createDirPath(std.Options.debug_io, sub);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\{"name": "dotdot", "version": 1, "formulas": []}
+    );
+    const dotted = try std.fmt.allocPrint(testing.allocator, "{s}/sub/../Maltfile.json", .{s.path});
+    defer testing.allocator.free(dotted);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", dotted });
+
+    const want = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, path, testing.allocator);
+    defer testing.allocator.free(want);
+    const stored = try storedManifestPath(testing.allocator, s.path, "dotdot");
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(want, stored);
+}
+
+test "import records a symlinked manifest by its target" {
+    var s = try Scratch.init(testing.allocator, "import_symlink");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+
+    const target = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(target);
+    try writeFile(target,
+        \\{"name": "linked", "version": 1, "formulas": []}
+    );
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/link.json", .{s.path});
+    defer testing.allocator.free(link);
+    try test_io.cwd().symLink(std.Options.debug_io, target, link, .{});
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", link });
+
+    // Same canonicalisation every other site uses: the row names the file
+    // that will actually be read, not the link.
+    const want = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, target, testing.allocator);
+    defer testing.allocator.free(want);
+    const stored = try storedManifestPath(testing.allocator, s.path, "linked");
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(want, stored);
+}
+
+test "import keeps the typed path as the registered name when the manifest has none" {
+    var s = try Scratch.init(testing.allocator, "import_name_fallback");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "brew \"wget\"\n");
+
+    const rel = try relativeToCwd(testing.allocator, path);
+    defer testing.allocator.free(rel);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", rel });
+
+    // The name stays what the user typed; only the path column is canonical.
+    const stored = try storedManifestPath(testing.allocator, s.path, rel);
+    defer testing.allocator.free(stored);
+    try testing.expect(std.fs.path.isAbsolute(stored));
+}
+
+test "remove --purge refuses a legacy relative manifest_path and keeps the row" {
+    var s = try Scratch.init(testing.allocator, "purge_legacy_rel");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+
+    // A relative path that *does* resolve from the runner's cwd: a purge that
+    // opens it instead of refusing is exactly the cwd-dependent read.
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "brew \"wget\"\n");
+    const rel = try relativeToCwd(testing.allocator, path);
+    defer testing.allocator.free(rel);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        var stmt = try db.prepare(
+            \\INSERT INTO bundles (name, manifest_path, created_at, version)
+            \\VALUES ('legacy', ?, 1700000000, 1);
+        );
+        defer stmt.finalize();
+        try stmt.bindText(1, rel);
+        _ = try stmt.step();
+    }
+
+    quiet();
+    defer unquiet();
+    try testing.expectError(
+        bundle.BundleError.BundlefileNotFound,
+        bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "--purge", "--dry-run", "legacy" }),
+    );
+
+    // Refusal happens before unregister, so the user can re-import by name.
+    const stored = try storedManifestPath(testing.allocator, s.path, "legacy");
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(rel, stored);
+}
+
+test "re-import replaces a legacy relative row with the canonical path" {
+    var s = try Scratch.init(testing.allocator, "reimport_legacy");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        var stmt = try db.prepare(
+            \\INSERT INTO bundles (name, manifest_path, created_at, version)
+            \\VALUES ('legacy', 'Brewfile', 1700000000, 1);
+        );
+        defer stmt.finalize();
+        _ = try stmt.step();
+    }
+
+    // The recovery the refusal message asks for: same name, fresh import.
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\{"name": "legacy", "version": 1, "formulas": []}
+    );
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path });
+
+    const want = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, path, testing.allocator);
+    defer testing.allocator.free(want);
+    const stored = try storedManifestPath(testing.allocator, s.path, "legacy");
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(want, stored);
+}
+
 // --- export -----------------------------------------------------------
 
 test "export with no installed packages emits an empty Brewfile body to stdout" {

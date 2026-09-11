@@ -109,6 +109,9 @@ jobs:
       - name: Regression guard - wipe manifest matches mt backup
         run: ./scripts/regressions/wipe-manifest-tap-qualification-wipe-manifest-drops-tap-qualification-for-casks.sh
 
+      - name: Regression guard - bundle import records the canonical manifest path
+        run: ./scripts/regressions/bundle-import-canonical-manifest-path-bundle-import-records-relative-manifest-path.sh
+
       - name: Build universal binary
         run: just build-universal
 
