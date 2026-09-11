@@ -84,7 +84,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Find current installed version
     var cur_stmt = db.prepare(
-        "SELECT id, version, revision, store_sha256, cellar_path, bin_isolated FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
+        "SELECT id, version, revision, store_sha256, cellar_path, bin_isolated, install_reason FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
     ) catch return error.Aborted;
     defer cur_stmt.finalize();
     cur_stmt.bindText(1, name) catch return error.Aborted;
@@ -111,6 +111,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const current_cellar_ptr = cur_stmt.columnText(4);
     const current_cellar_path = if (current_cellar_ptr) |c| std.mem.sliceTo(c, 0) else "";
     const current_bin_isolated = cur_stmt.columnInt(5) != 0;
+    // The row keeps its reason across the swap, so the receipt must too.
+    const current_on_request = if (cur_stmt.columnText(6)) |r| !std.mem.eql(u8, std.mem.sliceTo(r, 0), "dependency") else true;
 
     // pkg_version is what the on-disk Cellar / store dir is named after,
     // so the store-scan below must compare against this — not the bare
@@ -205,6 +207,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // Unchanged from the `materialize` wrapper this replaced.
         "",
         if (placeholder) |p| .{ .old = p.token, .new = p.value } else null,
+        current_on_request,
     ) catch {
         output.err("Failed to materialize {s} {s} from store", .{ name, target.pkg_version });
         return error.Aborted;

@@ -484,6 +484,7 @@ const OldKeg = struct {
     cellar_path: []const u8,
     tap: []const u8,
     bin_isolated: bool,
+    is_dep: bool,
 
     fn deinit(self: *OldKeg, allocator: std.mem.Allocator) void {
         allocator.free(self.version);
@@ -501,7 +502,7 @@ const OldKeg = struct {
 /// snapshot to a writer (SQLITE_BUSY). Returns null when no row matches.
 fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !?OldKeg {
     var stmt = try db.prepare(
-        "SELECT id, version, revision, store_sha256, cellar_path, tap, bin_isolated FROM kegs WHERE name = ?1 LIMIT 1;",
+        "SELECT id, version, revision, store_sha256, cellar_path, tap, bin_isolated, install_reason FROM kegs WHERE name = ?1 LIMIT 1;",
     );
     defer stmt.finalize();
     try stmt.bindText(1, name);
@@ -523,6 +524,8 @@ fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const 
         .cellar_path = cellar_path,
         .tap = tap,
         .bin_isolated = stmt.columnInt(6) != 0,
+        // NULL reads as direct, matching the DB-side `prior_reason` default.
+        .is_dep = if (stmt.columnText(7)) |r| std.mem.eql(u8, std.mem.sliceTo(r, 0), "dependency") else false,
     };
 }
 
@@ -676,7 +679,7 @@ fn upgradeFormula(
     const fetch = install_download_mod.installKegFromBottle(
         ctx,
         allocator,
-        .{ .ghcr = &ghcr, .http = http, .store = &store, .bar = sp.bind(), .cellar_diag = &cellar_diag },
+        .{ .ghcr = &ghcr, .http = http, .store = &store, .bar = sp.bind(), .cellar_diag = &cellar_diag, .is_dep = old.is_dep },
         &formula,
         prefix,
     ) catch |e| {
@@ -2018,6 +2021,23 @@ test "readOldKeg maps a NULL tap column to an owned empty string" {
     defer old.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("", old.tap);
     try std.testing.expect(install_args_mod.isCoreTap(old.tap));
+}
+
+test "readOldKeg carries the install reason so the new receipt can mirror it" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason)
+        \\VALUES ('dep', 'dep', '1.0', 'sha', '/c/dep/1.0', 'dependency'),
+        \\       ('top', 'top', '1.0', 'sha', '/c/top/1.0', 'direct');
+    );
+    var dep = (try readOldKeg(std.testing.allocator, &db, "dep")).?;
+    defer dep.deinit(std.testing.allocator);
+    try std.testing.expect(dep.is_dep);
+    var top = (try readOldKeg(std.testing.allocator, &db, "top")).?;
+    defer top.deinit(std.testing.allocator);
+    try std.testing.expect(!top.is_dep);
 }
 
 test "upgradeAllFormulas stops between packages once interrupted" {
