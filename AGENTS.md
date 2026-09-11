@@ -85,7 +85,8 @@ Ruby - spawn it argv-only and keep the call site narrow.
 
 **Formula Ruby is pinned.** Source fetched over the wire is executed only if its SHA256
 matches `src/core/pins_manifest.txt` against the pinned commit in `src/core/pins.zig`.
-No manifest entry, no execution. Regenerate both with `scripts/gen-pins.sh`.
+No manifest entry, no execution. The pin is frozen - upstream has migrated every Ruby
+`post_install` to declarative `post_install_steps` - so the manifest is no longer regenerated.
 
 **Service declarations are validated.** Formula `service:` blocks pass through
 `plist_mod.validate` before launchd sees them. Do not add bypasses.

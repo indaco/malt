@@ -6,7 +6,8 @@
 # matching Ruby source after verifying its SHA256. Formulas with no
 # entry are refused — the code path is fail-closed.
 #
-# Regenerate with: scripts/gen-pins.sh
+# Frozen: upstream has migrated every Ruby post_install to declarative
+# post_install_steps, so this manifest is no longer regenerated.
 # Pinned commit lives in src/core/pins.zig (homebrew_core_commit_sha).
 #
 # Lines starting with '#' and blank lines are ignored.
