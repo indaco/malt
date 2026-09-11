@@ -60,22 +60,39 @@ pub fn promoteStagingToCache(
     return cache_path;
 }
 
-/// Recursive byte sum under `<prefix>/cache/Tap`. Best-effort: any
-/// I/O failure contributes zero so doctor's read stays infallible.
-pub fn bytesUnder(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8) u64 {
+/// Byte totals under `<prefix>/cache/Tap`: everything on disk, and the
+/// subset `mt purge --cache` would free at the given retention window.
+pub const Usage = struct { total: u64 = 0, reclaimable: u64 = 0 };
+
+/// The `mt purge --cache` age gate, applied to every entry under
+/// `<prefix>/cache` (not just tap archives). Strictly older: an entry
+/// exactly `max_age_days` old is kept. Shared with the sweep so doctor's
+/// figure can never drift from what the sweep deletes. Saturating:
+/// `--cache=N` is unbounded and an absurd window means "keep
+/// everything", not an overflow abort.
+pub fn olderThan(now_secs: i64, mtime_secs: i64, max_age_days: i64) bool {
+    return now_secs - mtime_secs > max_age_days *| 86400;
+}
+
+/// Recursive walk of `<prefix>/cache/Tap`. Best-effort: any I/O failure
+/// contributes zero so doctor's read stays infallible. `now_secs` is a
+/// parameter so tests can move the clock instead of back-dating files.
+pub fn usageUnder(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, now_secs: i64, max_age_days: i64) Usage {
     var buf: [512]u8 = undefined;
-    const dir_path = std.fmt.bufPrint(&buf, "{s}/cache/Tap", .{prefix}) catch return 0;
-    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return 0;
+    const dir_path = std.fmt.bufPrint(&buf, "{s}/cache/Tap", .{prefix}) catch return .{};
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return .{};
     defer dir.close(io);
-    var walker = dir.walk(allocator) catch return 0;
+    var walker = dir.walk(allocator) catch return .{};
     defer walker.deinit();
-    var total: u64 = 0;
+    var usage: Usage = .{};
     while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
         const stat = std.Io.Dir.statFile(entry.dir, io, entry.basename, .{}) catch continue;
-        total += stat.size;
+        usage.total += stat.size;
+        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
+        if (olderThan(now_secs, mtime_secs, max_age_days)) usage.reclaimable += stat.size;
     }
-    return total;
+    return usage;
 }
 
 // ─── inline test scratch ──────────────────────────────────────────────
@@ -215,36 +232,89 @@ test "promoteStagingToCache: renames staging file to SHA-keyed slot" {
     try std.Io.Dir.accessAbsolute(io, cache_path, .{});
 }
 
-test "bytesUnder: returns 0 when cache dir is absent" {
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var s = try Scratch.init("tap_cache_bytes_absent");
-    defer s.deinit();
-    // Deliberately do not create <prefix>/cache/Tap.
-    try std.testing.expectEqual(@as(u64, 0), bytesUnder(io, std.testing.allocator, s.base));
+test "olderThan: strictly older than the window, so the boundary is kept" {
+    // Exactly `max_age_days` old is NOT older - the sweep keeps it, so
+    // the doctor figure must not count it either.
+    const day: i64 = 86400;
+    try std.testing.expect(!olderThan(30 * day, 0, 30));
+    try std.testing.expect(olderThan(30 * day + 1, 0, 30));
+    try std.testing.expect(!olderThan(10 * day, 0, 30));
+    // A zero-day window reclaims anything strictly in the past.
+    try std.testing.expect(olderThan(1, 0, 0));
+    try std.testing.expect(!olderThan(0, 0, 0));
 }
 
-test "bytesUnder: sums regular file sizes under cache/Tap" {
+test "olderThan: an absurdly wide window keeps everything instead of overflowing" {
+    // `--cache=N` is an unbounded i64; N * 86400 past i64 must read as
+    // "nothing is that old", not abort the sweep.
+    try std.testing.expect(!olderThan(std.math.maxInt(i64), 0, std.math.maxInt(i64)));
+    try std.testing.expect(!olderThan(1, 0, std.math.maxInt(i64) / 86400 + 1));
+}
+
+test "usageUnder: zero usage when cache dir is absent" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var s = try Scratch.init("tap_cache_bytes_sum");
+    var s = try Scratch.init("tap_cache_usage_absent");
     defer s.deinit();
-    const prefix = s.base;
+    // Deliberately do not create <prefix>/cache/Tap.
+    const u = usageUnder(io, std.testing.allocator, s.base, 0, 30);
+    try std.testing.expectEqual(@as(u64, 0), u.total);
+    try std.testing.expectEqual(@as(u64, 0), u.reclaimable);
+}
+
+fn seedEntry(io: std.Io, s: *Scratch, comptime sha: []const u8, comptime size: usize) !void {
+    var entry_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const entry = try cachePath(&entry_buf, s.base, sha, ".tar.gz");
+    const f = try std.Io.Dir.createFileAbsolute(io, entry, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, "x" ** size);
+}
+
+test "usageUnder: a fresh entry counts toward total but not reclaimable" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var s = try Scratch.init("tap_cache_usage_fresh");
+    defer s.deinit();
 
     // Production callers reach `ensureCacheDir` only after the
     // top-level `ensureDirs` has seeded `<prefix>/cache`; mirror
     // that here so the test pins the production invariant.
     try std.Io.Dir.cwd().createDirPath(io, s.p("/cache"));
+    try ensureCacheDir(io, s.base);
+    try seedEntry(io, &s, "00" ** 32, 256);
 
-    try ensureCacheDir(io, prefix);
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    const u = usageUnder(io, std.testing.allocator, s.base, now, 30);
+    try std.testing.expectEqual(@as(u64, 256), u.total);
+    try std.testing.expectEqual(@as(u64, 0), u.reclaimable);
+}
 
-    var entry_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const entry = try cachePath(&entry_buf, prefix, "00" ** 32, ".tar.gz");
-    const f = try std.Io.Dir.createFileAbsolute(io, entry, .{});
-    defer f.close(io);
-    try f.writeStreamingAll(io, "x" ** 256);
+test "usageUnder: total is stable while reclaimable swings with the window" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var s = try Scratch.init("tap_cache_usage_mixed");
+    defer s.deinit();
 
-    try std.testing.expectEqual(@as(u64, 256), bytesUnder(io, std.testing.allocator, prefix));
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/cache"));
+    try ensureCacheDir(io, s.base);
+    try seedEntry(io, &s, "00" ** 32, 100);
+    try seedEntry(io, &s, "11" ** 32, 300);
+
+    // Both entries were just written. Move the clock instead of
+    // back-dating files: the default window reclaims nothing now and
+    // everything 40 days on; a zero-day window reclaims everything one
+    // second on. Total never moves.
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    const none = usageUnder(io, std.testing.allocator, s.base, now, 30);
+    try std.testing.expectEqual(@as(u64, 400), none.total);
+    try std.testing.expectEqual(@as(u64, 0), none.reclaimable);
+    const aged = usageUnder(io, std.testing.allocator, s.base, now + 40 * 86400, 30);
+    try std.testing.expectEqual(@as(u64, 400), aged.total);
+    try std.testing.expectEqual(@as(u64, 400), aged.reclaimable);
+    const all = usageUnder(io, std.testing.allocator, s.base, now + 1, 0);
+    try std.testing.expectEqual(@as(u64, 400), all.total);
+    try std.testing.expectEqual(@as(u64, 400), all.reclaimable);
 }

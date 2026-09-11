@@ -1512,7 +1512,7 @@ test "a loaded doctor read repoints findings + reclaimable stats; a cleared read
     defer storage.deinit(allocator);
     const json =
         \\{"checks":[{"id":"a","severity":"warn","title":"A","fixable":true,"fix_class":"stale_lock"}],
-        \\"cask_history":{"retained_versions":3,"bytes":4096},"tap_cache":{"bytes":512}}
+        \\"cask_history":{"retained_versions":3,"bytes":4096},"tap_cache":{"bytes":1024,"reclaimable_bytes":512}}
     ;
     const parsed = try doctor_json.parse(allocator, json);
     _ = update(allocator, "/bin/mt", &st, &storage, &shared, .{ .loaded = .{ .doctor = parsed } });
@@ -1571,7 +1571,7 @@ test "update on a loaded document swaps in findings + stats and returns none" {
     var shared: ctx.SharedModel = .{};
     const parsed = try doctor_json.parse(testing.allocator,
         \\{"checks":[{"id":"a","severity":"warn","title":"A","fixable":true,"fix_class":"stale_lock"}],
-        \\"cask_history":{"retained_versions":3,"bytes":4096},"tap_cache":{"bytes":512}}
+        \\"cask_history":{"retained_versions":3,"bytes":4096},"tap_cache":{"bytes":1024,"reclaimable_bytes":512}}
     );
     const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .{ .loaded = .{ .doctor = parsed } });
     try testing.expect(next == .none);
