@@ -114,7 +114,7 @@ pub fn materialize(
     name: []const u8,
     version: []const u8,
 ) CellarError!Keg {
-    return materializeWithCellar(io, allocator, prefix, store_sha256, name, version, "", null);
+    return materializeWithCellar(io, allocator, prefix, store_sha256, name, version, "", null, true);
 }
 
 /// Materialize with an explicit cellar type from the bottle metadata.
@@ -124,6 +124,9 @@ pub fn materialize(
 ///
 /// `extra_replacement` carries a substitution the caller resolved from the
 /// formula (see `formula.dependencyPlaceholder`); null for most bottles.
+///
+/// `on_request` is what the receipt reports as `installed_on_request`; the
+/// caller decides it from the same source as the DB `install_reason`.
 pub fn materializeWithCellar(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -133,6 +136,7 @@ pub fn materializeWithCellar(
     version: []const u8,
     cellar_type: []const u8,
     extra_replacement: ?patch.Replacement,
+    on_request: bool,
 ) CellarError!Keg {
     // Before any filesystem work: this path is the clone source, and an
     // unvalidated key names the store root rather than one entry in it.
@@ -175,7 +179,9 @@ pub fn materializeWithCellar(
             };
             relocated_store.markVerified(io, prefix, store_sha256);
         }
-        writeInstallReceipt(io, cellar_path, name, version, store_sha256);
+        // The snapshot carries the first install's receipt; this install
+        // may have a different reason, so rewrite rather than trust it.
+        writeInstallReceiptFull(io, cellar_path, name, version, store_sha256, null, on_request);
         // Homebrew re-pours etc/var on every install; the cached keg
         // carries `.bottle`, so a wiped or drifted live config is
         // restored even when relocation is skipped.
@@ -261,7 +267,7 @@ pub fn materializeWithCellar(
     try relocateKegTree(io, allocator, cellar_path, cellar_type, extra_replacement);
 
     // Write INSTALL_RECEIPT.json for brew compatibility
-    writeInstallReceipt(io, cellar_path, name, version, store_sha256);
+    writeInstallReceiptFull(io, cellar_path, name, version, store_sha256, null, on_request);
 
     // Snapshot the post-relocation keg so the next install of the same
     // bottle sha takes the cache short-circuit at the top of this
@@ -924,10 +930,6 @@ fn jsonEscapeInto(buf: []u8, s: []const u8) ?[]const u8 {
     return buf[0..w];
 }
 
-fn writeInstallReceipt(io: std.Io, cellar_path: []const u8, name: []const u8, version: []const u8, store_sha256: []const u8) void {
-    writeInstallReceiptFull(io, cellar_path, name, version, store_sha256, null, true);
-}
-
 /// Public version with full options for tap installs.
 pub fn writeInstallReceiptFull(
     io: std.Io,
@@ -1489,6 +1491,7 @@ test "the materialize sinks refuse a keg path that leaves the Cellar" {
                 pair[1],
                 "",
                 null,
+                true,
             ));
             try testing.expectError(CellarError.UnsafePathComponent, materializeFromLocalCellar(
                 io,
@@ -1527,6 +1530,7 @@ test "an empty bottle key cannot make the store root a clone source" {
         "1.0",
         "",
         null,
+        true,
     ));
 
     // Absent, not cleaned up afterwards: the rejection precedes every write.
@@ -1563,6 +1567,7 @@ test "materializeWithCellar refuses a bottle key outside the store charset" {
             "1.0",
             "",
             null,
+            true,
         ));
     }
 
@@ -1590,6 +1595,7 @@ test "every Cellar sink reports a path that will not fit as PathTooLong" {
         "1.0",
         "",
         null,
+        true,
     ));
     try testing.expectError(CellarError.PathTooLong, materializeFromLocalCellar(
         io,
@@ -1620,6 +1626,7 @@ test "a store path that will not fit reports PathTooLong, not an allocation fail
         "1.0",
         "",
         null,
+        true,
     ));
 }
 
@@ -1650,6 +1657,7 @@ test "every Cellar sink refuses a symlinked package dir" {
         "1.0",
         "",
         null,
+        true,
     ));
     try testing.expectError(CellarError.UnsafeCellarLink, materializeFromLocalCellar(
         io,
@@ -1686,6 +1694,7 @@ test "the package-dir guard leaves a real directory and a first install alone" {
             "1.0",
             "",
             null,
+            true,
         ) catch |e| e != CellarError.UnsafeCellarLink);
         // `deleteTree` is a no-op on a missing path, so a clean return is
         // the expected outcome here - anything but the link refusal.

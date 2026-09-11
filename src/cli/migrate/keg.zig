@@ -171,6 +171,8 @@ pub fn migrateKeg(
         // a separate question from the placeholder.
         "",
         if (placeholder) |p| .{ .old = p.token, .new = p.value } else null,
+        // Migrated kegs are recorded as 'direct'.
+        true,
     ) catch |e| {
         output.err("    {s}: failed to materialize ({s})", .{ keg_name, cellar_mod.describeError(e) });
         output.emitNdjsonEvent(.materialized, keg_name, "failed");

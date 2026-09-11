@@ -567,6 +567,9 @@ pub const InstallKegDeps = struct {
     /// Where per-keg download-failure lines go; terminal by default so
     /// the shared upgrade per-keg loop is unchanged.
     sink: OutputSink = sink_mod.terminal,
+    /// Whether this keg is being poured as a dependency; the receipt's
+    /// `installed_on_request` is its inverse.
+    is_dep: bool = false,
 };
 
 /// Result of `installKegFromBottle`. `sha256` borrows from the formula's
@@ -623,6 +626,7 @@ pub fn installKegFromBottle(
         formula.pkg_version,
         bottle.cellar,
         extra_replacement,
+        !deps.is_dep,
     ) catch |err| {
         if (deps.cellar_diag) |out| out.* = err;
         return InstallError.CellarFailed;
@@ -855,6 +859,7 @@ fn installOneJob(pool: *InstallPool, job: *DownloadJob, result: *MaterializeResu
             .bar = job.bar,
             .cellar_diag = &cellar_diag,
             .sink = pool.sink,
+            .is_dep = job.is_dep,
         },
         formula,
         pool.prefix,
