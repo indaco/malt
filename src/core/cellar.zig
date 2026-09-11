@@ -150,10 +150,15 @@ pub fn materializeWithCellar(
     // bottle sha is already on disk, fully relocated. Clonefile-restore
     // it and skip the expensive extract → patch → codesign pipeline.
     // Falls through on any cache miss/error so a flaky cache never breaks
-    // the install.
+    // the install. The label is checked from the snapshot's own sidecar,
+    // not the store entry: a warm hit must work with no `store/<sha>/` on
+    // disk at all.
     if (relocated_store.has(io, prefix, store_sha256)) cache_hit: {
         relocated_store.materialize(io, allocator, prefix, store_sha256, name, version) catch |e| {
             std.log.debug("relocated cache miss for {s}: {s}", .{ store_sha256, @errorName(e) });
+            // Evict rather than skip: `save` is idempotent on the sha, so a
+            // stale label would otherwise win forever.
+            if (e == error.LabelMismatch) relocated_store.remove(io, prefix, store_sha256) catch {};
             break :cache_hit;
         };
         // A snapshot taken by an older, buggier relocation outlives the fix

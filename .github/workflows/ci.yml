@@ -118,6 +118,9 @@ jobs:
       - name: Regression guard - store entry without the requested keg is refused
         run: ./scripts/regressions/materialize-refuses-store-entry-root-keg-source-falls-back-to-store-entry-root.sh
 
+      - name: Regression guard - relocated cache warm hit checks the keg label
+        run: ./scripts/regressions/relocated-cache-warm-hit-checks-label-relocated-cache-warm-hit-ignores-the-requested-name-and-version.sh
+
       - name: Build universal binary
         run: just build-universal
 

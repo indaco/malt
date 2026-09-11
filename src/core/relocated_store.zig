@@ -18,7 +18,7 @@ const clonefile = @import("../fs/clonefile.zig");
 const dirsize = @import("../fs/dirsize.zig");
 const store_path = @import("../fs/store_path.zig");
 
-pub const RelocatedStoreError = store_path.Error || error{ SaveFailed, MaterializeFailed };
+pub const RelocatedStoreError = store_path.Error || error{ SaveFailed, MaterializeFailed, LabelMismatch };
 
 /// Relocation-logic version, folded into the cache path as
 /// `store-relocated/v<N>/<sha>`. The cached bytes are the output of
@@ -55,7 +55,10 @@ pub const RelocatedStoreError = store_path.Error || error{ SaveFailed, Materiali
 /// v8: a store entry without the requested keg is refused instead of cloned
 /// whole. A v7 entry snapshotted from one is the entry root itself, with the
 /// real keg nested below and nothing linkable at the top.
-pub const RELOC_LOGIC_VERSION: u32 = 8;
+///
+/// v9: a snapshot records the name/version it was taken under; a v8 entry
+/// carries no label and is restored under any label that presents its sha.
+pub const RELOC_LOGIC_VERSION: u32 = 9;
 
 /// Borrow the store constructor's key rule rather than keep a second copy.
 /// Its path is shorter than ours for the same prefix, so any `buf` that fits
@@ -110,7 +113,7 @@ pub fn save(
     // the loser would otherwise fail at `renameAbsolute` below.
     std.Io.Dir.accessAbsolute(io, dst, .{}) catch {
         // Not present yet — proceed with snapshot.
-        try saveFresh(io, allocator, prefix, name, version, dst);
+        try saveFresh(io, allocator, prefix, sha, name, version, dst);
         // A fresh save under the current version is the natural point to
         // reclaim kegs orphaned by a past logic-version bump. Best-effort.
         _ = reapStaleVersions(io, allocator, prefix, true);
@@ -123,6 +126,7 @@ fn saveFresh(
     io: std.Io,
     allocator: std.mem.Allocator,
     prefix: []const u8,
+    sha: []const u8,
     name: []const u8,
     version: []const u8,
     dst: []const u8,
@@ -168,6 +172,10 @@ fn saveFresh(
     std.Io.Dir.accessAbsolute(io, dst, .{}) catch {
         std.Io.Dir.renameAbsolute(tmp, dst, io) catch return RelocatedStoreError.SaveFailed;
         tmp_consumed = true;
+        // After the rename so the label never outlives a failed snapshot;
+        // best-effort because a lost label costs one eviction, never a
+        // wrong keg.
+        writeLabel(io, prefix, sha, name, version);
     };
 }
 
@@ -183,6 +191,9 @@ pub fn materialize(
 ) RelocatedStoreError!void {
     var src_buf: [512]u8 = undefined;
     const src = try cacheDir(&src_buf, prefix, RELOC_LOGIC_VERSION, sha);
+    // The sha names the bytes, the label names the keg they may be
+    // installed as. Check it before anything touches the Cellar.
+    if (!labelMatches(io, prefix, sha, name, version)) return RelocatedStoreError.LabelMismatch;
     std.Io.Dir.accessAbsolute(io, src, .{}) catch return RelocatedStoreError.MaterializeFailed;
 
     var parent_buf: [512]u8 = undefined;
@@ -212,6 +223,9 @@ pub fn remove(io: std.Io, prefix: []const u8, sha: []const u8) RelocatedStoreErr
     if (verifiedMark(&mark_buf, prefix, sha)) |mark| {
         std.Io.Dir.cwd().deleteFile(io, mark) catch {};
     } else |_| {}
+    if (labelMark(&mark_buf, prefix, sha)) |mark| {
+        std.Io.Dir.cwd().deleteFile(io, mark) catch {};
+    } else |_| {}
 
     std.Io.Dir.cwd().deleteTree(io, dir) catch return;
 }
@@ -222,6 +236,38 @@ fn verifiedMark(buf: []u8, prefix: []const u8, sha: []const u8) RelocatedStoreEr
     try checkSha(buf, prefix, sha);
     return std.fmt.bufPrint(buf, "{s}/store-relocated/v{d}/{s}.verified", .{ prefix, RELOC_LOGIC_VERSION, sha }) catch
         return RelocatedStoreError.PathTooLong;
+}
+
+/// `<sha>.keg`, the `name/version` a snapshot was taken under. A sibling of
+/// the snapshot dir for the same reason as the verified mark.
+fn labelMark(buf: []u8, prefix: []const u8, sha: []const u8) RelocatedStoreError![]u8 {
+    try checkSha(buf, prefix, sha);
+    return std.fmt.bufPrint(buf, "{s}/store-relocated/v{d}/{s}.keg", .{ prefix, RELOC_LOGIC_VERSION, sha }) catch
+        return RelocatedStoreError.PathTooLong;
+}
+
+fn writeLabel(io: std.Io, prefix: []const u8, sha: []const u8, name: []const u8, version: []const u8) void {
+    var buf: [512]u8 = undefined;
+    const mark = labelMark(&buf, prefix, sha) catch return;
+    var body_buf: [512]u8 = undefined;
+    const body = std.fmt.bufPrint(&body_buf, "{s}/{s}\n", .{ name, version }) catch return;
+    const f = std.Io.Dir.createFileAbsolute(io, mark, .{}) catch return;
+    defer f.close(io);
+    f.writeStreamingAll(io, body) catch {};
+}
+
+/// False on a missing or unreadable mark: an unlabelled snapshot is nobody's.
+fn labelMatches(io: std.Io, prefix: []const u8, sha: []const u8, name: []const u8, version: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    const mark = labelMark(&buf, prefix, sha) catch return false;
+    var want_buf: [512]u8 = undefined;
+    const want = std.fmt.bufPrint(&want_buf, "{s}/{s}\n", .{ name, version }) catch return false;
+    const f = std.Io.Dir.openFileAbsolute(io, mark, .{}) catch return false;
+    defer f.close(io);
+    // One byte past `want` so a longer label cannot pass as a prefix match.
+    var got_buf: [513]u8 = undefined;
+    const n = f.readPositionalAll(io, &got_buf, 0) catch return false;
+    return std.mem.eql(u8, got_buf[0..n], want);
 }
 
 /// True when this snapshot was checked after the malt that wrote it relocated
@@ -601,7 +647,7 @@ test "saveFresh cleans the tempdir on the race-loss branch" {
     const dst = try cacheDir(&dst_buf, prefix, RELOC_LOGIC_VERSION, valid_sha_for_tests);
     try std.Io.Dir.cwd().createDirPath(testIo(), dst);
 
-    try saveFresh(testIo(), testing.allocator, prefix, "rl", "1.0", dst);
+    try saveFresh(testIo(), testing.allocator, prefix, valid_sha_for_tests, "rl", "1.0", dst);
 
     // Race winner kept dst; the loser's tempdir must not survive. The temp is
     // a sibling of dst, so scan dst's parent (the versioned segment dir).
@@ -801,6 +847,98 @@ test "markVerified round-trips and only answers for the marked sha" {
     try testing.expect(!isVerified(testIo(), prefix, other));
     try testing.expect(!isVerified(testIo(), prefix, valid_sha_for_tests[0..63]));
     try testing.expect(!isVerified(testIo(), prefix, "../../etc/passwd"));
+}
+
+test "materialize restores a snapshot under the label it was saved as" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "label_ok");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try buildKegForTests(testing.allocator, prefix, "labelled", "1.0");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "labelled", "1.0");
+    try materialize(testIo(), testing.allocator, prefix, valid_sha_for_tests, "labelled", "1.0");
+}
+
+test "materialize refuses a different name for the same sha" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "label_name");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try buildKegForTests(testing.allocator, prefix, "labelled", "1.0");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "labelled", "1.0");
+    try testing.expectError(
+        RelocatedStoreError.LabelMismatch,
+        materialize(testIo(), testing.allocator, prefix, valid_sha_for_tests, "other", "1.0"),
+    );
+    // A refused label never touches the Cellar.
+    const dst = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/other", .{prefix});
+    defer testing.allocator.free(dst);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), dst, .{}));
+}
+
+test "materialize refuses a different version for the same sha" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "label_version");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try buildKegForTests(testing.allocator, prefix, "labelled", "1.0");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "labelled", "1.0");
+    try testing.expectError(
+        RelocatedStoreError.LabelMismatch,
+        materialize(testIo(), testing.allocator, prefix, valid_sha_for_tests, "labelled", "1.0_1"),
+    );
+}
+
+test "materialize refuses a request that is only a prefix of the stored label" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "label_prefix");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try buildKegForTests(testing.allocator, prefix, "labelled", "1.0_1");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "labelled", "1.0_1");
+    try testing.expectError(
+        RelocatedStoreError.LabelMismatch,
+        materialize(testIo(), testing.allocator, prefix, valid_sha_for_tests, "labelled", "1.0"),
+    );
+}
+
+test "materialize treats a snapshot without a label mark as a mismatch" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "label_missing");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try buildKegForTests(testing.allocator, prefix, "labelled", "1.0");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "labelled", "1.0");
+
+    var buf: [512]u8 = undefined;
+    const mark = try labelMark(&buf, prefix, valid_sha_for_tests);
+    try std.Io.Dir.cwd().deleteFile(testIo(), mark);
+    // Without a label there is no way to know whose bytes these are.
+    try testing.expectError(
+        RelocatedStoreError.LabelMismatch,
+        materialize(testIo(), testing.allocator, prefix, valid_sha_for_tests, "labelled", "1.0"),
+    );
+}
+
+test "remove clears the label mark with the entry" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "label_remove");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try buildKegForTests(testing.allocator, prefix, "labelled", "1.0");
+    try save(testIo(), testing.allocator, prefix, valid_sha_for_tests, "labelled", "1.0");
+    try remove(testIo(), prefix, valid_sha_for_tests);
+
+    var buf: [512]u8 = undefined;
+    const mark = try labelMark(&buf, prefix, valid_sha_for_tests);
+    // A surviving label would vouch for whatever the next save puts here.
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(testIo(), mark, .{}));
 }
 
 test "remove clears the verified mark with the entry" {

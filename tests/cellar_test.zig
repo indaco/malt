@@ -858,6 +858,64 @@ test "materializeWithCellar refuses a name dir with no matching version" {
     try expectKegSourceMissing("pkg");
 }
 
+test "materializeWithCellar refuses a warm hit under a label the snapshot was not taken as" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "other-name", "1.0");
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    // Cold install snapshots the keg under its real label.
+    const first = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "other-name",
+        "1.0",
+        ":any",
+        null,
+    );
+    testing.allocator.free(first.path);
+    try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+
+    // Same sha, different label: the warm path answers LabelMismatch and
+    // evicts the snapshot, so the cold path's store-entry check refuses it
+    // exactly as it would have without a cache.
+    const result = cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "pkg",
+        "9.9",
+        ":any",
+        null,
+    );
+    try testing.expectError(cellar_mod.CellarError.KegSourceMissing, result);
+    try testing.expect(!try fileExists(testing.allocator, "{s}/Cellar/pkg", .{prefix}));
+    try testing.expect(!relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+
+    // The legitimate label re-snapshots instead of staying cold forever.
+    const again = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "other-name",
+        "1.0",
+        ":any",
+        null,
+    );
+    testing.allocator.free(again.path);
+    try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
 // ---------------------------------------------------------------------------
 // Post-relocation keg verification
 // ---------------------------------------------------------------------------
