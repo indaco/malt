@@ -108,6 +108,9 @@ jobs:
       - name: Regression guard - doctor survives a relative keg path
         run: ./scripts/regressions/doctor-survives-a-relative-keg-path.sh
 
+      - name: Regression guard - wipe manifest matches mt backup
+        run: ./scripts/regressions/wipe-manifest-tap-qualification-wipe-manifest-drops-tap-qualification-for-casks.sh
+
       - name: Build universal binary
         run: just build-universal
 

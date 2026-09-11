@@ -100,78 +100,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (output.isJson()) return executeJson(ctx, allocator, &db, output_path, include_services);
 
     try writeHeader(w);
-    var count: usize = 0;
-
-    // Directly-installed formulae only — dependencies are pulled transitively
-    // by `malt install` during restore.
-    const formulae_sql =
-        "SELECT name, version FROM kegs " ++
-        "WHERE install_reason = 'direct' " ++
-        "ORDER BY name;";
-    {
-        var fstmt = try prepareOrFail(&db, formulae_sql);
-        defer fstmt.finalize();
-        while (try stepOrFail(&fstmt)) {
-            const name_ptr = fstmt.columnText(0) orelse continue;
-            const ver_ptr = fstmt.columnText(1);
-            const name = std.mem.sliceTo(name_ptr, 0);
-            const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
-            try writeEntry(w, .formula, name, version, include_versions);
-            count += 1;
-        }
-    }
-
-    // Tap is read alongside token + version so the line written for
-    // a third-party-tap cask carries the fully-qualified slug
-    // `<user>/<repo>/<token>`. Bare tokens 404 against the core API
-    // on restore; the qualified form routes through
-    // `installTapFormula` and re-installs from the owning tap.
-    {
-        var s = try prepareOrFail(&db, "SELECT token, version, tap FROM casks ORDER BY token;");
-        defer s.finalize();
-        while (try stepOrFail(&s)) {
-            const name_ptr = s.columnText(0) orelse continue;
-            const ver_ptr = s.columnText(1);
-            const tap_ptr = s.columnText(2);
-            const token = std.mem.sliceTo(name_ptr, 0);
-            const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
-            const tap = if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "";
-
-            // Qualify only for third-party taps. `homebrew/cask` is the
-            // core API path and stays bare so legacy backups parse the
-            // same way.
-            if (tap.len > 0 and !std.mem.eql(u8, tap, "homebrew/cask")) {
-                var qual_buf: [256]u8 = undefined;
-                const qualified = std.fmt.bufPrint(&qual_buf, "{s}/{s}", .{ tap, token }) catch {
-                    // Tap label too long for the qualified-name buffer —
-                    // fall back to the bare token so the entry isn't lost.
-                    try writeEntry(w, .cask, token, version, include_versions);
-                    count += 1;
-                    continue;
-                };
-                try writeEntry(w, .cask, qualified, version, include_versions);
-            } else {
-                try writeEntry(w, .cask, token, version, include_versions);
-            }
-            count += 1;
-        }
-    }
-
-    // Mirrors the JSON path's auto_start filter so both writers carry
-    // the same re-bootstrap invariant — presence of the line implies
-    // auto_start, no extra token needed.
-    if (include_services) {
-        {
-            var st = try prepareOrFail(&db, "SELECT name FROM services WHERE auto_start = 1 ORDER BY name;");
-            defer st.finalize();
-            while (try stepOrFail(&st)) {
-                const name_ptr = st.columnText(0) orelse continue;
-                const name = std.mem.sliceTo(name_ptr, 0);
-                try writeEntry(w, .service, name, "", false);
-                count += 1;
-            }
-        }
-    }
+    const count = try writeRows(w, &db, include_versions, include_services);
 
     const bytes = aw.written();
 
@@ -192,19 +121,100 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     output.success("Backup written to {s} ({d} packages)", .{ default_path, count });
 }
 
+pub const RowsError = error{ DatabaseError, WriteFailed };
+
+/// The plain-text row dump shared with the wipe manifest: the wipe copy is
+/// the one backup guaranteed to be needed, so it must never drift from what
+/// `mt restore` expects. Returns the number of entries written.
+pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool, include_services: bool) RowsError!usize {
+    var count: usize = 0;
+
+    // Directly-installed formulae only — dependencies are pulled transitively
+    // by `malt install` during restore.
+    const formulae_sql =
+        "SELECT name, version FROM kegs " ++
+        "WHERE install_reason = 'direct' " ++
+        "ORDER BY name;";
+    {
+        var fstmt = try prepareOrFail(db, formulae_sql);
+        defer fstmt.finalize();
+        while (try stepOrFail(&fstmt)) {
+            const name_ptr = fstmt.columnText(0) orelse continue;
+            const ver_ptr = fstmt.columnText(1);
+            const name = std.mem.sliceTo(name_ptr, 0);
+            const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
+            try writeEntry(w, .formula, name, version, include_versions);
+            count += 1;
+        }
+    }
+
+    // Tap is read alongside token + version so the line written for
+    // a third-party-tap cask carries the fully-qualified slug
+    // `<user>/<repo>/<token>`. Bare tokens 404 against the core API
+    // on restore; the qualified form routes through
+    // `installTapFormula` and re-installs from the owning tap.
+    {
+        var s = try prepareOrFail(db, "SELECT token, version, tap FROM casks ORDER BY token;");
+        defer s.finalize();
+        while (try stepOrFail(&s)) {
+            const name_ptr = s.columnText(0) orelse continue;
+            const ver_ptr = s.columnText(1);
+            const tap_ptr = s.columnText(2);
+            const token = std.mem.sliceTo(name_ptr, 0);
+            const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
+            const tap = if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "";
+
+            // Qualify only for third-party taps. `homebrew/cask` is the
+            // core API path and stays bare so legacy backups parse the
+            // same way.
+            if (tap.len > 0 and !std.mem.eql(u8, tap, "homebrew/cask")) {
+                var qual_buf: [256]u8 = undefined;
+                const qualified = std.fmt.bufPrint(&qual_buf, "{s}/{s}", .{ tap, token }) catch {
+                    // No legitimate slug overflows this; a bare token here
+                    // would be a line restore cannot use.
+                    output.err("Tap label too long for cask {s} ({s})", .{ token, tap });
+                    return RowsError.DatabaseError;
+                };
+                try writeEntry(w, .cask, qualified, version, include_versions);
+            } else {
+                try writeEntry(w, .cask, token, version, include_versions);
+            }
+            count += 1;
+        }
+    }
+
+    // Mirrors the JSON path's auto_start filter so both writers carry
+    // the same re-bootstrap invariant — presence of the line implies
+    // auto_start, no extra token needed.
+    if (include_services) {
+        {
+            var st = try prepareOrFail(db, "SELECT name FROM services WHERE auto_start = 1 ORDER BY name;");
+            defer st.finalize();
+            while (try stepOrFail(&st)) {
+                const name_ptr = st.columnText(0) orelse continue;
+                const name = std.mem.sliceTo(name_ptr, 0);
+                try writeEntry(w, .service, name, "", false);
+                count += 1;
+            }
+        }
+    }
+
+    return count;
+}
+
 /// A backup that silently drops rows is worse than no backup — restore would
 /// quietly rebuild a smaller machine. Both faults abort instead.
-fn prepareOrFail(db: *sqlite.Database, sql: []const u8) Error!sqlite.Statement {
+fn prepareOrFail(db: *sqlite.Database, sql: []const u8) RowsError!sqlite.Statement {
     return db.prepare(sql) catch |e| {
         output.err("Failed to read installed packages ({s})", .{@errorName(e)});
-        return Error.DatabaseError;
+        return RowsError.DatabaseError;
     };
 }
 
-fn stepOrFail(stmt: *sqlite.Statement) Error!bool {
+fn stepOrFail(stmt: *sqlite.Statement) RowsError!bool {
     return stmt.step() catch |e| {
         output.err("Database read failed mid-scan ({s})", .{@errorName(e)});
-        return Error.DatabaseError;
+        return RowsError.DatabaseError;
     };
 }
 
@@ -631,4 +641,90 @@ test "parseBackup silently drops any future unknown kind (forward-compat)" {
     try std.testing.expectEqual(@as(usize, 2), entries.len);
     try std.testing.expectEqualStrings("git", entries[0].name);
     try std.testing.expectEqualStrings("firefox", entries[1].name);
+}
+
+fn seedRowsDb() !sqlite.Database {
+    var db = try sqlite.Database.open(":memory:");
+    errdefer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, install_reason) VALUES
+        \\  ('git', 'git', '2.0', 'a', '/c/git', 'direct'),
+        \\  ('pcre', 'pcre', '10.0', 'b', '/c/pcre', 'dependency');
+        \\INSERT INTO casks(token, name, version, url, tap) VALUES
+        \\  ('foo', 'Foo', '1.0', 'https://x/foo.dmg', 'acme/tools'),
+        \\  ('bar', 'Bar', '2.0', 'https://x/bar.dmg', 'homebrew/cask'),
+        \\  ('baz', 'Baz', '3.0', 'https://x/baz.dmg', NULL),
+        \\  ('qux', 'Qux', '4.0', 'https://x/qux.dmg', '');
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start) VALUES
+        \\  ('svc', 'svc', '/svc.plist', 1),
+        \\  ('idle', 'idle', '/idle.plist', 0);
+    );
+    return db;
+}
+
+test "writeRows qualifies third-party casks and leaves core, NULL and empty taps bare" {
+    // Row order follows the raw token, not the emitted slug: `mt restore`
+    // consumers pin these bytes, so the ordering is part of the contract.
+    var db = try seedRowsDb();
+    defer db.close();
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const count = try writeRows(&aw.writer, &db, true, false);
+
+    try std.testing.expectEqualStrings(
+        "formula git@2.0\n" ++
+            "cask bar@2.0\n" ++
+            "cask baz@3.0\n" ++
+            "cask acme/tools/foo@1.0\n" ++
+            "cask qux@4.0\n",
+        aw.written(),
+    );
+    try std.testing.expectEqual(@as(usize, 5), count);
+}
+
+test "writeRows emits auto-start services only when asked" {
+    var db = try seedRowsDb();
+    defer db.close();
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const count = try writeRows(&aw.writer, &db, false, true);
+
+    try std.testing.expectEqualStrings(
+        "formula git\n" ++
+            "cask bar\n" ++
+            "cask baz\n" ++
+            "cask acme/tools/foo\n" ++
+            "cask qux\n" ++
+            "service svc\n",
+        aw.written(),
+    );
+    try std.testing.expectEqual(@as(usize, 6), count);
+}
+
+test "writeRows aborts on an unreadable table instead of truncating" {
+    // A short manifest reads as "fewer packages"; the fault must surface.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE kegs(x);");
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    try std.testing.expectError(Error.DatabaseError, writeRows(&aw.writer, &db, true, true));
+}
+
+test "writeRows refuses a tap label the qualified slug cannot hold" {
+    // Every legitimate `<user>/<repo>/<token>` fits; an oversized label is a
+    // corrupt row, and a bare token would be a line restore cannot use.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    const long_tap = "x" ** 300;
+    try db.exec("INSERT INTO casks(token, name, version, url, tap) VALUES ('foo', 'Foo', '1.0', 'https://x/foo.dmg', '" ++ long_tap ++ "');");
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    try std.testing.expectError(error.DatabaseError, writeRows(&aw.writer, &db, true, false));
 }
