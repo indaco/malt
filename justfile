@@ -86,6 +86,7 @@ regressions-harness:
     @./scripts/regressions/ghcr-bearer-header-fixed-stack-buffer.sh
     @./scripts/regressions/post-install-run-step-gh804.sh
     @./scripts/regressions/progress-shared-counters-atomic-progressbar-update-lock-free-data-race.sh
+    @./scripts/regressions/ruby-fallback-fenced-interpreter-homebrew-ruby-is-not-usable.sh
     @./scripts/regressions/scaled-timeout-clamp-scaled-timeout-overflow-on-content-length.sh
     @./scripts/regressions/term-sanitize-anti-injection-guarantee.sh
     @./scripts/regressions/tui-startup-outdated-network-freeze.sh
