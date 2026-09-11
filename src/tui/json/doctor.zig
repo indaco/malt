@@ -2,7 +2,7 @@
 //!
 //! Leaf module: imports only `std`. The versioned `checks` array drives the
 //! findings list; `cask_history`, `tap_cache`, and `taps` are read for their
-//! disk/tap totals (flat `Stats`). `schema_version` and any future field are
+//! reclaimable/tap figures (flat `Stats`). `schema_version` and any future field are
 //! ignored, and the consumed keys are defaulted, so a schema addition or an
 //! older payload never breaks parsing. `Finding` is TUI-local — never the core
 //! `render.Finding` — so the `--json` shape is the only coupling. Unlike the
@@ -40,10 +40,12 @@ pub const Finding = struct {
     fix_class: FixClass = .none,
 };
 
-/// Flat, copy-by-value disk/tap totals lifted off the wire. Plain scalars, so
-/// they outlive the parsed document's arena without borrowing it.
+/// Flat, copy-by-value figures lifted off the wire. Plain scalars, so they
+/// outlive the parsed document's arena without borrowing it.
 pub const Stats = struct {
     cask_bytes: u64 = 0,
+    /// The share `mt purge --cache` would free, not the cache total - the
+    /// tab renders it under "Reclaimable".
     tap_cache_bytes: u64 = 0,
     retained_versions: usize = 0,
     taps: usize = 0,
@@ -69,7 +71,7 @@ const Doc = struct {
     taps: []Tap = &.{},
 
     const CaskHistory = struct { retained_versions: usize = 0, bytes: u64 = 0 };
-    const TapCache = struct { bytes: u64 = 0 };
+    const TapCache = struct { bytes: u64 = 0, reclaimable_bytes: u64 = 0 };
     const Tap = struct {}; // only its count is used
 };
 
@@ -91,7 +93,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) Error!Parsed {
         .items = doc.value.checks,
         .stats = .{
             .cask_bytes = doc.value.cask_history.bytes,
-            .tap_cache_bytes = doc.value.tap_cache.bytes,
+            .tap_cache_bytes = doc.value.tap_cache.reclaimable_bytes,
             .retained_versions = doc.value.cask_history.retained_versions,
             .taps = doc.value.taps.len,
         },
@@ -117,13 +119,15 @@ test "parse populates stats from cask_history, tap_cache, and the taps count" {
     const bytes =
         \\{"checks":[{"id":"a","severity":"ok","title":"A"}],
         \\"cask_history":{"retained_versions":3,"bytes":4096},
-        \\"tap_cache":{"bytes":512},
+        \\"tap_cache":{"bytes":512,"reclaimable_bytes":128},
         \\"taps":[{"name":"x/y"},{"name":"z/w"}]}
     ;
     var p = try parse(testing.allocator, bytes);
     defer p.deinit();
     try testing.expectEqual(@as(u64, 4096), p.stats.cask_bytes);
-    try testing.expectEqual(@as(u64, 512), p.stats.tap_cache_bytes);
+    // The tab renders this under "Reclaimable", so it must be the
+    // sweepable figure, not the cache total.
+    try testing.expectEqual(@as(u64, 128), p.stats.tap_cache_bytes);
     try testing.expectEqual(@as(usize, 3), p.stats.retained_versions);
     try testing.expectEqual(@as(usize, 2), p.stats.taps);
 }
@@ -269,11 +273,22 @@ test "parse propagates a parse-time OOM instead of relabeling it BadJson" {
     try testing.expectError(error.OutOfMemory, parse(fa.allocator(), bytes));
 }
 
+test "parse treats a tap_cache without reclaimable_bytes as nothing to reclaim" {
+    // An older `mt` reports only the total; advertising it as reclaimable
+    // is the bug this field exists to fix, so default to zero.
+    const bytes =
+        \\{"checks":[],"tap_cache":{"bytes":512}}
+    ;
+    var p = try parse(testing.allocator, bytes);
+    defer p.deinit();
+    try testing.expectEqual(@as(u64, 0), p.stats.tap_cache_bytes);
+}
+
 test "stats survive overwriting the source buffer — plain scalars, no borrow" {
     // T-004 keeps `stats` after the shell frees the captured buffer; the scalars
     // must be copied, never sliced into the input.
     const src =
-        \\{"checks":[{"id":"a","severity":"ok","title":"A"}],"cask_history":{"retained_versions":7,"bytes":2048},"tap_cache":{"bytes":64},"taps":[{"name":"x/y"}]}
+        \\{"checks":[{"id":"a","severity":"ok","title":"A"}],"cask_history":{"retained_versions":7,"bytes":2048},"tap_cache":{"bytes":96,"reclaimable_bytes":64},"taps":[{"name":"x/y"}]}
     ;
     const buf = try testing.allocator.dupe(u8, src);
     defer testing.allocator.free(buf);

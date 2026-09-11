@@ -106,6 +106,9 @@ jobs:
       - name: Regression guard - doctor survives a relative keg path
         run: ./scripts/regressions/doctor-survives-a-relative-keg-path.sh
 
+      - name: Regression guard - doctor tap-cache figure matches purge --cache
+        run: ./scripts/regressions/doctor-tap-cache-figure-matches-purge-cache-doctor-suggests-purge-cache-but-running-it-nothing-to-reclaim.sh
+
       - name: Regression guard - wipe manifest matches mt backup
         run: ./scripts/regressions/wipe-manifest-tap-qualification-wipe-manifest-drops-tap-qualification-for-casks.sh
 

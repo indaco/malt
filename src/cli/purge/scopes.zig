@@ -16,6 +16,7 @@ const cellar_mod = @import("../../core/cellar.zig");
 const formula_mod = @import("../../core/formula.zig");
 const cask_mod = @import("../../core/cask.zig");
 const relocated_store = @import("../../core/relocated_store.zig");
+const tap_cache = @import("../../core/tap_cache.zig");
 const symlink = @import("../../fs/symlink.zig");
 const store_path = @import("../../fs/store_path.zig");
 const util = @import("util.zig");
@@ -285,7 +286,6 @@ fn pruneCacheRecursive(io: std.Io, cache_dir: []const u8, max_age_days: i64, dry
     defer dir.close(io);
 
     const now = std.Io.Clock.real.now(io).toSeconds();
-    const max_age_secs = max_age_days * 86400;
 
     var iter = dir.iterate();
     while (iter.next(io) catch null) |entry| {
@@ -297,7 +297,7 @@ fn pruneCacheRecursive(io: std.Io, cache_dir: []const u8, max_age_days: i64, dry
         }
         const stat = dir.statFile(io, entry.name, .{}) catch continue;
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
-        if (now - mtime_secs > max_age_secs) {
+        if (tap_cache.olderThan(now, mtime_secs, max_age_days)) {
             if (!dry_run) dir.deleteFile(io, entry.name) catch continue;
             // Full path so users (and the smoke tests) can see WHERE the
             // file lived; the leaf alone hides path-of-cleanup hot spots.
