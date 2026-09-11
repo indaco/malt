@@ -1771,6 +1771,29 @@ test "installFlagsFromOpts matches what the --cask --isolate-deps argv path pars
     try std.testing.expectEqual(parsed.flags.system_ruby.len, direct.system_ruby.len);
 }
 
+/// Seed `Cellar/zlib/1.3_1` (with `bin` and `lib`), a dependency receipt,
+/// and a `dependency` keg row so the promote tests only differ in asserts.
+fn seedDepKeg(s: *Scratch, io: std.Io, bin_isolated: bool) !sqlite.Database {
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/zlib/1.3_1/bin"));
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/zlib/1.3_1/lib"));
+    cellar_mod.writeInstallReceiptFull(io, s.p("/Cellar/zlib/1.3_1"), "zlib", "1.3_1", "sha", null, false);
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/db"));
+
+    var db = try sqlite.Database.open(s.p("/db/malt.db"));
+    errdefer db.close();
+    try schema.initSchema(&db);
+    var ins_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
+    const insert = try std.fmt.bufPrintSentinel(
+        &ins_buf,
+        "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason,bin_isolated) " ++
+            "VALUES('zlib','zlib','1.3',1,'sha','{s}/Cellar/zlib/1.3_1','dependency',{d});",
+        .{ s.base, @intFromBool(bin_isolated) },
+        0,
+    );
+    try db.exec(insert);
+    return db;
+}
+
 test "promoteNamedDepIfAny opt-links the revisioned dir, not the raw version" {
     // Isolated dep at version 1.3 revision 1 lives on disk as
     // Cellar/zlib/1.3_1. Promotion must point opt/zlib at that dir; a
@@ -1785,25 +1808,8 @@ test "promoteNamedDepIfAny opt-links the revisioned dir, not the raw version" {
     var s = try Scratch.init("promote_rev");
     defer s.deinit();
     const prefix = s.base;
-
-    const keg_lib = s.p("/Cellar/zlib/1.3_1/lib");
-    try std.Io.Dir.cwd().createDirPath(io, keg_lib);
-    const db_dir = s.p("/db");
-    try std.Io.Dir.cwd().createDirPath(io, db_dir);
-
-    const db_path = s.p("/db/malt.db");
-    var db = try sqlite.Database.open(db_path);
+    var db = try seedDepKeg(&s, io, true);
     defer db.close();
-    try schema.initSchema(&db);
-    var ins_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
-    const insert = try std.fmt.bufPrintSentinel(
-        &ins_buf,
-        "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason,bin_isolated) " ++
-            "VALUES('zlib','zlib','1.3',1,'sha','{s}/Cellar/zlib/1.3_1','dependency',1);",
-        .{prefix},
-        0,
-    );
-    try db.exec(insert);
 
     var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
     try testing.expectEqual(PromoteOutcome.relinked, promoteNamedDepIfAny(&db, &linker, "zlib"));
@@ -1834,24 +1840,8 @@ test "promoteNamedDepIfAny rewrites the receipt as installed on request" {
     var s = try Scratch.init("promote_receipt");
     defer s.deinit();
     const prefix = s.base;
-
-    const keg_dir = s.p("/Cellar/zlib/1.3_1");
-    try std.Io.Dir.cwd().createDirPath(io, keg_dir);
-    cellar_mod.writeInstallReceiptFull(io, keg_dir, "zlib", "1.3_1", "sha", null, false);
-    try std.Io.Dir.cwd().createDirPath(io, s.p("/db"));
-
-    var db = try sqlite.Database.open(s.p("/db/malt.db"));
+    var db = try seedDepKeg(&s, io, true);
     defer db.close();
-    try schema.initSchema(&db);
-    var ins_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
-    const insert = try std.fmt.bufPrintSentinel(
-        &ins_buf,
-        "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason,bin_isolated) " ++
-            "VALUES('zlib','zlib','1.3',1,'sha','{s}/Cellar/zlib/1.3_1','dependency',1);",
-        .{prefix},
-        0,
-    );
-    try db.exec(insert);
 
     var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
     try testing.expectEqual(PromoteOutcome.relinked, promoteNamedDepIfAny(&db, &linker, "zlib"));
@@ -1877,24 +1867,8 @@ test "a non-isolated dependency named directly is marked on request" {
     var s = try Scratch.init("promote_plain_dep");
     defer s.deinit();
     const prefix = s.base;
-
-    const keg_dir = s.p("/Cellar/zlib/1.3_1");
-    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/zlib/1.3_1/bin"));
-    cellar_mod.writeInstallReceiptFull(io, keg_dir, "zlib", "1.3_1", "sha", null, false);
-    try std.Io.Dir.cwd().createDirPath(io, s.p("/db"));
-
-    var db = try sqlite.Database.open(s.p("/db/malt.db"));
+    var db = try seedDepKeg(&s, io, false);
     defer db.close();
-    try schema.initSchema(&db);
-    var ins_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
-    const insert = try std.fmt.bufPrintSentinel(
-        &ins_buf,
-        "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason,bin_isolated) " ++
-            "VALUES('zlib','zlib','1.3',1,'sha','{s}/Cellar/zlib/1.3_1','dependency',0);",
-        .{prefix},
-        0,
-    );
-    try db.exec(insert);
 
     var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
     try testing.expectEqual(PromoteOutcome.marked, promoteNamedDepIfAny(&db, &linker, "zlib"));
