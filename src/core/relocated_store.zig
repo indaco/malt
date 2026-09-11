@@ -58,7 +58,11 @@ pub const RelocatedStoreError = store_path.Error || error{ SaveFailed, Materiali
 ///
 /// v9: a snapshot records the name/version it was taken under; a v8 entry
 /// carries no label and is restored under any label that presents its sha.
-pub const RELOC_LOGIC_VERSION: u32 = 9;
+///
+/// v10: verification hashes each binary against its code signature. A v9
+/// entry's verified mark was earned without that check, so a binary the
+/// kernel refuses could sit behind it indefinitely.
+pub const RELOC_LOGIC_VERSION: u32 = 10;
 
 /// Borrow the store constructor's key rule rather than keep a second copy.
 /// Its path is shorter than ours for the same prefix, so any `buf` that fits
