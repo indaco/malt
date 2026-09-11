@@ -25,6 +25,7 @@ const mirror_mod = @import("../net/mirror.zig");
 const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
 const bytes = @import("../ui/bytes.zig");
+const purge_args = @import("purge/args.zig");
 pub const cask_history = @import("doctor/cask_history.zig");
 const fix_mod = @import("doctor/fix.zig");
 pub const FixKind = fix_mod.FixKind;
@@ -267,20 +268,38 @@ pub fn emitCaskHistoryReport(allocator: std.mem.Allocator, io: std.Io, prefix: [
     output.writeStderrAll(aw.written());
 }
 
-/// Walk `<prefix>/cache/Tap` and emit the warmed tap-archive size as a
-/// human line, silent when the cache is empty so the clean case adds no
-/// noise. The `--json` view is a member of the merged document built in
+/// One human line for the tap-archive cache, silent when empty so the
+/// clean case adds no noise. The reclaim hint appears only when the
+/// sweep it names would actually free something. Pure for byte-pinning.
+pub fn writeTapCacheHuman(w: *std.Io.Writer, usage: tap_cache_mod.Usage, max_age_days: i64) !void {
+    if (usage.total == 0) return;
+    var total_buf: [32]u8 = undefined;
+    const total = bytes.humanize(usage.total, &total_buf);
+    if (usage.reclaimable == 0) {
+        try w.print("  > Tap archive cache: {s} (nothing older than {d} days to reclaim)\n", .{ total, max_age_days });
+        return;
+    }
+    var reclaim_buf: [32]u8 = undefined;
+    const reclaim = bytes.humanize(usage.reclaimable, &reclaim_buf);
+    try w.print("  > Tap archive cache: {s} ({s} older than {d} days). Run: mt purge --cache\n", .{ total, reclaim, max_age_days });
+}
+
+/// Walk `<prefix>/cache/Tap` and emit its usage as a human line. The
+/// `--json` view is a member of the merged document built in
 /// `emitDoctorJson`. Pure read; safe to invoke from `execute` post-checks.
 pub fn emitTapCacheReport(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) void {
-    const byte_count = tap_cache_mod.bytesUnder(io, allocator, prefix);
-
-    if (byte_count == 0) return;
+    const usage = collectTapCacheUsage(allocator, io, prefix);
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    var size_buf: [32]u8 = undefined;
-    const size = bytes.humanize(byte_count, &size_buf);
-    aw.writer.print("  > Tap archive cache: {s}. Run: mt purge --cache\n", .{size}) catch return;
+    writeTapCacheHuman(&aw.writer, usage, purge_args.default_cache_days) catch return;
     output.writeStderrAll(aw.written());
+}
+
+/// Measure the tap cache against the same retention window
+/// `mt purge --cache` applies by default.
+fn collectTapCacheUsage(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) tap_cache_mod.Usage {
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    return tap_cache_mod.usageUnder(io, allocator, prefix, now, purge_args.default_cache_days);
 }
 
 /// Emit the registered-tap forge/host block doctor shows after the
@@ -366,14 +385,14 @@ pub fn writeDoctorJson(
     w: *std.Io.Writer,
     findings: []const render.Finding,
     census: cask_history.Census,
-    tap_cache_bytes: u64,
+    tap_cache: tap_cache_mod.Usage,
     taps: []const tap_mod.TapInfo,
 ) !void {
     try output.writeSchemaVersionPrefix(w);
     try render.writeChecksField(w, findings);
     try w.writeAll(",");
     try cask_history.writeField(w, census);
-    try w.print(",\"tap_cache\":{{\"bytes\":{d}}}", .{tap_cache_bytes});
+    try w.print(",\"tap_cache\":{{\"bytes\":{d},\"reclaimable_bytes\":{d}}}", .{ tap_cache.total, tap_cache.reclaimable });
     try w.writeAll(",");
     try writeTapForgeField(w, taps);
     try w.writeAll("}\n");
@@ -386,7 +405,7 @@ pub fn writeDoctorJson(
 pub fn emitDoctorJson(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8, findings: []const render.Finding) void {
     var census = cask_history.collectCensus(allocator, io, prefix);
     defer census.deinit(allocator);
-    const tap_cache_bytes = tap_cache_mod.bytesUnder(io, allocator, prefix);
+    const tap_cache = collectTapCacheUsage(allocator, io, prefix);
     // Free the collected slice even when empty-but-allocated; only the
     // collection-failed (`null`) case substitutes a static empty slice.
     const taps_opt = collectTaps(allocator, prefix);
@@ -395,7 +414,7 @@ pub fn emitDoctorJson(allocator: std.mem.Allocator, io: std.Io, prefix: []const 
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    writeDoctorJson(&aw.writer, findings, census, tap_cache_bytes, taps) catch return;
+    writeDoctorJson(&aw.writer, findings, census, tap_cache, taps) catch return;
     output.writeStdoutAll(aw.written());
 }
 
@@ -1877,9 +1896,50 @@ test "emitTapCacheReport: human one-liner when cache holds bytes" {
     defer output.endStderrCapture();
     emitTapCacheReport(allocator, std.Options.debug_io, prefix);
 
+    // The entry was just written, so the sweep would free nothing: the
+    // line must say so instead of naming a command that reclaims 0 B.
     try testing.expectEqualStrings(
-        "  > Tap archive cache: 256.0 B. Run: mt purge --cache\n",
+        "  > Tap archive cache: 256.0 B (nothing older than 30 days to reclaim)\n",
         buf.items,
+    );
+}
+
+test "writeTapCacheHuman: silent when the cache is empty" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeTapCacheHuman(&aw.writer, .{}, 30);
+    try testing.expectEqualStrings("", aw.written());
+}
+
+test "writeTapCacheHuman: no reclaim hint when nothing is older than the window" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeTapCacheHuman(&aw.writer, .{ .total = 129 * 1024 * 1024 + 100 * 1024, .reclaimable = 0 }, 30);
+    try testing.expectEqualStrings(
+        "  > Tap archive cache: 129.1 MB (nothing older than 30 days to reclaim)\n",
+        aw.written(),
+    );
+}
+
+test "writeTapCacheHuman: names the sweep with only the bytes it will free" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeTapCacheHuman(&aw.writer, .{ .total = 129 * 1024 * 1024 + 100 * 1024, .reclaimable = 45 * 1024 * 1024 + 200 * 1024 }, 30);
+    try testing.expectEqualStrings(
+        "  > Tap archive cache: 129.1 MB (45.2 MB older than 30 days). Run: mt purge --cache\n",
+        aw.written(),
+    );
+}
+
+test "writeTapCacheHuman: the window in the line follows the parameter" {
+    // The hint must quote the same retention the sweep uses, not a
+    // literal that drifts when the default changes.
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeTapCacheHuman(&aw.writer, .{ .total = 2048, .reclaimable = 1024 }, 7);
+    try testing.expectEqualStrings(
+        "  > Tap archive cache: 2.0 KB (1.0 KB older than 7 days). Run: mt purge --cache\n",
+        aw.written(),
     );
 }
 
@@ -2221,13 +2281,13 @@ test "writeDoctorJson merges all four members under one versioned root" {
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try writeDoctorJson(&aw.writer, &findings, census, 7, &taps);
+    try writeDoctorJson(&aw.writer, &findings, census, .{ .total = 7, .reclaimable = 3 }, &taps);
 
     try testing.expectEqualStrings(
         "{\"schema_version\":1," ++
             "\"checks\":[{\"id\":\"stale_lock\",\"severity\":\"warn\",\"title\":\"Stale lock\",\"detail\":\"d\",\"fixable\":true,\"fix_class\":\"stale_lock\"}]," ++
             "\"cask_history\":{\"retained_versions\":0,\"bytes\":42}," ++
-            "\"tap_cache\":{\"bytes\":7}," ++
+            "\"tap_cache\":{\"bytes\":7,\"reclaimable_bytes\":3}," ++
             "\"taps\":[{\"name\":\"u/r\",\"host\":\"gitlab.com\"}]}\n",
         aw.written(),
     );
@@ -2240,7 +2300,7 @@ test "writeDoctorJson stays one valid JSON object with schema_version on the emp
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try writeDoctorJson(&aw.writer, &.{}, census, 0, &.{});
+    try writeDoctorJson(&aw.writer, &.{}, census, .{}, &.{});
 
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
     defer parsed.deinit();
@@ -2248,6 +2308,7 @@ test "writeDoctorJson stays one valid JSON object with schema_version on the emp
     try testing.expectEqual(@as(usize, 0), parsed.value.object.get("checks").?.array.items.len);
     try testing.expectEqual(@as(usize, 0), parsed.value.object.get("taps").?.array.items.len);
     try testing.expectEqual(@as(i64, 0), parsed.value.object.get("tap_cache").?.object.get("bytes").?.integer);
+    try testing.expectEqual(@as(i64, 0), parsed.value.object.get("tap_cache").?.object.get("reclaimable_bytes").?.integer);
 }
 
 fn infoCheckForTest(ctx: CheckCtx, name: []const u8) CheckResult {
