@@ -47,6 +47,11 @@ pub const CellarError = error{
     /// with. It arrives from tap JSON, so an empty or malformed one would
     /// otherwise format into a path that names the store root itself.
     InvalidSha256,
+    /// The store entry holds no `<name>/<version>` (or `<name>/<version>_<rev>`)
+    /// keg. The extractor keeps a well-formed bottle's top-level layout, so
+    /// this is a malformed or mislabelled bottle; cloning the entry root
+    /// instead would install a nested keg with nothing linkable at its root.
+    KegSourceMissing,
     OutOfMemory,
 };
 
@@ -62,6 +67,7 @@ pub fn describeError(err: CellarError) []const u8 {
         CellarError.UnsafePathComponent => "formula name or version would place the keg outside the Cellar",
         CellarError.UnsafeCellarLink => "<prefix>/Cellar/<name> is a symlink; remove or replace it with a real directory",
         CellarError.InvalidSha256 => "bottle sha256 is not 64 lowercase hex; refusing to build a store path from it",
+        CellarError.KegSourceMissing => "store entry has no <name>/<version> keg; the bottle is malformed or mislabelled",
         else => @errorName(err),
     };
 }
@@ -182,6 +188,38 @@ pub fn materializeWithCellar(
     const keg_src = std.fmt.bufPrint(&keg_src_buf, "{s}/{s}/{s}", .{ store_entry, name, version }) catch
         return CellarError.PathTooLong;
 
+    // Try keg_src first (exact version match), then scan for a revision
+    // suffix variant (e.g. "10.47_1"). Anything else is a malformed or
+    // mislabelled bottle: the entry root is never a valid keg source.
+    var keg_rev_buf: [512]u8 = undefined;
+    const src = blk: {
+        // 1. Exact match: {store}/{name}/{version}
+        std.Io.Dir.accessAbsolute(io, keg_src, .{}) catch {
+            // 2. Scan {store}/{name}/ for a dir starting with "{version}_"
+            var name_dir_buf: [512]u8 = undefined;
+            const name_dir_path = std.fmt.bufPrint(&name_dir_buf, "{s}/{s}", .{ store_entry, name }) catch return CellarError.PathTooLong;
+            var name_dir = std.Io.Dir.openDirAbsolute(io, name_dir_path, .{ .iterate = true }) catch break :blk null;
+            defer name_dir.close(io);
+            var it = name_dir.iterate();
+            while (it.next(io) catch null) |entry| {
+                if (entry.kind != .directory) continue;
+                // Match "{version}_..." (revision suffix)
+                if (entry.name.len > version.len and
+                    std.mem.eql(u8, entry.name[0..version.len], version) and
+                    entry.name[version.len] == '_')
+                {
+                    const rev_path = std.fmt.bufPrint(&keg_rev_buf, "{s}/{s}", .{ name_dir_path, entry.name }) catch return CellarError.PathTooLong;
+                    break :blk rev_path;
+                }
+            }
+            break :blk null;
+        };
+        break :blk keg_src;
+    } orelse {
+        std.log.debug("cellar keg source {s}: no such dir or {s}_<rev> sibling in store entry", .{ keg_src, version });
+        return CellarError.KegSourceMissing;
+    };
+
     // Ensure parent dir exists
     var parent_buf: [512]u8 = undefined;
     const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch
@@ -192,34 +230,6 @@ pub fn materializeWithCellar(
             std.log.debug("cellar parent mkdir {s}: {s}", .{ parent, @errorName(e) });
             return CellarError.CloneFailed;
         },
-    };
-
-    // Try keg_src first (exact version match), then scan for a revision
-    // suffix variant (e.g. "10.47_1"), fall back to store_entry.
-    var keg_rev_buf: [512]u8 = undefined;
-    const src = blk: {
-        // 1. Exact match: {store}/{name}/{version}
-        std.Io.Dir.accessAbsolute(io, keg_src, .{}) catch {
-            // 2. Scan {store}/{name}/ for a dir starting with "{version}_"
-            var name_dir_buf: [512]u8 = undefined;
-            const name_dir_path = std.fmt.bufPrint(&name_dir_buf, "{s}/{s}", .{ store_entry, name }) catch break :blk store_entry;
-            var name_dir = std.Io.Dir.openDirAbsolute(io, name_dir_path, .{ .iterate = true }) catch break :blk store_entry;
-            defer name_dir.close(io);
-            var it = name_dir.iterate();
-            while (it.next(io) catch null) |entry| {
-                if (entry.kind != .directory) continue;
-                // Match "{version}_..." (revision suffix)
-                if (entry.name.len > version.len and
-                    std.mem.eql(u8, entry.name[0..version.len], version) and
-                    entry.name[version.len] == '_')
-                {
-                    const rev_path = std.fmt.bufPrint(&keg_rev_buf, "{s}/{s}", .{ name_dir_path, entry.name }) catch break :blk store_entry;
-                    break :blk rev_path;
-                }
-            }
-            break :blk store_entry;
-        };
-        break :blk keg_src;
     };
 
     // errdefer: remove cellar entry on any failure from this point — including
