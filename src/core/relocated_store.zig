@@ -51,7 +51,11 @@ pub const RelocatedStoreError = store_path.Error || error{ SaveFailed, Materiali
 /// interpreter path, so every perl script restored from one stays unrunnable.
 /// v7: 64-bit fat containers are parsed instead of rejected. A v6 keg holding
 /// such a binary was cached with its install-prefix paths left unpatched.
-pub const RELOC_LOGIC_VERSION: u32 = 7;
+///
+/// v8: a store entry without the requested keg is refused instead of cloned
+/// whole. A v7 entry snapshotted from one is the entry root itself, with the
+/// real keg nested below and nothing linkable at the top.
+pub const RELOC_LOGIC_VERSION: u32 = 8;
 
 /// Borrow the store constructor's key rule rather than keep a second copy.
 /// Its path is shorter than ours for the same prefix, so any `buf` that fits
