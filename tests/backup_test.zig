@@ -220,6 +220,40 @@ test "writeEntry + parseBackup round-trip preserves every entry" {
     }
 }
 
+test "writeRows output parses back into restore entries with the tap kept on the cask" {
+    // The row writer and `parseBackup` are the two ends of the restore
+    // contract: a tap-qualified cask must come back as one name that
+    // `install --cask` can route to the owning tap.
+    var db = try malt.sqlite.Database.open(":memory:");
+    defer db.close();
+    try malt.schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path)
+        \\  VALUES ('git', 'git', '2.0', 'a', '/c/git');
+        \\INSERT INTO casks(token, name, version, url, tap)
+        \\  VALUES ('foo', 'Foo', '1.0', 'https://x/foo.dmg', 'acme/tools');
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start)
+        \\  VALUES ('svc', 'svc', '/svc.plist', 1);
+    );
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try backup.writeHeader(&aw.writer);
+    _ = try backup.writeRows(&aw.writer, &db, true, true);
+
+    const entries = try backup.parseBackup(testing.allocator, aw.written());
+    defer testing.allocator.free(entries);
+
+    try testing.expectEqual(@as(usize, 3), entries.len);
+    try testing.expectEqual(backup.Kind.formula, entries[0].kind);
+    try testing.expectEqualStrings("git", entries[0].name);
+    try testing.expectEqual(backup.Kind.cask, entries[1].kind);
+    try testing.expectEqualStrings("acme/tools/foo", entries[1].name);
+    try testing.expectEqualStrings("1.0", entries[1].version);
+    try testing.expectEqual(backup.Kind.service, entries[2].kind);
+    try testing.expectEqualStrings("svc", entries[2].name);
+}
+
 // ── defaultBackupPath ────────────────────────────────────────────────────
 
 test "writeBackupJson: empty inputs emit `{formulas:[],casks:[]}\\n`" {
