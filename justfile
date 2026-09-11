@@ -43,6 +43,7 @@ regressions-static:
     @./scripts/regressions/tap-cask-upgrade-deletes-app-before-pkg-sudo-confirm.sh
     @./scripts/regressions/cask-uninstall-deletes-the-artifact-its-prefetch-fetched.sh
     @./scripts/regressions/post-install-native-spawns-inherit-full-environment.sh
+    @./scripts/regressions/post-install-copy-deletes-destination-before-clone.sh
     @./scripts/regressions/tar-prescan-followups-925-926-follow-up.sh
     @./scripts/regressions/tui-background-fetch-no-double-reap-start-background-waits-after-kill.sh
     @MALT_STATIC_ONLY=1 ./scripts/regressions/post-install-steps-live-artefacts.sh
