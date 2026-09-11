@@ -129,6 +129,10 @@ pub const ProfileOpts = struct {
     /// Individual files needed by this spawn, such as the generated Ruby
     /// wrapper. These are literal rules, not directory grants.
     read_files: []const []const u8 = &.{},
+    /// Read-only trees the interpreter itself lives in; the deny list above
+    /// covers every package-manager prefix, so a fenced Ruby installed by
+    /// one cannot load its own dylibs without this.
+    read_dirs: []const []const u8 = &.{},
 };
 
 /// Render the deny-by-default SCL profile; writes limited to `cellar_path`
@@ -166,6 +170,7 @@ pub fn renderRubyProfile(
     buf.appendSlice(allocator, header) catch return SandboxError.ProfileBuildFailed;
 
     for (opts.read_files) |path| try validatePathForProfile(path);
+    for (opts.read_dirs) |path| try validatePathForProfile(path);
 
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     const w = &aw.writer;
@@ -229,6 +234,12 @@ pub fn renderRubyProfile(
         var real_buf: [std.fs.max_path_bytes]u8 = undefined;
         if (resolvedForProfile(path, &real_buf)) |real|
             w.print("\n  (literal \"{s}\")", .{real}) catch return SandboxError.ProfileBuildFailed;
+    }
+    for (opts.read_dirs) |path| {
+        writeCellarRule(w, path) catch return SandboxError.ProfileBuildFailed;
+        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (resolvedForProfile(path, &real_buf)) |real|
+            writeCellarRule(w, real) catch return SandboxError.ProfileBuildFailed;
     }
     w.writeAll(")\n") catch return SandboxError.ProfileBuildFailed;
 
@@ -400,9 +411,23 @@ pub fn runRubySandboxed(
 ) SandboxError!u8 {
     if (builtin.os.tag != .macos) return SandboxError.SandboxUnsupported;
 
+    // A package-manager Ruby links its dylibs through `<prefix>/opt/*`
+    // into `<prefix>/Cellar/*`; grant those two trees and nothing else
+    // there (no `etc`/`var`).
+    var cellar_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var opt_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var dirs: [2][]const u8 = undefined;
+    const read_dirs: []const []const u8 = if (interpreterPrefix(ruby_path)) |prefix| blk: {
+        dirs = .{
+            std.fmt.bufPrint(&cellar_dir_buf, "{s}/Cellar", .{prefix}) catch return SandboxError.ProfileBuildFailed,
+            std.fmt.bufPrint(&opt_dir_buf, "{s}/opt", .{prefix}) catch return SandboxError.ProfileBuildFailed,
+        };
+        break :blk &dirs;
+    } else &.{};
     const profile = try renderRubyProfile(allocator, cellar_path, malt_prefix, .{
         .home = env.home,
         .read_files = &.{script_path},
+        .read_dirs = read_dirs,
     });
     defer allocator.free(profile);
 
@@ -419,6 +444,15 @@ pub fn runRubySandboxed(
         return spawnInherit(argv_z, envp, limits, stdio);
     }
     return spawnFiltered(argv_z, envp, limits, stdio);
+}
+
+/// The package-manager prefix a Ruby was installed under, or null for a
+/// Ruby that already lives in an always-readable system tree.
+fn interpreterPrefix(ruby_path: []const u8) ?[]const u8 {
+    const suffix = "/opt/ruby/bin/ruby";
+    if (!std.mem.endsWith(u8, ruby_path, suffix)) return null;
+    const prefix = ruby_path[0 .. ruby_path.len - suffix.len];
+    return if (prefix.len == 0) null else prefix;
 }
 
 pub fn rawPassthroughEnabled(environ: std.process.Environ) bool {
@@ -802,6 +836,60 @@ test "renderRubyProfile emits deny-default + cellar + prefix subpaths" {
     try std.testing.expect(std.mem.indexOf(u8, profile, "(subpath \"/opt/malt/lib\")\n") == null);
     // IPC is opt-in: the default profile must NOT grant it.
     try std.testing.expect(std.mem.indexOf(u8, profile, "ipc-sysv-shm") == null);
+}
+
+test "renderRubyProfile grants read-only access to read_dirs, never writes" {
+    const profile = try renderRubyProfile(
+        std.testing.allocator,
+        "/opt/malt/Cellar/foo/1.0",
+        "/opt/malt",
+        .{ .read_dirs = &.{"/opt/homebrew/Cellar"} },
+    );
+    defer std.testing.allocator.free(profile);
+    const read_start = std.mem.indexOf(u8, profile, "(allow file-read-data").?;
+    const write_start = std.mem.indexOf(u8, profile, "(allow file-write*").?;
+    const grant = std.mem.indexOf(u8, profile, "(subpath \"/opt/homebrew/Cellar\")").?;
+    try std.testing.expect(grant > read_start and grant < write_start);
+    try std.testing.expect(std.mem.indexOf(u8, profile[write_start..], "/opt/homebrew/Cellar") == null);
+}
+
+test "renderRubyProfile also grants read_dirs under their resolved form" {
+    var s = try Scratch.init("sbx_read_dirs_test");
+    defer s.deinit();
+    _ = std.c.mkdir(s.base.ptr, 0o755); // EEXIST is fine
+
+    const a = s.arena.allocator();
+    const profile = try renderRubyProfile(
+        std.testing.allocator,
+        "/opt/malt/Cellar/foo/1.0",
+        "/opt/malt",
+        .{ .read_dirs = &.{s.base} },
+    );
+    defer std.testing.allocator.free(profile);
+
+    // /tmp resolves to /private/tmp; without the resolved grant a Ruby
+    // living under a symlinked prefix is denied its own files.
+    const lit = try std.fmt.allocPrint(a, "(subpath \"{s}\")", .{s.base});
+    const res = try std.fmt.allocPrint(a, "(subpath \"/private{s}\")", .{s.base});
+    try std.testing.expect(std.mem.indexOf(u8, profile, lit) != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, res) != null);
+}
+
+test "renderRubyProfile rejects an unsafe read_dirs entry" {
+    try std.testing.expectError(SandboxError.UnsafePath, renderRubyProfile(
+        std.testing.allocator,
+        "/opt/malt/Cellar/foo/1.0",
+        "/opt/malt",
+        .{ .read_dirs = &.{"/opt/homebrew/Cellar\"; (allow default)"} },
+    ));
+}
+
+test "interpreterPrefix names the package manager prefix that owns a Ruby" {
+    try std.testing.expectEqualStrings("/opt/homebrew", interpreterPrefix("/opt/homebrew/opt/ruby/bin/ruby").?);
+    try std.testing.expectEqualStrings("/usr/local", interpreterPrefix("/usr/local/opt/ruby/bin/ruby").?);
+    // The system Ruby lives in the always-readable /usr tree.
+    try std.testing.expect(interpreterPrefix("/usr/bin/ruby") == null);
+    try std.testing.expect(interpreterPrefix("/opt/ruby/bin/ruby") == null);
 }
 
 test "renderRubyProfile grants IPC only when allow_ipc is set" {
