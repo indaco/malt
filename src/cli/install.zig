@@ -360,71 +360,84 @@ fn alreadyInstalled(ctx: *const AppCtx, prefix: []const u8, pkg: []const u8, fla
 }
 
 /// Read-only DB probe used by the fast-path gate. Returns true iff any
-/// named pkg currently has `install_reason='dependency'` AND
-/// `bin_isolated=1` — i.e. the user is asking us to promote a dep keg
-/// the install pipeline must then re-link bin/sbin for. Quiet on
-/// errors: a missing DB is the empty case, not a failure to surface.
+/// named pkg currently has `install_reason='dependency'` — i.e. the user
+/// is asking for a keg that was only ever pulled in as a dependency, so
+/// the install pipeline must promote it. Quiet on errors: a missing DB
+/// is the empty case, not a failure to surface.
 fn anyNamedNeedsPromotion(ctx: *const AppCtx, prefix: []const u8, packages: []const []const u8) bool {
     var db = openExistingDb(ctx, prefix) orelse return false;
     defer db.close();
 
     var stmt = db.prepare(
-        "SELECT 1 FROM kegs WHERE name=?1 AND install_reason='dependency' AND bin_isolated=1 LIMIT 1;",
+        "SELECT 1 FROM kegs WHERE name=?1 AND install_reason='dependency' LIMIT 1;",
     ) catch return false;
     defer stmt.finalize();
 
     for (packages) |pkg| {
-        // Tap kegs are recorded under their leaf name, so the tap form has
-        // to be reduced before it can match a row.
-        const keg_name = if (args_mod.parseTapName(pkg)) |p| p.formula else pkg;
+        // Tap kegs are only ever recorded as direct, so a tap-form arg has
+        // nothing to promote; reducing it to the leaf would match a core
+        // keg of the same name instead.
+        if (isTapFormula(pkg)) continue;
         stmt.reset() catch return false;
-        stmt.bindText(1, keg_name) catch return false;
+        stmt.bindText(1, pkg) catch return false;
         if (stmt.step() catch false) return true;
     }
     return false;
 }
 
-/// Promote one named keg if it is currently an isolated dep: re-link
-/// bin/sbin, then clear `bin_isolated` and set `install_reason='direct'`.
-/// FS work happens before the DB update so a link failure leaves the
-/// row's prior `bin_isolated=1` intact — coherent with the (still
-/// absent) bin/sbin links and recoverable on retry.
-fn promoteIsolatedDepIfAny(
+const PromoteOutcome = enum {
+    /// Nothing to promote, or the promotion failed before the row changed.
+    none,
+    /// Was a bin-isolated dependency: bin/sbin links restored.
+    relinked,
+    /// Was a plain dependency: only the reason changed.
+    marked,
+};
+
+/// Promote one named keg if it is currently recorded as a dependency: set
+/// `install_reason='direct'`, and for an isolated dep also re-link bin/sbin
+/// and clear `bin_isolated`. FS work happens before the DB update so a
+/// link failure leaves the row's prior `bin_isolated=1` intact — coherent
+/// with the (still absent) bin/sbin links and recoverable on retry.
+fn promoteNamedDepIfAny(
     db: *sqlite.Database,
     linker: *linker_mod.Linker,
     name: []const u8,
-) bool {
+) PromoteOutcome {
     var sel = db.prepare(
-        "SELECT id, cellar_path, store_sha256, tap FROM kegs WHERE name=?1 AND install_reason='dependency' AND bin_isolated=1 LIMIT 1;",
-    ) catch return false;
+        "SELECT id, cellar_path, store_sha256, tap, bin_isolated FROM kegs WHERE name=?1 AND install_reason='dependency' LIMIT 1;",
+    ) catch return .none;
     defer sel.finalize();
-    sel.bindText(1, name) catch return false;
+    sel.bindText(1, name) catch return .none;
     const ok = sel.step() catch false;
-    if (!ok) return false;
+    if (!ok) return .none;
     const keg_id = sel.columnInt(0);
-    const cellar_ptr = sel.columnText(1) orelse return false;
+    const cellar_ptr = sel.columnText(1) orelse return .none;
     const cellar = std.mem.sliceTo(cellar_ptr, 0);
     const store_sha256 = if (sel.columnText(2)) |s| std.mem.sliceTo(s, 0) else "";
     const tap: ?[]const u8 = if (sel.columnText(3)) |t| std.mem.sliceTo(t, 0) else null;
+    const isolated = sel.columnInt(4) != 0;
 
-    linker.link(cellar, name, keg_id, false) catch return false;
-    // opt link already present on a promoted dep; best-effort refresh. The
-    // dir is named by pkg_version (`<version>_<revision>`), so derive the
-    // leaf from cellar_path — raw `version` would dangle for a revisioned dep.
-    linker.linkOpt(name, std.fs.path.basename(cellar)) catch {};
+    if (isolated) {
+        linker.link(cellar, name, keg_id, false) catch return .none;
+        // opt link already present on a promoted dep; best-effort refresh. The
+        // dir is named by pkg_version (`<version>_<revision>`), so derive the
+        // leaf from cellar_path — raw `version` would dangle for a revisioned dep.
+        linker.linkOpt(name, std.fs.path.basename(cellar)) catch {};
+    }
 
     var upd = db.prepare(
         "UPDATE kegs SET install_reason='direct', bin_isolated=0 WHERE id=?1;",
-    ) catch return false;
+    ) catch return .none;
     defer upd.finalize();
-    upd.bindInt(1, keg_id) catch return false;
-    _ = upd.step() catch return false;
+    upd.bindInt(1, keg_id) catch return .none;
+    _ = upd.step() catch return .none;
 
     // Keep the receipt in step with the row; best-effort like every other
     // receipt write. The version slot is the cellar dir leaf (pkg_version).
     cellar_mod.writeInstallReceiptFull(linker.io, cellar, name, std.fs.path.basename(cellar), store_sha256, tap, true);
 
-    return true;
+    return if (isolated) .relinked else .marked;
 }
 
 pub const InstallAllOpts = struct {
@@ -625,11 +638,11 @@ fn runInstall(
             if (isLocalFormulaPath(pkg)) break :fast;
             if (!alreadyInstalled(ctx, prefix, pkg, flags)) break :fast;
         }
-        // Promotion target — a named pkg currently recorded as an
-        // isolated dependency — needs `install_reason` cleared and
-        // bin/sbin symlinks materialised. That work fails open the DB
-        // and the lock, so it lives in the slow path; here we just
-        // gate the early return.
+        // Promotion target — a named pkg currently recorded as a
+        // dependency — needs `install_reason` cleared and, if isolated,
+        // bin/sbin symlinks materialised. That work opens the DB and the
+        // lock, so it lives in the slow path; here we just gate the
+        // early return.
         if (anyNamedNeedsPromotion(ctx, prefix, packages)) break :fast;
         for (packages) |pkg| {
             sink.info("{s} is already installed", .{pkg});
@@ -719,15 +732,17 @@ fn runInstall(
     var store = store_mod.Store.init(ctx.io, allocator, &db, prefix);
     var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
 
-    // Promote any named pkg currently recorded as an isolated dep.
+    // Promote any named pkg currently recorded as a dependency.
     // Done before resolution so the subsequent flow sees the post-
     // promotion state ("direct + present") and `collectFormulaJobs`
     // correctly short-circuits without re-downloading the keg.
-    for (packages) |pkg_name| {
-        if (promoteIsolatedDepIfAny(&db, &linker, pkg_name)) {
-            sink.success("{s} promoted to direct: bin/sbin links restored", .{pkg_name});
+    if (flags.promotesNamed()) for (packages) |pkg_name| {
+        switch (promoteNamedDepIfAny(&db, &linker, pkg_name)) {
+            .none => {},
+            .relinked => sink.success("{s} promoted to direct: bin/sbin links restored", .{pkg_name}),
+            .marked => sink.success("{s} promoted to direct", .{pkg_name}),
         }
-    }
+    };
 
     // One parsed-formula cache for the whole run; single free site.
     var formula_cache = deps_mod.FormulaCache.init(allocator);
@@ -1756,7 +1771,30 @@ test "installFlagsFromOpts matches what the --cask --isolate-deps argv path pars
     try std.testing.expectEqual(parsed.flags.system_ruby.len, direct.system_ruby.len);
 }
 
-test "promoteIsolatedDepIfAny opt-links the revisioned dir, not the raw version" {
+/// Seed `Cellar/zlib/1.3_1` (with `bin` and `lib`), a dependency receipt,
+/// and a `dependency` keg row so the promote tests only differ in asserts.
+fn seedDepKeg(s: *Scratch, io: std.Io, bin_isolated: bool) !sqlite.Database {
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/zlib/1.3_1/bin"));
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/zlib/1.3_1/lib"));
+    cellar_mod.writeInstallReceiptFull(io, s.p("/Cellar/zlib/1.3_1"), "zlib", "1.3_1", "sha", null, false);
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/db"));
+
+    var db = try sqlite.Database.open(s.p("/db/malt.db"));
+    errdefer db.close();
+    try schema.initSchema(&db);
+    var ins_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
+    const insert = try std.fmt.bufPrintSentinel(
+        &ins_buf,
+        "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason,bin_isolated) " ++
+            "VALUES('zlib','zlib','1.3',1,'sha','{s}/Cellar/zlib/1.3_1','dependency',{d});",
+        .{ s.base, @intFromBool(bin_isolated) },
+        0,
+    );
+    try db.exec(insert);
+    return db;
+}
+
+test "promoteNamedDepIfAny opt-links the revisioned dir, not the raw version" {
     // Isolated dep at version 1.3 revision 1 lives on disk as
     // Cellar/zlib/1.3_1. Promotion must point opt/zlib at that dir; a
     // raw-version opt link (Cellar/zlib/1.3) would dangle.
@@ -1770,28 +1808,11 @@ test "promoteIsolatedDepIfAny opt-links the revisioned dir, not the raw version"
     var s = try Scratch.init("promote_rev");
     defer s.deinit();
     const prefix = s.base;
-
-    const keg_lib = s.p("/Cellar/zlib/1.3_1/lib");
-    try std.Io.Dir.cwd().createDirPath(io, keg_lib);
-    const db_dir = s.p("/db");
-    try std.Io.Dir.cwd().createDirPath(io, db_dir);
-
-    const db_path = s.p("/db/malt.db");
-    var db = try sqlite.Database.open(db_path);
+    var db = try seedDepKeg(&s, io, true);
     defer db.close();
-    try schema.initSchema(&db);
-    var ins_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
-    const insert = try std.fmt.bufPrintSentinel(
-        &ins_buf,
-        "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason,bin_isolated) " ++
-            "VALUES('zlib','zlib','1.3',1,'sha','{s}/Cellar/zlib/1.3_1','dependency',1);",
-        .{prefix},
-        0,
-    );
-    try db.exec(insert);
 
     var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
-    try testing.expect(promoteIsolatedDepIfAny(&db, &linker, "zlib"));
+    try testing.expectEqual(PromoteOutcome.relinked, promoteNamedDepIfAny(&db, &linker, "zlib"));
 
     // opt/zlib must resolve (accessAbsolute follows the symlink; a
     // dangling link would surface FileNotFound).
@@ -1806,7 +1827,7 @@ test "promoteIsolatedDepIfAny opt-links the revisioned dir, not the raw version"
     try testing.expectEqual(@as(i64, 0), row.columnInt(1));
 }
 
-test "promoteIsolatedDepIfAny rewrites the receipt as installed on request" {
+test "promoteNamedDepIfAny rewrites the receipt as installed on request" {
     // The DB row flips to 'direct'; the keg's INSTALL_RECEIPT.json must
     // follow, or receipt readers keep seeing a dependency.
     const testing = std.testing;
@@ -1819,27 +1840,11 @@ test "promoteIsolatedDepIfAny rewrites the receipt as installed on request" {
     var s = try Scratch.init("promote_receipt");
     defer s.deinit();
     const prefix = s.base;
-
-    const keg_dir = s.p("/Cellar/zlib/1.3_1");
-    try std.Io.Dir.cwd().createDirPath(io, keg_dir);
-    cellar_mod.writeInstallReceiptFull(io, keg_dir, "zlib", "1.3_1", "sha", null, false);
-    try std.Io.Dir.cwd().createDirPath(io, s.p("/db"));
-
-    var db = try sqlite.Database.open(s.p("/db/malt.db"));
+    var db = try seedDepKeg(&s, io, true);
     defer db.close();
-    try schema.initSchema(&db);
-    var ins_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
-    const insert = try std.fmt.bufPrintSentinel(
-        &ins_buf,
-        "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason,bin_isolated) " ++
-            "VALUES('zlib','zlib','1.3',1,'sha','{s}/Cellar/zlib/1.3_1','dependency',1);",
-        .{prefix},
-        0,
-    );
-    try db.exec(insert);
 
     var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
-    try testing.expect(promoteIsolatedDepIfAny(&db, &linker, "zlib"));
+    try testing.expectEqual(PromoteOutcome.relinked, promoteNamedDepIfAny(&db, &linker, "zlib"));
 
     const receipt = try std.Io.Dir.cwd().readFileAlloc(io, s.p("/Cellar/zlib/1.3_1/INSTALL_RECEIPT.json"), allocator, .limited(4096));
     defer allocator.free(receipt);
@@ -1847,6 +1852,90 @@ test "promoteIsolatedDepIfAny rewrites the receipt as installed on request" {
     try testing.expect(std.mem.indexOf(u8, receipt, "\"installed_as_dependency\": false") != null);
     // The receipt's version slot is the cellar dir leaf, not the raw column.
     try testing.expect(std.mem.indexOf(u8, receipt, "\"stable\": \"1.3_1\"") != null);
+}
+
+test "a non-isolated dependency named directly is marked on request" {
+    // The user asked for it by name, so the row and receipt must say so.
+    // Its bin links already exist, so promotion must not re-link.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("promote_plain_dep");
+    defer s.deinit();
+    const prefix = s.base;
+    var db = try seedDepKeg(&s, io, false);
+    defer db.close();
+
+    var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
+    try testing.expectEqual(PromoteOutcome.marked, promoteNamedDepIfAny(&db, &linker, "zlib"));
+
+    var row = try db.prepare("SELECT install_reason, bin_isolated, (SELECT count(*) FROM links) FROM kegs WHERE name='zlib';");
+    defer row.finalize();
+    try testing.expect(try row.step());
+    try testing.expectEqualStrings("direct", std.mem.sliceTo(row.columnText(0).?, 0));
+    try testing.expectEqual(@as(i64, 0), row.columnInt(1));
+    try testing.expectEqual(@as(i64, 0), row.columnInt(2));
+
+    const receipt = try std.Io.Dir.cwd().readFileAlloc(io, s.p("/Cellar/zlib/1.3_1/INSTALL_RECEIPT.json"), allocator, .limited(4096));
+    defer allocator.free(receipt);
+    try testing.expect(std.mem.indexOf(u8, receipt, "\"installed_on_request\": true") != null);
+}
+
+test "the fast-path gate yields to a non-isolated dependency" {
+    // Without this the install short-circuits as "already installed" and
+    // the promotion above never runs.
+    const testing = std.testing;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var s = try Scratch.init("promote_gate");
+    defer s.deinit();
+    const prefix = s.base;
+    try std.Io.Dir.cwd().createDirPath(ctx.io, s.p("/db"));
+    {
+        var db = try sqlite.Database.open(s.p("/db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs(name,full_name,version,store_sha256,cellar_path,install_reason,bin_isolated)
+            \\VALUES('dep','dep','1.0','sha','/c/dep/1.0','dependency',0),
+            \\       ('top','top','1.0','sha','/c/top/1.0','direct',0);
+        );
+    }
+
+    try testing.expect(anyNamedNeedsPromotion(&ctx, prefix, &.{"dep"}));
+    try testing.expect(!anyNamedNeedsPromotion(&ctx, prefix, &.{"top"}));
+}
+
+test "a tap-form name never promotes the core dependency sharing its leaf" {
+    // `someone/tap/dep` is a different package from core `dep`; neither
+    // the gate nor the promotion may treat it as the user asking for `dep`.
+    const testing = std.testing;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var s = try Scratch.init("promote_tap_form");
+    defer s.deinit();
+    const prefix = s.base;
+    try std.Io.Dir.cwd().createDirPath(ctx.io, s.p("/db"));
+    var db = try sqlite.Database.open(s.p("/db/malt.db"));
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs(name,full_name,version,store_sha256,cellar_path,install_reason,bin_isolated)
+        \\VALUES('dep','dep','1.0','sha','/c/dep/1.0','dependency',0);
+    );
+
+    try testing.expect(!anyNamedNeedsPromotion(&ctx, prefix, &.{"someone/tap/dep"}));
+
+    var linker = linker_mod.Linker.init(ctx.io, testing.allocator, &db, prefix);
+    try testing.expectEqual(PromoteOutcome.none, promoteNamedDepIfAny(&db, &linker, "someone/tap/dep"));
+    var row = try db.prepare("SELECT install_reason FROM kegs WHERE name='dep';");
+    defer row.finalize();
+    try testing.expect(try row.step());
+    try testing.expectEqualStrings("dependency", std.mem.sliceTo(row.columnText(0).?, 0));
 }
 
 test "mapApiFetchError surfaces ApiUnreachable as NetworkError" {
