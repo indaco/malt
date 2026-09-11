@@ -41,7 +41,7 @@ pub const RubyError = error{
 /// core/* itself emits no UI.
 pub fn describeError(err: RubyError) []const u8 {
     return switch (err) {
-        RubyError.RubyNotFound => "no Ruby interpreter found (tried /opt/homebrew, /usr/local, rbenv, asdf, PATH)",
+        RubyError.RubyNotFound => "no Ruby interpreter found (tried /opt/homebrew, /usr/local, /usr/bin)",
         RubyError.TapNotFound => "no local homebrew-core tap clone, and the hash-pinned GitHub fallback was not viable for this formula",
         RubyError.FormulaSourceNotFound => "formula .rb source not found in the homebrew-core tap, and the hash-pinned GitHub fallback could not recover it",
         RubyError.PostInstallBodyNotFound => "could not extract a post_install body from the formula source",
@@ -304,7 +304,7 @@ pub fn runPostInstallWithBody(
     // maps each RubyError variant to user-facing text.
 
     // 1. Find Ruby (caller-owned heap slice — see detectRuby contract).
-    const ruby_path = detectRuby(io, environ, allocator) orelse return RubyError.RubyNotFound;
+    const ruby_path = detectRuby(io, allocator) orelse return RubyError.RubyNotFound;
     defer allocator.free(ruby_path);
 
     // 5. Generate wrapper script

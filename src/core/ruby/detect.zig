@@ -5,52 +5,35 @@
 //! cross-linking through `ruby_subprocess.zig`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
-/// Detect a usable Ruby interpreter. Returns a caller-owned absolute path
-/// or null. Caller must free the returned slice with `allocator.free`.
+// Order matters: the package-manager Ruby is preferred, the system one is last.
+const candidates = [_][]const u8{
+    "/opt/homebrew/opt/ruby/bin/ruby",
+    "/usr/local/opt/ruby/bin/ruby",
+    "/usr/bin/ruby",
+};
+
+/// Detect a Ruby interpreter the sandbox fence can start. Returns a
+/// caller-owned absolute path or null. Caller must free the returned slice
+/// with `allocator.free`.
 ///
-/// Previously this function returned static slices for the hardcoded
-/// candidates and `allocator.dupe`d slices for the rbenv/asdf/PATH
-/// branches — the only call site never freed, so the heap branches
-/// leaked. Unifying the contract on "always heap-owned" lets the caller
-/// pair every successful return with one `defer allocator.free(...)`.
+/// Only package-manager and system Rubies are probed: the fence denies
+/// reads under `$HOME` and scrubs `$PATH`, so version-manager shims and
+/// arbitrary PATH interpreters cannot run inside it. Keep `candidates` in
+/// step with the interpreter prefix the fence re-grants.
+///
+/// Previously the hardcoded candidates returned static slices while other
+/// branches `allocator.dupe`d — the only call site never freed, so the heap
+/// branches leaked. Unifying on "always heap-owned" lets the caller pair
+/// every successful return with one `defer allocator.free(...)`.
 ///
 /// Public for testability; not part of the stable surface.
-pub fn detectRuby(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator) ?[]const u8 {
-    const candidates = [_][]const u8{
-        "/opt/homebrew/opt/ruby/bin/ruby",
-        "/usr/local/opt/ruby/bin/ruby",
-        "/usr/bin/ruby",
-    };
+pub fn detectRuby(io: std.Io, allocator: std.mem.Allocator) ?[]const u8 {
     for (candidates) |path| {
         std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
         return allocator.dupe(u8, path) catch return null;
     }
-
-    // Reusable scratch for path joining — avoids per-iteration heap churn.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-
-    // User-local version managers: rbenv, asdf
-    if (std.process.Environ.getPosix(environ, "HOME")) |home| {
-        const shim_suffixes = [_][]const u8{ "/.rbenv/shims/ruby", "/.asdf/shims/ruby" };
-        for (shim_suffixes) |suffix| {
-            const path = std.fmt.bufPrint(&buf, "{s}{s}", .{ home, suffix }) catch continue;
-            std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
-            return allocator.dupe(u8, path) catch return null;
-        }
-    }
-
-    // PATH search
-    if (std.process.Environ.getPosix(environ, "PATH")) |path_env| {
-        var it = std.mem.splitScalar(u8, path_env, ':');
-        while (it.next()) |dir| {
-            if (dir.len == 0) continue;
-            const candidate = std.fmt.bufPrint(&buf, "{s}/ruby", .{dir}) catch continue;
-            std.Io.Dir.accessAbsolute(io, candidate, .{}) catch continue;
-            return allocator.dupe(u8, candidate) catch return null;
-        }
-    }
-
     return null;
 }
 
@@ -170,17 +153,25 @@ test "resolveFormulaRbPath falls back to the flat Formula/{name}.rb layout" {
     try testing.expect(std.mem.endsWith(u8, got.?, "/Formula/wget.rb"));
 }
 
-test "detectRuby returns a heap-owned slice that the caller can free" {
-    // The contract requires the returned slice to be allocator-owned so
-    // the call site can pair it with `defer allocator.free`. We can't
-    // assert the path itself (machine-dependent), but we *can* verify that
-    // freeing the result does not double-free or fault — which only holds
-    // if every branch returns heap memory rather than a mix of static and
-    // heap slices. An empty environ exercises the hardcoded-candidate
-    // branch, which is exactly the one that used to return static slices.
-    if (detectRuby(testIo(), .empty, testing.allocator)) |path| {
-        defer testing.allocator.free(path);
-        try testing.expect(path.len > 0);
-        try testing.expect(std.mem.startsWith(u8, path, "/"));
+test "detectRuby returns a heap-owned path and always finds one on macOS" {
+    // Heap-owned so the call site can pair it with one `defer allocator.free`.
+    // /usr/bin/ruby is part of the macOS base system, so null there means the
+    // probe itself is broken, not the box.
+    const path = detectRuby(testIo(), testing.allocator) orelse {
+        try testing.expect(builtin.os.tag != .macos);
+        return;
+    };
+    defer testing.allocator.free(path);
+    try testing.expect(std.mem.startsWith(u8, path, "/"));
+}
+
+test "detectRuby only offers interpreters the sandbox fence can start" {
+    // The fence only re-grants reads for a `/opt/ruby/bin/ruby` prefix and
+    // never denies the system tree; any other shape is detected only to die
+    // inside the fence. Checked over the whole list, not the runtime pick,
+    // so a bad candidate fails on every box.
+    for (candidates) |path| {
+        try testing.expect(std.mem.endsWith(u8, path, "/opt/ruby/bin/ruby") or
+            std.mem.eql(u8, path, "/usr/bin/ruby"));
     }
 }
