@@ -170,11 +170,10 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
             if (tap.len > 0 and !std.mem.eql(u8, tap, "homebrew/cask")) {
                 var qual_buf: [256]u8 = undefined;
                 const qualified = std.fmt.bufPrint(&qual_buf, "{s}/{s}", .{ tap, token }) catch {
-                    // Tap label too long for the qualified-name buffer —
-                    // fall back to the bare token so the entry isn't lost.
-                    try writeEntry(w, .cask, token, version, include_versions);
-                    count += 1;
-                    continue;
+                    // No legitimate slug overflows this; a bare token here
+                    // would be a line restore cannot use.
+                    output.err("Tap label too long for cask {s} ({s})", .{ token, tap });
+                    return RowsError.DatabaseError;
                 };
                 try writeEntry(w, .cask, qualified, version, include_versions);
             } else {
@@ -716,9 +715,9 @@ test "writeRows aborts on an unreadable table instead of truncating" {
     try std.testing.expectError(Error.DatabaseError, writeRows(&aw.writer, &db, true, true));
 }
 
-test "writeRows falls back to the bare token when the qualified slug overflows" {
-    // Pins the moved fallback: a tap label too long for `qual_buf` still
-    // yields an entry rather than a silently shorter manifest.
+test "writeRows refuses a tap label the qualified slug cannot hold" {
+    // Every legitimate `<user>/<repo>/<token>` fits; an oversized label is a
+    // corrupt row, and a bare token would be a line restore cannot use.
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
@@ -727,8 +726,5 @@ test "writeRows falls back to the bare token when the qualified slug overflows" 
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
-    const count = try writeRows(&aw.writer, &db, true, false);
-
-    try std.testing.expectEqualStrings("cask foo@1.0\n", aw.written());
-    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectError(error.DatabaseError, writeRows(&aw.writer, &db, true, false));
 }
