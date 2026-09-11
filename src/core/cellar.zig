@@ -341,8 +341,12 @@ fn walkMachOAndPatch(
         // One read/write per file for all replacements. Slots that fit
         // are rewritten in process; slots that overflow are queued for
         // the install_name_tool fallback below.
-        var outcome = patch.patchPathsCollecting(io, allocator, full_path, replacements) catch
-            continue;
+        // The file is written before the overflow list is finalised, so an
+        // OOM here has already mutated a binary that must be re-signed.
+        var outcome = patch.patchPathsCollecting(io, allocator, full_path, replacements) catch |e| switch (e) {
+            patch.PatchError.OutOfMemory => return CellarError.OutOfMemory,
+            else => continue,
+        };
         defer outcome.deinit(allocator);
 
         unrelocatable_out.* += outcome.unrelocatable_count;
@@ -358,11 +362,11 @@ fn walkMachOAndPatch(
 
         const any_modified = outcome.patched_count > 0 or outcome.overflow.len > 0;
         if (any_modified) {
-            // Transfer ownership of `full_path` into the modified list.
-            // On append failure, let the defer free it and carry on —
-            // we'd rather silently over-sign (i.e. not sign a file we
-            // mutated) than abort the whole materialize for an OOM.
-            modified_out.append(allocator, full_path) catch continue;
+            // Transfer ownership of `full_path` into the modified list. The
+            // bytes on disk no longer match their signature, and only this
+            // list gets them re-signed, so an append failure aborts the
+            // materialize; the caller's errdefer wipes the keg.
+            modified_out.append(allocator, full_path) catch return CellarError.OutOfMemory;
             keep_path = true;
         }
     }
@@ -584,6 +588,7 @@ pub fn relocateUnbottledKeg(
         CellarError.PathTooLong => return CellarError.PathTooLong,
         CellarError.InsufficientHeaderPad => return CellarError.InsufficientHeaderPad,
         CellarError.InstallNameToolMissing => return CellarError.InstallNameToolMissing,
+        CellarError.OutOfMemory => return CellarError.OutOfMemory,
         else => return CellarError.PatchFailed,
     };
 
@@ -659,6 +664,7 @@ fn relocateKegTree(
         CellarError.PathTooLong => return CellarError.PathTooLong,
         CellarError.InsufficientHeaderPad => return CellarError.InsufficientHeaderPad,
         CellarError.InstallNameToolMissing => return CellarError.InstallNameToolMissing,
+        CellarError.OutOfMemory => return CellarError.OutOfMemory,
         else => return CellarError.PatchFailed,
     };
 
@@ -1135,6 +1141,55 @@ test "relocateUnbottledKeg leaves a binary with no build-prefix reference untouc
         RelocStamp{ .version = relocated_store.RELOC_LOGIC_VERSION },
         readRelocStamp(io, keg).?,
     );
+}
+
+test "walkMachOAndPatch never returns success having mutated a file it did not queue for re-signing" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // The in-place rewrite lands before the path joins the re-sign list. An
+    // allocation failure in that window must abort the walk: a success that
+    // leaves the mutated file off the list ships a binary the kernel kills.
+    var s = try Scratch.init("reloc_walk_oom");
+    defer s.deinit();
+    const keg = s.p("/Cellar/tool/1.0");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/tool/1.0/bin"));
+    const bin = s.p("/Cellar/tool/1.0/bin/tool");
+
+    const bytes = try buildLoadDylibMachO(testing.allocator, "/opt/homebrew/opt/flac/lib/libFLAC.14.dylib", 128);
+    defer testing.allocator.free(bytes);
+    const reps = [_]patch.Replacement{.{ .old = "/opt/homebrew", .new = "/opt/malt" }};
+
+    // Sweep the failing slot across every allocation the walk makes so the
+    // append is hit regardless of how many precede it. An OOM seen after
+    // the rewrite proves the sweep reached that window.
+    var saw_post_write_oom = false;
+    var fail_index: usize = 0;
+    while (fail_index < 64) : (fail_index += 1) {
+        try atomic.atomicWriteFile(io, bin, bytes);
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        const alloc = failing.allocator();
+
+        var modified: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (modified.items) |m| alloc.free(m);
+            modified.deinit(alloc);
+        }
+        var unrelocatable: u32 = 0;
+        const result = walkMachOAndPatch(io, alloc, keg, &reps, &modified, &unrelocatable);
+
+        const got = try relocatedDylibPath(testing.allocator, io, bin);
+        defer testing.allocator.free(got);
+        const mutated = std.mem.startsWith(u8, got, "/opt/malt");
+
+        if (result) |_| {
+            if (mutated) try testing.expectEqual(@as(usize, 1), modified.items.len);
+        } else |e| {
+            try testing.expectEqual(CellarError.OutOfMemory, e);
+            if (mutated) saw_post_write_oom = true;
+        }
+    }
+    try testing.expect(saw_post_write_oom);
 }
 
 // Pins the describeError split: only the user-actionable mappings carry
