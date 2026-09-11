@@ -818,6 +818,46 @@ test "materializeWithCellar populates the relocated cache after a cold install" 
     try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
 }
 
+/// Seed a well-formed `<fixture_name>/1.0` keg under `valid_test_sha`, then
+/// request `pkg 9.9` from the same sha: nothing may reach the Cellar or the
+/// relocated cache, where the old fallback left a nested, unlinkable keg.
+fn expectKegSourceMissing(fixture_name: []const u8) !void {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, fixture_name, "1.0");
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const result = cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "pkg",
+        "9.9",
+        ":any",
+        null,
+    );
+    try testing.expectError(cellar_mod.CellarError.KegSourceMissing, result);
+
+    try testing.expect(!try fileExists(testing.allocator, "{s}/Cellar/pkg", .{prefix}));
+    try testing.expect(!relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
+}
+
+test "materializeWithCellar refuses a store entry that lacks the requested name dir" {
+    try expectKegSourceMissing("other-name");
+}
+
+test "materializeWithCellar refuses a name dir with no matching version" {
+    // Right name, wrong version: the revision-suffix scan runs and finds nothing.
+    try expectKegSourceMissing("pkg");
+}
+
 // ---------------------------------------------------------------------------
 // Post-relocation keg verification
 // ---------------------------------------------------------------------------
@@ -1027,7 +1067,10 @@ test "materializeWithCellar refuses a keg whose binary kept an unsubstituted pla
     ));
 
     // A keg that cannot load is not left installed, and never gets cached.
+    // The failure lands after the clone, so this is the path that must also
+    // reclaim the freshly-created Cellar/{name}/ parent.
     try testing.expect(!try fileExists(testing.allocator, "{s}/Cellar/unpatched/2.0", .{prefix}));
+    try testing.expect(!try fileExists(testing.allocator, "{s}/Cellar/unpatched", .{prefix}));
     try testing.expect(!relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
 }
 
@@ -1042,6 +1085,7 @@ test "describeError returns a non-empty, distinct message for every CellarError"
         cellar_mod.CellarError.VerifyFailed,
         cellar_mod.CellarError.RemoveFailed,
         cellar_mod.CellarError.UnsafePathComponent,
+        cellar_mod.CellarError.KegSourceMissing,
         cellar_mod.CellarError.OutOfMemory,
     };
     var seen: [cases.len][]const u8 = undefined;
@@ -1057,10 +1101,10 @@ test "describeError returns a non-empty, distinct message for every CellarError"
 }
 
 // ---------------------------------------------------------------------------
-// P8 — Empty Cellar/{name}/ parent dir is cleaned up on failed materialize
+// P8 - A failed materialize leaves no Cellar/{name}/ parent dir behind
 // ---------------------------------------------------------------------------
 
-test "failed materialize cleans up empty Cellar/{name}/ parent dir" {
+test "a missing keg source never creates the Cellar/{name}/ parent dir" {
     const prefix = try createTestDir(testing.allocator);
     defer {
         test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -1069,8 +1113,8 @@ test "failed materialize cleans up empty Cellar/{name}/ parent dir" {
 
     try setupMaltDirs(testing.allocator, prefix);
 
-    // No bottle fixture — the materialize call must fail (nothing to clone),
-    // which is what exercises the errdefer.
+    // No bottle fixture - the materialize call must refuse before it creates
+    // anything under the Cellar.
     _ = setMaltPrefix(prefix);
     defer restoreMaltPrefix("");
 
@@ -1084,7 +1128,7 @@ test "failed materialize cleans up empty Cellar/{name}/ parent dir" {
         ":any",
         null,
     );
-    try testing.expectError(cellar_mod.CellarError.CloneFailed, result);
+    try testing.expectError(cellar_mod.CellarError.KegSourceMissing, result);
 
     // Cellar/ghost/ must not exist on disk after the failure.
     var parent_buf: [512]u8 = undefined;
@@ -1124,10 +1168,10 @@ test "failed materialize leaves sibling versions untouched" {
         ":any",
         null,
     );
-    try testing.expectError(cellar_mod.CellarError.CloneFailed, result);
+    try testing.expectError(cellar_mod.CellarError.KegSourceMissing, result);
 
-    // Cellar/keeper/1.0 must still be there — the errdefer may delete the
-    // empty parent, but it must NOT recurse into a non-empty one.
+    // Cellar/keeper/1.0 must still be there: the refusal short-circuits
+    // before anything under Cellar/keeper/ is touched.
     var alive_buf: [512]u8 = undefined;
     const alive = try std.fmt.bufPrint(&alive_buf, "{s}/Cellar/keeper/1.0", .{prefix});
     try test_io.accessAbsolute(std.Options.debug_io, alive, .{});
