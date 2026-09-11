@@ -4,6 +4,64 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.24.1 - 2026-09-11
+
+### Highlights
+
+v0.24.1 is a hardening release: a cask upgrade, a purge, or a post-install step that fails now leaves what you had installed exactly as it was.
+
+- **Cask upgrades that can't lose the installed app.** The replacement is downloaded and verified before the installed version is touched, a tap cask installs from those same bytes without going back to the network, and a PKG cask asks for sudo up front - so a dropped connection or a declined prompt leaves your app exactly as it was.
+- **A purge you can restore from.** `purge --wipe --backup` writes the same manifest `mt backup` does - tap casks pinned, services included - and refuses to wipe when that backup can't be trusted; routine `mt cleanup` no longer deletes the cached artifact `mt rollback` needs for a cask you still have installed.
+- **Failures that stop cleanly.** A `copy` post-install step whose clone fails keeps the previous payload instead of leaving neither, and `malt migrate` gives up on a wedged disk with a non-zero exit instead of retrying forever.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **purge:** write the wipe manifest with the same rows mt backup writes ([e90fba71](https://github.com/indaco/malt/commit/e90fba71)) ([#986](https://github.com/indaco/malt/pull/986))
+- **smoke:** stop the install smoke's teardown tripping over an untracked dependency ([a6e77fd6](https://github.com/indaco/malt/commit/a6e77fd6)) ([#985](https://github.com/indaco/malt/pull/985))
+- **post-install:** keep the previous payload when a copy step's clone fails ([2d47c270](https://github.com/indaco/malt/commit/2d47c270)) ([#984](https://github.com/indaco/malt/pull/984))
+- **upgrade:** stop a refused PKG cask upgrade from destroying the installed version ([adf7d30e](https://github.com/indaco/malt/commit/adf7d30e)) ([#983](https://github.com/indaco/malt/pull/983))
+- **upgrade:** install a tap cask from the bytes its prefetch fetched ([9d757dbd](https://github.com/indaco/malt/commit/9d757dbd)) ([#981](https://github.com/indaco/malt/pull/981))
+- **upgrade:** keep the installed cask until its replacement is downloaded ([389e3fb0](https://github.com/indaco/malt/commit/389e3fb0)) ([#980](https://github.com/indaco/malt/pull/980))
+- **purge:** refuse to wipe when the backup manifest cannot be trusted ([edab28b9](https://github.com/indaco/malt/commit/edab28b9)) ([#979](https://github.com/indaco/malt/pull/979))
+- **purge:** stop routine cleanup from deleting an installed cask's cached artifact ([0b318625](https://github.com/indaco/malt/commit/0b318625)) ([#978](https://github.com/indaco/malt/pull/978))
+- reap child processes abandoned on pipe-read early returns ([05339daa](https://github.com/indaco/malt/commit/05339daa)) ([#977](https://github.com/indaco/malt/pull/977))
+- **tap:** stop a slugless tap name from ever panicking the cold path ([f8fefad2](https://github.com/indaco/malt/commit/f8fefad2)) ([#975](https://github.com/indaco/malt/pull/975))
+- **tui:** reap a pipe-less background audit exactly once ([86d93e9c](https://github.com/indaco/malt/commit/86d93e9c)) ([#974](https://github.com/indaco/malt/pull/974))
+- **migrate:** stop the Cellar scan instead of retrying a wedged disk forever ([08a7a4c5](https://github.com/indaco/malt/commit/08a7a4c5)) ([#973](https://github.com/indaco/malt/pull/973))
+
+### 📖 Documentation
+
+- **benchmark:** update results 2026-09-07 ([a6f9044b](https://github.com/indaco/malt/commit/a6f9044b)) ([#972](https://github.com/indaco/malt/pull/972))
+- **benchmark:** update results 2026-08-31 ([b7f2a84a](https://github.com/indaco/malt/commit/b7f2a84a)) ([#969](https://github.com/indaco/malt/pull/969))
+- **benchmark:** update results 2026-08-30 ([3f3b717a](https://github.com/indaco/malt/commit/3f3b717a)) ([#968](https://github.com/indaco/malt/pull/968))
+
+### 🤖 CI
+
+- **pins:** stop verifying and auto-bumping the homebrew-core pin ([1863eb89](https://github.com/indaco/malt/commit/1863eb89)) ([#987](https://github.com/indaco/malt/pull/987))
+- gate every static regression guard, not a hand-picked three ([6d12415b](https://github.com/indaco/malt/commit/6d12415b)) ([#976](https://github.com/indaco/malt/pull/976))
+- bump taiki-e/install-action from 2.85.4 to 2.87.1 ([bc42e0d8](https://github.com/indaco/malt/commit/bc42e0d8)) ([#971](https://github.com/indaco/malt/pull/971))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+- [@dependabot[bot]](https://github.com/dependabot[bot])
+
 ## v0.24.0 - 2026-08-29
 
 ### Highlights
