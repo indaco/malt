@@ -121,6 +121,9 @@ jobs:
       - name: Regression guard - relocated cache warm hit checks the keg label
         run: ./scripts/regressions/relocated-cache-warm-hit-checks-label-relocated-cache-warm-hit-ignores-the-requested-name-and-version.sh
 
+      - name: Regression guard - a patched Mach-O always reaches the re-sign list
+        run: ./scripts/regressions/walk-refuses-to-drop-a-mutated-macho-mutated-macho-can-skip-resigning-on-append-failure.sh
+
       - name: Build universal binary
         run: just build-universal
 
