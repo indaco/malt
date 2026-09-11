@@ -582,15 +582,35 @@ fn stepCopy(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         mkParent(ctx, target);
     }
 
-    // Always replace, as `cp_r` does — formulae omit `force` and rely on it.
-    // Skipping an existing destination would leave a stale payload behind.
-    std.Io.Dir.cwd().deleteTree(ctx.io, dest) catch {};
+    // Staged beside the destination rather than into it: the replace is only
+    // committed once the replacement exists.
+    const staging = std.fmt.allocPrint(ctx.allocator, "{s}.malt-incoming", .{dest}) catch return false;
+    // clonefile(2) refuses a destination that exists, and a crashed run can
+    // have left one behind.
+    std.Io.Dir.cwd().deleteTree(ctx.io, staging) catch {};
+    // Scrap on every path out; the swap consumes it on success.
+    defer std.Io.Dir.cwd().deleteTree(ctx.io, staging) catch {};
 
     // APFS clone: same bytes, no double disk cost, mtimes preserved.
-    clonefile.cloneTree(ctx.io, ctx.allocator, source, dest) catch {
+    clonefile.cloneTree(ctx.io, ctx.allocator, source, staging) catch {
         logUnsupported(ctx, "copy (clone failed)");
         return false;
     };
+
+    // Always replace, as `cp_r` does — formulae omit `force` and rely on it.
+    // Skipping an existing destination would leave a stale payload behind.
+    // Swapped aside rather than deleted so a failed rename is recoverable.
+    const aside = asidePath(ctx, dest) orelse return false;
+    std.Io.Dir.cwd().deleteTree(ctx.io, aside) catch {};
+    // The rename doubles as the existence probe: a stat would follow a
+    // symlink at `dest`, leaving a dangling one in place to block the swap.
+    const displaced = if (std.Io.Dir.renameAbsolute(dest, aside, ctx.io)) |_| true else |_| false;
+    atomic.atomicRename(ctx.io, ctx.allocator, staging, dest) catch {
+        if (displaced) std.Io.Dir.renameAbsolute(aside, dest, ctx.io) catch {};
+        logUnsupported(ctx, "copy (could not replace the destination)");
+        return false;
+    };
+    std.Io.Dir.cwd().deleteTree(ctx.io, aside) catch {};
     return true;
 }
 
@@ -2159,6 +2179,49 @@ fn seedEtc(h: *TestHarness, rel: []const u8, body: []const u8) ![]const u8 {
     try f.writeStreamingAll(h.io, body);
     f.close(h.io);
     return path;
+}
+
+fn writeAt(h: *TestHarness, path: []const u8, bytes: []const u8) !void {
+    const f = try std.Io.Dir.createFileAbsolute(h.io, path, .{ .truncate = true });
+    defer f.close(h.io);
+    try f.writeStreamingAll(h.io, bytes);
+}
+
+/// node's shape, the one the copy step exists to serve: npm in the keg.
+fn seedNpmSrc(h: *TestHarness, version: []const u8) ![]const u8 {
+    const a = h.arena.allocator();
+    const src = try std.fmt.allocPrint(a, "{s}/libexec/lib/node_modules/npm", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, src);
+    try writeAt(h, try std.fmt.allocPrint(a, "{s}/version.txt", .{src}), version);
+    return src;
+}
+
+/// The copy step node ships — no `force`, so it also pins replace semantics.
+fn npmCopyJson(h: *TestHarness) ![]const u8 {
+    return testFormulaJson(h,
+        \\[{"type":"copy",
+        \\  "source":{"path":"{{libexec}}/lib/node_modules/npm"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/node_modules"}}]
+    );
+}
+
+/// Lock `path` to mode 000 so clonefile(2) refuses the tree holding it. The
+/// handle comes back because the caller has to restore the mode before its own
+/// teardown walks it, and a mode-000 directory cannot be reopened by its owner.
+fn blockTree(h: *TestHarness, path: []const u8) !std.Io.File {
+    try std.Io.Dir.cwd().createDirPath(h.io, path);
+    var d = try std.Io.Dir.openDirAbsolute(h.io, path, .{});
+    errdefer d.close(h.io);
+    const f: std.Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
+    try f.setPermissions(h.io, .fromMode(0o000));
+    return f;
+}
+
+fn expectNoScratch(h: *TestHarness, dest: []const u8) !void {
+    for ([_][]const u8{ ".malt-incoming", ".malt-replaced" }) |suffix| {
+        const leftover = try std.fmt.allocPrint(h.arena.allocator(), "{s}{s}", .{ dest, suffix });
+        try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, leftover, .{}));
+    }
 }
 
 fn readBack(h: *TestHarness, path: []const u8) ![]const u8 {
@@ -3738,6 +3801,9 @@ test "copy places the source inside an existing directory target, not its conten
     // … and not flattened one level up.
     const flat = try std.fmt.allocPrint(a, "{s}/bin/npm-cli.js", .{dstdir});
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(h.io, flat, .{}));
+    // A first install has nothing to move aside; neither scratch path may
+    // survive the step regardless.
+    try expectNoScratch(&h, try std.fmt.allocPrint(a, "{s}/npm", .{dstdir}));
 }
 
 test "copy refuses a source outside the keg and prefix" {
@@ -3874,6 +3940,118 @@ test "copy replaces a stale destination even without a force flag" {
 
     const got = try readBack(&h, try std.fmt.allocPrint(a, "{s}/version.txt", .{stale}));
     try testing.expectEqualStrings("new\n", got);
+}
+
+test "copy keeps the previous destination when the clone fails" {
+    // The replace used to be committed before the replacement existed, so a
+    // clone that fails left the prefix with neither payload — which is how a
+    // failed node upgrade lost npm outright.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    const src = try seedNpmSrc(&h, "new\n");
+    const blocked = try blockTree(&h, try std.fmt.allocPrint(a, "{s}/blocked", .{src}));
+    defer blocked.close(h.io);
+    defer blocked.setPermissions(h.io, .fromMode(0o755)) catch {};
+
+    const dest = try std.fmt.allocPrint(a, "{s}/lib/node_modules/npm", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, dest);
+    const installed = try std.fmt.allocPrint(a, "{s}/version.txt", .{dest});
+    try writeAt(&h, installed, "old\n");
+
+    _ = execute(h.ctx(), try npmCopyJson(&h));
+    // An unsupported step only warns, so the run's verdict says nothing about
+    // the clone; the logged reason is what proves it failed.
+    try testing.expectEqualStrings("copy (clone failed)", h.flog.entries()[0].detail);
+    try testing.expectEqualStrings("old\n", try readBack(&h, installed));
+    try expectNoScratch(&h, dest);
+}
+
+test "copy keeps the destination when the swap itself fails" {
+    // The clone succeeds here and the rename does not, so the step must say
+    // so rather than blaming the clone — and the installed payload still has
+    // to survive. An aside a crashed run left unreclaimable blocks the swap.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    _ = try seedNpmSrc(&h, "new\n");
+    const dest = try std.fmt.allocPrint(a, "{s}/lib/node_modules/npm", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, dest);
+    const installed = try std.fmt.allocPrint(a, "{s}/version.txt", .{dest});
+    try writeAt(&h, installed, "old\n");
+
+    // An unreadable child keeps the aside non-empty, so both renames refuse it.
+    const stuck = try blockTree(&h, try std.fmt.allocPrint(a, "{s}.malt-replaced/stuck", .{dest}));
+    defer stuck.close(h.io);
+    defer stuck.setPermissions(h.io, .fromMode(0o755)) catch {};
+
+    _ = execute(h.ctx(), try npmCopyJson(&h));
+    try testing.expectEqualStrings("copy (could not replace the destination)", h.flog.entries()[0].detail);
+    try testing.expectEqualStrings("old\n", try readBack(&h, installed));
+}
+
+test "copy replaces a dangling symlink left at the destination" {
+    // A stat-based existence check reports a dangling symlink as absent, so it
+    // would survive the swap — and renaming a directory onto a symlink is
+    // ENOTDIR, failing a copy that has every right to succeed.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    _ = try seedNpmSrc(&h, "new\n");
+    const dstdir = try std.fmt.allocPrint(a, "{s}/lib/node_modules", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, dstdir);
+    const dest = try std.fmt.allocPrint(a, "{s}/npm", .{dstdir});
+    try std.Io.Dir.symLinkAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/gone", .{dstdir}), dest, .{});
+
+    try testing.expect(execute(h.ctx(), try npmCopyJson(&h)));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqualStrings("new\n", try readBack(&h, try std.fmt.allocPrint(a, "{s}/version.txt", .{dest})));
+}
+
+test "copy keeps a plain-file destination when the clone fails" {
+    // A target that is not an existing directory *is* the destination, so the
+    // aside dance has to cover a plain file, not just a tree.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    const src = try std.fmt.allocPrint(a, "{s}/libexec/payload", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, src);
+    const blocked = try blockTree(&h, try std.fmt.allocPrint(a, "{s}/blocked", .{src}));
+    defer blocked.close(h.io);
+    defer blocked.setPermissions(h.io, .fromMode(0o755)) catch {};
+
+    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/share", .{h.prefix}));
+    const dest = try std.fmt.allocPrint(a, "{s}/share/payload", .{h.prefix});
+    try writeAt(&h, dest, "old\n");
+
+    const json = try testFormulaJson(&h,
+        \\[{"type":"copy",
+        \\  "source":{"path":"{{libexec}}/payload"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/share/payload"}}]
+    );
+    _ = execute(h.ctx(), json);
+    try testing.expectEqualStrings("copy (clone failed)", h.flog.entries()[0].detail);
+    try testing.expectEqualStrings("old\n", try readBack(&h, dest));
+}
+
+test "copy reclaims a staging path a crashed run left behind" {
+    // clonefile(2) refuses a destination that already exists, so a stale
+    // `.malt-incoming` would otherwise wedge every later copy of that path.
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+
+    _ = try seedNpmSrc(&h, "new\n");
+    const dest = try std.fmt.allocPrint(a, "{s}/lib/node_modules/npm", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}.malt-incoming/junk", .{dest}));
+
+    try testing.expect(execute(h.ctx(), try npmCopyJson(&h)));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqualStrings("new\n", try readBack(&h, try std.fmt.allocPrint(a, "{s}/version.txt", .{dest})));
 }
 
 // --- migrated step types ---------------------------------------------------
