@@ -95,7 +95,7 @@ The `--use-system-ruby` path runs in a macOS `sandbox-exec` profile that denies 
 
 ### Homebrew-core pin
 
-Formula Ruby source fetched over the wire is checked against `src/core/pins_manifest.txt` and executed only if the SHA256 matches the pinned `homebrew-core` commit in `src/core/pins.zig`. No manifest entry = no execution. Regenerate both with `scripts/gen-pins.sh` when bumping the pin.
+Formula Ruby source fetched over the wire is checked against `src/core/pins_manifest.txt` and executed only if the SHA256 matches the pinned `homebrew-core` commit in `src/core/pins.zig`. No manifest entry = no execution. The pin is frozen: upstream has migrated every Ruby `post_install` to declarative `post_install_steps`, which malt runs natively, so the manifest is no longer regenerated.
 
 ### Service declarations
 

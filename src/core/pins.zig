@@ -7,8 +7,9 @@
 //! -> expected SHA256 of the .rb blob at that commit. The fetch path in
 //! ruby_subprocess.zig uses both to refuse anything outside this pin.
 //!
-//! Regenerate with `scripts/gen-pins.sh` whenever the pinned commit
-//! bumps — the release should never ship with a stale pin.
+//! The pin is frozen: upstream has migrated every Ruby post_install to
+//! declarative post_install_steps, which malt runs natively, so this
+//! manifest is no longer regenerated.
 
 const std = @import("std");
 
@@ -19,7 +20,7 @@ const std = @import("std");
 /// Fixed-array type: the 40-char length is a comptime property, so no
 /// slice header is emitted at use sites.
 ///
-/// Bump at release time via `scripts/gen-pins.sh`.
+/// Frozen — see the module doc above.
 pub const homebrew_core_commit_sha: [40]u8 = "b6ad3325be06d915c6c8de96cb64249cf9d41d3c".*;
 
 const MANIFEST_TEXT: []const u8 = @embedFile("pins_manifest.txt");
