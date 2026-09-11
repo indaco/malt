@@ -374,11 +374,12 @@ fn anyNamedNeedsPromotion(ctx: *const AppCtx, prefix: []const u8, packages: []co
     defer stmt.finalize();
 
     for (packages) |pkg| {
-        // Tap kegs are recorded under their leaf name, so the tap form has
-        // to be reduced before it can match a row.
-        const keg_name = if (args_mod.parseTapName(pkg)) |p| p.formula else pkg;
+        // Tap kegs are only ever recorded as direct, so a tap-form arg has
+        // nothing to promote; reducing it to the leaf would match a core
+        // keg of the same name instead.
+        if (isTapFormula(pkg)) continue;
         stmt.reset() catch return false;
-        stmt.bindText(1, keg_name) catch return false;
+        stmt.bindText(1, pkg) catch return false;
         if (stmt.step() catch false) return true;
     }
     return false;
@@ -1933,6 +1934,34 @@ test "the fast-path gate yields to a non-isolated dependency" {
 
     try testing.expect(anyNamedNeedsPromotion(&ctx, prefix, &.{"dep"}));
     try testing.expect(!anyNamedNeedsPromotion(&ctx, prefix, &.{"top"}));
+}
+
+test "a tap-form name never promotes the core dependency sharing its leaf" {
+    // `someone/tap/dep` is a different package from core `dep`; neither
+    // the gate nor the promotion may treat it as the user asking for `dep`.
+    const testing = std.testing;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var s = try Scratch.init("promote_tap_form");
+    defer s.deinit();
+    const prefix = s.base;
+    try std.Io.Dir.cwd().createDirPath(ctx.io, s.p("/db"));
+    var db = try sqlite.Database.open(s.p("/db/malt.db"));
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs(name,full_name,version,store_sha256,cellar_path,install_reason,bin_isolated)
+        \\VALUES('dep','dep','1.0','sha','/c/dep/1.0','dependency',0);
+    );
+
+    try testing.expect(!anyNamedNeedsPromotion(&ctx, prefix, &.{"someone/tap/dep"}));
+
+    var linker = linker_mod.Linker.init(ctx.io, testing.allocator, &db, prefix);
+    try testing.expectEqual(PromoteOutcome.none, promoteNamedDepIfAny(&db, &linker, "someone/tap/dep"));
+    var row = try db.prepare("SELECT install_reason FROM kegs WHERE name='dep';");
+    defer row.finalize();
+    try testing.expect(try row.step());
+    try testing.expectEqualStrings("dependency", std.mem.sliceTo(row.columnText(0).?, 0));
 }
 
 test "mapApiFetchError surfaces ApiUnreachable as NetworkError" {
