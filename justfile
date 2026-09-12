@@ -46,6 +46,7 @@ regressions-static:
     @./scripts/regressions/post-install-copy-deletes-destination-before-clone.sh
     @./scripts/regressions/tar-prescan-followups-925-926-follow-up.sh
     @./scripts/regressions/tui-background-fetch-no-double-reap-start-background-waits-after-kill.sh
+    @./scripts/regressions/install-smoke-red-run-reverts-casks-and-skips-upstream-outages-local-smoke-install.sh
     @MALT_STATIC_ONLY=1 ./scripts/regressions/post-install-steps-live-artefacts.sh
     @./scripts/test/bench_release_resolution_test.sh
 

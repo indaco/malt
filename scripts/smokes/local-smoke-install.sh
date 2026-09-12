@@ -47,11 +47,12 @@
 #
 # Time/bandwidth: ~30-40 min, ~4 GB downloaded fresh.
 #
-# Cleanup: on success (FAIL=0), every cask installed by this run is
-# `mt uninstall`-ed and every formula too — so /Applications and any
-# other system-touching state malt knows about is reverted before the
-# EXIT trap wipes the temp PREFIX/CACHE/LOGDIR. On failure, artifacts
-# stay around for triage (matches scripts/local-bench.sh behavior).
+# Cleanup: every cask installed by this run is `mt uninstall`-ed on both
+# exit paths — casks are the only state that escapes MALT_PREFIX, and a
+# leftover /Applications app would make every later run SKIP that case.
+# On success (FAIL=0) formulas are uninstalled too and the EXIT trap wipes
+# the temp PREFIX/CACHE/LOGDIR. On failure, formulas and the prefix/cache/
+# logdir stay around for triage (matches scripts/local-bench.sh behavior).
 #
 # App casks are SKIPPED when the target /Applications/<App>.app
 # already exists — we never trample the user's pre-existing apps.
@@ -90,6 +91,10 @@ export MALT_CACHE="$CACHE"
 # Deterministic, machine-parseable output.
 export NO_COLOR=1
 export MALT_NO_EMOJI=1
+
+# Upstream failures only; no `Failed to install` (that also wraps malt's
+# extract/relocate/dep errors, which this smoke exists to catch).
+TRANSIENT_RE='rate limit|Network failure|Cannot fetch tap from GitHub|Tap formula/cask not found|Could not resolve|Failed to download|Download failed with status|SHA256 mismatch'
 
 PASS=0
 FAIL=0
@@ -328,8 +333,9 @@ install_download_only_tap_reuse() {
   dl_log="$LOGDIR/$(printf '%s' "$tag.dl" | tr -c 'A-Za-z0-9' _).log"
   printf '  RUN   [%s.dl] %s install --download-only %s\n' "$tag" "$MT_BIN" "$slug"
   if ! "$MT_BIN" install --download-only "$slug" >"$dl_log" 2>&1; then
-    if grep -qE "rate limit|Network failure|Cannot fetch tap from GitHub|Tap formula/cask not found" "$dl_log"; then
+    if grep -qE "$TRANSIENT_RE" "$dl_log"; then
       printf '  SKIP  [%s] %s: transient classified failure\n' "$tag" "$slug"
+      grep -m1 -E "$TRANSIENT_RE" "$dl_log" | sed 's/^/        | /'
       SKIP=$((SKIP + 1))
       SKIPS+=("$tag")
       return
@@ -434,8 +440,9 @@ install_tap_formula() {
   "$MT_BIN" install "$slug" >"$log" 2>&1 || rc=$?
 
   if [[ "$rc" -ne 0 ]]; then
-    if grep -qE "rate limit|Network failure|Cannot fetch tap from GitHub|Tap formula/cask not found" "$log"; then
+    if grep -qE "$TRANSIENT_RE" "$log"; then
       printf '  SKIP  [%s] %s: transient classified failure\n' "$tag" "$slug"
+      grep -m1 -E "$TRANSIENT_RE" "$log" | sed 's/^/        | /'
       SKIP=$((SKIP + 1))
       SKIPS+=("$tag")
       return
@@ -471,11 +478,13 @@ install_tap_formulas() {
   done
 }
 
-# Reverse what we installed. Casks first because they touch /Applications;
-# formulas second (they live entirely under MALT_PREFIX, but uninstalling
-# also exercises the uninstall path). Best-effort: a stuck uninstall must
-# not block the script from completing.
-cleanup_installs() {
+# Reverse what we installed. Best-effort: a stuck uninstall must not block
+# the script from completing.
+#
+# Casks run on both exit paths because they touch /Applications; formulas
+# live entirely under MALT_PREFIX and are torn down on success only, so a
+# red run keeps the prefix intact for triage.
+cleanup_casks() {
   printf '\n── Cleanup ───────────────────────────────────────\n'
   local item out
   for item in "${INSTALLED_CASKS[@]}"; do
@@ -483,6 +492,10 @@ cleanup_installs() {
     out=$("$MT_BIN" uninstall --cask "$item" 2>&1) ||
       printf '  WARN: uninstall --cask %s exited non-zero (continuing): %s\n' "$item" "$out"
   done
+}
+
+cleanup_formulas() {
+  local item out
   # Forced because only top-level installs are tracked: a dependency the
   # script never named still holds a reference and would refuse an otherwise
   # correct teardown (mongosh, pulled in by mongodb-community, pins node).
@@ -520,13 +533,16 @@ if ((SKIP > 0)); then
 fi
 if ((FAIL > 0)); then
   printf '  failures: %s\n' "${FAILURES[*]}"
+  cleanup_casks
   printf '\n  triage state preserved in:\n'
   printf '    PREFIX=%s\n' "$PREFIX"
+  printf '    CACHE=%s\n' "$CACHE"
   printf '    LOGDIR=%s\n' "$LOGDIR"
   # Drop the EXIT trap so artifacts survive for triage.
   trap - EXIT
   exit 1
 fi
 
-cleanup_installs
+cleanup_casks
+cleanup_formulas
 exit 0
