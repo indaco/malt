@@ -37,20 +37,35 @@ pub fn isAllowedPrefixByte(b: u8) bool {
 /// Validate a candidate install prefix. Called at the env boundary so
 /// downstream code can assume absolute, NUL-free, traversal-free.
 pub fn validatePrefix(prefix: []const u8) PrefixError!void {
-    if (prefix.len == 0) return PrefixError.Empty;
-    if (prefix.len > max_prefix_len) return PrefixError.TooLong;
-    if (prefix[0] != '/') return PrefixError.NotAbsolute;
-    if (std.mem.indexOfScalar(u8, prefix, 0) != null) return PrefixError.EmbeddedNul;
+    try validateHead(prefix);
     // Tight charset closes the BUG-007/BUG-019 injection class — quotes,
     // backslashes, control bytes, parens etc. flow into single-quoted
     // Ruby literals and sandbox-profile strings unchanged.
     for (prefix) |b| if (!isAllowedPrefixByte(b)) return PrefixError.DisallowedByte;
+    try validateComponents(prefix);
+}
 
+/// The prefix rules minus the charset: what a root needs when it is only
+/// ever used as a filesystem path or an argv element (the cache dir), so
+/// a space or non-ASCII byte stays legal there.
+pub fn validateShape(path: []const u8) PrefixError!void {
+    try validateHead(path);
+    try validateComponents(path);
+}
+
+fn validateHead(path: []const u8) PrefixError!void {
+    if (path.len == 0) return PrefixError.Empty;
+    if (path.len > max_prefix_len) return PrefixError.TooLong;
+    if (path[0] != '/') return PrefixError.NotAbsolute;
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return PrefixError.EmbeddedNul;
+}
+
+fn validateComponents(path: []const u8) PrefixError!void {
     // Strip one trailing slash; `/opt/malt/` is fine, `//` inside is not.
-    const trimmed = if (prefix.len > 1 and prefix[prefix.len - 1] == '/')
-        prefix[0 .. prefix.len - 1]
+    const trimmed = if (path.len > 1 and path[path.len - 1] == '/')
+        path[0 .. path.len - 1]
     else
-        prefix;
+        path;
     if (trimmed.len == 1) return; // just "/" — no components to scan
 
     var it = std.mem.splitScalar(u8, trimmed, '/');
@@ -198,6 +213,18 @@ test "validatePrefix: length == max_prefix_len accepted" {
 test "validatePrefix: '//' inside rejected" {
     try std.testing.expectError(error.EmptyComponent, validatePrefix("/opt//malt"));
     try std.testing.expectError(error.EmptyComponent, validatePrefix("//opt/malt"));
+}
+
+test "validateShape: a space is legal where the charset does not apply" {
+    try validateShape("/Volumes/My Backup/malt-cache");
+    try std.testing.expectError(PrefixError.DisallowedByte, validatePrefix("/Volumes/My Backup/malt-cache"));
+}
+
+test "validateShape: still refuses what every reader relies on" {
+    try std.testing.expectError(PrefixError.NotAbsolute, validateShape("rel/cache"));
+    try std.testing.expectError(PrefixError.DotDotComponent, validateShape("/tmp/a b/../etc"));
+    try std.testing.expectError(PrefixError.EmptyComponent, validateShape("/tmp//cache"));
+    try std.testing.expectError(PrefixError.Empty, validateShape(""));
 }
 
 test "validatePrefix: single dot component is permitted (not our job to canonicalise)" {

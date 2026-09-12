@@ -30,18 +30,22 @@ pub fn maltPrefixChecked() prefix_path.PrefixError![:0]const u8 {
 /// than falling back silently. Callers that hold an AppCtx and want to
 /// surface the error should use `maltPrefixChecked` instead.
 pub fn maltPrefixOrAbort() [:0]const u8 {
-    return maltPrefixChecked() catch |e| {
-        const raw = getenvLocal("MALT_PREFIX") orelse "<unset>";
-        // Bypass the UI layer — atomic.zig sits below it in the dep graph.
-        var buf: [1024]u8 = undefined;
-        const msg = std.fmt.bufPrint(
-            &buf,
-            "malt: refusing to use MALT_PREFIX='{s}': {s}\n",
-            .{ raw, prefix_path.describePrefixError(e) },
-        ) catch "malt: MALT_PREFIX rejected; refusing to proceed\n";
-        _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-        std.process.exit(78); // EX_CONFIG
-    };
+    return maltPrefixChecked() catch |e| refuseEnv("MALT_PREFIX", e);
+}
+
+/// Shared fail-closed exit for the two env-provided roots so their
+/// wording and exit code cannot drift apart.
+fn refuseEnv(name: []const u8, e: prefix_path.PrefixError) noreturn {
+    const raw = getenvLocal(name) orelse "<unset>";
+    // Bypass the UI layer — atomic.zig sits below it in the dep graph.
+    var buf: [1024]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "malt: refusing to use {s}='{s}': {s}\n",
+        .{ name, raw, prefix_path.describePrefixError(e) },
+    ) catch "malt: env root rejected; refusing to proceed\n";
+    _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+    std.process.exit(78); // EX_CONFIG
 }
 
 /// Rename `src_path` to `dst_path`. Tries a single `rename(2)` first — the
@@ -215,11 +219,25 @@ pub fn maltDbDir(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/db", .{maltPrefixOrAbort()});
 }
 
+/// Validated form of `maltCacheDir`: MALT_CACHE is checked at the env
+/// boundary like MALT_PREFIX, since `purge --wipe` deleteTree's it and
+/// every reader assumes an absolute root. Shape only: the cache dir never
+/// reaches a Ruby literal or sandbox profile, so the charset stays off.
+pub fn maltCacheDirChecked(allocator: std.mem.Allocator) (prefix_path.PrefixError || std.mem.Allocator.Error)![]const u8 {
+    if (getenvLocal("MALT_CACHE")) |cache| {
+        try prefix_path.validateShape(cache);
+        return allocator.dupe(u8, cache);
+    }
+    return std.fmt.allocPrint(allocator, "{s}/cache", .{try maltPrefixChecked()});
+}
+
 /// Return the cache directory, honouring MALT_CACHE env var.
-/// Falls back to "{prefix}/cache".
+/// Falls back to "{prefix}/cache". A malformed value is refused the
+/// way a malformed MALT_PREFIX is.
 pub fn maltCacheDir(allocator: std.mem.Allocator) ![]const u8 {
     if (getenvLocal("MALT_CACHE")) |cache| {
-        return allocator.dupe(u8, std.mem.sliceTo(cache, 0));
+        prefix_path.validateShape(cache) catch |e| refuseEnv("MALT_CACHE", e);
+        return allocator.dupe(u8, cache);
     }
     return std.fmt.allocPrint(allocator, "{s}/cache", .{maltPrefixOrAbort()});
 }

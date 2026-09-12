@@ -7,6 +7,7 @@ const std = @import("std");
 
 const atomic = @import("../../fs/atomic.zig");
 const read = @import("../../fs/read.zig");
+const prefix_path = @import("../../fs/prefix_path.zig");
 const json_escape = @import("../../core/json_escape.zig");
 
 const cache_filename = "version-notify.json";
@@ -33,8 +34,17 @@ pub const EnvOverride = struct {
     home: ?[]const u8 = null,
 };
 
-/// Returns slice-into-`buf`, or null if no env var in the chain is set.
+/// Returns slice-into-`buf`, or null if no env var in the chain is set or
+/// the winner is malformed: the readers use the `*Absolute` std entry
+/// points, and a best-effort notice must skip rather than trip their assert
+/// or write through a `..`.
 pub fn cacheDirFrom(env: EnvOverride, buf: []u8) ?[]const u8 {
+    const dir = resolveDir(env, buf) orelse return null;
+    prefix_path.validateShape(dir) catch return null;
+    return dir;
+}
+
+fn resolveDir(env: EnvOverride, buf: []u8) ?[]const u8 {
     if (env.malt_cache) |v| if (v.len > 0) return std.fmt.bufPrint(buf, "{s}", .{v}) catch null;
     if (env.xdg_cache_home) |v| if (v.len > 0) return std.fmt.bufPrint(buf, "{s}/malt", .{v}) catch null;
     if (env.home) |v| if (v.len > 0) return std.fmt.bufPrint(buf, "{s}/.cache/malt", .{v}) catch null;
@@ -239,6 +249,25 @@ test "cacheDirFrom: empty values fall through to the next candidate" {
         .home = "/home/u",
     }, &buf) orelse return error.TestExpectedNonNull;
     try std.testing.expectEqualStrings("/home/u/.cache/malt", got);
+}
+
+test "cacheDirFrom: a non-absolute root is unusable, not resolved against cwd" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(cacheDirFrom(.{ .malt_cache = "rel", .home = "/h" }, &buf) == null);
+    try std.testing.expect(cacheDirFrom(.{ .xdg_cache_home = "rel", .home = "/h" }, &buf) == null);
+    try std.testing.expect(cacheDirFrom(.{ .home = "rel" }, &buf) == null);
+}
+
+test "cacheDirFrom: a traversing root is unusable, never a write target" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(cacheDirFrom(.{ .malt_cache = "/tmp/c/../../Library", .home = "/h" }, &buf) == null);
+    try std.testing.expect(cacheDirFrom(.{ .xdg_cache_home = "/tmp/../x", .home = "/h" }, &buf) == null);
+}
+
+test "cacheDirFrom: an absolute root with a space is still honoured" {
+    var buf: [256]u8 = undefined;
+    const got = cacheDirFrom(.{ .home = "/Users/a b" }, &buf) orelse return error.TestExpectedNonNull;
+    try std.testing.expectEqualStrings("/Users/a b/.cache/malt", got);
 }
 
 test "encodeState: byte-for-byte JSON format is pinned" {
