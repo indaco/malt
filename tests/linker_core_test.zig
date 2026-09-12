@@ -239,6 +239,124 @@ test "checkConflicts detects a nested cross-keg collision" {
     try testing.expect(matched);
 }
 
+test "checkConflicts stays empty when the keg's own links are already in place" {
+    const prefix = try uniquePrefix("link_self_no_conflict");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    const keg = try makeKegWithBinary(prefix, "foo", "1.0", "foo");
+    defer testing.allocator.free(keg);
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertKeg(&db, 1, "foo", keg);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try linker.link(keg, "foo", 1, false);
+
+    // The boundary check must not turn a relink into a self-conflict.
+    const conflicts = try linker.checkConflicts(keg, false);
+    defer testing.allocator.free(conflicts);
+    try testing.expectEqual(@as(usize, 0), conflicts.len);
+}
+
+test "checkConflicts flags a symlink into a sibling version of the same formula" {
+    const prefix = try uniquePrefix("link_sibling_version_conflict");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    // Cellar/foo/1.0_1 continues Cellar/foo/1.0 without a separator, so a
+    // bare prefix match would call the sibling's symlink "same keg".
+    const keg_new = try makeKegWithBinary(prefix, "foo", "1.0", "foo");
+    defer testing.allocator.free(keg_new);
+    const keg_sibling = try makeKegWithBinary(prefix, "foo", "1.0_1", "foo");
+    defer testing.allocator.free(keg_sibling);
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertKeg(&db, 1, "foo", keg_sibling);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try linker.link(keg_sibling, "foo", 1, false);
+
+    const conflicts = try linker.checkConflicts(keg_new, false);
+    defer {
+        for (conflicts) |c| {
+            testing.allocator.free(c.link_path);
+            testing.allocator.free(c.existing_keg);
+        }
+        testing.allocator.free(conflicts);
+    }
+    try testing.expectEqual(@as(usize, 1), conflicts.len);
+    try testing.expect(std.mem.endsWith(u8, conflicts[0].link_path, "/bin/foo"));
+    try testing.expect(std.mem.indexOf(u8, conflicts[0].existing_keg, "foo/1.0_1") != null);
+    try testing.expect(conflicts[0].owned_by_keg);
+}
+
+test "checkConflicts flags a regular file occupying a leaf slot" {
+    const prefix = try uniquePrefix("link_plain_file_conflict");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    const keg = try makeKegWithBinary(prefix, "foo", "1.0", "tool");
+    defer testing.allocator.free(keg);
+    // Not a symlink: readLink fails on it, which must count as occupied.
+    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/tool", .{prefix});
+    defer testing.allocator.free(slot);
+    try writeFile(slot, "USER DATA\n");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+
+    const conflicts = try linker.checkConflicts(keg, false);
+    defer {
+        for (conflicts) |c| {
+            testing.allocator.free(c.link_path);
+            testing.allocator.free(c.existing_keg);
+        }
+        testing.allocator.free(conflicts);
+    }
+    try testing.expectEqual(@as(usize, 1), conflicts.len);
+    try testing.expect(std.mem.endsWith(u8, conflicts[0].link_path, "/bin/tool"));
+    try testing.expectEqualStrings("existing file", conflicts[0].existing_keg);
+    try testing.expect(!conflicts[0].owned_by_keg);
+}
+
+test "checkConflicts flags a directory occupying a leaf slot as not keg-owned" {
+    const prefix = try uniquePrefix("link_dir_in_slot_conflict");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    const keg = try makeKegWithBinary(prefix, "foo", "1.0", "tool");
+    defer testing.allocator.free(keg);
+    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/tool", .{prefix});
+    defer testing.allocator.free(slot);
+    try test_io.cwd().createDirPath(std.Options.debug_io, slot);
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+
+    const conflicts = try linker.checkConflicts(keg, false);
+    defer {
+        for (conflicts) |c| {
+            testing.allocator.free(c.link_path);
+            testing.allocator.free(c.existing_keg);
+        }
+        testing.allocator.free(conflicts);
+    }
+    try testing.expectEqual(@as(usize, 1), conflicts.len);
+    try testing.expectEqualStrings("existing directory", conflicts[0].existing_keg);
+    try testing.expect(!conflicts[0].owned_by_keg);
+}
+
 test "unlink prunes emptied nested dirs but keeps dirs another keg still links" {
     const prefix = try uniquePrefix("unlink_prune");
     defer testing.allocator.free(prefix);
@@ -734,7 +852,10 @@ test "checkConflicts flags a file-vs-directory collision the symlink probe misse
     }
     var hit = false;
     for (conflicts) |c| {
-        if (std.mem.endsWith(u8, c.link_path, "/share/data")) hit = true;
+        if (std.mem.endsWith(u8, c.link_path, "/share/data")) {
+            hit = true;
+            try testing.expect(c.owned_by_keg); // alpha's symlink, not a stray file
+        }
     }
     try testing.expect(hit);
 }

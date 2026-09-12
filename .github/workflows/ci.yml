@@ -130,6 +130,9 @@ jobs:
       - name: Regression guard - a patched Mach-O always reaches the re-sign list
         run: ./scripts/regressions/walk-refuses-to-drop-a-mutated-macho-mutated-macho-can-skip-resigning-on-append-failure.sh
 
+      - name: Regression guard - link pre-check refuses sibling-version symlinks and occupied plain-file slots
+        run: ./scripts/regressions/conflict-precheck-boundary-and-plain-file-conflict-precheck-prefix-match-and-skipped-targets.sh
+
       - name: Build universal binary
         run: just build-universal
 

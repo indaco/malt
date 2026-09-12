@@ -1285,6 +1285,39 @@ fn runInstall(
     }
 }
 
+/// `--force` only sweeps links a keg of the same name left behind; another
+/// package's links need an uninstall, and a stray file or directory in the
+/// slot has to be removed by hand.
+fn conflictHint(conflicts: []const linker_mod.Conflict, name: []const u8) []const u8 {
+    var other_keg = false;
+    for (conflicts) |c| {
+        if (!c.owned_by_keg) return "Remove the conflicting file or directory first.";
+        if (!kegOwnedBy(c.existing_keg, name)) other_keg = true;
+    }
+    return if (other_keg) "Uninstall the conflicting package first." else "Use --force to overwrite.";
+}
+
+/// `existing_keg` is `Cellar/<name>/<ver>`; match the name segment only.
+fn kegOwnedBy(existing_keg: []const u8, name: []const u8) bool {
+    const marker = "Cellar/";
+    if (!std.mem.startsWith(u8, existing_keg, marker)) return false;
+    const rest = existing_keg[marker.len..];
+    return rest.len > name.len and rest[name.len] == '/' and std.mem.startsWith(u8, rest, name);
+}
+
+test "conflictHint names the one action that actually clears the slot" {
+    const same: linker_mod.Conflict = .{ .link_path = "/p/bin/a", .existing_keg = "Cellar/a/1.0" };
+    const other: linker_mod.Conflict = .{ .link_path = "/p/bin/b", .existing_keg = "Cellar/ab/2.0" };
+    const file: linker_mod.Conflict = .{ .link_path = "/p/bin/c", .existing_keg = "existing file", .owned_by_keg = false };
+    try std.testing.expectEqualStrings("Use --force to overwrite.", conflictHint(&.{same}, "a"));
+    try std.testing.expectEqualStrings("Uninstall the conflicting package first.", conflictHint(&.{other}, "a"));
+    try std.testing.expectEqualStrings("Uninstall the conflicting package first.", conflictHint(&.{ same, other }, "a"));
+    try std.testing.expectEqualStrings("Remove the conflicting file or directory first.", conflictHint(&.{ same, other, file }, "a"));
+    // Name compare is whole-segment: `a` must not claim `ab`'s keg.
+    try std.testing.expect(!kegOwnedBy("Cellar/ab/2.0", "a"));
+    try std.testing.expect(kegOwnedBy("Cellar/a/1.0", "a"));
+}
+
 /// Link + record a materialised keg. Must run serially: linker conflict
 /// checks read live symlink state and SQLite is single-writer.
 ///
@@ -1327,7 +1360,7 @@ fn linkAndRecord(
             for (conflicts) |conflict| {
                 sink.err("  {s} already linked by {s}", .{ conflict.link_path, conflict.existing_keg });
             }
-            sink.err("Use --force to overwrite, or uninstall the conflicting package first.", .{});
+            sink.err("{s}", .{conflictHint(conflicts, job.name)});
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.LinkFailed;
         }
