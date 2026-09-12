@@ -113,6 +113,20 @@ else
   }
 fi
 
+# 4b. the prefix half of the same gate; runs before the tty check, so no pty needed
+set +e
+out=$(cd "$S" && MALT_PREFIX=rel MALT_CACHE="$S/ok" "$BIN" tui </dev/null 2>&1)
+rc=$?
+set -e
+[[ $rc -eq 78 ]] || {
+  echo "FAIL: tui with relative MALT_PREFIX rc=$rc (want 78)"
+  exit 1
+}
+grep -q 'refusing to use MALT_PREFIX' <<<"$out" || {
+  echo "FAIL: no refusal message from tui for MALT_PREFIX"
+  exit 1
+}
+
 # 5. the passive version notice never aborts a command that succeeded.
 # Every CI marker the notifier honours is scrubbed, or the probe passes
 # vacuously on a runner; the assume-tty seam stands in for a real terminal.
