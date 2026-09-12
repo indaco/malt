@@ -133,6 +133,9 @@ jobs:
       - name: Regression guard - link pre-check refuses sibling-version symlinks and occupied plain-file slots
         run: ./scripts/regressions/conflict-precheck-boundary-and-plain-file-conflict-precheck-prefix-match-and-skipped-targets.sh
 
+      - name: Regression guard - subprocess extractors refuse escaping link targets
+        run: ./scripts/regressions/xz-zip-extractors-lack-pax-linkpath-prescan.sh
+
       - name: Build universal binary
         run: just build-universal
 
