@@ -119,6 +119,52 @@ test "maltCacheDir falls back to {prefix}/cache when MALT_CACHE unset" {
     try testing.expectEqualStrings("/tmp/malt_atomic_cache_fallback/cache", path);
 }
 
+test "maltCacheDirChecked: relative MALT_CACHE returns NotAbsolute" {
+    setCache("rel/cache");
+    defer unsetCache();
+    try testing.expectError(error.NotAbsolute, atomic.maltCacheDirChecked(testing.allocator));
+}
+
+test "maltCacheDirChecked: traversal MALT_CACHE returns DotDotComponent" {
+    setCache("/tmp/malt/../etc");
+    defer unsetCache();
+    try testing.expectError(error.DotDotComponent, atomic.maltCacheDirChecked(testing.allocator));
+}
+
+test "maltCacheDirChecked: MALT_CACHE with a space is honoured, the charset is prefix-only" {
+    setCache("/tmp/malt cache");
+    defer unsetCache();
+    const path = try atomic.maltCacheDirChecked(testing.allocator);
+    defer testing.allocator.free(path);
+    try testing.expectEqualStrings("/tmp/malt cache", path);
+}
+
+test "maltCacheDirChecked: unset falls back to {prefix}/cache" {
+    unsetCache();
+    setPrefix("/tmp/malt_atomic_cache_checked_fallback");
+    defer unsetPrefix();
+    const path = try atomic.maltCacheDirChecked(testing.allocator);
+    defer testing.allocator.free(path);
+    try testing.expectEqualStrings("/tmp/malt_atomic_cache_checked_fallback/cache", path);
+}
+
+test "maltCacheDirChecked: a valid MALT_CACHE wins even when MALT_PREFIX is malformed" {
+    setCache("/tmp/malt_atomic_cache_wins");
+    defer unsetCache();
+    setPrefix("relative/prefix");
+    defer unsetPrefix();
+    const path = try atomic.maltCacheDirChecked(testing.allocator);
+    defer testing.allocator.free(path);
+    try testing.expectEqualStrings("/tmp/malt_atomic_cache_wins", path);
+}
+
+test "maltCacheDirChecked: unset with a malformed MALT_PREFIX surfaces the prefix error" {
+    unsetCache();
+    setPrefix("relative/prefix");
+    defer unsetPrefix();
+    try testing.expectError(error.NotAbsolute, atomic.maltCacheDirChecked(testing.allocator));
+}
+
 test "maltCacheDir honours MALT_CACHE env var" {
     setCache("/tmp/malt_atomic_cache_override");
     defer unsetCache();
