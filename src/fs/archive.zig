@@ -622,8 +622,9 @@ fn validateZip(io: std.Io, archive_path: []const u8) !void {
 }
 
 /// Extracts a tar.xz archive file to a directory using the system `tar` command.
-/// Zig 0.15's xz decompressor uses the legacy I/O API which doesn't integrate
-/// with std.tar, so we shell out to the system tar (always available on macOS).
+/// The pure-Zig xz decoder allocates the LZMA2 dictionary per block at the
+/// archive-declared size and is materially slower than liblzma on cask-sized
+/// payloads, so we shell out to the system tar (always available on macOS).
 /// `--no-same-permissions`/`--no-same-owner` stop tar from honouring archived
 /// uid/mode bits on extract — downloaded archives should not shape the
 /// on-disk identity of what they produce.
@@ -642,8 +643,10 @@ pub fn extractTarXzFile(io: std.Io, archive_path: []const u8, dest_dir: []const 
         else => return error.ExtractionFailed,
     }
 
-    // `tar tf` validated entry names, not symlink targets; check those on
-    // the materialised tree.
+    // `tar tf` resolves pax `path=`, so the name check above saw effective
+    // member names. Hard-link targets never appear in a listing; bsdtar's own
+    // linkname security refuses them (the colocated guard tests pin that).
+    // Escaping symlinks are the residue - check those on the materialised tree.
     try rejectEscapingSymlinks(io, dest_dir);
 }
 
@@ -787,14 +790,18 @@ fn testTarHeader(name: []const u8, typeflag: u8, link: []const u8, size: u64) [5
     @memcpy(h[257..262], "ustar");
     h[263] = '0';
     h[264] = '0';
-    // Checksum: sum the whole header with the chksum field read as spaces.
+    testTarSeal(&h);
+    return h;
+}
+
+/// Checksum: sum the whole header with the chksum field read as spaces.
+fn testTarSeal(h: *[512]u8) void {
     @memset(h[148..156], ' ');
     var sum: u64 = 0;
     for (h) |b| sum += b;
     _ = std.fmt.bufPrint(h[148..154], "{o:0>6}", .{sum}) catch unreachable;
     h[154] = 0;
     h[155] = ' ';
-    return h;
 }
 
 /// A GNU sparse header with the "extended sparse headers follow" bit set.
@@ -802,12 +809,7 @@ fn testTarHeader(name: []const u8, typeflag: u8, link: []const u8, size: u64) [5
 fn testGnuSparseHeader() [512]u8 {
     var h = testTarHeader("sparse", 'S', "", 0);
     h[482] = 1;
-    @memset(h[148..156], ' ');
-    var sum: u64 = 0;
-    for (h) |b| sum += b;
-    _ = std.fmt.bufPrint(h[148..154], "{o:0>6}", .{sum}) catch unreachable;
-    h[154] = 0;
-    h[155] = ' ';
+    testTarSeal(&h);
     return h;
 }
 
@@ -856,6 +858,17 @@ const TestTar = struct {
 
     fn entry(self: *TestTar, name: []const u8, typeflag: u8, link: []const u8) void {
         const h = testTarHeader(name, typeflag, link, 0);
+        @memcpy(self.buf[self.len..][0..512], h[0..]);
+        self.len += 512;
+    }
+
+    /// `entry` with an explicit mode. Headers default to mode 0, and macOS
+    /// refuses readlink on a mode-0 symlink, which would stop the post-extract
+    /// walk before it can judge the target.
+    fn modeEntry(self: *TestTar, name: []const u8, typeflag: u8, link: []const u8, mode: u16) void {
+        var h = testTarHeader(name, typeflag, link, 0);
+        _ = std.fmt.bufPrint(h[100..107], "{o:0>7}", .{mode}) catch unreachable;
+        testTarSeal(&h);
         @memcpy(self.buf[self.len..][0..512], h[0..]);
         self.len += 512;
     }
@@ -924,6 +937,24 @@ fn testExtractLimited(io: std.Io, s: *Scratch, raw: []const u8, limits: Limits) 
     return extractTarGzLimited(io, s.p("/a.tar.gz"), s.p("/dest"), limits);
 }
 
+/// Write `raw` uncompressed under `s` and run `extractTarXzFile` into
+/// `<s>/dest`. The xz path validates by listing rather than by magic, so a
+/// plain `.tar` exercises the same subprocess pipeline as a `.tar.xz`.
+fn testExtractXz(io: std.Io, s: *Scratch, raw: []const u8) !void {
+    try s.dir.writeFile(io, .{ .sub_path = "a.tar", .data = raw });
+    // System tar reports each refusal on the inherited stderr; park fd 2 on
+    // /dev/null for the call so the runner's output stays clean.
+    const saved = std.c.dup(std.posix.STDERR_FILENO);
+    if (saved < 0) return error.Unexpected;
+    defer _ = std.c.close(saved);
+    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+    if (devnull < 0) return error.Unexpected;
+    defer _ = std.c.close(devnull);
+    if (std.c.dup2(devnull, std.posix.STDERR_FILENO) < 0) return error.Unexpected;
+    defer _ = std.c.dup2(saved, std.posix.STDERR_FILENO);
+    return extractTarXzFile(io, s.p("/a.tar"), s.p("/dest"));
+}
+
 test "extractZip ignores a PATH-resident unzip shim" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
 
@@ -961,6 +992,81 @@ test "extractZip ignores a PATH-resident unzip shim" {
 
     try extractZip(shim_io.io(), archive_path, dest);
     try std.Io.Dir.accessAbsolute(test_io, s.p("/dest/payload"), .{});
+}
+
+// The subprocess extractor never inspects hard-link targets itself; these
+// pin the refusals malt delegates to system tar's linkname security so a
+// toolchain change surfaces here instead of reopening the escape silently.
+
+test "extractTarXzFile rejects a hard link whose target climbs out" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("xz_hardlink_climb");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.entry("pkg/b", '1', "../../outside/victim");
+    try std.testing.expectError(error.ExtractionFailed, testExtractXz(io, &s, t.bytes()));
+}
+
+test "extractTarXzFile rejects a file written through an archive symlink" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("xz_write_through_symlink");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    // No `..` in any entry name and no absolute target: this is the vector
+    // that survives if only the dot-dot check ever changes.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.entry("pkg/s", '2', "../../outside");
+    t.file("pkg/s/pwn", "x");
+    try std.testing.expectError(error.ExtractionFailed, testExtractXz(io, &s, t.bytes()));
+}
+
+test "extractTarXzFile rejects a pax linkpath that overrides a benign hard link" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("xz_pax_hardlink");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    // `tar tf` lists only member names, so the escaping target is invisible
+    // to the listing check; the refusal has to come from the extractor.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.file("pkg/a", "x");
+    t.pax('x', "linkpath", "../../outside/victim");
+    t.entry("pkg/b", '1', "pkg/a");
+    try std.testing.expectError(error.ExtractionFailed, testExtractXz(io, &s, t.bytes()));
+}
+
+test "extractTarXzFile rejects a pax linkpath that overrides a benign symlink" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("xz_pax_symlink");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    // System tar materialises an escaping symlink with exit 0; only the
+    // post-extract walk catches it, and it must take the tree with it.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.pax('x', "linkpath", "../../../../tmp/outside");
+    t.modeEntry("pkg/s", '2', "pkg/a", 0o755);
+    try std.testing.expectError(error.ExtractionFailed, testExtractXz(io, &s, t.bytes()));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, s.p("/dest"), .{}));
 }
 
 test "extractTarGz rejects a pax linkpath that escapes the destination" {
