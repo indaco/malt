@@ -1069,6 +1069,25 @@ test "extractTarXzFile rejects a pax linkpath that overrides a benign symlink" {
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, s.p("/dest"), .{}));
 }
 
+test "extractTarXzFile wipes the tree when a symlink target cannot be read" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("xz_unreadable_symlink");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    // macOS refuses readlink on a mode-0 symlink, so the walk cannot judge
+    // the target. Unverifiable must mean rejected *and* wiped, not a bare
+    // error that leaves the hostile link on disk.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.entry("pkg/s", '2', "../../../../tmp/outside");
+    try std.testing.expectError(error.ExtractionFailed, testExtractXz(io, &s, t.bytes()));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, s.p("/dest"), .{}));
+}
+
 test "extractTarGz rejects a pax linkpath that escapes the destination" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
