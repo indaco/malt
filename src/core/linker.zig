@@ -82,11 +82,25 @@ pub const Linker = struct {
                 // scanning kegs with many files. `rel` is the full nested
                 // path relative to the linkable dir.
                 var link_target_buf: [1024]u8 = undefined;
-                const link_target_len = prefix_dir.readLink(self.io, rel, &link_target_buf) catch continue;
+                const link_target_len = prefix_dir.readLink(self.io, rel, &link_target_buf) catch |err| switch (err) {
+                    error.FileNotFound => continue, // slot is free
+                    // Anything else (a regular file, an unreadable entry) is
+                    // occupied by something we cannot verify; `link` would
+                    // replace it, so refuse here.
+                    else => {
+                        var lp_buf: [std.fs.max_path_bytes]u8 = undefined;
+                        const link_path = std.fmt.bufPrint(&lp_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, rel }) catch continue;
+                        conflicts.append(self.allocator, .{
+                            .link_path = self.allocator.dupe(u8, link_path) catch continue,
+                            .existing_keg = self.allocator.dupe(u8, "existing file") catch continue,
+                        }) catch continue;
+                        continue;
+                    },
+                };
                 const link_target = link_target_buf[0..link_target_len];
 
                 // If the existing symlink points into a different keg, it's a conflict
-                if (!std.mem.startsWith(u8, link_target, keg_path)) {
+                if (!isUnderKeg(link_target, keg_path)) {
                     var link_path_buf: [std.fs.max_path_bytes]u8 = undefined;
                     const link_path = std.fmt.bufPrint(&link_path_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, rel }) catch continue;
 
@@ -174,6 +188,14 @@ pub const Linker = struct {
             pos = (slash orelse rel.len) + 1;
         }
         return null;
+    }
+
+    /// True when `target` lies inside `keg_path`. A bare prefix match is not
+    /// enough: `Cellar/foo/1.0_1` continues `Cellar/foo/1.0` byte-for-byte.
+    fn isUnderKeg(target: []const u8, keg_path: []const u8) bool {
+        return target.len > keg_path.len and
+            std.mem.startsWith(u8, target, keg_path) and
+            target[keg_path.len] == '/';
     }
 
     /// Extract "Cellar/<name>/<ver>" from a full path like "/opt/malt/Cellar/foo/1.0/bin/foo"
@@ -464,6 +486,16 @@ test "the broken-link sweep covers every dir the linker writes into" {
     }
     try testing.expect(has_etc);
     try testing.expectEqual(@as(usize, 6), swept.len);
+}
+
+test "isUnderKeg: only a '/' after the keg path counts as inside it" {
+    const keg = "/opt/malt/Cellar/foo/1.0";
+    try testing.expect(Linker.isUnderKeg("/opt/malt/Cellar/foo/1.0/bin/x", keg));
+    try testing.expect(!Linker.isUnderKeg("/opt/malt/Cellar/foo/1.0_1/bin/x", keg));
+    try testing.expect(!Linker.isUnderKeg("/opt/malt/Cellar/foo/1.0.1/bin/x", keg));
+    try testing.expect(!Linker.isUnderKeg("/opt/malt/Cellar/foo/1.0", keg));
+    try testing.expect(!Linker.isUnderKeg("/opt/malt/Cellar/foo/1.", keg));
+    try testing.expect(!Linker.isUnderKeg("/opt/malt/Cellar/bar/1.0/bin/x", keg));
 }
 
 test "isDanglingLinkError: only a missing target counts" {
