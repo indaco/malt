@@ -39,6 +39,7 @@ const offline_mod = @import("net/offline.zig");
 const color_mod = @import("ui/color.zig");
 const custom_theme = @import("ui/custom_theme.zig");
 const theme_file = @import("fs/theme_file.zig");
+const atomic = @import("fs/atomic.zig");
 const output_mod = @import("ui/output.zig");
 const progress_mod = @import("ui/progress.zig");
 const notifier = @import("update/notifier.zig");
@@ -745,6 +746,11 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         // can't reach `cli/help`. Reads parse `mt … --json`; writes re-exec `mt`.
         .tui => {
             if (cli_help.showIfRequested(ctx, cmd_args, "tui")) return;
+            // The leaf reads MALT_PREFIX/MALT_CACHE itself and cannot reach the
+            // fs validator, so fail closed here, before the alt-screen would
+            // swallow the refusal. Only the checks matter; the values are dropped.
+            _ = atomic.maltPrefixOrAbort();
+            allocator.free(try atomic.maltCacheDir(allocator));
             // Resolve this binary's path so the TUI re-execs the *same* `mt` for
             // delegated mutations. Falling back to a bare `mt` would resolve
             // through PATH, where a package's own bin directory can shadow us.
