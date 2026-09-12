@@ -5,16 +5,21 @@
 # relative value tripped the std absolute-path assert and aborted the
 # process with a stack trace. The fix routes MALT_CACHE through the same
 # boundary check MALT_PREFIX already has, refusing malformed values with
-# exit 78 before any I/O.
+# exit 78 before any I/O. `mt tui` reads the env itself, so it is gated by
+# the same check before the alt-screen can swallow the message.
 #
 # Usage: scripts/regressions/malt-cache-validated-before-wipe-malt-cache-unvalidated-and-wiped.sh
 # Requirements: built `malt` binary at $MALT_BIN or zig-out/bin/malt.
-# No network.
+# The TUI probe drives a pty when perl IO::Pty is available and falls back
+# to a non-tty launch otherwise. No network.
 
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
+export MT_BIN="$BIN"
+# shellcheck source=scripts/lib/tui_pty.sh
+source "$ROOT/scripts/lib/tui_pty.sh"
 [[ -x "$BIN" ]] || {
   echo "build malt first: zig build" >&2
   exit 2
@@ -69,4 +74,41 @@ MALT_PREFIX="$S/prefix" MALT_CACHE="$S/ok" "$BIN" purge --wipe --yes >/dev/null 
   exit 1
 }
 
-echo "ok: MALT_CACHE validated before wipe"
+# 4. the dashboard is gated by the same check, before the alt-screen
+mkdir -p "$S/prefix/db"
+if perl -MIO::Pty -e 1 >/dev/null 2>&1 && perl -c "$TUI_PTY_DRIVER" >/dev/null 2>&1; then
+  cap="$S/tui_cap.bin"
+  status=$(
+    cd "$S" || exit 1
+    export MALT_PREFIX="$S/prefix" MALT_CACHE=rel MALT_OFFLINE=1
+    unset CI NO_COLOR
+    tui_pty_drive "$cap" 90 24 <<<'quitwait 1.5'
+  )
+  grep -q 'EXIT_STATUS=78' <<<"$status" || {
+    echo "FAIL: tui with relative MALT_CACHE on a tty: $status (want EXIT_STATUS=78)"
+    exit 1
+  }
+  if grep -aEq 'panic:|reached unreachable' "$cap"; then
+    echo "FAIL: tui with relative MALT_CACHE still panics"
+    exit 1
+  fi
+  grep -aq 'refusing to use MALT_CACHE' "$cap" || {
+    echo "FAIL: no refusal message from tui on a tty"
+    exit 1
+  }
+else
+  set +e
+  out=$(cd "$S" && MALT_PREFIX="$S/prefix" MALT_CACHE=rel "$BIN" tui </dev/null 2>&1)
+  rc=$?
+  set -e
+  [[ $rc -eq 78 ]] || {
+    echo "FAIL: tui with relative MALT_CACHE rc=$rc (want 78)"
+    exit 1
+  }
+  grep -q 'refusing to use MALT_CACHE' <<<"$out" || {
+    echo "FAIL: no refusal message from tui"
+    exit 1
+  }
+fi
+
+echo "ok: MALT_CACHE validated before wipe and tui launch"
