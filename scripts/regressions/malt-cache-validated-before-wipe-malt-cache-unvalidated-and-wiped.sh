@@ -6,7 +6,9 @@
 # process with a stack trace. The fix routes MALT_CACHE through the same
 # boundary check MALT_PREFIX already has, refusing malformed values with
 # exit 78 before any I/O. `mt tui` reads the env itself, so it is gated by
-# the same check before the alt-screen can swallow the message.
+# the same check before the alt-screen can swallow the message. The passive
+# version notice resolves its own state file from MALT_CACHE and is
+# best-effort, so there a non-absolute root skips the notice instead.
 #
 # Usage: scripts/regressions/malt-cache-validated-before-wipe-malt-cache-unvalidated-and-wiped.sh
 # Requirements: built `malt` binary at $MALT_BIN or zig-out/bin/malt.
@@ -111,4 +113,22 @@ else
   }
 fi
 
-echo "ok: MALT_CACHE validated before wipe and tui launch"
+# 5. the passive version notice never aborts a command that succeeded.
+# Every CI marker the notifier honours is scrubbed, or the probe passes
+# vacuously on a runner; the assume-tty seam stands in for a real terminal.
+set +e
+out=$(cd "$S" && env -u CI -u GITHUB_ACTIONS -u BUILDKITE -u JENKINS_URL -u TF_BUILD -u CIRCLECI -u GITLAB_CI \
+  MALT_PREFIX="$S/prefix" MALT_CACHE=rel MALT_VERSION_NOTIFIER_ASSUME_TTY=1 "$BIN" list 2>&1)
+rc=$?
+set -e
+[[ $rc -eq 0 ]] || {
+  echo "FAIL: list with relative MALT_CACHE rc=$rc (want 0)"
+  printf '%s\n' "$out" | head -5
+  exit 1
+}
+if grep -Eq 'panic:|reached unreachable' <<<"$out"; then
+  echo "FAIL: version notice still panics on a relative MALT_CACHE"
+  exit 1
+fi
+
+echo "ok: MALT_CACHE validated before wipe, tui launch and the version notice"
