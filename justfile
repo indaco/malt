@@ -354,6 +354,14 @@ backport ref:
     just fmt-check test
     echo "▸ Cherry-picked {{ ref }} onto $branch — review, then 'just patch'."
 
+# Cherry-pick every main commit from <from> (inclusive) up to <to> onto
+# the current release branch, running the test gate once at the end.
+#   just backport-range 58c90712          # 58c90712..main
+#   just backport-range 58c90712 62b3a3ac
+[group('release')]
+backport-range from to="main":
+    just backport '{{ from }}^..{{ to }}'
+
 # Prepare a patch on the current release branch: gate -> sley bump ->
 # sley changelog merge. Refuses to run from main or a dirty tree. The
 # push + tag steps are intentionally manual; the recipe prints the
