@@ -4,6 +4,66 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.24.2 - 2026-09-12
+
+### Highlights
+
+v0.24.2 is a hardening release: malt now records why each keg is installed the way Homebrew does, refuses a bottle or link it cannot vouch for, and lets post-install steps run on a Homebrew Ruby.
+
+- **Cleanup that keeps what you asked for.** Naming a dependency directly makes it a requested keg, a migrated Homebrew prefix keeps its dependency edges, and every `INSTALL_RECEIPT.json` matches malt's own record - so `bundle dump`, `purge`, and `link --isolate` see the same picture as `brew`.
+- **No more silently broken installs.** A binary with a stale signature, a cached keg under the wrong name, a bottle with no keg inside, or an archive with an unverifiable symlink is refused and wiped, and `mt link` reports a conflict instead of overwriting a sibling version or a stray file.
+- **Post-install steps on a Homebrew Ruby.** The Ruby fallback can run a package-manager Ruby inside the sandbox and only offers interpreters that can actually start there.
+- **Numbers you can act on.** `mt doctor` reports only what `purge --cache` will reclaim, `bundle remove --purge` finds the manifest from any directory, and a malformed `MALT_CACHE` is refused instead of wiping the wrong tree.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **migrate:** record a brew dependency as a dependency instead of a requested keg ([3dc4e7ed](https://github.com/indaco/malt/commit/3dc4e7ed)) ([#1008](https://github.com/indaco/malt/pull/1008))
+- **fs:** refuse a malformed MALT_CACHE instead of wiping or aborting on it ([871de424](https://github.com/indaco/malt/commit/871de424)) ([#1006](https://github.com/indaco/malt/pull/1006))
+- **archive:** wipe the extracted tree when a symlink target cannot be verified ([91b75506](https://github.com/indaco/malt/commit/91b75506)) ([#1004](https://github.com/indaco/malt/pull/1004))
+- **linker:** refuse to link over a sibling version's symlink or a plain file the pre-check could not read ([c7c4556c](https://github.com/indaco/malt/commit/c7c4556c)) ([#1002](https://github.com/indaco/malt/pull/1002))
+- **install:** record a dependency the user names directly as installed on request ([d7a79131](https://github.com/indaco/malt/commit/d7a79131)) ([#1001](https://github.com/indaco/malt/pull/1001))
+- **cellar:** write the keg's real install reason into INSTALL_RECEIPT.json ([79977f53](https://github.com/indaco/malt/commit/79977f53)) ([#1000](https://github.com/indaco/malt/pull/1000))
+- **cellar:** refuse to install a relocated binary whose signature no longer covers it ([37f33257](https://github.com/indaco/malt/commit/37f33257)) ([#998](https://github.com/indaco/malt/pull/998))
+- **cellar:** abort the materialize instead of installing a patched binary that was never re-signed ([374de88b](https://github.com/indaco/malt/commit/374de88b)) ([#997](https://github.com/indaco/malt/pull/997))
+- **cellar:** refuse a cached keg restored under a name or version it was not installed as ([d4e3a5d3](https://github.com/indaco/malt/commit/d4e3a5d3)) ([#995](https://github.com/indaco/malt/pull/995))
+- **cellar:** refuse a store entry without the requested keg instead of installing it nested ([1bf9bdac](https://github.com/indaco/malt/commit/1bf9bdac)) ([#994](https://github.com/indaco/malt/pull/994))
+- **doctor:** report only what purge --cache will reclaim from the tap cache ([895bcfa6](https://github.com/indaco/malt/commit/895bcfa6)) ([#993](https://github.com/indaco/malt/pull/993))
+- **post-install:** stop offering the Ruby fallback interpreters the fence cannot run ([8f923931](https://github.com/indaco/malt/commit/8f923931)) ([#991](https://github.com/indaco/malt/pull/991))
+- **post-install:** let the Ruby fallback run with a package-manager Ruby inside the fence ([9b668ee6](https://github.com/indaco/malt/commit/9b668ee6)) ([#990](https://github.com/indaco/malt/pull/990))
+- **bundle:** record the imported manifest by its canonical path so purge reads the right file from any cwd ([f4c6a3a8](https://github.com/indaco/malt/commit/f4c6a3a8)) ([#988](https://github.com/indaco/malt/pull/988))
+
+### 📖 Documentation
+
+- **readme:** give every badge an icon ([485ccf9a](https://github.com/indaco/malt/commit/485ccf9a)) ([#989](https://github.com/indaco/malt/pull/989))
+
+### ✅ Tests
+
+- **smoke:** revert casks on a red install smoke and excuse upstream outages as SKIP ([1b713b8b](https://github.com/indaco/malt/commit/1b713b8b)) ([#1007](https://github.com/indaco/malt/pull/1007))
+- **archive:** pin the link-target refusals malt delegates to system tar ([4b074efa](https://github.com/indaco/malt/commit/4b074efa)) ([#1003](https://github.com/indaco/malt/pull/1003))
+
+### 🏡 Chores
+
+- **just:** backport an inclusive commit range with one test gate ([bfa587bf](https://github.com/indaco/malt/commit/bfa587bf)) ([#1009](https://github.com/indaco/malt/pull/1009))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.24.1 - 2026-09-11
 
 ### Highlights

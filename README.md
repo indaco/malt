@@ -77,7 +77,7 @@ The script needs [`cosign`](https://docs.sigstore.dev/cosign/system_config/insta
 To verify `install.sh` itself out of band, pin to a release tag - the latest below, or any release you trust - and compare its SHA256 against that release's notes:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.24.1/scripts/install.sh" -o install.sh
+curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.24.2/scripts/install.sh" -o install.sh
 shasum -a 256 install.sh
 bash install.sh
 ```
@@ -831,33 +831,39 @@ For installing malt from a local checkout (the end-user path), see [From source]
 Install times on macOS 14 (Apple Silicon).
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install (median ±σ)
 
-| Package | malt 0.24.0 | nanobrew v0.1.208 | zerobrew v0.3.2 | Homebrew |
-| ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.465±0.040s | 0.510±0.015s | 0.909±0.028s | 1.372±0.114s |
-| **wget** (6 deps) | 4.681±0.638s | 5.506±0.401s | 7.083±0.415s | 1.448±0.124s |
-| **ffmpeg** (11 deps) | 4.157±0.504s | 5.215±0.379s | 9.767±0.262s | 3.680±0.284s |
+| Package              | malt 0.24.0  | nanobrew v0.1.208 | zerobrew v0.3.2 | Homebrew     |
+| -------------------- | ------------ | ----------------- | --------------- | ------------ |
+| **tree** (0 deps)    | 0.465±0.040s | 0.510±0.015s      | 0.909±0.028s    | 1.372±0.114s |
+| **wget** (6 deps)    | 4.681±0.638s | 5.506±0.401s      | 7.083±0.415s    | 1.448±0.124s |
+| **ffmpeg** (11 deps) | 4.157±0.504s | 5.215±0.379s      | 9.767±0.262s    | 3.680±0.284s |
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew |
-| ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.010s | 0.020s | 0.395s |
-| **wget** (6 deps) | 0.026s | 0.035s | 1.110s |
-| **ffmpeg** (11 deps) | 0.030s | 1.696s | 4.815s |
+| Package              | malt   | nanobrew | zerobrew |
+| -------------------- | ------ | -------- | -------- |
+| **tree** (0 deps)    | 0.010s | 0.020s   | 0.395s   |
+| **wget** (6 deps)    | 0.026s | 0.035s   | 1.110s   |
+| **ffmpeg** (11 deps) | 0.030s | 1.696s   | 4.815s   |
+
 <!-- BENCH:WARM:END -->
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size   |
+| -------- | ------ |
 | **malt** | 4.3 MB |
 | nanobrew | 3.1 MB |
 | zerobrew | 8.7 MB |
+
 <!-- BENCH:SIZE:END -->
 
 Apple Silicon (GitHub Actions macos-14), 2026-09-07. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
