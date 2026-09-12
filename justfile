@@ -77,6 +77,7 @@ regressions-hermetic:
 regressions-harness:
     @./scripts/regressions/cached-outdated-drops-revision-bumped-packages.sh
     @./scripts/regressions/child-run-sequential-pipe-drain-deadlock.sh
+    @./scripts/regressions/conflict-precheck-boundary-and-plain-file-conflict-precheck-prefix-match-and-skipped-targets.sh
     @./scripts/regressions/cosign-guard-fails-open-and-spawn-not-pinned.sh
     @./scripts/regressions/csi-whitelist-ignores-private-parameter-bytes.sh
     @./scripts/regressions/dsl-chmod-mode-cast-panic-large-literal.sh
