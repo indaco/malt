@@ -13,6 +13,7 @@ FILTERS=(
   "extractTarXzFile rejects a file written through an archive symlink"
   "extractTarXzFile rejects a pax linkpath that overrides a benign hard link"
   "extractTarXzFile rejects a pax linkpath that overrides a benign symlink"
+  "extractTarXzFile wipes the tree when a symlink target cannot be read"
 )
 
 # The guards live in colocated `test {}` blocks; if one is ever deleted the

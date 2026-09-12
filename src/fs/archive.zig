@@ -698,31 +698,29 @@ fn validateSubprocessListing(io: std.Io, argv: []const []const u8) !void {
 /// not symlink *targets*; macOS `tar`/`unzip` refuse to write *through* a
 /// symlink, so a dangling escaping link is the only residue — this catches it.
 /// The whole tree is wiped on rejection so a failed extract leaves nothing
-/// behind, matching the in-process tar.gz contract. The walker descends real
-/// directories only (symlink entries are never followed), so it cannot loop.
+/// behind, matching the in-process tar.gz contract. A target the walk cannot
+/// read (macOS refuses readlink on a mode-0 link) is treated as an escape:
+/// unverifiable is not safe. The walker descends real directories only
+/// (symlink entries are never followed), so it cannot loop.
 fn rejectEscapingSymlinks(io: std.Io, dest_dir: []const u8) !void {
-    var escaped = false;
-    {
-        var dir = std.Io.Dir.openDirAbsolute(io, dest_dir, .{ .iterate = true }) catch
-            return error.ExtractionFailed;
-        defer dir.close(io);
-        var walker = dir.walk(child_allocator) catch return error.ExtractionFailed;
-        defer walker.deinit();
-        while (walker.next(io) catch return error.ExtractionFailed) |entry| {
-            if (entry.kind != .sym_link) continue;
-            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const len = entry.dir.readLink(io, entry.basename, &buf) catch return error.ExtractionFailed;
-            // `entry.path` is relative to dest_dir — the same shape the tar.gz
-            // pre-scan feeds `isSafeSymlinkTarget`, so the policy stays uniform.
-            if (!isSafeSymlinkTarget(entry.path, buf[0..len])) {
-                escaped = true;
-                break;
-            }
-        }
-    }
-    if (escaped) {
+    checkSymlinkTargets(io, dest_dir) catch {
         std.Io.Dir.cwd().deleteTree(io, dest_dir) catch {};
         return error.ExtractionFailed;
+    };
+}
+
+fn checkSymlinkTargets(io: std.Io, dest_dir: []const u8) !void {
+    var dir = try std.Io.Dir.openDirAbsolute(io, dest_dir, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(child_allocator);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .sym_link) continue;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const len = try entry.dir.readLink(io, entry.basename, &buf);
+        // `entry.path` is relative to dest_dir — the same shape the tar.gz
+        // pre-scan feeds `isSafeSymlinkTarget`, so the policy stays uniform.
+        if (!isSafeSymlinkTarget(entry.path, buf[0..len])) return error.ExtractionFailed;
     }
 }
 
@@ -1065,6 +1063,25 @@ test "extractTarXzFile rejects a pax linkpath that overrides a benign symlink" {
     var t = TestTar.init(&raw);
     t.pax('x', "linkpath", "../../../../tmp/outside");
     t.modeEntry("pkg/s", '2', "pkg/a", 0o755);
+    try std.testing.expectError(error.ExtractionFailed, testExtractXz(io, &s, t.bytes()));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, s.p("/dest"), .{}));
+}
+
+test "extractTarXzFile wipes the tree when a symlink target cannot be read" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var s = try Scratch.init("xz_unreadable_symlink");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    // macOS refuses readlink on a mode-0 symlink, so the walk cannot judge
+    // the target. Unverifiable must mean rejected *and* wiped, not a bare
+    // error that leaves the hostile link on disk.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.entry("pkg/s", '2', "../../../../tmp/outside");
     try std.testing.expectError(error.ExtractionFailed, testExtractXz(io, &s, t.bytes()));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, s.p("/dest"), .{}));
 }
