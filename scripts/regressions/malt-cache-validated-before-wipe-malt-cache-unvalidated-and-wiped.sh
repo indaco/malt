@@ -76,6 +76,17 @@ MALT_PREFIX="$S/prefix" MALT_CACHE="$S/ok" "$BIN" purge --wipe --yes >/dev/null 
   exit 1
 }
 
+# 3b. a space is legal in a cache root; only the install prefix carries a charset
+mkdir -p "$S/prefix/db" "$S/with space"
+MALT_PREFIX="$S/prefix" MALT_CACHE="$S/with space" "$BIN" purge --wipe --yes >/dev/null 2>&1 || {
+  echo "FAIL: absolute MALT_CACHE with a space refused"
+  exit 1
+}
+[[ ! -e "$S/with space" ]] || {
+  echo "FAIL: cache dir with a space not wiped"
+  exit 1
+}
+
 # 4. the dashboard is gated by the same check, before the alt-screen
 mkdir -p "$S/prefix/db"
 if perl -MIO::Pty -e 1 >/dev/null 2>&1 && perl -c "$TUI_PTY_DRIVER" >/dev/null 2>&1; then
