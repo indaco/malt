@@ -2,7 +2,8 @@
 //!
 //! Extracts the small subset of fields malt's private-tap copy-from-Cellar
 //! fallback needs from a keg's `INSTALL_RECEIPT.json`: source tap, stable
-//! version, and runtime dependency names. The parser is deliberately
+//! version, runtime dependency names, and whether the keg was installed on
+//! request. The parser is deliberately
 //! lenient — newer brew versions add fields we don't read, older ones
 //! omit fields we tolerate as null/absent.
 
@@ -22,6 +23,9 @@ pub const Receipt = struct {
     source_path: []const u8,
     /// `runtime_dependencies[*].full_name`. Order preserved.
     runtime_deps: []const []const u8,
+    /// `installed_on_request`. True when absent: very old brew receipts
+    /// omit the pair, and metadata must never demote a keg.
+    on_request: bool,
 
     arena: std.heap.ArenaAllocator,
 
@@ -127,11 +131,20 @@ pub fn parseInstallReceipt(parent: std.mem.Allocator, json_text: []const u8) Par
         break :blk list.toOwnedSlice(a) catch return ParseError.OutOfMemory;
     };
 
+    const on_request = blk: {
+        const v = root.get("installed_on_request") orelse break :blk true;
+        break :blk switch (v) {
+            .bool => |b| b,
+            else => true,
+        };
+    };
+
     return .{
         .tap = tap,
         .version = version,
         .source_path = source_path,
         .runtime_deps = deps,
+        .on_request = on_request,
         .arena = arena,
     };
 }
@@ -205,6 +218,34 @@ test "parseInstallReceipt tolerates missing optional fields" {
     try std.testing.expectEqualStrings("", r.version);
     try std.testing.expectEqualStrings("", r.source_path);
     try std.testing.expectEqual(@as(usize, 0), r.runtime_deps.len);
+    // Very old brew receipts omit the reason pair; absent means requested.
+    try std.testing.expect(r.on_request);
+}
+
+test "parseInstallReceipt reads installed_on_request true" {
+    const src = "{\"installed_as_dependency\": true, \"installed_on_request\": true}";
+    var r = try parseInstallReceipt(std.testing.allocator, src);
+    defer r.deinit();
+    try std.testing.expect(r.on_request);
+}
+
+test "parseInstallReceipt reads installed_on_request false" {
+    const src = "{\"installed_as_dependency\": true, \"installed_on_request\": false}";
+    var r = try parseInstallReceipt(std.testing.allocator, src);
+    defer r.deinit();
+    try std.testing.expect(!r.on_request);
+}
+
+test "parseInstallReceipt treats a null or non-bool installed_on_request as requested" {
+    for ([_][]const u8{
+        "{\"installed_on_request\": null}",
+        "{\"installed_on_request\": \"false\"}",
+        "{\"installed_on_request\": 0}",
+    }) |src| {
+        var r = try parseInstallReceipt(std.testing.allocator, src);
+        defer r.deinit();
+        try std.testing.expect(r.on_request);
+    }
 }
 
 test "parseInstallReceipt tolerates a missing source object" {

@@ -2554,6 +2554,106 @@ test "tap fallback runs the DSL post_install body and reports completion" {
     try testing.expect(!containsLine(stderr_buf.items, "post_install partially skipped"));
 }
 
+// ── Brew install reason ────────────────────────────────────────────────
+
+// Seed `prefix/Cellar/<name>/1.0/INSTALL_RECEIPT.json` carrying `reason`
+// verbatim (empty = key absent, as very old brew receipts have it).
+fn seedBrewReceipt(brew: []const u8, name: []const u8, reason: []const u8) !void {
+    try seedFakeBrew(brew, &.{name});
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/1.0/INSTALL_RECEIPT.json", .{ brew, name });
+    defer testing.allocator.free(path);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    const body = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{{s}\"source\":{{\"tap\":\"homebrew/core\",\"versions\":{{\"stable\":\"1.0\"}}}}}}",
+        .{reason},
+    );
+    defer testing.allocator.free(body);
+    try f.writeStreamingAll(std.Options.debug_io, body);
+}
+
+fn seed404(mt: []const u8, name: []const u8) !void {
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.404", .{ cache_api, name });
+    defer testing.allocator.free(marker);
+    (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
+}
+
+fn expectKegReason(mt: []const u8, name: []const u8, reason: []const u8) !void {
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{mt}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT install_reason, bin_isolated FROM kegs WHERE name = ?;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    try testing.expect(try stmt.step());
+    try testing.expectEqualStrings(reason, std.mem.span(stmt.columnText(0).?));
+    try testing.expect(!stmt.columnBool(1));
+
+    // The row and the malt-side receipt are written by different call
+    // sites; both must carry the brew reason or Homebrew-compatible
+    // tooling and malt disagree about the same keg.
+    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/1.0/INSTALL_RECEIPT.json", .{ mt, name });
+    defer testing.allocator.free(receipt_path);
+    const raw = try test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, receipt_path, 64 * 1024);
+    defer testing.allocator.free(raw);
+    const on_request = if (std.mem.eql(u8, reason, "direct")) "true" else "false";
+    const needle = try std.fmt.allocPrint(testing.allocator, "\"installed_on_request\": {s}", .{on_request});
+    defer testing.allocator.free(needle);
+    try testing.expect(std.mem.indexOf(u8, raw, needle) != null);
+}
+
+test "migrate records a brew dependency as a dependency and an absent reason as direct" {
+    resetOutput();
+    const brew = try scratchDir("brew_reason");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt_z = try scratchDir("mt_rsn");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
+
+    // The fallback is the only offline route into a migrated row; the
+    // receipt's installed_on_request bit is what the row must mirror.
+    try seedBrewReceipt(brew, "libdep", "\"installed_as_dependency\":true,\"installed_on_request\":false,");
+    try seedBrewReceipt(brew, "oldkeg", "");
+    try seed404(mt_z, "libdep");
+    try seed404(mt_z, "oldkeg");
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    output.setMode(.json);
+    defer resetOutput();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 2), parsed.value.object.get("migrated").?.array.items.len);
+
+    try expectKegReason(mt_z, "libdep", "dependency");
+    try expectKegReason(mt_z, "oldkeg", "direct");
+}
+
 test "tap fallback partial-DSL emits the --use-system-ruby hint same as install" {
     resetOutput();
     color.setForTest(false, false);

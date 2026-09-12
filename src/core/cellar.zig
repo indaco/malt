@@ -847,6 +847,7 @@ pub fn materializeFromLocalCellar(
     version: []const u8,
     tap: []const u8,
     cellar_type: []const u8,
+    on_request: bool,
 ) CellarError!Keg {
     if (!confined(name, version)) return CellarError.UnsafePathComponent;
     if (packageDirIsLink(io, prefix, name)) return CellarError.UnsafeCellarLink;
@@ -890,7 +891,7 @@ pub fn materializeFromLocalCellar(
     // Tap-aware receipt: the source-of-truth tap is the sibling
     // brew install's, not "homebrew/core". `mt list` and friends use
     // this to surface where a keg originally came from.
-    writeInstallReceiptFull(io, cellar_path, name, version, "", tap, true);
+    writeInstallReceiptFull(io, cellar_path, name, version, "", tap, on_request);
 
     const owned_path = allocator.dupe(u8, cellar_path) catch return CellarError.OutOfMemory;
     return .{ .name = name, .version = version, .path = owned_path };
@@ -1502,6 +1503,7 @@ test "the materialize sinks refuse a keg path that leaves the Cellar" {
                 pair[1],
                 "homebrew/core",
                 "",
+                true,
             ));
         }
     }
@@ -1606,6 +1608,7 @@ test "every Cellar sink reports a path that will not fit as PathTooLong" {
         "1.0",
         "homebrew/core",
         "",
+        true,
     ));
     try testing.expectError(CellarError.PathTooLong, remove(io, prefix, "pkg", "1.0"));
 }
@@ -1668,6 +1671,7 @@ test "every Cellar sink refuses a symlinked package dir" {
         "1.0",
         "homebrew/core",
         "",
+        true,
     ));
 
     try std.Io.Dir.accessAbsolute(io, canary, .{});

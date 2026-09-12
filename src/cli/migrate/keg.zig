@@ -107,6 +107,10 @@ pub fn migrateKeg(
         return .skipped_installed;
     }
 
+    // The brew receipt, not migrate, knows whether the user asked for it.
+    const on_request = brewOnRequest(ctx.io, allocator, deps.homebrew_prefix, keg_name);
+    const install_reason = if (on_request) "direct" else "dependency";
+
     // Two `defer`s below collapse six per-branch cleanups.
     const formula_json = deps.api.fetchFormula(keg_name) catch |e| switch (e) {
         // `NotFound` is the only API outcome that triggers the
@@ -171,8 +175,7 @@ pub fn migrateKeg(
         // a separate question from the placeholder.
         "",
         if (placeholder) |p| .{ .old = p.token, .new = p.value } else null,
-        // Migrated kegs are recorded as 'direct'.
-        true,
+        on_request,
     ) catch |e| {
         output.err("    {s}: failed to materialize ({s})", .{ keg_name, cellar_mod.describeError(e) });
         output.emitNdjsonEvent(.materialized, keg_name, "failed");
@@ -190,7 +193,7 @@ pub fn migrateKeg(
     defer if (deps.db_mu) |m| if (!db_mu_unlocked) m.unlock(ctx.io);
 
     if (!formula.keg_only) {
-        const keg_id = record.recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct", false, .{}) catch {
+        const keg_id = record.recordKeg(deps.db, &formula, bottle.sha256, keg.path, install_reason, false, .{}) catch {
             output.err("    {s}: failed to record in database", .{keg_name});
             cellar_mod.remove(ctx.io, deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
@@ -214,7 +217,7 @@ pub fn migrateKeg(
         };
         recordDeps(deps.db, keg_id, &formula);
     } else {
-        const keg_id = record.recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct", false, .{}) catch {
+        const keg_id = record.recordKeg(deps.db, &formula, bottle.sha256, keg.path, install_reason, false, .{}) catch {
             cellar_mod.remove(ctx.io, deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
@@ -329,6 +332,7 @@ fn migrateFromLocalCellar(
         // pass empty so the relocation pipeline treats it as a normal
         // bottle (full absolute-path rewrite + placeholder substitution).
         "",
+        receipt.on_request,
     ) catch |e| {
         output.err("    {s}: failed to materialize from local Cellar ({s})", .{ keg_name, cellar_mod.describeError(e) });
         return .failed_install;
@@ -348,7 +352,7 @@ fn migrateFromLocalCellar(
         .tap = receipt.tap,
         .store_sha256 = "",
         .cellar_path = keg.path,
-        .install_reason = "direct",
+        .install_reason = if (receipt.on_request) "direct" else "dependency",
         .bin_isolated = false,
     }, .{}) catch {
         output.err("    {s}: failed to record in database", .{keg_name});
@@ -529,6 +533,19 @@ fn findInstalledKegPath(
         }
     }
     return best_path;
+}
+
+/// Whether the brew prefix installed `name` on request. Any failure to
+/// locate, read, or parse the receipt yields `true`: metadata must never
+/// demote a keg to a dependency or fail the migrate.
+fn brewOnRequest(io: std.Io, allocator: std.mem.Allocator, homebrew_prefix: []const u8, name: []const u8) bool {
+    const keg_path = findInstalledKegPath(io, allocator, homebrew_prefix, name) catch null orelse return true;
+    defer allocator.free(keg_path);
+    const text = readInstallReceipt(io, allocator, keg_path) catch return true;
+    defer allocator.free(text);
+    var receipt = install_receipt_mod.parseInstallReceipt(allocator, text) catch return true;
+    defer receipt.deinit();
+    return receipt.on_request;
 }
 
 /// Slurp `INSTALL_RECEIPT.json` from a keg directory. Caller owns.
@@ -929,6 +946,37 @@ test "readInstallReceipt round-trips a real INSTALL_RECEIPT.json under DebugAllo
     const text = try readInstallReceipt(std.Options.debug_io, std.testing.allocator, dir);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings(payload, text);
+}
+
+fn writeBrewReceipt(s: *Scratch, name: []const u8, payload: []const u8) !void {
+    const a = s.arena.allocator();
+    const keg_dir = try std.fmt.allocPrint(a, "{s}/Cellar/{s}/1.0", .{ s.base, name });
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, keg_dir);
+    const path = try std.fmt.allocPrint(a, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    const w = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+    defer w.close(std.Options.debug_io);
+    try w.writeStreamingAll(std.Options.debug_io, payload);
+}
+
+test "brewOnRequest reads a dependency keg's receipt as not on request" {
+    var s = try Scratch.init("brew_on_request_dep");
+    defer s.deinit();
+    try writeBrewReceipt(&s, "libidn2", "{\"installed_as_dependency\": true, \"installed_on_request\": false}");
+    try std.testing.expect(!brewOnRequest(std.Options.debug_io, std.testing.allocator, s.base, "libidn2"));
+}
+
+test "brewOnRequest defaults to on request when the brew Cellar has no copy" {
+    var s = try Scratch.init("brew_on_request_missing");
+    defer s.deinit();
+    try std.testing.expect(brewOnRequest(std.Options.debug_io, std.testing.allocator, s.base, "ghost"));
+}
+
+test "brewOnRequest defaults to on request when the receipt is malformed" {
+    // Metadata must never demote a keg or fail the migrate.
+    var s = try Scratch.init("brew_on_request_malformed");
+    defer s.deinit();
+    try writeBrewReceipt(&s, "broken", "{not json");
+    try std.testing.expect(brewOnRequest(std.Options.debug_io, std.testing.allocator, s.base, "broken"));
 }
 
 test "full_name buffer fits realistic long tap+keg combinations" {

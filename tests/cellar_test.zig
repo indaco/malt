@@ -973,6 +973,37 @@ test "materializeWithCellar writes a dependency receipt when the keg is not on r
     try expectDependencyReceipt(testing.allocator, keg.path);
 }
 
+test "materializeFromLocalCellar writes a dependency receipt when the keg is not on request" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    // The store fixture doubles as the sibling brew keg to copy from.
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "dep", "1.0");
+    const src_keg = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/dep/1.0", .{ prefix, valid_test_sha });
+    defer testing.allocator.free(src_keg);
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const keg = try cellar_mod.materializeFromLocalCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        src_keg,
+        "dep",
+        "1.0",
+        "homebrew/core",
+        "",
+        false,
+    );
+    defer testing.allocator.free(keg.path);
+
+    try expectDependencyReceipt(testing.allocator, keg.path);
+}
+
 test "materializeWithCellar warm path rewrites the receipt with the current install reason" {
     const prefix = try createTestDir(testing.allocator);
     defer {
@@ -2077,6 +2108,7 @@ test "a symlinked package dir cannot redirect a keg write out of the prefix" {
         "1.0",
         "homebrew/core",
         "",
+        true,
     ));
     try testing.expectError(error.UnsafeCellarLink, cellar_mod.materializeWithCellar(
         std.Options.debug_io,
