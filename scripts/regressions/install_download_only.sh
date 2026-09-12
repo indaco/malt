@@ -151,15 +151,17 @@ pass "follow-up cask install populated casks row"
 
 # ── 6. Tap formula --download-only: warm cache/Tap, no Cellar/db. ─────
 # Real binary tap that ships a single executable through the
-# materializeRubyFormula path. Transient classified failures (rate
-# limits, DNS) are skipped, not failures — same shape as
-# install_tap_tmp_cleanup.sh.
+# materializeRubyFormula path.
 TAP_TARGET="${TAP_TARGET:-indaco/tap/sley}"
+# Upstream failures only; no `Failed to install` (that also wraps malt's
+# extract/relocate/dep errors).
+TRANSIENT_RE='rate limit|Network failure|Cannot fetch tap from GitHub|Tap formula/cask not found|Could not resolve|Failed to download|Download failed with status|SHA256 mismatch'
 TAP_LOG="$PREFIX/tap_install.log"
 printf '▸ malt install --download-only %s\n' "$TAP_TARGET"
 if ! "$BIN" install --download-only "$TAP_TARGET" >"$TAP_LOG" 2>&1; then
-  if grep -qE "rate limit|Network failure|Cannot fetch tap from GitHub|Tap formula/cask not found" "$TAP_LOG"; then
+  if grep -qE "$TRANSIENT_RE" "$TAP_LOG"; then
     printf '  - %s: transient classified failure; skipping tap section\n' "$TAP_TARGET"
+    grep -m1 -E "$TRANSIENT_RE" "$TAP_LOG" | sed 's/^/    | /'
     printf '\n✔ install-download-only regression test passed (tap section skipped)\n'
     exit 0
   fi
