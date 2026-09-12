@@ -1285,6 +1285,23 @@ fn runInstall(
     }
 }
 
+/// `--force` and `uninstall` only clear links a keg owns; a stray file or
+/// directory in the slot has to be removed by hand.
+fn conflictHint(conflicts: []const linker_mod.Conflict) []const u8 {
+    for (conflicts) |c| {
+        if (!c.owned_by_keg) return "Remove the conflicting file or directory first.";
+    }
+    return "Use --force to overwrite, or uninstall the conflicting package first.";
+}
+
+test "conflictHint points at --force/uninstall only when every slot is keg-owned" {
+    const keg: linker_mod.Conflict = .{ .link_path = "/p/bin/a", .existing_keg = "Cellar/a/1.0" };
+    const file: linker_mod.Conflict = .{ .link_path = "/p/bin/b", .existing_keg = "existing file", .owned_by_keg = false };
+    try std.testing.expect(std.mem.indexOf(u8, conflictHint(&.{keg}), "--force") != null);
+    try std.testing.expect(std.mem.indexOf(u8, conflictHint(&.{file}), "--force") == null);
+    try std.testing.expect(std.mem.indexOf(u8, conflictHint(&.{ keg, file }), "Remove") != null);
+}
+
 /// Link + record a materialised keg. Must run serially: linker conflict
 /// checks read live symlink state and SQLite is single-writer.
 ///
@@ -1327,7 +1344,7 @@ fn linkAndRecord(
             for (conflicts) |conflict| {
                 sink.err("  {s} already linked by {s}", .{ conflict.link_path, conflict.existing_keg });
             }
-            sink.err("Use --force to overwrite, or uninstall the conflicting package first.", .{});
+            sink.err("{s}", .{conflictHint(conflicts)});
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.LinkFailed;
         }

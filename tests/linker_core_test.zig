@@ -292,6 +292,7 @@ test "checkConflicts flags a symlink into a sibling version of the same formula"
     try testing.expectEqual(@as(usize, 1), conflicts.len);
     try testing.expect(std.mem.endsWith(u8, conflicts[0].link_path, "/bin/foo"));
     try testing.expect(std.mem.indexOf(u8, conflicts[0].existing_keg, "foo/1.0_1") != null);
+    try testing.expect(conflicts[0].owned_by_keg);
 }
 
 test "checkConflicts flags a regular file occupying a leaf slot" {
@@ -323,6 +324,37 @@ test "checkConflicts flags a regular file occupying a leaf slot" {
     try testing.expectEqual(@as(usize, 1), conflicts.len);
     try testing.expect(std.mem.endsWith(u8, conflicts[0].link_path, "/bin/tool"));
     try testing.expectEqualStrings("existing file", conflicts[0].existing_keg);
+    try testing.expect(!conflicts[0].owned_by_keg);
+}
+
+test "checkConflicts flags a directory occupying a leaf slot as not keg-owned" {
+    const prefix = try uniquePrefix("link_dir_in_slot_conflict");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    const keg = try makeKegWithBinary(prefix, "foo", "1.0", "tool");
+    defer testing.allocator.free(keg);
+    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/tool", .{prefix});
+    defer testing.allocator.free(slot);
+    try test_io.cwd().createDirPath(std.Options.debug_io, slot);
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+
+    const conflicts = try linker.checkConflicts(keg, false);
+    defer {
+        for (conflicts) |c| {
+            testing.allocator.free(c.link_path);
+            testing.allocator.free(c.existing_keg);
+        }
+        testing.allocator.free(conflicts);
+    }
+    try testing.expectEqual(@as(usize, 1), conflicts.len);
+    try testing.expectEqualStrings("existing directory", conflicts[0].existing_keg);
+    try testing.expect(!conflicts[0].owned_by_keg);
 }
 
 test "unlink prunes emptied nested dirs but keeps dirs another keg still links" {
@@ -820,7 +852,10 @@ test "checkConflicts flags a file-vs-directory collision the symlink probe misse
     }
     var hit = false;
     for (conflicts) |c| {
-        if (std.mem.endsWith(u8, c.link_path, "/share/data")) hit = true;
+        if (std.mem.endsWith(u8, c.link_path, "/share/data")) {
+            hit = true;
+            try testing.expect(c.owned_by_keg); // alpha's symlink, not a stray file
+        }
     }
     try testing.expect(hit);
 }
