@@ -622,8 +622,9 @@ fn validateZip(io: std.Io, archive_path: []const u8) !void {
 }
 
 /// Extracts a tar.xz archive file to a directory using the system `tar` command.
-/// Zig 0.15's xz decompressor uses the legacy I/O API which doesn't integrate
-/// with std.tar, so we shell out to the system tar (always available on macOS).
+/// The pure-Zig xz decoder allocates the LZMA2 dictionary per block at the
+/// archive-declared size and is materially slower than liblzma on cask-sized
+/// payloads, so we shell out to the system tar (always available on macOS).
 /// `--no-same-permissions`/`--no-same-owner` stop tar from honouring archived
 /// uid/mode bits on extract — downloaded archives should not shape the
 /// on-disk identity of what they produce.
@@ -642,8 +643,10 @@ pub fn extractTarXzFile(io: std.Io, archive_path: []const u8, dest_dir: []const 
         else => return error.ExtractionFailed,
     }
 
-    // `tar tf` validated entry names, not symlink targets; check those on
-    // the materialised tree.
+    // `tar tf` resolves pax `path=`, so the name check above saw effective
+    // member names. Hard-link targets never appear in a listing; bsdtar's own
+    // linkname security refuses them (the colocated guard tests pin that).
+    // Escaping symlinks are the residue - check those on the materialised tree.
     try rejectEscapingSymlinks(io, dest_dir);
 }
 
