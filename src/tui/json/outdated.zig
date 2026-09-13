@@ -1,8 +1,9 @@
 //! malt — parse `mt outdated --json` into TUI-local structs.
 //!
 //! Leaf module: imports only `std`. The unified `outdated` array (formulae and
-//! casks mixed, each tagged `type`) is the contract; `schema_version`, `time_ms`,
-//! and any future field are ignored, so a schema addition never breaks parsing.
+//! casks mixed, each tagged `type`) plus the root `complete` flag are the
+//! contract; `schema_version`, `time_ms`, and any future field are ignored, so
+//! a schema addition never breaks parsing.
 //! The structs are TUI-local — never the core outdated structs — so the `--json`
 //! shape is the only coupling.
 
@@ -32,6 +33,9 @@ pub const OutdatedRow = struct {
 pub const Parsed = struct {
     doc: std.json.Parsed(Doc),
     items: []const OutdatedRow,
+    /// False when the CLI could not verify every keg: `items` are the rows it
+    /// did prove, and an empty list is not an all-clear.
+    complete: bool,
 
     pub fn deinit(self: Parsed) void {
         self.doc.deinit();
@@ -51,8 +55,10 @@ const Row = struct {
     downgrade: bool = false,
 };
 
+// `complete` is emitted only when false, so its absence means complete.
 const Doc = struct {
     outdated: []Row,
+    complete: bool = true,
 };
 
 /// Parse the captured `mt outdated --json` document. Malformed or non-conforming
@@ -83,7 +89,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) Error!Parsed {
         .tap = row.tap,
         .downgrade = row.downgrade,
     };
-    return .{ .doc = doc, .items = items };
+    return .{ .doc = doc, .items = items, .complete = doc.value.complete };
 }
 
 // ─── tests ───────────────────────────────────────────────────────────
@@ -152,6 +158,29 @@ test "parse yields zero items for an empty outdated array" {
     var p = try parse(testing.allocator, "{\"schema_version\":1,\"outdated\":[]}");
     defer p.deinit();
     try testing.expectEqual(@as(usize, 0), p.items.len);
+}
+
+test "parse reads an incomplete audit from the root and defaults to complete" {
+    // A document without the key - every complete audit, and the on-disk
+    // fixture - is complete; only an explicit false marks the audit unverified.
+    var whole = try parse(testing.allocator, "{\"schema_version\":1,\"outdated\":[]}");
+    defer whole.deinit();
+    try testing.expect(whole.complete);
+
+    var partial = try parse(testing.allocator, "{\"schema_version\":1,\"outdated\":[],\"complete\":false}");
+    defer partial.deinit();
+    try testing.expect(!partial.complete);
+}
+
+test "parse keeps proven rows of an incomplete audit" {
+    // Partial is not empty: the rows the audit did prove are real data.
+    const bytes =
+        \\{"outdated":[{"name":"a","installed":"1","latest":"2","type":"formula","pinned":false}],"complete":false}
+    ;
+    var p = try parse(testing.allocator, bytes);
+    defer p.deinit();
+    try testing.expect(!p.complete);
+    try testing.expectEqual(@as(usize, 1), p.items.len);
 }
 
 test "parse rejects malformed and empty input as BadJson" {

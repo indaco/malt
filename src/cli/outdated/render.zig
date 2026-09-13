@@ -52,6 +52,7 @@ pub fn writeJsonArray(
     allocator: std.mem.Allocator,
     stdout: *std.Io.Writer,
     rows: []const Row,
+    complete: bool,
 ) !void {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
@@ -78,7 +79,10 @@ pub fn writeJsonArray(
         if (isDowngrade(r.installed, r.latest)) try w.writeAll(",\"downgrade\":true");
         try w.writeAll("}");
     }
-    try w.writeAll("]}\n");
+    try w.writeAll("]");
+    // Only when false: a complete audit stays byte-identical.
+    if (!complete) try w.writeAll(",\"complete\":false");
+    try w.writeAll("}\n");
     stdout.writeAll(aw.written()) catch return;
 }
 
@@ -147,7 +151,7 @@ test "writeJsonArray wraps formulae and casks in a versioned root with all six f
         .{ .name = "beta-cask", .installed = "3.0", .latest = "4.0", .kind = .cask, .pinned = true, .tap = "user/repo" },
         .{ .name = "yanked", .installed = "2.4.15", .latest = "2.4.14", .kind = .formula, .pinned = false, .tap = "" },
     };
-    try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
+    try writeJsonArray(std.testing.allocator, &aw.writer, &rows, true);
 
     const want =
         \\{"schema_version":1,"outdated":[{"name":"alpha","installed":"1.0","latest":"2.0","type":"formula","pinned":false,"tap":""},{"name":"beta-cask","installed":"3.0","latest":"4.0","type":"cask","pinned":true,"tap":"user/repo"},{"name":"yanked","installed":"2.4.15","latest":"2.4.14","type":"formula","pinned":false,"tap":"","downgrade":true}]}
@@ -164,7 +168,7 @@ test "writeJsonArray leaves an incomparable pair unmarked" {
     const rows = [_]Row{
         .{ .name = "odd", .installed = "1.0rc2", .latest = "1.0", .kind = .formula, .pinned = false, .tap = "" },
     };
-    try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
+    try writeJsonArray(std.testing.allocator, &aw.writer, &rows, true);
 
     const want =
         \\{"schema_version":1,"outdated":[{"name":"odd","installed":"1.0rc2","latest":"1.0","type":"formula","pinned":false,"tap":""}]}
@@ -181,7 +185,7 @@ test "writeJsonArray keeps casks inside the array, not as per-line NDJSON" {
     const rows = [_]Row{
         .{ .name = "only-cask", .installed = "1.0", .latest = "2.0", .kind = .cask, .pinned = false, .tap = "" },
     };
-    try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
+    try writeJsonArray(std.testing.allocator, &aw.writer, &rows, true);
 
     const out = aw.written();
     try std.testing.expect(std.mem.startsWith(u8, out, "{\"schema_version\":1,\"outdated\":["));
@@ -199,7 +203,7 @@ test "writeJsonArray comma-separates a formula-only array with no trailing comma
         .{ .name = "alpha", .installed = "1.0", .latest = "2.0", .kind = .formula, .pinned = false, .tap = "" },
         .{ .name = "bravo", .installed = "3.0", .latest = "4.0", .kind = .formula, .pinned = false, .tap = "" },
     };
-    try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
+    try writeJsonArray(std.testing.allocator, &aw.writer, &rows, true);
 
     const want =
         \\{"schema_version":1,"outdated":[{"name":"alpha","installed":"1.0","latest":"2.0","type":"formula","pinned":false,"tap":""},{"name":"bravo","installed":"3.0","latest":"4.0","type":"formula","pinned":false,"tap":""}]}
@@ -210,8 +214,16 @@ test "writeJsonArray comma-separates a formula-only array with no trailing comma
 test "writeJsonArray emits an empty array under the versioned root for no rows" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
-    try writeJsonArray(std.testing.allocator, &aw.writer, &.{});
+    try writeJsonArray(std.testing.allocator, &aw.writer, &.{}, true);
     try std.testing.expectEqualStrings("{\"schema_version\":1,\"outdated\":[]}\n", aw.written());
+}
+
+test "writeJsonArray marks the root incomplete only when the audit could not verify every keg" {
+    // After the array, so the `startsWith` pins above keep holding.
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeJsonArray(std.testing.allocator, &aw.writer, &.{}, false);
+    try std.testing.expectEqualStrings("{\"schema_version\":1,\"outdated\":[],\"complete\":false}\n", aw.written());
 }
 
 test "writeJsonArray keeps a pinned-but-outdated row with pinned:true" {
@@ -222,7 +234,7 @@ test "writeJsonArray keeps a pinned-but-outdated row with pinned:true" {
     const rows = [_]Row{
         .{ .name = "held", .installed = "1.0", .latest = "2.0", .kind = .formula, .pinned = true, .tap = "" },
     };
-    try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
+    try writeJsonArray(std.testing.allocator, &aw.writer, &rows, true);
 
     const want =
         \\{"schema_version":1,"outdated":[{"name":"held","installed":"1.0","latest":"2.0","type":"formula","pinned":true,"tap":""}]}
@@ -239,7 +251,7 @@ test "writeJsonArray escapes embedded quotes in name and tap" {
     const rows = [_]Row{
         .{ .name = "a\"b", .installed = "1.0", .latest = "2.0", .kind = .cask, .pinned = false, .tap = "x\"y" },
     };
-    try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
+    try writeJsonArray(std.testing.allocator, &aw.writer, &rows, true);
 
     const want =
         \\{"schema_version":1,"outdated":[{"name":"a\"b","installed":"1.0","latest":"2.0","type":"cask","pinned":false,"tap":"x\"y"}]}

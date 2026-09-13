@@ -37,6 +37,9 @@ pub const State = struct {
     /// finished `mt upgrade` covered. `mt upgrade <name>` is formula-first, so the
     /// two kinds run as separate passes; `null` when no upgrade is in flight.
     pending_kind: ?Kind = null,
+    /// The last read could not verify every keg: `items` are real but an empty
+    /// list is not an all-clear, and the header count is withheld.
+    unverified: bool = false,
 };
 
 /// Tab-private parse storage: the Outdated audit's parsed rows plus the parallel
@@ -192,7 +195,12 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     if (rect.height == 0) return;
     const filter = s.chrome.filter.slice();
     const g = listGeometry(s, rect);
-    if (g.count == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "Everything is up to date.");
+    if (g.count == 0) return tab.renderHint(f, rect, if (filter.len != 0)
+        "No matches."
+    else if (s.unverified)
+        "Could not verify every package; check the network and refresh."
+    else
+        "Everything is up to date.");
     // A fixed bold heading rides above the list and costs it one row.
     tab.renderHeading(f, rect, 4, &.{
         .{ .label = "NAME", .width = 22 },
@@ -486,7 +494,9 @@ fn dropUpgradedRows(
     storage.checked = new_checked;
     st.items = new_items;
     st.checked = new_checked;
-    shared.outdated_count = new_items.len;
+    // An unverified read keeps its count withheld: the upgrade proved
+    // nothing about the rows the audit never checked.
+    shared.outdated_count = if (st.unverified) null else new_items.len;
 }
 
 /// Clear to the known-zero state, freeing the parse and the shell-owned checkbox
@@ -498,6 +508,7 @@ fn clearRows(allocator: std.mem.Allocator, st: *State, storage: *Storage, shared
     storage.checked = &.{};
     st.items = &.{};
     st.checked = &.{};
+    st.unverified = false;
     shared.outdated_count = 0; // nothing outdated is a known zero, not "unknown"
 }
 
@@ -518,7 +529,9 @@ fn applyOutdatedParse(allocator: std.mem.Allocator, st: *State, storage: *Storag
     storage.checked = checked;
     st.items = parsed.items;
     st.checked = checked;
-    shared.outdated_count = parsed.items.len;
+    st.unverified = !parsed.complete;
+    // A partial count is not the count; the header renders null as unknown.
+    shared.outdated_count = if (parsed.complete) parsed.items.len else null;
 }
 
 /// Seed the tab from the on-disk snapshot for an instant warm paint before the
@@ -1068,6 +1081,80 @@ test "a reloaded outdated read reallocs the checkbox buffer to the new row count
     try testing.expectEqualStrings("z", storage.outdated.?.items[0].name);
     try testing.expectEqual(@as(?usize, 1), shared.outdated_count);
     try testing.expect(!storage.checked[0]); // fresh buffer, all clear
+}
+
+test "an unverified empty read withholds the all-clear and the header count" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    // The child checked nothing: "Everything is up to date." would be fabricated.
+    try loadOutdated(&st, &storage, &shared, "{\"outdated\":[],\"complete\":false}");
+    try testing.expectEqual(@as(?usize, null), shared.outdated_count);
+
+    var buf: [1024]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    render(&st, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "Could not verify") != null);
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "up to date") == null);
+}
+
+test "an unverified read still renders its proven rows" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    try loadOutdated(&st, &storage, &shared, "{\"outdated\":[{\"name\":\"proven\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false}],\"complete\":false}");
+    // A partial count is not the count; the rows are real and stay upgradeable.
+    try testing.expectEqual(@as(?usize, null), shared.outdated_count);
+    try testing.expectEqual(@as(usize, 1), st.items.len);
+}
+
+test "a complete reload after an unverified one restores the all-clear and the count" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    try loadOutdated(&st, &storage, &shared, "{\"outdated\":[],\"complete\":false}");
+    try loadOutdated(&st, &storage, &shared, "{\"outdated\":[]}");
+    try testing.expectEqual(@as(?usize, 0), shared.outdated_count);
+
+    var buf: [1024]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    render(&st, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "up to date") != null);
+}
+
+test "a known-zero read after an unverified one restores the all-clear" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    try loadOutdated(&st, &storage, &shared, "{\"outdated\":[],\"complete\":false}");
+    _ = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .cleared);
+    try testing.expectEqual(@as(?usize, 0), shared.outdated_count);
+
+    var buf: [1024]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    render(&st, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "up to date") != null);
+}
+
+test "upgrading the proven rows of an unverified read keeps the count withheld" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    try loadOutdated(&st, &storage, &shared, "{\"outdated\":[{\"name\":\"proven\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false}],\"complete\":false}");
+    try dropUpgradedRows(testing.allocator, &st, &storage, &shared, &.{.{ .name = "proven", .kind = .formula }});
+    // The audit still never checked the rest: "0 outdated" would contradict
+    // the pane, which keeps saying the packages could not be verified.
+    try testing.expectEqual(@as(?usize, null), shared.outdated_count);
+
+    var buf: [1024]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    render(&st, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "Could not verify") != null);
 }
 
 test "dropUpgradedRows on an unloaded store is a no-op" {
