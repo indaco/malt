@@ -10,6 +10,7 @@ const help_mod = @import("help.zig");
 const manifest_mod = @import("../core/bundle/manifest.zig");
 const runner_mod = @import("../core/bundle/runner.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const path_write = @import("../fs/path_write.zig");
@@ -819,9 +820,13 @@ fn openDb(ctx: *const AppCtx) !sqlite.Database {
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return BundleError.DatabaseError;
     var db = try sqlite.Database.open(path);
-    // Schema init is idempotent; a real failure surfaces at the next
-    // prepare/step call in the caller with a narrower error.
-    schema.initSchema(&db) catch {};
+    // Schema init is idempotent; a newer-than-us DB is the one failure to
+    // stop on, anything else surfaces at the caller's next prepare/step.
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) {
+        schema_report.reportInitFailure(&db, e, prefix);
+        db.close();
+        return error.Aborted;
+    };
     return db;
 }
 

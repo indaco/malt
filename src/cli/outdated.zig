@@ -6,6 +6,7 @@ const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const formula_mod = @import("../core/formula.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const tap_slug = @import("../tap_slug.zig");
@@ -979,7 +980,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return;
     };
     defer db.close();
-    schema.initSchema(&db) catch return;
+    schema.initSchema(&db) catch |e| {
+        schema_report.reportInitFailure(&db, e, prefix);
+        return error.Aborted;
+    };
 
     // Validate --tap before any cache/network I/O so a typo never
     // writes a partial snapshot or warms an API cache for nothing.

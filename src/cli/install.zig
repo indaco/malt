@@ -24,6 +24,7 @@ const tap_slug = @import("../tap_slug.zig");
 const lock_mod = @import("../db/lock.zig");
 const lock_report = @import("lock_report.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const symlink = @import("../fs/symlink.zig");
@@ -667,8 +668,9 @@ fn runInstall(
     defer db.close();
 
     // Initialize schema
-    schema.initSchema(&db) catch {
-        sink.err("Failed to initialize database schema", .{});
+    schema.initSchema(&db) catch |e| {
+        var msg_buf: [512]u8 = undefined;
+        sink.err("{s}", .{schema_report.initFailureMessage(&msg_buf, e, schema.currentVersion(&db) catch 0, prefix)});
         return InstallError.DatabaseError;
     };
 

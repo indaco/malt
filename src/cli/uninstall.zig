@@ -5,6 +5,7 @@ const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const atomic = @import("../fs/atomic.zig");
 const symlink = @import("../fs/symlink.zig");
 const output = @import("../ui/output.zig");
@@ -69,7 +70,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return error.Aborted;
     };
     defer db.close();
-    schema.initSchema(&db) catch return;
+    schema.initSchema(&db) catch |e| {
+        schema_report.reportInitFailure(&db, e, prefix);
+        return error.Aborted;
+    };
 
     // Check if it's a cask first (or if --cask was passed)
     if (force_cask or cask_mod.isInstalled(&db, name)) {
