@@ -41,7 +41,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             return error.Aborted;
         }
         refreshSnapshot(ctx, allocator, cache_dir) catch |e| {
-            output.err("Failed to refresh outdated snapshot: {s}", .{@errorName(e)});
+            reportCheckFailure(e);
             return error.Aborted;
         };
         output.info("Outdated snapshot refreshed.", .{});
@@ -72,6 +72,15 @@ fn invalidateSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_di
     std.Io.Dir.deleteFileAbsolute(ctx.io, path) catch {};
 }
 
+/// An unverified audit is an expected outcome (offline upstream), not an
+/// internal failure, so it gets the same words `mt outdated` uses.
+fn reportCheckFailure(e: anyerror) void {
+    switch (e) {
+        error.AuditIncomplete => output.err(outdated_mod.audit_incomplete_msg, .{}),
+        else => output.err("Failed to refresh outdated snapshot: {s}", .{@errorName(e)}),
+    }
+}
+
 fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8) !void {
     const prefix = atomic.maltPrefixOrAbort();
     var db_path_buf: [512]u8 = undefined;
@@ -93,4 +102,19 @@ fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: 
     api.offline = ctx.offline;
 
     try outdated_mod.refreshSnapshot(ctx, allocator, &db, &api, cache_dir, null);
+}
+
+test "reportCheckFailure names an unverified audit in plain words, other errors by name" {
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &err_buf);
+    defer output.endStderrCapture();
+
+    reportCheckFailure(error.AuditIncomplete);
+    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "Could not verify every package") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "AuditIncomplete") == null);
+
+    err_buf.clearRetainingCapacity();
+    reportCheckFailure(error.ConnectionRefused);
+    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "ConnectionRefused") != null);
 }
