@@ -70,10 +70,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return error.Aborted;
     };
     defer db.close();
-    schema.initSchema(&db) catch |e| {
-        schema_report.reportInitFailure(&db, e, prefix);
-        return error.Aborted;
-    };
+    schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
 
     // Check if it's a cask first (or if --cask was passed)
     if (force_cask or cask_mod.isInstalled(&db, name)) {

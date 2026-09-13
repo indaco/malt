@@ -10,6 +10,7 @@ const malt = @import("malt");
 const test_io = @import("test_io");
 const testing = std.testing;
 const list = malt.cli_list;
+const search = malt.cli_search;
 const pin = malt.cli_pin;
 const install = malt.install;
 const install_record = malt.install_record;
@@ -96,7 +97,7 @@ test "list refuses a too-new DB and names both versions" {
     defer output.endStderrCapture();
 
     const ctx = ctxWithSink();
-    try testing.expectError(error.Aborted, list.execute(&ctx, &.{}));
+    try testing.expectError(error.SchemaTooNew, list.execute(&ctx, &.{}));
     try expectNamesBothVersions(captured.items);
 }
 
@@ -110,7 +111,7 @@ test "list --json refuses a too-new DB rather than emitting an empty prefix" {
     defer output.endStderrCapture();
 
     const ctx = ctxWithSink();
-    try testing.expectError(error.Aborted, list.execute(&ctx, &.{"--json"}));
+    try testing.expectError(error.SchemaTooNew, list.execute(&ctx, &.{"--json"}));
     try expectNamesBothVersions(captured.items);
 }
 
@@ -141,7 +142,7 @@ test "pin refuses a too-new DB instead of operating on it" {
     defer output.endStderrCapture();
 
     const ctx = ctxWithSink();
-    try testing.expectError(error.Aborted, pin.execute(&ctx, testing.allocator, &.{"tree"}));
+    try testing.expectError(error.SchemaTooNew, pin.execute(&ctx, testing.allocator, &.{"tree"}));
     try expectNamesBothVersions(captured.items);
 
     // The gate exists so an older binary never writes to a newer shape.
@@ -151,6 +152,19 @@ test "pin refuses a too-new DB instead of operating on it" {
     defer stmt.finalize();
     try testing.expect(try stmt.step());
     try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
+}
+
+test "search --installed refuses a too-new DB instead of reporting nothing installed" {
+    var s = try Scratch.init(testing.allocator, "search");
+    defer s.deinit(testing.allocator);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    const ctx = ctxWithSink();
+    try testing.expectError(error.SchemaTooNew, search.execute(&ctx, testing.allocator, &.{ "--installed", "tree" }));
+    try expectNamesBothVersions(captured.items);
 }
 
 fn schemaCheck() !doctor.Check {

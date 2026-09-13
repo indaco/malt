@@ -677,11 +677,10 @@ fn drainTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fet
     const n = std.posix.read(f.fd, &chunk) catch return failLiveTabFetch(io, allocator, painter, fetches, app, store, t);
     if (n == 0) { // EOF: the audit closed stdout — reap the child here
         const status = f.child.wait(io) catch return finishTabFetch(allocator, painter, fetches, app, store, t, .{ .failed = error.WaitFailed });
-        const ok = switch (status) {
-            .exited => |code| code <= f.max_ok_exit,
-            else => false, // signal/stopped/unknown: never parse a half-written doc
+        const outcome: FetchOutcome = switch (status) {
+            .exited => |code| if (code > f.max_ok_exit) .{ .failed = spawn.exitError(code) } else if (f.buf.items.len == 0) .empty else .{ .bytes = f.buf.items },
+            else => .{ .failed = error.ChildFailed }, // signal/stopped/unknown: never parse a half-written doc
         };
-        const outcome: FetchOutcome = if (!ok) .{ .failed = error.ChildFailed } else if (f.buf.items.len == 0) .empty else .{ .bytes = f.buf.items };
         return finishTabFetch(allocator, painter, fetches, app, store, t, outcome);
     }
     if (f.buf.items.len + n > max_fetch_bytes) return failLiveTabFetch(io, allocator, painter, fetches, app, store, t);
@@ -2276,6 +2275,23 @@ test "a non-zero child exit fails the fetch without parsing a half-written doc" 
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expectEqual(@as(?usize, 5), app.shared.outdated_count); // a bad exit keeps the last-good, never 0
     try std.testing.expect(app.shared.banner.isSet());
+}
+
+test "a child refusing a newer database banners the upgrade hint, not ChildFailed" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/usr/bin/perl", "-e", "exit 4" }, .stdout = .pipe, .stderr = .ignore });
+    var app: App = .{ .shared = .{ .outdated_count = 5 } };
+    app.shared.tab_loading.insert(.outdated);
+    var store: Storages = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0, .parse = outdated.fetch_spec.?.parse, .fail_op = outdated.fetch_spec.?.refresh_op });
+    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
+    try std.testing.expectEqual(@as(?usize, 5), app.shared.outdated_count); // last-good kept
+    const b = app.shared.banner.slice();
+    try std.testing.expect(std.mem.indexOf(u8, b, "newer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, b, "ChildFailed") == null);
 }
 
 test "the doctor fetch tolerates a severity exit (≤2) as success" {

@@ -56,6 +56,7 @@ pub fn classify(err: RunError) ErrorClass {
         error.SpawnFailed,
         error.WaitFailed,
         error.ChildFailed,
+        error.DatabaseNewerThanMalt,
         error.EmptyOutput,
         error.ReadFailed,
         error.BadJson,
@@ -177,6 +178,24 @@ pub fn startBackground(io: std.Io, fetches: *Fetches, shared: *SharedModel, r: c
     fetches.set(r.tag, .{ .tab = r.tag, .child = child, .fd = out.handle, .max_ok_exit = r.max_ok_exit, .parse = r.parse, .fail_op = r.fail_op });
 }
 
+/// Banner detail for a failed fetch — a sentence for the refusal the user can fix,
+/// the error name for everything else.
+pub fn failReason(err: anyerror) []const u8 {
+    return switch (err) {
+        error.DatabaseNewerThanMalt => "database is newer than this malt — upgrade malt",
+        else => @errorName(err),
+    };
+}
+
+test "exitError/failReason: only the newer-database exit gets a sentence, the rest keep their name" {
+    try std.testing.expectEqual(error.DatabaseNewerThanMalt, spawn.exitError(spawn.schema_too_new_exit));
+    try std.testing.expectEqual(error.ChildFailed, spawn.exitError(1));
+    try std.testing.expectEqual(error.ChildFailed, spawn.exitError(3)); // app-running is the upgrade pass's to name
+    try std.testing.expectEqualStrings("database is newer than this malt — upgrade malt", failReason(error.DatabaseNewerThanMalt));
+    try std.testing.expectEqualStrings("ChildFailed", failReason(error.ChildFailed));
+    try std.testing.expectEqualStrings("ReadFailed", failReason(error.ReadFailed));
+}
+
 /// A drained fetch's outcome, kept three-way so a *failed* audit (bad exit, read
 /// fault) stays distinct from a *clean empty* one: empty clears the tab to a
 /// known-zero state, failure keeps the last-good data behind a banner.
@@ -194,7 +213,7 @@ pub const FetchOutcome = union(enum) { bytes: []const u8, empty, failed: anyerro
 pub fn foldOutcome(allocator: std.mem.Allocator, shared: *SharedModel, parse: cmd.ParseFn, fail_op: []const u8, outcome: FetchOutcome) RunError!cmd.Msg {
     switch (outcome) {
         .failed => |err| {
-            shared.banner.set(fail_op, @errorName(err));
+            shared.banner.set(fail_op, failReason(err));
             return .failed;
         },
         .empty => return .cleared,
@@ -236,7 +255,7 @@ pub fn performRead(io: std.Io, allocator: std.mem.Allocator, painter: Painter, s
     const bytes: ?[]u8 = readBytes(io, allocator, painter, loading, r) catch |err| switch (classify(err)) {
         .fatal => return err,
         .recoverable => {
-            shared.banner.set(r.fail_op, @errorName(err));
+            shared.banner.set(r.fail_op, failReason(err));
             return .failed;
         },
     };
