@@ -702,7 +702,10 @@ fn collectLiveCellarVersions(io: std.Io, allocator: std.mem.Allocator, prefix: [
         .opened => |db_val| db_val,
     };
     defer db.close();
-    schema.initSchema(&db) catch return false;
+    schema.initSchema(&db) catch |e| {
+        output.warn("old-versions: cannot read kegs for cellar link check, falling back to mtime ({s})", .{@errorName(e)});
+        return false;
+    };
 
     var stmt = db.prepare("SELECT name, version, revision FROM kegs;") catch return false;
     defer stmt.finalize();

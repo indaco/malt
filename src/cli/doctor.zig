@@ -13,6 +13,7 @@ const perms_mod = @import("../core/perms.zig");
 const signals = @import("../core/signals.zig");
 const lock_mod = @import("../db/lock.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const symlink = @import("../fs/symlink.zig");
@@ -35,6 +36,7 @@ pub const FixPlan = fix_mod.Plan;
 pub const planFixes = fix_mod.planFixes;
 const post_install = @import("doctor/post_install.zig");
 const lock_report = @import("lock_report.zig");
+const cli_info = @import("info.zig");
 const render = @import("doctor/render.zig");
 pub const CheckStatus = render.CheckStatus;
 pub const CheckStyle = render.CheckStyle;
@@ -115,6 +117,7 @@ pub const Tally = struct {
 // a scratch prefix without re-listing the table.
 pub const checks = [_]Check{
     .{ .name = "MALT_PREFIX", .run = checkMaltPrefix },
+    .{ .name = "Database schema", .run = checkDatabaseSchema },
     .{ .name = "SQLite integrity", .run = checkSqliteIntegrity },
     .{ .name = "Directory structure", .run = checkDirectoryStructure },
     .{ .name = "Stale lock", .run = checkStaleLock },
@@ -349,7 +352,7 @@ fn collectTaps(allocator: std.mem.Allocator, prefix: []const u8) ?[]tap_mod.TapI
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
     var db = sqlite.Database.open(db_path) catch return null;
     defer db.close();
-    schema.initSchema(&db) catch {};
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) return null;
     return tap_mod.list(allocator, &db) catch null;
 }
 
@@ -688,6 +691,25 @@ fn checkMaltPrefix(ctx: CheckCtx, name: []const u8) CheckResult {
     return .ok;
 }
 
+/// A DB migrated by a newer malt is structurally perfect, so the integrity
+/// probe below stays green; this row is where that fact lands. Every other
+/// state — no DB, unopenable, unwritable — is the integrity row's verdict.
+fn checkDatabaseSchema(ctx: CheckCtx, name: []const u8) CheckResult {
+    var db = cli_info.openDb(ctx.prefix) orelse {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer db.close();
+
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) {
+        var msg_buf: [512]u8 = undefined;
+        printCheck(name, .err_status, schema_report.initFailureMessage(&msg_buf, e, schema.currentVersion(&db) catch 0, ctx.prefix));
+        return .err_status;
+    };
+    printCheck(name, .ok, null);
+    return .ok;
+}
+
 fn checkSqliteIntegrity(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
@@ -699,9 +721,6 @@ fn checkSqliteIntegrity(ctx: CheckCtx, name: []const u8) CheckResult {
         return .err_status;
     };
     defer db.close();
-
-    // Schema is idempotent; the `PRAGMA integrity_check` below is the real probe.
-    schema.initSchema(&db) catch {};
 
     var stmt = db.prepare("PRAGMA integrity_check;") catch {
         printCheck(name, .err_status, "Cannot run integrity check");

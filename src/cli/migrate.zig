@@ -13,6 +13,7 @@ const store_mod = @import("../core/store.zig");
 const lock_mod = @import("../db/lock.zig");
 const lock_report = @import("lock_report.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const prefix_path = @import("../fs/prefix_path.zig");
@@ -239,8 +240,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
     defer db.close();
 
-    schema.initSchema(&db) catch {
-        output.err("Failed to initialize database schema", .{});
+    schema.initSchema(&db) catch |e| {
+        schema_report.reportInitFailure(&db, e, prefix);
         return error.Aborted;
     };
 

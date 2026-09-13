@@ -5,6 +5,7 @@ const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const signals = @import("../core/signals.zig");
@@ -52,8 +53,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer freeDependents(allocator, dependents);
 
     if (db_opt) |*db| {
-        // Schema is idempotent; read-only uses queries degrade to empty on a broken DB.
-        schema.initSchema(db) catch {};
+        // Schema is idempotent; read-only uses queries degrade to empty on
+        // a broken DB, but a newer-than-us DB must not be read at all.
+        schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) {
+            schema_report.reportInitFailure(db, e, prefix);
+            return error.Aborted;
+        };
         dependents = collectDependents(allocator, db, name, recursive) catch &.{};
     }
 

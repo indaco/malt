@@ -7,6 +7,7 @@ const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
@@ -56,7 +57,10 @@ fn run(ctx: *const AppCtx, args: []const []const u8, action: Action) !void {
         return error.Aborted;
     };
     defer db.close();
-    schema.initSchema(&db) catch {};
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) {
+        schema_report.reportInitFailure(&db, e, prefix);
+        return error.Aborted;
+    };
 
     const updated = setPinned(&db, name, action.flag()) catch {
         output.err("Database update failed for {s}", .{name});

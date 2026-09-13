@@ -15,6 +15,7 @@ const tap_mod = @import("../core/tap.zig");
 const forge = @import("../core/forge.zig");
 const lock_mod = @import("../db/lock.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const api_mod = @import("../net/api.zig");
@@ -346,7 +347,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return;
     };
     defer db.close();
-    schema.initSchema(&db) catch return;
+    schema.initSchema(&db) catch |e| {
+        schema_report.reportInitFailure(&db, e, prefix);
+        return error.Aborted;
+    };
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();

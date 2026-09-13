@@ -7,6 +7,7 @@ const AppCtx = @import("../app_ctx.zig").AppCtx;
 const tap_mod = @import("../core/tap.zig");
 const forge = @import("../core/forge.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
@@ -769,7 +770,10 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
         return error.Aborted;
     };
     defer db.close();
-    schema.initSchema(&db) catch return;
+    schema.initSchema(&db) catch |e| {
+        schema_report.reportInitFailure(&db, e, prefix);
+        return error.Aborted;
+    };
 
     if (pin_slug) |slug| {
         try pinTap(ctx, allocator, &db, slug, pin_sha.?);
