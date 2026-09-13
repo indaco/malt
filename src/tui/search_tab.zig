@@ -230,8 +230,8 @@ pub fn footerHintFor(view: View) []const u8 {
 
 /// The hit the selection points at, clamping the (shell-driven, unbounded)
 /// selection into the result list. No filter: the query already ran server-side,
-/// so the selection indexes straight into `items`. The shell reads its `name`
-/// and `kind` to build the install argv.
+/// so the selection indexes straight into `items`. The key handlers read its
+/// `name` and `kind` for the info read, the basket toggle, and the install fallback.
 pub fn selectedMatch(s: *const State) ?Match {
     const i = selectedIndex(s) orelse return null;
     return s.items[i];
