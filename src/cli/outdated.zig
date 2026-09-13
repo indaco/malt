@@ -732,7 +732,7 @@ test "warmSnapshotFromRecompute writes the in-hand entries on a full-keg walk" {
         .{ .name = @constCast("firefox"), .installed = @constCast("120.0"), .latest = @constCast("121.0") },
     };
 
-    warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, .all, .{}, &formulas, &casks);
+    warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, .all, .{}, true, &formulas, &casks);
 
     const read = readSnapshot(io, std.testing.allocator, cache_dir) orelse
         return error.SnapshotUnreadable;
@@ -760,7 +760,7 @@ test "warmSnapshotFromRecompute writes no snapshot on a narrowed walk" {
 
     // A pinned/tap/formula-only walk is not the full keg set; warming from it
     // would persist a partial snapshot the next reader would trust as complete.
-    warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, .pinned_only, .{ .pinned_only = true }, &formulas, &.{});
+    warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, .pinned_only, .{ .pinned_only = true }, true, &formulas, &.{});
 
     try std.testing.expect(readSnapshot(io, std.testing.allocator, cache_dir) == null);
 }
@@ -787,7 +787,7 @@ test "warmSnapshotFromRecompute gate is closed for every narrowed walk, not just
         defer s.deinit();
         const cache_dir = s.base;
 
-        warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, case.filter, case.scope, &entries, &entries);
+        warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, case.filter, case.scope, true, &entries, &entries);
         try std.testing.expect(readSnapshot(io, std.testing.allocator, cache_dir) == null);
     }
 }
@@ -804,7 +804,7 @@ test "warmSnapshotFromRecompute writes an empty snapshot when a full walk finds 
 
     // The zero-keg full recompute: an empty audit still writes, so a later
     // cached read serves "nothing outdated" instead of a stale snapshot.
-    warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, .all, .{}, &.{}, &.{});
+    warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, .all, .{}, true, &.{}, &.{});
 
     const read = readSnapshot(io, std.testing.allocator, cache_dir) orelse
         return error.SnapshotUnreadable;
@@ -830,8 +830,76 @@ test "warmSnapshotFromRecompute swallows a write failure without crashing" {
     (try s.dir.createFile(io, "not_a_dir", .{})).close(io);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const file_as_dir = try std.fmt.bufPrint(&path_buf, "{s}/not_a_dir", .{base});
-    warmSnapshotFromRecompute(&ctx, std.testing.allocator, file_as_dir, .all, .{}, &.{}, &.{});
+    warmSnapshotFromRecompute(&ctx, std.testing.allocator, file_as_dir, .all, .{}, true, &.{}, &.{});
     try std.testing.expect(readSnapshot(io, std.testing.allocator, file_as_dir) == null);
+}
+
+test "warmSnapshotFromRecompute writes no snapshot from a full walk that could not verify a row" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+
+    var s = try Scratch.init("warm_incomplete_walk");
+    defer s.deinit();
+    const cache_dir = s.base;
+
+    // Full scope but an unverified row: the empty entry set is not an
+    // all-clear, and persisting it would hide every outdated keg for a TTL.
+    warmSnapshotFromRecompute(&ctx, std.testing.allocator, cache_dir, .all, .{}, false, &.{}, &.{});
+
+    try std.testing.expect(readSnapshot(io, std.testing.allocator, cache_dir) == null);
+}
+
+test "emitEntries replaces the all-clear with a warning when the audit is incomplete" {
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &err_buf);
+    defer output.endStderrCapture();
+
+    var stdout_buf: [256]u8 = undefined;
+    var stdout: std.Io.Writer = .fixed(&stdout_buf);
+
+    // One row the audit did prove outdated: it stays listed - the warning
+    // replaces only the all-clear, never real data.
+    const proven = [_]OutdatedEntry{
+        .{ .name = @constCast("wget"), .installed = @constCast("1.21.3"), .latest = @constCast("1.21.4") },
+    };
+    const rows = [_]KegRow{.{ .name = "wget", .version = "1.21.3" }};
+    try emitEntries(std.testing.allocator, &stdout, false, .{}, .{
+        .formula_entries = &proven,
+        .formula_rows = &rows,
+        .cask_entries = &.{},
+        .cask_rows = &.{},
+        .complete = false,
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, stdout.buffered(), "wget") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "up to date") == null);
+    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "Could not verify") != null);
+}
+
+test "emitEntries keeps the JSON array clean and warns on stderr when the audit is incomplete" {
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &err_buf);
+    defer output.endStderrCapture();
+
+    var stdout_buf: [256]u8 = undefined;
+    var stdout: std.Io.Writer = .fixed(&stdout_buf);
+
+    // The TUI child parses stdout as JSON; the warning must not leak into it.
+    try emitEntries(std.testing.allocator, &stdout, true, .{}, .{
+        .formula_entries = &.{},
+        .formula_rows = &.{},
+        .cask_entries = &.{},
+        .cask_rows = &.{},
+        .complete = false,
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, stdout.buffered(), "\"outdated\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdout.buffered(), "Could not verify") == null);
+    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "Could not verify") != null);
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {

@@ -1442,13 +1442,19 @@ test "assembleEntries: only needs_upgrade is a line; proven_current and unknown 
 test "fetchDisposition: a fetch that resolved nothing is unknown, never proven_current" {
     // The old slot read null as "up to date"; the fetch path has no map, so it
     // cannot prove that — porting the null through would skip a real upgrade.
-    try std.testing.expect(fetchDisposition(null) == .unknown);
+    try std.testing.expect(fetchDisposition(.unresolved) == .unknown);
+}
+
+test "fetchDisposition: a fetched current row stays unknown, never proven_current" {
+    // The tri-state exists for the audit's completeness bit only; the upgrade
+    // audit still pays a redundant attempt rather than trusting a fetch compare.
+    try std.testing.expect(fetchDisposition(.current) == .unknown);
 }
 
 test "fetchDisposition: a resolved latest needs upgrade and carries the version" {
     const a = std.testing.allocator;
     const latest = try a.dupe(u8, "2.0.0");
-    const d = fetchDisposition(latest);
+    const d = fetchDisposition(.{ .latest = latest });
     defer freeDisposition(a, d);
     try std.testing.expect(d == .needs_upgrade);
     try std.testing.expectEqualStrings("2.0.0", d.needs_upgrade);
@@ -1767,4 +1773,123 @@ test "parseFormulaLatest returns null for every malformed or missing shape" {
             return error.UnexpectedValue;
         }
     }
+}
+
+/// Offline client + API over `cache_dir`; the audit under test sees exactly
+/// what the on-disk cache holds and nothing else.
+const OfflineAudit = struct {
+    threaded: std.Io.Threaded,
+    inner: std.http.Client,
+    http: client_mod.HttpClient,
+    api: api_mod.BrewApi,
+    db: sqlite.Database,
+    ctx: AppCtx,
+
+    fn init(self: *OfflineAudit, cache_dir: []const u8) !void {
+        const schema = @import("../../db/schema.zig");
+        self.threaded = .init(std.testing.allocator, .{});
+        const io = self.threaded.io();
+        self.inner = .{ .allocator = std.testing.allocator, .io = io };
+        self.http = client_mod.HttpClient.initWith(&self.inner, io, std.process.Environ.empty, std.testing.allocator);
+        self.http.offline = true;
+        self.api = api_mod.BrewApi.init(io, std.testing.allocator, &self.http, cache_dir);
+        self.api.offline = true;
+        self.db = try sqlite.Database.open(":memory:");
+        try schema.initSchema(&self.db);
+        self.ctx = .{ .io = io, .environ = .empty, .offline = true };
+    }
+
+    fn deinit(self: *OfflineAudit) void {
+        self.db.close();
+        self.http.deinit();
+        self.threaded.deinit();
+    }
+};
+
+test "collectOutdatedFormulas reports an incomplete audit when a core row cannot be checked" {
+    var s = try Scratch.init("audit_offline_cold");
+    defer s.deinit();
+    var oa: OfflineAudit = undefined;
+    try oa.init(s.base);
+    defer oa.deinit();
+
+    // Offline with a cold cache: the index and the per-keg fetch both fail,
+    // so this row's verdict is fabricated if the audit reads as complete.
+    const kegs = [_]KegRow{.{ .name = "behind_row", .version = "1.0" }};
+    const audit = try collectOutdatedFormulas(&oa.ctx, std.testing.allocator, &oa.db, &oa.api, s.base, &kegs, null);
+    defer snap_mod.freeEntrySlice(std.testing.allocator, audit.entries);
+
+    try std.testing.expectEqual(@as(usize, 0), audit.entries.len);
+    try std.testing.expect(!audit.complete);
+}
+
+test "collectOutdatedFormulas reports a complete audit when the index answered for every row" {
+    var s = try Scratch.init("audit_index_current");
+    defer s.deinit();
+    var oa: OfflineAudit = undefined;
+    try oa.init(s.base);
+    defer oa.deinit();
+
+    try s.dir.createDirPath(oa.ctx.io, "api");
+    const f = try s.dir.createFile(oa.ctx.io, "api/versions_formula.txt", .{});
+    try f.writeStreamingAll(oa.ctx.io, "current_row\t1.0\t0\nabsent_row_peer\t2.0\t0\n");
+    f.close(oa.ctx.io);
+
+    // A proven-current row and a miss on a healthy index both count as
+    // answered: nothing failed, so the empty result is a real all-clear.
+    const kegs = [_]KegRow{
+        .{ .name = "current_row", .version = "1.0" },
+        .{ .name = "missing_row", .version = "1.0" },
+    };
+    const audit = try collectOutdatedFormulas(&oa.ctx, std.testing.allocator, &oa.db, &oa.api, s.base, &kegs, null);
+    defer snap_mod.freeEntrySlice(std.testing.allocator, audit.entries);
+
+    try std.testing.expectEqual(@as(usize, 0), audit.entries.len);
+    try std.testing.expect(audit.complete);
+}
+
+test "collectOutdatedFormulas reports an incomplete audit from the pool path too" {
+    var s = try Scratch.init("audit_pool_offline");
+    defer s.deinit();
+    var oa: OfflineAudit = undefined;
+    try oa.init(s.base);
+    defer oa.deinit();
+
+    // Enough rows to cross the pool threshold: the worker reports the
+    // tri-state on its own path, so it must taint exactly like the serial one.
+    var kegs: [outdated_default_workers]KegRow = undefined;
+    for (&kegs) |*k| k.* = .{ .name = "behind_row", .version = "1.0" };
+    const audit = try collectOutdatedFormulas(&oa.ctx, std.testing.allocator, &oa.db, &oa.api, s.base, &kegs, null);
+    defer snap_mod.freeEntrySlice(std.testing.allocator, audit.entries);
+
+    try std.testing.expectEqual(@as(usize, 0), audit.entries.len);
+    try std.testing.expect(!audit.complete);
+}
+
+test "collectOutdatedFormulas treats zero kegs as a complete audit" {
+    var s = try Scratch.init("audit_zero_kegs");
+    defer s.deinit();
+    var oa: OfflineAudit = undefined;
+    try oa.init(s.base);
+    defer oa.deinit();
+
+    const audit = try collectOutdatedFormulas(&oa.ctx, std.testing.allocator, &oa.db, &oa.api, s.base, &.{}, null);
+    defer snap_mod.freeEntrySlice(std.testing.allocator, audit.entries);
+    try std.testing.expect(audit.complete);
+}
+
+test "refreshSnapshot refuses to write from an audit that could not verify a row" {
+    var s = try Scratch.init("refresh_incomplete");
+    defer s.deinit();
+    var oa: OfflineAudit = undefined;
+    try oa.init(s.base);
+    defer oa.deinit();
+
+    try oa.db.exec(
+        "INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path) " ++
+            "VALUES ('behind_row','behind_row','1.0',0,'seedsha','/tmp/c/behind_row/1.0')",
+    );
+
+    try std.testing.expectError(error.AuditIncomplete, refreshSnapshot(&oa.ctx, std.testing.allocator, &oa.db, &oa.api, s.base, null));
+    try std.testing.expect(snap_mod.readSnapshot(oa.ctx.io, std.testing.allocator, s.base) == null);
 }
