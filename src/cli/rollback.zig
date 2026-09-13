@@ -510,6 +510,8 @@ pub fn capturePinnedById(db: *sqlite.Database, keg_id: i64) bool {
 /// silently writing 0. Updating in place rather than swapping the row keeps
 /// its id, so the `links` and `dependencies` rows hanging off it - and every
 /// column that records user intent - survive without being re-derived.
+/// The tap commit is dropped: the store entry has none of its own, and a
+/// stale one would let the next upgrade call this keg current.
 /// Caller owns the surrounding transaction.
 pub fn retargetKegRow(
     db: *sqlite.Database,
@@ -523,7 +525,7 @@ pub fn retargetKegRow(
     var up = try db.prepare(
         \\UPDATE kegs
         \\SET version = ?1, revision = ?2, store_sha256 = ?3, cellar_path = ?4,
-        \\    installed_at = datetime('now')
+        \\    installed_at = datetime('now'), tap_commit_sha = NULL
         \\WHERE id = ?5;
     );
     defer up.finalize();
@@ -1409,6 +1411,33 @@ test "retargetKegRow leaves a core keg's tap NULL" {
     try retargetKegRow(&db, keg_id, "1.7", "sha-old", "/c/jq/1.7");
 
     var stmt = try db.prepare("SELECT tap IS NULL FROM kegs WHERE id = ?1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, keg_id);
+    _ = try stmt.step();
+    try testing.expect(stmt.columnBool(0));
+}
+
+test "retargetKegRow forgets the tap commit so the next upgrade re-checks instead of trusting the upgraded-to sha" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // The row still names the commit the upgrade fetched at; the store entry
+    // being rolled back to carries no commit of its own.
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, tap, tap_commit_sha)
+        \\VALUES ('b', 'acme/tap/b', '2.0', 0, 'sha-new', '/c/b/2.0', 'acme/tap', 'head-y');
+    );
+    const keg_id = blk: {
+        var s = try db.prepare("SELECT id FROM kegs WHERE name='b';");
+        defer s.finalize();
+        _ = try s.step();
+        break :blk s.columnInt(0);
+    };
+
+    try retargetKegRow(&db, keg_id, "1.0", "sha-old", "/c/b/1.0");
+
+    var stmt = try db.prepare("SELECT tap_commit_sha IS NULL FROM kegs WHERE id = ?1;");
     defer stmt.finalize();
     try stmt.bindInt(1, keg_id);
     _ = try stmt.step();
