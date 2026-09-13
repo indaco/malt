@@ -485,12 +485,15 @@ const OldKeg = struct {
     tap: []const u8,
     bin_isolated: bool,
     is_dep: bool,
+    /// Tap commit this keg was installed from; null when unknown.
+    tap_commit_sha: ?[]const u8,
 
     fn deinit(self: *OldKeg, allocator: std.mem.Allocator) void {
         allocator.free(self.version);
         allocator.free(self.sha256);
         allocator.free(self.cellar_path);
         allocator.free(self.tap);
+        if (self.tap_commit_sha) |c| allocator.free(c);
     }
 };
 
@@ -502,7 +505,7 @@ const OldKeg = struct {
 /// snapshot to a writer (SQLITE_BUSY). Returns null when no row matches.
 fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !?OldKeg {
     var stmt = try db.prepare(
-        "SELECT id, version, revision, store_sha256, cellar_path, tap, bin_isolated, install_reason FROM kegs WHERE name = ?1 LIMIT 1;",
+        "SELECT id, version, revision, store_sha256, cellar_path, tap, bin_isolated, install_reason, tap_commit_sha FROM kegs WHERE name = ?1 LIMIT 1;",
     );
     defer stmt.finalize();
     try stmt.bindText(1, name);
@@ -515,6 +518,8 @@ fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const 
     const cellar_path = try allocator.dupe(u8, if (stmt.columnText(4)) |cp| std.mem.sliceTo(cp, 0) else "");
     errdefer allocator.free(cellar_path);
     const tap = try allocator.dupe(u8, if (stmt.columnText(5)) |t| std.mem.sliceTo(t, 0) else "");
+    errdefer allocator.free(tap);
+    const tap_commit_sha: ?[]const u8 = if (stmt.columnText(8)) |c| try allocator.dupe(u8, std.mem.sliceTo(c, 0)) else null;
 
     return .{
         .keg_id = stmt.columnInt(0),
@@ -526,6 +531,7 @@ fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const 
         .bin_isolated = stmt.columnInt(6) != 0,
         // NULL reads as direct, matching the DB-side `prior_reason` default.
         .is_dep = if (stmt.columnText(7)) |r| std.mem.eql(u8, std.mem.sliceTo(r, 0), "dependency") else false,
+        .tap_commit_sha = tap_commit_sha,
     };
 }
 
@@ -581,7 +587,7 @@ fn upgradeFormula(
     // before touching `formulae.brew.sh`. `old.tap` is owned and lives
     // until this function returns, so it is safe to pass across the call.
     if (!install_args_mod.isCoreTap(old.tap)) {
-        return upgradeTapFormula(ctx, allocator, name, old.tap, old.version, old.revision, db, prefix, dry_run, force, audit_mode, bulk, sink);
+        return upgradeTapFormula(ctx, allocator, name, old.tap, old.version, old.revision, old.tap_commit_sha, db, prefix, dry_run, force, audit_mode, bulk, sink);
     }
 
     // Reconstruct the revision-aware path label for the old keg so
@@ -860,6 +866,7 @@ fn upgradeTapFormula(
     tap_label: []const u8,
     installed_version: []const u8,
     installed_revision: i64,
+    installed_commit: ?[]const u8,
     db: *sqlite.Database,
     prefix: [:0]const u8,
     dry_run: bool,
@@ -914,7 +921,10 @@ fn upgradeTapFormula(
             output.err("Could not resolve {s} HEAD: empty response", .{tap_label});
             return error.Aborted;
         });
-    const same_commit = if (cached_sha_opt) |c| std.mem.eql(u8, c, fresh_sha) else false;
+    // Compare against the keg's own commit, not the tap pin: every pin writer
+    // (a sibling upgrade, `mt tap` re-run) advances the pin without reinstalling
+    // this keg. Unknown gates as "upgrade".
+    const same_commit = if (installed_commit) |c| std.mem.eql(u8, c, fresh_sha) else false;
 
     // Third policy, deliberately not the version policy: a tap formula upgrades
     // on tap content, so a `.rb` edit with no version bump still reinstalls.
@@ -2031,6 +2041,24 @@ test "readOldKeg maps a NULL tap column to an owned empty string" {
     defer old.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("", old.tap);
     try std.testing.expect(install_args_mod.isCoreTap(old.tap));
+}
+
+test "readOldKeg reads a NULL tap_commit_sha as unknown and a populated one verbatim" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // NULL must stay null (not ""): the gate treats unknown as "upgrade".
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, tap_commit_sha)
+        \\VALUES ('unknown', 'acme/tap/unknown', '1.0', 'sha', '/c/unknown/1.0', 'acme/tap', NULL),
+        \\       ('known',   'acme/tap/known',   '1.0', 'sha', '/c/known/1.0',   'acme/tap', 'abc123');
+    );
+    var unknown = (try readOldKeg(std.testing.allocator, &db, "unknown")).?;
+    defer unknown.deinit(std.testing.allocator);
+    try std.testing.expect(unknown.tap_commit_sha == null);
+    var known = (try readOldKeg(std.testing.allocator, &db, "known")).?;
+    defer known.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("abc123", known.tap_commit_sha.?);
 }
 
 test "readOldKeg carries the install reason so the new receipt can mirror it" {

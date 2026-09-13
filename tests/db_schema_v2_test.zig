@@ -283,4 +283,12 @@ test "v14 leaves one identity per tap across taps, kegs and casks" {
     defer full.finalize();
     try testing.expect(try full.step());
     try testing.expectEqualStrings("indaco/tap/a", std.mem.sliceTo(full.columnText(0).?, 0));
+
+    // The v15 backfill runs in the same pass and must key off the merged
+    // identity: keg 'a' came in under the unpinned spelling, so it inherits
+    // the surviving row's pin rather than staying NULL.
+    var commits = try t.db.prepare("SELECT COUNT(*) FROM kegs WHERE tap_commit_sha = 'abc123';");
+    defer commits.finalize();
+    try testing.expect(try commits.step());
+    try testing.expectEqual(@as(i64, 2), commits.columnInt(0));
 }
