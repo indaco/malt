@@ -106,6 +106,7 @@ comptime {
     _ = @import("no_readall_in_loop_test.zig");
     _ = @import("offline_mode_test.zig");
     _ = @import("origin_test.zig");
+    _ = @import("outdated_read_only_test.zig");
     _ = @import("outdated_test.zig");
     _ = @import("output_test.zig");
     _ = @import("patcher_test.zig");
