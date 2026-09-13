@@ -391,6 +391,32 @@ test "recordKegFields round-trips revision and bin_isolated as zero for tap/loca
     try testing.expectEqual(@as(i64, 0), try readIntCol(&db, "SELECT bin_isolated FROM kegs WHERE name = ?1;", "roundtrip"));
 }
 
+test "recordKegFields persists the fetch commit so the upgrade gate can read a keg-scoped fact" {
+    var db = try openTestDb();
+    defer db.close();
+
+    var f = KegFields{
+        .name = "tapkeg",
+        .full_name = "acme/tap/tapkeg",
+        .version = "1.0.0",
+        .revision = 0,
+        .tap = "acme/tap",
+        .store_sha256 = "deadbeef",
+        .cellar_path = "/opt/malt/Cellar/tapkeg/1.0.0",
+        .install_reason = "direct",
+        .bin_isolated = false,
+        .tap_commit_sha = "abc123",
+    };
+    _ = try recordKegFields(&db, f, .{});
+
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("abc123", try readTextCol(&db, "SELECT tap_commit_sha FROM kegs WHERE name = ?1;", "tapkeg", &buf));
+    // A same-version re-record (install --force) replaces the commit too.
+    f.tap_commit_sha = "def456";
+    _ = try recordKegFields(&db, f, .{});
+    try testing.expectEqualStrings("def456", try readTextCol(&db, "SELECT tap_commit_sha FROM kegs WHERE name = ?1;", "tapkeg", &buf));
+}
+
 test "recordKeg adapter persists the formula's fields identically" {
     var db = try openTestDb();
     defer db.close();
@@ -411,6 +437,8 @@ test "recordKeg adapter persists the formula's fields identically" {
     try testing.expectEqualStrings("2.1.0", try readTextCol(&db, "SELECT version FROM kegs WHERE name = ?1;", "adapter", &buf));
     try testing.expectEqualStrings("acme/tap", try readTextCol(&db, "SELECT tap FROM kegs WHERE name = ?1;", "adapter", &buf));
     try testing.expectEqualStrings("shashasha", try readTextCol(&db, "SELECT store_sha256 FROM kegs WHERE name = ?1;", "adapter", &buf));
+    // Core kegs have no tap commit; the adapter must leave it NULL, not "".
+    try testing.expectEqual(@as(i64, 1), try readIntCol(&db, "SELECT tap_commit_sha IS NULL FROM kegs WHERE name = ?1;", "adapter"));
 }
 
 test "recordKegFields opens its own transaction under default opts" {

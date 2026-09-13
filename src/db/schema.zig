@@ -1014,6 +1014,10 @@ test "fresh DB ships kegs at the v5 UNIQUE without a rebuild (v5 shape)" {
     const isolated = std.mem.indexOf(u8, sql, "bin_isolated") orelse
         return error.TestExpectedBinIsolated;
     try testing.expect(isolated < unique);
+    // Same for the v15 column: inline, not appended by the v14→v15 ALTER.
+    const tap_commit = std.mem.indexOf(u8, sql, "tap_commit_sha") orelse
+        return error.TestExpectedTapCommitSha;
+    try testing.expect(tap_commit < unique);
 
     // The rebuild used to drop and re-create these; nothing does now.
     try testing.expect(try indexExists(&db, "idx_kegs_name"));
@@ -1342,6 +1346,65 @@ test "v13→v14 leaves a core-tap keg and a NULL tap alone" {
     try testing.expect(try stmt.step());
     try testing.expectEqualStrings("jq", std.mem.sliceTo(stmt.columnText(0).?, 0));
     try testing.expect(stmt.columnText(1) == null);
+}
+
+fn seedV14(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.exec("DELETE FROM schema_version WHERE version >= 15;");
+}
+
+test "v14→v15 backfills tap kegs from their tap's pin and leaves the rest NULL" {
+    // The pin was the gate's "installed at" proxy; copying it keeps a
+    // migrated keg gating exactly as before instead of reinstalling the
+    // whole tap on the first `mt upgrade`. No pin to copy - core keg,
+    // unpinned tap row, tap row gone - stays NULL and gates as "upgrade".
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo)
+        \\VALUES ('acme/tap', 'https://github.com/acme/homebrew-tap', 'abc123', 'acme', 'homebrew-tap'),
+        \\       ('bare/tap', 'https://github.com/bare/homebrew-tap', NULL, 'bare', 'homebrew-tap');
+    );
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap)
+        \\VALUES ('a', 'acme/tap/a', '1.0', 'sha-a', '/c/a/1.0', 'acme/tap'),
+        \\       ('b', 'acme/tap/b', '2.0', 'sha-b', '/c/b/2.0', 'acme/tap'),
+        \\       ('jq', 'jq', '1.7', 'sha-jq', '/c/jq/1.7', NULL),
+        \\       ('c', 'bare/tap/c', '1.0', 'sha-c', '/c/c/1.0', 'bare/tap'),
+        \\       ('orphan', 'gone/tap/orphan', '1.0', 'sha-o', '/c/orphan/1.0', 'gone/tap');
+    );
+    try seedV14(&db);
+    try migrate(&db);
+
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("abc123", (try tapField(&db, "SELECT tap_commit_sha FROM kegs WHERE name = ?1;", "a", &buf)).?);
+    try testing.expectEqualStrings("abc123", (try tapField(&db, "SELECT tap_commit_sha FROM kegs WHERE name = ?1;", "b", &buf)).?);
+    for ([_][]const u8{ "jq", "c", "orphan" }) |name| {
+        try testing.expect((try tapField(&db, "SELECT tap_commit_sha FROM kegs WHERE name = ?1;", name, &buf)) == null);
+    }
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
+}
+
+test "v14→v15 is idempotent and never overwrites a keg that already knows its commit" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo)
+        \\VALUES ('acme/tap', 'https://github.com/acme/homebrew-tap', 'newhead', 'acme', 'homebrew-tap');
+    );
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, tap_commit_sha)
+        \\VALUES ('a', 'acme/tap/a', '1.0', 'sha-a', '/c/a/1.0', 'acme/tap', 'installed-at');
+    );
+    try seedV14(&db);
+    try migrate(&db);
+    try seedV14(&db);
+    try migrate(&db);
+
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("installed-at", (try tapField(&db, "SELECT tap_commit_sha FROM kegs WHERE name = ?1;", "a", &buf)).?);
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 test "v4→v5 migration is idempotent when kegs already carries the v5 UNIQUE" {

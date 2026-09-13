@@ -2033,6 +2033,24 @@ test "readOldKeg maps a NULL tap column to an owned empty string" {
     try std.testing.expect(install_args_mod.isCoreTap(old.tap));
 }
 
+test "readOldKeg reads a NULL tap_commit_sha as unknown and a populated one verbatim" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // NULL must stay null (not ""): the gate treats unknown as "upgrade".
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, tap_commit_sha)
+        \\VALUES ('unknown', 'acme/tap/unknown', '1.0', 'sha', '/c/unknown/1.0', 'acme/tap', NULL),
+        \\       ('known',   'acme/tap/known',   '1.0', 'sha', '/c/known/1.0',   'acme/tap', 'abc123');
+    );
+    var unknown = (try readOldKeg(std.testing.allocator, &db, "unknown")).?;
+    defer unknown.deinit(std.testing.allocator);
+    try std.testing.expect(unknown.tap_commit_sha == null);
+    var known = (try readOldKeg(std.testing.allocator, &db, "known")).?;
+    defer known.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("abc123", known.tap_commit_sha.?);
+}
+
 test "readOldKeg carries the install reason so the new receipt can mirror it" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
