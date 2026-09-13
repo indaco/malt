@@ -238,11 +238,12 @@ pub fn selectedMatch(s: *const State) ?Match {
 }
 
 /// The index of the active row in `items`, clamping the unbounded cursor. No
-/// filter, so the cursor indexes straight into `items`. Null on an empty list, and
-/// while a re-query is searching: stale items linger behind the status line then,
-/// so no key may act on a row the user cannot see (the gate `hitTest` applies).
+/// filter, so the cursor indexes straight into `items`. Null on an empty list, in
+/// the basket view, and while the results are not loaded (a re-query searching, or
+/// no query yet): the results list is not on screen then, so no key may act on a
+/// row the user cannot see (the gate `hitTest` applies).
 pub fn selectedIndex(s: *const State) ?usize {
-    if (s.phase != .loaded or s.items.len == 0) return null;
+    if (s.view != .results or s.phase != .loaded or s.items.len == 0) return null;
     return @min(s.chrome.view.selected, s.items.len - 1);
 }
 
@@ -897,6 +898,43 @@ test "basket removal keys stay live while a re-query is searching" {
     try testing.expectEqual(@as(usize, 1), s.selected_count); // basket ops are phase-free
     try testing.expect(stepKey(&s, &storage, ch('n')) == .none);
     try testing.expectEqual(@as(usize, 0), s.selected_count);
+}
+
+test "enter is inert in the basket view" {
+    // The basket view hides the results list, so Enter must neither fetch info for
+    // a results row the user cannot see nor close a pane that is not painted; the
+    // basket footer offers no Enter verb.
+    var s: State = .{ .items = &sample, .phase = .loaded, .view = .basket };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    s.chrome.view.selected = 0; // wget in the results list
+    try testing.expect(stepKey(&s, &storage, .enter) == .none);
+    try testing.expect(s.detail == null);
+    s.detail = .{ .name = "wget" }; // a pane left open from the results view
+    try testing.expect(stepKey(&s, &storage, .enter) == .none);
+    try testing.expect(s.detail != null); // not toggled closed behind the basket
+    s.view = .results; // back on the results list, Enter closes it as before
+    try testing.expect(stepKey(&s, &storage, .enter) == .none);
+    try testing.expect(s.detail == null);
+}
+
+test "i with an empty basket is inert in the basket view" {
+    // The empty-basket fallback installs the active results row, which is hidden
+    // behind the basket view; nothing on screen means nothing to install.
+    var s: State = .{ .items = &sample, .phase = .loaded, .view = .basket };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    s.chrome.view.selected = 0; // wget, installable in the results view
+    try testing.expect(stepKey(&s, &storage, ch('i')) == .none);
+    try testing.expect(s.pending_kind == null);
+}
+
+test "selectedMatch is null in the basket view" {
+    var s: State = .{ .items = &sample, .phase = .loaded, .view = .basket };
+    s.chrome.view.selected = 0;
+    try testing.expect(selectedMatch(&s) == null);
+    s.view = .results;
+    try testing.expectEqualStrings("wget", selectedMatch(&s).?.name);
 }
 
 test "selectedMatch is null while the results are not loaded" {
