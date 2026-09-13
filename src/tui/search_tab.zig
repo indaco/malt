@@ -3,7 +3,8 @@
 //! Leaf module. Pure cores only: `step` maps a key to a `Cmd` (`i` installs the
 //! selection, Enter reads `mt info`) or performs a pure basket op in place; the
 //! shell commits the filter-as-query via `searchCmd`. `update` folds the pump's
-//! result back (a search parse becomes the results, an install refetches). The tab
+//! result back (a search parse becomes the results; an install pass chains
+//! formula → cask, then refetches once the run ends if any pass succeeded). The tab
 //! names effects as data and never imports the runner. `render(state, frame, rect)`
 //! is a pure function of `(state, rect)` so a resize is a re-render.
 //!
@@ -67,6 +68,11 @@ pub const State = struct {
     basket: []const SelEntry = &.{},
     /// Which list the body shows; `l` toggles it.
     view: View = .results,
+    /// The kind of the install pass in flight, so the fold drops only its picks.
+    /// `mt install` kind flags are run-global, so a basket goes out one pass per kind.
+    pending_kind: ?Kind = null,
+    /// A pass in this run exited 0; the query re-runs once the last pass ends.
+    install_refetch: bool = false,
 };
 
 /// Search runs synchronously on demand; it never background-fetches.
@@ -112,6 +118,20 @@ pub const Selection = struct {
     /// Absent is a no-op, so a stale removal can never trap.
     pub fn remove(self: *Selection, allocator: std.mem.Allocator, name: []const u8, kind: Kind) void {
         if (self.indexOf(name, kind)) |i| {
+            allocator.free(self.entries.items[i].name);
+            _ = self.entries.swapRemove(i); // order is irrelevant for a set
+        }
+    }
+
+    /// Drop every pick of one kind, freeing its bytes — a finished install pass
+    /// consumed them. The other kind's picks wait for their own pass.
+    pub fn removeKind(self: *Selection, allocator: std.mem.Allocator, kind: Kind) void {
+        var i: usize = 0;
+        while (i < self.entries.items.len) {
+            if (self.entries.items[i].kind != kind) {
+                i += 1;
+                continue;
+            }
             allocator.free(self.entries.items[i].name);
             _ = self.entries.swapRemove(i); // order is irrelevant for a set
         }
@@ -563,10 +583,28 @@ fn openSearchInfoCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *cons
     return .{ .read = .{ .argv = argv, .mode = .polled, .parse = cmd.parserFor(.info, info_json.parse), .tag = .search, .fail_op = info_fail_op } };
 }
 
-/// The basket's `mt install …` mutation, or `Cmd.none` when nothing installable is
-/// selected. `update` re-runs the query on success so the installed markers flip.
-fn installCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State, storage: *const Storage) cmd.Cmd {
-    const argv = (installArgv(allocator, mt_path, &storage.selected, s) catch return .none) orelse return .none;
+/// The basket's first `mt install …` pass, or `Cmd.none` when nothing installable is
+/// selected. The whole basket installs, so an off-screen pick installs too; it goes
+/// out formula-first, then `update` chains the cask pass and re-runs the query so
+/// the installed markers flip. Empty basket ⇒ the active row, if it is installable.
+fn installCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storage: *const Storage) cmd.Cmd {
+    if (storage.selected.entries.items.len == 0) {
+        const i = selectedIndex(s) orelse return .none;
+        const m = s.items[i];
+        if (m.installed) return .none;
+        const argv = cmd.inlineArgv(allocator, mt_path, &.{ "install", kindFlag(m.kind), m.name }) catch return .none;
+        s.pending_kind = m.kind;
+        return .{ .run_mutation = .{ .argv = argv, .tag = .search, .fail_op = install_fail_op } };
+    }
+    return startPass(allocator, mt_path, s, &storage.selected, .formula) orelse
+        startPass(allocator, mt_path, s, &storage.selected, .cask) orelse .none;
+}
+
+/// Build one kind's install `run_mutation` and mark it pending, or `null` when the
+/// basket holds no pick of that kind. An argv-build OOM drops the effect, not the TUI.
+fn startPass(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, sel: *const Selection, kind: Kind) ?cmd.Cmd {
+    const argv = (installArgvForKind(allocator, mt_path, sel, kind) catch return null) orelse return null;
+    s.pending_kind = kind;
     return .{ .run_mutation = .{ .argv = argv, .tag = .search, .fail_op = install_fail_op } };
 }
 
@@ -594,8 +632,9 @@ pub fn syncSelected(s: *State, storage: *const Storage) void {
 }
 
 /// Fold a completed effect back into the model. A delivered `search` parse becomes
-/// the ranked results; an `info` parse opens the pane; a finished install refetches;
-/// a `.failed` read leaves the "searching…" phase behind its banner.
+/// the ranked results; an `info` parse opens the pane; a finished install pass
+/// chains the next kind or refetches; a `.failed` read leaves the "searching…"
+/// phase behind its banner.
 pub fn update(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storage: *Storage, shared: *ctx.SharedModel, msg: cmd.Msg) cmd.Cmd {
     switch (msg) {
         .loaded => |parsed| switch (parsed) {
@@ -617,13 +656,15 @@ pub fn update(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, stor
                 return .none;
             },
         },
-        .mutated => |code| return foldInstall(allocator, mt_path, s, storage, shared, code),
+        .mutated => |code| return foldInstallPass(allocator, mt_path, s, storage, shared, code),
         // A 0-byte exit-0 read shouldn't reach search on the happy path, but if it
         // does it must reset the phase like `.failed`, never strand the spinner.
         .cleared, .failed => {
             // Fall back to the last good results, or guidance if none ever loaded.
             s.phase = if (storage.search != null) .loaded else .idle;
-            return .none;
+            // An install pass that never spawned also lands here: its picks stay
+            // for retry, and an earlier pass's refetch must not be lost with it.
+            return endInstallRun(allocator, mt_path, s);
         },
     }
 }
@@ -661,66 +702,68 @@ fn setInfoDetail(s: *State, storage: *Storage, parsed: info_json.Parsed) void {
     s.detail = parsed.info;
 }
 
-/// Fold a finished install: a clean exit consumed the basket (clear it, mark the
-/// siblings stale, re-run the query so markers flip); a non-zero exit retains the
-/// basket behind a recoverable banner.
-fn foldInstall(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storage: *Storage, shared: *ctx.SharedModel, code: u8) cmd.Cmd {
-    const ok = code == 0;
-    applyInstallOutcome(storage, allocator, ok); // clear on success, retain on failure
-    syncSelected(s, storage); // basket may now be empty → leaf gate + footer reflect it
-    if (!ok) {
+/// Fold one finished install pass: a clean exit consumed that kind's picks (drop
+/// them, mark the siblings stale); a non-zero exit retains them behind a recoverable
+/// banner. Then chain the cask pass after the formula one, and once the last pass
+/// ends re-run the query so markers flip - if any pass succeeded.
+fn foldInstallPass(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storage: *Storage, shared: *ctx.SharedModel, code: u8) cmd.Cmd {
+    const kind = s.pending_kind orelse return .none; // defensive: no pass in flight
+    if (code == 0) {
+        storage.selected.removeKind(allocator, kind);
+        projectSearchChecked(storage);
+        shared.markStaleAfter(.search); // Installed/Outdated/Services may have changed too
+        s.install_refetch = true;
+    } else {
         shared.banner.set(install_fail_op, "ChildFailed");
-        return .none;
     }
-    shared.markStaleAfter(.search); // Installed/Outdated/Services may have changed too
-    return searchReadCmd(allocator, mt_path, s); // re-run the query; markers flip
+    syncSelected(s, storage); // picks dropped only on success; the leaf gate + footer follow either way
+    // Passes are independent: run the cask pass after the formula one regardless of
+    // the formula outcome, so a failed formula pass still lets checked casks install.
+    if (kind == .formula) {
+        if (startPass(allocator, mt_path, s, &storage.selected, .cask)) |next| return next;
+    }
+    return endInstallRun(allocator, mt_path, s);
 }
 
-/// Build the `mt install …` argv from the cross-query basket. The whole basket
-/// installs, so an off-screen pick installs too. Empty basket ⇒ fall back to the
-/// active row (the no-selection case); null when that row is absent or already
-/// installed (the no-op). A single target keeps the explicit `--formula`/`--cask`
-/// flag, because a name can exist as both and bare `mt install <name>` silently picks
-/// the formula; a multi install passes bare names and lets `mt` detect each one's
-/// kind. Basket names are owned, so the argv outlives the parse it was checked in.
-fn installArgv(allocator: std.mem.Allocator, mt_path: []const u8, sel: *const Selection, st: *const State) std.mem.Allocator.Error!?[]const []const u8 {
-    const entries = sel.entries.items;
-    if (entries.len == 0) {
-        // Empty basket: the active row, if it is installable.
-        const i = selectedIndex(st) orelse return null;
-        const m = st.items[i];
-        if (m.installed) return null;
-        return try cmd.inlineArgv(allocator, mt_path, &.{ "install", kindFlag(m.kind), m.name });
-    }
-    if (entries.len == 1) {
-        const e = entries[0];
-        return try cmd.inlineArgv(allocator, mt_path, &.{ "install", kindFlag(e.kind), e.name });
-    }
-    const argv = try allocator.alloc([]const u8, 2 + entries.len);
-    argv[0] = mt_path;
-    argv[1] = "install";
-    for (entries, 0..) |e, k| argv[2 + k] = e.name;
-    return argv;
+/// Close the install run: re-run the query iff a pass changed the disk, so the
+/// installed markers flip; a run with no clean pass has nothing to show. No-op
+/// (`Cmd.none`) when no run is in flight.
+fn endInstallRun(allocator: std.mem.Allocator, mt_path: []const u8, s: *State) cmd.Cmd {
+    s.pending_kind = null;
+    const refetch = s.install_refetch;
+    s.install_refetch = false;
+    return if (refetch) searchReadCmd(allocator, mt_path, s) else .none;
 }
 
-/// The single-target disambiguation flag for a kind. A closed switch: a new kind is
-/// a compile error, never a silent default.
+/// Build `[mt, install, <flag>, names…]` for one kind's picks, or null when the
+/// basket holds none of that kind. `mt install` kind flags are run-global and a bare
+/// name resolves formula-first, so a checked cask only reaches `mt` as a cask through
+/// its own `--cask` pass. Basket names are owned, so the argv outlives the parse it
+/// was checked in.
+fn installArgvForKind(allocator: std.mem.Allocator, mt_path: []const u8, sel: *const Selection, kind: Kind) std.mem.Allocator.Error!?[]const []const u8 {
+    var n: usize = 0;
+    for (sel.entries.items) |e| n += @intFromBool(e.kind == kind);
+    if (n == 0) return null;
+    const rest = try allocator.alloc([]const u8, 2 + n);
+    defer allocator.free(rest);
+    rest[0] = "install";
+    rest[1] = kindFlag(kind);
+    var k: usize = 2;
+    for (sel.entries.items) |e| {
+        if (e.kind != kind) continue;
+        rest[k] = e.name;
+        k += 1;
+    }
+    return try cmd.inlineArgv(allocator, mt_path, rest);
+}
+
+/// The per-pass disambiguation flag for a kind. A closed switch: a new kind is a
+/// compile error, never a silent default.
 fn kindFlag(k: Kind) []const u8 {
     return switch (k) {
         .formula => "--formula",
         .cask => "--cask",
     };
-}
-
-/// Post-install basket lifecycle: a clean install (exit 0) consumed the whole basket,
-/// so clear it and re-project the now-empty checked slice; a failed install retains
-/// the basket for retry. Pure over the storage — the seam the install path's
-/// clear-on-success / retain-on-failure policy is tested through.
-fn applyInstallOutcome(storage: *Storage, allocator: std.mem.Allocator, ok: bool) void {
-    if (!ok) return; // retain for retry
-    storage.selected.deinit(allocator);
-    storage.selected = .{};
-    projectSearchChecked(storage);
 }
 
 // ─── tests ───────────────────────────────────────────────────────────
@@ -1281,39 +1324,85 @@ test "searchArgv returns null for an empty query so no remote read fires" {
     try testing.expect((try searchArgv(testing.allocator, "/bin/mt", &st)) == null);
 }
 
-test "installArgv installs the whole basket as bare names for a batch" {
+test "a mixed basket installs in a --formula pass then a --cask pass" {
     const alloc = testing.allocator;
-    var sel: Selection = .{};
-    defer sel.deinit(alloc);
-    try sel.toggle(alloc, "bat", .formula);
-    try sel.toggle(alloc, "redis", .formula);
-    const st: State = .{ .items = &.{} }; // basket-driven: no rows on screen
-    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
-    defer alloc.free(argv);
-    // mt, install, bat, redis — a batch passes bare names (no global kind flag).
-    try testing.expectEqual(@as(usize, 4), argv.len);
-    try testing.expectEqualStrings("install", argv[1]);
-    try testing.expectEqualStrings("bat", argv[2]);
-    try testing.expectEqualStrings("redis", argv[3]);
+    // The motivating collision: `docker` is both a formula and a cask, and the user
+    // checked the cask. `mt install` kind flags are run-global and a bare name
+    // resolves formula-first, so the only way the pick's kind reaches `mt` is one
+    // flagged pass per kind.
+    var st: State = .{ .items = &.{} }; // basket-driven: no rows on screen
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(alloc);
+    try storage.selected.toggle(alloc, "bat", .formula);
+    try storage.selected.toggle(alloc, "docker", .cask);
+    syncSelected(&st, &storage);
+
+    const first = stepKey(&st, &storage, ch('i'));
+    defer alloc.free(first.run_mutation.argv);
+    try testing.expect(first == .run_mutation);
+    try testing.expectEqualStrings("install", first.run_mutation.argv[1]);
+    try testing.expectEqualStrings("--formula", first.run_mutation.argv[2]);
+    try testing.expectEqualStrings("bat", first.run_mutation.argv[3]);
+    try testing.expectEqual(@as(usize, 4), first.run_mutation.argv.len); // no cask name leaks in
+    try testing.expectEqual(Kind.formula, st.pending_kind.?);
+
+    const second = update(alloc, "/opt/malt/bin/mt", &st, &storage, &shared, .{ .mutated = 0 });
+    defer alloc.free(second.run_mutation.argv);
+    try testing.expect(second == .run_mutation); // the cask pass chains, no re-query yet
+    try testing.expectEqualStrings("--cask", second.run_mutation.argv[2]);
+    try testing.expectEqualStrings("docker", second.run_mutation.argv[3]);
+    try testing.expectEqual(@as(usize, 4), second.run_mutation.argv.len);
+    try testing.expectEqual(Kind.cask, st.pending_kind.?);
+    // The formula pass consumed only its own pick; the cask waits for its pass.
+    try testing.expect(!storage.selected.contains("bat", .formula));
+    try testing.expect(storage.selected.contains("docker", .cask));
+    try testing.expectEqual(@as(usize, 1), st.selected_count);
 }
 
-test "installArgv keeps the entry's kind flag for a single-entry basket" {
+test "an all-cask basket of two starts directly with the --cask pass" {
     const alloc = testing.allocator;
-    // The motivating collision: one name, two kinds. The basket entry's stored kind
-    // picks the flag, so a single install can't silently default to the formula when
-    // the user chose the cask — the reason the explicit flag exists.
+    // Two checked casks go out under one `--cask` flag, never as bare names - a
+    // homogeneous cask basket is just as exposed to the formula-first collision.
+    var st: State = .{ .items = &.{} };
+    st.chrome.filter.push("docker");
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(alloc);
+    try storage.selected.toggle(alloc, "docker", .cask);
+    try storage.selected.toggle(alloc, "firefox", .cask);
+    syncSelected(&st, &storage);
+    const eff = stepKey(&st, &storage, ch('i'));
+    defer alloc.free(eff.run_mutation.argv);
+    try testing.expect(eff == .run_mutation);
+    try testing.expectEqual(@as(usize, 5), eff.run_mutation.argv.len); // mt, install, --cask, a, b
+    try testing.expectEqualStrings("--cask", eff.run_mutation.argv[2]);
+    try testing.expectEqualStrings("docker", eff.run_mutation.argv[3]);
+    try testing.expectEqualStrings("firefox", eff.run_mutation.argv[4]);
+    try testing.expectEqual(Kind.cask, st.pending_kind.?);
+    // With no formula picks the cask pass is the last one: the run ends here, the
+    // basket is consumed, and the query re-runs.
+    const last = update(alloc, "/opt/malt/bin/mt", &st, &storage, &shared, .{ .mutated = 0 });
+    defer alloc.free(last.read.argv);
+    try testing.expect(last == .read);
+    try testing.expectEqual(@as(usize, 0), st.selected_count);
+    try testing.expect(st.pending_kind == null);
+}
+
+test "installArgvForKind keeps the entry's kind flag for a single-entry basket" {
+    const alloc = testing.allocator;
     var sel: Selection = .{};
     defer sel.deinit(alloc);
     try sel.toggle(alloc, "docker", .cask);
-    const st: State = .{ .items = &.{} };
-    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    try testing.expect((try installArgvForKind(alloc, "/bin/mt", &sel, .formula)) == null); // nothing of that kind
+    const argv = (try installArgvForKind(alloc, "/bin/mt", &sel, .cask)).?;
     defer alloc.free(argv);
     try testing.expectEqual(@as(usize, 4), argv.len); // mt, install, --cask, name
     try testing.expectEqualStrings("--cask", argv[2]);
     try testing.expectEqualStrings("docker", argv[3]);
 }
 
-test "installArgv keeps a basket pick whose on-screen row reads installed (no per-package prune)" {
+test "installArgvForKind keeps a basket pick whose on-screen row reads installed (no per-package prune)" {
     const alloc = testing.allocator;
     var sel: Selection = .{};
     defer sel.deinit(alloc);
@@ -1323,41 +1412,48 @@ test "installArgv keeps a basket pick whose on-screen row reads installed (no pe
     // pick's `installed` flag can't be trusted — `mt install` is idempotent instead.
     // The basket path never consults the on-screen rows.
     const items = [_]Match{.{ .name = "git", .kind = .formula, .installed = true }};
-    const st: State = .{ .items = &items };
-    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
-    defer alloc.free(argv);
-    try testing.expectEqual(@as(usize, 4), argv.len); // single-entry basket → flag form
-    try testing.expectEqualStrings("--formula", argv[2]); // and the formula flag, not just --cask
-    try testing.expectEqualStrings("git", argv[3]);
+    var st: State = .{ .items = &items };
+    var storage: Storage = .{ .selected = sel };
+    sel = .{}; // storage owns the basket now
+    defer storage.deinit(alloc);
+    syncSelected(&st, &storage);
+    const eff = stepKey(&st, &storage, ch('i'));
+    defer alloc.free(eff.run_mutation.argv);
+    try testing.expect(eff == .run_mutation);
+    try testing.expectEqual(@as(usize, 4), eff.run_mutation.argv.len);
+    try testing.expectEqualStrings("--formula", eff.run_mutation.argv[2]);
+    try testing.expectEqualStrings("git", eff.run_mutation.argv[3]);
 }
 
-test "installArgv over an empty basket falls back to the active row, keeping its kind flag" {
+test "an empty basket installs the active row under its own kind flag" {
     const alloc = testing.allocator;
     const items = [_]Match{
         .{ .name = "firefox", .kind = .cask, .installed = false },
         .{ .name = "wget", .kind = .formula, .installed = false },
     };
-    var sel: Selection = .{}; // empty: never allocates, no free needed
     var st: State = .{ .items = &items };
+    var storage: Storage = .{}; // empty basket: never allocates
     st.chrome.view.selected = 0; // firefox (cask)
-    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
-    defer alloc.free(argv);
-    try testing.expectEqual(@as(usize, 4), argv.len); // single → mt, install, --cask, name
-    try testing.expectEqualStrings("--cask", argv[2]);
-    try testing.expectEqualStrings("firefox", argv[3]);
+    const eff = stepKey(&st, &storage, ch('i'));
+    defer alloc.free(eff.run_mutation.argv);
+    try testing.expect(eff == .run_mutation);
+    try testing.expectEqual(@as(usize, 4), eff.run_mutation.argv.len); // mt, install, --cask, name
+    try testing.expectEqualStrings("--cask", eff.run_mutation.argv[2]);
+    try testing.expectEqualStrings("firefox", eff.run_mutation.argv[3]);
+    try testing.expectEqual(Kind.cask, st.pending_kind.?); // the fold knows which pass this was
 }
 
-test "installArgv is null with an empty basket and no installable active row" {
-    const alloc = testing.allocator;
-    var sel: Selection = .{};
+test "install is a no-op with an empty basket and no installable active row" {
+    var storage: Storage = .{};
     const on_system = [_]Match{.{ .name = "jq", .kind = .formula, .installed = true }};
-    const st_installed: State = .{ .items = &on_system };
-    try testing.expect((try installArgv(alloc, "/bin/mt", &sel, &st_installed)) == null); // active row already installed
-    const empty: State = .{ .items = &.{} };
-    try testing.expect((try installArgv(alloc, "/bin/mt", &sel, &empty)) == null); // nothing on screen, empty basket
+    var st_installed: State = .{ .items = &on_system };
+    try testing.expect(stepKey(&st_installed, &storage, ch('i')) == .none); // active row already installed
+    try testing.expect(st_installed.pending_kind == null); // nothing in flight
+    var empty: State = .{ .items = &.{} };
+    try testing.expect(stepKey(&empty, &storage, ch('i')) == .none); // nothing on screen, empty basket
 }
 
-test "a basket filled across two separate queries installs every pick in one argv" {
+test "a basket filled across two separate queries installs every pick in one pass" {
     const alloc = testing.allocator;
     var sel: Selection = .{};
     defer sel.deinit(alloc);
@@ -1380,18 +1476,18 @@ test "a basket filled across two separate queries installs every pick in one arg
         b.deinit();
     }
 
-    // One `i` installs both, in a single argv, no matter which results are on screen —
+    // One `i` installs both, in a single pass, no matter which results are on screen —
     // the owned basket spans the two queries.
-    const st: State = .{ .items = &.{} };
-    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    const argv = (try installArgvForKind(alloc, "/bin/mt", &sel, .formula)).?;
     defer alloc.free(argv);
-    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqual(@as(usize, 5), argv.len);
     try testing.expectEqualStrings("install", argv[1]);
-    try testing.expectEqualStrings("bat", argv[2]);
-    try testing.expectEqualStrings("redis", argv[3]);
+    try testing.expectEqualStrings("--formula", argv[2]);
+    try testing.expectEqualStrings("bat", argv[3]);
+    try testing.expectEqualStrings("redis", argv[4]);
 }
 
-test "installArgv reads names from the owned basket, not the freed parse it was checked in" {
+test "installArgvForKind reads names from the owned basket, not the freed parse it was checked in" {
     const alloc = testing.allocator;
     var sel: Selection = .{};
     defer sel.deinit(alloc);
@@ -1405,11 +1501,24 @@ test "installArgv reads names from the owned basket, not the freed parse it was 
         try sel.toggle(alloc, parsed.items[1].name, parsed.items[1].kind);
         parsed.deinit(); // the parse the names were borrowed from is gone
     }
-    const st: State = .{ .items = &.{} };
-    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    const argv = (try installArgvForKind(alloc, "/bin/mt", &sel, .formula)).?;
     defer alloc.free(argv);
-    try testing.expectEqualStrings("bat", argv[2]); // owned bytes, not a dangling borrow
-    try testing.expectEqualStrings("redis", argv[3]);
+    try testing.expectEqualStrings("bat", argv[3]); // owned bytes, not a dangling borrow
+    try testing.expectEqualStrings("redis", argv[4]);
+}
+
+test "removeKind drops only that kind's picks and frees their bytes" {
+    const alloc = testing.allocator;
+    var sel: Selection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "bat", .formula);
+    try sel.toggle(alloc, "docker", .cask);
+    try sel.toggle(alloc, "redis", .formula);
+    sel.removeKind(alloc, .formula);
+    try testing.expectEqual(@as(usize, 1), sel.entries.items.len);
+    try testing.expect(sel.contains("docker", .cask)); // the other kind is untouched
+    sel.removeKind(alloc, .formula); // none left of that kind: a no-op, never a trap
+    try testing.expectEqual(@as(usize, 1), sel.entries.items.len);
 }
 
 test "selection toggles (name, kind) membership and owns its bytes" {
@@ -1511,10 +1620,9 @@ test "removing a pick then installing builds an argv without the removed name" {
     try sel.toggle(alloc, "bat", .formula);
     try sel.toggle(alloc, "redis", .formula);
     sel.remove(alloc, "bat", .formula);
-    const st: State = .{ .items = &.{} };
-    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    const argv = (try installArgvForKind(alloc, "/bin/mt", &sel, .formula)).?;
     defer alloc.free(argv);
-    try testing.expectEqual(@as(usize, 4), argv.len); // single → mt, install, --formula, name
+    try testing.expectEqual(@as(usize, 4), argv.len); // mt, install, --formula, name
     try testing.expectEqualStrings("redis", argv[3]);
     try testing.expect(std.mem.indexOf(u8, argv[3], "bat") == null);
 }
@@ -1581,36 +1689,157 @@ test "projectSearchChecked fills the storage checked slice from the selection" {
     try testing.expect(!storage.checked[1]); // installed → never checked
 }
 
-test "a clean install (exit 0) clears the basket and re-projects the checked slice" {
+test "a clean install pass (exit 0) drops its kind's picks and re-projects the checked slice" {
     const alloc = testing.allocator;
     var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
     defer storage.deinit(alloc);
     storage.search = try search_json.parse(alloc,
-        \\{"results":[{"name":"bat","type":"formula","installed":false}]}
+        \\{"results":[{"name":"bat","type":"formula","installed":false},{"name":"docker","type":"cask","installed":false}]}
     );
-    storage.checked = try alloc.alloc(bool, 1);
+    storage.checked = try alloc.alloc(bool, 2);
     @memset(storage.checked, false);
     try storage.selected.toggle(alloc, "bat", .formula);
     try storage.selected.toggle(alloc, "redis", .formula); // an off-list pick too
+    try storage.selected.toggle(alloc, "docker", .cask);
     projectSearchChecked(&storage);
+    var st: State = .{ .items = storage.search.?.items, .checked = storage.checked };
+    syncSelected(&st, &storage);
     try testing.expect(storage.checked[0]); // bat checked before the install
 
-    applyInstallOutcome(&storage, alloc, true);
-    try testing.expectEqual(@as(usize, 0), storage.selected.entries.items.len); // basket emptied
-    try testing.expect(!storage.checked[0]); // re-projected against the now-empty basket
+    const first = stepKey(&st, &storage, ch('i'));
+    alloc.free(first.run_mutation.argv); // formula pass
+    const next = update(alloc, "/opt/malt/bin/mt", &st, &storage, &shared, .{ .mutated = 0 });
+    defer alloc.free(next.run_mutation.argv); // cask pass
+    try testing.expectEqual(@as(usize, 1), storage.selected.entries.items.len); // only the cask remains
+    try testing.expect(!storage.checked[0]); // bat re-projected against the shrunk basket
+    try testing.expect(storage.checked[1]); // docker still checked, awaiting its pass
 }
 
-test "a failed install (non-zero exit) retains the whole basket for retry" {
+test "a failed install pass (non-zero exit) retains its kind's picks for retry" {
     const alloc = testing.allocator;
+    var st: State = .{ .items = &.{} };
     var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
     defer storage.deinit(alloc);
     try storage.selected.toggle(alloc, "bat", .formula);
     try storage.selected.toggle(alloc, "redis", .formula);
+    syncSelected(&st, &storage);
 
-    applyInstallOutcome(&storage, alloc, false);
+    const first = stepKey(&st, &storage, ch('i'));
+    alloc.free(first.run_mutation.argv);
+    try testing.expect(update(alloc, "/opt/malt/bin/mt", &st, &storage, &shared, .{ .mutated = 1 }) == .none);
     try testing.expectEqual(@as(usize, 2), storage.selected.entries.items.len); // untouched
     try testing.expect(storage.selected.contains("bat", .formula));
     try testing.expect(storage.selected.contains("redis", .formula));
+    try testing.expect(st.pending_kind == null); // the run is over
+}
+
+test "a failed formula pass still chains the cask pass and retains only the formula picks" {
+    const alloc = testing.allocator;
+    // Passes are independent: a checked cask is never held hostage by an unrelated
+    // formula failure, and the failed formula picks stay in the basket for retry.
+    var st: State = .{ .items = &.{} };
+    st.chrome.filter.push("docker");
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(alloc);
+    try storage.selected.toggle(alloc, "bat", .formula);
+    try storage.selected.toggle(alloc, "docker", .cask);
+    syncSelected(&st, &storage);
+
+    const first = stepKey(&st, &storage, ch('i'));
+    alloc.free(first.run_mutation.argv); // the formula pass
+    const second = update(alloc, "/opt/malt/bin/mt", &st, &storage, &shared, .{ .mutated = 1 });
+    defer alloc.free(second.run_mutation.argv);
+    try testing.expect(second == .run_mutation); // the cask pass still runs
+    try testing.expectEqualStrings("--cask", second.run_mutation.argv[2]);
+    try testing.expect(std.mem.startsWith(u8, shared.banner.slice(), "install failed"));
+    try testing.expect(storage.selected.contains("bat", .formula)); // retained for retry
+
+    const last = update(alloc, "/opt/malt/bin/mt", &st, &storage, &shared, .{ .mutated = 0 });
+    defer alloc.free(last.read.argv);
+    try testing.expect(last == .read); // one pass succeeded, so the query re-runs
+    try testing.expect(!storage.selected.contains("docker", .cask)); // the cask pass consumed its pick
+    try testing.expect(storage.selected.contains("bat", .formula));
+    try testing.expect(st.pending_kind == null);
+}
+
+test "a failed cask pass after a clean formula pass ends the run and still re-queries" {
+    const alloc = testing.allocator;
+    // The formula pass flipped markers on disk, so the re-query must not be lost to
+    // the later cask failure; the cask pick stays for retry.
+    var st: State = .{ .items = &.{} };
+    st.chrome.filter.push("docker");
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(alloc);
+    try storage.selected.toggle(alloc, "bat", .formula);
+    try storage.selected.toggle(alloc, "docker", .cask);
+    syncSelected(&st, &storage);
+
+    const first = stepKey(&st, &storage, ch('i'));
+    alloc.free(first.run_mutation.argv);
+    const second = update(alloc, "/opt/malt/bin/mt", &st, &storage, &shared, .{ .mutated = 0 });
+    alloc.free(second.run_mutation.argv);
+    const last = update(alloc, "/opt/malt/bin/mt", &st, &storage, &shared, .{ .mutated = 1 });
+    defer alloc.free(last.read.argv);
+    try testing.expect(last == .read);
+    try testing.expect(storage.selected.contains("docker", .cask));
+    try testing.expectEqual(@as(usize, 1), st.selected_count);
+    try testing.expect(st.pending_kind == null);
+}
+
+test "a pass that fails to spawn ends the run without leaking its state into the next" {
+    const alloc = testing.allocator;
+    // The formula pass ran clean, then the cask pass never spawned (`.failed`, the
+    // pump set the banner). The run is over: the formula install still earns its
+    // refetch, the unspawned cask pick stays for retry, and nothing carries into a
+    // later run whose own passes all fail.
+    var st: State = .{ .items = &.{} };
+    st.chrome.filter.push("docker");
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(alloc);
+    try storage.selected.toggle(alloc, "bat", .formula);
+    try storage.selected.toggle(alloc, "docker", .cask);
+    syncSelected(&st, &storage);
+
+    alloc.free(stepKey(&st, &storage, ch('i')).run_mutation.argv);
+    alloc.free(update(alloc, "/opt/malt/bin/mt", &st, &storage, &shared, .{ .mutated = 0 }).run_mutation.argv);
+    const after_fault = update(alloc, "/opt/malt/bin/mt", &st, &storage, &shared, .failed);
+    defer alloc.free(after_fault.read.argv);
+    try testing.expect(after_fault == .read); // the clean formula pass changed the disk
+    try testing.expect(st.pending_kind == null);
+    try testing.expect(storage.selected.contains("docker", .cask)); // retained for retry
+
+    alloc.free(stepKey(&st, &storage, ch('i')).run_mutation.argv); // a fresh run: the cask pass
+    try testing.expect(update(alloc, "/opt/malt/bin/mt", &st, &storage, &shared, .{ .mutated = 1 }) == .none); // no stale refetch
+}
+
+test "a failed search read with no install in flight neither refetches nor consumes the basket" {
+    var st: State = .{ .phase = .searching };
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    try storage.selected.toggle(testing.allocator, "bat", .formula);
+    syncSelected(&st, &storage);
+    // The `.failed` arm is shared with a failed read; with no run in flight it must
+    // stay a plain phase reset, never a stray re-query loop.
+    try testing.expect(update(testing.allocator, "/bin/mt", &st, &storage, &shared, .failed) == .none);
+    try testing.expectEqual(@as(usize, 1), st.selected_count);
+}
+
+test "a finished install with no pass in flight is ignored" {
+    var st: State = .{};
+    var storage: Storage = .{};
+    var shared: ctx.SharedModel = .{};
+    defer storage.deinit(testing.allocator);
+    try storage.selected.toggle(testing.allocator, "bat", .formula);
+    syncSelected(&st, &storage);
+    // A stray `.mutated` (nothing was started) must not consume the basket.
+    try testing.expect(update(testing.allocator, "/bin/mt", &st, &storage, &shared, .{ .mutated = 0 }) == .none);
+    try testing.expectEqual(@as(usize, 1), st.selected_count);
 }
 
 test "update on a failed search leaves no stuck searching phase (guidance when none loaded)" {
@@ -1679,25 +1908,32 @@ test "a successful install clears the basket, marks siblings stale, and re-runs 
     defer storage.deinit(testing.allocator);
     try storage.selected.toggle(testing.allocator, "bat", .formula);
     syncSelected(&st, &storage);
+    const first = stepKey(&st, &storage, ch('i'));
+    testing.allocator.free(first.run_mutation.argv);
     const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .{ .mutated = 0 });
     defer testing.allocator.free(next.read.argv);
     try testing.expect(next == .read); // re-run the query so markers flip
     try testing.expectEqualStrings("search", next.read.argv[1]);
     try testing.expectEqual(@as(usize, 0), st.selected_count); // basket consumed
     try testing.expect(shared.takeDirty(.installed)); // siblings marked stale
+    try testing.expect(st.pending_kind == null); // the run is over
 }
 
 test "a failed install retains the basket behind a recoverable banner and does not re-query" {
     var st: State = .{};
+    st.chrome.filter.push("bat");
     var storage: Storage = .{};
     var shared: ctx.SharedModel = .{};
     defer storage.deinit(testing.allocator);
     try storage.selected.toggle(testing.allocator, "bat", .formula);
     syncSelected(&st, &storage);
+    const first = stepKey(&st, &storage, ch('i'));
+    testing.allocator.free(first.run_mutation.argv);
     const next = update(testing.allocator, "/bin/mt", &st, &storage, &shared, .{ .mutated = 1 });
     try testing.expect(next == .none); // no re-query on failure
     try testing.expectEqual(@as(usize, 1), st.selected_count); // basket retained for retry
     try testing.expect(std.mem.startsWith(u8, shared.banner.slice(), "install failed"));
+    try testing.expect(!shared.takeDirty(.installed)); // nothing changed on disk
 }
 
 test "Enter toggles an open results pane closed for the selected row" {
