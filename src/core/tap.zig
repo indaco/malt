@@ -1580,6 +1580,12 @@ pub const RawFetch = union(enum) {
     not_found: u16,
 };
 
+/// Where a tap keg's `.rb` may live, in the order the install resolver
+/// probes them. `Casks/` is a keg layout too: a tarball cask with no `app`
+/// stanza (goreleaser's `homebrew_casks` output) is installed as a keg, and
+/// the audit must read the same file install did.
+pub const keg_rb_subtrees: []const forge.RawKind = &.{ .formula, .cask, .formula_root };
+
 /// Fetch a tap package's `.rb` by trying each `subtree` layout at `sha` in
 /// order; the first HTTP 200 wins. The "try the next layout" decision keys
 /// only on HTTP status, so the Ruby parse stays in the caller — keeping this
