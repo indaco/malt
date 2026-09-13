@@ -62,6 +62,10 @@ pub const ResolvedRubyFormula = struct {
     /// Label for the `kegs.tap` column and, optionally, `tap_mod.add`.
     tap_label: []const u8,
     version: []const u8,
+    /// `.rb` `revision N` (0 when absent). Names the Cellar leaf and the
+    /// keg row as `<version>_N` so the outdated audit, which qualifies
+    /// upstream the same way, sees an installed keg as current.
+    revision: i64 = 0,
     /// Archive URL post `#{version}` interpolation.
     url: []const u8,
     sha256: []const u8,
@@ -431,6 +435,7 @@ fn installTapRb(
         .full_name = pkg_name,
         .tap_label = tap_slug,
         .version = rb.version,
+        .revision = rb.revision,
         .url = final_url,
         .sha256 = rb.sha256,
         .binary_name = parseCaskBinary(resp.body),
@@ -573,6 +578,7 @@ pub fn installLocalFormula(
         .full_name = realpath,
         .tap_label = "local",
         .version = rb.version,
+        .revision = rb.revision,
         .url = final_url,
         .sha256 = rb.sha256,
         // Borrows from `body`, which outlives the materialise call below.
@@ -948,9 +954,15 @@ pub fn materializeRubyFormula(
         return;
     }
 
+    // The leaf is `<version>_<revision>` like a core keg: uninstall, purge
+    // and rollback all rebuild it from the row, so the dir must match.
+    var pkgver_buf: [128]u8 = undefined;
+    const pkg_version = formula_mod.pkgVersion(&pkgver_buf, resolved.version, resolved.revision) catch
+        return InstallError.CellarFailed;
+
     // Extract to Cellar directly (tap-style binaries are simple archives).
     var cellar_buf: [512]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, resolved.name, resolved.version }) catch
+    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, resolved.name, pkg_version }) catch
         return InstallError.CellarFailed;
 
     var parent_buf: [512]u8 = undefined;
@@ -979,7 +991,7 @@ pub fn materializeRubyFormula(
     // Not staged behind the backstop because an artifact swap without a
     // version bump does not happen in practice.
     if (force) {
-        install_mod.pruneCellarForReinstall(ctx, prefix, resolved.name, resolved.version);
+        install_mod.pruneCellarForReinstall(ctx, prefix, resolved.name, pkg_version);
     }
     std.Io.Dir.createDirAbsolute(ctx.io, cellar_path, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
@@ -1120,14 +1132,15 @@ pub fn materializeRubyFormula(
     var keg_id: i64 = 0;
     {
         // Route through the canonical seam inside the caller-owned txn.
-        // revision/bin_isolated stay at their schema defaults (0) — a
-        // tap/local formula has no bin-isolation intent — and the seam's
-        // default `inherit_pin` reproduces the COALESCE-MAX pin carry-over.
+        // The revision is the `.rb`'s so the audit's `isCurrent` compares
+        // the same pair it qualifies upstream with; bin_isolated stays 0
+        // (no bin-isolation intent) and the seam's default `inherit_pin`
+        // reproduces the COALESCE-MAX pin carry-over.
         keg_id = record.recordKegFields(db, .{
             .name = resolved.name,
             .full_name = resolved.full_name,
             .version = resolved.version,
-            .revision = 0,
+            .revision = resolved.revision,
             .tap = resolved.tap_label,
             .store_sha256 = resolved.sha256,
             .cellar_path = cellar_path,
@@ -1157,7 +1170,7 @@ pub fn materializeRubyFormula(
     linker.link(cellar_path, resolved.name, keg_id, false) catch {
         sink.warn("Some links for {s} could not be created", .{resolved.name});
     };
-    linker.linkOpt(resolved.name, resolved.version) catch {
+    linker.linkOpt(resolved.name, pkg_version) catch {
         sink.warn("Could not create opt link for {s}", .{resolved.name});
     };
 
@@ -1167,7 +1180,7 @@ pub fn materializeRubyFormula(
     // a row.
     if (force) {
         install_mod.dropStaleKegRows(ctx, allocator, db, resolved.name, cellar_path);
-        install_mod.pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, resolved.name, resolved.version);
+        install_mod.pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, resolved.name, pkg_version);
     }
 
     db.commit() catch return InstallError.RecordFailed;
