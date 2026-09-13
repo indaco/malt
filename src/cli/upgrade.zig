@@ -839,7 +839,7 @@ fn tapFormulaUpstreamVersion(
 ) ?[]u8 {
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
-    var fetch = tap_mod.fetchRawFile(&http, ctx.environ, forge_kind, raw_base, sha, name, &.{ .formula, .formula_root }) catch return null;
+    var fetch = tap_mod.fetchRawFile(&http, ctx.environ, forge_kind, raw_base, sha, name, tap_mod.keg_rb_subtrees) catch return null;
     switch (fetch) {
         .not_found => return null,
         .found => |*resp| {
