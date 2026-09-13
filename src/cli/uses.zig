@@ -55,10 +55,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (db_opt) |*db| {
         // Schema is idempotent; read-only uses queries degrade to empty on
         // a broken DB, but a newer-than-us DB must not be read at all.
-        schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) {
-            schema_report.reportInitFailure(db, e, prefix);
-            return error.Aborted;
-        };
+        schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(db, e, prefix);
         dependents = collectDependents(allocator, db, name, recursive) catch &.{};
     }
 

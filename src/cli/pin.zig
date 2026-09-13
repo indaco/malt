@@ -57,10 +57,7 @@ fn run(ctx: *const AppCtx, args: []const []const u8, action: Action) !void {
         return error.Aborted;
     };
     defer db.close();
-    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) {
-        schema_report.reportInitFailure(&db, e, prefix);
-        return error.Aborted;
-    };
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(&db, e, prefix);
 
     const updated = setPinned(&db, name, action.flag()) catch {
         output.err("Database update failed for {s}", .{name});

@@ -240,10 +240,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
     defer db.close();
 
-    schema.initSchema(&db) catch |e| {
-        schema_report.reportInitFailure(&db, e, prefix);
-        return error.Aborted;
-    };
+    schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
 
     // Acquire lock; `MALT_LOCK_TIMEOUT_MS` tunes the 30 s default.
     var lock_path_buf: [prefix_path.path_buf_len]u8 = undefined;

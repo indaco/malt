@@ -29,11 +29,14 @@ pub fn initFailureMessage(buf: []u8, e: schema.MigrateError, db_version: i64, pr
     };
 }
 
-/// Emit the failure on the global `output` channel. Reads the DB's own
-/// version marker so every open site reports the same numbers.
-pub fn reportInitFailure(db: *sqlite.Database, e: schema.MigrateError, prefix: []const u8) void {
+/// Emit the failure on the global `output` channel and hand back the error
+/// the site aborts with. `SchemaTooNew` keeps its name so `main` can give it
+/// a dedicated exit code the TUI turns into a banner reason; anything else
+/// is the plain `Aborted` contract.
+pub fn abortInitFailure(db: *sqlite.Database, e: schema.MigrateError, prefix: []const u8) error{ SchemaTooNew, Aborted } {
     var buf: [512]u8 = undefined;
     output.err("{s}", .{initFailureMessage(&buf, e, schema.currentVersion(db) catch 0, prefix)});
+    return if (e == error.SchemaTooNew) error.SchemaTooNew else error.Aborted;
 }
 
 test "initFailureMessage names the DB version, the supported ceiling and the path on SchemaTooNew" {

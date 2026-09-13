@@ -980,10 +980,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return;
     };
     defer db.close();
-    schema.initSchema(&db) catch |e| {
-        schema_report.reportInitFailure(&db, e, prefix);
-        return error.Aborted;
-    };
+    schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
 
     // Validate --tap before any cache/network I/O so a typo never
     // writes a partial snapshot or warms an API cache for nothing.

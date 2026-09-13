@@ -13,7 +13,16 @@
 const std = @import("std");
 const term = @import("term.zig");
 
-pub const SpawnError = error{ SpawnFailed, WaitFailed, ChildFailed };
+pub const SpawnError = error{ SpawnFailed, WaitFailed, ChildFailed, DatabaseNewerThanMalt };
+
+/// `main`'s exit for a DB newer than this malt — the mt→TUI process contract,
+/// like the doctor severity cap and the cask app-running code.
+pub const schema_too_new_exit: u8 = 4;
+
+/// The one refusal a read can hit that the user must act on keeps its name.
+pub fn exitError(code: u8) SpawnError {
+    return if (code == schema_too_new_exit) error.DatabaseNewerThanMalt else error.ChildFailed;
+}
 pub const ReadError = SpawnError || error{ EmptyOutput, ReadFailed, OutOfMemory };
 pub const InlineError = term.TermError || SpawnError;
 
@@ -61,7 +70,7 @@ pub fn runChildTolerant(io: std.Io, argv: []const []const u8, max_ok_exit: u8) S
     var child = std.process.spawn(io, .{ .argv = argv }) catch return error.SpawnFailed;
     const status = child.wait(io) catch return error.WaitFailed;
     switch (status) {
-        .exited => |code| if (code > max_ok_exit) return error.ChildFailed,
+        .exited => |code| if (code > max_ok_exit) return exitError(code),
         .signal, .stopped, .unknown => return error.ChildFailed,
     }
 }
@@ -97,7 +106,7 @@ fn captureJson(
 
     const status = child.wait(io) catch return error.WaitFailed;
     switch (status) {
-        .exited => |code| if (code > max_ok_exit) return error.ChildFailed,
+        .exited => |code| if (code > max_ok_exit) return exitError(code),
         .signal, .stopped, .unknown => return error.ChildFailed,
     }
     return bytes;
@@ -203,7 +212,7 @@ fn capturePolled(
 
     const status = child.wait(io) catch return error.WaitFailed;
     switch (status) {
-        .exited => |code| if (code > max_ok_exit) return error.ChildFailed,
+        .exited => |code| if (code > max_ok_exit) return exitError(code),
         .signal, .stopped, .unknown => return error.ChildFailed,
     }
     return buf.toOwnedSlice(allocator);
@@ -397,6 +406,14 @@ test "runChild surfaces a non-zero exit as ChildFailed, not swallowed" {
     var t = threaded();
     defer t.deinit();
     try testing.expectError(error.ChildFailed, runChild(t.io(), &.{"/usr/bin/false"}));
+}
+
+test "a child refusing a newer database is named on both the run and the read path" {
+    var t = threaded();
+    defer t.deinit();
+    const argv = &.{ "/usr/bin/perl", "-e", "exit 4" };
+    try testing.expectError(error.DatabaseNewerThanMalt, runChild(t.io(), argv));
+    try testing.expectError(error.DatabaseNewerThanMalt, readJson(t.io(), testing.allocator, argv));
 }
 
 test "runChild surfaces a missing program as SpawnFailed" {
