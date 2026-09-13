@@ -826,6 +826,19 @@ test "tapWarmDecision: null taints, equal skips, differing collects" {
     try std.testing.expectEqual(TapWarmDecision.collect, tapWarmDecision("1.2.0_1", "1.2.0"));
 }
 
+/// A keg at the tap's HEAD whose recorded `<version>_<revision>` differs from
+/// the `.rb`'s is one `mt outdated` lists but the commit gate calls current;
+/// nothing but a forced reinstall clears that, so say so.
+fn realignHint(buf: []u8, name: []const u8, installed: []const u8, upstream: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s} is installed as {s} but the tap declares {s} - reinstall with --force to realign", .{ name, installed, upstream });
+}
+
+test "realignHint names both versions and the --force way out" {
+    var buf: [256]u8 = undefined;
+    const hint = try realignHint(&buf, "revfix", "1.0.0", "1.0.0_2");
+    try std.testing.expectEqualStrings("revfix is installed as 1.0.0 but the tap declares 1.0.0_2 - reinstall with --force to realign", hint);
+}
+
 /// Resolve a tap formula's upstream version from its `.rb` at `sha`, for the
 /// dry-run warm. Reuses the shared `tap.fetchRawFile` leaf; the parse is local
 /// (the outdated audit taints differently, so per-caller failure policy stays
@@ -932,7 +945,20 @@ fn upgradeTapFormula(
     // Stated to users in `upgrade_help` (`src/cli/help.zig`); the version rule it
     // differs from is the note in `src/cli/outdated/refresh.zig`.
     if (!force and same_commit) {
-        if (!bulk) output.skip("{s} is already at latest tap commit", .{name});
+        if (!bulk) {
+            output.skip("{s} is already at latest tap commit", .{name});
+            // Same commit means the same `.rb`, so a differing qualified
+            // version can only be a row recorded without its revision.
+            var qbuf: [256]u8 = undefined;
+            const installed = formula_mod.pkgVersion(&qbuf, installed_version, installed_revision) catch installed_version;
+            if (tapFormulaUpstreamVersion(ctx, allocator, urls.forge, urls.raw_base, fresh_sha, name)) |upstream| {
+                defer allocator.free(upstream);
+                if (tapWarmDecision(upstream, installed) == .collect) {
+                    var hint_buf: [512]u8 = undefined;
+                    if (realignHint(&hint_buf, name, installed, upstream)) |hint| output.info("{s}", .{hint}) else |_| {}
+                }
+            }
+        }
         output.emitNdjsonEvent(.up_to_date, name, null);
         return .up_to_date;
     }
