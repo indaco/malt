@@ -238,13 +238,10 @@ fn openDb(ctx: *const AppCtx) !sqlite.Database {
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return ServicesError.DatabaseError;
     var db = try sqlite.Database.open(path);
+    errdefer db.close();
     // Schema is idempotent; a newer-than-us DB is the one failure to stop
     // on, subcommand queries surface anything else.
-    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) {
-        schema_report.reportInitFailure(&db, e, prefix);
-        db.close();
-        return error.Aborted;
-    };
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(&db, e, prefix);
     return db;
 }
 

@@ -55,10 +55,7 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
     };
     defer db.close();
     // Schema is idempotent; a newer-than-us DB is the one failure to stop on.
-    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) {
-        schema_report.reportInitFailure(&db, e, prefix);
-        return error.Aborted;
-    };
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(&db, e, prefix);
 
     // Look up the keg
     var stmt = db.prepare("SELECT id, cellar_path FROM kegs WHERE name = ?1 LIMIT 1;") catch {
@@ -162,10 +159,7 @@ fn executeLinkIsolate(ctx: *const AppCtx, allocator: std.mem.Allocator, name: ?[
         return error.Aborted;
     };
     defer db.close();
-    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) {
-        schema_report.reportInitFailure(&db, e, prefix);
-        return error.Aborted;
-    };
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(&db, e, prefix);
 
     if (all_flag) {
         var sel = db.prepare(
@@ -287,10 +281,7 @@ pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []c
     };
     defer db.close();
     // Schema is idempotent; a newer-than-us DB is the one failure to stop on.
-    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) {
-        schema_report.reportInitFailure(&db, e, prefix);
-        return error.Aborted;
-    };
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(&db, e, prefix);
 
     // Look up the keg
     var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch {

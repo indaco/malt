@@ -392,10 +392,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const prefix = atomic.maltPrefixOrAbort();
     var db_opt: ?sqlite.Database = cli_info.openDb(prefix);
     defer if (db_opt) |*d| d.close();
-    if (db_opt) |*db| schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) {
-        schema_report.reportInitFailure(db, e, prefix);
-        return error.Aborted;
-    };
+    if (db_opt) |*db| schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(db, e, prefix);
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);

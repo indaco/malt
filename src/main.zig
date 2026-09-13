@@ -657,6 +657,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
             // Dedicated code so the TUI can footer the cause; mirrored in
             // `tui/app.zig`. Message already printed, like Aborted below.
             error.AppRunning => std.process.exit(3),
+            // Same shape: the TUI banners "database is newer than this malt"
+            // off this code; mirrored in `tui/spawn.zig`.
+            error.SchemaTooNew => std.process.exit(4),
             // Ctrl-C during a long walk. Deliberately not `error.Interrupted`
             // — that name is std's EINTR value and would silently map an I/O
             // hiccup onto a user-cancel exit code.

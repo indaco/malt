@@ -13,7 +13,7 @@ const outdated_mod = @import("outdated.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
-pub const UpdateError = error{Aborted} || std.mem.Allocator.Error;
+pub const UpdateError = error{ Aborted, SchemaTooNew } || std.mem.Allocator.Error;
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) UpdateError!void {
     if (help.showIfRequested(ctx, args, "update")) return;
@@ -41,9 +41,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.err("offline mode: `mt update --check` requires network access.", .{});
             return error.Aborted;
         }
-        refreshSnapshot(ctx, allocator, cache_dir) catch |e| {
-            reportCheckFailure(e);
-            return error.Aborted;
+        refreshSnapshot(ctx, allocator, cache_dir) catch |e| switch (e) {
+            // Already reported at the source; keep the code so `main` maps it.
+            error.SchemaTooNew, error.Aborted => |known| return known,
+            else => {
+                reportCheckFailure(e);
+                return error.Aborted;
+            },
         };
         output.info("Outdated snapshot refreshed.", .{});
         return;
@@ -93,10 +97,7 @@ fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: 
         return;
     };
     defer db.close();
-    schema.initSchema(&db) catch |e| {
-        schema_report.reportInitFailure(&db, e, prefix);
-        return error.Aborted;
-    };
+    schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();

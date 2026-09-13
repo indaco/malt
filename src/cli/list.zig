@@ -78,10 +78,7 @@ pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
         return;
     };
     defer db.close();
-    schema.initSchema(&db) catch |e| {
-        schema_report.reportInitFailure(&db, e, prefix);
-        return error.Aborted;
-    };
+    schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);

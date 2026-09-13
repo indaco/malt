@@ -100,10 +100,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (db_opt) |*db| {
         // Schema is idempotent; info's API fallback handles a broken DB, but
         // a newer-than-us DB must not be read as "not installed".
-        schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) {
-            schema_report.reportInitFailure(db, e, prefix);
-            return error.Aborted;
-        };
+        schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(db, e, prefix);
         if (sel.formula and try emitInstalledFormula(ctx, allocator, db, name, prefix, stdout, json_mode, colorize)) return;
         if (sel.cask and try emitInstalledCask(allocator, db, name, stdout, json_mode, colorize)) return;
     }

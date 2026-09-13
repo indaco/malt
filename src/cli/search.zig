@@ -6,6 +6,7 @@ const testing = std.testing;
 
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const api_mod = @import("../net/api.zig");
@@ -409,7 +410,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 if (search_formula) formula = runKindLocal(f_alloc, &db, .formula, search_query) catch .{};
                 if (search_cask) cask = runKindLocal(c_alloc, &db, .cask, search_query) catch .{};
             }
-        } else |_| {}
+        } else |e| if (e == error.SchemaTooNew) return e; // a newer DB must not read as "nothing installed"
     }
 
     if (shouldRunApi(scope)) {
@@ -468,7 +469,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (json_mode) {
         // Installed flag is JSON-only; the set lives in the formula arena,
         // freed with everything else at function exit.
-        const set = loadInstalledSet(ctx, f_alloc);
+        const set = try loadInstalledSet(ctx, f_alloc);
         try emitJson(f_alloc, stdout, formula, cask, search_query, set);
     } else {
         emitHuman(stdout, formula, cask, search_query);
@@ -497,7 +498,7 @@ fn openLocalDb(ctx: *const AppCtx) !?sqlite.Database {
     _ = std.Io.Dir.cwd().statFile(ctx.io, std.mem.sliceTo(db_path, 0), .{}) catch return null;
     var db = sqlite.Database.open(db_path) catch return null;
     errdefer db.close();
-    try schema.initSchema(&db);
+    schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
     return db;
 }
 
@@ -759,8 +760,8 @@ fn writeSearchJson(w: *std.Io.Writer, query: []const u8, results: []const Result
 /// (fresh prefix) or any read failure yields an empty set — every result
 /// then reads `installed:false`, which is correct. Slices live in
 /// `allocator`, freed with the caller's arena.
-fn loadInstalledSet(ctx: *const AppCtx, allocator: std.mem.Allocator) InstalledSet {
-    const db_opt = openLocalDb(ctx) catch return .{};
+fn loadInstalledSet(ctx: *const AppCtx, allocator: std.mem.Allocator) error{SchemaTooNew}!InstalledSet {
+    const db_opt = openLocalDb(ctx) catch |e| return if (e == error.SchemaTooNew) error.SchemaTooNew else .{};
     var db = db_opt orelse return .{};
     defer db.close();
     return .{

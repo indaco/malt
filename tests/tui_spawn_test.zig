@@ -140,6 +140,15 @@ test "readJsonPolled ticks while a slow child runs and returns the same bytes a 
     try testing.expect(ticks >= 1);
 }
 
+test "readJsonPolled names a child refusing a newer database like the blocking read does" {
+    var t = threaded();
+    defer t.deinit();
+    var ticks: usize = 0;
+    try testing.expectError(error.DatabaseNewerThanMalt, spawn.readJsonPolled(t.io(), testing.allocator, &.{
+        "/bin/sh", "-c", "exit 4",
+    }, 0, CountTicker{ .n = &ticks }));
+}
+
 test "readJsonPolled maps an exit-0 empty response to null (fresh prefix), no tick needed" {
     var t = threaded();
     defer t.deinit();
