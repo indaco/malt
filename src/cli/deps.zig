@@ -8,6 +8,7 @@ const AppCtx = @import("../app_ctx.zig").AppCtx;
 const formula_mod = @import("../core/formula.zig");
 const signals = @import("../core/signals.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const api_mod = @import("../net/api.zig");
@@ -391,7 +392,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const prefix = atomic.maltPrefixOrAbort();
     var db_opt: ?sqlite.Database = cli_info.openDb(prefix);
     defer if (db_opt) |*d| d.close();
-    if (db_opt) |*db| schema.initSchema(db) catch {};
+    if (db_opt) |*db| schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) {
+        schema_report.reportInitFailure(db, e, prefix);
+        return error.Aborted;
+    };
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);

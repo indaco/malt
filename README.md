@@ -403,6 +403,7 @@ mt doctor --post-install-status          # check DSL support per installed formu
 
 | Check               | Pass                                          | Fail                                     |
 | ------------------- | --------------------------------------------- | ---------------------------------------- |
+| Database schema     | Schema version is one this malt can operate   | Error: written by a newer malt, upgrade  |
 | SQLite integrity    | `PRAGMA integrity_check` returns `ok`         | Error: database corrupt                  |
 | Directory structure | All required directories exist under prefix   | Warn: missing directory                  |
 | Stale lock          | No lock file, or lock PID is running          | Warn: suggest removal                    |

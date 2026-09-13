@@ -4,6 +4,7 @@ const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const help_mod = @import("help.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
@@ -78,8 +79,6 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     var db = try openDb(ctx);
     defer db.close();
-    // Schema is idempotent; subcommand queries surface the real error if the DB is broken.
-    schema.initSchema(&db) catch {};
 
     if (std.mem.eql(u8, sub, "list") or std.mem.eql(u8, sub, "ls")) {
         return cmdList(ctx.io, allocator, &db);
@@ -238,7 +237,15 @@ fn openDb(ctx: *const AppCtx) !sqlite.Database {
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return ServicesError.DatabaseError;
-    return sqlite.Database.open(path);
+    var db = try sqlite.Database.open(path);
+    // Schema is idempotent; a newer-than-us DB is the one failure to stop
+    // on, subcommand queries surface anything else.
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) {
+        schema_report.reportInitFailure(&db, e, prefix);
+        db.close();
+        return error.Aborted;
+    };
+    return db;
 }
 
 test "writeServicesJson: empty input still emits the versioned root with an empty array" {

@@ -6,6 +6,7 @@ const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const linker = @import("../core/linker.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const dirsize = @import("../fs/dirsize.zig");
@@ -77,7 +78,10 @@ pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
         return;
     };
     defer db.close();
-    schema.initSchema(&db) catch return;
+    schema.initSchema(&db) catch |e| {
+        schema_report.reportInitFailure(&db, e, prefix);
+        return error.Aborted;
+    };
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);

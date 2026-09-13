@@ -5,6 +5,7 @@ const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const linker_mod = @import("../core/linker.zig");
 const atomic = @import("../fs/atomic.zig");
 const prefix_path = @import("../fs/prefix_path.zig");
@@ -53,8 +54,11 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
         return error.Aborted;
     };
     defer db.close();
-    // Schema is idempotent; existing DB with current shape is the common case.
-    schema.initSchema(&db) catch {};
+    // Schema is idempotent; a newer-than-us DB is the one failure to stop on.
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) {
+        schema_report.reportInitFailure(&db, e, prefix);
+        return error.Aborted;
+    };
 
     // Look up the keg
     var stmt = db.prepare("SELECT id, cellar_path FROM kegs WHERE name = ?1 LIMIT 1;") catch {
@@ -158,7 +162,10 @@ fn executeLinkIsolate(ctx: *const AppCtx, allocator: std.mem.Allocator, name: ?[
         return error.Aborted;
     };
     defer db.close();
-    schema.initSchema(&db) catch {};
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) {
+        schema_report.reportInitFailure(&db, e, prefix);
+        return error.Aborted;
+    };
 
     if (all_flag) {
         var sel = db.prepare(
@@ -279,8 +286,11 @@ pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []c
         return error.Aborted;
     };
     defer db.close();
-    // Schema is idempotent; existing DB with current shape is the common case.
-    schema.initSchema(&db) catch {};
+    // Schema is idempotent; a newer-than-us DB is the one failure to stop on.
+    schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) {
+        schema_report.reportInitFailure(&db, e, prefix);
+        return error.Aborted;
+    };
 
     // Look up the keg
     var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch {

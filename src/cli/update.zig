@@ -6,6 +6,7 @@ const AppCtx = @import("../app_ctx.zig").AppCtx;
 const atomic = @import("../fs/atomic.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
+const schema_report = @import("schema_report.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const outdated_mod = @import("outdated.zig");
@@ -92,7 +93,10 @@ fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: 
         return;
     };
     defer db.close();
-    schema.initSchema(&db) catch return;
+    schema.initSchema(&db) catch |e| {
+        schema_report.reportInitFailure(&db, e, prefix);
+        return error.Aborted;
+    };
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
