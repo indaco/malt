@@ -981,7 +981,9 @@ fn tapVersionFromSubtrees(
             // installed one — see the outdated policy note above.
             // Keyed on the primary subtree, not the list length, so adding a
             // root-layout cask fallback the way `.formula_root` was added
-            // cannot silently re-qualify.
+            // cannot silently re-qualify. A keg resolved from `Casks/` on the
+            // formula leg lands here too; goreleaser casks carry no `revision`,
+            // so the qualification is a no-op and the bare version still matches.
             const is_cask = subtrees.len > 0 and subtrees[0] == .cask;
             const revision = if (is_cask) 0 else rb_info.revision;
             var ver_buf: [256]u8 = undefined;
@@ -1005,7 +1007,8 @@ fn tapCaskLatestVersion(
     return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, token, http, &.{.cask}, "cask");
 }
 
-/// Tap formula: `Formula/<name>.rb`, falling back to a root-layout `<name>.rb`.
+/// Tap formula: `Formula/<name>.rb`, then `Casks/<name>.rb` (a tarball cask
+/// installed as a keg), then a root-layout `<name>.rb` — the install order.
 fn tapFormulaLatestVersion(
     alloc: std.mem.Allocator,
     head_cache: *TapHeadResolve,
@@ -1016,7 +1019,7 @@ fn tapFormulaLatestVersion(
     name: []const u8,
     http: *client_mod.HttpClient,
 ) ?[]u8 {
-    return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, name, http, &.{ .formula, .formula_root }, "formula");
+    return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, name, http, tap_mod.keg_rb_subtrees, "formula");
 }
 
 /// Serial-path single-row check. `latest` is caller-owned.
@@ -1553,15 +1556,18 @@ test "isCorePathRow routes core rows to the map and third-party taps per-HEAD" {
     try std.testing.expect(!isCorePathRow(.{ .name = "f", .version = "1", .tap = "user/repo" }));
 }
 
-// Serves 404 to the first request (the `Formula/<name>.rb` probe), then the
-// root-layout `.rb` to the second — exercising the `.formula_root` fallback.
-const RbFallbackServer = struct {
+// Answers by request path — `/Formula/`, `/Casks/`, or the root `<name>.rb` —
+// with that layout's body, 404 when it is null; so a test can pin which layout
+// a subtree list reaches and in what order.
+const RbLayoutServer = struct {
     io: std.Io,
     listener: *std.Io.net.Server,
-    root_rb: []const u8,
-    idx: std.atomic.Value(usize),
+    formula_rb: ?[]const u8 = null,
+    cask_rb: ?[]const u8 = null,
+    root_rb: ?[]const u8 = null,
+    requests: std.atomic.Value(usize) = .init(0),
 
-    fn serve(self: *RbFallbackServer) void {
+    fn serve(self: *RbLayoutServer) void {
         while (true) {
             const stream = self.listener.accept(self.io) catch return;
             defer stream.close(self.io);
@@ -1571,15 +1577,32 @@ const RbFallbackServer = struct {
             var writer = stream.writer(self.io, &wbuf);
             var srv = std.http.Server.init(&reader.interface, &writer.interface);
             var req = srv.receiveHead() catch return;
-            const first = self.idx.fetchAdd(1, .monotonic) == 0;
-            if (first) {
-                req.respond("", .{ .status = .not_found }) catch return; // Formula/ miss
+            _ = self.requests.fetchAdd(1, .monotonic);
+            const target = req.head.target;
+            const body: ?[]const u8 = if (std.mem.indexOf(u8, target, "/Formula/") != null)
+                self.formula_rb
+            else if (std.mem.indexOf(u8, target, "/Casks/") != null)
+                self.cask_rb
+            else
+                self.root_rb;
+            if (body) |b| {
+                req.respond(b, .{ .status = .ok }) catch return;
             } else {
-                req.respond(self.root_rb, .{ .status = .ok }) catch return; // root hit
+                req.respond("", .{ .status = .not_found }) catch return;
             }
         }
     }
 };
+
+// The goreleaser `homebrew_casks` shape: a `Casks/<name>.rb` whose artifact is
+// a plain tarball, which install materialises as a keg.
+const tarball_cask_rb =
+    \\cask "pkg" do
+    \\  version "1.13.1"
+    \\  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    \\  url "https://x/releases/download/v1.13.1/pkg_Darwin_arm64.tar.gz"
+    \\end
+;
 
 test "tapVersionFromSubtrees falls back to the root layout and parses the version" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
@@ -1598,8 +1621,8 @@ test "tapVersionFromSubtrees falls back to the root layout and parses the versio
         \\  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
         \\end
     ;
-    var srv = RbFallbackServer{ .io = io, .listener = &listener, .root_rb = root_rb, .idx = std.atomic.Value(usize).init(0) };
-    const thread = try std.Thread.spawn(.{}, RbFallbackServer.serve, .{&srv});
+    var srv = RbLayoutServer{ .io = io, .listener = &listener, .root_rb = root_rb };
+    const thread = try std.Thread.spawn(.{}, RbLayoutServer.serve, .{&srv});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1636,8 +1659,8 @@ test "tapVersionFromSubtrees qualifies the resolved version with the .rb revisio
         \\  revision 2
         \\end
     ;
-    var srv = RbFallbackServer{ .io = io, .listener = &listener, .root_rb = rev_rb, .idx = std.atomic.Value(usize).init(0) };
-    const thread = try std.Thread.spawn(.{}, RbFallbackServer.serve, .{&srv});
+    var srv = RbLayoutServer{ .io = io, .listener = &listener, .root_rb = rev_rb };
+    const thread = try std.Thread.spawn(.{}, RbLayoutServer.serve, .{&srv});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1674,10 +1697,8 @@ test "tapVersionFromSubtrees discards the revision on the cask leg" {
         \\  revision 2
         \\end
     ;
-    // Primed to 1: the cask leg has no root-layout fallback to spend the
-    // server's opening 404 on.
-    var srv = RbFallbackServer{ .io = io, .listener = &listener, .root_rb = cask_rb, .idx = std.atomic.Value(usize).init(1) };
-    const thread = try std.Thread.spawn(.{}, RbFallbackServer.serve, .{&srv});
+    var srv = RbLayoutServer{ .io = io, .listener = &listener, .cask_rb = cask_rb };
+    const thread = try std.Thread.spawn(.{}, RbLayoutServer.serve, .{&srv});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
@@ -1697,6 +1718,75 @@ test "tapVersionFromSubtrees discards the revision on the cask leg" {
     // upgrade's cask skip decision compares against.
     const parsed = install_rb_parse_mod.parseRubyFormula(cask_rb).?;
     try std.testing.expectEqualStrings(parsed.version, v.?);
+}
+
+test "tapVersionFromSubtrees resolves a keg whose .rb lives under Casks/" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    // No `Formula/` and no root `.rb`: only the `Casks/` probe can answer, so
+    // a list that never asks for it cannot pass by accident.
+    var srv = RbLayoutServer{ .io = io, .listener = &listener, .cask_rb = tarball_cask_rb };
+    const thread = try std.Thread.spawn(.{}, RbLayoutServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.keg_rb_subtrees, "formula", "user/repo");
+    listener.deinit(io);
+    thread.join();
+
+    defer if (v) |vv| std.testing.allocator.free(vv);
+    try std.testing.expect(v != null);
+    // Bare version: the implicit revision 0 qualifies to nothing, so it stays
+    // byte-equal to what install recorded.
+    try std.testing.expectEqualStrings("1.13.1", v.?);
+}
+
+test "tapVersionFromSubtrees reads Formula/ before Casks/ when a tap ships both" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    const formula_rb =
+        \\class Pkg < Formula
+        \\  url "https://x/pkg-2.0.0.tar.gz"
+        \\  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+        \\  version "2.0.0"
+        \\end
+    ;
+    // Install picks `Formula/` first, so the audit must read the same file.
+    var srv = RbLayoutServer{ .io = io, .listener = &listener, .formula_rb = formula_rb, .cask_rb = tarball_cask_rb };
+    const thread = try std.Thread.spawn(.{}, RbLayoutServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.keg_rb_subtrees, "formula", "user/repo");
+    listener.deinit(io);
+    thread.join();
+
+    defer if (v) |vv| std.testing.allocator.free(vv);
+    try std.testing.expect(v != null);
+    try std.testing.expectEqualStrings("2.0.0", v.?);
+    try std.testing.expectEqual(@as(usize, 1), srv.requests.load(.monotonic));
 }
 
 test "tap rows reuse the caller-supplied client (the tap path constructs no HttpClient)" {
