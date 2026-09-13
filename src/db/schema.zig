@@ -35,6 +35,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
         \\    pinned        INTEGER NOT NULL DEFAULT 0,
         \\    install_reason TEXT NOT NULL DEFAULT 'direct',
         \\    bin_isolated  INTEGER NOT NULL DEFAULT 0,
+        \\    tap_commit_sha TEXT,
         \\    UNIQUE(name, version, revision)
         \\);
     );
@@ -128,7 +129,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 14;
+pub const known_schema_version: i64 = 15;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -152,6 +153,7 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 12) try migrateV11toV12(db);
     if (ver < 13) try migrateV12toV13(db);
     if (ver < 14) try migrateV13toV14(db);
+    if (ver < 15) try migrateV14toV15(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -732,6 +734,33 @@ fn migrateV13toV14(db: *sqlite.Database) sqlite.SqliteError!void {
     }
 
     try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (14);");
+
+    try db.commit();
+}
+
+/// v15 - the commit a tap keg was installed from. The upgrade gate used
+/// to read the per-tap pin as a stand-in, but every pin writer advances it
+/// without reinstalling the tap's other kegs, wedging them as "already
+/// upgraded". Backfilled from the pin so migrated kegs keep gating exactly
+/// as before; core kegs have no tap row and stay NULL (that path never
+/// reads it). PRAGMA-guarded like the column-adds above.
+fn migrateV14toV15(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    if (try columnsPresent(db, "PRAGMA table_info(kegs);", &.{"tap"})) {
+        if (!try columnsPresent(db, "PRAGMA table_info(kegs);", &.{"tap_commit_sha"})) {
+            try db.exec("ALTER TABLE kegs ADD COLUMN tap_commit_sha TEXT;");
+        }
+        if (try columnsPresent(db, "PRAGMA table_info(taps);", &.{ "name", "commit_sha" })) {
+            try db.exec(
+                \\UPDATE kegs SET tap_commit_sha = (SELECT commit_sha FROM taps WHERE taps.name = kegs.tap)
+                \\WHERE tap_commit_sha IS NULL AND tap IS NOT NULL;
+            );
+        }
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (15);");
 
     try db.commit();
 }

@@ -1133,6 +1133,7 @@ pub fn materializeRubyFormula(
             .cellar_path = cellar_path,
             .install_reason = "direct",
             .bin_isolated = false,
+            .tap_commit_sha = if (resolved.tap_registration) |t| t.commit_sha else null,
         }, .{ .in_transaction = true }) catch return InstallError.RecordFailed;
 
         // Without these rows `mt cleanup` sees the deps as orphans and

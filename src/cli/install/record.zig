@@ -143,7 +143,7 @@ pub const RecordOpts = struct {
     in_transaction: bool = false,
 };
 
-/// The flat write surface for the `kegs` INSERT — exactly the nine
+/// The flat write surface for the `kegs` INSERT — exactly the ten
 /// columns the SQL binds, nothing more. Callers holding a `Formula` go
 /// through the `recordKeg` adapter; the tap/local path (which holds a
 /// `ResolvedRubyFormula`, not a `Formula`) builds this directly instead
@@ -158,6 +158,9 @@ pub const KegFields = struct {
     cellar_path: []const u8,
     install_reason: []const u8,
     bin_isolated: bool,
+    /// Tap commit the `.rb` was fetched at; the upgrade gate's keg-scoped
+    /// "installed at". NULL for core and local kegs.
+    tap_commit_sha: ?[]const u8 = null,
 };
 
 /// The one `kegs` INSERT for the install path. Returns the keg_id.
@@ -180,11 +183,11 @@ pub fn recordKegFields(
     // REPLACE handles same-(name, version) re-records (install --force,
     // revision bumps); upgrade (different version) just INSERTs alongside.
     const sql = if (opts.inherit_pin)
-        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, bin_isolated, pinned)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));"
+        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, bin_isolated, tap_commit_sha, pinned)" ++
+            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));"
     else
-        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, bin_isolated, pinned)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0);";
+        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, bin_isolated, tap_commit_sha, pinned)" ++
+            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0);";
 
     var stmt = try db.prepare(sql);
     defer stmt.finalize();
@@ -198,6 +201,7 @@ pub fn recordKegFields(
     try stmt.bindText(7, f.cellar_path);
     try stmt.bindText(8, f.install_reason);
     try stmt.bindInt(9, if (f.bin_isolated) 1 else 0);
+    if (f.tap_commit_sha) |c| try stmt.bindText(10, c) else try stmt.bindNull(10);
 
     _ = try stmt.step();
 
