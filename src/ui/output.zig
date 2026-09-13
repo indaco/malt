@@ -240,9 +240,9 @@ fn writeStdout(bytes: []const u8) void {
 }
 
 /// Closed vocabulary of the prefix-line variants. The comptime table
-/// below drives one shared `writePrefixLine` body so the seven public
+/// below drives one shared `writePrefixLine` body so the public
 /// helpers each shrink to a tiny bufPrint + one call.
-const PrefixLineKind = enum { info, warn, success, err, notice, dim, skip };
+const PrefixLineKind = enum { info, warn, warn_always, success, err, notice, dim, skip };
 
 /// `.prefix_wrap` wraps only the glyph in role colour and leaves the
 /// message bare (info/warn/success/err/notice). `.line_wrap` wraps the
@@ -263,6 +263,7 @@ fn prefixLineSpec(comptime kind: PrefixLineKind) PrefixLineSpec {
     return switch (kind) {
         .info => .{ .role = .info, .emoji_prefix = "  ▸ ", .plain_prefix = "  > ", .shape = .prefix_wrap, .respect_quiet = true },
         .warn => .{ .role = .warn, .emoji_prefix = "  ⚠ ", .plain_prefix = "  ! ", .shape = .prefix_wrap, .respect_quiet = true },
+        .warn_always => .{ .role = .warn, .emoji_prefix = "  ⚠ ", .plain_prefix = "  ! ", .shape = .prefix_wrap, .respect_quiet = false },
         .success => .{ .role = .success, .emoji_prefix = "  ✓ ", .plain_prefix = "  * ", .shape = .prefix_wrap, .respect_quiet = true },
         .err => .{ .role = .err, .emoji_prefix = "  ✗ ", .plain_prefix = "  x ", .shape = .prefix_wrap, .respect_quiet = false },
         .notice => .{ .role = .notice, .emoji_prefix = "  ⓘ ", .plain_prefix = "  i ", .shape = .prefix_wrap, .respect_quiet = true },
@@ -336,6 +337,12 @@ pub fn info(comptime fmt: []const u8, args: anytype) void {
 
 pub fn warn(comptime fmt: []const u8, args: anytype) void {
     emitPrefixLine(.warn, fmt, args);
+}
+
+/// A warning the caller must not lose under `--quiet`: the output it
+/// qualifies is still printed there, so hiding it would change its meaning.
+pub fn warnAlways(comptime fmt: []const u8, args: anytype) void {
+    emitPrefixLine(.warn_always, fmt, args);
 }
 
 pub fn success(comptime fmt: []const u8, args: anytype) void {
@@ -669,6 +676,23 @@ test "notice and warn render bytewise-distinct lines with color and emoji off" {
     endStderrCapture();
 
     try std.testing.expect(!std.mem.eql(u8, notice_buf.items, warn_buf.items));
+}
+
+test "warnAlways keeps the warn glyph and ignores --quiet" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const prior_quiet = isQuiet();
+    color.setForTest(false, true);
+    setQuiet(true);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer {
+        endStderrCapture();
+        color.setForTest(null, null);
+        setQuiet(prior_quiet);
+    }
+
+    warnAlways("still shown", .{});
+    try std.testing.expectEqualStrings("  \xe2\x9a\xa0 still shown\n", buf.items);
 }
 
 test "notice is suppressed by --quiet" {

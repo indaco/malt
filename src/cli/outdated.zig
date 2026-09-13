@@ -904,18 +904,28 @@ test "emitEntries keeps the JSON array clean and warns on stderr when the audit 
     try std.testing.expect(std.mem.indexOf(u8, stdout.buffered(), "\"complete\":false") != null);
 }
 
-test "emitEntries leaves the JSON root byte-identical when the audit is complete" {
+test "emitEntries still warns about an incomplete audit under --quiet" {
+    // `--quiet` hides the all-clear too, so without the warning a script
+    // would read an empty listing as "nothing outdated".
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(std.testing.allocator);
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(true);
+    defer output.setQuiet(prior_quiet);
+    output.beginStderrCapture(std.testing.allocator, &err_buf);
+    defer output.endStderrCapture();
+
     var stdout_buf: [256]u8 = undefined;
     var stdout: std.Io.Writer = .fixed(&stdout_buf);
-
-    try emitEntries(std.testing.allocator, &stdout, true, .{}, .{
+    try emitEntries(std.testing.allocator, &stdout, false, .{}, .{
         .formula_entries = &.{},
         .formula_rows = &.{},
         .cask_entries = &.{},
         .cask_rows = &.{},
+        .complete = false,
     });
 
-    try std.testing.expectEqualStrings("{\"schema_version\":1,\"outdated\":[]}\n", stdout.buffered());
+    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "Could not verify") != null);
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -1133,8 +1143,10 @@ fn emitEntries(
     }
 }
 
+pub const audit_incomplete_msg = "Could not verify every package; snapshot not updated.";
+
 fn warnAuditIncomplete() void {
-    output.warn("Could not verify every package; snapshot not updated.", .{});
+    output.warnAlways(audit_incomplete_msg, .{});
 }
 
 fn recomputeAndEmit(
