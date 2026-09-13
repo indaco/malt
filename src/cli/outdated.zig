@@ -1078,6 +1078,9 @@ const EmitSlices = struct {
     formula_rows: []const KegRow,
     cask_entries: []const OutdatedEntry,
     cask_rows: []const KegRow,
+    /// False when a recompute could not check every row; a snapshot read is
+    /// always complete (it was only ever written from a complete audit).
+    complete: bool = true,
 };
 
 /// Single emit point shared by the snapshot and recompute paths. JSON
@@ -1096,14 +1099,26 @@ fn emitEntries(
         try appendRenderRows(allocator, &rows, s.formula_entries, s.formula_rows, .formula);
         try appendRenderRows(allocator, &rows, s.cask_entries, s.cask_rows, .cask);
         try render_mod.writeJsonArray(allocator, stdout, rows.items);
+        // stderr only: the TUI child parses stdout as JSON.
+        if (!s.complete) warnAuditIncomplete();
         return;
     }
 
     render_mod.writeFormulaEntries(stdout, s.formula_entries);
     render_mod.writeCaskEntries(stdout, s.cask_entries);
+    // The rows listed are real; the all-clear is not, so it gives way to
+    // the warning.
+    if (!s.complete) {
+        warnAuditIncomplete();
+        return;
+    }
     if (summaryMessage(s.formula_entries.len, s.cask_entries.len, scope.formula_only, scope.cask_only)) |msg| {
         output.info("{s}", .{msg});
     }
+}
+
+fn warnAuditIncomplete() void {
+    output.warn("Could not verify every package; snapshot not updated.", .{});
 }
 
 fn recomputeAndEmit(
@@ -1142,10 +1157,13 @@ fn recomputeAndEmit(
     defer if (f_rows) |r| freeKegRows(allocator, r);
     var f_entries: ?[]OutdatedEntry = null;
     defer if (f_entries) |e| freeEntrySlice(allocator, e);
+    var complete = true;
     if (!scope.cask_only) {
         const rows = try loadFormulaRows(allocator, db, filter);
         f_rows = rows;
-        f_entries = try collectOutdatedFormulas(ctx, allocator, db, &api, cache_dir, rows, workers_override);
+        const audit = try collectOutdatedFormulas(ctx, allocator, db, &api, cache_dir, rows, workers_override);
+        f_entries = audit.entries;
+        complete = complete and audit.complete;
     }
 
     var c_rows: ?[]KegRow = null;
@@ -1155,7 +1173,9 @@ fn recomputeAndEmit(
     if (!scope.formula_only) {
         const rows = try loadCaskRows(allocator, db, filter);
         c_rows = rows;
-        c_entries = try collectOutdatedCasks(ctx, allocator, db, &api, cache_dir, rows, workers_override);
+        const audit = try collectOutdatedCasks(ctx, allocator, db, &api, cache_dir, rows, workers_override);
+        c_entries = audit.entries;
+        complete = complete and audit.complete;
     }
 
     try emitEntries(allocator, stdout, json_mode, scope, .{
@@ -1163,11 +1183,12 @@ fn recomputeAndEmit(
         .formula_rows = f_rows orelse &.{},
         .cask_entries = c_entries orelse &.{},
         .cask_rows = c_rows orelse &.{},
+        .complete = complete,
     });
 
     // Warm the shared snapshot from the entries we just audited instead of
     // re-auditing the same keg set inside `refreshSnapshot`.
-    warmSnapshotFromRecompute(ctx, allocator, cache_dir, filter, scope, f_entries orelse &.{}, c_entries orelse &.{});
+    warmSnapshotFromRecompute(ctx, allocator, cache_dir, filter, scope, complete, f_entries orelse &.{}, c_entries orelse &.{});
 }
 
 fn warmSnapshotFromRecompute(
@@ -1176,6 +1197,7 @@ fn warmSnapshotFromRecompute(
     cache_dir: []const u8,
     filter: KegFilter,
     scope: ScopeFlags,
+    complete: bool,
     f_entries: []const OutdatedEntry,
     c_entries: []const OutdatedEntry,
 ) void {
@@ -1185,12 +1207,15 @@ fn warmSnapshotFromRecompute(
     // re-expand it, so anything absent reads as "up to date". A narrowed
     // recompute (pinned, tap, formula-only, cask-only) audits only a subset,
     // so persisting it here would silently under-report every keg it skipped.
-    // `refresh_ok ⇒ full-keg audit` is the invariant that prevents that.
+    // An incomplete walk (offline, down API, Ctrl-C, unparseable tap .rb)
+    // has the same shape as a real all-clear and would be served as one for
+    // a whole TTL, so it closes the gate too - recomputing every run beats
+    // hiding every outdated keg. `refresh_ok ⇒ full, complete audit`.
     const refresh_ok = switch (filter) {
         .all => !scope.cask_only and !scope.formula_only,
         .pinned_only, .by_tap => false,
     };
-    if (!refresh_ok) return;
+    if (!refresh_ok or !complete) return;
 
     // Best-effort: a write failure must not shadow the listing the user
     // already saw. The entries are the recompute's own audit, so this warms

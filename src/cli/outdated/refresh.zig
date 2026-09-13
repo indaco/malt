@@ -64,7 +64,9 @@ pub fn shouldUsePool(jobs: usize) bool {
 /// Recompute every outdated entry (formulas + casks) and overwrite the
 /// snapshot at `{cache_dir}/outdated.json`. Best-effort: failures are
 /// folded into the caller's `catch {}` so a snapshot write never blocks
-/// the user-facing output that already succeeded.
+/// the user-facing output that already succeeded. An audit that could
+/// not verify a row is refused (`error.AuditIncomplete`): its entries
+/// look like an all-clear but prove nothing.
 pub fn refreshSnapshot(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -79,33 +81,21 @@ pub fn refreshSnapshot(
     defer rows_mod.freeKegRows(allocator, cask_rows);
 
     const formulas = try collectOutdatedFormulas(ctx, allocator, db, api, cache_dir, formula_rows, workers_override);
-    defer {
-        for (formulas) |e| {
-            allocator.free(e.name);
-            allocator.free(e.installed);
-            allocator.free(e.latest);
-        }
-        allocator.free(formulas);
-    }
+    defer snap_mod.freeEntrySlice(allocator, formulas.entries);
     const casks = try collectOutdatedCasks(ctx, allocator, db, api, cache_dir, cask_rows, workers_override);
-    defer {
-        for (casks) |e| {
-            allocator.free(e.name);
-            allocator.free(e.installed);
-            allocator.free(e.latest);
-        }
-        allocator.free(casks);
-    }
+    defer snap_mod.freeEntrySlice(allocator, casks.entries);
 
-    try writeSnapshotEntries(ctx, allocator, cache_dir, formulas, casks);
+    if (!formulas.complete or !casks.complete) return error.AuditIncomplete;
+    try writeSnapshotEntries(ctx, allocator, cache_dir, formulas.entries, casks.entries);
 }
 
 /// Stamp `now` and write the snapshot from entries already in hand — the
 /// single home for the outdated snapshot's timestamp policy and shape.
-/// Callers must pass a *full* keg-set audit (formulas + casks): the write is
-/// unconditional, so a narrowed audit here would persist a partial snapshot
-/// and make the Outdated view silently under-report. `refresh_ok ⇒ full-keg
-/// audit` is the invariant every caller upholds.
+/// Callers must pass a *full and complete* keg-set audit (formulas + casks):
+/// the write is unconditional, so a narrowed or unverified audit here would
+/// persist a partial snapshot and make the Outdated view silently
+/// under-report. `refresh_ok ⇒ full, complete audit` is the invariant every
+/// caller upholds.
 pub fn writeSnapshotEntries(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -120,9 +110,17 @@ pub fn writeSnapshotEntries(
     });
 }
 
+/// Entries plus whether every row was checked: an unreachable row and a
+/// proven-current row are both absent from `entries`.
+pub const Audit = struct {
+    entries: []OutdatedEntry,
+    complete: bool,
+};
+
 /// Compute outdated formulas for `kegs`. Sort order follows `kegs` —
 /// callers query the DB with `ORDER BY name`. Per-row API failures or
-/// 404s drop silently (matches the old serial behaviour).
+/// 404s drop silently from `entries` (matches the old serial behaviour)
+/// but clear `complete`.
 pub fn collectOutdatedFormulas(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -131,7 +129,7 @@ pub fn collectOutdatedFormulas(
     cache_dir: []const u8,
     kegs: []const KegRow,
     workers_override: ?usize,
-) std.mem.Allocator.Error![]OutdatedEntry {
+) std.mem.Allocator.Error!Audit {
     return collectOutdated(ctx, allocator, db, api, cache_dir, kegs, workers_override, .formula);
 }
 
@@ -144,7 +142,7 @@ pub fn collectOutdatedCasks(
     cache_dir: []const u8,
     kegs: []const KegRow,
     workers_override: ?usize,
-) std.mem.Allocator.Error![]OutdatedEntry {
+) std.mem.Allocator.Error!Audit {
     return collectOutdated(ctx, allocator, db, api, cache_dir, kegs, workers_override, .cask);
 }
 
@@ -230,12 +228,24 @@ pub fn freeDispositions(allocator: std.mem.Allocator, ds: []Disposition) void {
     allocator.free(ds);
 }
 
+/// Per-keg fetch outcome. `current` never becomes `proven_current` (see
+/// `Disposition`); the split from `unresolved` only exists so the audit can
+/// tell a failed fetch from a row it did check.
+const Upstream = union(enum) {
+    /// Caller-owned latest version; the row is outdated.
+    latest: []u8,
+    current,
+    unresolved,
+};
+
 /// Read a per-keg fetch result as a disposition. A fetch resolves the latest
-/// version or it does not; it never proves a row current, so a null here is
-/// `unknown` — the fetch path has no map to compare against.
-fn fetchDisposition(latest: ?[]u8) Disposition {
-    if (latest) |l| return .{ .needs_upgrade = l };
-    return .unknown;
+/// version or it does not; it never proves a row current, so anything but
+/// `latest` is `unknown` — the fetch path has no map to compare against.
+fn fetchDisposition(upstream: Upstream) Disposition {
+    return switch (upstream) {
+        .latest => |l| .{ .needs_upgrade = l },
+        .current, .unresolved => .unknown,
+    };
 }
 
 /// The only minter of `proven_current`. Core-ness is checked here rather than
@@ -284,7 +294,7 @@ fn resolveViaFetch(
     kegs: []const KegRow,
     workers_override: ?usize,
     kind: Kind,
-    latest_versions: []?[]u8,
+    latest_versions: []Upstream,
 ) std.mem.Allocator.Error!void {
     if (!shouldUsePool(kegs.len)) {
         for (kegs, 0..) |row, i| {
@@ -363,15 +373,20 @@ fn collectOutdated(
     kegs: []const KegRow,
     workers_override: ?usize,
     kind: Kind,
-) std.mem.Allocator.Error![]OutdatedEntry {
-    const dispositions = try collectDispositions(ctx, allocator, db, api, cache_dir, kegs, workers_override, kind);
+) std.mem.Allocator.Error!Audit {
+    var complete = true;
+    const dispositions = try collectDispositions(ctx, allocator, db, api, cache_dir, kegs, workers_override, kind, &complete);
     defer freeDispositions(allocator, dispositions);
-    return assembleEntries(allocator, kegs, dispositions);
+    return .{
+        .entries = try assembleEntries(allocator, kegs, dispositions),
+        .complete = complete,
+    };
 }
 
 /// Resolve every keg to what the audit could prove about it, aligned 1:1 with
 /// `kegs`. Callers own each `needs_upgrade` payload — release the slice with
-/// `freeDispositions`.
+/// `freeDispositions`. `complete` clears on a failed per-keg fetch; an index
+/// miss is an answer.
 fn collectDispositions(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -381,6 +396,7 @@ fn collectDispositions(
     kegs: []const KegRow,
     workers_override: ?usize,
     kind: Kind,
+    complete: *bool,
 ) std.mem.Allocator.Error![]Disposition {
     if (kegs.len == 0) return allocator.alloc(Disposition, 0);
 
@@ -467,11 +483,11 @@ fn collectDispositions(
         defer allocator.free(sub_kegs);
         const sub_idx = try allocator.alloc(usize, n_fetch);
         defer allocator.free(sub_idx);
-        const sub_latest = try allocator.alloc(?[]u8, n_fetch);
+        const sub_latest = try allocator.alloc(Upstream, n_fetch);
         defer allocator.free(sub_latest);
-        @memset(sub_latest, null);
-        errdefer for (sub_latest) |maybe| {
-            if (maybe) |v| allocator.free(v);
+        @memset(sub_latest, .unresolved);
+        errdefer for (sub_latest) |u| {
+            if (u == .latest) allocator.free(u.latest);
         };
 
         var j: usize = 0;
@@ -487,8 +503,9 @@ fn collectDispositions(
         // Fetch rows are `unknown` until now (the map never wrote them), so
         // overwriting the slot cannot strand a payload.
         for (sub_idx, 0..) |orig, k| {
+            if (sub_latest[k] == .unresolved) complete.* = false;
             dispositions[orig] = fetchDisposition(sub_latest[k]);
-            sub_latest[k] = null; // ownership moved into the disposition
+            sub_latest[k] = .unresolved; // ownership moved into the disposition
         }
     }
 
@@ -1002,8 +1019,7 @@ fn tapFormulaLatestVersion(
     return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, name, http, &.{ .formula, .formula_root }, "formula");
 }
 
-/// Serial-path single-row check. Returns a caller-owned latest-version
-/// string if `row` is outdated, null otherwise.
+/// Serial-path single-row check. `latest` is caller-owned.
 fn fetchLatest(
     allocator: std.mem.Allocator,
     head_cache: *TapHeadResolve,
@@ -1013,17 +1029,17 @@ fn fetchLatest(
     environ: std.process.Environ,
     kind: Kind,
     row: KegRow,
-) std.mem.Allocator.Error!?[]u8 {
-    const v = upstreamLatest(allocator, head_cache, db, api, io, environ, kind, row) orelse return null;
+) std.mem.Allocator.Error!Upstream {
+    const v = upstreamLatest(allocator, head_cache, db, api, io, environ, kind, row) orelse return .unresolved;
     // The shared currency policy qualifies the installed side and compares it to
     // the (already revision-qualified) upstream. Anything but a proven match is
     // outdated: malt mirrors the tap as source of truth — see the outdated-policy
     // note above `Disposition`.
     if (formula_mod.isCurrent(row.version, row.revision, v) == .current) {
         allocator.free(v);
-        return null;
+        return .current;
     }
-    return v;
+    return .{ .latest = v };
 }
 
 /// Pull `versions.stable` out of a Homebrew formula JSON document.
@@ -1086,8 +1102,8 @@ const WorkerCtx = struct {
     row: KegRow,
     kind: Kind,
     /// Result allocated on the **caller** allocator so it survives
-    /// arena teardown. Null = up-to-date or fetch failed.
-    out: ?[]u8 = null,
+    /// arena teardown.
+    out: Upstream = .unresolved,
     /// Out-of-memory from caller-allocator dupe; surfaced after join.
     /// Other failures stay silent to match the serial behaviour.
     err: ?std.mem.Allocator.Error = null,
@@ -1119,12 +1135,15 @@ fn runOne(out_alloc: std.mem.Allocator, wctx: *WorkerCtx) void {
     const latest = upstreamLatest(arena_alloc, wctx.head_cache, wctx.db, &local_api, wctx.io, wctx.environ, wctx.kind, wctx.row) orelse return;
     // Same shared currency policy as the serial `fetchLatest` path: qualify the
     // installed side so a revision-only bump isn't read as bare.
-    if (formula_mod.isCurrent(wctx.row.version, wctx.row.revision, latest) == .current) return;
+    if (formula_mod.isCurrent(wctx.row.version, wctx.row.revision, latest) == .current) {
+        wctx.out = .current;
+        return;
+    }
 
     // Move into the caller's allocator so the result outlives `arena.deinit()`.
-    wctx.out = out_alloc.dupe(u8, latest) catch |e| blk: {
+    wctx.out = if (out_alloc.dupe(u8, latest)) |owned| .{ .latest = owned } else |e| blk: {
         wctx.err = e;
-        break :blk null;
+        break :blk .unresolved;
     };
 }
 
@@ -1137,7 +1156,7 @@ fn runPool(
     kegs: []const KegRow,
     workers_override: ?usize,
     kind: Kind,
-    latest_versions: []?[]u8,
+    latest_versions: []Upstream,
 ) std.mem.Allocator.Error!void {
     const worker_count = outdatedWorkerCount(kegs.len, workers_override);
     std.debug.assert(worker_count > 0);
