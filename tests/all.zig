@@ -89,6 +89,7 @@ comptime {
     _ = @import("linker_isolation_test.zig");
     _ = @import("linker_test.zig");
     _ = @import("list_cli_test.zig");
+    _ = @import("schema_too_new_cli_test.zig");
     _ = @import("list_test.zig");
     _ = @import("lock_test.zig");
     _ = @import("macho_test.zig");
