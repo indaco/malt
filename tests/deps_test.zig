@@ -16,10 +16,7 @@ fn testArena() std.heap.ArenaAllocator {
     return std.heap.ArenaAllocator.init(testing.allocator);
 }
 
-const c_env = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c_env = test_io.c;
 
 test "formula dependencies parsed from JSON" {
     var arena = testArena();

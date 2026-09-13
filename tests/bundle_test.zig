@@ -437,10 +437,7 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
     try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
 }
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 test "real-world Brewfile shapes parse without error" {
     // Regression canary: shapes pulled from popular public dotfiles repos.

@@ -13,10 +13,7 @@ const install_local = @import("malt").install_local;
 const install_rb_parse = @import("malt").install_rb_parse;
 const install_record = @import("malt").install_record;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 // ─── isLocalFormulaPath ──────────────────────────────────────────────
 

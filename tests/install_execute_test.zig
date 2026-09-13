@@ -10,10 +10,7 @@ const testing = std.testing;
 const install = @import("malt").install;
 const install_record = @import("malt").install_record;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 /// Scratch MALT_PREFIX under a process-unique base, so overlapping test runs
 /// cannot wipe each other's fixtures. Caller frees and removes the tree.

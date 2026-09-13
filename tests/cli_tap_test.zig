@@ -11,10 +11,7 @@ const TapNameError = tap_cli.TapNameError;
 const bad = TapNameError.InvalidTapName;
 const test_io = @import("test_io");
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     // Process-unique: a bare timestamp collides between overlapping runs.

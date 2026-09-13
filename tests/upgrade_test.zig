@@ -17,10 +17,7 @@ const formula_mod = malt.formula;
 const lock_mod = malt.lock;
 const output = malt.output;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "upgrade_exec", suffix);

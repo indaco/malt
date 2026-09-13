@@ -14,10 +14,7 @@ const output = malt.output;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 const ScratchPrefix = struct {
     path: [:0]u8,

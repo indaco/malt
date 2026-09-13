@@ -11,10 +11,7 @@ const malt = @import("malt");
 const test_io = @import("test_io");
 const which = malt.cli_which;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 /// Build a fake malt prefix with `Cellar/<name>/<ver>/bin/<name>` and a
 /// `bin/<name>` symlink pointing at it. Returns the prefix path; caller

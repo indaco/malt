@@ -13,10 +13,7 @@ const notifier = malt.update_notifier;
 const app_ctx = malt.app_ctx;
 const fs_compat = test_io;
 
-const c_env = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c_env = test_io.c;
 
 test "shouldNotify: full table — equal/newer/post-update" {
     const Case = struct {
