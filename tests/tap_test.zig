@@ -573,3 +573,37 @@ test "describeResolveError: every forge × TapError variant gets a non-empty hin
         }
     }
 }
+
+// ── failed-upgrade pin restore ────────────────────────────────────────
+// `mt upgrade` bumps the tap pin (add + updateHead) before the install
+// leg runs; on failure it must put the pre-upgrade (sha, etag) pair back
+// so the sha-truth skip gate does not read the failed run as current.
+// The null-etag row matters most: a leftover fresh etag makes the retry
+// 304 and re-read as current.
+
+test "failed upgrade restore: the pre-bump (sha, etag) pair comes back exactly, null included" {
+    const cases = [_]struct { sha: ?[]const u8, etag: ?[]const u8 }{
+        .{ .sha = valid_sha, .etag = "W/\"old\"" },
+        .{ .sha = valid_sha, .etag = null },
+        .{ .sha = null, .etag = null },
+    };
+    for (cases) |before| {
+        var db = try openDb();
+        defer db.close();
+        try schema.initSchema(&db);
+        try tap.add(&db, "a/b", "a", "homebrew-b", before.sha);
+        if (before.sha) |sha| try tap.updateHead(&db, "a/b", sha, before.etag);
+
+        // The upgrade path's pin bump, then the restore the failure path runs.
+        try tap.add(&db, "a/b", "a", "homebrew-b", other_sha);
+        try tap.updateHead(&db, "a/b", other_sha, "W/\"fresh\"");
+        if (before.sha) |sha| try tap.updateHead(&db, "a/b", sha, before.etag) else try tap.clearHead(&db, "a/b");
+
+        const sha = try tap.getCommitSha(testing.allocator, &db, "a/b");
+        defer if (sha) |v| testing.allocator.free(v);
+        const etag = try tap.getHeadEtag(testing.allocator, &db, "a/b");
+        defer if (etag) |v| testing.allocator.free(v);
+        try testing.expectEqualDeep(before.sha, sha);
+        try testing.expectEqualDeep(before.etag, etag);
+    }
+}
