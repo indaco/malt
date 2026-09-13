@@ -74,7 +74,7 @@ seed_snapshot() {
 # (1) Online + stale (10 min > 5 min TTL) -> recompute overwrites the snapshot.
 seed_snapshot 600
 run_outdated "$BIN"
-if grep -q '9.9' "$SNAP"; then
+if grep -qF '9.9' "$SNAP"; then
   fail "online stale snapshot was served, not recomputed — TTL acted as a warning only (the bug)"
 fi
 pass "online stale snapshot is recomputed (bogus entry gone)"
@@ -82,7 +82,7 @@ pass "online stale snapshot is recomputed (bogus entry gone)"
 # (2) Online + fresh (1 min < 5 min TTL) -> snapshot served, left intact.
 seed_snapshot 60
 run_outdated "$BIN"
-if ! grep -q '9.9' "$SNAP"; then
+if ! grep -qF '9.9' "$SNAP"; then
   fail "online fresh snapshot was recomputed — the cache window is gone (over-recompute)"
 fi
 pass "online fresh snapshot is served (cache window preserved)"
@@ -90,7 +90,7 @@ pass "online fresh snapshot is served (cache window preserved)"
 # (3) Offline + stale -> served and NOT overwritten (no under-reporting offline).
 seed_snapshot 600
 MALT_OFFLINE=1 run_outdated "$BIN"
-if ! grep -q '9.9' "$SNAP"; then
+if ! grep -qF '9.9' "$SNAP"; then
   fail "offline stale snapshot was overwritten — would under-report when it cannot refresh"
 fi
 pass "offline stale snapshot is served and preserved"
