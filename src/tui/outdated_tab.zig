@@ -9,9 +9,9 @@
 //! `(state, rect)` so a resize is a re-render. The shell owns the row data and
 //! the parallel `checked` buffer; the tab borrows both. Pinned rows are shown
 //! greyed and can never enter the checked set — the wireframe holds them back
-//! from a bulk upgrade. `space` toggles the cursor row, `a` checks all
-//! non-pinned, `n` clears, and `u`/Enter with N>0 requests the upgrade; an empty
-//! selection is a no-op surfaced by the action line.
+//! from a bulk upgrade. `space` toggles the cursor row, `a` checks the visible
+//! non-pinned rows, `n` clears all, and `u`/Enter with N>0 requests the upgrade;
+//! an empty selection is a no-op surfaced by the action line.
 
 const std = @import("std");
 const cmd = @import("cmd.zig");
@@ -150,11 +150,16 @@ fn toggleSelected(s: *State) void {
     s.checked[idx] = !s.checked[idx];
 }
 
-/// Bulk set: `a` checks every non-pinned row, `n` (on=false) clears all. A pinned
-/// row is never checked, so `a` leaves it untouched.
+/// Bulk set: `a` checks every non-pinned row the active filter shows, `n`
+/// (on=false) clears all. A pinned row is never checked, so `a` leaves it
+/// untouched.
 fn setAll(s: *State, on: bool) void {
+    const filter = s.chrome.filter.slice();
     for (s.items, 0..) |p, i| {
         if (i >= s.checked.len) break;
+        // `a` arms only what the user can see; `n` disarms everything so a
+        // filter can never hide a checked row from a clear.
+        if (on and !matches(p.name, filter)) continue;
         s.checked[i] = on and !p.pinned;
     }
 }
@@ -627,6 +632,40 @@ test "a checks every non-pinned row and leaves pinned rows unchecked" {
 test "n clears every checkbox" {
     var checked = [_]bool{ true, false, true, true };
     var s: State = .{ .items = &sample, .checked = &checked };
+    _ = stepKey(&s, ch('n'));
+    for (checked) |b| try testing.expect(!b);
+}
+
+test "a with an active filter checks only the visible rows" {
+    var checked = [_]bool{false} ** 4;
+    var s: State = .{ .items = &sample, .checked = &checked };
+    s.chrome.filter.push("fire"); // firefox only
+    _ = stepKey(&s, ch('a'));
+    try testing.expectEqual(@as(usize, 1), selectedCount(&s));
+    try testing.expect(checked[2]); // firefox
+}
+
+test "a with an active filter leaves an already-checked hidden row checked" {
+    var checked = [_]bool{ true, false, false, false }; // wget checked before filtering
+    var s: State = .{ .items = &sample, .checked = &checked };
+    s.chrome.filter.push("fire");
+    _ = stepKey(&s, ch('a'));
+    try testing.expect(checked[0]); // wget: hidden, still checked
+    try testing.expect(!checked[3]); // ffmpeg: hidden, untouched
+}
+
+test "a with a filter that shows only a pinned row arms nothing" {
+    var checked = [_]bool{false} ** 4;
+    var s: State = .{ .items = &sample, .checked = &checked };
+    s.chrome.filter.push("curl"); // pinned, and the only visible row
+    _ = stepKey(&s, ch('a'));
+    for (checked) |b| try testing.expect(!b);
+}
+
+test "n with an active filter clears hidden rows too" {
+    var checked = [_]bool{ true, false, true, true };
+    var s: State = .{ .items = &sample, .checked = &checked };
+    s.chrome.filter.push("fire");
     _ = stepKey(&s, ch('n'));
     for (checked) |b| try testing.expect(!b);
 }
