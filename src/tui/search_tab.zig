@@ -238,9 +238,11 @@ pub fn selectedMatch(s: *const State) ?Match {
 }
 
 /// The index of the active row in `items`, clamping the unbounded cursor. No
-/// filter, so the cursor indexes straight into `items`. Null on an empty list.
+/// filter, so the cursor indexes straight into `items`. Null on an empty list, and
+/// while a re-query is searching: stale items linger behind the status line then,
+/// so no key may act on a row the user cannot see (the gate `hitTest` applies).
 pub fn selectedIndex(s: *const State) ?usize {
-    if (s.items.len == 0) return null;
+    if (s.phase != .loaded or s.items.len == 0) return null;
     return @min(s.chrome.view.selected, s.items.len - 1);
 }
 
@@ -853,6 +855,58 @@ test "i on an empty list is inert" {
     try testing.expect(stepKey(&s, &storage, ch('i')) == .none);
 }
 
+test "enter, space and i are inert while a re-query is searching" {
+    // A re-query paints only "searching…", but `items` still holds the previous
+    // query's rows. The keyboard must refuse them the way `hitTest` already does:
+    // no hidden-row info read, no hidden-row pick, no hidden-row install.
+    var s: State = .{ .items = &sample, .phase = .searching };
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    s.chrome.view.selected = 0; // wget, not installed: installable when loaded
+    try testing.expect(stepKey(&s, &storage, .enter) == .none);
+    try testing.expect(stepKey(&s, &storage, .space) == .none);
+    try testing.expectEqual(@as(usize, 0), s.selected_count); // nothing latched
+    try testing.expect(stepKey(&s, &storage, ch('i')) == .none);
+    try testing.expect(s.pending_kind == null); // no install pass started
+}
+
+test "i installs a non-empty basket even while a re-query is searching" {
+    // The basket is phase-independent: its picks are owned, not rows on screen, so
+    // the spinner never holds a checked install hostage.
+    const alloc = testing.allocator;
+    var s: State = .{ .items = &sample, .phase = .searching };
+    var storage: Storage = .{};
+    defer storage.deinit(alloc);
+    try storage.selected.toggle(alloc, "ripgrep", .formula);
+    syncSelected(&s, &storage);
+    const eff = stepKey(&s, &storage, ch('i'));
+    defer alloc.free(eff.run_mutation.argv);
+    try testing.expect(eff == .run_mutation);
+    try testing.expectEqualStrings("ripgrep", eff.run_mutation.argv[3]);
+}
+
+test "basket removal keys stay live while a re-query is searching" {
+    const alloc = testing.allocator;
+    var s: State = .{ .items = &sample, .phase = .searching, .view = .basket };
+    var storage: Storage = .{};
+    defer storage.deinit(alloc);
+    try storage.selected.toggle(alloc, "ripgrep", .formula);
+    try storage.selected.toggle(alloc, "wget", .formula);
+    syncSelected(&s, &storage);
+    try testing.expect(stepKey(&s, &storage, .space) == .none);
+    try testing.expectEqual(@as(usize, 1), s.selected_count); // basket ops are phase-free
+    try testing.expect(stepKey(&s, &storage, ch('n')) == .none);
+    try testing.expectEqual(@as(usize, 0), s.selected_count);
+}
+
+test "selectedMatch is null while the results are not loaded" {
+    var s: State = .{ .items = &sample, .phase = .searching };
+    s.chrome.view.selected = 0;
+    try testing.expect(selectedMatch(&s) == null);
+    s.phase = .loaded;
+    try testing.expectEqualStrings("wget", selectedMatch(&s).?.name);
+}
+
 test "an unrelated key is inert" {
     var s: State = .{ .items = &sample };
     var storage: Storage = .{};
@@ -1300,7 +1354,7 @@ test "searchReadCmd and openSearchInfoCmd build polled reads so the searching fr
     storage.search = try search_json.parse(alloc,
         \\{"results":[{"name":"bat","type":"formula","installed":false}]}
     );
-    var info_state: State = .{ .items = storage.search.?.items };
+    var info_state: State = .{ .items = storage.search.?.items, .phase = .loaded };
     const info_eff = openSearchInfoCmd(alloc, "/opt/homebrew/bin/mt", &info_state);
     defer alloc.free(info_eff.read.argv);
     try testing.expectEqual(cmd.Cmd.Mode.polled, info_eff.read.mode);
@@ -1431,7 +1485,7 @@ test "an empty basket installs the active row under its own kind flag" {
         .{ .name = "firefox", .kind = .cask, .installed = false },
         .{ .name = "wget", .kind = .formula, .installed = false },
     };
-    var st: State = .{ .items = &items };
+    var st: State = .{ .items = &items, .phase = .loaded };
     var storage: Storage = .{}; // empty basket: never allocates
     st.chrome.view.selected = 0; // firefox (cask)
     const eff = stepKey(&st, &storage, ch('i'));
@@ -1446,7 +1500,7 @@ test "an empty basket installs the active row under its own kind flag" {
 test "install is a no-op with an empty basket and no installable active row" {
     var storage: Storage = .{};
     const on_system = [_]Match{.{ .name = "jq", .kind = .formula, .installed = true }};
-    var st_installed: State = .{ .items = &on_system };
+    var st_installed: State = .{ .items = &on_system, .phase = .loaded };
     try testing.expect(stepKey(&st_installed, &storage, ch('i')) == .none); // active row already installed
     try testing.expect(st_installed.pending_kind == null); // nothing in flight
     var empty: State = .{ .items = &.{} };
