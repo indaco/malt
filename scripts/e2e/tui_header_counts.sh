@@ -6,9 +6,11 @@
 # Outdated tabs. Inline tests cover the count-refresh functions in isolation; this
 # proves the launch path wires them into the header under a real pty.
 #
-# Asserts (with 8 seeded kegs, a fresh prefix → 0 outdated):
+# Asserts (with 8 seeded kegs; the launch audit runs offline, so it lands
+# unverified and the header withholds the count as `—` rather than claiming 0):
 #   - the header reads "8 kegs" at launch, before any tab switch;
-#   - the header reads "0 outdated" at launch;
+#   - the outdated slot resolves from its spinner to `—` once the audit lands,
+#     and never to "0 outdated";
 #   - the Installed tab was never entered (no seeded row appears), so the count
 #     came from the launch prime, not a lazy tab load.
 #
@@ -46,7 +48,10 @@ ACT
 echo "$out" | grep -q "EXIT_STATUS=0" || fail "mt tui did not exit 0 on q ($out)"
 
 grep -qa "8 kegs" "$CAP" || fail "header never showed the seeded keg count at launch"
-grep -qa "0 outdated" "$CAP" || fail "header never showed the outdated count at launch"
+# The launch chrome already says "— kegs  •  — outdated"; only a landed audit
+# paints the filled keg count next to the withheld outdated slot.
+grep -qa "8 kegs  •  — outdated" "$CAP" || fail "outdated slot never resolved after the launch audit landed"
+grep -qa "0 outdated" "$CAP" && fail "an unverified offline audit was reported as 0 outdated"
 grep -qa "pkg01" "$CAP" && fail "Installed tab was entered — count did not come from the launch prime"
 
 echo "tui-header-counts: PASS"
