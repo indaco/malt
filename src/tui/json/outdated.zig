@@ -1,8 +1,9 @@
 //! malt — parse `mt outdated --json` into TUI-local structs.
 //!
 //! Leaf module: imports only `std`. The unified `outdated` array (formulae and
-//! casks mixed, each tagged `type`) is the contract; `schema_version`, `time_ms`,
-//! and any future field are ignored, so a schema addition never breaks parsing.
+//! casks mixed, each tagged `type`) plus the root `complete` flag are the
+//! contract; `schema_version`, `time_ms`, and any future field are ignored, so
+//! a schema addition never breaks parsing.
 //! The structs are TUI-local — never the core outdated structs — so the `--json`
 //! shape is the only coupling.
 

@@ -900,6 +900,22 @@ test "emitEntries keeps the JSON array clean and warns on stderr when the audit 
     try std.testing.expect(std.mem.indexOf(u8, stdout.buffered(), "\"outdated\":[]") != null);
     try std.testing.expect(std.mem.indexOf(u8, stdout.buffered(), "Could not verify") == null);
     try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "Could not verify") != null);
+    // The child's stderr never reaches the TUI, so the root carries the signal.
+    try std.testing.expect(std.mem.indexOf(u8, stdout.buffered(), "\"complete\":false") != null);
+}
+
+test "emitEntries leaves the JSON root byte-identical when the audit is complete" {
+    var stdout_buf: [256]u8 = undefined;
+    var stdout: std.Io.Writer = .fixed(&stdout_buf);
+
+    try emitEntries(std.testing.allocator, &stdout, true, .{}, .{
+        .formula_entries = &.{},
+        .formula_rows = &.{},
+        .cask_entries = &.{},
+        .cask_rows = &.{},
+    });
+
+    try std.testing.expectEqualStrings("{\"schema_version\":1,\"outdated\":[]}\n", stdout.buffered());
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -1098,8 +1114,8 @@ fn emitEntries(
         defer rows.deinit(allocator);
         try appendRenderRows(allocator, &rows, s.formula_entries, s.formula_rows, .formula);
         try appendRenderRows(allocator, &rows, s.cask_entries, s.cask_rows, .cask);
-        try render_mod.writeJsonArray(allocator, stdout, rows.items);
-        // stderr only: the TUI child parses stdout as JSON.
+        try render_mod.writeJsonArray(allocator, stdout, rows.items, s.complete);
+        // The warning stays on stderr: the TUI child parses stdout as JSON.
         if (!s.complete) warnAuditIncomplete();
         return;
     }
