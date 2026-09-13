@@ -150,7 +150,7 @@ test "collectOutdatedFormulas (small-N, single-client path) returns sorted outda
 
     var db = try openTestDb();
     defer db.close();
-    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
+    const out = (try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null)).entries;
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, 2), out.len);
@@ -182,7 +182,7 @@ test "collectOutdatedFormulas (large-N, pool path) preserves sorted order" {
     var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
     var db = try openTestDb();
     defer db.close();
-    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &rows_buf, null);
+    const out = (try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &rows_buf, null)).entries;
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, names.len), out.len);
@@ -216,7 +216,7 @@ test "collectOutdatedFormulas tolerates a missing/404 entry without aborting" {
 
     var db = try openTestDb();
     defer db.close();
-    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
+    const out = (try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null)).entries;
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, 2), out.len);
@@ -244,7 +244,7 @@ test "collectOutdatedCasks (small-N) returns sorted outdated rows only" {
 
     var db = try openTestDb();
     defer db.close();
-    const out = try outdated_mod.collectOutdatedCasks(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
+    const out = (try outdated_mod.collectOutdatedCasks(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null)).entries;
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, 2), out.len);
@@ -270,7 +270,7 @@ test "collectOutdatedCasks (large-N, pool path) preserves sorted order" {
     var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
     var db = try openTestDb();
     defer db.close();
-    const out = try outdated_mod.collectOutdatedCasks(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &rows_buf, null);
+    const out = (try outdated_mod.collectOutdatedCasks(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &rows_buf, null)).entries;
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, tokens.len), out.len);
@@ -302,7 +302,7 @@ test "collectOutdated resolves core rows from the version map with no per-keg ca
     };
     var db = try openTestDb();
     defer db.close();
-    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
+    const out = (try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null)).entries;
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, 1), out.len);
@@ -329,7 +329,7 @@ test "collectOutdated detects an upstream revision bump" {
     };
     var db = try openTestDb();
     defer db.close();
-    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
+    const out = (try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null)).entries;
     defer freeEntries(testing.allocator, out);
 
     // Only the revision-behind keg is outdated; `latest` carries the full
@@ -364,7 +364,7 @@ test "collectOutdated warns and falls back to per-keg on an empty version map" {
     };
     var db = try openTestDb();
     defer db.close();
-    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
+    const out = (try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null)).entries;
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, 1), out.len);
@@ -398,7 +398,7 @@ test "collectOutdated fetch fallback detects an upstream revision-only bump" {
     };
     var db = try openTestDb();
     defer db.close();
-    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
+    const out = (try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null)).entries;
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, 1), out.len);
