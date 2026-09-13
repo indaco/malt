@@ -838,7 +838,8 @@ fn warnTapCaskFetchFailed(tap_label: []const u8, token: []const u8, reason: []co
     );
 }
 
-/// Production resolver: the conditional-GET path with DB-cached etag.
+/// Production resolver: a conditional GET that sends the DB-cached etag
+/// but never writes back; only mutating commands advance the pin.
 /// Bound to the `*HeadResolverCtx` the cache passes back per call. The
 /// arena `a` is the cache's arena, so returned slices live for the
 /// cache's lifetime without an extra dupe at the call site.
@@ -875,13 +876,12 @@ const HeadResolverCtx = struct {
                 return null;
             });
 
-        // Dupe into arena so the cache owns the slice after res.deinit()
-        // (arena's free is a no-op so this is purely for ownership clarity).
-        const sha_owned = a.dupe(u8, final_sha) catch return null;
-        if (!res.not_modified) {
-            if (res.etag) |et| tap_mod.updateHead(self.db, tap_label, sha_owned, et) catch {};
-        }
-        return sha_owned;
+        // Dupe into arena so the cache owns the slice after res.deinit().
+        // Never persist (sha, etag) here: `taps.commit_sha` is what upgrade
+        // reads as "installed at", so a read-only check must not advance it.
+        // Cost: a moved tap costs one 200 per recompute until the next
+        // upgrade or `mt tap --refresh` re-pins.
+        return a.dupe(u8, final_sha) catch null;
     }
 };
 

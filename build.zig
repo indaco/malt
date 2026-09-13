@@ -206,6 +206,7 @@ pub fn build(b: *std.Build) void {
         "tests/sandbox_macos_test.zig",
         "tests/services_validate_test.zig",
         "tests/spawn_invariant_test.zig",
+        "tests/outdated_read_only_test.zig",
         "tests/child_test.zig",
         "tests/net_client_test.zig",
         "tests/net_client_pool_test.zig",
