@@ -89,8 +89,11 @@ pass "${NAME}: version-current by construction (installed == upstream == '${V}')
 # Force the tap HEAD to look moved. Bogus cached sha so the real HEAD differs;
 # stale etag so the conditional GET returns 200 (a fresh real sha) instead of
 # 304 (which would fall back to the bogus cached sha and read as unchanged).
+# The keg's own installed-from commit is what the gate compares, so it is
+# rewound alongside the pin - a real HEAD move leaves both behind.
 sqlite3 "$DB" "UPDATE taps SET commit_sha='${FORCED_SHA}', head_etag='W/\"stale-force-200\"' WHERE name='${TAP}';"
-pass "${TAP}: forced a HEAD move (cached sha rewound, etag staled)"
+sqlite3 "$DB" "UPDATE kegs SET tap_commit_sha='${FORCED_SHA}' WHERE name='${NAME}';"
+pass "${TAP}: forced a HEAD move (cached sha and keg commit rewound, etag staled)"
 
 # The run under test: bulk `mt upgrade`, no names.
 UP_LOG="$PREFIX/upgrade_bulk.log"
@@ -136,6 +139,13 @@ final_sha=$(sqlite3 "$DB" "SELECT commit_sha FROM taps WHERE name='${TAP}';")
 [[ "$final_sha" != "$FORCED_SHA" ]] ||
   fail "${TAP}: cached sha still the forced value — the HEAD fetch never resolved"
 pass "${TAP}: cached sha advanced off the forced value"
+
+# The reinstall recorded the commit it fetched at, so the next gate reads
+# keg truth rather than falling back to "unknown, upgrade".
+keg_sha=$(sqlite3 "$DB" "SELECT IFNULL(tap_commit_sha,'') FROM kegs WHERE name='${NAME}';")
+[[ "$keg_sha" == "$final_sha" ]] ||
+  fail "${NAME}: keg commit '${keg_sha}' does not match the tap pin '${final_sha}' after reinstall"
+pass "${NAME}: reinstall recorded the fetched commit on the keg"
 
 # Sha-truth refresh, not a version bump: the keg stays at the same version.
 final_v=$(sqlite3 "$DB" "SELECT version FROM kegs WHERE name='${NAME}';")
