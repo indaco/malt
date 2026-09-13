@@ -974,6 +974,16 @@ fn upgradeTapFormula(
 
     var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
     install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, install_sink_mod.terminal) catch {
+        // The pin above now names a commit whose formula never landed; left
+        // in place, the sha-truth gate would call the next retry "already at
+        // latest" forever. Rewind both columns: a restored sha with the fresh
+        // etag still 304s and reads as current. `add` cannot rewind (COALESCE).
+        const restored = if (cached_sha_opt) |c|
+            tap_mod.updateHead(db, tap_label, c, cached_etag_opt)
+        else
+            tap_mod.clearHead(db, tap_label);
+        // A silent restore failure would bring the "already at latest" lie back.
+        restored catch |e| output.warn("Could not restore tap pin for {s}: {s} - retry with --force", .{ tap_label, @errorName(e) });
         output.err("Failed to upgrade tap formula {s}", .{full_name});
         return error.Aborted;
     };

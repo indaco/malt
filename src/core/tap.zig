@@ -424,6 +424,19 @@ pub fn updateHead(
     _ = try stmt.step();
 }
 
+/// Drop both pin columns of an existing tap row. `updateHead` cannot
+/// express "back to unpinned" (its sha is validated, non-optional), and
+/// `remove` would also drop owner/repo/host; this is the only way to
+/// rewind a row that had no pin before an upgrade bumped it.
+pub fn clearHead(db: *sqlite.Database, name: []const u8) !void {
+    var stmt = try db.prepare(
+        "UPDATE taps SET commit_sha = NULL, head_etag = NULL WHERE name = ?1;",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    _ = try stmt.step();
+}
+
 pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
     var taps: std.ArrayList(TapInfo) = .empty;
     // ArrayList.deinit doesn't reach row sub-allocations; walk them too.
@@ -819,6 +832,56 @@ test "updateHead with null etag clears the column (server omitted ETag)" {
 
     const et = try getHeadEtag(std.testing.allocator, &db, "user/repo");
     try std.testing.expectEqual(@as(?[]const u8, null), et);
+}
+
+test "clearHead drops both pin columns so the next resolve starts unpinned" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try add(&db, "user/repo", "user", "homebrew-repo", null);
+    try updateHead(&db, "user/repo", "0123456789abcdef0123456789abcdef01234567", "W/\"feed\"");
+
+    try clearHead(&db, "user/repo");
+
+    try std.testing.expectEqual(@as(?[]const u8, null), try getCommitSha(std.testing.allocator, &db, "user/repo"));
+    try std.testing.expectEqual(@as(?[]const u8, null), try getHeadEtag(std.testing.allocator, &db, "user/repo"));
+}
+
+test "clearHead keeps the row itself (owner/repo survive, unlike remove)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try add(&db, "user/repo", "user", "homebrew-repo", "0123456789abcdef0123456789abcdef01234567");
+
+    try clearHead(&db, "user/repo");
+
+    const pair = try effectiveOwnerRepo(std.testing.allocator, &db, "user/repo", "github.com");
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("user", pair.owner);
+    try std.testing.expectEqualStrings("homebrew-repo", pair.repo);
+}
+
+test "updateHead can move commit_sha backwards where add cannot" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    const old_sha = "0123456789abcdef0123456789abcdef01234567";
+    const new_sha = "abcdef0123456789abcdef0123456789abcdef01";
+    try add(&db, "user/repo", "user", "homebrew-repo", new_sha);
+
+    // add() is COALESCE-sticky: a null sha never rewinds the pin.
+    try add(&db, "user/repo", "user", "homebrew-repo", null);
+    const after_add = (try getCommitSha(std.testing.allocator, &db, "user/repo")).?;
+    defer std.testing.allocator.free(after_add);
+    try std.testing.expectEqualStrings(new_sha, after_add);
+
+    try updateHead(&db, "user/repo", old_sha, null);
+    const after_update = (try getCommitSha(std.testing.allocator, &db, "user/repo")).?;
+    defer std.testing.allocator.free(after_update);
+    try std.testing.expectEqualStrings(old_sha, after_update);
 }
 
 test "getHeadEtag returns null for a tap name that was never added" {
