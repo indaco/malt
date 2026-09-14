@@ -14,7 +14,7 @@
 # warm path's existing pre-wipe.
 #
 # Usage: scripts/regressions/install_zig_clonefail_gh85.sh
-# Requirements: built `malt` binary at $MALT_BIN or zig-out/bin/malt,
+# Requirements: built `malt` binary at $MALT_BIN or zig-out/bin/malt, jq,
 # network access to ghcr.io / formulae.brew.sh.
 
 set -euo pipefail
@@ -51,14 +51,23 @@ TARGET="${TARGET:-zig}" # zig drags in lld@21 + zstd, the original bug pair
 #
 # We deliberately leave Cellar/$TARGET/ absent so the top-level fastpath
 # (which only checks `Cellar/<top>` existence) does not short-circuit.
-STALE_DEPS=("lld@21:21.1.8_1" "llvm@21:21.1.8" "zstd:1.5.7_1" "lz4:1.10.0" "xz:5.8.3")
+#
+# Versions are resolved live from the formula API: a hard-coded pin goes
+# stale on every upstream bump and then fails step 4 for the wrong reason.
+STALE_DEPS=()
+for dep in lld@21 llvm@21 zstd lz4 xz; do
+  ver=$(curl -fsS "https://formulae.brew.sh/api/formula/$dep.json" |
+    jq -r 'if .revision > 0 then "\(.versions.stable)_\(.revision)" else .versions.stable end') ||
+    fail "could not resolve current version of $dep"
+  STALE_DEPS+=("$dep:$ver")
+done
 for entry in "${STALE_DEPS[@]}"; do
   dep="${entry%%:*}"
   ver="${entry##*:}"
   mkdir -p "$PREFIX/Cellar/$dep/$ver"
   printf 'stale\n' >"$PREFIX/Cellar/$dep/$ver/STALE_FILE"
 done
-pass "planted stale Cellar/<dep>/<version> fixtures"
+pass "planted stale Cellar/<dep>/<version> fixtures (${STALE_DEPS[*]})"
 
 # ── 2. Install — must complete cleanly and emit the success line. ──────
 LOG="$PREFIX/install.log"
