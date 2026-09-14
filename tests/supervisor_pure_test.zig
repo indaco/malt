@@ -12,10 +12,7 @@ const plist_mod = malt.services_plist;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 /// Scratch tree under a process-unique base, so overlapping test runs cannot
 /// wipe each other's fixtures.

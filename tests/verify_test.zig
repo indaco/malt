@@ -153,8 +153,8 @@ test "verifyCosignBlob accepts a cosign that exits 0" {
 
 // libc env mutators: Zig 0.16 has no std wrapper for these and the
 // regression test needs a scoped PATH change to prove bare-name lookup.
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+const setenv = test_io.c.setenv;
+const unsetenv = test_io.c.unsetenv;
 
 test "verifyCosignBlob finds a bare 'cosign' via PATH (regression: gh#151)" {
     // Before: `fs_compat.Child.spawn` initialized Threaded with an empty

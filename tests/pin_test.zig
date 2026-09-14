@@ -11,10 +11,7 @@ const cli_pin = malt.cli_pin;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "pin", suffix);

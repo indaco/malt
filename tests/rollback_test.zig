@@ -11,10 +11,7 @@ const sqlite = @import("malt").sqlite;
 const schema = @import("malt").schema;
 const rollback = @import("malt").cli_rollback;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 fn setPrefix(v: [:0]const u8) void {
     _ = c.setenv("MALT_PREFIX", v.ptr, 1);

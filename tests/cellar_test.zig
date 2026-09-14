@@ -11,10 +11,7 @@ const parser = @import("malt").parser;
 const install_args = @import("malt").install_args;
 
 // libc setenv/unsetenv — available because tests link with libc
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 // ---------------------------------------------------------------------------
 // Helpers
