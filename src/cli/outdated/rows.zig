@@ -127,14 +127,16 @@ pub fn freeKegRows(allocator: std.mem.Allocator, rows: []KegRow) void {
 
 /// Reads `name, version, tap, pinned` into caller-owned `KegRow`s.
 /// Tap is left null when the row's value is SQL NULL (core-API cask,
-/// or a v5-era row not yet backfilled).
+/// or a v5-era row not yet backfilled). A prepare/step failure
+/// propagates: zero rows would read as an all-clear downstream, so a
+/// drifted table must never look like an empty prefix.
 fn loadKegRows(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     sql: [:0]const u8,
     bind1: ?[]const u8,
 ) ![]KegRow {
-    var stmt = db.prepare(sql) catch return &.{};
+    var stmt = try db.prepare(sql);
     defer stmt.finalize();
     if (bind1) |b| try stmt.bindText(1, b);
 
@@ -147,7 +149,7 @@ fn loadKegRows(
         }
         rows.deinit(allocator);
     }
-    while (stmt.step() catch false) {
+    while (try stmt.step()) {
         const name_ptr = stmt.columnText(0) orelse continue;
         const ver_ptr = stmt.columnText(1);
         const name_slice = std.mem.sliceTo(name_ptr, 0);
@@ -206,4 +208,23 @@ test "freeKegRows releases name, version, and optional tap" {
         .tap = try std.testing.allocator.dupe(u8, "foo/bar"),
     };
     freeKegRows(std.testing.allocator, rows);
+}
+
+test "loadFormulaRows refuses to read a drifted kegs table as zero rows" {
+    // A table that passed `initSchema` but lost a SELECTed column is
+    // indistinguishable from an empty prefix downstream; the leaf must
+    // surface the failure, not hand back an all-clear.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE kegs (name TEXT, version TEXT, revision INTEGER, tap TEXT);");
+    try db.exec("INSERT INTO kegs (name, version, revision, tap) VALUES ('alpha', '1.0', 0, NULL);");
+    try std.testing.expectError(error.PrepareFailed, loadFormulaRows(std.testing.allocator, &db, .all));
+}
+
+test "loadCaskRows refuses to read a drifted casks table as zero rows" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE casks (token TEXT, version TEXT, tap TEXT);");
+    try db.exec("INSERT INTO casks (token, version, tap) VALUES ('alpha', '1.0', NULL);");
+    try std.testing.expectError(error.PrepareFailed, loadCaskRows(std.testing.allocator, &db, .all));
 }

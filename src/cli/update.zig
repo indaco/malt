@@ -82,6 +82,7 @@ fn invalidateSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_di
 fn reportCheckFailure(e: anyerror) void {
     switch (e) {
         error.AuditIncomplete => output.err(outdated_mod.audit_incomplete_msg, .{}),
+        error.PrepareFailed, error.StepFailed, error.Corrupt => output.err(outdated_mod.unreadable_rows_fmt, .{@errorName(e)}),
         else => output.err("Failed to refresh outdated snapshot: {s}", .{@errorName(e)}),
     }
 }
@@ -91,10 +92,16 @@ fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: 
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return error.Aborted;
 
-    var db = sqlite.Database.open(db_path) catch {
-        // Fresh prefix: write an empty snapshot so readers get instant "all clear".
-        try outdated_mod.writeSnapshotEntries(ctx, allocator, cache_dir, &.{}, &.{});
-        return;
+    var db = outdated_mod.openPrefixDb(ctx.io, db_path) catch |e| switch (e) {
+        error.Absent => {
+            // Fresh prefix: write an empty snapshot so readers get instant "all clear".
+            try outdated_mod.writeSnapshotEntries(ctx, allocator, cache_dir, &.{}, &.{});
+            return;
+        },
+        error.Unreadable => {
+            output.err("Failed to open database: {s}", .{db_path});
+            return error.Aborted;
+        },
     };
     defer db.close();
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
@@ -122,4 +129,18 @@ test "reportCheckFailure names an unverified audit in plain words, other errors 
     err_buf.clearRetainingCapacity();
     reportCheckFailure(error.ConnectionRefused);
     try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "ConnectionRefused") != null);
+}
+
+test "reportCheckFailure points an unreadable database at mt doctor instead of a raw error name" {
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &err_buf);
+    defer output.endStderrCapture();
+
+    for ([_]anyerror{ error.PrepareFailed, error.StepFailed, error.Corrupt }) |e| {
+        err_buf.clearRetainingCapacity();
+        reportCheckFailure(e);
+        try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "mt doctor") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "Failed to refresh") == null);
+    }
 }

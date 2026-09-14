@@ -975,9 +975,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const prefix = atomic.maltPrefixOrAbort();
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
-    var db = sqlite.Database.open(db_path) catch {
+    var db = openPrefixDb(ctx.io, db_path) catch |e| switch (e) {
         // Fresh prefix: nothing installed = nothing to be outdated.
-        return;
+        error.Absent => return,
+        error.Unreadable => {
+            output.err("Failed to open database: {s}", .{db_path});
+            return error.Aborted;
+        },
     };
     defer db.close();
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
@@ -1026,17 +1030,17 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                     .{max_age_minutes},
                 );
             }
-            try emitFromSnapshot(allocator, &db, snap_opt.?, stdout, json_mode, .{
+            emitFromSnapshot(allocator, &db, snap_opt.?, stdout, json_mode, .{
                 .cask_only = cask_only,
                 .formula_only = formula_only,
-            });
+            }) catch |e| return abortUnreadableRows(e);
         },
-        .recompute => try recomputeAndEmit(ctx, allocator, &db, cache_dir, stdout, json_mode, .{
+        .recompute => recomputeAndEmit(ctx, allocator, &db, cache_dir, stdout, json_mode, .{
             .cask_only = cask_only,
             .formula_only = formula_only,
             .pinned_only = pinned_only,
             .tap = tap_filter,
-        }),
+        }) catch |e| return abortUnreadableRows(e),
     }
 }
 
@@ -1148,6 +1152,118 @@ pub const audit_incomplete_msg = "Could not verify every package; snapshot not u
 
 fn warnAuditIncomplete() void {
     output.warnAlways(audit_incomplete_msg, .{});
+}
+
+/// Only a missing `db/` directory may read as "nothing installed":
+/// anything that exists there but cannot be opened is an error, never
+/// an all-clear. SQLite's CREATE flag alone would hide that difference,
+/// and probing the file itself would report a stray `db` file as absent.
+pub fn openPrefixDb(io: std.Io, db_path: [:0]const u8) error{ Absent, Unreadable }!sqlite.Database {
+    const db_dir = std.fs.path.dirname(db_path) orelse unreachable;
+    const present = if (std.Io.Dir.accessAbsolute(io, db_dir, .{})) true else |e| e != error.FileNotFound;
+    return sqlite.Database.open(db_path) catch if (present) error.Unreadable else error.Absent;
+}
+
+/// Shared with `mt update --check` so both snapshot writers say the
+/// same thing about a database they could not read.
+pub const unreadable_rows_fmt = "Could not read installed packages ({s}). Try `mt doctor`.";
+
+/// A row load that failed must read as a diagnostic, never as an
+/// empty audit; every other error keeps its name for `main`.
+fn abortUnreadableRows(e: anyerror) anyerror!void {
+    return switch (e) {
+        error.PrepareFailed, error.StepFailed, error.Corrupt => {
+            output.err(unreadable_rows_fmt, .{@errorName(e)});
+            return error.Aborted;
+        },
+        else => e,
+    };
+}
+
+test "abortUnreadableRows turns a failed row load into a diagnostic, not an empty audit" {
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &err_buf);
+    defer output.endStderrCapture();
+
+    // Corrupt: page-level damage surfaces mid-scan, after open and initSchema passed.
+    for ([_]anyerror{ error.PrepareFailed, error.StepFailed, error.Corrupt }) |e| {
+        err_buf.clearRetainingCapacity();
+        try std.testing.expectError(error.Aborted, abortUnreadableRows(e));
+        try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "mt doctor") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err_buf.items, @errorName(e)) != null);
+    }
+}
+
+fn scratchDbPath(s: *Scratch) ![:0]const u8 {
+    return std.fmt.allocPrintSentinel(s.arena.allocator(), "{s}/db/malt.db", .{s.base}, 0);
+}
+
+test "openPrefixDb reports a prefix with no db/ directory as absent" {
+    var s = try Scratch.init("openPrefixDb_absent");
+    defer s.deinit();
+    const db_path = try scratchDbPath(&s);
+    try std.testing.expectError(error.Absent, openPrefixDb(fs_test_io, db_path));
+}
+
+test "openPrefixDb creates the database when db/ exists but the file does not" {
+    // Still a fresh prefix: nothing to read, but the audit may run for real.
+    var s = try Scratch.init("openPrefixDb_dir_only");
+    defer s.deinit();
+    const db_path = try scratchDbPath(&s);
+    try s.dir.createDirPath(fs_test_io, "db");
+    var db = try openPrefixDb(fs_test_io, db_path);
+    db.close();
+}
+
+test "openPrefixDb refuses a file that exists but is not a database" {
+    var s = try Scratch.init("openPrefixDb_corrupt");
+    defer s.deinit();
+    const db_path = try scratchDbPath(&s);
+    try s.dir.createDirPath(fs_test_io, "db");
+    const file = try std.Io.Dir.createFileAbsolute(fs_test_io, db_path, .{ .truncate = true });
+    defer file.close(fs_test_io);
+    try file.writeStreamingAll(fs_test_io, "not a sqlite header");
+    try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path));
+}
+
+test "openPrefixDb refuses a db that is a file where the directory should be" {
+    // ENOTDIR reads as "not found" to a probe of the file path; probing
+    // the directory is what keeps this from passing as a fresh prefix.
+    var s = try Scratch.init("openPrefixDb_notdir");
+    defer s.deinit();
+    const db_path = try scratchDbPath(&s);
+    const blocker = try s.dir.createFile(fs_test_io, "db", .{});
+    blocker.close(fs_test_io);
+    try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path));
+}
+
+test "openPrefixDb refuses a db/ directory it cannot look into" {
+    // EACCES on the directory is not "nothing installed": the file may
+    // well be there, so this must never read as a fresh prefix.
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+    var s = try Scratch.init("openPrefixDb_walled");
+    defer s.deinit();
+    const db_path = try scratchDbPath(&s);
+    try s.dir.createDirPath(fs_test_io, "db");
+    var db_dir = try s.dir.openDir(fs_test_io, "db", .{});
+    defer db_dir.close(fs_test_io);
+    try db_dir.setPermissions(fs_test_io, std.Io.File.Permissions.fromMode(0));
+    defer db_dir.setPermissions(fs_test_io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+    try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path));
+}
+
+test "abortUnreadableRows leaves every other error to main, unprinted" {
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &err_buf);
+    defer output.endStderrCapture();
+
+    try std.testing.expectError(error.AuditIncomplete, abortUnreadableRows(error.AuditIncomplete));
+    try std.testing.expectError(error.OutOfMemory, abortUnreadableRows(error.OutOfMemory));
+    // A lock held by a concurrent command is not something `mt doctor` fixes.
+    try std.testing.expectError(error.Busy, abortUnreadableRows(error.Busy));
+    try std.testing.expectEqual(@as(usize, 0), err_buf.items.len);
 }
 
 fn recomputeAndEmit(
