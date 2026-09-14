@@ -112,8 +112,8 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
             }
         }
 
-        // Extract `revision N` (global, unquoted integer). Ignored by the
-        // install path; the outdated audit uses it to spot revision bumps.
+        // Extract `revision N` (global, unquoted integer). Names the keg's
+        // `<version>_N` leaf and lets the outdated audit spot revision bumps.
         // Layout-blind and formula-oriented: it matches at any indentation, in
         // any block, so the cask caller discards what it finds.
         if (revision == 0 and std.mem.startsWith(u8, line, "revision ")) {
