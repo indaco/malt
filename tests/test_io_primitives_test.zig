@@ -86,6 +86,25 @@ test "getenv returns the value for a set variable" {
     try testing.expect(v.len > 0);
 }
 
+// ── setenv / unsetenv ────────────────────────────────────────────────
+
+test "unsetenv of an inherited variable keeps the failure printer alive" {
+    // The runner prints a failing assertion through the debug `Threaded`,
+    // whose lazy environ scan walks the block the process was started with.
+    // libc compacts that block in place when an inherited variable is unset,
+    // so an unprimed scan hits a null entry and the test crashes instead of
+    // reporting. `MALT_PREFIX` is inherited from build.zig in every test run.
+    const prev = fs.getenv("MALT_PREFIX") orelse return error.SkipZigTest;
+    var prev_buf: [std.fs.max_path_bytes]u8 = undefined;
+    @memcpy(prev_buf[0..prev.len], prev);
+    prev_buf[prev.len] = 0;
+    defer _ = fs.c.setenv("MALT_PREFIX", prev_buf[0..prev.len :0], 1);
+
+    _ = fs.c.unsetenv("MALT_PREFIX");
+    _ = std.debug.lockStderr(&.{});
+    std.debug.unlockStderr();
+}
+
 test "getenv does not match a prefix-only name" {
     // A classic environ-walk bug: matching "PAT" against "PATH=...".
     // Pin that prefix matches do NOT leak through.

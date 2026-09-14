@@ -16,10 +16,7 @@ const string = dsl.builtins.string;
 const Value = dsl.Value;
 const ExecCtx = pathname.ExecCtx;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 fn uniqueSandbox(suffix: []const u8) ![]const u8 {
     const p = try test_io.uniqueTempPath(testing.allocator, "dsl_builtins", suffix);

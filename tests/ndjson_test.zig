@@ -15,10 +15,7 @@ const output = malt.output;
 const io_mod = malt.output;
 const upgrade = malt.upgrade;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 /// One stable name per step in the 9-step install protocol described in
 /// the README. Locking these in a slice forces a compile-time review when

@@ -20,6 +20,26 @@ pub fn uniqueTempPath(allocator: std.mem.Allocator, group: []const u8, tag: []co
     });
 }
 
+/// libc `setenv`/`unsetenv` for fixtures. Tests must unset through here: the
+/// runner prints a failing assertion via the debug `Threaded`, whose lazy
+/// environ scan walks the inherited env block, and libc compacts that block
+/// in place when an inherited variable is unset. Scanning once before the
+/// first unset memoises the walk, so a later failure is reported, not a crash.
+pub const c = struct {
+    const libc = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    };
+
+    pub const setenv = libc.setenv;
+
+    pub fn unsetenv(name: [*:0]const u8) c_int {
+        _ = std.debug.lockStderr(&.{});
+        std.debug.unlockStderr();
+        return libc.unsetenv(name);
+    }
+};
+
 /// Lazy `/dev/null` handle used to sink writes under the test runner. The
 /// runner owns fd 1 for its IPC protocol, and dumps any captured stderr
 /// next to a "failed command:" trailer — both swamp the summary with noise

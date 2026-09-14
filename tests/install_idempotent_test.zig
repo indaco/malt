@@ -12,10 +12,7 @@ const test_io = @import("test_io");
 const testing = std.testing;
 const install = malt.install;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 fn pathExists(path: []const u8) bool {
     test_io.accessAbsolute(std.Options.debug_io, path, .{}) catch return false;

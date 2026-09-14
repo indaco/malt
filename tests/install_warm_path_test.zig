@@ -15,10 +15,7 @@ const testing = std.testing;
 const cellar_mod = @import("malt").cellar;
 const relocated = @import("malt").relocated_store;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 fn setMaltPrefix(prefix: [:0]const u8) [:0]const u8 {
     const old = test_io.getenv("MALT_PREFIX") orelse "";

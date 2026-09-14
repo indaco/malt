@@ -473,7 +473,18 @@ test "FormulaCache.entryCount tracks the live entry count" {
 
 const c_set = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    const libc = struct {
+        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    };
+
+    // libc compacts the inherited env block in place, and the runner's failure
+    // printer walks that block lazily; scanning it once first keeps a later
+    // failing assertion reported instead of crashing on a null entry.
+    fn unsetenv(name: [*:0]const u8) c_int {
+        _ = std.debug.lockStderr(&.{});
+        std.debug.unlockStderr();
+        return libc.unsetenv(name);
+    }
 };
 
 fn seedKegOnDisk(io: std.Io, prefix: []const u8, name: []const u8, db: *sqlite.Database) ![]const u8 {

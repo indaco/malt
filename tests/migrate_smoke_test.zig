@@ -15,10 +15,7 @@ const output = malt.output;
 const io_mod = malt.output;
 const color = malt.color;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 // Reset globals other tests may have flipped. `setMode(.human)` matters for the
 // --json assertions below — JSON mode is sticky across tests otherwise.

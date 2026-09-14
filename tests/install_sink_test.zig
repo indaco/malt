@@ -14,10 +14,7 @@ const install_record = malt.install_record;
 const install_sink = malt.install_sink;
 const output = malt.output;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 /// Counts the human lines a sink receives so a test can assert routing
 /// went through `ctx` and never touched the global stderr.

@@ -12,10 +12,7 @@ const install_record = malt.install_record;
 const linker_mod = malt.linker;
 const formula_mod = malt.formula;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 const fake_formula_json =
     \\{

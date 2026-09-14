@@ -12,10 +12,7 @@ const test_io = @import("test_io");
 const testing = std.testing;
 const install = @import("malt").install;
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const c = test_io.c;
 
 const ambiguity_marker: []const u8 = "exists as both a formula and a cask";
 
