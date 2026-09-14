@@ -72,12 +72,23 @@ export NO_COLOR=1
 export MALT_NO_EMOJI=1
 
 # Bound any single binary invocation. macOS lacks `timeout` by default;
-# perl is on every system. `alarm 0` is a no-op so the wrapper is safe
-# for shells without alarm support.
+# perl is on every system. The child gets its own process group and the
+# alarm kills the whole group: a plain `alarm; exec` only reaps the
+# direct child, so a wrapper that forks (mvnDebug -> java parked on a
+# JDWP socket) leaves a grandchild holding our stdout pipe and the
+# `$(...)` capture never returns.
 run_with_timeout() {
   local secs="$1"
   shift
-  perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+  perl -e '
+    my $secs = shift;
+    my $pid = fork // die "fork: $!";
+    if ($pid == 0) { setpgrp; exec @ARGV or exit 127 }
+    $SIG{ALRM} = sub { kill KILL => -$pid; waitpid $pid, 0; exit 124 };
+    alarm $secs;
+    waitpid $pid, 0;
+    exit(($? >> 8) || ($? & 127 ? 128 + ($? & 127) : 0));
+  ' "$secs" "$@"
 }
 
 # Source-of-truth Cellar. Default = the developer's real brew install
