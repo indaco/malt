@@ -223,16 +223,17 @@ test "incrementRef and decrementRef update refcount" {
     try ctx.store.incrementRef(sha_ref);
     try ctx.store.decrementRef(sha_ref);
 
-    // After 2 increments and 1 decrement, refcount should be 1
-    // Verify via orphans — should NOT be an orphan
-    var orphans = try ctx.store.orphans();
-    defer {
-        for (orphans.items) |o| testing.allocator.free(o);
-        orphans.deinit(testing.allocator);
-    }
-    for (orphans.items) |o| {
-        try testing.expect(!std.mem.eql(u8, o, sha_ref));
-    }
+    // Read the counter itself: `orphans()` answers from `kegs`, so it cannot
+    // witness arithmetic on a row no keg holds.
+    try testing.expectEqual(@as(?i64, 1), try refcountOf(&ctx.db, sha_ref));
+}
+
+fn refcountOf(db: *sqlite.Database, sha: []const u8) !?i64 {
+    var stmt = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, sha);
+    if (!try stmt.step()) return null;
+    return stmt.columnInt(0);
 }
 
 // ── Key validation ─────────────────────────────────────────────────────────
@@ -327,12 +328,7 @@ test "decrementRef stays permissive so a legacy row can still be wound down" {
     // Rejecting here would strand the row instead of protecting anything.
     try ctx.store.decrementRef("legacy-row");
 
-    var orphans = try ctx.store.orphans();
-    defer {
-        for (orphans.items) |o| testing.allocator.free(o);
-        orphans.deinit(testing.allocator);
-    }
-    try testing.expectEqual(@as(usize, 1), orphans.items.len);
+    try testing.expectEqual(@as(?i64, 0), try refcountOf(&ctx.db, "legacy-row"));
 }
 
 test "remove rejects a malformed key before it can delete or transact" {

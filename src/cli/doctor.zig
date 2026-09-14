@@ -2091,11 +2091,9 @@ test "checkCellarPackageDirs: a live operation downgrades the finding, never hid
     try testing.expectEqual(CheckResult.info_status, checkCellarPackageDirs(ctx, "Cellar package directories"));
 }
 
-test "checkOrphanedStore: counts only unreferenced refcount<=0 rows across store entries" {
-    // Parity guard for the shared-probe swap: one orphan, one live ref, one
-    // no-row entry and one keg-held under-counted entry must warn with exactly
-    // one orphan — a miscount (probe reuse or the count-vs-remove policy
-    // leaking) flips the outcome or the number.
+test "checkOrphanedStore: counts every row no keg holds across store entries" {
+    // Parity guard for the shared probe: two orphans among five entry
+    // shapes; a miscount flips the outcome or the number.
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
     var s = try Scratch.init("doctor_orphan_store");
@@ -2112,13 +2110,14 @@ test "checkOrphanedStore: counts only unreferenced refcount<=0 rows across store
         \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY, refcount INTEGER NOT NULL DEFAULT 1);
         \\CREATE TABLE kegs (id INTEGER PRIMARY KEY, store_sha256 TEXT);
         \\INSERT INTO store_refs VALUES ('orphan', 0);
+        \\INSERT INTO store_refs VALUES ('inflated', 3);
         \\INSERT INTO store_refs VALUES ('live', 2);
         \\INSERT INTO store_refs VALUES ('held', 0);
-        \\INSERT INTO kegs (store_sha256) VALUES ('held');
+        \\INSERT INTO kegs (store_sha256) VALUES ('live'), ('held');
     );
     db.close();
 
-    for ([_][]const u8{ "orphan", "live", "norow", "held" }) |sha| {
+    for ([_][]const u8{ "orphan", "inflated", "live", "norow", "held" }) |sha| {
         var eb: [std.fs.max_path_bytes]u8 = undefined;
         const entry = try std.fmt.bufPrint(&eb, "{s}/store/{s}", .{ prefix, sha });
         try std.Io.Dir.cwd().createDirPath(io, entry);
@@ -2131,11 +2130,11 @@ test "checkOrphanedStore: counts only unreferenced refcount<=0 rows across store
 
     const ctx: CheckCtx = .{ .allocator = allocator, .prefix = prefix, .io = io, .environ = .empty };
     try testing.expectEqual(CheckResult.warn_status, checkOrphanedStore(ctx, "Orphaned store entries"));
-    try testing.expect(std.mem.indexOf(u8, out.items, "1 orphaned store entry") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "2 orphaned store entr") != null);
 }
 
-test "checkOrphanedStore: a store with no refcount<=0 row is ok" {
-    // Pins the clean branch of the probe swap: live-ref and no-row entries
+test "checkOrphanedStore: a store whose every row a keg holds is ok" {
+    // Pins the clean branch of the probe swap: keg-held and no-row entries
     // must not warn.
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
@@ -2153,6 +2152,7 @@ test "checkOrphanedStore: a store with no refcount<=0 row is ok" {
         \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY, refcount INTEGER NOT NULL DEFAULT 1);
         \\CREATE TABLE kegs (id INTEGER PRIMARY KEY, store_sha256 TEXT);
         \\INSERT INTO store_refs VALUES ('live', 2);
+        \\INSERT INTO kegs (store_sha256) VALUES ('live');
     );
     db.close();
 
