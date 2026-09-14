@@ -56,11 +56,12 @@ pub fn parseArgs(args: []const []const u8) Opts {
     return opts;
 }
 
-/// Emit the manual-recovery hint for a failed self-replace, split out so the
-/// error→message mapping is unit-testable. `RollbackFailed` strands the old
-/// binary at `.old` (loud `mv` recovery); everything else leaves the target
-/// intact (normal install hint). Printing the wrong one misleads the user.
-fn printReplaceFailure(err: swap.SwapError, new_binary: []const u8, self_exe: []const u8) void {
+/// Emit the manual-recovery hint for a failed self-replace and fail the
+/// command, split out so the error→message mapping is unit-testable.
+/// `RollbackFailed` strands the old binary at `.old` (loud `mv` recovery);
+/// everything else leaves the target intact (normal install hint). Either
+/// way the update did not happen, so the exit status must say so.
+fn reportReplaceFailure(err: swap.SwapError, new_binary: []const u8, self_exe: []const u8) error{Aborted}!void {
     switch (err) {
         error.RollbackFailed => {
             // Two renames went one-and-a-half: target is gone, .old is still
@@ -75,6 +76,7 @@ fn printReplaceFailure(err: swap.SwapError, new_binary: []const u8, self_exe: []
             output.info("Manual update: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, self_exe });
         },
     }
+    return error.Aborted;
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -264,14 +266,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.info("Manual update: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, self_exe });
             return error.Aborted;
         },
-        error.StagingFailed, error.SwapFailed => {
-            printReplaceFailure(error.SwapFailed, new_binary, self_exe);
-            return;
-        },
-        error.RollbackFailed => {
-            printReplaceFailure(error.RollbackFailed, new_binary, self_exe);
-            return error.Aborted;
-        },
+        error.StagingFailed, error.SwapFailed => return reportReplaceFailure(error.SwapFailed, new_binary, self_exe),
+        error.RollbackFailed => return reportReplaceFailure(error.RollbackFailed, new_binary, self_exe),
         else => return e,
     };
 
@@ -576,7 +572,7 @@ fn unverifiedAllowed(environ: std.process.Environ) bool {
     return std.mem.eql(u8, v, "1");
 }
 
-test "printReplaceFailure emits the loud mv-recovery only for RollbackFailed" {
+test "reportReplaceFailure emits the loud mv-recovery only for RollbackFailed and always fails the command" {
     const testing = std.testing;
     const self_exe = "/opt/malt/bin/malt";
     var buf: std.ArrayList(u8) = .empty;
@@ -584,10 +580,12 @@ test "printReplaceFailure emits the loud mv-recovery only for RollbackFailed" {
 
     // SwapFailed: target untouched, so the normal install hint — and NOT the
     // `mv .old` line, which would fail because a successful swap never left a
-    // stranded `.old`.
+    // stranded `.old`. An intact target is still a failed update: the exit
+    // status must say so or `version update --yes && ...` runs on the old binary.
     output.beginStderrCapture(testing.allocator, &buf);
-    printReplaceFailure(error.SwapFailed, "/tmp/malt.new", self_exe);
+    const swap_res = reportReplaceFailure(error.SwapFailed, "/tmp/malt.new", self_exe);
     output.endStderrCapture();
+    try testing.expectError(error.Aborted, swap_res);
     try testing.expect(std.mem.indexOf(u8, buf.items, "sudo install -m 0755 -b -B .old") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "sudo mv") == null);
 
@@ -595,7 +593,8 @@ test "printReplaceFailure emits the loud mv-recovery only for RollbackFailed" {
     // hint must name the exact `mv` that puts it back.
     buf.clearRetainingCapacity();
     output.beginStderrCapture(testing.allocator, &buf);
-    printReplaceFailure(error.RollbackFailed, "/tmp/malt.new", self_exe);
+    const rollback_res = reportReplaceFailure(error.RollbackFailed, "/tmp/malt.new", self_exe);
     output.endStderrCapture();
+    try testing.expectError(error.Aborted, rollback_res);
     try testing.expect(std.mem.indexOf(u8, buf.items, "sudo mv /opt/malt/bin/malt.old /opt/malt/bin/malt") != null);
 }
