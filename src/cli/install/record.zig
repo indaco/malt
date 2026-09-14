@@ -229,7 +229,18 @@ pub fn recordKeg(
     bin_isolated: bool,
     opts: RecordOpts,
 ) sqlite.SqliteError!i64 {
-    return recordKegFields(db, .{
+    return recordKegFields(db, kegFields(formula, store_sha256, cellar_path, install_reason, bin_isolated), opts);
+}
+
+/// Built ahead of the insert by callers that must undo by name and version.
+pub fn kegFields(
+    formula: *const formula_mod.Formula,
+    store_sha256: []const u8,
+    cellar_path: []const u8,
+    install_reason: []const u8,
+    bin_isolated: bool,
+) KegFields {
+    return .{
         .name = formula.name,
         .full_name = formula.full_name,
         .version = formula.version,
@@ -239,7 +250,7 @@ pub fn recordKeg(
         .cellar_path = cellar_path,
         .install_reason = install_reason,
         .bin_isolated = bin_isolated,
-    }, opts);
+    };
 }
 
 /// Delete a keg record (rollback / replaced-old-row helper). Wipes

@@ -243,8 +243,8 @@ test "re-migrating an installed keg does not claim the bottle a second time" {
     try testing.expectEqual(@as(i64, 1), try claimedRefs(&h.db));
 }
 
-// The claim sits after both record branches; moving it inside the linked
-// one would leave keg-only bottles unclaimed and reclaimable while live.
+// The claim sits after the shared record step; gating it on the link
+// would leave keg-only bottles unclaimed and reclaimable while live.
 test "a keg-only migrate claims the bottle exactly once" {
     var fx = try Fixture.init("kegonly");
     defer fx.deinit();
