@@ -375,7 +375,7 @@ fn readTextCol(db: *sqlite.Database, sql: [:0]const u8, name: []const u8, buf: [
     return buf[0..slice.len];
 }
 
-test "recordKegFields round-trips revision and bin_isolated as zero for tap/local" {
+test "recordKegFields round-trips a zero revision and bin_isolated as zero" {
     var db = try openTestDb();
     defer db.close();
 

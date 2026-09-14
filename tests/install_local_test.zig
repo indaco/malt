@@ -951,3 +951,195 @@ test "materializeRubyFormula refuses a symlinked package dir" {
     defer testing.allocator.free(leaked);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, leaked, .{}));
 }
+
+// ─── .rb revision reaches the keg row and the Cellar leaf ───────────
+
+// Real `Threaded` io to spawn `tar` — `std.Options.debug_io`'s failing
+// allocator can't back a child spawn.
+fn runTar(argv: []const []const u8) !void {
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{ .environ = malt.app_ctx.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var child = try std.process.spawn(io, .{ .argv = argv, .stdout = .ignore, .stderr = .ignore });
+    switch (try child.wait(io)) {
+        .exited => |code| if (code != 0) return error.TarFailed,
+        else => return error.TarFailed,
+    }
+}
+
+// Pack a one-file `bin/<name>` keg at the SHA-keyed tap-cache path so
+// `materializeRubyFormula` takes the warm branch and stays offline.
+fn seedKegArchive(prefix: []const u8, name: []const u8, sha: []const u8) !void {
+    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/work_{s}/bin", .{ prefix, name });
+    defer testing.allocator.free(bin_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
+    const exe = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, name });
+    defer testing.allocator.free(exe);
+    try writeFile(exe, "#!/bin/sh\necho hi\n");
+
+    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache/Tap", .{prefix});
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_parent);
+    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    const work = bin_dir[0 .. bin_dir.len - "/bin".len];
+    try runTar(&.{ "tar", "czf", cache_path, "-C", work, "bin" });
+}
+
+fn installFromWarmCache(prefix: [:0]const u8, resolved: install_local.ResolvedRubyFormula, force: bool) !void {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    inline for (.{ "db", "Cellar" }) |sub| {
+        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ prefix, sub });
+        defer testing.allocator.free(dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+    }
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    try install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        force,
+        false, // download_only
+        null, // prefetch_slot
+        malt.install_sink.silent,
+    );
+}
+
+// The single row for `name`; errors when there is none or more than one,
+// since a leftover row is exactly what would keep the audit re-flagging it.
+const KegRow = struct { revision: i64, cellar_path: []const u8 };
+
+fn kegRevisionAndPath(prefix: []const u8, name: []const u8, path_buf: []u8) !KegRow {
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT revision, cellar_path FROM kegs WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    if (!try stmt.step()) return error.NoRow;
+    const raw = std.mem.sliceTo(stmt.columnText(1) orelse return error.NoText, 0);
+    @memcpy(path_buf[0..raw.len], raw);
+    const row: KegRow = .{ .revision = stmt.columnInt(0), .cellar_path = path_buf[0..raw.len] };
+    if (try stmt.step()) return error.StaleRowLeftBehind;
+    return row;
+}
+
+test "materializeRubyFormula names the keg row and Cellar leaf by the .rb revision" {
+    // The audit qualifies upstream as `<version>_<revision>`; the row and the
+    // leaf must carry the same pair or the keg is outdated forever. Row and
+    // dir move together because uninstall/purge/rollback derive the dir
+    // from the row.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "ab" ** 32;
+    try seedKegArchive(prefix, "revfix", sha);
+
+    try installFromWarmCache(prefix, .{
+        .name = "revfix",
+        .full_name = "user/repo/revfix",
+        .tap_label = "user/repo",
+        .version = "1.0.0",
+        .revision = 2,
+        .url = "https://example.invalid/revfix-1.0.0.tar.gz",
+        .sha256 = sha,
+    }, false);
+
+    const want = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/revfix/1.0.0_2", .{prefix});
+    defer testing.allocator.free(want);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const row = try kegRevisionAndPath(prefix, "revfix", &path_buf);
+    try testing.expectEqual(@as(i64, 2), row.revision);
+    try testing.expectEqualStrings(want, row.cellar_path);
+    try test_io.accessAbsolute(std.Options.debug_io, want, .{});
+
+    const opt = try std.fmt.allocPrint(testing.allocator, "{s}/opt/revfix", .{prefix});
+    defer testing.allocator.free(opt);
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings(want, try test_io.readLinkAbsolute(std.Options.debug_io, opt, &link_buf));
+}
+
+test "materializeRubyFormula keeps a revision-less .rb on the bare Cellar leaf" {
+    // The `Casks/`-served goreleaser shape: no `revision`, so the audit
+    // compares the bare version and the leaf must stay bare.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "cd" ** 32;
+    try seedKegArchive(prefix, "bare", sha);
+
+    try installFromWarmCache(prefix, .{
+        .name = "bare",
+        .full_name = "user/repo/bare",
+        .tap_label = "user/repo",
+        .version = "1.0.0",
+        .url = "https://example.invalid/bare-1.0.0.tar.gz",
+        .sha256 = sha,
+    }, false);
+
+    const want = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/bare/1.0.0", .{prefix});
+    defer testing.allocator.free(want);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const row = try kegRevisionAndPath(prefix, "bare", &path_buf);
+    try testing.expectEqual(@as(i64, 0), row.revision);
+    try testing.expectEqualStrings(want, row.cellar_path);
+    try test_io.accessAbsolute(std.Options.debug_io, want, .{});
+}
+
+test "force reinstall migrates a pre-fix bare keg onto the revisioned leaf" {
+    // Kegs installed before the revision was kept sit on `<version>` with
+    // `revision = 0`. `--force` is their migration path: the new leaf is
+    // `<version>_N` and the other-version prune removes the bare dir.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "ef" ** 32;
+    try seedKegArchive(prefix, "migr", sha);
+
+    const bare: install_local.ResolvedRubyFormula = .{
+        .name = "migr",
+        .full_name = "user/repo/migr",
+        .tap_label = "user/repo",
+        .version = "1.0.0",
+        .url = "https://example.invalid/migr-1.0.0.tar.gz",
+        .sha256 = sha,
+    };
+    try installFromWarmCache(prefix, bare, false);
+
+    var revisioned = bare;
+    revisioned.revision = 2;
+    try installFromWarmCache(prefix, revisioned, true);
+
+    const old = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/migr/1.0.0", .{prefix});
+    defer testing.allocator.free(old);
+    const want = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/migr/1.0.0_2", .{prefix});
+    defer testing.allocator.free(want);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const row = try kegRevisionAndPath(prefix, "migr", &path_buf);
+    try testing.expectEqual(@as(i64, 2), row.revision);
+    try testing.expectEqualStrings(want, row.cellar_path);
+    try test_io.accessAbsolute(std.Options.debug_io, want, .{});
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, old, .{}));
+}
