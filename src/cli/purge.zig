@@ -4,6 +4,7 @@
 const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const atomic = @import("../fs/atomic.zig");
+const artefact_cache = @import("../core/artefact_cache.zig");
 const prefix_path = @import("../fs/prefix_path.zig");
 const signals = @import("../core/signals.zig");
 const output = @import("../ui/output.zig");
@@ -95,6 +96,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return Error.OpenFileFailed;
     };
     defer allocator.free(cache_dir);
+    artefact_cache.adoptLegacy(ctx.io, prefix, cache_dir);
 
     const start_ts = std.Io.Clock.real.now(ctx.io).toMilliseconds();
 

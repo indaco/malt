@@ -10,6 +10,7 @@ const lock_mod = @import("../db/lock.zig");
 const lock_report = @import("lock_report.zig");
 const cellar = @import("../core/cellar.zig");
 const cask_mod = @import("../core/cask.zig");
+const artefact_cache = @import("../core/artefact_cache.zig");
 const linker_mod = @import("../core/linker.zig");
 const store_mod = @import("../core/store.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -442,6 +443,7 @@ fn dispatchCask(
         return error.Aborted;
     };
     defer allocator.free(cache_dir);
+    artefact_cache.adoptLegacy(ctx.io, prefix, cache_dir);
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, cache_dir);
     installer.offline = ctx.offline;
     installer.reinstallFromHistory(token, target_pkg_version) catch |e| {

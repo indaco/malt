@@ -843,10 +843,11 @@ test "--wipe --backup writes an empty manifest when the prefix never had a datab
     try test_io.accessAbsolute(std.Options.debug_io, backup_path, .{});
 }
 
-test "--stale-casks sweeps the cask cache under MALT_CACHE and leaves {prefix}/cache alone" {
+test "--stale-casks sweeps the cask cache under MALT_CACHE and adopts a legacy orphan first" {
     // The writers land artefacts under `$MALT_CACHE/Cask`; a sweep that
-    // still scanned `{prefix}/cache/Cask` would never reclaim them and
-    // would delete files no live writer owns.
+    // still scanned `{prefix}/cache/Cask` would never reclaim them. A file
+    // left there from before the override is adopted, then judged like
+    // any other — an orphan goes, from both locations.
     const allocator = testing.allocator;
     var prefix = try ScratchPrefix.init(allocator, "stale_casks_malt_cache");
     defer prefix.deinit(allocator);
@@ -882,7 +883,10 @@ test "--stale-casks sweeps the cask cache under MALT_CACHE and leaves {prefix}/c
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, ghost, .{}));
     const legacy = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/legacy-1.0.dmg", .{prefix.path});
     defer allocator.free(legacy);
-    try test_io.accessAbsolute(std.Options.debug_io, legacy, .{});
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, legacy, .{}));
+    const adopted = try std.fmt.allocPrint(allocator, "{s}/Cask/legacy-1.0.dmg", .{alt});
+    defer allocator.free(adopted);
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, adopted, .{}));
 }
 
 test "--old-versions sweeps the stale per-version artefact under MALT_CACHE" {

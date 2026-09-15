@@ -5,6 +5,7 @@ const std = @import("std");
 
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const cask_mod = @import("../core/cask.zig");
+const artefact_cache = @import("../core/artefact_cache.zig");
 const cellar_mod = @import("../core/cellar.zig");
 const signals = @import("../core/signals.zig");
 const deps_mod = @import("../core/deps.zig");
@@ -1152,6 +1153,7 @@ fn upgradeRoutedTapCask(
         return error.Aborted;
     };
     defer allocator.free(cache_dir);
+    artefact_cache.adoptLegacy(ctx.io, prefix, cache_dir);
 
     // Single DB transaction across uninstall + install + recordInstall.
     // Mirrors the core-API path in `upgradeCask` so a partial failure
@@ -1489,6 +1491,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // when the new app is already on disk. The malt.lock fileguards
     // against other malt writers, so holding the SQLite txn across the
     // (potentially slow) install is harmless to other connections.
+    artefact_cache.adoptLegacy(ctx.io, prefix, api.cache_dir);
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, api.cache_dir);
     installer.offline = ctx.offline;
 

@@ -12,6 +12,7 @@ const std = @import("std");
 
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const cask_mod = @import("../core/cask.zig");
+const artefact_cache = @import("../core/artefact_cache.zig");
 const cellar_mod = @import("../core/cellar.zig");
 const deps_mod = @import("../core/deps.zig");
 const formula_mod = @import("../core/formula.zig");
@@ -1673,6 +1674,7 @@ fn installCask(
         return InstallError.DownloadFailed;
     };
     defer allocator.free(cache_dir);
+    artefact_cache.adoptLegacy(ctx.io, prefix, cache_dir);
 
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, cache_dir);
     installer.artifact_type_override = artifact_type;

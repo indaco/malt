@@ -14,6 +14,9 @@ const testing = std.testing;
 const test_io = @import("test_io");
 
 const scanned_roots = [_][]const u8{ "src/cli", "src/core" };
+/// The one reader of the pre-override layout: it exists to move that tree
+/// under `MALT_CACHE`, so spelling `{prefix}/cache` there is the point.
+const legacy_reader = "src/core/artefact_cache.zig";
 /// Every spelling of `{prefix}/cache`: the bare format literal, the
 /// artefact-tier subdirectories, and the
 /// `prefix_path.join(buf, prefix, "/cache")` suffix.
@@ -38,6 +41,7 @@ fn scanTree(scanned_root: []const u8) !usize {
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
+        if (std.mem.endsWith(u8, legacy_reader, entry.path)) continue;
 
         const file = try dir.openFile(io, entry.path, .{});
         defer file.close(io);

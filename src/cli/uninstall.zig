@@ -13,6 +13,7 @@ const lock_mod = @import("../db/lock.zig");
 const linker = @import("../core/linker.zig");
 const cellar = @import("../core/cellar.zig");
 const cask_mod = @import("../core/cask.zig");
+const artefact_cache = @import("../core/artefact_cache.zig");
 const formula_mod = @import("../core/formula.zig");
 const supervisor_mod = @import("../core/services/supervisor.zig");
 const help = @import("help.zig");
@@ -300,6 +301,7 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
         return error.Aborted;
     };
     defer allocator.free(cache_dir);
+    artefact_cache.adoptLegacy(ctx.io, prefix, cache_dir);
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, cache_dir);
     installer.uninstall(token) catch |un_err| {
         if (un_err == error.AppRunning) {
