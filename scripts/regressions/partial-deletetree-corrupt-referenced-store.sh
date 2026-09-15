@@ -7,7 +7,7 @@
 # left the earlier siblings gone while the row survived — a corrupt entry the DB
 # still reports as valid, so a later link/verify reads truncated store content.
 #
-# This seeds a true refcount-0 orphan with two children, makes one *child*
+# This seeds a true orphan (a row no keg holds) with two children, makes one *child*
 # undeletable with the macOS immutable flag (root-proof, so it reproduces in any
 # CI), runs `mt doctor --fix`, and asserts the consistent end-state: the entry is
 # gone from the referenced path and its ref row is cleared.
@@ -27,7 +27,7 @@ if [[ ! -x "$MALT_BIN" ]]; then
   exit 1
 fi
 command -v sqlite3 >/dev/null 2>&1 || {
-  printf 'SKIP: sqlite3 not on PATH — needed to seed the refcount-0 row.\n' >&2
+  printf 'SKIP: sqlite3 not on PATH — needed to seed the orphan row.\n' >&2
   exit 2
 }
 command -v chflags >/dev/null 2>&1 || {
@@ -52,11 +52,11 @@ mkdir -p "$PFX/db" "$PFX/store/$SHA"
 : >"$PFX/store/$SHA/a"
 : >"$PFX/store/$SHA/b"
 
-# Materialise the schema via the real initializer, then seed a refcount-0 row so
+# Materialise the schema via the real initializer, then seed an orphan row so
 # the store dir is a true orphan the reaper will try to sweep.
 "$MALT_BIN" purge --store-orphans </dev/null >/dev/null 2>&1 || true
 sqlite3 "$PFX/db/malt.db" \
-  "INSERT OR REPLACE INTO store_refs (store_sha256, refcount) VALUES ('$SHA', 0);"
+  "INSERT OR REPLACE INTO store_refs (store_sha256) VALUES ('$SHA');"
 
 # Undeletable child under a deletable parent: unlink of an immutable file fails.
 chflags uchg "$PFX/store/$SHA/b"

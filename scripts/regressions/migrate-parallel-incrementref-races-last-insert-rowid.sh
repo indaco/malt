@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Regression: in `migrate --parallel` every worker shares one SQLite
-# connection. The store-refcount bump (`Store.incrementRef`) runs an
+# connection. The store claim (`Store.claim`) runs an
 # autocommit `INSERT INTO store_refs` guarded only by the store's own
 # mutex, NOT the migrate DB lock (`db_mu`) that serialises the keg
 # transactions. Because `last_insert_rowid()` is connection-global, a
-# peer worker's refcount insert can land between this worker's
+# peer worker's claim insert can land between this worker's
 # `INSERT INTO kegs` and its `last_insert_rowid()` read, handing the
 # worker a foreign rowid. Links and deps then attach to the wrong keg,
 # and a rollback deletes an unrelated keg row.
 #
-# The fix serialises the refcount bump under `db_mu` so no connection
+# The fix serialises the claim under `db_mu` so no connection
 # write escapes the lock. No CLI subcommand drives two record-path
 # workers against one connection in isolation, so the guard is a
-# colocated `test {}` that hammers `incrementRef` from peer threads
+# colocated `test {}` that hammers `claim` from peer threads
 # while one worker records kegs, asserting each worker's keg_id still
 # resolves to its own `kegs` row. This script builds the test binary
 # and judges that test by name; it exits non-zero if the guard
@@ -24,7 +24,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-FILTER="incrementRef under db_mu keeps each worker's keg_id bound to its own kegs row"
+FILTER="claim under db_mu keeps each worker's keg_id bound to its own kegs row"
 
 # The guard lives in a colocated `test {}`; if it is ever deleted the name
 # filter below would match nothing and silently pass. Fail loudly instead.
@@ -50,8 +50,8 @@ if [[ -z "$LINE" ]]; then
   exit 1
 fi
 if [[ "$LINE" != *OK ]]; then
-  echo "FAIL: a peer worker's refcount insert corrupted last_insert_rowid" >&2
+  echo "FAIL: a peer worker's claim insert corrupted last_insert_rowid" >&2
   exit 1
 fi
 
-echo "PASS: keg_id isolation holds under concurrent incrementRef"
+echo "PASS: keg_id isolation holds under concurrent claims"

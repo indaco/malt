@@ -40,10 +40,10 @@ SHA=$(printf 'ab%.0s' {1..32})
 mkdir -p "$PFX/db" "$PFX/store/$SHA" "$PFX/Cellar/probe/1.0"
 
 # Let the real initializer create the schema, then seed the exact state a
-# warm reinstall after an uninstall leaves behind: refcount 0, live keg.
+# warm reinstall after an uninstall leaves behind: a claim row, live keg.
 "$MALT_BIN" purge --store-orphans </dev/null >/dev/null 2>&1 || true
 sqlite3 "$PFX/db/malt.db" \
-  "INSERT INTO store_refs (store_sha256, refcount) VALUES ('$SHA', 0);
+  "INSERT INTO store_refs (store_sha256) VALUES ('$SHA');
    INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
      VALUES ('probe','probe','1.0',0,'$SHA','$PFX/Cellar/probe/1.0');"
 
