@@ -715,12 +715,13 @@ fn runInstall(
     defer http_pool.deinit();
     http_pool.setOfflineAll(ctx.offline);
 
-    // Set up API client
-    var cache_dir_buf: [512]u8 = undefined;
-    // Pin the unreachable: prefix is sanity-capped + format suffix is fixed,
-    // so a future bump to either side fails the build instead of the catch.
-    comptime std.debug.assert(max_prefix_sane_len + "/cache".len + 1 <= cache_dir_buf.len);
-    const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch unreachable;
+    // Same resolution as `mt update`: with MALT_CACHE set, a bare
+    // `{prefix}/cache` is a second metadata cache that update never wipes.
+    const cache_dir = atomic.maltCacheDir(allocator) catch {
+        sink.err("Failed to resolve cache directory", .{});
+        return InstallError.DownloadFailed;
+    };
+    defer allocator.free(cache_dir);
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
     api.offline = ctx.offline;

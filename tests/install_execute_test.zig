@@ -43,7 +43,14 @@ test "execute with no positional args reports NoPackages" {
 }
 
 fn seedFormulaCache(prefix: []const u8, name: []const u8, json: []const u8) !void {
-    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
+    const cache_root = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{prefix});
+    defer testing.allocator.free(cache_root);
+    try seedFormulaCacheAt(cache_root, name, json);
+}
+
+/// Seed under an explicit cache root, for the MALT_CACHE override tests.
+fn seedFormulaCacheAt(cache_root: []const u8, name: []const u8, json: []const u8) !void {
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{cache_root});
     defer testing.allocator.free(cache_api);
     try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.json", .{ cache_api, name });
@@ -53,6 +60,25 @@ fn seedFormulaCache(prefix: []const u8, name: []const u8, json: []const u8) !voi
     try f.writeStreamingAll(std.Options.debug_io, json);
 }
 
+/// Formula document with a bottle for every platform the resolver knows,
+/// so the dry-run plan resolves on any host.
+const alpha_no_deps_json =
+    \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"",
+    \\ "versions":{"stable":"1.0"},"revision":0,"dependencies":[],"oldnames":[],
+    \\ "keg_only":false,"post_install_defined":false,
+    \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
+    \\   "files":{
+    \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+    \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+    \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+    \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
+    \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+    \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+    \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
+    \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"}
+    \\   }}}}
+;
+
 test "execute --dry-run prints a plan for a cached formula" {
     const prefix_z = try setupPrefix("mm");
     defer testing.allocator.free(prefix_z);
@@ -60,23 +86,7 @@ test "execute --dry-run prints a plan for a cached formula" {
     defer _ = c.unsetenv("MALT_PREFIX");
     const prefix: []const u8 = prefix_z;
 
-    const json =
-        \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"",
-        \\ "versions":{"stable":"1.0"},"revision":0,"dependencies":[],"oldnames":[],
-        \\ "keg_only":false,"post_install_defined":false,
-        \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
-        \\   "files":{
-        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
-        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
-        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
-        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
-        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
-        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
-        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
-        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"}
-        \\   }}}}
-    ;
-    try seedFormulaCache(prefix, "alpha", json);
+    try seedFormulaCache(prefix, "alpha", alpha_no_deps_json);
 
     // Dry-run goes: ensureDirs → open DB → acquire lock → cache hit for alpha →
     // cache miss for the optional cask probe (swallowed) → collectFormulaJobs →
@@ -86,6 +96,32 @@ test "execute --dry-run prints a plan for a cached formula" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "alpha" });
+}
+
+// `mt update` wipes `$MALT_CACHE/api`; install must resolve against that same
+// directory or the override splits the metadata cache in two and `update`
+// can never refresh what install reads.
+test "execute --dry-run honours MALT_CACHE for the API cache" {
+    const prefix_z = try setupPrefix("mc");
+    defer testing.allocator.free(prefix_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const alt = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/altcache", .{prefix_z}, 0);
+    defer testing.allocator.free(alt);
+    _ = c.setenv("MALT_CACHE", alt.ptr, 1);
+    defer _ = c.unsetenv("MALT_CACHE");
+
+    // Only under the override: offline, a read of {prefix}/cache/api misses
+    // and the dry-run fails with PartialFailure instead of printing the plan.
+    try seedFormulaCacheAt(alt, "alpha", alpha_no_deps_json);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
     try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "alpha" });
 }
 
@@ -198,23 +234,7 @@ test "execute --dry-run with one cached + one 404 package exits PartialFailure" 
     defer _ = c.unsetenv("MALT_PREFIX");
     const prefix: []const u8 = prefix_z;
 
-    const json =
-        \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"",
-        \\ "versions":{"stable":"1.0"},"revision":0,"dependencies":[],"oldnames":[],
-        \\ "keg_only":false,"post_install_defined":false,
-        \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
-        \\   "files":{
-        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
-        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
-        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
-        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
-        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
-        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
-        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
-        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"}
-        \\   }}}}
-    ;
-    try seedFormulaCache(prefix, "alpha", json);
+    try seedFormulaCache(prefix, "alpha", alpha_no_deps_json);
 
     const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
     defer testing.allocator.free(cache_api);
@@ -251,23 +271,7 @@ test "Ctrl-C between pool and link sweeps !job.succeeded and exits PartialFailur
     // Cache the formula so dispatch resolves (1 job lands in all_jobs)
     // but DON'T seed the store, so the worker would have to fetch — the
     // armed interrupt makes it exit instead, leaving !job.succeeded.
-    const json =
-        \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"",
-        \\ "versions":{"stable":"1.0"},"revision":0,"dependencies":[],"oldnames":[],
-        \\ "keg_only":false,"post_install_defined":false,
-        \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
-        \\   "files":{
-        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
-        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
-        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
-        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"2222222222222222222222222222222222222222222222222222222222222222"},
-        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
-        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
-        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"},
-        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"6666666666666666666666666666666666666666666666666666666666666666"}
-        \\   }}}}
-    ;
-    try seedFormulaCache(prefix_z, "alpha", json);
+    try seedFormulaCache(prefix_z, "alpha", alpha_no_deps_json);
 
     const prior_interrupted = malt.signals.isInterrupted();
     defer malt.signals.setInterruptedForTest(prior_interrupted);
