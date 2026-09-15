@@ -12,7 +12,7 @@ pub const Store = struct {
     io: std.Io,
     db: *sqlite.Database,
     prefix: []const u8,
-    /// Serializes write operations (commitFrom, incrementRef, decrementRef)
+    /// Serializes write operations (commitFrom, claim, remove)
     /// across parallel download workers. exists() is read-only and safe without lock.
     mutex: std.Io.Mutex,
 
@@ -82,57 +82,26 @@ pub const Store = struct {
 
     /// The sole ingress for a store key. A row whose key names no
     /// constructible store path is one `remove` could never reap, so it is
-    /// refused at birth rather than stranded. `decrementRef` stays permissive
-    /// on purpose: rejecting there would strand a legacy row, not protect it.
-    pub fn incrementRef(self: *Store, sha256: []const u8) StoreError!void {
+    /// refused at birth rather than stranded. Idempotent: `kegs` decides
+    /// what is reclaimable, so the row only records that a keg once took
+    /// the bytes and a repeat claim has nothing to add.
+    pub fn claim(self: *Store, sha256: []const u8) StoreError!void {
         var buf: [store_path.entry_buf_len]u8 = undefined;
         _ = try store_path.entry(&buf, self.prefix, sha256);
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         var stmt = self.db.prepare(
-            "INSERT INTO store_refs (store_sha256, refcount) VALUES (?1, 1)" ++
-                " ON CONFLICT(store_sha256) DO UPDATE SET refcount = refcount + 1;",
+            "INSERT OR IGNORE INTO store_refs (store_sha256) VALUES (?1);",
         ) catch return StoreError.RefCountError;
         defer stmt.finalize();
         stmt.bindText(1, sha256) catch return StoreError.RefCountError;
         _ = stmt.step() catch return StoreError.RefCountError;
     }
 
-    /// Reconcile a store entry's refcount with the `kegs` rows that hold it.
-    /// Idempotent, so a forced reinstall (which replaces a `kegs` row rather
-    /// than adding one) cannot drift the counter the way an increment would.
-    /// Shares `incrementRef`'s key ingress check.
-    pub fn syncRef(self: *Store, sha256: []const u8) StoreError!void {
-        var buf: [store_path.entry_buf_len]u8 = undefined;
-        _ = try store_path.entry(&buf, self.prefix, sha256);
-
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        var stmt = self.db.prepare(
-            "INSERT INTO store_refs (store_sha256, refcount)" ++
-                " VALUES (?1, (SELECT count(*) FROM kegs WHERE store_sha256 = ?1))" ++
-                " ON CONFLICT(store_sha256) DO UPDATE SET refcount = excluded.refcount;",
-        ) catch return StoreError.RefCountError;
-        defer stmt.finalize();
-        stmt.bindText(1, sha256) catch return StoreError.RefCountError;
-        _ = stmt.step() catch return StoreError.RefCountError;
-    }
-
-    pub fn decrementRef(self: *Store, sha256: []const u8) StoreError!void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        var stmt = self.db.prepare(
-            "UPDATE store_refs SET refcount = refcount - 1 WHERE store_sha256 = ?1 AND refcount > 0;",
-        ) catch return StoreError.RefCountError;
-        defer stmt.finalize();
-        stmt.bindText(1, sha256) catch return StoreError.RefCountError;
-        _ = stmt.step() catch return StoreError.RefCountError;
-    }
-
-    /// Find reclaimable store entries. `kegs`, not the counter, is the
-    /// authority on whether the bytes are still owned: the counter can
-    /// under-count a live keg or keep a stranded claim nobody holds.
+    /// Find reclaimable store entries: every claim no `kegs` row holds.
+    /// A store dir with no claim at all is a warm or in-flight commit
+    /// and is deliberately invisible here.
     pub fn orphans(self: *Store) StoreError!std.ArrayList([]const u8) {
         var list: std.ArrayList([]const u8) = .empty;
         errdefer {
@@ -178,7 +147,7 @@ test "orphans surfaces a prepare failure as RefCountError, not an empty list" {
 test "orphans frees the duplicated sha and returns OutOfMemory when the append fails" {
     var db = try openSchemaDb();
     defer db.close();
-    try db.exec("INSERT INTO store_refs (store_sha256, refcount) VALUES ('a', 0);");
+    try db.exec("INSERT INTO store_refs (store_sha256) VALUES ('a');");
 
     // fail_index 1: the dupe (alloc #0) succeeds, the list's first growth (#1)
     // fails - so a dropped `owned` is a real leak the base allocator catches.
@@ -190,7 +159,7 @@ test "orphans frees the duplicated sha and returns OutOfMemory when the append f
 test "orphans frees already-collected shas via errdefer on a mid-scan OOM" {
     var db = try openSchemaDb();
     defer db.close();
-    try db.exec("INSERT INTO store_refs (store_sha256, refcount) VALUES ('a', 0), ('b', 0);");
+    try db.exec("INSERT INTO store_refs (store_sha256) VALUES ('a'), ('b');");
 
     // fail_index 2: row 'a' is dupe'd (#0) and appended (#1); the second row's
     // dupe (#2) fails, so the errdefer must free the already-collected 'a'.
@@ -204,7 +173,7 @@ test "orphans skips a NULL store_sha256 row and still returns the real orphan" {
     defer db.close();
     // SQLite permits NULL in a TEXT PRIMARY KEY that isn't NOT NULL, so the
     // `columnText orelse continue` branch is reachable, not dead.
-    try db.exec("INSERT INTO store_refs (store_sha256, refcount) VALUES (NULL, 0), ('real', 0);");
+    try db.exec("INSERT INTO store_refs (store_sha256) VALUES (NULL), ('real');");
 
     var store = Store.init(std.Options.debug_io, testing.allocator, &db, "");
     var list = try store.orphans();
@@ -216,12 +185,10 @@ test "orphans skips a NULL store_sha256 row and still returns the real orphan" {
     try testing.expectEqualStrings("real", list.items[0]);
 }
 
-test "orphans returns every row no keg holds, however high its counter drifted" {
+test "orphans returns every row no keg holds" {
     var db = try openSchemaDb();
     defer db.close();
-    try db.exec(
-        "INSERT INTO store_refs (store_sha256, refcount) VALUES ('zero', 0), ('inflated', 3);",
-    );
+    try db.exec("INSERT INTO store_refs (store_sha256) VALUES ('one'), ('two');");
 
     var store = Store.init(std.Options.debug_io, testing.allocator, &db, "");
     var list = try store.orphans();
@@ -232,10 +199,10 @@ test "orphans returns every row no keg holds, however high its counter drifted" 
     try testing.expectEqual(@as(usize, 2), list.items.len);
 }
 
-test "orphans excludes an entry a live keg still holds, whatever the counter says" {
+test "orphans excludes an entry a live keg still holds" {
     var db = try openSchemaDb();
     defer db.close();
-    try db.exec("INSERT INTO store_refs (store_sha256, refcount) VALUES ('loose', 0), ('held', 0);");
+    try db.exec("INSERT INTO store_refs (store_sha256) VALUES ('loose'), ('held');");
     try db.exec(
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)" ++
             " VALUES ('probe', 'probe', '1.0', 'held', '/prefix/Cellar/probe/1.0');",
@@ -251,77 +218,48 @@ test "orphans excludes an entry a live keg still holds, whatever the counter say
     try testing.expectEqualStrings("loose", list.items[0]);
 }
 
-fn refcountOf(db: *sqlite.Database, sha: []const u8) !?i64 {
-    var stmt = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;");
+fn hasRow(db: *sqlite.Database, sha: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM store_refs WHERE store_sha256 = ?1;");
     defer stmt.finalize();
     try stmt.bindText(1, sha);
-    if (!try stmt.step()) return null;
-    return stmt.columnInt(0);
+    return try stmt.step();
 }
 
-test "syncRef reconciles the counter with the kegs rows and stays idempotent" {
+test "claim records the key once and is a no-op on repeat" {
     var db = try openSchemaDb();
     defer db.close();
     const sha = "a" ** 64;
 
     var store = Store.init(std.Options.debug_io, testing.allocator, &db, "/prefix");
+    try store.claim(sha);
+    try testing.expect(try hasRow(&db, sha));
 
-    // Warm materialize after an uninstall: the row already sits at 0 while a
-    // keg holds the bytes, so the sync must lift it back to 1.
-    try db.exec("INSERT INTO store_refs (store_sha256, refcount) VALUES ('" ++ sha ++ "', 0);");
-    try db.exec(
-        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)" ++
-            " VALUES ('probe', 'probe', '1.0', '" ++ sha ++ "', '/prefix/Cellar/probe/1.0');",
-    );
-    try store.syncRef(sha);
-    try testing.expectEqual(@as(?i64, 1), try refcountOf(&db, sha));
-
-    // `--force` replaces the keg row rather than adding one: an increment
-    // would drift up here, a reconcile must not.
-    try store.syncRef(sha);
-    try testing.expectEqual(@as(?i64, 1), try refcountOf(&db, sha));
+    // A forced reinstall or an upgrade sharing the bottle claims the same
+    // key again; the set must not grow or fail.
+    try store.claim(sha);
+    var count = try db.prepare("SELECT count(*) FROM store_refs;");
+    defer count.finalize();
+    try testing.expect(try count.step());
+    try testing.expectEqual(@as(i64, 1), count.columnInt(0));
 }
 
-test "syncRef on a bottle no keg holds leaves the entry reclaimable" {
-    var db = try openSchemaDb();
-    defer db.close();
-    const sha = "b" ** 64;
-
-    var store = Store.init(std.Options.debug_io, testing.allocator, &db, "/prefix");
-    try store.syncRef(sha);
-    try testing.expectEqual(@as(?i64, 0), try refcountOf(&db, sha));
-}
-
-test "syncRef refuses a key a store path could never name" {
+test "claim refuses a key a store path could never name" {
     var db = try openSchemaDb();
     defer db.close();
 
     var store = Store.init(std.Options.debug_io, testing.allocator, &db, "/prefix");
-    try testing.expectError(StoreError.InvalidSha256, store.syncRef("not-hex"));
-    try testing.expectError(StoreError.InvalidSha256, store.syncRef(""));
-    try testing.expectError(StoreError.InvalidSha256, store.syncRef("A" ** 64));
+    try testing.expectError(StoreError.InvalidSha256, store.claim("not-hex"));
+    try testing.expectError(StoreError.InvalidSha256, store.claim(""));
+    try testing.expectError(StoreError.InvalidSha256, store.claim("A" ** 64));
     // Refused at birth means no row was created either.
-    try testing.expectEqual(@as(?i64, null), try refcountOf(&db, "not-hex"));
+    try testing.expect(!try hasRow(&db, "not-hex"));
 }
 
-test "syncRef restores the true count after a decrement against the same key" {
-    // Upgrade releases the old bottle then reconciles the new one. When both
-    // versions carry the same sha those are the same key, so the reconcile has
-    // to be able to undo the decrement — otherwise the fresh keg's entry is
-    // left at 0.
+test "claim surfaces a table it cannot write to instead of pretending" {
     var db = try openSchemaDb();
     defer db.close();
-    const sha = "c" ** 64;
+    try db.exec("DROP TABLE store_refs;");
 
     var store = Store.init(std.Options.debug_io, testing.allocator, &db, "/prefix");
-    try db.exec(
-        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)" ++
-            " VALUES ('probe', 'probe', '2.0', '" ++ sha ++ "', '/prefix/Cellar/probe/2.0');",
-    );
-    try store.syncRef(sha);
-    try store.decrementRef(sha);
-    try testing.expectEqual(@as(?i64, 0), try refcountOf(&db, sha));
-
-    try store.syncRef(sha);
-    try testing.expectEqual(@as(?i64, 1), try refcountOf(&db, sha));
+    try testing.expectError(StoreError.RefCountError, store.claim("b" ** 64));
 }

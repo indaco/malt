@@ -71,7 +71,7 @@ if ! zig build test-bin >/dev/null 2>&1; then
 fi
 if ! OUT=$(MALT_PREFIX=/tmp/malt-test-prefix "$KEG_TEST" 2>&1); then
   printf '%s\n' "$OUT" | grep -iE "failed|leaked|panic" >&2 || true
-  fail "a refused materialise left a claimed store refcount"
+  fail "a refused materialise left a store_refs claim behind"
 fi
 
 # --- Arm 3: the upgrade failure line carries the variant --------------------

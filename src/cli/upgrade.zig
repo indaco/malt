@@ -481,7 +481,6 @@ const OldKeg = struct {
     keg_id: i64,
     version: []const u8,
     revision: i64,
-    sha256: []const u8,
     cellar_path: []const u8,
     tap: []const u8,
     bin_isolated: bool,
@@ -491,7 +490,6 @@ const OldKeg = struct {
 
     fn deinit(self: *OldKeg, allocator: std.mem.Allocator) void {
         allocator.free(self.version);
-        allocator.free(self.sha256);
         allocator.free(self.cellar_path);
         allocator.free(self.tap);
         if (self.tap_commit_sha) |c| allocator.free(c);
@@ -506,7 +504,7 @@ const OldKeg = struct {
 /// snapshot to a writer (SQLITE_BUSY). Returns null when no row matches.
 fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !?OldKeg {
     var stmt = try db.prepare(
-        "SELECT id, version, revision, store_sha256, cellar_path, tap, bin_isolated, install_reason, tap_commit_sha FROM kegs WHERE name = ?1 LIMIT 1;",
+        "SELECT id, version, revision, cellar_path, tap, bin_isolated, install_reason, tap_commit_sha FROM kegs WHERE name = ?1 LIMIT 1;",
     );
     defer stmt.finalize();
     try stmt.bindText(1, name);
@@ -514,24 +512,21 @@ fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const 
 
     const version = try allocator.dupe(u8, if (stmt.columnText(1)) |v| std.mem.sliceTo(v, 0) else "unknown");
     errdefer allocator.free(version);
-    const sha256 = try allocator.dupe(u8, if (stmt.columnText(3)) |s| std.mem.sliceTo(s, 0) else "");
-    errdefer allocator.free(sha256);
-    const cellar_path = try allocator.dupe(u8, if (stmt.columnText(4)) |cp| std.mem.sliceTo(cp, 0) else "");
+    const cellar_path = try allocator.dupe(u8, if (stmt.columnText(3)) |cp| std.mem.sliceTo(cp, 0) else "");
     errdefer allocator.free(cellar_path);
-    const tap = try allocator.dupe(u8, if (stmt.columnText(5)) |t| std.mem.sliceTo(t, 0) else "");
+    const tap = try allocator.dupe(u8, if (stmt.columnText(4)) |t| std.mem.sliceTo(t, 0) else "");
     errdefer allocator.free(tap);
-    const tap_commit_sha: ?[]const u8 = if (stmt.columnText(8)) |c| try allocator.dupe(u8, std.mem.sliceTo(c, 0)) else null;
+    const tap_commit_sha: ?[]const u8 = if (stmt.columnText(7)) |c| try allocator.dupe(u8, std.mem.sliceTo(c, 0)) else null;
 
     return .{
         .keg_id = stmt.columnInt(0),
         .version = version,
         .revision = stmt.columnInt(2),
-        .sha256 = sha256,
         .cellar_path = cellar_path,
         .tap = tap,
-        .bin_isolated = stmt.columnInt(6) != 0,
+        .bin_isolated = stmt.columnInt(5) != 0,
         // NULL reads as direct, matching the DB-side `prior_reason` default.
-        .is_dep = if (stmt.columnText(7)) |r| std.mem.eql(u8, std.mem.sliceTo(r, 0), "dependency") else false,
+        .is_dep = if (stmt.columnText(6)) |r| std.mem.eql(u8, std.mem.sliceTo(r, 0), "dependency") else false,
         .tap_commit_sha = tap_commit_sha,
     };
 }
@@ -778,14 +773,8 @@ fn upgradeFormula(
         }
     }
 
-    // Release the old bytes first, then reconcile the new: when both versions
-    // share a bottle sha, a decrement applied afterwards would zero an entry
-    // the fresh keg still holds. refcount is advisory; upgrade is already
-    // complete on disk.
-    if (old.sha256.len > 0) {
-        store.decrementRef(old.sha256) catch {};
-    }
-    store.syncRef(fetch.sha256) catch {};
+    // The claim is advisory; upgrade is already complete on disk.
+    store.claim(fetch.sha256) catch {};
 
     // Same post-install contract as `mt install`: the fresh keg's hook
     // (declarative steps or Ruby body) runs against the new version, and
@@ -2018,7 +2007,6 @@ test "readOldKeg releases the WAL read snapshot before a second connection advan
     var old = (try readOldKeg(alloc, &a, "foo")).?;
     defer old.deinit(alloc);
     try std.testing.expectEqualStrings("1.0", old.version);
-    try std.testing.expectEqualStrings("sha-foo", old.sha256);
     try std.testing.expect(old.bin_isolated);
 
     {

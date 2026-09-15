@@ -8,7 +8,7 @@
 # like a clean prefix. A user watching `--fix` do nothing could not tell
 # "already clean" from "tried and could not".
 #
-# This seeds a true refcount-0 orphan, makes its directory undeletable with
+# This seeds a true orphan (a row no keg holds), makes its directory undeletable with
 # the macOS immutable flag, runs `mt doctor --fix`, and asserts the output
 # names the blocker. The flag also makes the case root-proof: an immutable
 # entry resists removal even for the superuser, so the bug reproduces in any
@@ -29,7 +29,7 @@ if [[ ! -x "$MALT_BIN" ]]; then
   exit 1
 fi
 command -v sqlite3 >/dev/null 2>&1 || {
-  printf 'SKIP: sqlite3 not on PATH — needed to seed the refcount-0 row.\n' >&2
+  printf 'SKIP: sqlite3 not on PATH — needed to seed the orphan row.\n' >&2
   exit 2
 }
 command -v chflags >/dev/null 2>&1 || {
@@ -50,11 +50,11 @@ trap 'chflags -R nouchg "$PFX" 2>/dev/null || true; rm -rf "$PFX"' EXIT
 
 mkdir -p "$PFX/db" "$PFX/store/$SHA"
 
-# Materialise the schema via the real initializer, then seed a refcount-0
+# Materialise the schema via the real initializer, then seed an orphan
 # row so the store dir is a true orphan the reaper will try to sweep.
 "$MALT_BIN" purge --store-orphans </dev/null >/dev/null 2>&1 || true
 sqlite3 "$PFX/db/malt.db" \
-  "INSERT OR REPLACE INTO store_refs (store_sha256, refcount) VALUES ('$SHA', 0);"
+  "INSERT OR REPLACE INTO store_refs (store_sha256) VALUES ('$SHA');"
 
 # Make the entry undeletable: rmdir of an immutable dir fails with EPERM.
 chflags uchg "$PFX/store/$SHA"

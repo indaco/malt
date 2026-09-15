@@ -88,7 +88,7 @@ tui_pty_seed_keg_real() {
 }
 
 # Seed one orphaned store entry: a sha256 dir under store/ plus a store_refs
-# row whose refcount has dropped to 0 — the exact shape `mt doctor --fix
+# row no keg holds — the exact shape `mt doctor --fix
 # orphaned_store` and `mt purge --store-orphans` both sweep. A bare dir with no
 # row is a warm / in-flight commit, not an orphan. Optional arg overrides the sha.
 tui_pty_seed_orphan_store() {
@@ -96,7 +96,7 @@ tui_pty_seed_orphan_store() {
   mkdir -p "$TUI_PREFIX/store/$sha"
   : >"$TUI_PREFIX/store/$sha/payload"
   sqlite3 "$TUI_PREFIX/db/malt.db" \
-    "INSERT OR REPLACE INTO store_refs (store_sha256, refcount) VALUES ('$sha', 0);"
+    "INSERT OR REPLACE INTO store_refs (store_sha256) VALUES ('$sha');"
 }
 
 # Drive `mt tui` under the pty. Args: <capfile> <cols> <rows>; the action

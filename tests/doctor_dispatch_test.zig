@@ -182,7 +182,7 @@ test "in-flight downgrade: all three fs-vs-DB checks become info only while an o
     defer s.deinit(testing.allocator);
 
     // missing keg: a kegs row whose cellar dir does not exist (err).
-    // orphaned store: a store/<sha> dir with a refcount-0 ref row (warn).
+    // orphaned store: a store/<sha> dir with a ref row no keg holds (warn).
     const orphan_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
     {
         var db_path_buf: [512]u8 = undefined;
@@ -201,8 +201,7 @@ test "in-flight downgrade: all three fs-vs-DB checks become info only while an o
         const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store/{s}", .{ s.path, orphan_sha });
         try test_io.cwd().createDirPath(std.Options.debug_io, store_dir);
         var store = store_mod.Store.init(std.Options.debug_io, testing.allocator, &db, s.path);
-        try store.incrementRef(orphan_sha);
-        try store.decrementRef(orphan_sha);
+        try store.claim(orphan_sha);
     }
     // broken symlink: a dangling link under bin/ (warn).
     {
@@ -795,8 +794,8 @@ test "fix hint fires when a broken symlink is present and --fix is off" {
 }
 
 test "fix hint fires when an orphaned store entry is present" {
-    // Plant a store/<sha> directory whose store_refs refcount has dropped
-    // to 0 — a true orphan; checkOrphanedStore counts it and arms the hint.
+    // Plant a store/<sha> directory with a ref row no keg holds — a true
+    // orphan; checkOrphanedStore counts it and arms the hint.
     const allocator = testing.allocator;
     var s = try Scratch.init(allocator, "fix_hint_orphan");
     defer s.deinit(allocator);
@@ -809,8 +808,7 @@ test "fix hint fires when an orphaned store entry is present" {
         defer db.close();
         try schema.initSchema(&db);
         var store = store_mod.Store.init(std.Options.debug_io, allocator, &db, s.path);
-        try store.incrementRef(sha);
-        try store.decrementRef(sha);
+        try store.claim(sha);
     }
 
     const orphan = try std.fmt.allocPrint(allocator, "{s}/store/{s}", .{ s.path, sha });

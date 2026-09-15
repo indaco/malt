@@ -203,11 +203,11 @@ pub fn migrateKeg(
     output.emitNdjsonEvent(.recorded, keg_name, "ok");
     recordDepsFromList(deps.db, keg_id, formula.dependencies);
 
-    // Claim only once a keg row references the bytes: bumping before
-    // materialise strands one claim per failed retry, and nothing can
-    // reclaim it. `db_mu` is already held here and is not recursive.
-    deps.store.incrementRef(bottle.sha256) catch |e| {
-        std.log.warn("refcount increment failed for {s}: {s}", .{ keg_name, @errorName(e) });
+    // Claim only once a keg row references the bytes: a row with no keg
+    // reads as an orphan, so claiming before materialise would hand a
+    // failed retry's bytes to the sweep. `db_mu` is already held here.
+    deps.store.claim(bottle.sha256) catch |e| {
+        std.log.warn("store claim failed for {s}: {s}", .{ keg_name, @errorName(e) });
     };
 
     if (formula.hasPostInstallHook()) {
@@ -613,29 +613,6 @@ fn releaseDbMuForOomFallback(io: std.Io, db_mu: ?*std.Io.Mutex) bool {
     return false;
 }
 
-/// Bump the store refcount under `db_mu`. `incrementRef`'s autocommit
-/// `INSERT INTO store_refs` shares the migrate connection with every
-/// worker's keg transaction; guarded only by its own `store.mutex` it
-/// can land between a peer worker's `INSERT INTO kegs` and that
-/// worker's connection-global `last_insert_rowid()` read, handing the
-/// peer a foreign rowid. Taking `db_mu` makes it the single
-/// connection-wide write lock so no insert escapes it. Serial callers
-/// pass `db_mu == null` and pay no lock cost. Not recursive: callers
-/// already holding `db_mu` must call `store.incrementRef` directly.
-fn incrementRefLocked(
-    io: std.Io,
-    store: *store_mod.Store,
-    db_mu: ?*std.Io.Mutex,
-    sha256: []const u8,
-    keg_name: []const u8,
-) void {
-    if (db_mu) |m| m.lockUncancelable(io);
-    defer if (db_mu) |m| m.unlock(io);
-    store.incrementRef(sha256) catch |e| {
-        std.log.warn("refcount increment failed for {s}: {s}", .{ keg_name, @errorName(e) });
-    };
-}
-
 /// One statement, not `record.deleteKeg`: that one clears `links` first and
 /// bails on its first error, so the DB fault that just failed `link` would
 /// leave the keg row behind.
@@ -997,14 +974,12 @@ test "releaseDbMuForOomFallback is a no-op on the serial path (db_mu null)" {
 }
 
 // Reproduces the migrate --parallel shared-connection race: peer workers
-// hammer `incrementRef` while one worker records kegs. Because
-// `last_insert_rowid()` is connection-global, an unguarded refcount
-// insert landing between a worker's `INSERT INTO kegs` and its rowid read
-// hands the worker a foreign keg_id. Holding `db_mu` over the bump is what
-// closes it — `migrateKeg` now bumps inside the region it already holds,
-// and `incrementRefLocked` gives callers outside that region the same
-// guarantee.
-test "incrementRef under db_mu keeps each worker's keg_id bound to its own kegs row" {
+// hammer `claim` while one worker records kegs. Because
+// `last_insert_rowid()` is connection-global, an unguarded claim insert
+// landing between a worker's `INSERT INTO kegs` and its rowid read hands
+// the worker a foreign keg_id. Holding `db_mu` over the claim is what
+// closes it — `migrateKeg` claims inside the region it already holds.
+test "claim under db_mu keeps each worker's keg_id bound to its own kegs row" {
 
     // Sharing one connection across threads is only sound in SQLite's
     // serialized mode — the same contract migrate --parallel enforces.
@@ -1065,8 +1040,8 @@ test "incrementRef under db_mu keeps each worker's keg_id bound to its own kegs 
 
         fn hammer(c: *@This()) void {
             // Spin until the recorder is done so the overlap covers the
-            // whole record loop. Each sha is unique so the bump is a fresh
-            // INSERT (an ON CONFLICT UPDATE leaves last_insert_rowid alone
+            // whole record loop. Each sha is unique so the claim is a fresh
+            // INSERT (an ignored duplicate leaves last_insert_rowid alone
             // and would hide the race). Capped so a missed `done` can't run
             // the table away with memory.
             var i: usize = 0;
@@ -1074,7 +1049,9 @@ test "incrementRef under db_mu keeps each worker's keg_id bound to its own kegs 
                 const n = c.ref_seq.fetchAdd(1, .monotonic);
                 var sha_buf: [64]u8 = undefined;
                 const sha = std.fmt.bufPrint(&sha_buf, "{x:0>64}", .{n}) catch unreachable;
-                incrementRefLocked(c.io, c.store, c.db_mu, sha, "race");
+                c.db_mu.lockUncancelable(c.io);
+                c.store.claim(sha) catch {};
+                c.db_mu.unlock(c.io);
             }
         }
     };
@@ -1088,24 +1065,6 @@ test "incrementRef under db_mu keeps each worker's keg_id bound to its own kegs 
     h2.join();
 
     try std.testing.expect(!ctx.leaked.load(.monotonic));
-}
-
-test "incrementRefLocked on the serial path (db_mu null) still bumps the refcount" {
-    const io = std.Options.debug_io;
-    var db = try sqlite.Database.open(":memory:");
-    defer db.close();
-    try schema.initSchema(&db);
-
-    var store = store_mod.Store.init(io, std.testing.allocator, &db, "");
-    // Serial callers pass db_mu == null: no lock, no deadlock, ref still lands.
-    const sha = "deadbeef" ** 8;
-    incrementRefLocked(io, &store, null, sha, "solo");
-
-    var stmt = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;");
-    defer stmt.finalize();
-    try stmt.bindText(1, sha);
-    try std.testing.expect(try stmt.step());
-    try std.testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
 }
 
 test "migrate keg record through the shared seam preserves pin inheritance, bin_isolated=0, and own-txn commit" {

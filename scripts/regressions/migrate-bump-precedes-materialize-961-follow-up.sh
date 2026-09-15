@@ -63,8 +63,8 @@ grep -q 'failed to materialize' "$tmp/run.txt" ||
   fail "migrate did not reach the cellar refusal — the fixture no longer exercises the bug"
 
 n=$(sqlite3 "$prefix/db/malt.db" \
-  "SELECT COALESCE(SUM(refcount),0) FROM store_refs WHERE store_sha256='$sha';")
+  "SELECT count(*) FROM store_refs WHERE store_sha256='$sha';")
 [[ "$n" == "0" ]] ||
-  fail "three blocked migrate runs claimed refcount=$n for a keg that was never created"
+  fail "three blocked migrate runs left a store_refs row for a keg that was never created"
 
 echo "PASS: a blocked migrate claims no store bytes, however often it is retried"

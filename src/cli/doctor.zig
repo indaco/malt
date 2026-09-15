@@ -2092,7 +2092,7 @@ test "checkCellarPackageDirs: a live operation downgrades the finding, never hid
 }
 
 test "checkOrphanedStore: counts every row no keg holds across store entries" {
-    // Parity guard for the shared probe: two orphans among five entry
+    // Parity guard for the shared probe: two orphans among four entry
     // shapes; a miscount flips the outcome or the number.
     const allocator = testing.allocator;
     const io = std.Options.debug_io;
@@ -2107,17 +2107,14 @@ test "checkOrphanedStore: counts every row no keg holds across store entries" {
     const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     try db.exec(
-        \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY, refcount INTEGER NOT NULL DEFAULT 1);
+        \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY);
         \\CREATE TABLE kegs (id INTEGER PRIMARY KEY, store_sha256 TEXT);
-        \\INSERT INTO store_refs VALUES ('orphan', 0);
-        \\INSERT INTO store_refs VALUES ('inflated', 3);
-        \\INSERT INTO store_refs VALUES ('live', 2);
-        \\INSERT INTO store_refs VALUES ('held', 0);
-        \\INSERT INTO kegs (store_sha256) VALUES ('live'), ('held');
+        \\INSERT INTO store_refs VALUES ('orphan-a'), ('orphan-b'), ('live');
+        \\INSERT INTO kegs (store_sha256) VALUES ('live');
     );
     db.close();
 
-    for ([_][]const u8{ "orphan", "inflated", "live", "norow", "held" }) |sha| {
+    for ([_][]const u8{ "orphan-a", "orphan-b", "live", "norow" }) |sha| {
         var eb: [std.fs.max_path_bytes]u8 = undefined;
         const entry = try std.fmt.bufPrint(&eb, "{s}/store/{s}", .{ prefix, sha });
         try std.Io.Dir.cwd().createDirPath(io, entry);
@@ -2149,9 +2146,9 @@ test "checkOrphanedStore: a store whose every row a keg holds is ok" {
     const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     try db.exec(
-        \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY, refcount INTEGER NOT NULL DEFAULT 1);
+        \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY);
         \\CREATE TABLE kegs (id INTEGER PRIMARY KEY, store_sha256 TEXT);
-        \\INSERT INTO store_refs VALUES ('live', 2);
+        \\INSERT INTO store_refs VALUES ('live');
         \\INSERT INTO kegs (store_sha256) VALUES ('live');
     );
     db.close();
