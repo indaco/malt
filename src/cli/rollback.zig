@@ -494,6 +494,54 @@ pub fn removeCurrentCellarDir(
     return cellar.remove(io, prefix, name, pkg_version);
 }
 
+/// The keg row rollback swaps away from, copied out of its statement so the
+/// connection holds no read snapshot while it waits for the lock.
+const CurrentKeg = struct {
+    id: i64,
+    version: []const u8,
+    revision: i64,
+    cellar_path: []const u8,
+    bin_isolated: bool,
+    on_request: bool,
+};
+
+/// Newest keg row for `name`, or null when none is installed. `version` and
+/// `cellar_path` land in the caller's buffers; the statement is finalized
+/// before returning.
+fn readCurrentKeg(db: *sqlite.Database, name: []const u8, ver_buf: []u8, cellar_buf: []u8) error{Aborted}!?CurrentKeg {
+    var stmt = db.prepare(
+        "SELECT id, version, revision, store_sha256, cellar_path, bin_isolated, install_reason FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
+    ) catch return error.Aborted;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return error.Aborted;
+    if (!(stmt.step() catch false)) return null;
+
+    const ver = if (stmt.columnText(1)) |v| std.mem.sliceTo(v, 0) else "unknown";
+    const cellar_path = if (stmt.columnText(4)) |c| std.mem.sliceTo(c, 0) else "";
+    return .{
+        .id = stmt.columnInt(0),
+        .version = std.fmt.bufPrint(ver_buf, "{s}", .{ver}) catch return error.Aborted,
+        .revision = stmt.columnInt(2),
+        .cellar_path = std.fmt.bufPrint(cellar_buf, "{s}", .{cellar_path}) catch return error.Aborted,
+        .bin_isolated = stmt.columnInt(5) != 0,
+        // The row keeps its reason across the swap, so the receipt must too.
+        .on_request = if (stmt.columnText(6)) |r| !std.mem.eql(u8, std.mem.sliceTo(r, 0), "dependency") else true,
+    };
+}
+
+/// True while `name`'s newest keg row is still the one captured before the
+/// lock wait. Every writer that can change a keg's store entries also
+/// rewrites its row, so this one read detects a concurrent install,
+/// upgrade or migrate.
+pub fn kegRowStillCurrent(db: *sqlite.Database, name: []const u8, id: i64, version: []const u8, revision: i64) bool {
+    var stmt = db.prepare("SELECT id, version, revision FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;") catch return false;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return false;
+    if (!(stmt.step() catch false)) return false;
+    const ver = if (stmt.columnText(1)) |v| std.mem.sliceTo(v, 0) else "unknown";
+    return stmt.columnInt(0) == id and stmt.columnInt(2) == revision and std.mem.eql(u8, ver, version);
+}
+
 /// Returns the `pinned` flag of the keg row identified by `keg_id`, or
 /// false if the row is missing or the read fails. Pub for tests; used
 /// inside `execute` to snapshot the hold across a DELETE/INSERT swap.
@@ -1494,19 +1542,12 @@ test "removeCurrentCellarDir wipes a plain version dir when revision is zero" {
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, keg_dir, .{}));
 }
 
-test "dispatchCask acquires malt.lock before the reinstall mutation" {
-    // dispatchCask drives a real CaskInstaller against a live prefix, so it
-    // can't be exercised in isolation. The invariant that matters — the
-    // uninstall+reinstall must serialize on the prefix lock, like every other
-    // mutating command — is pinned at the source level: `LockFile.acquire`
-    // must precede `reinstallFromHistory` inside the function body.
-    const src = @embedFile("rollback.zig");
-    const marker = "fn dispatchCask(";
-    const start = std.mem.indexOf(u8, src, marker) orelse return error.DispatchCaskFnNotFound;
-
+/// Source text of the function introduced by `marker`, up to its closing
+/// brace, for tests that pin call ordering inside a body.
+fn fnBody(src: []const u8, marker: []const u8) ![]const u8 {
+    const start = std.mem.indexOf(u8, src, marker) orelse return error.FnNotFound;
     var depth: usize = 0;
     var seen_open = false;
-    var body_end: usize = 0;
     var i: usize = start + marker.len;
     while (i < src.len) : (i += 1) {
         switch (src[i]) {
@@ -1516,16 +1557,21 @@ test "dispatchCask acquires malt.lock before the reinstall mutation" {
             },
             '}' => {
                 depth -= 1;
-                if (seen_open and depth == 0) {
-                    body_end = i;
-                    break;
-                }
+                if (seen_open and depth == 0) return src[start..i];
             },
             else => {},
         }
     }
-    try testing.expect(body_end > start);
-    const body = src[start..body_end];
+    return error.FnBodyUnterminated;
+}
+
+test "dispatchCask acquires malt.lock before the reinstall mutation" {
+    // dispatchCask drives a real CaskInstaller against a live prefix, so it
+    // can't be exercised in isolation. The invariant that matters — the
+    // uninstall+reinstall must serialize on the prefix lock, like every other
+    // mutating command — is pinned at the source level: `LockFile.acquire`
+    // must precede `reinstallFromHistory` inside the function body.
+    const body = try fnBody(@embedFile("rollback.zig"), "fn dispatchCask(");
 
     const acquire_pos = std.mem.indexOf(u8, body, "LockFile.acquire") orelse
         return error.LockAcquireMissing;
@@ -1536,4 +1582,144 @@ test "dispatchCask acquires malt.lock before the reinstall mutation" {
     // Acquire failures must surface accurate per-error diagnostics via the
     // shared reporter, not a blanket "another process" message.
     try testing.expect(std.mem.indexOf(u8, body, "reportAcquireFailure") != null);
+}
+
+// --- kegRowStillCurrent ------------------------------------------------
+
+fn seedKeg(db: *sqlite.Database, name: []const u8, version: []const u8, revision: i64) !i64 {
+    var ins = try db.prepare(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES (?1, ?1, ?2, ?3, 'sha', '/c');
+    );
+    defer ins.finalize();
+    try ins.bindText(1, name);
+    try ins.bindText(2, version);
+    try ins.bindInt(3, revision);
+    _ = try ins.step();
+
+    var sel = try db.prepare("SELECT last_insert_rowid();");
+    defer sel.finalize();
+    _ = try sel.step();
+    return sel.columnInt(0);
+}
+
+test "kegRowStillCurrent is true while the captured row is untouched" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    const id = try seedKeg(&db, "tree", "2.1.0", 1);
+
+    try testing.expect(kegRowStillCurrent(&db, "tree", id, "2.1.0", 1));
+}
+
+test "kegRowStillCurrent is false once the row was replaced by a newer keg of the same name" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    const id = try seedKeg(&db, "tree", "2.1.0", 0);
+
+    // An upgrade inserts the new row and deletes the old one: the id moves.
+    try db.exec("UPDATE kegs SET installed_at = '2000-01-01 00:00:00' WHERE name = 'tree';");
+    _ = try seedKeg(&db, "tree", "2.2.0", 0);
+    try db.exec("DELETE FROM kegs WHERE version = '2.1.0';");
+
+    try testing.expect(!kegRowStillCurrent(&db, "tree", id, "2.1.0", 0));
+}
+
+test "kegRowStillCurrent is false once the version or revision moved in place" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    const id = try seedKeg(&db, "tree", "2.1.0", 0);
+
+    try db.exec("UPDATE kegs SET revision = 1 WHERE name = 'tree';");
+    try testing.expect(!kegRowStillCurrent(&db, "tree", id, "2.1.0", 0));
+
+    try db.exec("UPDATE kegs SET revision = 0, version = '2.2.0' WHERE name = 'tree';");
+    try testing.expect(!kegRowStillCurrent(&db, "tree", id, "2.1.0", 0));
+}
+
+test "kegRowStillCurrent is false once the row is gone" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    const id = try seedKeg(&db, "tree", "2.1.0", 0);
+
+    try db.exec("DELETE FROM kegs WHERE name = 'tree';");
+    try testing.expect(!kegRowStillCurrent(&db, "tree", id, "2.1.0", 0));
+}
+
+test "execute re-validates the keg row between the lock and the first mutation" {
+    // The race window (read before the lock, act after it) can't be driven
+    // from a test, so the ordering is pinned at the source level: nothing
+    // may keep a statement open across the lock wait, and the re-check must
+    // sit between `LockFile.acquire` and `materializeWithCellar`.
+    const body = try fnBody(@embedFile("rollback.zig"), "pub fn execute(");
+
+    const acquire_pos = std.mem.indexOf(u8, body, "LockFile.acquire") orelse
+        return error.LockAcquireMissing;
+    const materialize_pos = std.mem.indexOf(u8, body, "materializeWithCellar(") orelse
+        return error.MaterializeCallMissing;
+    const recheck_pos = std.mem.indexOf(u8, body, "kegRowStillCurrent(") orelse
+        return error.RecheckMissing;
+    try testing.expect(acquire_pos < recheck_pos and recheck_pos < materialize_pos);
+
+    try testing.expect(std.mem.indexOf(u8, body[0..acquire_pos], ".finalize()") == null);
+}
+
+test "rollback re-validates the keg row under the lock after a concurrent commit" {
+    var s = try Scratch.init("rollback_recheck");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, s.base);
+    const db_path = s.p("/malt.db");
+
+    var a = try sqlite.Database.open(db_path);
+    defer a.close();
+    try schema.initSchema(&a);
+    const id = try seedKeg(&a, "tree", "2.1.0", 0);
+
+    // Connection A reads the row the way `execute` does before the lock.
+    var ver_buf: [128]u8 = undefined;
+    var cellar_buf: [512]u8 = undefined;
+    const cur = (try readCurrentKeg(&a, "tree", &ver_buf, &cellar_buf)).?;
+    try testing.expectEqual(id, cur.id);
+
+    // Connection B is the upgrade that lands while A waits for the lock.
+    var b = try sqlite.Database.open(db_path);
+    defer b.close();
+    try b.exec("UPDATE kegs SET version = '2.2.0' WHERE name = 'tree';");
+
+    // A must see B's commit and still be allowed to open a write
+    // transaction: a snapshot pinned by a still-open statement would fail
+    // here with a busy error instead of reaching the re-check.
+    try testing.expect(!kegRowStillCurrent(&a, "tree", cur.id, cur.version, cur.revision));
+    try a.beginTransaction();
+    a.rollback();
+}
+
+test "a read statement left open across a concurrent commit hides it from the re-check" {
+    // Why the pre-lock read must finalize before the wait: WAL pins the
+    // connection's snapshot for as long as any statement is active, so the
+    // re-check would keep confirming stale values and the write transaction
+    // would be refused.
+    var s = try Scratch.init("rollback_snapshot");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, s.base);
+    const db_path = s.p("/malt.db");
+
+    var a = try sqlite.Database.open(db_path);
+    defer a.close();
+    try schema.initSchema(&a);
+    const id = try seedKeg(&a, "tree", "2.1.0", 0);
+
+    var open_stmt = try a.prepare("SELECT id FROM kegs WHERE name = 'tree';");
+    defer open_stmt.finalize();
+    try testing.expect(try open_stmt.step());
+
+    var b = try sqlite.Database.open(db_path);
+    defer b.close();
+    try b.exec("UPDATE kegs SET version = '2.2.0' WHERE name = 'tree';");
+
+    try testing.expect(kegRowStillCurrent(&a, "tree", id, "2.1.0", 0));
+    try testing.expectError(error.Busy, a.beginTransaction());
 }
