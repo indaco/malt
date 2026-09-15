@@ -38,8 +38,8 @@ done
 
 # Every prefix the suite mints must stay in the pattern list; a missing variant
 # leaks a multi-GB Cellar or cache tree on each crashed run.
-for pattern in 'malt_\*' 'malt-\*' 'mt_\*' 'mt-\*' 'mt\.\*' 'ml_\*' 'ml\.\*' \
-  'mc_\*' 'mc\.\*' 'probe-budget\.\*'; do
+for pattern in 'malt_\*' 'malt-\*' 'mt_\*' 'mt-\*' 'mt\.\*' 'mt\?\?\?' 'mj\?\?\?' 'mjc\?\?\?' \
+  'ml_\*' 'ml\.\*' 'mc_\*' 'mc-\*' 'mc\.\*' 'probe-budget\.\*'; do
   grep -qE "^patterns=.*${pattern}" "$CLEAN" ||
     fail "clean.sh dropped the '${pattern}' scratch prefix"
 done
