@@ -55,8 +55,8 @@ pub fn checkPostInstallStatus(ctx: *const AppCtx, allocator: std.mem.Allocator, 
             no_pi_count += 1;
             continue;
         };
+        defer allocator.free(formula_json);
         var formula = formula_mod.parseFormula(allocator, formula_json) catch {
-            allocator.free(formula_json);
             no_pi_count += 1;
             continue;
         };
