@@ -842,3 +842,96 @@ test "--wipe --backup writes an empty manifest when the prefix never had a datab
 
     try test_io.accessAbsolute(std.Options.debug_io, backup_path, .{});
 }
+
+test "--stale-casks sweeps the cask cache under MALT_CACHE and leaves {prefix}/cache alone" {
+    // The writers land artefacts under `$MALT_CACHE/Cask`; a sweep that
+    // still scanned `{prefix}/cache/Cask` would never reclaim them and
+    // would delete files no live writer owns.
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "stale_casks_malt_cache");
+    defer prefix.deinit(allocator);
+
+    const alt = try std.fmt.allocPrintSentinel(allocator, "{s}/alt", .{prefix.path}, 0);
+    defer allocator.free(alt);
+    _ = c.setenv("MALT_CACHE", alt.ptr, 1);
+    defer _ = c.unsetenv("MALT_CACHE");
+
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+    }
+
+    try writeFileAt(allocator, &.{ alt, "Cask", "ghost-1.0.dmg" }, "x");
+    try writeFileAt(allocator, &.{ prefix.path, "cache", "Cask", "legacy-1.0.dmg" }, "x");
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(true);
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try purge.execute(&ctx, allocator, &.{ "--stale-casks", "--yes" });
+
+    const ghost = try std.fmt.allocPrint(allocator, "{s}/Cask/ghost-1.0.dmg", .{alt});
+    defer allocator.free(ghost);
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, ghost, .{}));
+    const legacy = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/legacy-1.0.dmg", .{prefix.path});
+    defer allocator.free(legacy);
+    try test_io.accessAbsolute(std.Options.debug_io, legacy, .{});
+}
+
+test "--old-versions sweeps the stale per-version artefact under MALT_CACHE" {
+    // The footprint and the sweep both read the override; a stale
+    // artefact left under `$MALT_CACHE/Cask` after the history row is
+    // gone would be unreachable by every later sweep.
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "old_versions_malt_cache");
+    defer prefix.deinit(allocator);
+
+    const alt = try std.fmt.allocPrintSentinel(allocator, "{s}/alt", .{prefix.path}, 0);
+    defer allocator.free(alt);
+    _ = c.setenv("MALT_CACHE", alt.ptr, 1);
+    defer _ = c.unsetenv("MALT_CACHE");
+
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO casks (token, name, version, url, sha256, app_path, auto_updates)
+            \\VALUES ('flux', 'flux', '2.0', 'https://example.invalid/dummy', NULL, NULL, 0);
+        );
+        try db.exec(
+            \\INSERT INTO cask_versions (token, version, url, sha256, artifact_type, cache_path)
+            \\VALUES ('flux', '1.0', 'https://example.invalid/dummy', NULL, 'dmg', NULL),
+            \\       ('flux', '2.0', 'https://example.invalid/dummy', NULL, 'dmg', NULL);
+        );
+    }
+
+    try writeFileAt(allocator, &.{ alt, "Cask", "flux-1.0.dmg" }, "stale");
+    try writeFileAt(allocator, &.{ alt, "Cask", "flux-2.0.dmg" }, "current");
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(true);
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try purge.execute(&ctx, allocator, &.{ "--old-versions", "--yes" });
+
+    const stale = try std.fmt.allocPrint(allocator, "{s}/Cask/flux-1.0.dmg", .{alt});
+    defer allocator.free(stale);
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, stale, .{}));
+    const current = try std.fmt.allocPrint(allocator, "{s}/Cask/flux-2.0.dmg", .{alt});
+    defer allocator.free(current);
+    try test_io.accessAbsolute(std.Options.debug_io, current, .{});
+}
