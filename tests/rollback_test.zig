@@ -1161,8 +1161,9 @@ fn readSnapshotBytes(prefix: [:0]const u8, allocator: std.mem.Allocator) ![]u8 {
 
 // `mt outdated` and the TUI badge serve a present, fresh snapshot as-is. A
 // downgraded keg was current when the file was warmed, so it has no entry a
-// prune could drop: the only honest snapshot after a rollback is no snapshot.
-test "a completed rollback drops the outdated snapshot; a dry-run leaves it alone" {
+// prune could drop; with nothing fresh in the API cache to say what current
+// is, the only honest snapshot after a rollback is no snapshot.
+test "a completed rollback drops the outdated snapshot when the API cache is cold; a dry-run leaves it alone" {
     var pbuf: [64]u8 = undefined;
     const prefix = rbPrefix(&pbuf, "snapshot_drop");
     try makeSandbox(prefix);
@@ -1196,6 +1197,97 @@ test "a completed rollback drops the outdated snapshot; a dry-run leaves it alon
     const ver = try installedVersion(prefix, testing.allocator, "wget");
     defer testing.allocator.free(ver);
     try testing.expectEqualStrings("1.20", ver);
+    var path_buf: [600]u8 = undefined;
+    const snap = try std.fmt.bufPrint(&path_buf, "{s}/cache/outdated.json", .{prefix});
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, snap, .{}));
+}
+
+/// A fresh cached formula document, as `mt update` or a recent audit leaves it.
+fn seedCachedFormula(prefix: [:0]const u8, name: []const u8, body: []const u8) !void {
+    const io = std.Options.debug_io;
+    var dir_buf: [512]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/cache/api", .{prefix});
+    try test_io.cwd().createDirPath(io, dir);
+    var path_buf: [600]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/formula_{s}.json", .{ dir, name });
+    const f = try test_io.createFileAbsolute(io, path, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, body);
+}
+
+// When the API cache can still say what current is, the snapshot can
+// describe the rolled-back keg itself; dropping the file would make every
+// other keg re-audit to learn one entry.
+test "a completed rollback keeps the outdated snapshot and lists the rolled-back keg" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "snapshot_upsert");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try installKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
+    try seedFreshSnapshot(prefix);
+    try seedCachedFormula(prefix, "wget", "{\"name\":\"wget\",\"versions\":{\"stable\":\"1.22\"},\"revision\":0}");
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try rollback.execute(&ctx, testing.allocator, &.{"wget"});
+
+    var dir_buf: [512]u8 = undefined;
+    const cache_dir = try std.fmt.bufPrint(&dir_buf, "{s}/cache", .{prefix});
+    const snap = malt.cli_outdated.readSnapshot(std.Options.debug_io, testing.allocator, cache_dir) orelse return error.SnapshotDropped;
+    defer malt.cli_outdated.freeSnapshot(testing.allocator, snap);
+    try testing.expectEqual(@as(i64, 9999999999999), snap.generated_at_ms);
+    try testing.expectEqual(@as(usize, 1), snap.formulas.len);
+    try testing.expectEqualStrings("wget", snap.formulas[0].name);
+    try testing.expectEqualStrings("1.20", snap.formulas[0].installed);
+    try testing.expectEqualStrings("1.22", snap.formulas[0].latest);
+}
+
+// The audit compares a tap package against its tap HEAD, never the core API,
+// so a same-named core document must not stand in for it.
+test "a completed rollback of a tap keg ignores a same-named core formula and drops the snapshot" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "snapshot_tap_keg");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try installKeg(prefix, "wget", "1.22");
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try db.exec("UPDATE kegs SET tap = 'user/repo' WHERE name = 'wget';");
+    }
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
+    try seedFreshSnapshot(prefix);
+    try seedCachedFormula(prefix, "wget", "{\"name\":\"wget\",\"versions\":{\"stable\":\"1.22\"},\"revision\":0}");
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try rollback.execute(&ctx, testing.allocator, &.{"wget"});
+
     var path_buf: [600]u8 = undefined;
     const snap = try std.fmt.bufPrint(&path_buf, "{s}/cache/outdated.json", .{prefix});
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, snap, .{}));

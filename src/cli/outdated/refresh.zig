@@ -1048,7 +1048,7 @@ fn fetchLatest(
 /// Pull `versions.stable` out of a Homebrew formula JSON document.
 /// Returns a fresh caller-owned copy or null if the field is missing /
 /// the document is malformed.
-fn parseFormulaLatest(allocator: std.mem.Allocator, json_bytes: []const u8) ?[]u8 {
+pub fn parseFormulaLatest(allocator: std.mem.Allocator, json_bytes: []const u8) ?[]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch return null;
     defer parsed.deinit();
     const obj = switch (parsed.value) {

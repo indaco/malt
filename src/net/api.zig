@@ -231,6 +231,37 @@ pub fn findNameMatches(
     return out.toOwnedSlice(allocator);
 }
 
+/// TTL-gated read of `{cache_dir}/api/<prefix><key>.json` without a client:
+/// verbs that only consult the cache never need HTTP. Caller owns the bytes.
+pub fn readFreshCache(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, key: []const u8, prefix: []const u8) ?[]const u8 {
+    var path_buf: [512]u8 = undefined;
+    const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ cache_dir, prefix, key }) catch return null;
+
+    const stat = std.Io.Dir.cwd().statFile(io, cache_path, .{}) catch return null;
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
+    if (now - mtime_secs > cache_ttl_secs) return null;
+
+    return readCacheFile(io, allocator, cache_path);
+}
+
+/// Whole-file read; a short read is a miss rather than a truncated document.
+fn readCacheFile(io: std.Io, allocator: std.mem.Allocator, cache_path: []const u8) ?[]const u8 {
+    const file = std.Io.Dir.cwd().openFile(io, cache_path, .{}) catch return null;
+    defer file.close(io);
+    const file_stat = file.stat(io) catch return null;
+    const content = allocator.alloc(u8, file_stat.size) catch return null;
+    const bytes_read = file.readPositionalAll(io, content, 0) catch {
+        allocator.free(content);
+        return null;
+    };
+    if (bytes_read < content.len) {
+        allocator.free(content);
+        return null;
+    }
+    return content;
+}
+
 pub const BrewApi = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -297,7 +328,7 @@ pub const BrewApi = struct {
 
     /// Cache filename prefix for each `Kind`. Centralised so probe and
     /// fetch helpers can't drift out of sync over which name they stat.
-    fn prefixForKind(kind: Kind) []const u8 {
+    pub fn prefixForKind(kind: Kind) []const u8 {
         return switch (kind) {
             .formula => "formula_",
             .cask => "cask_",
@@ -623,16 +654,7 @@ pub const BrewApi = struct {
     }
 
     pub fn readCache(self: *BrewApi, key: []const u8, prefix: []const u8) ?[]const u8 {
-        var path_buf: [512]u8 = undefined;
-        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return null;
-
-        // Check freshness
-        const stat = std.Io.Dir.cwd().statFile(self.io, cache_path, .{}) catch return null;
-        const now = std.Io.Clock.real.now(self.io).toSeconds();
-        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
-        if (now - mtime_secs > cache_ttl_secs) return null;
-
-        return self.readCacheBytes(key, prefix);
+        return readFreshCache(self.io, self.allocator, self.cache_dir, key, prefix);
     }
 
     /// TTL-bypass cache read. Returns caller-owned bytes if the file
@@ -642,20 +664,7 @@ pub const BrewApi = struct {
     pub fn readCacheBytes(self: *BrewApi, key: []const u8, prefix: []const u8) ?[]const u8 {
         var path_buf: [512]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return null;
-
-        const file = std.Io.Dir.cwd().openFile(self.io, cache_path, .{}) catch return null;
-        defer file.close(self.io);
-        const file_stat = file.stat(self.io) catch return null;
-        const content = self.allocator.alloc(u8, file_stat.size) catch return null;
-        const bytes_read = file.readPositionalAll(self.io, content, 0) catch {
-            self.allocator.free(content);
-            return null;
-        };
-        if (bytes_read < content.len) {
-            self.allocator.free(content);
-            return null;
-        }
-        return content;
+        return readCacheFile(self.io, self.allocator, cache_path);
     }
 
     pub fn writeCache(self: *const BrewApi, key: []const u8, prefix: []const u8, data: []const u8) void {

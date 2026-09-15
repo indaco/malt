@@ -17,6 +17,7 @@ const formula_mod = @import("../core/formula.zig");
 const supervisor_mod = @import("../core/services/supervisor.zig");
 const help = @import("help.zig");
 const lock_report = @import("lock_report.zig");
+const snap_mod = @import("outdated/snapshot.zig");
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "uninstall")) return;
@@ -133,9 +134,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Land the DB writes before any Cellar teardown so a SIGKILL
     // between filesystem and database steps can't leave a keg row
     // pointing at a Cellar dir that is gone. CASCADE drops deps/links rows.
-    finalizeDbRemoval(&db, keg_id) catch {
+    if (finalizeDbRemoval(&db, keg_id)) {
+        reconcileOutdated(ctx.io, allocator, .formulas, name);
+    } else |_| {
         output.warn("Could not finalize uninstall for {s}", .{name});
-    };
+    }
 
     // Remove Cellar directory (dir name carries the _<revision> suffix
     // when the keg was installed with revision > 0).
@@ -166,6 +169,16 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 
     output.success("{s} uninstalled", .{name});
+}
+
+/// Drop the removed package from `{cache}/outdated.json` so the TUI's raw
+/// read stops painting it. Only after the row is gone: the file must never
+/// run ahead of the DB. A MALT_CACHE the readers refuse is skipped, not
+/// fatal — the uninstall has already committed.
+fn reconcileOutdated(io: std.Io, allocator: std.mem.Allocator, table: snap_mod.Table, name: []const u8) void {
+    const cache_dir = atomic.maltCacheDirChecked(allocator) catch return;
+    defer allocator.free(cache_dir);
+    snap_mod.reconcileEntry(io, allocator, cache_dir, table, name, .removed);
 }
 
 /// Whether any keg row for `name` survives this uninstall. Errors answer
@@ -294,6 +307,7 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
         );
         return error.Aborted;
     };
+    reconcileOutdated(ctx.io, allocator, .casks, token);
 
     output.success("{s} uninstalled", .{token});
 }
