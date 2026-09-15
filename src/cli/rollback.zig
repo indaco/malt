@@ -83,14 +83,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer db.close();
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
 
-    // Find current installed version
-    var cur_stmt = db.prepare(
-        "SELECT id, version, revision, store_sha256, cellar_path, bin_isolated, install_reason FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
-    ) catch return error.Aborted;
-    defer cur_stmt.finalize();
-    cur_stmt.bindText(1, name) catch return error.Aborted;
-
-    if (!(cur_stmt.step() catch false)) {
+    // Find current installed version. Read through a short-lived statement:
+    // one left open would pin this connection's read snapshot across the
+    // lock wait, so the re-check below could never see a concurrent commit.
+    var current_ver_buf: [128]u8 = undefined;
+    var current_cellar_buf: [512]u8 = undefined;
+    const current = (try readCurrentKeg(&db, name, &current_ver_buf, &current_cellar_buf)) orelse {
         // Cask path: not a keg, but the same token may name an
         // installed cask. The cask listing and reinstall flow live
         // alongside the keg flow so the user-facing `--list` / `--to`
@@ -100,35 +98,22 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         }
         output.err("{s} is not installed", .{name});
         return error.Aborted;
-    }
-
-    const current_id = cur_stmt.columnInt(0);
-    const current_ver_ptr = cur_stmt.columnText(1);
-    const current_ver = if (current_ver_ptr) |v| std.mem.sliceTo(v, 0) else "unknown";
-    const current_revision = cur_stmt.columnInt(2);
-
-    // Kept so a failed swap can rebuild the current version's symlinks:
-    // the filesystem half of the swap isn't covered by the DB transaction.
-    const current_cellar_ptr = cur_stmt.columnText(4);
-    const current_cellar_path = if (current_cellar_ptr) |c| std.mem.sliceTo(c, 0) else "";
-    const current_bin_isolated = cur_stmt.columnInt(5) != 0;
-    // The row keeps its reason across the swap, so the receipt must too.
-    const current_on_request = if (cur_stmt.columnText(6)) |r| !std.mem.eql(u8, std.mem.sliceTo(r, 0), "dependency") else true;
+    };
 
     // pkg_version is what the on-disk Cellar / store dir is named after,
     // so the store-scan below must compare against this — not the bare
     // upstream `version` — to correctly skip a current revision-bumped
     // keg (e.g. version="1.9.2", revision=2 → label "1.9.2_2").
     var current_pkgver_buf: [128]u8 = undefined;
-    const current_pkg_version = formula_mod.pkgVersion(&current_pkgver_buf, current_ver, current_revision) catch current_ver;
+    const current_pkg_version = formula_mod.pkgVersion(&current_pkgver_buf, current.version, current.revision) catch current.version;
 
     // `--to <current>` is an idempotent no-op: the user is asking to
     // land on the version they're already on, so do nothing rather than
     // surface "not in the store" against a listing that omits the
     // current entry by design.
     if (parsed.to_version) |req| {
-        if (std.mem.eql(u8, req, current_pkg_version) or std.mem.eql(u8, req, current_ver)) {
-            output.info("{s} is already at {s}", .{ name, current_ver });
+        if (std.mem.eql(u8, req, current_pkg_version) or std.mem.eql(u8, req, current.version)) {
+            output.info("{s} is already at {s}", .{ name, current.version });
             return;
         }
     }
@@ -148,7 +133,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     if (entries.items.len == 0) {
         output.err("No previous version found for {s} in the store", .{name});
-        output.info("The store only contains the current version ({s})", .{current_ver});
+        output.info("The store only contains the current version ({s})", .{current.version});
         return error.Aborted;
     }
 
@@ -160,10 +145,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
     const target = entries.items[target_idx];
 
-    output.info("Rolling back {s}: {s} -> {s}", .{ name, current_ver, target.pkg_version });
+    output.info("Rolling back {s}: {s} -> {s}", .{ name, current.version, target.pkg_version });
 
     if (dry_run) {
-        output.info("Dry run: would rollback {s} from {s} to {s}", .{ name, current_ver, target.pkg_version });
+        output.info("Dry run: would rollback {s} from {s} to {s}", .{ name, current.version, target.pkg_version });
         return;
     }
 
@@ -181,6 +166,14 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         },
     };
     defer lk.release(ctx.io);
+
+    // Everything above was read without the lock. A writer that landed in
+    // the meantime has moved the row, the Cellar dir and the store; nothing
+    // on disk has been touched yet, so refusing is free.
+    if (!kegRowStillCurrent(&db, name, current.id, current.version, current.revision)) {
+        output.err("{s} changed while waiting for the lock - re-run mt rollback", .{name});
+        return error.Aborted;
+    }
 
     // No parsed formula here, and the DB rows describe the version being
     // rolled away from — so read the target's own shipped formula source.
@@ -208,7 +201,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // Unchanged from the `materialize` wrapper this replaced.
         "",
         if (placeholder) |p| .{ .old = p.token, .new = p.value } else null,
-        current_on_request,
+        current.on_request,
     ) catch {
         output.err("Failed to materialize {s} {s} from store", .{ name, target.pkg_version });
         return error.Aborted;
@@ -222,15 +215,17 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         .linker = &linker,
         .prefix = prefix,
         .name = name,
-        .keg_id = current_id,
-        .cellar_path = current_cellar_path,
-        .bin_isolated = current_bin_isolated,
+        .keg_id = current.id,
+        // So a failed swap can rebuild the current version's symlinks: the
+        // filesystem half of the swap isn't covered by the DB transaction.
+        .cellar_path = current.cellar_path,
+        .bin_isolated = current.bin_isolated,
         .abandoned_pkg_version = target.pkg_version,
     };
 
     db.beginTransaction() catch return error.Aborted;
 
-    swapKeg(&db, &linker, current_id, name, target, keg.path, current_bin_isolated) catch {
+    swapKeg(&db, &linker, current.id, name, target, keg.path, current.bin_isolated) catch {
         undo.run();
         output.err("Failed to record rollback of {s} in the database", .{name});
         return error.Aborted;
@@ -244,7 +239,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Only now is the previous version expendable. pkg_version-aware so a
     // revision-bumped current keg dir (e.g. "1.9.2_2") doesn't linger.
-    removeCurrentCellarDir(ctx.io, prefix, name, current_ver, current_revision) catch {
+    removeCurrentCellarDir(ctx.io, prefix, name, current.version, current.revision) catch {
         output.warn("Could not remove cellar entry for {s} {s}", .{ name, current_pkg_version });
     };
 
