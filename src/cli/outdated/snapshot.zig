@@ -273,6 +273,68 @@ pub fn deleteSnapshot(io: std.Io, cache_dir: []const u8) void {
     };
 }
 
+pub const Table = enum { formulas, casks };
+
+/// What a verb did to one package, as the snapshot needs to hear it.
+pub const Change = union(enum) {
+    removed,
+    /// `installed` is the revision-qualified label the reader intersects on;
+    /// `latest` is whatever the local API cache can still vouch for.
+    moved: struct { installed: []const u8, latest: ?[]const u8 },
+};
+
+/// Edit one entry of `{cache_dir}/outdated.json` in place, keeping the
+/// lease: a stale entry misleads the TUI's raw read, but dropping the file
+/// costs every other keg its audit. Best-effort. An absent or unreadable
+/// file is left alone (a verb never synthesises an audit); a keg the cache
+/// cannot describe falls back to `deleteSnapshot`.
+pub fn reconcileEntry(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    cache_dir: []const u8,
+    table: Table,
+    name: []const u8,
+    change: Change,
+) void {
+    const snap = readSnapshot(io, allocator, cache_dir) orelse return;
+    defer freeSnapshot(allocator, snap);
+
+    const upsert: ?OutdatedEntry = switch (change) {
+        .removed => null,
+        .moved => |m| blk: {
+            const latest = m.latest orelse {
+                deleteSnapshot(io, cache_dir);
+                return;
+            };
+            if (std.mem.eql(u8, m.installed, latest)) break :blk null;
+            break :blk .{ .name = @constCast(name), .installed = @constCast(m.installed), .latest = @constCast(latest) };
+        },
+    };
+
+    const rows = switch (table) {
+        .formulas => snap.formulas,
+        .casks => snap.casks,
+    };
+    var edited: std.ArrayList(OutdatedEntry) = .empty;
+    defer edited.deinit(allocator);
+    var replaced = false;
+    for (rows) |e| {
+        if (!std.mem.eql(u8, e.name, name)) {
+            edited.append(allocator, e) catch return;
+        } else if (upsert != null and !replaced) {
+            edited.append(allocator, upsert.?) catch return;
+            replaced = true;
+        }
+    }
+    if (upsert) |u| if (!replaced) edited.append(allocator, u) catch return;
+
+    writeSnapshot(io, allocator, cache_dir, .{
+        .generated_at_ms = snap.generated_at_ms,
+        .formulas = if (table == .formulas) edited.items else snap.formulas,
+        .casks = if (table == .casks) edited.items else snap.casks,
+    }) catch |e| output.warn("Could not update the outdated snapshot under {s}: {s}", .{ cache_dir, @errorName(e) });
+}
+
 /// Free both arrays + every duped string in `snap`.
 pub fn freeSnapshot(allocator: std.mem.Allocator, snap: OwnedSnapshot) void {
     freeEntrySlice(allocator, snap.formulas);
@@ -498,4 +560,198 @@ test "deleteSnapshot warns when the file cannot be removed, but not when it is a
     deleteSnapshot(io, dir);
     deleteSnapshot(io, dir);
     try std.testing.expectEqualStrings("", err_buf.items);
+}
+
+const ReconcileFixture = struct {
+    dir: []const u8,
+    dir_buf: [64]u8 = undefined,
+
+    const io = std.Options.debug_io;
+    const a = std.testing.allocator;
+    const seed =
+        \\{"version":2,"generated_at_ms":1700000000000,"formulas":[{"name":"wget","installed":"1.20","latest":"1.22"},{"name":"jq","installed":"1.7","latest":"1.8"}],"casks":[{"name":"wget","installed":"1","latest":"2"}]}
+    ;
+
+    fn init(self: *ReconcileFixture, comptime tag: []const u8) !void {
+        self.dir = try std.fmt.bufPrint(&self.dir_buf, "/tmp/malt_snap_rec_{s}_{d}", .{ tag, std.c.getpid() });
+        std.Io.Dir.cwd().deleteTree(io, self.dir) catch {};
+        try self.write(seed);
+    }
+
+    fn deinit(self: *ReconcileFixture) void {
+        std.Io.Dir.cwd().deleteTree(io, self.dir) catch {};
+    }
+
+    fn write(self: *ReconcileFixture, bytes: []const u8) !void {
+        try std.Io.Dir.cwd().createDirPath(io, self.dir);
+        const path = try snapshotPath(a, self.dir);
+        defer a.free(path);
+        try atomic.atomicWriteFile(io, path, bytes);
+    }
+
+    fn raw(self: *ReconcileFixture) !?[]u8 {
+        const path = try snapshotPath(a, self.dir);
+        defer a.free(path);
+        const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |e| switch (e) {
+            error.FileNotFound => return null,
+            else => return e,
+        };
+        defer file.close(io);
+        const st = try file.stat(io);
+        const buf = try a.alloc(u8, @intCast(st.size));
+        errdefer a.free(buf);
+        _ = try file.readPositionalAll(io, buf, 0);
+        return buf;
+    }
+
+    fn parsed(self: *ReconcileFixture) !OwnedSnapshot {
+        return readSnapshot(io, a, self.dir) orelse error.SnapshotUnreadable;
+    }
+};
+
+fn expectNames(entries: []const OutdatedEntry, want: []const []const u8) !void {
+    try std.testing.expectEqual(want.len, entries.len);
+    for (entries, want) |e, w| try std.testing.expectEqualStrings(w, e.name);
+}
+
+test "reconcileEntry .removed drops only the named entry of the addressed table and keeps the lease" {
+    // An uninstalled keg must leave the file, not take every other keg's
+    // audit with it: the TUI paints the raw file, so a stray entry is a lie
+    // but a deleted file is a re-audit for everyone.
+    var fx: ReconcileFixture = undefined;
+    try fx.init("removed");
+    defer fx.deinit();
+
+    reconcileEntry(ReconcileFixture.io, ReconcileFixture.a, fx.dir, .formulas, "wget", .removed);
+
+    const snap = try fx.parsed();
+    defer freeSnapshot(ReconcileFixture.a, snap);
+    try std.testing.expectEqual(@as(i64, 1_700_000_000_000), snap.generated_at_ms);
+    try expectNames(snap.formulas, &.{"jq"});
+    // Same token in the other table is a different package.
+    try expectNames(snap.casks, &.{"wget"});
+}
+
+test "reconcileEntry .moved upserts a revision-qualified entry in place, or appends a new one" {
+    var fx: ReconcileFixture = undefined;
+    try fx.init("upsert");
+    defer fx.deinit();
+    const io = ReconcileFixture.io;
+    const a = ReconcileFixture.a;
+
+    // A rolled-back keg that the file already lists is rewritten where it
+    // sits; `installed` is stored verbatim because the reader intersects
+    // on the revision-qualified label.
+    reconcileEntry(io, a, fx.dir, .formulas, "wget", .{ .moved = .{ .installed = "1.19_1", .latest = "1.22" } });
+    {
+        const snap = try fx.parsed();
+        defer freeSnapshot(a, snap);
+        try expectNames(snap.formulas, &.{ "wget", "jq" });
+        try std.testing.expectEqualStrings("1.19_1", snap.formulas[0].installed);
+        try std.testing.expectEqualStrings("1.22", snap.formulas[0].latest);
+    }
+
+    // An older local install of a keg the audit never saw is appended.
+    reconcileEntry(io, a, fx.dir, .casks, "foo", .{ .moved = .{ .installed = "1.0", .latest = "2.0" } });
+    {
+        const snap = try fx.parsed();
+        defer freeSnapshot(a, snap);
+        try expectNames(snap.casks, &.{ "wget", "foo" });
+        try std.testing.expectEqualStrings("2.0", snap.casks[1].latest);
+        try std.testing.expectEqual(@as(i64, 1_700_000_000_000), snap.generated_at_ms);
+    }
+}
+
+test "reconcileEntry .moved onto latest drops the entry" {
+    // Landing on what upstream calls current is "not outdated"; an entry
+    // with installed == latest would be a row the reader could never
+    // explain.
+    var fx: ReconcileFixture = undefined;
+    try fx.init("current");
+    defer fx.deinit();
+
+    reconcileEntry(ReconcileFixture.io, ReconcileFixture.a, fx.dir, .formulas, "jq", .{ .moved = .{ .installed = "1.8", .latest = "1.8" } });
+
+    const snap = try fx.parsed();
+    defer freeSnapshot(ReconcileFixture.a, snap);
+    try expectNames(snap.formulas, &.{"wget"});
+}
+
+test "reconcileEntry .moved without a known latest deletes the file" {
+    // With no cached upstream version the file cannot describe the moved
+    // keg, and an omission is exactly the lie a snapshot must never tell;
+    // only an absent file forces the re-audit.
+    var fx: ReconcileFixture = undefined;
+    try fx.init("unknown");
+    defer fx.deinit();
+
+    reconcileEntry(ReconcileFixture.io, ReconcileFixture.a, fx.dir, .formulas, "wget", .{ .moved = .{ .installed = "1.19", .latest = null } });
+
+    try std.testing.expectEqual(@as(?[]u8, null), try fx.raw());
+}
+
+test "reconcileEntry never creates a file, even when the change would delete one" {
+    // A verb edits the audit it finds; synthesising one would hand the
+    // reader a fresh lease on an empty set.
+    var fx: ReconcileFixture = undefined;
+    try fx.init("absent");
+    defer fx.deinit();
+    const io = ReconcileFixture.io;
+    const a = ReconcileFixture.a;
+    deleteSnapshot(io, fx.dir);
+
+    reconcileEntry(io, a, fx.dir, .formulas, "wget", .removed);
+    reconcileEntry(io, a, fx.dir, .formulas, "wget", .{ .moved = .{ .installed = "1.19", .latest = "1.22" } });
+    reconcileEntry(io, a, fx.dir, .formulas, "wget", .{ .moved = .{ .installed = "1.19", .latest = null } });
+
+    try std.testing.expectEqual(@as(?[]u8, null), try fx.raw());
+}
+
+test "reconcileEntry leaves a malformed file byte-identical" {
+    // Readers already treat garbage as a miss; rewriting it would turn
+    // "recompute" into a well-formed lie.
+    var fx: ReconcileFixture = undefined;
+    try fx.init("garbage");
+    defer fx.deinit();
+    const io = ReconcileFixture.io;
+    const a = ReconcileFixture.a;
+    try fx.write("{\"version\":1,\"formulas\":[}");
+
+    reconcileEntry(io, a, fx.dir, .formulas, "wget", .removed);
+    reconcileEntry(io, a, fx.dir, .formulas, "wget", .{ .moved = .{ .installed = "1.19", .latest = null } });
+
+    const after = (try fx.raw()).?;
+    defer a.free(after);
+    try std.testing.expectEqualStrings("{\"version\":1,\"formulas\":[}", after);
+}
+
+test "reconcileEntry collapses a duplicated name to the one entry it was given" {
+    // A tampered file naming a package twice must not come out of an edit
+    // still naming it twice.
+    var fx: ReconcileFixture = undefined;
+    try fx.init("dupe");
+    defer fx.deinit();
+    const a = ReconcileFixture.a;
+    try fx.write(
+        \\{"version":2,"generated_at_ms":1,"formulas":[{"name":"wget","installed":"1.20","latest":"1.22"},{"name":"wget","installed":"1.19","latest":"1.22"}],"casks":[]}
+    );
+
+    reconcileEntry(ReconcileFixture.io, a, fx.dir, .formulas, "wget", .{ .moved = .{ .installed = "1.18", .latest = "1.22" } });
+
+    const snap = try fx.parsed();
+    defer freeSnapshot(a, snap);
+    try expectNames(snap.formulas, &.{"wget"});
+    try std.testing.expectEqualStrings("1.18", snap.formulas[0].installed);
+}
+
+test "reconcileEntry removing an absent name still yields a valid file with the same content" {
+    var fx: ReconcileFixture = undefined;
+    try fx.init("noop");
+    defer fx.deinit();
+
+    reconcileEntry(ReconcileFixture.io, ReconcileFixture.a, fx.dir, .casks, "nope", .removed);
+
+    const after = (try fx.raw()).?;
+    defer ReconcileFixture.a.free(after);
+    try std.testing.expectEqualStrings(ReconcileFixture.seed, after);
 }
