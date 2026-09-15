@@ -6,8 +6,9 @@
 # Covers every variant used by the project:
 #   malt_* / malt-*            Zig test scratch + bench work dir
 #   mt_* / mt-* / mt.*         CLI test dirs, bench prefix, smoke PREFIX
+#   mt??? / mj??? / mjc???     install smokes' PREFIX / CACHE (dirs only)
 #   ml_* / ml.*                LOGDIR (smoke + e2e security)
-#   mc_* / mc.*                CACHE  (smoke + e2e security)
+#   mc_* / mc-* / mc.*         CACHE  (smoke + e2e security + run e2e)
 #   probe-budget.*             notifier probe-budget regression
 # and the bench peer-tool prefixes (/tmp/nb, /tmp/zb, /tmp/malt-bench),
 # honouring BENCH_WORK_DIR / MALT_BENCH_PREFIX / NB_BENCH_PREFIX /
@@ -88,9 +89,10 @@ remove_tree coverage
 # Patterns cover every mktemp/fixture prefix across tests + e2e + smoke +
 # bench. The underscore / dot / hyphen variants are intentional - smoke
 # uses `mktemp -d /tmp/mt.XXX`, e2e security uses `mt_sec.XXX`, bench
-# uses `/tmp/malt-bench`. Missing one variant leaks multi-GB Cellar or
-# cache dirs on every crashed run.
-patterns='malt_* malt-* mt_* mt-* mt.* ml_* ml.* mc_* mc.* probe-budget.*'
+# uses `/tmp/malt-bench`; `mt???` / `mj???` / `mjc???` are the install
+# smokes' width-only names (dirs only, see the loop). Missing one variant
+# leaks multi-GB Cellar or cache dirs on every crashed run.
+patterns='malt_* malt-* mt_* mt-* mt.* mt??? mj??? mjc??? ml_* ml.* mc_* mc-* mc.* probe-budget.*'
 
 # `mktemp -d -t <prefix>` resolves against $TMPDIR, which on macOS is a
 # per-user dir under /var/folders - most of the shell suite lands there
@@ -118,6 +120,9 @@ for root in $roots; do
     # shellcheck disable=SC2086
     for path in $root/$pattern; do
       [ -e "$path" ] || continue
+      case $pattern in
+      "mt???" | "mj???" | "mjc???") [ -d "$path" ] || continue ;;
+      esac
       remove_tree "$path"
     done
   done

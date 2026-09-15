@@ -115,8 +115,12 @@ fi
 # /tmp/mtXXX gives /tmp/mtaBc — 10 bytes, still enough entropy for parallel runs.
 PREFIX=$(mktemp -d /tmp/mtXXX)
 CACHE=$(mktemp -d /tmp/mc.XXX)
+# Logs live outside the prefix: the install under test owns that tree, so a
+# log inside it is not guaranteed to survive the very failure it should explain.
+LOGS=$(mktemp -d /tmp/mt_smoke_logs.XXX)
 log "prefix: $PREFIX (${#PREFIX} bytes)"
 log "cache:  $CACHE"
+log "logs:   $LOGS"
 
 # Cleanup on any exit — only remove the dirs we created, never anything under
 # /opt/malt or the user's real prefix. Invoked indirectly via `trap` below.
@@ -129,6 +133,9 @@ cleanup() {
   fi
   if [ -n "${CACHE:-}" ] && [[ "$CACHE" == /tmp/mc.* ]]; then
     rm -rf "$CACHE"
+  fi
+  if [ -n "${LOGS:-}" ] && [[ "$LOGS" == /tmp/mt_smoke_logs.* ]]; then
+    rm -rf "$LOGS"
   fi
 }
 trap cleanup EXIT INT TERM
@@ -145,7 +152,7 @@ export PATH="$PREFIX/bin:$PATH"
 # ── 1. Install ────────────────────────────────────────────────────────────
 log "installing ${PACKAGES[*]} into $PREFIX …"
 
-INSTALL_LOG="$PREFIX/.install.log"
+INSTALL_LOG="$LOGS/install.log"
 if retry "$MT_BIN" install "${PACKAGES[@]}" >"$INSTALL_LOG" 2>&1; then
   pass "mt install exited 0"
 else
@@ -155,7 +162,7 @@ fi
 
 # ── 2. mt doctor ──────────────────────────────────────────────────────────
 log "running mt doctor …"
-DOCTOR_LOG="$PREFIX/.doctor.log"
+DOCTOR_LOG="$LOGS/doctor.log"
 if "$MT_BIN" doctor >"$DOCTOR_LOG" 2>&1; then
   pass "mt doctor reported a clean tree"
 else
@@ -220,7 +227,7 @@ if [ "$FAILURES" -eq 0 ]; then
   log "$(green 'ALL CHECKS PASSED') (prefix: $PREFIX)"
   exit 0
 else
-  log "$(red "$FAILURES CHECK(S) FAILED") (prefix kept at $PREFIX for inspection)"
+  log "$(red "$FAILURES CHECK(S) FAILED") (prefix kept at $PREFIX, logs at $LOGS for inspection)"
   # Disarm the cleanup trap so the user can inspect the broken tree.
   trap - EXIT
   exit 1
