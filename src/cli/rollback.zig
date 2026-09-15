@@ -19,6 +19,9 @@ const help = @import("help.zig");
 const install_mod = @import("install.zig");
 const formula_mod = @import("../core/formula.zig");
 const snap_mod = @import("outdated/snapshot.zig");
+const outdated_mod = @import("outdated.zig");
+const api_mod = @import("../net/api.zig");
+const install_args_mod = @import("install/args.zig");
 
 /// `error.Aborted` is returned on every user-facing failure. The caller has
 /// already emitted a message via `output.err`; main.zig catches it and exits
@@ -255,21 +258,44 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.warn("Could not create opt link for {s}", .{name});
     };
 
-    // Upgrade prunes the outdated snapshot because the moved keg is in it;
-    // a rolled-back keg was current when the file was warmed, so it is not,
-    // and a fresh file would keep hiding it from `mt outdated` and the TUI.
-    invalidateOutdatedSnapshot(ctx.io, allocator);
+    // A rolled-back keg was current when the snapshot was warmed, so a
+    // fresh file would keep hiding it from `mt outdated` and the TUI.
+    reconcileOutdatedSnapshot(ctx.io, allocator, &db, .formulas, name, target.pkg_version);
 
     output.info("{s} rolled back to {s}", .{ name, target.pkg_version });
 }
 
-/// Drop `{cache}/outdated.json` so the next reader re-audits. Resolved the
-/// way `mt outdated` resolves it; a MALT_CACHE the readers would refuse is
+/// Record the rolled-back package in `{cache}/outdated.json` from what the
+/// fresh API cache says is current; with nothing to say, drop the file so
+/// the next reader re-audits. A MALT_CACHE the readers would refuse is
 /// skipped, not fatal — the rollback has already committed.
-fn invalidateOutdatedSnapshot(io: std.Io, allocator: std.mem.Allocator) void {
+fn reconcileOutdatedSnapshot(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, table: snap_mod.Table, name: []const u8, installed: []const u8) void {
     const cache_dir = atomic.maltCacheDirChecked(allocator) catch return;
     defer allocator.free(cache_dir);
-    snap_mod.deleteSnapshot(io, cache_dir);
+    const kind: api_mod.BrewApi.Kind = switch (table) {
+        .formulas => .formula,
+        .casks => .cask,
+    };
+    // The audit resolves a tap package against its tap HEAD, never the core
+    // API, so a same-named core document must not stand in for it.
+    const latest = if (coreSourced(db, table, name)) outdated_mod.cachedLatest(io, allocator, cache_dir, kind, name) else null;
+    defer if (latest) |l| allocator.free(l);
+    snap_mod.reconcileEntry(io, allocator, cache_dir, table, name, .{ .moved = .{ .installed = installed, .latest = latest } });
+}
+
+/// Whether the installed row comes from the core API. Any doubt answers
+/// "no": a dropped snapshot costs a re-audit, a wrong entry lies.
+fn coreSourced(db: *sqlite.Database, table: snap_mod.Table, name: []const u8) bool {
+    const sql = switch (table) {
+        .formulas => "SELECT tap FROM kegs WHERE name = ?1 LIMIT 1;",
+        .casks => "SELECT tap FROM casks WHERE token = ?1 LIMIT 1;",
+    };
+    var stmt = db.prepare(sql) catch return false;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return false;
+    if (!(stmt.step() catch false)) return false;
+    const tap = stmt.columnText(0) orelse return true;
+    return install_args_mod.isCoreTap(std.mem.sliceTo(tap, 0));
 }
 
 /// Point the keg at `target` inside the caller's transaction. `unlink`
@@ -418,7 +444,7 @@ fn dispatchCask(
         return error.Aborted;
     };
     // See the keg path: the downgraded cask is not in the snapshot to prune.
-    invalidateOutdatedSnapshot(ctx.io, allocator);
+    reconcileOutdatedSnapshot(ctx.io, allocator, db, .casks, token, target_pkg_version);
     output.info("{s} rolled back to {s}", .{ token, target_pkg_version });
 }
 

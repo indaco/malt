@@ -11,13 +11,14 @@
 #
 # `pruneSnapshot` (what `mt upgrade` calls) cannot fix this: it only drops
 # entries, and a keg that was current when the snapshot was warmed has no
-# entry to drop. Only deleting the file forces the next reader to re-audit.
+# entry to drop. With no fresh cached formula to say what current is (the
+# case here), only deleting the file forces the next reader to re-audit.
 #
 # Two behaviours pinned, both hermetic (assert on the file, never on
 # `mt outdated`, which would re-audit over HTTP once the file is gone):
 #   1. `mt rollback --dry-run` changes nothing, so the snapshot stays
 #      byte-identical.
-#   2. A real `mt rollback` removes the snapshot.
+#   2. A real `mt rollback` on a cold API cache removes the snapshot.
 #
 # Usage: scripts/regressions/rollback-invalidates-outdated-snapshot-rollback-never-invalidates-outdated-snapshot.sh
 # Requirements: built `malt` at $MALT_BIN or zig-out/bin/malt,

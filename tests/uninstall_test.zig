@@ -436,3 +436,110 @@ test "execute keeps a symlinked package dir while another version is recorded" {
     const st = try test_io.cwd().statFile(std.Options.debug_io, pkg_dir, .{ .follow_symlinks = false });
     try testing.expectEqual(std.Io.File.Kind.sym_link, st.kind);
 }
+
+// ─── outdated snapshot reconcile ─────────────────────────────────────
+
+const snapshot_seed =
+    \\{"version":2,"generated_at_ms":1700000000000,"formulas":[{"name":"foo","installed":"1.0","latest":"2.0"},{"name":"bar","installed":"3.0","latest":"3.1"}],"casks":[{"name":"foo","installed":"1","latest":"2"},{"name":"firefox","installed":"123.0","latest":"124.0"}]}
+;
+
+fn seedSnapshot(prefix: []const u8) !void {
+    const io = std.Options.debug_io;
+    var dir_buf: [512]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/cache", .{prefix});
+    try test_io.cwd().createDirPath(io, dir);
+    var path_buf: [600]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/outdated.json", .{dir});
+    const f = try test_io.createFileAbsolute(io, path, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, snapshot_seed);
+}
+
+fn readSnapshot(prefix: []const u8) !malt.cli_outdated.OwnedSnapshot {
+    var dir_buf: [512]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/cache", .{prefix});
+    return malt.cli_outdated.readSnapshot(std.Options.debug_io, testing.allocator, dir) orelse error.SnapshotMissing;
+}
+
+fn readSnapshotRaw(prefix: []const u8) ![]u8 {
+    var path_buf: [600]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/cache/outdated.json", .{prefix});
+    return test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, path, 4096);
+}
+
+test "execute drops the uninstalled keg from the outdated snapshot and nothing else" {
+    // The TUI paints the raw file, so a removed keg left in it stays on the
+    // Outdated tab until the lease lapses; deleting the whole file instead
+    // would cost every other keg its audit.
+    var prefix = try ScratchPrefix.init(testing.allocator, "snapshot_keg");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedSnapshot(prefix.path);
+
+    quiet();
+    defer unquiet();
+    try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
+
+    const snap = try readSnapshot(prefix.path);
+    defer malt.cli_outdated.freeSnapshot(testing.allocator, snap);
+    try testing.expectEqual(@as(i64, 1_700_000_000_000), snap.generated_at_ms);
+    try testing.expectEqual(@as(usize, 1), snap.formulas.len);
+    try testing.expectEqualStrings("bar", snap.formulas[0].name);
+    // The cask that shares the token is a different package.
+    try testing.expectEqual(@as(usize, 2), snap.casks.len);
+    try testing.expectEqualStrings("foo", snap.casks[0].name);
+}
+
+test "execute on a cask drops it from the snapshot's casks only" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "snapshot_cask");
+    defer prefix.deinit(testing.allocator);
+    const token = "firefox";
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        const cask_json =
+            \\{"token":"firefox","name":["Firefox"],"version":"123.0","desc":"","homepage":"",
+            \\ "url":"https://example.com/firefox.dmg",
+            \\ "sha256":"00000000000000000000000000000000000000000000000000000000deadbeef",
+            \\ "auto_updates":false,"artifacts":[{"app":["Firefox.app"]}]}
+        ;
+        var parsed = try cask.parseCask(testing.allocator, cask_json);
+        defer parsed.deinit();
+        const app_path = try std.fmt.allocPrint(testing.allocator, "{s}/Firefox.app", .{prefix.path});
+        defer testing.allocator.free(app_path);
+        try cask.recordInstall(&db, &parsed, app_path, null);
+    }
+    const app_path_z = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/Firefox.app", .{prefix.path}, 0);
+    defer testing.allocator.free(app_path_z);
+    try test_io.makeDirAbsolute(std.Options.debug_io, app_path_z);
+    try seedSnapshot(prefix.path);
+
+    quiet();
+    defer unquiet();
+    try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{token});
+
+    const snap = try readSnapshot(prefix.path);
+    defer malt.cli_outdated.freeSnapshot(testing.allocator, snap);
+    try testing.expectEqual(@as(usize, 2), snap.formulas.len);
+    try testing.expectEqual(@as(usize, 1), snap.casks.len);
+    try testing.expectEqualStrings("foo", snap.casks[0].name);
+}
+
+test "an aborted uninstall leaves the outdated snapshot byte-identical" {
+    // Nothing moved, so the audit is still true; rewriting it would only
+    // risk the file for no gain.
+    var prefix = try ScratchPrefix.init(testing.allocator, "snapshot_abort");
+    defer prefix.deinit(testing.allocator);
+    try seedSnapshot(prefix.path);
+
+    quiet();
+    defer unquiet();
+    try testing.expectError(error.Aborted, uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"}));
+
+    const after = try readSnapshotRaw(prefix.path);
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(snapshot_seed, after);
+}

@@ -4,6 +4,7 @@
 const std = @import("std");
 
 const AppCtx = @import("../app_ctx.zig").AppCtx;
+const cask_mod = @import("../core/cask.zig");
 const formula_mod = @import("../core/formula.zig");
 const schema = @import("../db/schema.zig");
 const schema_report = @import("schema_report.zig");
@@ -164,6 +165,23 @@ pub fn pruneSnapshot(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Datab
         .formulas = f_entries,
         .casks = c_entries,
     }) catch {};
+}
+
+/// Upstream version for `name` as the fresh API cache last saw it, revision-
+/// qualified like the snapshot expects; null on a miss. Cache-only: a
+/// snapshot edit must never cost a fetch, and a stale document would vouch
+/// for longer than the audit's own lease. Caller frees.
+pub fn cachedLatest(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, kind: api_mod.BrewApi.Kind, name: []const u8) ?[]u8 {
+    const json = api_mod.readFreshCache(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(kind)) orelse return null;
+    defer allocator.free(json);
+    return switch (kind) {
+        .formula => refresh_mod.parseFormulaLatest(allocator, json),
+        .cask => blk: {
+            var cask = cask_mod.parseCask(allocator, json) catch break :blk null;
+            defer cask.deinit();
+            break :blk allocator.dupe(u8, cask.version) catch null;
+        },
+    };
 }
 
 fn dupEntry(allocator: std.mem.Allocator, e: OutdatedEntry) std.mem.Allocator.Error!OutdatedEntry {
@@ -562,6 +580,66 @@ test "pruneSnapshot never synthesises a snapshot that was not there" {
 
     pruneSnapshot(io, a, &env.db, env.dir());
     try std.testing.expect(readSnapshot(io, a, env.dir()) == null);
+}
+
+/// Write `{cache}/api/<file>` with `mtime_ns` so the TTL gate can be steered.
+fn seedApiDoc(scratch: *const Scratch, file: []const u8, body: []const u8, mtime_ns: ?i96) !void {
+    var api_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const api_dir = try std.fmt.bufPrint(&api_dir_buf, "{s}/api", .{scratch.base});
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, api_dir);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ api_dir, file });
+    try atomic.atomicWriteFile(fs_test_io, path, body);
+    const ns = mtime_ns orelse return;
+    const f = try std.Io.Dir.openFileAbsolute(fs_test_io, path, .{ .mode = .write_only });
+    defer f.close(fs_test_io);
+    try f.setTimestamps(fs_test_io, .{
+        .access_timestamp = .{ .new = .{ .nanoseconds = ns } },
+        .modify_timestamp = .{ .new = .{ .nanoseconds = ns } },
+    });
+}
+
+test "cachedLatest qualifies a fresh formula document with its revision" {
+    // The snapshot reader intersects on `pkgVersion`, so a bare stable for a
+    // revisioned keg would be an entry `mt outdated` silently drops while
+    // the TUI still paints it.
+    var scratch = try Scratch.init("cached_latest_formula");
+    defer scratch.deinit();
+    try seedApiDoc(&scratch, "formula_wget.json", "{\"name\":\"wget\",\"versions\":{\"stable\":\"1.22\"},\"revision\":1}", null);
+
+    const latest = cachedLatest(fs_test_io, std.testing.allocator, scratch.base, .formula, "wget") orelse return error.TestExpectedLatest;
+    defer std.testing.allocator.free(latest);
+    try std.testing.expectEqualStrings("1.22_1", latest);
+}
+
+test "cachedLatest reads a cask document's flat version" {
+    var scratch = try Scratch.init("cached_latest_cask");
+    defer scratch.deinit();
+    try seedApiDoc(&scratch, "cask_foo.json", "{\"token\":\"foo\",\"version\":\"2.0\",\"url\":\"https://x/y.dmg\",\"sha256\":\"0\",\"artifacts\":[{\"app\":[\"Foo.app\"]}]}", null);
+
+    const latest = cachedLatest(fs_test_io, std.testing.allocator, scratch.base, .cask, "foo") orelse return error.TestExpectedLatest;
+    defer std.testing.allocator.free(latest);
+    try std.testing.expectEqualStrings("2.0", latest);
+}
+
+test "cachedLatest refuses a document older than the cache TTL" {
+    // The snapshot's lease is the cache TTL: an entry built from a stale
+    // document would vouch for longer than the audit itself would.
+    var scratch = try Scratch.init("cached_latest_stale");
+    defer scratch.deinit();
+    try seedApiDoc(&scratch, "formula_wget.json", "{\"name\":\"wget\",\"versions\":{\"stable\":\"1.22\"}}", 0);
+
+    try std.testing.expectEqual(@as(?[]u8, null), cachedLatest(fs_test_io, std.testing.allocator, scratch.base, .formula, "wget"));
+}
+
+test "cachedLatest yields null for an absent or malformed document, never a fetch" {
+    var scratch = try Scratch.init("cached_latest_miss");
+    defer scratch.deinit();
+
+    try std.testing.expectEqual(@as(?[]u8, null), cachedLatest(fs_test_io, std.testing.allocator, scratch.base, .formula, "wget"));
+
+    try seedApiDoc(&scratch, "formula_wget.json", "{\"name\":\"wget\"}", null);
+    try std.testing.expectEqual(@as(?[]u8, null), cachedLatest(fs_test_io, std.testing.allocator, scratch.base, .formula, "wget"));
 }
 
 test "intersectWithDb drops a keg whose revision moved past the snapshot" {
