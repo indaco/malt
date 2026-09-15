@@ -1,8 +1,10 @@
 //! Persistent cache for tap-formula archives. Layout:
-//! `<prefix>/cache/Tap/<sha256>.<ext>`. Keyed by the .rb-declared
-//! SHA so two archives can never collide on the filename; lifetime is
+//! `<cache>/Tap/<sha256>.<ext>`, where `<cache>` is the directory the
+//! cli/ caller resolved (`MALT_CACHE` or `{prefix}/cache`) so the tier
+//! sits where `mt purge --cache` prunes. Keyed by the .rb-declared SHA
+//! so two archives can never collide on the filename; lifetime is
 //! managed by `mt purge --cache` (age-based) and `mt doctor` (size
-//! reporting). Sibling to the cask cache at `<prefix>/cache/Cask/`.
+//! reporting). Sibling to the cask cache at `<cache>/Cask/`.
 
 const std = @import("std");
 
@@ -10,29 +12,25 @@ const std = @import("std");
 /// the leading dot (e.g. `.tar.gz`, `.zip`). Pure: no filesystem
 /// access; surfaces `NoSpaceLeft` on buffer overflow so the caller
 /// can fail loud instead of stranding bytes at a truncated path.
-pub fn cachePath(buf: []u8, prefix: []const u8, sha256: []const u8, ext: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/cache/Tap/{s}{s}", .{ prefix, sha256, ext });
+pub fn cachePath(buf: []u8, cache_dir: []const u8, sha256: []const u8, ext: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}/Tap/{s}{s}", .{ cache_dir, sha256, ext });
 }
 
-/// Idempotent `mkdir -p` for `<prefix>/cache/Tap`. Safe across
-/// concurrent installs — `PathAlreadyExists` is the expected hot
-/// path and not an error.
-pub fn ensureCacheDir(io: std.Io, prefix: []const u8) !void {
+/// Idempotent `mkdir -p` for `<cache>/Tap`. Recursive because nothing
+/// creates `$MALT_CACHE` itself; safe across concurrent installs.
+pub fn ensureCacheDir(io: std.Io, cache_dir: []const u8) !void {
     var buf: [512]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&buf, "{s}/cache/Tap", .{prefix});
-    std.Io.Dir.createDirAbsolute(io, dir, .default_dir) catch |e| switch (e) {
-        error.PathAlreadyExists => return,
-        else => return e,
-    };
+    const dir = try std.fmt.bufPrint(&buf, "{s}/Tap", .{cache_dir});
+    try std.Io.Dir.cwd().createDirPath(io, dir);
 }
 
 /// Single-`access` probe of the cache entry for `(sha256, ext)`. Hot
 /// path for the "warm cache" short-circuit: a cache hit lets the
 /// caller skip both the HTTP archive fetch and the SHA recomputation
 /// (the filename IS the SHA).
-pub fn exists(io: std.Io, prefix: []const u8, sha256: []const u8, ext: []const u8) bool {
+pub fn exists(io: std.Io, cache_dir: []const u8, sha256: []const u8, ext: []const u8) bool {
     var buf: [512]u8 = undefined;
-    const path = cachePath(&buf, prefix, sha256, ext) catch return false;
+    const path = cachePath(&buf, cache_dir, sha256, ext) catch return false;
     std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
     return true;
 }
@@ -46,26 +44,38 @@ pub fn exists(io: std.Io, prefix: []const u8, sha256: []const u8, ext: []const u
 /// SHA-verified the staging bytes.
 pub fn promoteStagingToCache(
     io: std.Io,
-    prefix: []const u8,
+    cache_dir: []const u8,
     sha256: []const u8,
     ext: []const u8,
     staging_path: []const u8,
     cache_path_buf: []u8,
 ) ![]const u8 {
-    try ensureCacheDir(io, prefix);
-    const cache_path = try cachePath(cache_path_buf, prefix, sha256, ext);
-    // rename(2) is atomic on the same filesystem — staging + cache
-    // live under the same `<prefix>` so this is the hot path.
-    try std.Io.Dir.renameAbsolute(staging_path, cache_path, io);
+    try ensureCacheDir(io, cache_dir);
+    const cache_path = try cachePath(cache_path_buf, cache_dir, sha256, ext);
+    std.Io.Dir.renameAbsolute(staging_path, cache_path, io) catch |e| switch (e) {
+        // Staging lives under `<prefix>/tmp`; `MALT_CACHE` may sit on
+        // another volume, where rename(2) cannot reach.
+        error.CrossDevice => try publishAcrossVolumes(io, staging_path, cache_path),
+        else => return e,
+    };
     return cache_path;
 }
 
-/// Byte totals under `<prefix>/cache/Tap`: everything on disk, and the
+/// Cross-volume stand-in for the rename: the copy lands through a temp
+/// file next to `cache_path`, so the permanent name still appears whole
+/// or not at all. The staging file is best-effort removed afterwards —
+/// a leftover is reaped by the existing tmp sweep.
+fn publishAcrossVolumes(io: std.Io, staging_path: []const u8, cache_path: []const u8) !void {
+    try std.Io.Dir.copyFileAbsolute(staging_path, cache_path, io, .{});
+    std.Io.Dir.cwd().deleteFile(io, staging_path) catch {};
+}
+
+/// Byte totals under `<cache>/Tap`: everything on disk, and the
 /// subset `mt purge --cache` would free at the given retention window.
 pub const Usage = struct { total: u64 = 0, reclaimable: u64 = 0 };
 
-/// The `mt purge --cache` age gate, applied to every entry under
-/// `<prefix>/cache` (not just tap archives). Strictly older: an entry
+/// The `mt purge --cache` age gate, applied to every entry under the
+/// cache dir (not just tap archives). Strictly older: an entry
 /// exactly `max_age_days` old is kept. Shared with the sweep so doctor's
 /// figure can never drift from what the sweep deletes. Saturating:
 /// `--cache=N` is unbounded and an absurd window means "keep
@@ -74,12 +84,12 @@ pub fn olderThan(now_secs: i64, mtime_secs: i64, max_age_days: i64) bool {
     return now_secs - mtime_secs > max_age_days *| 86400;
 }
 
-/// Recursive walk of `<prefix>/cache/Tap`. Best-effort: any I/O failure
+/// Recursive walk of `<cache>/Tap`. Best-effort: any I/O failure
 /// contributes zero so doctor's read stays infallible. `now_secs` is a
 /// parameter so tests can move the clock instead of back-dating files.
-pub fn usageUnder(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, now_secs: i64, max_age_days: i64) Usage {
+pub fn usageUnder(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, now_secs: i64, max_age_days: i64) Usage {
     var buf: [512]u8 = undefined;
-    const dir_path = std.fmt.bufPrint(&buf, "{s}/cache/Tap", .{prefix}) catch return .{};
+    const dir_path = std.fmt.bufPrint(&buf, "{s}/Tap", .{cache_dir}) catch return .{};
     var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return .{};
     defer dir.close(io);
     var walker = dir.walk(allocator) catch return .{};
@@ -142,11 +152,14 @@ const Scratch = struct {
     }
 };
 
-test "cachePath: composes prefix/cache/Tap/<sha>.<ext>" {
+test "cachePath: composes <cache_dir>/Tap/<sha>.<ext>" {
+    // The cache dir is resolved by the caller (`MALT_CACHE` or
+    // `{prefix}/cache`); composing `/cache` here again would split the
+    // tier from the pruner the moment the override is set.
     var buf: [256]u8 = undefined;
-    const got = try cachePath(&buf, "/opt/h", "ab" ** 32, ".tar.gz");
+    const got = try cachePath(&buf, "/alt", "ab" ** 32, ".tar.gz");
     try std.testing.expectEqualStrings(
-        "/opt/h/cache/Tap/" ++ ("ab" ** 32) ++ ".tar.gz",
+        "/alt/Tap/" ++ ("ab" ** 32) ++ ".tar.gz",
         got,
     );
 }
@@ -177,7 +190,7 @@ test "exists: returns false when cache dir absent" {
     const io = threaded.io();
     var s = try Scratch.init("tap_cache_exists_absent");
     defer s.deinit();
-    try std.testing.expect(!exists(io, s.base, "ab" ** 32, ".tar.gz"));
+    try std.testing.expect(!exists(io, s.p("/cache"), "ab" ** 32, ".tar.gz"));
 }
 
 test "exists: returns true when SHA-keyed entry is on disk" {
@@ -186,18 +199,31 @@ test "exists: returns true when SHA-keyed entry is on disk" {
     const io = threaded.io();
     var s = try Scratch.init("tap_cache_exists_hit");
     defer s.deinit();
-    const prefix = s.base;
+    const cache_dir = s.p("/cache");
 
-    try std.Io.Dir.cwd().createDirPath(io, s.p("/cache"));
-    try ensureCacheDir(io, prefix);
+    try std.Io.Dir.cwd().createDirPath(io, cache_dir);
+    try ensureCacheDir(io, cache_dir);
 
     var entry_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const entry = try cachePath(&entry_buf, prefix, "cd" ** 32, ".zip");
+    const entry = try cachePath(&entry_buf, cache_dir, "cd" ** 32, ".zip");
     const f = try std.Io.Dir.createFileAbsolute(io, entry, .{});
     f.close(io);
 
-    try std.testing.expect(exists(io, prefix, "cd" ** 32, ".zip"));
-    try std.testing.expect(!exists(io, prefix, "ee" ** 32, ".zip"));
+    try std.testing.expect(exists(io, cache_dir, "cd" ** 32, ".zip"));
+    try std.testing.expect(!exists(io, cache_dir, "ee" ** 32, ".zip"));
+}
+
+test "ensureCacheDir: creates the Tap dir even when the cache root does not exist yet" {
+    // Nothing creates `$MALT_CACHE` on the user's behalf, so the first tap
+    // install into a fresh override must not fail on a missing parent.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var s = try Scratch.init("tap_cache_ensure_fresh_root");
+    defer s.deinit();
+
+    try ensureCacheDir(io, s.p("/alt"));
+    try std.Io.Dir.accessAbsolute(io, s.p("/alt/Tap"), .{});
 }
 
 test "promoteStagingToCache: renames staging file to SHA-keyed slot" {
@@ -207,7 +233,7 @@ test "promoteStagingToCache: renames staging file to SHA-keyed slot" {
 
     var s = try Scratch.init("tap_cache_promote");
     defer s.deinit();
-    const prefix = s.base;
+    const cache_dir = s.p("/cache");
 
     inline for ([_][]const u8{ "/tmp", "/cache" }) |sub| {
         try std.Io.Dir.cwd().createDirPath(io, s.p(sub));
@@ -221,15 +247,43 @@ test "promoteStagingToCache: renames staging file to SHA-keyed slot" {
     }
 
     var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_path = try promoteStagingToCache(io, prefix, "aa" ** 32, ".tar.gz", staging, &cache_buf);
+    const cache_path = try promoteStagingToCache(io, cache_dir, "aa" ** 32, ".tar.gz", staging, &cache_buf);
 
     var want_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const want = try cachePath(&want_buf, prefix, "aa" ** 32, ".tar.gz");
+    const want = try cachePath(&want_buf, cache_dir, "aa" ** 32, ".tar.gz");
     try std.testing.expectEqualStrings(want, cache_path);
 
     // The rename moved the staging file; the source path must be gone.
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, staging, .{}));
     try std.Io.Dir.accessAbsolute(io, cache_path, .{});
+}
+
+test "publishAcrossVolumes: the cache slot holds the staged bytes and the staging file is gone" {
+    // Same filesystem here, but the contract is what a real EXDEV needs:
+    // full bytes at the permanent name, no staging leftover.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var s = try Scratch.init("tap_cache_cross_volume");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/tmp"));
+    try ensureCacheDir(io, s.p("/cache"));
+
+    const staging = s.p("/tmp/tap_download.4242.zip");
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, staging, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "cross-volume-bytes");
+    }
+    const dest = s.p("/cache/Tap/" ++ "bb" ** 32 ++ ".zip");
+    try publishAcrossVolumes(io, staging, dest);
+
+    var buf: [64]u8 = undefined;
+    const f = try std.Io.Dir.openFileAbsolute(io, dest, .{});
+    defer f.close(io);
+    const n = try f.readPositionalAll(io, &buf, 0);
+    try std.testing.expectEqualStrings("cross-volume-bytes", buf[0..n]);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, staging, .{}));
 }
 
 test "olderThan: strictly older than the window, so the boundary is kept" {
@@ -257,15 +311,15 @@ test "usageUnder: zero usage when cache dir is absent" {
     const io = threaded.io();
     var s = try Scratch.init("tap_cache_usage_absent");
     defer s.deinit();
-    // Deliberately do not create <prefix>/cache/Tap.
-    const u = usageUnder(io, std.testing.allocator, s.base, 0, 30);
+    // Deliberately do not create <cache>/Tap.
+    const u = usageUnder(io, std.testing.allocator, s.p("/cache"), 0, 30);
     try std.testing.expectEqual(@as(u64, 0), u.total);
     try std.testing.expectEqual(@as(u64, 0), u.reclaimable);
 }
 
 fn seedEntry(io: std.Io, s: *Scratch, comptime sha: []const u8, comptime size: usize) !void {
     var entry_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const entry = try cachePath(&entry_buf, s.base, sha, ".tar.gz");
+    const entry = try cachePath(&entry_buf, s.p("/cache"), sha, ".tar.gz");
     const f = try std.Io.Dir.createFileAbsolute(io, entry, .{});
     defer f.close(io);
     try f.writeStreamingAll(io, "x" ** size);
@@ -279,14 +333,14 @@ test "usageUnder: a fresh entry counts toward total but not reclaimable" {
     defer s.deinit();
 
     // Production callers reach `ensureCacheDir` only after the
-    // top-level `ensureDirs` has seeded `<prefix>/cache`; mirror
+    // top-level `ensureDirs` has seeded the cache dir; mirror
     // that here so the test pins the production invariant.
     try std.Io.Dir.cwd().createDirPath(io, s.p("/cache"));
-    try ensureCacheDir(io, s.base);
+    try ensureCacheDir(io, s.p("/cache"));
     try seedEntry(io, &s, "00" ** 32, 256);
 
     const now = std.Io.Clock.real.now(io).toSeconds();
-    const u = usageUnder(io, std.testing.allocator, s.base, now, 30);
+    const u = usageUnder(io, std.testing.allocator, s.p("/cache"), now, 30);
     try std.testing.expectEqual(@as(u64, 256), u.total);
     try std.testing.expectEqual(@as(u64, 0), u.reclaimable);
 }
@@ -298,8 +352,9 @@ test "usageUnder: total is stable while reclaimable swings with the window" {
     var s = try Scratch.init("tap_cache_usage_mixed");
     defer s.deinit();
 
-    try std.Io.Dir.cwd().createDirPath(io, s.p("/cache"));
-    try ensureCacheDir(io, s.base);
+    const cache_dir = s.p("/cache");
+    try std.Io.Dir.cwd().createDirPath(io, cache_dir);
+    try ensureCacheDir(io, cache_dir);
     try seedEntry(io, &s, "00" ** 32, 100);
     try seedEntry(io, &s, "11" ** 32, 300);
 
@@ -308,13 +363,13 @@ test "usageUnder: total is stable while reclaimable swings with the window" {
     // everything 40 days on; a zero-day window reclaims everything one
     // second on. Total never moves.
     const now = std.Io.Clock.real.now(io).toSeconds();
-    const none = usageUnder(io, std.testing.allocator, s.base, now, 30);
+    const none = usageUnder(io, std.testing.allocator, cache_dir, now, 30);
     try std.testing.expectEqual(@as(u64, 400), none.total);
     try std.testing.expectEqual(@as(u64, 0), none.reclaimable);
-    const aged = usageUnder(io, std.testing.allocator, s.base, now + 40 * 86400, 30);
+    const aged = usageUnder(io, std.testing.allocator, cache_dir, now + 40 * 86400, 30);
     try std.testing.expectEqual(@as(u64, 400), aged.total);
     try std.testing.expectEqual(@as(u64, 400), aged.reclaimable);
-    const all = usageUnder(io, std.testing.allocator, s.base, now + 1, 0);
+    const all = usageUnder(io, std.testing.allocator, cache_dir, now + 1, 0);
     try std.testing.expectEqual(@as(u64, 400), all.total);
     try std.testing.expectEqual(@as(u64, 400), all.reclaimable);
 }

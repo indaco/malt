@@ -447,3 +447,39 @@ test "ca-certificates installed and linked: an ok ssl_ca_bundle finding" {
         return error.MissingSslFinding;
     try testing.expectEqual(doctor.CheckStatus.ok, f.severity);
 }
+
+test "emitDoctorJson sizes tap_cache from the cache dir it is handed, not the prefix" {
+    // The hint next to the figure is `mt purge --cache`, which prunes the
+    // resolved cache dir; a figure read from `{prefix}/cache/Tap` would
+    // name bytes that purge can never reach.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "tap_cache_dir");
+    defer s.deinit(allocator);
+    try s.initSchema();
+
+    const alt = try std.fmt.allocPrint(allocator, "{s}/alt", .{s.path});
+    defer allocator.free(alt);
+    inline for (.{ "{s}/alt/Tap", "{s}/cache/Tap" }) |fmt| {
+        const dir = try std.fmt.allocPrint(allocator, fmt, .{s.path});
+        defer allocator.free(dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+    }
+    inline for (.{ .{ "{s}/alt/Tap/" ++ "ab" ** 32 ++ ".tar.gz", "xx" }, .{ "{s}/cache/Tap/" ++ "ab" ** 32 ++ ".tar.gz", "x" } }) |entry| {
+        const path = try std.fmt.allocPrint(allocator, entry[0], .{s.path});
+        defer allocator.free(path);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, entry[1]);
+    }
+
+    output.setMode(.json);
+    defer output.setMode(.human);
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    output.beginStdoutCapture(allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, alt, &.{});
+
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"tap_cache\":{\"bytes\":2,") != null);
+}

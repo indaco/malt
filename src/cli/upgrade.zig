@@ -1147,10 +1147,16 @@ fn upgradeRoutedTapCask(
         return error.Aborted;
     };
 
+    const cache_dir = atomic.maltCacheDir(allocator) catch {
+        output.err("Failed to resolve cache directory", .{});
+        return error.Aborted;
+    };
+    defer allocator.free(cache_dir);
+
     // Single DB transaction across uninstall + install + recordInstall.
     // Mirrors the core-API path in `upgradeCask` so a partial failure
     // can't leave the casks row missing once the new app is on disk.
-    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
+    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, cache_dir);
     installer.offline = ctx.offline;
     // Spares the prefetched artefact from the uninstall's cache sweep.
     installer.prefetched_artifact = prefetched;
@@ -1483,7 +1489,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // when the new app is already on disk. The malt.lock fileguards
     // against other malt writers, so holding the SQLite txn across the
     // (potentially slow) install is harmless to other connections.
-    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
+    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, api.cache_dir);
     installer.offline = ctx.offline;
 
     // Fetch before destroying, as in `upgradeRoutedTapCask` above.

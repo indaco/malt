@@ -91,7 +91,7 @@ const install_help =
     \\                     can later GC them). `--only-dependencies` accepted for
     \\                     brew-parity.
     \\  --download-only    Warm the bottle store (formulas), the Cask cache (casks),
-    \\                     or the tap archive cache (`<prefix>/cache/Tap/` for
+    \\                     or the tap archive cache (`<cache>/Tap/` for
     \\                     `user/repo/<formula>`) and stop before materialise/link/
     \\                     record. The Cellar, /Applications, and DB stay untouched;
     \\                     a follow-up `mt install` consumes the cached bytes.

@@ -1,4 +1,5 @@
-//! Pin test: no `cli/*` file may build the cache directory from the prefix.
+//! Pin test: no `cli/*` or `core/*` file may build the cache directory from
+//! the prefix.
 //!
 //! `atomic.maltCacheDir` is the one place that honours `MALT_CACHE`. A
 //! hand-formatted `{prefix}/cache` at a call site reads and writes a
@@ -12,12 +13,19 @@ const testing = std.testing;
 
 const test_io = @import("test_io");
 
-const scanned_root = "src/cli";
-/// Both spellings of `{prefix}/cache`: the format literal and the
+const scanned_roots = [_][]const u8{ "src/cli", "src/core" };
+/// Every spelling of `{prefix}/cache`: the bare format literal, the
+/// artefact-tier subdirectories, and the
 /// `prefix_path.join(buf, prefix, "/cache")` suffix.
-const forbidden = [_][]const u8{ "\"{s}/cache\"", ", \"/cache\")" };
+const forbidden = [_][]const u8{ "\"{s}/cache\"", "\"{s}/cache/Cask", "\"{s}/cache/Tap", ", \"/cache\")" };
 
-test "no cli/ site formats the cache dir from the prefix" {
+test "no cli/ or core/ site formats the cache dir from the prefix" {
+    var hits: usize = 0;
+    for (scanned_roots) |root| hits += try scanTree(root);
+    if (hits != 0) return error.PrefixCacheHardCoded;
+}
+
+fn scanTree(scanned_root: []const u8) !usize {
     const io = std.Options.debug_io;
 
     var dir = try test_io.cwd().openDir(io, scanned_root, .{ .iterate = true });
@@ -38,14 +46,13 @@ test "no cli/ site formats the cache dir from the prefix" {
         defer testing.allocator.free(content);
         _ = try file.readPositionalAll(io, content, 0);
 
-        hits += scanContent(entry.path, content);
+        hits += scanContent(scanned_root, entry.path, content);
     }
-
-    if (hits != 0) return error.PrefixCacheHardCoded;
+    return hits;
 }
 
 /// Prints one line per hit and returns the count.
-fn scanContent(rel_path: []const u8, content: []const u8) usize {
+fn scanContent(scanned_root: []const u8, rel_path: []const u8, content: []const u8) usize {
     var hits: usize = 0;
     for (forbidden) |needle| {
         var cursor: usize = 0;
@@ -60,7 +67,9 @@ fn scanContent(rel_path: []const u8, content: []const u8) usize {
 }
 
 test "scanContent flags both hand-built spellings and ignores the helper call" {
-    try testing.expectEqual(@as(usize, 0), scanContent("ok.zig", "const d = atomic.maltCacheDir(allocator) catch return;\n"));
-    try testing.expectEqual(@as(usize, 1), scanContent("bad.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache\", .{prefix});\n"));
-    try testing.expectEqual(@as(usize, 1), scanContent("join.zig", "const d = prefix_path.join(&buf, prefix, \"/cache\") catch return;\n"));
+    try testing.expectEqual(@as(usize, 0), scanContent("src/x", "ok.zig", "const d = atomic.maltCacheDir(allocator) catch return;\n"));
+    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "bad.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache\", .{prefix});\n"));
+    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "cask.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache/Cask/{s}\", .{ prefix, name });\n"));
+    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "tap.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache/Tap\", .{prefix});\n"));
+    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "join.zig", "const d = prefix_path.join(&buf, prefix, \"/cache\") catch return;\n"));
 }

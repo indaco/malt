@@ -18,6 +18,7 @@ const output = malt.output;
 
 const Scratch = struct {
     path: [:0]u8,
+    cache_dir: []u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
         const base = try test_io.uniqueTempPath(allocator, "doctor_cask_history", tag);
@@ -31,11 +32,13 @@ const Scratch = struct {
             defer allocator.free(dir);
             try test_io.cwd().createDirPath(std.Options.debug_io, dir);
         }
-        return .{ .path = path };
+        const cache_dir = try std.fmt.allocPrint(allocator, "{s}/cache", .{path});
+        return .{ .path = path, .cache_dir = cache_dir };
     }
 
     fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        allocator.free(self.cache_dir);
         allocator.free(self.path);
     }
 
@@ -93,7 +96,7 @@ test "emitCaskHistoryReport: default mode prints a one-line summary on stderr" {
     output.beginStderrCapture(allocator, &stderr_buf);
     defer output.endStderrCapture();
 
-    doctor.emitCaskHistoryReport(allocator, std.Options.debug_io, s.path);
+    doctor.emitCaskHistoryReport(allocator, std.Options.debug_io, s.path, s.cache_dir);
 
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Retained cask versions: 2") != null);
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "mt purge --old-versions") != null);
@@ -114,7 +117,7 @@ test "emitCaskHistoryReport: empty case stays silent on stderr in human mode" {
     output.beginStderrCapture(allocator, &stderr_buf);
     defer output.endStderrCapture();
 
-    doctor.emitCaskHistoryReport(allocator, std.Options.debug_io, s.path);
+    doctor.emitCaskHistoryReport(allocator, std.Options.debug_io, s.path, s.cache_dir);
 
     try testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
 }
@@ -134,7 +137,7 @@ test "emitCaskHistoryReport: --verbose lists every retained (token version) unde
     output.beginStderrCapture(allocator, &stderr_buf);
     defer output.endStderrCapture();
 
-    doctor.emitCaskHistoryReport(allocator, std.Options.debug_io, s.path);
+    doctor.emitCaskHistoryReport(allocator, std.Options.debug_io, s.path, s.cache_dir);
 
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Retained cask versions: 2") != null);
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha 1.0") != null);
@@ -162,7 +165,7 @@ test "emitDoctorJson: the merged --json carries the cask_history payload on stdo
     defer output.endStderrCapture();
 
     // The cask_history data is now one member of the single merged document.
-    doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, &.{});
+    doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, s.cache_dir, &.{});
 
     try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"schema_version\":1") != null);
     try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"cask_history\":") != null);
@@ -191,7 +194,7 @@ test "emitCaskHistoryReport: read-only — cask_versions rows survive the walk" 
     output.beginStderrCapture(allocator, &stderr_buf);
     defer output.endStderrCapture();
 
-    doctor.emitCaskHistoryReport(allocator, std.Options.debug_io, s.path);
+    doctor.emitCaskHistoryReport(allocator, std.Options.debug_io, s.path, s.cache_dir);
 
     const after = try countCaskVersionRows(allocator, s.path);
     try testing.expectEqual(before, after);

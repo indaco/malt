@@ -30,8 +30,8 @@ const font_cask_json =
     \\ "artifacts":[{"font":["A.ttf"]},{"font":["B.ttf"]}]}
 ;
 
-fn newInstaller(threaded: *std.Io.Threaded, db: *sqlite.Database, prefix: [:0]const u8) cask.CaskInstaller {
-    return cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, db, prefix);
+fn newInstaller(threaded: *std.Io.Threaded, db: *sqlite.Database, fx: *Fixture) cask.CaskInstaller {
+    return cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, db, fx.base, fx.p("cache"));
 }
 
 /// Scratch tree under a process-unique base, so overlapping test runs cannot
@@ -70,7 +70,6 @@ test "uninstall unlinks every font listed in the manifest, then drops Caskroom a
     const io = std.Options.debug_io;
     var fx = try Fixture.init("basic");
     defer fx.deinit();
-    const prefix = fx.base;
 
     // Reconstruct the post-install on-disk state without driving a real
     // install: two placed fonts plus the manifest that records them.
@@ -94,7 +93,7 @@ test "uninstall unlinks every font listed in the manifest, then drops Caskroom a
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = newInstaller(&threaded, &db, prefix);
+    var installer = newInstaller(&threaded, &db, &fx);
 
     try installer.uninstall("font-x");
 
@@ -110,7 +109,6 @@ test "uninstall removes only manifested fonts and tolerates a stale entry" {
     const io = std.Options.debug_io;
     var fx = try Fixture.init("precise");
     defer fx.deinit();
-    const prefix = fx.base;
 
     const font_a = fx.p("Fonts/A.ttf");
     try putFile(io, font_a, "AAA"); // manifested, present
@@ -134,7 +132,7 @@ test "uninstall removes only manifested fonts and tolerates a stale entry" {
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = newInstaller(&threaded, &db, prefix);
+    var installer = newInstaller(&threaded, &db, &fx);
 
     try installer.uninstall("font-x");
 
@@ -152,7 +150,6 @@ fn expectKept(io: std.Io, path: []const u8, body: []const u8) !void {
 test "uninstall survives a missing manifest and still clears the DB row" {
     var fx = try Fixture.init("drift");
     defer fx.deinit();
-    const prefix = fx.base;
 
     // The Caskroom (and its manifest) was manually nuked: app_path points at a
     // manifest that no longer exists. Uninstall must treat this as "nothing to
@@ -169,7 +166,7 @@ test "uninstall survives a missing manifest and still clears the DB row" {
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = newInstaller(&threaded, &db, prefix);
+    var installer = newInstaller(&threaded, &db, &fx);
 
     try installer.uninstall("font-x");
     try testing.expect(!cask.isInstalled(&db, "font-x"));
