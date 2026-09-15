@@ -8,6 +8,7 @@ const std = @import("std");
 
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const cask_mod = @import("../../core/cask.zig");
+const artefact_cache = @import("../../core/artefact_cache.zig");
 const cellar_mod = @import("../../core/cellar.zig");
 const formula_mod = @import("../../core/formula.zig");
 const hash = @import("../../core/hash.zig");
@@ -815,6 +816,7 @@ pub fn materializeRubyFormula(
     sink: OutputSink,
 ) InstallError!void {
     sink.info("Found {s} {s}", .{ resolved.name, resolved.version });
+    artefact_cache.adoptLegacy(ctx.io, prefix, cache_dir);
 
     // Refuse any scheme other than `https://`. A `.rb` that smuggled
     // `http://` (downgrade), `file:///etc/passwd`, `ftp://`, or a data

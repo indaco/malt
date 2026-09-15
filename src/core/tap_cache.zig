@@ -7,6 +7,7 @@
 //! reporting). Sibling to the cask cache at `<cache>/Cask/`.
 
 const std = @import("std");
+const artefact_cache = @import("artefact_cache.zig");
 
 /// Compose the canonical cache path for a tap archive. `ext` includes
 /// the leading dot (e.g. `.tar.gz`, `.zip`). Pure: no filesystem
@@ -52,22 +53,11 @@ pub fn promoteStagingToCache(
 ) ![]const u8 {
     try ensureCacheDir(io, cache_dir);
     const cache_path = try cachePath(cache_path_buf, cache_dir, sha256, ext);
-    std.Io.Dir.renameAbsolute(staging_path, cache_path, io) catch |e| switch (e) {
-        // Staging lives under `<prefix>/tmp`; `MALT_CACHE` may sit on
-        // another volume, where rename(2) cannot reach.
-        error.CrossDevice => try publishAcrossVolumes(io, staging_path, cache_path),
-        else => return e,
-    };
+    // Staging lives under `<prefix>/tmp`; `MALT_CACHE` may sit on another
+    // volume, where rename(2) cannot reach. A staging file left behind by
+    // the copy path is reaped by the existing tmp sweep.
+    try artefact_cache.moveFile(io, staging_path, cache_path);
     return cache_path;
-}
-
-/// Cross-volume stand-in for the rename: the copy lands through a temp
-/// file next to `cache_path`, so the permanent name still appears whole
-/// or not at all. The staging file is best-effort removed afterwards —
-/// a leftover is reaped by the existing tmp sweep.
-fn publishAcrossVolumes(io: std.Io, staging_path: []const u8, cache_path: []const u8) !void {
-    try std.Io.Dir.copyFileAbsolute(staging_path, cache_path, io, .{});
-    std.Io.Dir.cwd().deleteFile(io, staging_path) catch {};
 }
 
 /// Byte totals under `<cache>/Tap`: everything on disk, and the
@@ -256,34 +246,6 @@ test "promoteStagingToCache: renames staging file to SHA-keyed slot" {
     // The rename moved the staging file; the source path must be gone.
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, staging, .{}));
     try std.Io.Dir.accessAbsolute(io, cache_path, .{});
-}
-
-test "publishAcrossVolumes: the cache slot holds the staged bytes and the staging file is gone" {
-    // Same filesystem here, but the contract is what a real EXDEV needs:
-    // full bytes at the permanent name, no staging leftover.
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var s = try Scratch.init("tap_cache_cross_volume");
-    defer s.deinit();
-    try std.Io.Dir.cwd().createDirPath(io, s.p("/tmp"));
-    try ensureCacheDir(io, s.p("/cache"));
-
-    const staging = s.p("/tmp/tap_download.4242.zip");
-    {
-        const f = try std.Io.Dir.createFileAbsolute(io, staging, .{});
-        defer f.close(io);
-        try f.writeStreamingAll(io, "cross-volume-bytes");
-    }
-    const dest = s.p("/cache/Tap/" ++ "bb" ** 32 ++ ".zip");
-    try publishAcrossVolumes(io, staging, dest);
-
-    var buf: [64]u8 = undefined;
-    const f = try std.Io.Dir.openFileAbsolute(io, dest, .{});
-    defer f.close(io);
-    const n = try f.readPositionalAll(io, &buf, 0);
-    try std.testing.expectEqualStrings("cross-volume-bytes", buf[0..n]);
-    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, staging, .{}));
 }
 
 test "olderThan: strictly older than the window, so the boundary is kept" {

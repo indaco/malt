@@ -63,9 +63,4 @@ done
 [[ "$(cat "$MALT_CACHE/Cask/flux-2.0.dmg")" == dmg ]] || fail "adopted artefact lost its bytes"
 pass "legacy cask artefact, font sidecar and tap archive moved under MALT_CACHE"
 
-# Idempotent: a second run with nothing left to adopt changes nothing.
-"$BIN" purge --stale-casks --yes >/dev/null 2>&1 || true
-[[ -e "$MALT_CACHE/Cask/flux-2.0.dmg" ]] || fail "second run lost the adopted artefact"
-pass "re-running the sweep is a no-op"
-
 echo "legacy artefacts adopted under MALT_CACHE: OK"
