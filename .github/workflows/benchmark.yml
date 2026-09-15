@@ -110,6 +110,11 @@ jobs:
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
           ## Benchmark Results — macOS 14 (Apple Silicon)
 
+          - Benchmarked releases:
+            - malt `${STEPS_TREE_OUTPUTS_MT_VER}`
+            - nanobrew `${STEPS_TREE_OUTPUTS_NB_VER}`
+            - zerobrew `${STEPS_TREE_OUTPUTS_ZB_VER}`
+
           ### Binary Size
           | Tool | Size |
           |------|------|
@@ -118,13 +123,11 @@ jobs:
           | zerobrew | ${STEPS_TREE_OUTPUTS_ZB_SIZE} |
 
           ### Cold Install (median ±σ)
-          | Package | malt ${STEPS_TREE_OUTPUTS_MT_VER} | nanobrew ${STEPS_TREE_OUTPUTS_NB_VER} | zerobrew ${STEPS_TREE_OUTPUTS_ZB_VER} | Homebrew |
+          | Package | malt | nanobrew | zerobrew | Homebrew |
           |---------|------|----------|----------|----------|
           | **tree** (0 deps) | ${STEPS_TREE_OUTPUTS_MT_COLD_DISP} | ${STEPS_TREE_OUTPUTS_NB_COLD_DISP} | ${STEPS_TREE_OUTPUTS_ZB_COLD_DISP} | ${STEPS_TREE_OUTPUTS_BREW_COLD_DISP} |
           | **wget** (6 deps) | ${STEPS_WGET_OUTPUTS_MT_COLD_DISP} | ${STEPS_WGET_OUTPUTS_NB_COLD_DISP} | ${STEPS_WGET_OUTPUTS_ZB_COLD_DISP} | ${STEPS_WGET_OUTPUTS_BREW_COLD_DISP} |
           | **ffmpeg** (11 deps) | ${STEPS_FFMPEG_OUTPUTS_MT_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_NB_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_ZB_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_BREW_COLD_DISP} |
-
-          **Benchmarked releases:** malt `${STEPS_TREE_OUTPUTS_MT_VER}`, nanobrew `${STEPS_TREE_OUTPUTS_NB_VER}`, zerobrew `${STEPS_TREE_OUTPUTS_ZB_VER}` (malt pinned to its latest release branch; peer tools to their latest release tag).
 
           ### Warm Install
           | Package | malt | nanobrew | zerobrew |
@@ -166,6 +169,18 @@ jobs:
         run: |
           DATE=$(date -u +"%Y-%m-%d")
 
+          # Platform and benchmarked releases live in one list above the
+          # tables so no table header has to carry them.
+          cat > /tmp/meta_table.md << TABLE
+          <!-- BENCH:META:START -->
+          - Install times on macOS 14 (Apple Silicon).
+          - Benchmarked releases:
+            - malt \`${STEPS_TREE_OUTPUTS_MT_VER}\`
+            - nanobrew \`${STEPS_TREE_OUTPUTS_NB_VER}\`
+            - zerobrew \`${STEPS_TREE_OUTPUTS_ZB_VER}\`
+          <!-- BENCH:META:END -->
+          TABLE
+
           # Generate new size table
           cat > /tmp/size_table.md << TABLE
           <!-- BENCH:SIZE:START -->
@@ -188,7 +203,7 @@ jobs:
           <!-- BENCH:COLD:START -->
           ### Cold Install (median ±σ)
 
-          | Package | malt ${STEPS_TREE_OUTPUTS_MT_VER} | nanobrew ${STEPS_TREE_OUTPUTS_NB_VER} | zerobrew ${STEPS_TREE_OUTPUTS_ZB_VER} | Homebrew |
+          | Package | malt | nanobrew | zerobrew | Homebrew |
           | ------- | ---- | -------- | -------- | -------- |
           | **tree** (0 deps) | ${STEPS_TREE_OUTPUTS_MT_COLD_DISP} | ${STEPS_TREE_OUTPUTS_NB_COLD_DISP} | ${STEPS_TREE_OUTPUTS_ZB_COLD_DISP} | ${STEPS_TREE_OUTPUTS_BREW_COLD_DISP} |
           | **wget** (6 deps) | ${STEPS_WGET_OUTPUTS_MT_COLD_DISP} | ${STEPS_WGET_OUTPUTS_NB_COLD_DISP} | ${STEPS_WGET_OUTPUTS_ZB_COLD_DISP} | ${STEPS_WGET_OUTPUTS_BREW_COLD_DISP} |
@@ -228,10 +243,10 @@ jobs:
           TABLE
 
           # Strip leading whitespace from heredoc indentation
-          sed -i '' 's/^          //' /tmp/size_table.md /tmp/cold_table.md /tmp/warm_table.md
+          sed -i '' 's/^          //' /tmp/meta_table.md /tmp/size_table.md /tmp/cold_table.md /tmp/warm_table.md
 
           # Replace sections between markers
-          for marker in SIZE COLD WARM; do
+          for marker in META SIZE COLD WARM; do
             file="/tmp/$(echo "$marker" | tr '[:upper:]' '[:lower:]')_table.md"
             sed -i '' "/<!-- BENCH:${marker}:START -->/,/<!-- BENCH:${marker}:END -->/{
               /<!-- BENCH:${marker}:START -->/{
@@ -244,8 +259,8 @@ jobs:
           done
 
           # Update date. The anchor pins to the README's actual
-          # line (no `> Benchmarks on` blockquote prefix).
-          sed -i '' "s|^Apple Silicon (GitHub Actions macos-14), .*|Apple Silicon (GitHub Actions macos-14), $DATE. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).|" README.md
+          # blockquote line.
+          sed -i '' "s|^> Apple Silicon (GitHub Actions macos-14), .*|> Apple Silicon (GitHub Actions macos-14), $DATE. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).|" README.md
         env:
           STEPS_TREE_OUTPUTS_MT_SIZE: ${{ steps.tree.outputs.mt_size }}
           STEPS_TREE_OUTPUTS_NB_SIZE: ${{ steps.tree.outputs.nb_size }}
