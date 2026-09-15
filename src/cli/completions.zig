@@ -434,7 +434,7 @@ pub const zsh_script =
     \\                    ;;
     \\                purge)
     \\                    _arguments \
-    \\                        '--store-orphans[Refcount-0 store blobs]' \
+    \\                        '--store-orphans[Store blobs no installed keg references]' \
     \\                        '--unused-deps[Orphaned dependency kegs]' \
     \\                        '--cache=-[Prune cache files older than N days]::days:' \
     \\                        '--cache[Prune cache files older than 30 days]' \
@@ -759,7 +759,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command restore' -F
     \\
     \\    # purge — scope flags
-    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l store-orphans    -d 'Refcount-0 store blobs'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l store-orphans    -d 'Store blobs no installed keg references'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l unused-deps      -d 'Orphaned dependency kegs'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l cache            -d 'Prune cache files older than 30 days (or N via --cache=N)'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l downloads        -d 'Wipe the downloads cache (typed confirm)'

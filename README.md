@@ -437,7 +437,7 @@ mt purge --wipe --backup ~/snapshot.txt --remove-binary --yes
 
 | Scope             | Removes                                                 | Confirm gate        |
 | ----------------- | ------------------------------------------------------- | ------------------- |
-| `--store-orphans` | Refcount-0 blobs in `{prefix}/store`                    | none                |
+| `--store-orphans` | Store blobs no installed keg references                 | none                |
 | `--unused-deps`   | Indirect-install kegs no other package needs            | none                |
 | `--cache[=DAYS]`  | Cache files older than DAYS (default 30)                | none                |
 | `--downloads`     | Entire `{cache}/downloads` directory                    | type `downloads`    |

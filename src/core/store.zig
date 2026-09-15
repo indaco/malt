@@ -53,7 +53,7 @@ pub const Store = struct {
     }
 
     /// Removes both the on-disk path AND the store_refs row.  Without the
-    /// row delete, refcount-0 rows keep returning from `orphans()` on every
+    /// row delete, orphan rows keep returning from `orphans()` on every
     /// purge run — the bug `doctor --fix` already worked around.  deleteTree
     /// is a no-op on a missing path, so phantom rows still trigger DB cleanup.
     /// The DB delete runs inside an immediate transaction so concurrent
@@ -132,7 +132,7 @@ pub const Store = struct {
 
     /// Find reclaimable store entries. `kegs`, not the counter, is the
     /// authority on whether the bytes are still owned: the counter can
-    /// under-count a live keg.
+    /// under-count a live keg or keep a stranded claim nobody holds.
     pub fn orphans(self: *Store) StoreError!std.ArrayList([]const u8) {
         var list: std.ArrayList([]const u8) = .empty;
         errdefer {
@@ -140,8 +140,8 @@ pub const Store = struct {
             list.deinit(self.allocator);
         }
         var stmt = self.db.prepare(
-            "SELECT store_sha256 FROM store_refs WHERE refcount <= 0" ++
-                " AND NOT EXISTS (SELECT 1 FROM kegs WHERE kegs.store_sha256 = store_refs.store_sha256);",
+            "SELECT store_sha256 FROM store_refs" ++
+                " WHERE NOT EXISTS (SELECT 1 FROM kegs WHERE kegs.store_sha256 = store_refs.store_sha256);",
         ) catch return StoreError.RefCountError;
         defer stmt.finalize();
 
@@ -216,11 +216,11 @@ test "orphans skips a NULL store_sha256 row and still returns the real orphan" {
     try testing.expectEqualStrings("real", list.items[0]);
 }
 
-test "orphans returns exactly the refcount-zero rows and skips referenced rows" {
+test "orphans returns every row no keg holds, however high its counter drifted" {
     var db = try openSchemaDb();
     defer db.close();
     try db.exec(
-        "INSERT INTO store_refs (store_sha256, refcount) VALUES ('zero_a', 0), ('zero_b', 0), ('held', 3);",
+        "INSERT INTO store_refs (store_sha256, refcount) VALUES ('zero', 0), ('inflated', 3);",
     );
 
     var store = Store.init(std.Options.debug_io, testing.allocator, &db, "");
