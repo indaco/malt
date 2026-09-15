@@ -452,3 +452,50 @@ test "renderSnapshot handles empty formula and cask lists" {
     ;
     try std.testing.expectEqualStrings(want, json);
 }
+
+test "deleteSnapshot removes the file so the next reader must re-audit" {
+    // A rollback moves a keg below what the snapshot calls current; that keg
+    // has no entry to prune, so only an absent file makes readers recompute.
+    const a = std.testing.allocator;
+    const io = std.Options.debug_io;
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_snap_delete_{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    try writeSnapshot(io, a, dir, .{ .generated_at_ms = 1, .formulas = &.{}, .casks = &.{} });
+    try std.testing.expect(readSnapshot(io, a, dir) != null);
+
+    deleteSnapshot(io, dir);
+    try std.testing.expect(readSnapshot(io, a, dir) == null);
+}
+
+test "deleteSnapshot warns when the file cannot be removed, but not when it is already gone" {
+    // A stale snapshot that survives a rollback is the bug this guards
+    // against; if the delete fails for any reason other than absence the
+    // user must hear it, or `mt outdated` keeps lying with no signal.
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+    const a = std.testing.allocator;
+    const io = std.Options.debug_io;
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/malt_snap_locked_{d}", .{std.c.getpid()}, 0);
+    defer {
+        _ = std.c.chmod(dir.ptr, 0o755);
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    }
+    try writeSnapshot(io, a, dir, .{ .generated_at_ms = 1, .formulas = &.{}, .casks = &.{} });
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(a);
+    output.beginStderrCapture(a, &err_buf);
+    defer output.endStderrCapture();
+
+    _ = std.c.chmod(dir.ptr, 0o500);
+    deleteSnapshot(io, dir);
+    try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "outdated snapshot") != null);
+
+    _ = std.c.chmod(dir.ptr, 0o755);
+    err_buf.clearRetainingCapacity();
+    deleteSnapshot(io, dir);
+    deleteSnapshot(io, dir);
+    try std.testing.expectEqualStrings("", err_buf.items);
+}
