@@ -10,7 +10,7 @@ const schema = @import("malt").schema;
 const store_mod = @import("malt").store;
 
 // One distinct 64-hex key per fixture: collapsing them onto a shared constant
-// would quietly void the idempotent-commit and refcount assertions below.
+// would quietly void the idempotent-commit and claim assertions below.
 const sha_missing = "1" ** 64;
 const sha_commit_src = "2" ** 64;
 const sha_default_src = "3" ** 64;
@@ -150,8 +150,7 @@ test "remove also drops the store_refs row so the orphan does not return" {
     }
     ctx.store.db = &ctx.db;
 
-    try ctx.store.incrementRef(sha_orphan);
-    try ctx.store.decrementRef(sha_orphan); // refcount → 0
+    try ctx.store.claim(sha_orphan); // no keg holds it: an orphan
 
     // Pre-condition: enumerate sees the orphan.
     {
@@ -188,7 +187,7 @@ test "remove drops FS path and store_refs row in one transactional pass" {
     const dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ ctx.prefix, sha });
     defer testing.allocator.free(dir);
     test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
-    try ctx.store.incrementRef(sha);
+    try ctx.store.claim(sha);
     try testing.expect(ctx.store.exists(sha));
 
     try ctx.store.remove(sha);
@@ -205,35 +204,6 @@ test "remove drops FS path and store_refs row in one transactional pass" {
     // A leaked open transaction would make the next BEGIN IMMEDIATE error.
     try ctx.db.beginTransaction();
     try ctx.db.commit();
-}
-
-test "incrementRef and decrementRef update refcount" {
-    var ctx = try setupTestStore(testing.allocator);
-    defer {
-        ctx.db.close();
-        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
-        testing.allocator.free(ctx.prefix);
-    }
-    // setupTestStore stored a `*sqlite.Database` pointing at its own stack
-    // `db`. Re-bind it to the now-owned `ctx.db` so prepare() doesn't read
-    // a freed frame.
-    ctx.store.db = &ctx.db;
-
-    try ctx.store.incrementRef(sha_ref);
-    try ctx.store.incrementRef(sha_ref);
-    try ctx.store.decrementRef(sha_ref);
-
-    // Read the counter itself: `orphans()` answers from `kegs`, so it cannot
-    // witness arithmetic on a row no keg holds.
-    try testing.expectEqual(@as(?i64, 1), try refcountOf(&ctx.db, sha_ref));
-}
-
-fn refcountOf(db: *sqlite.Database, sha: []const u8) !?i64 {
-    var stmt = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;");
-    defer stmt.finalize();
-    try stmt.bindText(1, sha);
-    if (!try stmt.step()) return null;
-    return stmt.columnInt(0);
 }
 
 // ── Key validation ─────────────────────────────────────────────────────────
@@ -288,49 +258,6 @@ test "an explicit source path does not buy a caller past the key check" {
     try test_io.accessAbsolute(std.Options.debug_io, src, .{});
 }
 
-test "incrementRef refuses to create a row a store key could never name" {
-    var ctx = try setupTestStore(testing.allocator);
-    defer {
-        ctx.db.close();
-        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
-        testing.allocator.free(ctx.prefix);
-    }
-    ctx.store.db = &ctx.db;
-
-    // The sole DB ingress for a store key. A row born here that `remove`
-    // would later refuse is a row nothing can reap.
-    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.incrementRef("not-hex"));
-    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.incrementRef(""));
-    try testing.expectError(store_mod.StoreError.InvalidSha256, ctx.store.incrementRef("A" ** 64));
-
-    var stmt = try ctx.db.prepare("SELECT count(*) FROM store_refs;");
-    defer stmt.finalize();
-    try testing.expect(try stmt.step());
-    try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
-}
-
-test "decrementRef stays permissive so a legacy row can still be wound down" {
-    var ctx = try setupTestStore(testing.allocator);
-    defer {
-        ctx.db.close();
-        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
-        testing.allocator.free(ctx.prefix);
-    }
-    ctx.store.db = &ctx.db;
-
-    // Seed the way a legacy or hand-edited row got there, bypassing the guard.
-    {
-        var ins = try ctx.db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES ('legacy-row', 1);");
-        defer ins.finalize();
-        _ = try ins.step();
-    }
-
-    // Rejecting here would strand the row instead of protecting anything.
-    try ctx.store.decrementRef("legacy-row");
-
-    try testing.expectEqual(@as(?i64, 0), try refcountOf(&ctx.db, "legacy-row"));
-}
-
 test "remove rejects a malformed key before it can delete or transact" {
     var ctx = try setupTestStore(testing.allocator);
     defer {
@@ -340,13 +267,13 @@ test "remove rejects a malformed key before it can delete or transact" {
     }
     ctx.store.db = &ctx.db;
 
-    // A hand-edited row: refcount 0, key not hex, entry present on disk.
+    // A hand-edited row: key not hex, no keg, entry present on disk.
     const bad = "not-hex";
     const dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ ctx.prefix, bad });
     defer testing.allocator.free(dir);
     test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
     {
-        var ins = try ctx.db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES ('not-hex', 0);");
+        var ins = try ctx.db.prepare("INSERT INTO store_refs (store_sha256) VALUES ('not-hex');");
         defer ins.finalize();
         _ = try ins.step();
     }

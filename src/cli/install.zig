@@ -1223,11 +1223,9 @@ fn runInstall(
             continue;
         };
 
-        // Claim the store bytes for the keg row just written. Reconciling
-        // against `kegs` (rather than bumping) keeps a warm materialize from
-        // under-counting and `--force` from over-counting.
-        store.syncRef(job.store_sha256) catch |e| {
-            sink.warn("refcount sync failed for {s}: {s}", .{ job.name, @errorName(e) });
+        // Claim the store bytes for the keg row just written.
+        store.claim(job.store_sha256) catch |e| {
+            sink.warn("store claim failed for {s}: {s}", .{ job.name, @errorName(e) });
         };
 
         // `--force` post-link: now that `recordKeg` has inserted the

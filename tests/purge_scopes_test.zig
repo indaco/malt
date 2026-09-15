@@ -360,7 +360,7 @@ test "--old-versions --dry-run iterates Cellar dirs that hold multiple versions"
 
 // --- --store-orphans ----------------------------------------------------
 
-test "--store-orphans --dry-run iterates store entries with refcount=0" {
+test "--store-orphans --dry-run iterates store entries no keg holds" {
     const allocator = testing.allocator;
     var prefix = try ScratchPrefix.init(allocator, "store_orphans");
     defer prefix.deinit(allocator);
@@ -372,9 +372,9 @@ test "--store-orphans --dry-run iterates store entries with refcount=0" {
         defer db.close();
         try schema.initSchema(&db);
 
-        // Mark a store entry as orphaned (refcount = 0). The scope
-        // walks store/<sha>/ for sizing, so create the matching dir.
-        var stmt = try db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES (?1, 0);");
+        // A claim no keg holds is an orphan. The scope walks
+        // store/<sha>/ for sizing, so create the matching dir.
+        var stmt = try db.prepare("INSERT INTO store_refs (store_sha256) VALUES (?1);");
         defer stmt.finalize();
         try stmt.bindText(1, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         _ = try stmt.step();
@@ -410,7 +410,7 @@ test "--store-orphans skips a store_refs row whose key is not a store key" {
         try schema.initSchema(&db);
 
         for ([_][]const u8{ good, legacy }) |key| {
-            var stmt = try db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES (?1, 0);");
+            var stmt = try db.prepare("INSERT INTO store_refs (store_sha256) VALUES (?1);");
             defer stmt.finalize();
             try stmt.bindText(1, key);
             _ = try stmt.step();

@@ -80,7 +80,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Find the keg
     var find_stmt = db.prepare(
-        "SELECT id, version, revision, store_sha256 FROM kegs WHERE name = ?1 LIMIT 1;",
+        "SELECT id, version, revision FROM kegs WHERE name = ?1 LIMIT 1;",
     ) catch return;
     defer find_stmt.finalize();
     find_stmt.bindText(1, name) catch return;
@@ -94,9 +94,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const keg_id = find_stmt.columnInt(0);
     const ver_ptr = find_stmt.columnText(1);
     const revision = find_stmt.columnInt(2);
-    const sha_ptr = find_stmt.columnText(3);
     const version = if (ver_ptr) |v| std.mem.sliceTo(v, 0) else "unknown";
-    const sha256 = if (sha_ptr) |s| std.mem.sliceTo(s, 0) else "";
 
     // Revision-aware dir name for the on-disk cellar entry.
     var pkgver_buf: [128]u8 = undefined;
@@ -133,9 +131,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
 
     // Land the DB writes before any Cellar teardown so a SIGKILL
-    // between filesystem and database steps can't strand a refcount
-    // above the on-disk reality. CASCADE drops deps/links rows.
-    finalizeDbRemoval(&db, sha256, keg_id) catch {
+    // between filesystem and database steps can't leave a keg row
+    // pointing at a Cellar dir that is gone. CASCADE drops deps/links rows.
+    finalizeDbRemoval(&db, keg_id) catch {
         output.warn("Could not finalize uninstall for {s}", .{name});
     };
 
@@ -180,21 +178,13 @@ fn nameStillRecorded(db: *sqlite.Database, name: []const u8) bool {
     return stmt.step() catch true;
 }
 
-// Atomic DB-side teardown for an uninstall: the store-ref decrement and
-// the kegs delete must commit together so a SIGKILL between them can't
-// leave a refcount bumped above the on-disk Cellar reality.
-fn finalizeDbRemoval(db: *sqlite.Database, sha256: []const u8, keg_id: i64) sqlite.SqliteError!void {
+// DB-side teardown for an uninstall. Deleting the keg row is what
+// releases the store bytes: the `store_refs` row stays so the orphan
+// sweep can find them. One transaction so CASCADE and the delete land
+// together.
+fn finalizeDbRemoval(db: *sqlite.Database, keg_id: i64) sqlite.SqliteError!void {
     try db.beginTransaction();
     errdefer db.rollback();
-
-    if (sha256.len > 0) {
-        var dec = try db.prepare(
-            "UPDATE store_refs SET refcount = refcount - 1 WHERE store_sha256 = ?1 AND refcount > 0;",
-        );
-        defer dec.finalize();
-        try dec.bindText(1, sha256);
-        _ = try dec.step();
-    }
 
     var del = try db.prepare("DELETE FROM kegs WHERE id = ?1;");
     defer del.finalize();
@@ -223,12 +213,11 @@ fn testSeedKeg(db: *sqlite.Database, name: []const u8, sha256: []const u8) !i64 
     return sel.columnInt(0);
 }
 
-fn testRefcount(db: *sqlite.Database, sha256: []const u8) !?i64 {
-    var sel = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;");
+fn testRefRowPresent(db: *sqlite.Database, sha256: []const u8) !bool {
+    var sel = try db.prepare("SELECT 1 FROM store_refs WHERE store_sha256 = ?1;");
     defer sel.finalize();
     try sel.bindText(1, sha256);
-    if (!try sel.step()) return null;
-    return sel.columnInt(0);
+    return try sel.step();
 }
 
 fn testKegPresent(db: *sqlite.Database, keg_id: i64) !bool {
@@ -238,48 +227,40 @@ fn testKegPresent(db: *sqlite.Database, keg_id: i64) !bool {
     return try sel.step();
 }
 
-test "finalizeDbRemoval bundles the ref decrement with the kegs delete" {
+test "finalizeDbRemoval drops the kegs row and leaves the store claim for the orphan sweep" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
 
     const sha = "abc123";
-    var ins_ref = try db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES (?1, 2);");
-    try ins_ref.bindText(1, sha);
-    _ = try ins_ref.step();
-    ins_ref.finalize();
-
+    try db.exec("INSERT INTO store_refs (store_sha256) VALUES ('abc123');");
     const keg_id = try testSeedKeg(&db, "foo", sha);
-    try finalizeDbRemoval(&db, sha, keg_id);
+    try finalizeDbRemoval(&db, keg_id);
 
     try testing.expect(!try testKegPresent(&db, keg_id));
-    try testing.expectEqual(@as(?i64, 1), try testRefcount(&db, sha));
+    // The row is what makes the bytes visible to `purge --store-orphans`;
+    // deleting it here would hide them from every reclaim path.
+    try testing.expect(try testRefRowPresent(&db, sha));
 }
 
-test "finalizeDbRemoval rolls the ref decrement back when the delete is blocked" {
+test "finalizeDbRemoval leaves the kegs row when the delete is blocked" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
 
     const sha = "abc123";
-    var ins_ref = try db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES (?1, 2);");
-    try ins_ref.bindText(1, sha);
-    _ = try ins_ref.step();
-    ins_ref.finalize();
-
+    try db.exec("INSERT INTO store_refs (store_sha256) VALUES ('abc123');");
     const keg_id = try testSeedKeg(&db, "foo", sha);
 
-    // Trip the DELETE so atomicity is observable: after the failure,
-    // refcount must be untouched and the kegs row must still be there.
     try db.exec(
         \\CREATE TRIGGER block_keg_delete BEFORE DELETE ON kegs
         \\BEGIN SELECT RAISE(ABORT, 'blocked'); END;
     );
 
-    try testing.expectError(sqlite.SqliteError.ConstraintViolation, finalizeDbRemoval(&db, sha, keg_id));
+    try testing.expectError(sqlite.SqliteError.ConstraintViolation, finalizeDbRemoval(&db, keg_id));
 
     try testing.expect(try testKegPresent(&db, keg_id));
-    try testing.expectEqual(@as(?i64, 2), try testRefcount(&db, sha));
+    try testing.expect(try testRefRowPresent(&db, sha));
 }
 
 /// Uninstall a cask by token.

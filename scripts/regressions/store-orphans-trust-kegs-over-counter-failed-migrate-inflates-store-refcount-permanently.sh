@@ -41,9 +41,9 @@ export MALT_PREFIX="$prefix" NO_COLOR=1 MALT_NO_EMOJI=1 MALT_OFFLINE=1
 # A dry run creates the schema without touching the store.
 "$BIN" purge --store-orphans --dry-run >/dev/null 2>&1 || true
 
-# The inflated shape: three stranded claims, zero owning kegs.
+# The stranded shape: a claim row with zero owning kegs.
 sqlite3 "$prefix/db/malt.db" \
-  "INSERT INTO store_refs (store_sha256, refcount) VALUES ('$sha', 3);"
+  "INSERT INTO store_refs (store_sha256) VALUES ('$sha');"
 
 "$BIN" doctor >"$tmp/doctor.txt" 2>&1 || true
 grep -q '1 orphaned store entry' "$tmp/doctor.txt" ||

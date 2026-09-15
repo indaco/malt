@@ -102,8 +102,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
     // 6. store_refs
     try db.exec(
         \\CREATE TABLE IF NOT EXISTS store_refs (
-        \\    store_sha256  TEXT PRIMARY KEY,
-        \\    refcount      INTEGER NOT NULL DEFAULT 1
+        \\    store_sha256  TEXT PRIMARY KEY
         \\);
     );
 
@@ -129,7 +128,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 15;
+pub const known_schema_version: i64 = 16;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -154,6 +153,7 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 13) try migrateV12toV13(db);
     if (ver < 14) try migrateV13toV14(db);
     if (ver < 15) try migrateV14toV15(db);
+    if (ver < 16) try migrateV15toV16(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -761,6 +761,21 @@ fn migrateV14toV15(db: *sqlite.Database) sqlite.SqliteError!void {
     }
 
     try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (15);");
+
+    try db.commit();
+}
+
+/// `kegs` decides what is reclaimable, so the counter carried no
+/// information; a column nothing reads only invites a reader to trust it.
+fn migrateV15toV16(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    if (try columnsPresent(db, "PRAGMA table_info(store_refs);", &.{"refcount"})) {
+        try db.exec("ALTER TABLE store_refs DROP COLUMN refcount;");
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (16);");
 
     try db.commit();
 }

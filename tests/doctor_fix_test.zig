@@ -409,7 +409,7 @@ test "executeFix: live run sweeps stale lock + broken symlinks together" {
     try testing.expect(!pathExists(ghost));
 }
 
-test "fixOrphanedStore: sweeps refcount-zero entries against a real DB" {
+test "fixOrphanedStore: sweeps entries no keg holds against a real DB" {
     var prefix_buf: [128]u8 = undefined;
     const prefix = try makePrefix(&prefix_buf, "orphans");
     defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -428,8 +428,8 @@ test "fixOrphanedStore: sweeps refcount-zero entries against a real DB" {
     defer db.close();
     try schema.initSchema(&db);
 
-    // Seed: a store entry whose refcount drops to 0 is what `--store-orphans`
-    // sweeps; the fixer must do the same.
+    // Seed: a store entry no keg holds is what `--store-orphans` sweeps;
+    // the fixer must do the same.
     const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
     var entry_dir_buf: [320]u8 = undefined;
     const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
@@ -440,8 +440,7 @@ test "fixOrphanedStore: sweeps refcount-zero entries against a real DB" {
     const io = threaded.io();
 
     var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
-    try store.incrementRef(sha);
-    try store.decrementRef(sha);
+    try store.claim(sha);
 
     try testing.expectEqual(@as(u32, 1), fix.probeOrphanedStoreCount(io, prefix));
     const sweep = fix.fixOrphanedStore(io, prefix);
@@ -452,7 +451,7 @@ test "fixOrphanedStore: sweeps refcount-zero entries against a real DB" {
 }
 
 test "fixOrphanedStore: an undeletable orphan is reported as blocked, not silently skipped" {
-    // A refcount-0 orphan whose directory cannot be removed must surface as
+    // An orphan whose directory cannot be removed must surface as
     // blocked with a reason — not a silent count of 0 that reads exactly like
     // a clean prefix. Here the macOS immutable flag is the (root-proof) blocker.
     var prefix_buf: [128]u8 = undefined;
@@ -483,8 +482,7 @@ test "fixOrphanedStore: an undeletable orphan is reported as blocked, not silent
     const io = threaded.io();
 
     var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
-    try store.incrementRef(sha);
-    try store.decrementRef(sha);
+    try store.claim(sha);
 
     // Make the entry undeletable; clear the flag before the prefix teardown,
     // or deleteTree of the prefix would itself be blocked.
@@ -532,8 +530,7 @@ test "fixOrphanedStore: a partial sweep removes what it can and reports the rest
         var dir_buf: [320]u8 = undefined;
         const dir = try std.fmt.bufPrint(&dir_buf, "{s}/store/{s}", .{ prefix, sha });
         try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
-        try store.incrementRef(sha);
-        try store.decrementRef(sha);
+        try store.claim(sha);
     }
 
     var locked_z_buf: [320]u8 = undefined;
@@ -587,8 +584,7 @@ test "fixOrphanedStore: an immutable child never leaves a partial entry under a 
     const io = threaded.io();
 
     var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
-    try store.incrementRef(sha);
-    try store.decrementRef(sha);
+    try store.claim(sha);
 
     // Make one child undeletable; clear the flag wherever it ends up (the sweep
     // renames the entry aside), or the prefix teardown itself would block.
@@ -703,8 +699,7 @@ test "fixOrphanedStore: a stranded reap dir does not block reaping a fresh same-
     try writeFile(try std.fmt.bufPrint(&leaf_buf, "{s}/a", .{entry_dir}), "x");
 
     var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
-    try store.incrementRef(sha);
-    try store.decrementRef(sha);
+    try store.claim(sha);
 
     const sweep = fix.fixOrphanedStore(io, prefix);
     // Reaped despite the stranded name — probed to a free slot, not blocked.
@@ -747,8 +742,7 @@ test "orphan parity: an entry a live keg holds is invisible to both doctor and p
     const io = threaded.io();
 
     var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
-    try store.incrementRef(sha); // cold install
-    try store.decrementRef(sha); // uninstall drops the counter, keeps the bytes
+    try store.claim(sha); // cold install; uninstall keeps the row and the bytes
     try db.exec(
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)" ++
             " VALUES ('probe', 'probe', '1.0', '" ++ sha ++ "', '/probe/Cellar/probe/1.0');",
@@ -772,7 +766,7 @@ test "orphan parity: an entry a live keg holds is invisible to both doctor and p
 
 test "orphan parity: a no-row store entry is invisible to both doctor and purge" {
     // A store dir with no `store_refs` row is a warm / in-flight commit
-    // (`--download-only`, or an install interrupted before `incrementRef`).
+    // (`--download-only`, or an install interrupted before the claim).
     // `purge --store-orphans` is DB-driven and cannot remove it; doctor must
     // not flag it as one, or it routes the user to a command that no-ops.
     var prefix_buf: [128]u8 = undefined;
@@ -793,7 +787,7 @@ test "orphan parity: a no-row store entry is invisible to both doctor and purge"
     defer db.close();
     try schema.initSchema(&db);
 
-    // On disk but never `incrementRef`-d: no `store_refs` row.
+    // On disk but never claimed: no `store_refs` row.
     const sha = "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface";
     var entry_dir_buf: [320]u8 = undefined;
     const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });

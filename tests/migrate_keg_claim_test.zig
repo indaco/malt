@@ -1,7 +1,7 @@
 //! Integration tests for the store claim `cli/migrate/keg.zig::migrateKeg`
-//! takes. The refcount is what keeps a bottle's bytes out of every reclaim
-//! path, so it may only be bumped once a `kegs` row actually references
-//! them — otherwise a retried, blocked migrate pins those bytes forever.
+//! takes. A `store_refs` row no keg holds is an orphan, so the claim may
+//! only land once a `kegs` row actually references the bytes — otherwise a
+//! retried, blocked migrate hands the warm bottle to the next sweep.
 
 const std = @import("std");
 const malt = @import("malt");
@@ -94,14 +94,11 @@ fn plantSymlinkedPackageDir(io: std.Io, prefix: []const u8, name: []const u8) !v
     try test_io.symLinkAbsolute(io, victim, pkg_dir, .{ .is_directory = true });
 }
 
-fn claimedRefs(db: *sqlite.Database) !i64 {
-    var stmt = try db.prepare(
-        "SELECT COALESCE(SUM(refcount), 0) FROM store_refs WHERE store_sha256 = ?1;",
-    );
+fn claimed(db: *sqlite.Database) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM store_refs WHERE store_sha256 = ?1;");
     defer stmt.finalize();
     try stmt.bindText(1, sha);
-    _ = try stmt.step();
-    return stmt.columnInt(0);
+    return try stmt.step();
 }
 
 fn kegRows(db: *sqlite.Database) !i64 {
@@ -187,8 +184,8 @@ test "a refused migrate claims no store bytes, however often it is retried" {
 
     const ctx = h.ctx();
     const deps = h.deps(&fx);
-    // Three attempts: one stranded bump is a bug, three is the inflation
-    // that no reclaim path can ever drain.
+    // Three attempts: a claim taken by any of them would be a row no keg
+    // holds, and the sweep would reclaim the warm bytes the next migrate needs.
     for (0..3) |_| {
         try testing.expectEqual(
             migrate_keg.KegResult.failed_install,
@@ -197,10 +194,10 @@ test "a refused migrate claims no store bytes, however often it is retried" {
     }
 
     try testing.expectEqual(@as(i64, 0), try kegRows(&h.db));
-    try testing.expectEqual(@as(i64, 0), try claimedRefs(&h.db));
+    try testing.expect(!try claimed(&h.db));
 }
 
-test "a successful migrate claims the bottle exactly once" {
+test "a successful migrate claims the bottle" {
     var fx = try Fixture.init("ok");
     defer fx.deinit();
     try fx.seed("planted", false);
@@ -217,10 +214,10 @@ test "a successful migrate claims the bottle exactly once" {
     );
 
     try testing.expectEqual(@as(i64, 1), try kegRows(&h.db));
-    try testing.expectEqual(@as(i64, 1), try claimedRefs(&h.db));
+    try testing.expect(try claimed(&h.db));
 }
 
-test "re-migrating an installed keg does not claim the bottle a second time" {
+test "re-migrating an installed keg keeps the bottle claimed" {
     var fx = try Fixture.init("again");
     defer fx.deinit();
     try fx.seed("planted", false);
@@ -240,12 +237,12 @@ test "re-migrating an installed keg does not claim the bottle a second time" {
         migrate_keg.migrateKeg(&ctx, h.arena.allocator(), "planted", deps),
     );
 
-    try testing.expectEqual(@as(i64, 1), try claimedRefs(&h.db));
+    try testing.expect(try claimed(&h.db));
 }
 
 // The claim sits after the shared record step; gating it on the link
 // would leave keg-only bottles unclaimed and reclaimable while live.
-test "a keg-only migrate claims the bottle exactly once" {
+test "a keg-only migrate claims the bottle" {
     var fx = try Fixture.init("kegonly");
     defer fx.deinit();
     try fx.seed("planted", true);
@@ -262,13 +259,13 @@ test "a keg-only migrate claims the bottle exactly once" {
     );
 
     try testing.expectEqual(@as(i64, 1), try kegRows(&h.db));
-    try testing.expectEqual(@as(i64, 1), try claimedRefs(&h.db));
+    try testing.expect(try claimed(&h.db));
 }
 
-// `std.Io.Mutex` is not recursive, so routing the claim back through
-// `incrementRefLocked` here would hang every worker rather than fail a
-// check. This drives the locked shape end to end so that never ships.
-test "a parallel-shaped migrate claims once without re-taking the worker lock" {
+// `std.Io.Mutex` is not recursive, so re-taking `db_mu` around the claim
+// would hang every worker rather than fail a check. This drives the locked
+// shape end to end so that never ships.
+test "a parallel-shaped migrate claims without re-taking the worker lock" {
     var fx = try Fixture.init("parallel");
     defer fx.deinit();
     try fx.seed("planted", false);
@@ -289,5 +286,5 @@ test "a parallel-shaped migrate claims once without re-taking the worker lock" {
     try testing.expect(db_mu.tryLock());
     db_mu.unlock(h.threaded.io());
 
-    try testing.expectEqual(@as(i64, 1), try claimedRefs(&h.db));
+    try testing.expect(try claimed(&h.db));
 }

@@ -170,21 +170,19 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     }
 
     var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
-    var store = store_mod.Store.init(io, allocator, &db, prefix);
 
     // Per-orphan removal is best-effort across all steps: a partially-linked
     // or partially-materialized keg must still be cleanable. Callers rely on
-    // the DB `DELETE` as the authoritative removal signal; filesystem and
-    // refcount side-effects converge on subsequent runs.
+    // the DB `DELETE` as the authoritative removal signal; filesystem
+    // side-effects converge on subsequent runs.
     for (removable.items) |name| {
-        var stmt = db.prepare("SELECT id, store_sha256, cellar_path FROM kegs WHERE name = ?1;") catch continue;
+        var stmt = db.prepare("SELECT id, cellar_path FROM kegs WHERE name = ?1;") catch continue;
         defer stmt.finalize();
         stmt.bindText(1, name) catch continue;
 
         if (stmt.step() catch false) {
             const keg_id = stmt.columnInt(0);
-            const sha_ptr = stmt.columnText(1);
-            const cellar_ptr = stmt.columnText(2);
+            const cellar_ptr = stmt.columnText(1);
 
             // The on-disk dir is named by pkg_version (`<version>_<revision>`),
             // so derive the leaf from cellar_path — raw `version` would miss a
@@ -208,9 +206,6 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
                 const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
                 // Parent dir may be non-empty (sibling versions still installed).
                 if (parent_path.len > 0) std.Io.Dir.deleteDirAbsolute(io, parent_path) catch {};
-            }
-            if (sha_ptr) |s| {
-                store.decrementRef(std.mem.sliceTo(s, 0)) catch {};
             }
             var del = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch continue;
             defer del.finalize();

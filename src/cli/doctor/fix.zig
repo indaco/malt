@@ -836,7 +836,7 @@ test "isPurgeableOrphan: a row is an orphan exactly when no keg holds it" {
     try std.testing.expect(!isPurgeableOrphan(false, true));
 }
 
-test "OrphanProbe: one probe reset-drives orphan / live-ref / no-row / held shas in sequence" {
+test "OrphanProbe: one probe reset-drives orphan / live-ref / no-row shas in sequence" {
     // Driving every sha through a single probe is the point: it proves
     // reset-then-rebind works across rows — the lifecycle the old per-call
     // prepare/finalize never exercised.
@@ -849,22 +849,17 @@ test "OrphanProbe: one probe reset-drives orphan / live-ref / no-row / held shas
     var db = try sqlite.Database.open(db_path);
     defer db.close();
     try db.exec(
-        \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY, refcount INTEGER NOT NULL DEFAULT 1);
+        \\CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY);
         \\CREATE TABLE kegs (id INTEGER PRIMARY KEY, store_sha256 TEXT);
-        \\INSERT INTO store_refs VALUES ('orphan', 0);
-        \\INSERT INTO store_refs VALUES ('inflated', 3);
-        \\INSERT INTO store_refs VALUES ('live', 2);
-        \\INSERT INTO store_refs VALUES ('held', 0);
-        \\INSERT INTO kegs (store_sha256) VALUES ('live'), ('held');
+        \\INSERT INTO store_refs VALUES ('orphan'), ('live');
+        \\INSERT INTO kegs (store_sha256) VALUES ('live');
     );
 
     var probe = try OrphanProbe.init(&db);
     defer probe.deinit();
-    try std.testing.expect(probe.isOrphan("orphan")); // row reached zero, no keg
-    try std.testing.expect(probe.isOrphan("inflated")); // stranded claims, no keg
+    try std.testing.expect(probe.isOrphan("orphan")); // row, no keg
     try std.testing.expect(!probe.isOrphan("live")); // keg holds it
     try std.testing.expect(!probe.isOrphan("missing")); // no row
-    try std.testing.expect(!probe.isOrphan("held")); // under-counted, keg still holds it
     // Reusable after a positive hit: same probe instance, sha reused.
     try std.testing.expect(probe.isOrphan("orphan"));
 }

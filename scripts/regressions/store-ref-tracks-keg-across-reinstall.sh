@@ -39,10 +39,10 @@ fail() {
 
 db() { sqlite3 "$PREFIX/db/malt.db" "$1"; }
 
-# refcount for the one store entry, or "none" when no row exists.
-refcount() {
+# "row" when the store entry is claimed, "none" when no row exists.
+claim() {
   local v
-  v=$(db "SELECT refcount FROM store_refs WHERE store_sha256 = '$1';")
+  v=$(db "SELECT 'row' FROM store_refs WHERE store_sha256 = '$1';")
   printf '%s' "${v:-none}"
 }
 
@@ -51,37 +51,39 @@ refcount() {
 
 SHA=$(db "SELECT store_sha256 FROM kegs WHERE name = '$PKG';")
 [[ -n "$SHA" ]] || fail 'cold install recorded no keg'
-[[ "$(refcount "$SHA")" == 1 ]] ||
-  fail "cold install left refcount $(refcount "$SHA"), want 1"
+[[ "$(claim "$SHA")" == row ]] ||
+  fail "cold install left no store_refs row"
 pass "cold install claims the bytes"
 
 "$BIN" uninstall "$PKG" </dev/null >/dev/null 2>&1 ||
   fail "uninstall of $PKG failed"
-[[ "$(refcount "$SHA")" == 0 ]] ||
-  fail "uninstall left refcount $(refcount "$SHA"), want 0"
+[[ "$(claim "$SHA")" == row ]] ||
+  fail "uninstall dropped the store_refs row; the orphan sweep can no longer see the bytes"
 [[ -d "$PREFIX/store/$SHA" ]] ||
   fail 'uninstall removed the store entry; the warm-reinstall path is gone'
 pass 'uninstall releases the bytes but keeps them warm'
 
 # The bug: this install materializes from the warm store, so the old
-# download-gated bump never fired and the entry stayed at 0.
+# download-gated claim never fired.
 "$BIN" install "$PKG" </dev/null >/dev/null 2>&1 ||
   fail "warm reinstall of $PKG failed"
-[[ "$(refcount "$SHA")" == 1 ]] ||
-  fail "warm reinstall left refcount $(refcount "$SHA"), want 1"
-pass 'warm reinstall re-claims the bytes for the new keg'
+[[ "$(claim "$SHA")" == row ]] ||
+  fail "warm reinstall left no store_refs row"
+pass 'warm reinstall keeps the bytes claimed for the new keg'
 
 "$BIN" purge --store-orphans </dev/null >/dev/null 2>&1 || true
 [[ -d "$PREFIX/store/$SHA" ]] ||
   fail 'the orphan sweep reclaimed bytes a live keg holds'
 pass 'the orphan sweep leaves a referenced entry alone'
 
-# The opposite drift: --force replaces the keg row rather than adding one,
-# so a plain increment here would climb past the single keg that exists.
+# --force replaces the keg row rather than adding one; the claim must
+# still be there and the sweep must still leave the entry alone.
 "$BIN" install --force "$PKG" </dev/null >/dev/null 2>&1 ||
   fail "forced reinstall of $PKG failed"
-[[ "$(refcount "$SHA")" == 1 ]] ||
-  fail "forced reinstall left refcount $(refcount "$SHA"), want 1"
-pass 'a forced reinstall does not inflate the count'
+[[ "$(claim "$SHA")" == row ]] ||
+  fail "forced reinstall left no store_refs row"
+"$BIN" purge --store-orphans --dry-run </dev/null 2>&1 | grep -q "$SHA" &&
+  fail 'the orphan sweep lists an entry a forced reinstall still holds'
+pass 'a forced reinstall keeps the entry claimed'
 
 printf 'PASS: the store ref tracks the keg across the reinstall lifecycle\n'

@@ -292,3 +292,35 @@ test "v14 leaves one identity per tap across taps, kegs and casks" {
     try testing.expect(try commits.step());
     try testing.expectEqual(@as(i64, 2), commits.columnInt(0));
 }
+
+fn storeRefsHasColumn(db: *sqlite.Database, name: []const u8) !bool {
+    var stmt = try db.prepare("PRAGMA table_info(store_refs);");
+    defer stmt.finalize();
+    while (try stmt.step()) {
+        const col = stmt.columnText(1) orelse continue;
+        if (std.mem.eql(u8, std.mem.sliceTo(col, 0), name)) return true;
+    }
+    return false;
+}
+
+test "v16 drops the store_refs counter and keeps every claim row" {
+    var t = try TempDb.init("v16_store_refs_claim_set");
+    defer t.deinit();
+    try schema.initSchema(&t.db);
+    try testing.expect(!try storeRefsHasColumn(&t.db, "refcount"));
+
+    // Rebuild the v15 shape: the counter column back on the table and a
+    // row whose count drifted, then rerun the chain from v15.
+    try t.db.exec("ALTER TABLE store_refs ADD COLUMN refcount INTEGER NOT NULL DEFAULT 1;");
+    try t.db.exec("INSERT INTO store_refs (store_sha256, refcount) VALUES ('sha', 3);");
+    try t.db.exec("DELETE FROM schema_version WHERE version >= 16;");
+    try schema.migrate(&t.db);
+
+    try testing.expect(!try storeRefsHasColumn(&t.db, "refcount"));
+    var rows = try t.db.prepare("SELECT store_sha256 FROM store_refs;");
+    defer rows.finalize();
+    try testing.expect(try rows.step());
+    try testing.expectEqualStrings("sha", std.mem.sliceTo(rows.columnText(0).?, 0));
+    try testing.expect(!try rows.step());
+    try testing.expectEqual(@as(i64, 16), try schema.currentVersion(&t.db));
+}
