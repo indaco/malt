@@ -583,8 +583,8 @@ pub const InstallKegResult = struct {
 /// Materialise a keg from a formula's bottle URL.
 ///
 /// Composes the install pipeline's per-keg work — bottle resolve, GHCR
-/// download with bounded retry, store commit, cellar materialize +
-/// refcount — so the install pool worker and the upgrade per-keg
+/// download with bounded retry, store commit, cellar materialize —
+/// so the install pool worker and the upgrade per-keg
 /// loop share one implementation instead of drifting in two places.
 ///
 /// On a warm store the download branch is skipped entirely and the
@@ -632,14 +632,14 @@ pub fn installKegFromBottle(
         return InstallError.CellarFailed;
     };
 
-    // The store ref belongs to the keg row, not to this download: the caller
-    // claims it with `Store.syncRef` once `recordKeg` has run.
+    // The store claim belongs to the keg row, not to this download: the
+    // caller takes it with `Store.claim` once `recordKeg` has run.
     return .{ .sha256 = bottle.sha256, .keg = keg };
 }
 
 /// Ensure the bottle bytes live at `<prefix>/store/<sha>/`. Returns
 /// `true` when a fresh commit happened (i.e. the store didn't already
-/// hold the SHA), `false` for the warm-store skip. The refcount and
+/// hold the SHA), `false` for the warm-store skip. The claim and
 /// materialise steps are the caller's job — this seam is shared by
 /// `installKegFromBottle` and the `--download-only` pool worker.
 pub fn downloadBottleToStore(
@@ -771,7 +771,7 @@ pub const InstallPool = struct {
     /// keeps a thread-safe heap (typically `smp_allocator`).
     worker_backing: std.mem.Allocator,
     /// When set, workers stop after the per-keg download phase. The
-    /// caller's serial link loop bails on this flag; refcount stays at 0
+    /// caller's serial link loop bails on this flag; no claim is taken,
     /// so warmed bytes are invisible to `purge --store-orphans`.
     download_only: bool = false,
     /// Where per-keg worker output goes; terminal by default.

@@ -137,8 +137,8 @@ test "an orphaned store entry serializes a fixable orphaned_store finding" {
     defer s.deinit(allocator);
     try s.initSchema();
 
-    // A store/<sha> dir whose store_refs refcount has dropped to 0 is a
-    // true orphan — the entry `purge --store-orphans` removes.
+    // A store/<sha> dir claimed by no keg is a true orphan — the entry
+    // `purge --store-orphans` removes.
     const sha = "0000000000000000000000000000000000000000000000000000000000000000";
     const orphan = try std.fmt.allocPrint(allocator, "{s}/store/{s}", .{ s.path, sha });
     defer allocator.free(orphan);
@@ -150,8 +150,7 @@ test "an orphaned store entry serializes a fixable orphaned_store finding" {
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         var store = store_mod.Store.init(std.Options.debug_io, allocator, &db, s.path);
-        try store.incrementRef(sha);
-        try store.decrementRef(sha);
+        try store.claim(sha);
     }
 
     var result = walk(allocator, s.path);

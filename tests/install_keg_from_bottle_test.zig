@@ -244,8 +244,8 @@ test "installKegFromBottle stamps the specific CellarError variant into cellar_d
 
 // ── cold-path store claim ──────────────────────────────────────────────────
 //
-// The refcount bump is the store's "these bytes are claimed" marker, and it
-// is only reachable on a cold commit — the warm path skips it by contract.
+// The `store_refs` row is the store's "these bytes are claimed" marker, and
+// it is only reachable on a cold commit — the warm path skips it by contract.
 // So this arm serves a real bottle over a loopback registry, the same
 // offline transport `bottle_download_test.zig` uses.
 
@@ -286,14 +286,6 @@ fn tarCzf(argv: []const []const u8) !void {
 
 fn refRows(db: *sqlite.Database, sha: []const u8) !i64 {
     var stmt = try db.prepare("SELECT count(*) FROM store_refs WHERE store_sha256 = ?1;");
-    defer stmt.finalize();
-    try stmt.bindText(1, sha);
-    _ = try stmt.step();
-    return stmt.columnInt(0);
-}
-
-fn claimedRefs(db: *sqlite.Database, sha: []const u8) !i64 {
-    var stmt = try db.prepare("SELECT count(*) FROM store_refs WHERE store_sha256 = ?1 AND refcount > 0;");
     defer stmt.finalize();
     try stmt.bindText(1, sha);
     _ = try stmt.step();
@@ -412,9 +404,8 @@ test "installKegFromBottle claims no store bytes when the materialise is refused
 
     // No keg row references these bytes, so nothing may claim them. Note
     // this leaves NO row, which is not the same as reclaimable: purge
-    // defines an orphan as a row at refcount <= 0, and a rowless entry is
-    // deliberately invisible to it. What this pins is that the refcount
-    // never lies about a keg that does not exist.
-    try testing.expectEqual(@as(i64, 0), try claimedRefs(&db, &sha));
+    // defines an orphan as a row no keg holds, and a rowless entry is
+    // deliberately invisible to it. What this pins is that a claim never
+    // lies about a keg that does not exist.
     try testing.expectEqual(@as(i64, 0), try refRows(&db, &sha));
 }

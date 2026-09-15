@@ -48,9 +48,8 @@ fn unquiet() void {
 }
 
 // Insert a fully-formed kegs row plus an empty Cellar dir so the happy
-// path has something to delete. `store_sha256` is left blank so the
-// `decrementRef` branch short-circuits — that path is exercised
-// separately by the store tests.
+// path has something to delete. `store_sha256` is left blank: the store
+// claim is exercised separately by the store tests.
 fn seedKeg(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8, version: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
@@ -93,7 +92,7 @@ fn kegRowExists(prefix: []const u8, name: []const u8) !bool {
 }
 
 // Seed a keg whose store_sha256 is populated and a matching store_refs row.
-// Lets the test inspect the post-uninstall refcount, which seedKeg above
+// Lets the test inspect the post-uninstall claim, which seedKeg above
 // deliberately sidesteps by leaving sha empty.
 fn seedKegWithStoreRef(
     allocator: std.mem.Allocator,
@@ -101,7 +100,6 @@ fn seedKegWithStoreRef(
     name: []const u8,
     version: []const u8,
     sha256: []const u8,
-    refcount: i64,
 ) !void {
     var db_path_buf: [512]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
@@ -123,10 +121,9 @@ fn seedKegWithStoreRef(
     try ins_keg.bindText(4, cellar_rel);
     _ = try ins_keg.step();
 
-    var ins_ref = try db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES (?1, ?2);");
+    var ins_ref = try db.prepare("INSERT INTO store_refs (store_sha256) VALUES (?1);");
     defer ins_ref.finalize();
     try ins_ref.bindText(1, sha256);
-    try ins_ref.bindInt(2, refcount);
     _ = try ins_ref.step();
 
     const cellar_dir = try std.fmt.allocPrint(allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
@@ -134,16 +131,15 @@ fn seedKegWithStoreRef(
     try test_io.cwd().createDirPath(std.Options.debug_io, cellar_dir);
 }
 
-fn refcountFor(prefix: []const u8, sha256: []const u8) !?i64 {
+fn storeRefExists(prefix: []const u8, sha256: []const u8) !bool {
     var db_path_buf: [512]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
-    var stmt = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;");
+    var stmt = try db.prepare("SELECT 1 FROM store_refs WHERE store_sha256 = ?1;");
     defer stmt.finalize();
     try stmt.bindText(1, sha256);
-    if (!try stmt.step()) return null;
-    return stmt.columnInt(0);
+    return try stmt.step();
 }
 
 // --- early-return branches ----------------------------------------------
@@ -350,15 +346,14 @@ test "execute on a cask surfaces removeRecord SqliteError with db.errMsg in the 
     try testing.expect(std.mem.indexOf(u8, captured.items, "ConstraintViolation") != null);
 }
 
-test "execute drops the kegs row and decrements the store ref together" {
-    // Pre-fix the FS teardown ran before the ref decrement, so a SIGKILL
-    // mid-uninstall could leave the store row inflated above the on-disk
-    // state. Asserting both writes land guards the bundled-transaction shape.
+test "execute drops the kegs row and leaves the store claim for the orphan sweep" {
+    // Deleting the keg row is what releases the bytes; the `store_refs` row
+    // is how `purge --store-orphans` finds them afterwards, so it must stay.
     var prefix = try ScratchPrefix.init(testing.allocator, "storeref");
     defer prefix.deinit(testing.allocator);
 
     const sha = "abc123";
-    try seedKegWithStoreRef(testing.allocator, prefix.path, "foo", "1.0", sha, 2);
+    try seedKegWithStoreRef(testing.allocator, prefix.path, "foo", "1.0", sha);
 
     quiet();
     defer unquiet();
@@ -366,7 +361,7 @@ test "execute drops the kegs row and decrements the store ref together" {
     try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
 
     try testing.expect(!try kegRowExists(prefix.path, "foo"));
-    try testing.expectEqual(@as(?i64, 1), try refcountFor(prefix.path, sha));
+    try testing.expect(try storeRefExists(prefix.path, sha));
 }
 
 test "execute clears a symlinked package dir instead of deleting through it" {
