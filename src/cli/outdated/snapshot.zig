@@ -260,6 +260,19 @@ pub fn readSnapshot(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const
     return parseSnapshot(allocator, bytes) catch null;
 }
 
+/// Remove `{cache_dir}/outdated.json`. Deletes rather than prunes: a keg
+/// moved below what the snapshot called current has no entry to drop, so
+/// only a re-audit can represent it. Best-effort — absent is the goal — but
+/// a file that stays put keeps misleading readers, so that is said aloud.
+pub fn deleteSnapshot(io: std.Io, cache_dir: []const u8) void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ cache_dir, snapshot_file }) catch return;
+    std.Io.Dir.deleteFileAbsolute(io, path) catch |e| switch (e) {
+        error.FileNotFound => {},
+        else => output.warn("Could not remove the stale outdated snapshot at {s}: {s}", .{ path, @errorName(e) }),
+    };
+}
+
 /// Free both arrays + every duped string in `snap`.
 pub fn freeSnapshot(allocator: std.mem.Allocator, snap: OwnedSnapshot) void {
     freeEntrySlice(allocator, snap.formulas);

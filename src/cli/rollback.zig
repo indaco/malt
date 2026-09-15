@@ -18,6 +18,7 @@ const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 const install_mod = @import("install.zig");
 const formula_mod = @import("../core/formula.zig");
+const snap_mod = @import("outdated/snapshot.zig");
 
 /// `error.Aborted` is returned on every user-facing failure. The caller has
 /// already emitted a message via `output.err`; main.zig catches it and exits
@@ -254,7 +255,21 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.warn("Could not create opt link for {s}", .{name});
     };
 
+    // Upgrade prunes the outdated snapshot because the moved keg is in it;
+    // a rolled-back keg was current when the file was warmed, so it is not,
+    // and a fresh file would keep hiding it from `mt outdated` and the TUI.
+    invalidateOutdatedSnapshot(ctx.io, allocator);
+
     output.info("{s} rolled back to {s}", .{ name, target.pkg_version });
+}
+
+/// Drop `{cache}/outdated.json` so the next reader re-audits. Resolved the
+/// way `mt outdated` resolves it; a MALT_CACHE the readers would refuse is
+/// skipped, not fatal — the rollback has already committed.
+fn invalidateOutdatedSnapshot(io: std.Io, allocator: std.mem.Allocator) void {
+    const cache_dir = atomic.maltCacheDirChecked(allocator) catch return;
+    defer allocator.free(cache_dir);
+    snap_mod.deleteSnapshot(io, cache_dir);
 }
 
 /// Point the keg at `target` inside the caller's transaction. `unlink`
@@ -402,6 +417,8 @@ fn dispatchCask(
         output.err("failed to reinstall {s} {s} ({s})", .{ token, target_pkg_version, @errorName(e) });
         return error.Aborted;
     };
+    // See the keg path: the downgraded cask is not in the snapshot to prune.
+    invalidateOutdatedSnapshot(ctx.io, allocator);
     output.info("{s} rolled back to {s}", .{ token, target_pkg_version });
 }
 
