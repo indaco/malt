@@ -178,14 +178,18 @@ fn buildVersionMap(
     return map;
 }
 
-/// True when `row` resolves against the bulk version map: every formula,
-/// and any cask from the core tap (or with no tap). Non-core tap casks
-/// fall through to the per-HEAD `.rb` path the bulk dump can't cover.
 /// Core rows (no tap or the homebrew core tap) resolve from the bulk version
-/// map; third-party-tap rows fall through to the per-HEAD `.rb` path. Only the
-/// tap decides — kind-independent.
+/// map; third-party-tap rows fall through to the per-HEAD `.rb` path; local
+/// rows (`isLocalRow`) are skipped before either. Only the tap decides —
+/// kind-independent.
 fn isCorePathRow(row: KegRow) bool {
     return if (row.tap) |t| install_args_mod.isCoreTap(t) else true;
+}
+
+/// A `--local` keg has no upstream: it is out of the audit's scope, neither
+/// current nor outdated, and must never reach the map or the fetch path.
+fn isLocalRow(row: KegRow) bool {
+    return if (row.tap) |t| install_args_mod.isLocalTap(t) else false;
 }
 
 // Outdated policy — the normative statement. malt treats the tap as the source
@@ -1556,6 +1560,13 @@ test "isCorePathRow routes core rows to the map and third-party taps per-HEAD" {
     try std.testing.expect(!isCorePathRow(.{ .name = "f", .version = "1", .tap = "user/repo" }));
 }
 
+test "isLocalRow: only a --local keg is out of the audit's scope" {
+    try std.testing.expect(isLocalRow(.{ .name = "older", .version = "1", .tap = "local" }));
+    try std.testing.expect(!isLocalRow(.{ .name = "wget", .version = "1" }));
+    try std.testing.expect(!isLocalRow(.{ .name = "x", .version = "1", .tap = "homebrew/core" }));
+    try std.testing.expect(!isLocalRow(.{ .name = "x", .version = "1", .tap = "user/repo" }));
+}
+
 // Answers by request path — `/Formula/`, `/Casks/`, or the root `<name>.rb` —
 // with that layout's body, 404 when it is null; so a test can pin which layout
 // a subtree list reaches and in what order.
@@ -1985,6 +1996,68 @@ test "collectOutdatedFormulas treats zero kegs as a complete audit" {
     const audit = try collectOutdatedFormulas(&oa.ctx, std.testing.allocator, &oa.db, &oa.api, s.base, &.{}, null);
     defer snap_mod.freeEntrySlice(std.testing.allocator, audit.entries);
     try std.testing.expect(audit.complete);
+}
+
+test "collectOutdatedFormulas skips a local keg without marking the audit incomplete" {
+    var s = try Scratch.init("audit_local_beside_core");
+    defer s.deinit();
+    var oa: OfflineAudit = undefined;
+    try oa.init(s.base);
+    defer oa.deinit();
+
+    try s.dir.createDirPath(oa.ctx.io, "api");
+    const f = try s.dir.createFile(oa.ctx.io, "api/versions_formula.txt", .{});
+    try f.writeStreamingAll(oa.ctx.io, "core_row\t2.0\t0\n");
+    f.close(oa.ctx.io);
+
+    // The client is offline with no cached answer for the local keg: had the
+    // audit tried to resolve it, the row would come back unresolved and taint
+    // `complete`. A complete audit proves the row was never attempted.
+    const kegs = [_]KegRow{
+        .{ .name = "older", .version = "1.0", .tap = "local" },
+        .{ .name = "core_row", .version = "1.0" },
+    };
+    const audit = try collectOutdatedFormulas(&oa.ctx, std.testing.allocator, &oa.db, &oa.api, s.base, &kegs, null);
+    defer snap_mod.freeEntrySlice(std.testing.allocator, audit.entries);
+
+    try std.testing.expect(audit.complete);
+    try std.testing.expectEqual(@as(usize, 1), audit.entries.len);
+    try std.testing.expectEqualStrings("core_row", audit.entries[0].name);
+    try std.testing.expectEqualStrings("2.0", audit.entries[0].latest);
+}
+
+test "collectOutdatedFormulas with only a local keg is complete and empty on a cold cache" {
+    var s = try Scratch.init("audit_local_only");
+    defer s.deinit();
+    var oa: OfflineAudit = undefined;
+    try oa.init(s.base);
+    defer oa.deinit();
+
+    // No index, no per-keg cache: any fetch attempt would fail and clear
+    // `complete`, so a complete audit pins that nothing was fetched.
+    const kegs = [_]KegRow{.{ .name = "older", .version = "1.0", .tap = "local" }};
+    const audit = try collectOutdatedFormulas(&oa.ctx, std.testing.allocator, &oa.db, &oa.api, s.base, &kegs, null);
+    defer snap_mod.freeEntrySlice(std.testing.allocator, audit.entries);
+
+    try std.testing.expect(audit.complete);
+    try std.testing.expectEqual(@as(usize, 0), audit.entries.len);
+}
+
+test "collectOutdatedCasks skips a local row on the cask leg too" {
+    var s = try Scratch.init("audit_local_cask");
+    defer s.deinit();
+    var oa: OfflineAudit = undefined;
+    try oa.init(s.base);
+    defer oa.deinit();
+
+    // Both kinds share one disposition pass; pin the cask leg so a
+    // kind-specific reader can never reintroduce the tap routing.
+    const kegs = [_]KegRow{.{ .name = "older", .version = "1.0", .tap = "local" }};
+    const audit = try collectOutdatedCasks(&oa.ctx, std.testing.allocator, &oa.db, &oa.api, s.base, &kegs, null);
+    defer snap_mod.freeEntrySlice(std.testing.allocator, audit.entries);
+
+    try std.testing.expect(audit.complete);
+    try std.testing.expectEqual(@as(usize, 0), audit.entries.len);
 }
 
 test "refreshSnapshot refuses to write from an audit that could not verify a row" {
