@@ -110,7 +110,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return error.Aborted;
     };
     std.Io.Dir.accessAbsolute(ctx.io, installed_bin, .{}) catch {
-        return ephemeralRun(ctx, allocator, parsed.pkg_name, parsed.cmd_args, parsed.keep, prefix);
+        return ephemeralRun(ctx, allocator, parsed.pkg_name, parsed.cmd_args, parsed.keep);
     };
 
     output.info("Running installed {s}...", .{parsed.pkg_name});
@@ -123,7 +123,6 @@ fn ephemeralRun(
     pkg_name: []const u8,
     cmd_args: []const []const u8,
     keep: bool,
-    prefix: []const u8,
 ) !void {
     output.info("Fetching {s} for ephemeral run...", .{pkg_name});
 
@@ -131,11 +130,13 @@ fn ephemeralRun(
     defer http.deinit();
     http.offline = ctx.offline;
 
-    var cache_buf: [512]u8 = undefined;
-    const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch {
-        output.err("Cache path too long for {s}", .{pkg_name});
+    // Same resolution as `mt update`: with MALT_CACHE set, a bare
+    // `{prefix}/cache` is a second metadata cache that update never wipes.
+    const cache_dir = atomic.maltCacheDir(allocator) catch {
+        output.err("Failed to resolve cache directory for {s}", .{pkg_name});
         return error.Aborted;
     };
+    defer allocator.free(cache_dir);
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
     api.offline = ctx.offline;
