@@ -91,6 +91,7 @@ comptime {
     _ = @import("list_cli_test.zig");
     _ = @import("schema_too_new_cli_test.zig");
     _ = @import("no_swallowed_schema_init_test.zig");
+    _ = @import("no_prefix_cache_in_cli_test.zig");
     _ = @import("list_test.zig");
     _ = @import("lock_test.zig");
     _ = @import("macho_test.zig");

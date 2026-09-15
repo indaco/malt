@@ -274,6 +274,7 @@ pub fn build(b: *std.Build) void {
         "tests/list_cli_test.zig",
         "tests/schema_too_new_cli_test.zig",
         "tests/no_swallowed_schema_init_test.zig",
+        "tests/no_prefix_cache_in_cli_test.zig",
         "tests/tap_cli_test.zig",
         "tests/uses_cli_test.zig",
         "tests/deps_cli_exec_test.zig",
