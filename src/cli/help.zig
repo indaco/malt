@@ -555,7 +555,7 @@ const purge_help =
     \\is required — running `malt purge` with no scope is an error.
     \\
     \\Scopes (one or more required):
-    \\  --store-orphans      Refcount-0 blobs in {prefix}/store
+    \\  --store-orphans      Store blobs no installed keg references
     \\  --unused-deps        Indirect-install kegs no other package needs
     \\  --cache[=DAYS]       Cache files older than DAYS (default 30)
     \\  --downloads          Wipe {cache}/downloads entirely        (typed confirm)
