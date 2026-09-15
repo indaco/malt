@@ -1335,6 +1335,69 @@ test "skipped_no_bottle: cached formula with no platform bottle is categorized c
     try testing.expectEqual(@as(i64, 1), root.get("counts").?.object.get("skipped_no_bottle").?.integer);
 }
 
+// `mt update` wipes `$MALT_CACHE/api`; migrate must resolve against that
+// same directory or the override splits the metadata cache in two.
+test "migrate honours MALT_CACHE for the API cache" {
+    resetOutput();
+
+    const brew = try scratchDir("brew_mc");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt_z = try scratchDir("mt_mc");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
+
+    try seedFakeBrew(brew, &.{"noplatform"});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const alt = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/altcache", .{mt_z}, 0);
+    defer testing.allocator.free(alt);
+    _ = c.setenv("MALT_CACHE", alt.ptr, 1);
+    defer _ = c.unsetenv("MALT_CACHE");
+
+    // Offline + the bottle-less formula cached under $MALT_CACHE only: a hit
+    // lands in skipped_no_bottle, a miss at {prefix}/cache/api in failed.
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{alt});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const cache_path = try std.fmt.allocPrint(testing.allocator, "{s}/formula_noplatform.json", .{cache_api});
+    defer testing.allocator.free(cache_path);
+    const cache_file = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
+    defer cache_file.close(std.Options.debug_io);
+    try cache_file.writeStreamingAll(std.Options.debug_io,
+        \\{"name":"noplatform","full_name":"noplatform","tap":"homebrew/core","versions":{"stable":"1.0"}}
+    );
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron(), .offline = true };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqual(@as(usize, 1), root.get("skipped_no_bottle").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), root.get("failed").?.array.items.len);
+}
+
 // ── Iterator-error surface: scanCellarKegs logs + preserves prior ──────
 //
 // `iter.next() catch null` silently collapsed the scan on any permission,

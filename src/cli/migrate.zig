@@ -267,11 +267,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer http.deinit();
     http.offline = ctx.offline;
 
-    var cache_dir_buf: [prefix_path.path_buf_len]u8 = undefined;
-    const cache_dir = prefix_path.join(&cache_dir_buf, prefix, "/cache") catch {
+    // Same resolution as `mt update`: with MALT_CACHE set, a bare
+    // `{prefix}/cache` is a second metadata cache that update never wipes.
+    const cache_dir = atomic.maltCacheDir(allocator) catch {
         output.err("Failed to resolve cache directory", .{});
         return error.Aborted;
     };
+    defer allocator.free(cache_dir);
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
     api.offline = ctx.offline;

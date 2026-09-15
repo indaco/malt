@@ -147,3 +147,46 @@ test "execute on a cached-404 formula returns Aborted before exec" {
         run.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"ghost-pkg"}),
     );
 }
+
+// --- MALT_CACHE ---------------------------------------------------------
+
+// `mt update` wipes `$MALT_CACHE/api`; run must fetch from that same
+// directory or a formula the user just refreshed is never what runs.
+test "execute honours MALT_CACHE for the API cache" {
+    var s = try Scratch.init(testing.allocator, "malt_cache");
+    defer s.deinit(testing.allocator);
+
+    const alt = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/altcache", .{s.path}, 0);
+    defer testing.allocator.free(alt);
+    _ = c.setenv("MALT_CACHE", alt.ptr, 1);
+    defer _ = c.unsetenv("MALT_CACHE");
+
+    // Empty bottle map: a hit progresses past the fetch to "No bottle
+    // available" and aborts before exec; an offline miss aborts earlier
+    // with "not found". Both are Aborted, so the message is the witness.
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{alt});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const doc = try std.fmt.allocPrint(testing.allocator, "{s}/formula_regfoo.json", .{cache_api});
+    defer testing.allocator.free(doc);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, doc, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\{"name":"regfoo","versions":{"stable":"1.0"},"revision":0,"bottle":{"stable":{"files":{}}}}
+        );
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    var ctx = malt.app_ctx.debug_ctx;
+    ctx.offline = true;
+    try testing.expectError(
+        error.Aborted,
+        run.execute(&ctx, testing.allocator, &.{"regfoo"}),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No bottle available for regfoo") != null);
+}

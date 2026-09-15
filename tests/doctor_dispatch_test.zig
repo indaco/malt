@@ -276,6 +276,56 @@ test "execute --post-install-status returns without invoking the walker" {
     try doctor.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--post-install-status"});
 }
 
+// `mt update` wipes `$MALT_CACHE/api`; the probe must read that same
+// directory or a formula miss silently counts as "without post_install".
+test "execute --post-install-status honours MALT_CACHE for the API cache" {
+    var s = try Scratch.init(testing.allocator, "pi_malt_cache");
+    defer s.deinit(testing.allocator);
+
+    const alt = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/altcache", .{s.path}, 0);
+    defer testing.allocator.free(alt);
+    _ = c.setenv("MALT_CACHE", alt.ptr, 1);
+    defer _ = c.unsetenv("MALT_CACHE");
+
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+            \\VALUES ('regfoo', 'regfoo', '1.0', 0, '', '/c/regfoo/1.0');
+        );
+    }
+
+    // Steps-migrated hook: classified from the document alone, so a cache
+    // hit is visible in the tally without any Ruby-source lookup.
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{alt});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const doc = try std.fmt.allocPrint(testing.allocator, "{s}/formula_regfoo.json", .{cache_api});
+    defer testing.allocator.free(doc);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, doc, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\{"name":"regfoo","versions":{"stable":"1.0"},"revision":0,
+            \\ "post_install_steps":[{"type":"mkdir_p","path":"var/regfoo"}]}
+        );
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    var ctx = malt.app_ctx.debug_ctx;
+    ctx.offline = true;
+    try doctor.execute(&ctx, testing.allocator, &.{"--post-install-status"});
+    try testing.expect(std.mem.indexOf(u8, captured.items, "1 total, 0 without post_install, 1 with post_install") != null);
+}
+
 // --- pure helpers ------------------------------------------------------
 
 test "externalToolAvailable rejects a missing absolute tool path" {
