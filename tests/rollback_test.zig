@@ -994,8 +994,10 @@ const WriteLockSquatter = struct {
     fn run(self: *WriteLockSquatter) void {
         const io = std.Options.debug_io;
         // `execute` only needs a moment to open the DB and init the schema;
-        // taking the write lock earlier would fail it there instead.
-        std.Io.sleep(io, .fromNanoseconds(500 * std.time.ns_per_ms), .awake) catch {};
+        // taking the write lock earlier would fail it there instead. The
+        // margin is generous on purpose: a starved runner must not turn
+        // this into a false regression.
+        std.Io.sleep(io, .fromNanoseconds(1000 * std.time.ns_per_ms), .awake) catch {};
         var writer = sqlite.Database.open(self.db_path) catch return;
         defer writer.close();
         writer.beginTransaction() catch return;
@@ -1046,6 +1048,10 @@ test "a rollback that cannot open its DB transaction says why and drops the mate
 
     try testing.expectError(error.Aborted, rollback.execute(&ctx, testing.allocator, &.{"wget"}));
 
+    // Precondition first: if the squatter won the write lock before schema
+    // init, the run never reached the transaction and the test, not the
+    // product, needs a wider margin.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Failed to initialize database schema") == null);
     // A silent non-zero exit gives the user nothing to act on.
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Could not begin DB transaction for wget") != null);
 
