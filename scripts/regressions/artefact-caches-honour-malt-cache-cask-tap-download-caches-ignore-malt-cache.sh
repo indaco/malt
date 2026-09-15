@@ -57,7 +57,10 @@ pass "doctor sizes the tap cache under MALT_CACHE"
 : >"$PREFIX/cache/Cask/legacy.dmg"
 "$BIN" purge --stale-casks --yes >/dev/null 2>&1 || true
 [[ ! -e "$MALT_CACHE/Cask/ghost.dmg" ]] || fail "--stale-casks left \$MALT_CACHE/Cask/ghost.dmg"
-[[ -e "$PREFIX/cache/Cask/legacy.dmg" ]] || fail "--stale-casks reached into {prefix}/cache/Cask"
+# A pre-override leftover is adopted into the override first, then judged
+# like any other entry: an orphan is gone from both locations.
+[[ ! -e "$PREFIX/cache/Cask/legacy.dmg" && ! -e "$MALT_CACHE/Cask/legacy.dmg" ]] ||
+  fail "--stale-casks did not adopt-and-sweep {prefix}/cache/Cask/legacy.dmg"
 pass "--stale-casks sweeps the cask cache under MALT_CACHE"
 
 "$BIN" purge --cache=0 --yes >/dev/null 2>&1 || true
