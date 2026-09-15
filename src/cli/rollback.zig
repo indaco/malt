@@ -223,7 +223,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         .abandoned_pkg_version = target.pkg_version,
     };
 
-    db.beginTransaction() catch return error.Aborted;
+    // The target already sits under Cellar/ with no row pointing at it, so
+    // a refused transaction must take it back down.
+    db.beginTransaction() catch |txn_err| {
+        output.err("Could not begin DB transaction for {s}: {s} ({s})", .{ name, @errorName(txn_err), db.errMsg() });
+        cellar.remove(ctx.io, prefix, name, target.pkg_version) catch {};
+        return error.Aborted;
+    };
 
     swapKeg(&db, &linker, current.id, name, target, keg.path, current.bin_isolated) catch {
         undo.run();
