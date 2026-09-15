@@ -10,6 +10,7 @@ const testing = std.testing;
 const sqlite = @import("malt").sqlite;
 const schema = @import("malt").schema;
 const rollback = @import("malt").cli_rollback;
+const lock = @import("malt").lock;
 
 const c = test_io.c;
 
@@ -980,6 +981,89 @@ test "a rollback that fails mid-swap restores the current version's links" {
     var new_buf: [512]u8 = undefined;
     const new_cellar = try std.fmt.bufPrint(&new_buf, "{s}/Cellar/wget/1.20", .{prefix});
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, new_cellar, .{}));
+}
+
+/// Keeps malt.lock until it holds the DB write lock, then hands malt.lock
+/// over: `execute` gets through schema init and its pre-lock reads, and
+/// meets a refused BEGIN only once the target is materialized.
+const WriteLockSquatter = struct {
+    db_path: [:0]const u8,
+    lk: lock.LockFile,
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *WriteLockSquatter) void {
+        const io = std.Options.debug_io;
+        // `execute` only needs a moment to open the DB and init the schema;
+        // taking the write lock earlier would fail it there instead.
+        std.Io.sleep(io, .fromNanoseconds(500 * std.time.ns_per_ms), .awake) catch {};
+        var writer = sqlite.Database.open(self.db_path) catch return;
+        defer writer.close();
+        writer.beginTransaction() catch return;
+        defer writer.rollback();
+        self.lk.release(io);
+        while (!self.done.load(.acquire)) {
+            std.Io.sleep(io, .fromNanoseconds(10 * std.time.ns_per_ms), .awake) catch {};
+        }
+    }
+};
+
+test "a rollback that cannot open its DB transaction says why and drops the materialized target" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "txn_fail");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try installKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
+
+    var db_path_buf: [512]u8 = undefined;
+    var lock_path_buf: [512]u8 = undefined;
+    var squatter: WriteLockSquatter = .{
+        .db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix}),
+        .lk = try lock.LockFile.acquire(std.Options.debug_io, try std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}), 1000),
+    };
+    const thread = try std.Thread.spawn(.{}, WriteLockSquatter.run, .{&squatter});
+    defer {
+        squatter.done.store(true, .release);
+        thread.join();
+    }
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try testing.expectError(error.Aborted, rollback.execute(&ctx, testing.allocator, &.{"wget"}));
+
+    // A silent non-zero exit gives the user nothing to act on.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Could not begin DB transaction for wget") != null);
+
+    const io = std.Options.debug_io;
+
+    // The target was materialized before the transaction and must not be
+    // left behind as a Cellar dir no row points at...
+    var new_buf: [512]u8 = undefined;
+    const new_cellar = try std.fmt.bufPrint(&new_buf, "{s}/Cellar/wget/1.20", .{prefix});
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, new_cellar, .{}));
+
+    // ...while the current version is untouched.
+    var cur_buf: [512]u8 = undefined;
+    const cur_cellar = try std.fmt.bufPrint(&cur_buf, "{s}/Cellar/wget/1.22", .{prefix});
+    try test_io.accessAbsolute(io, cur_cellar, .{});
+    const ver = try installedVersion(prefix, testing.allocator, "wget");
+    defer testing.allocator.free(ver);
+    try testing.expectEqualStrings("1.22", ver);
 }
 
 /// Make a keg dir's contents un-unlinkable so `cellar.remove` fails without
