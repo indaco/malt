@@ -448,6 +448,7 @@ fn collectDispositions(
         var core_rows: usize = 0;
         var matched: usize = 0;
         for (kegs, 0..) |row, i| {
+            if (isLocalRow(row)) continue; // out of scope: stays `.unknown`
             if (!isCorePathRow(row)) {
                 needs_fetch[i] = true; // tap cask → per-HEAD
                 continue;
@@ -469,7 +470,9 @@ fn collectDispositions(
             }
         }
     } else {
-        @memset(needs_fetch, true); // no map → every row via per-keg
+        // No map → every row via per-keg, except local rows: they have no
+        // upstream, so a fetch could only fail and taint `complete`.
+        for (kegs, 0..) |row, i| needs_fetch[i] = !isLocalRow(row);
     }
 
     // One dedup cache shared by every per-keg row (tap-HEAD coalescing).
