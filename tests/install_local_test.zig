@@ -870,11 +870,11 @@ test "materializeRubyFormula refuses a symlinked package dir" {
     const sha = "cc" ** 32;
 
     var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache/Tap", .{prefix});
-    try test_io.cwd().createDirPath(std.Options.debug_io, cache_parent);
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
 
     var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     try writeFile(cache_path, "warm-archive-fixture\n");
 
     // The keg would land here if the guard let the kernel follow the link.
@@ -938,6 +938,7 @@ test "materializeRubyFormula refuses a symlinked package dir" {
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false,
         false,
         false,
@@ -978,10 +979,10 @@ fn seedKegArchive(prefix: []const u8, name: []const u8, sha: []const u8) !void {
     try writeFile(exe, "#!/bin/sh\necho hi\n");
 
     var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache/Tap", .{prefix});
-    try test_io.cwd().createDirPath(std.Options.debug_io, cache_parent);
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
     var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     const work = bin_dir[0 .. bin_dir.len - "/bin".len];
     try runTar(&.{ "tar", "czf", cache_path, "-C", work, "bin" });
 }
@@ -1019,6 +1020,7 @@ fn installFromWarmCache(prefix: [:0]const u8, resolved: install_local.ResolvedRu
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         force,
         false, // download_only

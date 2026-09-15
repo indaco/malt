@@ -17,6 +17,7 @@ const output = malt.output;
 
 const Scratch = struct {
     path: [:0]u8,
+    cache_dir: []u8,
 
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Scratch {
         const base = try test_io.uniqueTempPath(allocator, "doctor_tap_forge", tag);
@@ -34,11 +35,13 @@ const Scratch = struct {
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
-        return .{ .path = path };
+        const cache_dir = try std.fmt.allocPrint(allocator, "{s}/cache", .{path});
+        return .{ .path = path, .cache_dir = cache_dir };
     }
 
     fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        allocator.free(self.cache_dir);
         allocator.free(self.path);
     }
 
@@ -116,7 +119,7 @@ test "emitDoctorJson: the merged --json carries the taps payload on stdout" {
     defer output.endStdoutCapture();
 
     // The taps data is now one member of the single merged document.
-    doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, &.{});
+    doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, s.cache_dir, &.{});
 
     try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"schema_version\":1") != null);
     try testing.expect(std.mem.indexOf(
@@ -141,7 +144,7 @@ test "emitDoctorJson: the merged --json keeps an empty taps array when no taps e
     output.beginStdoutCapture(allocator, &stdout_buf);
     defer output.endStdoutCapture();
 
-    doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, &.{});
+    doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, s.cache_dir, &.{});
 
     try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"taps\":[]") != null);
 }

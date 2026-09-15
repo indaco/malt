@@ -314,7 +314,7 @@ install_only_deps_wget() {
 }
 
 # Warm-cache reuse for the tap-archive cache: `--download-only` populates
-# `$PREFIX/cache/Tap/<sha>.<ext>` and leaves Cellar+kegs untouched; a
+# `$MALT_CACHE/Tap/<sha>.<ext>` and leaves Cellar+kegs untouched; a
 # follow-up `mt install` consumes the warmed bytes without growing the
 # cache. The single new install-surface contract from T-048 — the
 # bottle/cask warm-reuse paths are pinned by
@@ -327,7 +327,7 @@ install_download_only_tap_reuse() {
   local tag="smoke.install.download_only.tap"
   local slug="indaco/tap/sley"
   local name="sley"
-  local cache_dir="$PREFIX/cache/Tap"
+  local cache_dir="$CACHE/Tap"
 
   local dl_log
   dl_log="$LOGDIR/$(printf '%s' "$tag.dl" | tr -c 'A-Za-z0-9' _).log"

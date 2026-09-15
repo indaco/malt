@@ -295,7 +295,12 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
 
     output.info("Uninstalling cask {s}...", .{token});
 
-    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
+    const cache_dir = atomic.maltCacheDir(allocator) catch {
+        output.err("Failed to resolve cache directory", .{});
+        return error.Aborted;
+    };
+    defer allocator.free(cache_dir);
+    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, cache_dir);
     installer.uninstall(token) catch |un_err| {
         if (un_err == error.AppRunning) {
             output.err("Cannot uninstall {s}: the app is running. Quit it and try again.", .{token});

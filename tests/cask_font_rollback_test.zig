@@ -38,8 +38,8 @@ const synthetic_json =
     \\ "url":"https://example.com/x.zip","sha256":"no_check","auto_updates":false}
 ;
 
-fn newInstaller(threaded: *std.Io.Threaded, db: *sqlite.Database, prefix: [:0]const u8) cask.CaskInstaller {
-    return cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, db, prefix);
+fn newInstaller(threaded: *std.Io.Threaded, db: *sqlite.Database, fx: *Fixture) cask.CaskInstaller {
+    return cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, db, fx.base, fx.p("cache"));
 }
 
 /// Scratch tree under a process-unique base, so overlapping test runs cannot
@@ -78,7 +78,6 @@ test "placeExtracted honors font_entries_override on an artifact-less cask" {
     const io = std.Options.debug_io;
     var fx = try Fixture.init("override");
     defer fx.deinit();
-    const prefix = fx.base;
 
     const extract = fx.p("extract");
     try putFile(io, fx.p("extract/ttf/A.ttf"), "AAA");
@@ -92,7 +91,7 @@ test "placeExtracted honors font_entries_override on an artifact-less cask" {
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = newInstaller(&threaded, &db, prefix);
+    var installer = newInstaller(&threaded, &db, &fx);
 
     // The override carries the stanzas the synthetic JSON lost — rollback's
     // re-source path. With it set, the font branch must fire despite the empty
@@ -120,7 +119,6 @@ test "font_entries_override is re-sanitized: a tampered sidecar entry cannot tra
     const io = std.Options.debug_io;
     var fx = try Fixture.init("tamper");
     defer fx.deinit();
-    const prefix = fx.base;
 
     const extract = fx.p("extract");
     try putFile(io, fx.p("extract/Good.ttf"), "GOOD");
@@ -135,7 +133,7 @@ test "font_entries_override is re-sanitized: a tampered sidecar entry cannot tra
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = newInstaller(&threaded, &db, prefix);
+    var installer = newInstaller(&threaded, &db, &fx);
 
     // The override comes from an on-disk sidecar that could be tampered; the
     // leaf must re-sanitize at placement so a `..` hop is still rejected.
@@ -156,7 +154,6 @@ test "a fresh font install persists a per-version sidecar that round-trips the s
     const io = std.Options.debug_io;
     var fx = try Fixture.init("sidecar");
     defer fx.deinit();
-    const prefix = fx.base;
 
     const extract = fx.p("extract");
     try putFile(io, fx.p("extract/ttf/A.ttf"), "AAA");
@@ -171,7 +168,7 @@ test "a fresh font install persists a per-version sidecar that round-trips the s
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = newInstaller(&threaded, &db, prefix);
+    var installer = newInstaller(&threaded, &db, &fx);
 
     // Installing (the font branch) must persist the stanzas next to the cached
     // artifact so a later rollback can restore them offline, JSON-free.
@@ -188,8 +185,8 @@ test "a fresh font install persists a per-version sidecar that round-trips the s
     try testing.expect(spec.entries[1].target == null);
 }
 
-fn readSpecUnderOom(alloc: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]const u8) !void {
-    var installer = cask.CaskInstaller.init(std.Options.debug_io, testEnviron(), alloc, db, prefix);
+fn readSpecUnderOom(alloc: std.mem.Allocator, db: *sqlite.Database, fx: *Fixture) !void {
+    var installer = cask.CaskInstaller.init(std.Options.debug_io, testEnviron(), alloc, db, fx.base, fx.p("cache"));
     if (try installer.readFontSpec("font-x", "1.0")) |spec| {
         var s = spec;
         s.deinit(alloc);
@@ -204,13 +201,12 @@ test "readFontSpec frees its buffers on allocation failure" {
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
-    try testing.checkAllAllocationFailures(testing.allocator, readSpecUnderOom, .{ &db, fx.base });
+    try testing.checkAllAllocationFailures(testing.allocator, readSpecUnderOom, .{ &db, &fx });
 }
 
 test "readFontSpec returns null when no sidecar was written" {
     var fx = try Fixture.init("nospec");
     defer fx.deinit();
-    const prefix = fx.base;
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -218,7 +214,7 @@ test "readFontSpec returns null when no sidecar was written" {
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = newInstaller(&threaded, &db, prefix);
+    var installer = newInstaller(&threaded, &db, &fx);
 
     try testing.expect((try installer.readFontSpec("absent", "9.9")) == null);
 }

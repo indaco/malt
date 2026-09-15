@@ -111,7 +111,7 @@ test "CaskInstaller.uninstall on a missing token returns UninstallFailed" {
     const prefix: [:0]const u8 = "/tmp/mcask";
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix);
+    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix, prefix ++ "/cache");
     try testing.expectError(cask.CaskError.UninstallFailed, installer.uninstall("nope-nope"));
 }
 
@@ -157,7 +157,7 @@ test "CaskInstaller.uninstall refuses with AppRunning while the app bundle is li
 
     var fx = try Fixture.init("running_prefix");
     defer fx.deinit();
-    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
     // Distinct from UninstallFailed so the CLI can say "the app is running".
     try testing.expectError(cask.CaskError.AppRunning, installer.uninstall("running-app"));
 }
@@ -170,7 +170,7 @@ test "CaskInstaller.isOutdated returns false for an unknown token" {
     const prefix: [:0]const u8 = "/tmp/mcask2";
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix);
+    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix, prefix ++ "/cache");
     try testing.expect(!try installer.isOutdated("nope-nope", "1.0"));
 }
 
@@ -190,7 +190,7 @@ test "CaskInstaller.install rejects a cask with an unknown artifact URL extensio
     const prefix: [:0]const u8 = "/tmp/mc3";
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix);
+    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix, prefix ++ "/cache");
     try testing.expectError(cask.CaskError.InstallFailed, installer.install(&c));
 }
 
@@ -213,7 +213,7 @@ test "artifact_type_override bypasses URL detection" {
     defer fx.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
 
     // Without override: fails at the type gate with InstallFailed
     try testing.expectError(cask.CaskError.InstallFailed, installer.install(&c));
@@ -260,7 +260,7 @@ test "CaskInstaller.uninstall propagates removeRecord SqliteError" {
     defer fx.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
 
     try testing.expectError(sqlite.SqliteError.StepFailed, installer.uninstall("firefox"));
 }
@@ -293,7 +293,7 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
     defer fx.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
     try installer.uninstall("firefox");
 
     // DB row is gone and the staged "app bundle" has been removed.
@@ -342,7 +342,6 @@ test "downloadOnly reports a missing cask digest as its own error, not a mismatc
 
     var fx = try Fixture.init("sha_missing");
     defer fx.deinit();
-    // `downloadOnly` creates `cache/Cask` with a single-level makedir.
     try test_io.cwd().createDirPath(std.Options.debug_io, fx.p("cache"));
 
     var db = try sqlite.Database.open(":memory:");
@@ -359,7 +358,7 @@ test "downloadOnly reports a missing cask digest as its own error, not a mismatc
     defer c.deinit();
     try testing.expect(c.sha256 == null);
 
-    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
     try testing.expectError(error.Sha256Missing, installer.downloadOnly(&c));
 }
 
@@ -389,7 +388,7 @@ test "downloadOnly reports a cleartext origin as its own error, not a download f
     );
     defer c.deinit();
 
-    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
     try testing.expectError(error.InsecureOrigin, installer.downloadOnly(&c));
 }
 
@@ -422,7 +421,7 @@ test "a failed cask prefetch leaves the installed app and its row intact" {
     defer threaded.deinit();
     const io = threaded.io();
     try std.Io.Dir.cwd().createDirPath(io, fx.p("cache"));
-    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
     installer.offline = true; // stands in for the dropped connection, hermetically
 
     try testing.expectError(cask.CaskError.DownloadFailed, installer.downloadOnly(&c));
@@ -465,7 +464,7 @@ test "an unpinned artefact fetched once survives uninstall and installs from the
     try std.Io.Dir.cwd().createDirPath(io, app_path);
     try cask.recordInstall(&db, &c, app_path, null);
 
-    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
     installer.offline = true; // any re-fetch would fail loudly instead of quietly working
     installer.prefetched_artifact = prefetched;
 
@@ -510,7 +509,7 @@ test "a PKG cask's cached artefact survives uninstall when the prefetch named it
     // The install recorded the artefact itself, which is what a PKG cask does.
     try cask.recordInstall(&db, &c, prefetched, null);
 
-    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
     installer.offline = true;
     installer.prefetched_artifact = prefetched;
 
@@ -551,7 +550,7 @@ test "uninstall still removes an app_path the prefetch does not name" {
     try std.Io.Dir.cwd().createDirPath(io, app_path);
     try cask.recordInstall(&db, &c, app_path, null);
 
-    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
     installer.offline = true;
     installer.prefetched_artifact = prefetched;
 

@@ -127,11 +127,11 @@ fn runTar(argv: []const []const u8) !void {
 /// takes the warm-cache branch and never touches the network.
 fn seedRawBinaryCache(prefix: []const u8, sha: []const u8, body: []const u8) ![]const u8 {
     var parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const parent = try std.fmt.bufPrint(&parent_buf, "{s}/cache/Tap", .{prefix});
-    try test_io.cwd().createDirPath(std.Options.debug_io, parent);
+    const parent = try std.fmt.bufPrint(&parent_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, parent);
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try malt.tap_cache.cachePath(&path_buf, prefix, sha, ".bin");
+    const path = try malt.tap_cache.cachePath(&path_buf, parent, sha, ".bin");
     const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, body);
@@ -484,11 +484,11 @@ test "--download-only on tap formula with warm tap cache prints path + skips Cel
     const sha = "ee" ** 32;
 
     var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache/Tap", .{prefix});
-    try test_io.cwd().createDirPath(std.Options.debug_io, cache_parent);
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
 
     var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     {
         const f = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
         defer f.close(std.Options.debug_io);
@@ -545,6 +545,7 @@ test "--download-only on tap formula with warm tap cache prints path + skips Cel
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         true, // download_only
@@ -581,11 +582,11 @@ test "--download-only --force on tap formula with warm cache is a no-op refresh"
     const sha = "22" ** 32;
 
     var cache_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache/Tap", .{prefix});
-    try test_io.cwd().createDirPath(std.Options.debug_io, cache_dir);
+    const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_dir);
 
     var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_dir, sha, ".tar.gz");
     {
         const f = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
         defer f.close(std.Options.debug_io);
@@ -633,6 +634,7 @@ test "--download-only --force on tap formula with warm cache is a no-op refresh"
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         true, // force
         true, // download_only
@@ -664,11 +666,11 @@ test "--download-only --ndjson on tap formula emits download_started + complete 
     const sha = "11" ** 32;
 
     var cache_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache/Tap", .{prefix});
-    try test_io.cwd().createDirPath(std.Options.debug_io, cache_dir);
+    const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_dir);
 
     var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_dir, sha, ".tar.gz");
     {
         const f = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
         defer f.close(std.Options.debug_io);
@@ -725,6 +727,7 @@ test "--download-only --ndjson on tap formula emits download_started + complete 
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         true, // download_only
@@ -816,10 +819,10 @@ test "materializeRubyFormula refuses a source archive that yields no linkable ar
     }
 
     var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache/Tap", .{prefix});
-    try test_io.cwd().createDirPath(std.Options.debug_io, cache_parent);
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
     var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     try runTar(&.{ "tar", "czf", cache_path, "-C", work, "payload" });
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -863,6 +866,7 @@ test "materializeRubyFormula refuses a source archive that yields no linkable ar
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -906,10 +910,10 @@ test "materializeRubyFormula installs a lib-only keg that ships no binary" {
     }
 
     var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache/Tap", .{prefix});
-    try test_io.cwd().createDirPath(std.Options.debug_io, cache_parent);
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
     var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     try runTar(&.{ "tar", "czf", cache_path, "-C", work, "lib" });
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -948,6 +952,7 @@ test "materializeRubyFormula installs a lib-only keg that ships no binary" {
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1062,6 +1067,7 @@ test "materializeRubyFormula installs a tap formula whose url is an uncompressed
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1136,6 +1142,7 @@ test "materializeRubyFormula honours binary_name when staging an uncompressed bi
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1201,6 +1208,7 @@ test "materializeRubyFormula refuses a compressed body arriving on the raw-binar
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1262,6 +1270,7 @@ test "materializeRubyFormula truncated body on the raw-binary path is refused" {
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1340,6 +1349,7 @@ test "materializeRubyFormula records the declared dependencies of a tap formula"
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1411,6 +1421,7 @@ test "materializeRubyFormula --dry-run names the dependencies it would pull in" 
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         true, // dry_run
         false, // force
         false, // download_only
@@ -1450,10 +1461,10 @@ test "materializeRubyFormula stamps an extracted tap archive as relocated, not e
     }
 
     var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache/Tap", .{prefix});
-    try test_io.cwd().createDirPath(std.Options.debug_io, cache_parent);
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
     var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
     try runTar(&.{ "tar", "czf", cache_path, "-C", work, "bin" });
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -1492,6 +1503,7 @@ test "materializeRubyFormula stamps an extracted tap archive as relocated, not e
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         false, // force
         false, // download_only
@@ -1581,6 +1593,7 @@ test "a tap PKG cask upgrade refuses before its prefetch fills the slot" {
         &db,
         &linker,
         prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
         false, // dry_run
         true, // force
         true, // download_only — the upgrade route's prefetch pass
