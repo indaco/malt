@@ -39,6 +39,7 @@ pub fn collectCensus(
     allocator: std.mem.Allocator,
     io: std.Io,
     prefix: []const u8,
+    cache_dir: []const u8,
 ) Census {
     const empty: Census = .{ .entries = &.{}, .total_bytes = 0 };
 
@@ -76,7 +77,7 @@ pub fn collectCensus(
         const tok = std.mem.sliceTo(tok_ptr, 0);
         const ver = std.mem.sliceTo(ver_ptr, 0);
 
-        const byte_count = perVersionFootprint(io, allocator, prefix, tok, ver);
+        const byte_count = perVersionFootprint(io, allocator, prefix, cache_dir, tok, ver);
         const tok_dup = allocator.dupe(u8, tok) catch continue;
         const ver_dup = allocator.dupe(u8, ver) catch {
             allocator.free(tok_dup);
@@ -102,6 +103,7 @@ fn perVersionFootprint(
     io: std.Io,
     allocator: std.mem.Allocator,
     prefix: []const u8,
+    cache_dir: []const u8,
     token: []const u8,
     version: []const u8,
 ) u64 {
@@ -113,7 +115,7 @@ fn perVersionFootprint(
     } else |_| {}
 
     for ([_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz" }) |ext| {
-        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/cache/Cask/{s}-{s}{s}", .{ prefix, token, version, ext }) catch continue;
+        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/Cask/{s}-{s}{s}", .{ cache_dir, token, version, ext }) catch continue;
         if (std.Io.Dir.cwd().statFile(io, cache_path, .{})) |st| {
             total += st.size;
         } else |_| {}
@@ -232,6 +234,9 @@ fn seedScratch(allocator: std.mem.Allocator, tag: []const u8) ![:0]u8 {
     return prefix;
 }
 
+/// Never reached: these fixtures plant no cache artefact.
+const unused_cache_dir = "/nonexistent/malt_cask_history_cache";
+
 fn writeFile(path: []const u8, body: []const u8) !void {
     const f = try std.Io.Dir.createFileAbsolute(fs_test_io, path, .{ .truncate = true });
     defer f.close(fs_test_io);
@@ -275,11 +280,13 @@ test "collectCensus reports retained versions plus on-disk bytes" {
     defer allocator.free(app_1_0);
     try writeFile(app_1_0, "x" ** 64);
 
-    const cache_1_5 = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/alpha-1.5.dmg", .{prefix});
+    const cache_dir = try std.fs.path.join(allocator, &.{ prefix, "cache" });
+    defer allocator.free(cache_dir);
+    const cache_1_5 = try std.fmt.allocPrint(allocator, "{s}/Cask/alpha-1.5.dmg", .{cache_dir});
     defer allocator.free(cache_1_5);
     try writeFile(cache_1_5, "y" ** 128);
 
-    var census = collectCensus(allocator, fs_test_io, prefix);
+    var census = collectCensus(allocator, fs_test_io, prefix, cache_dir);
     defer census.deinit(allocator);
 
     try testing.expectEqual(@as(usize, 2), census.entries.len);
@@ -407,7 +414,7 @@ test "collectCensus ignores orphan history rows that have no live casks entry" {
         );
     }
 
-    var census = collectCensus(allocator, fs_test_io, prefix);
+    var census = collectCensus(allocator, fs_test_io, prefix, unused_cache_dir);
     defer census.deinit(allocator);
 
     try testing.expectEqual(@as(usize, 0), census.entries.len);
@@ -442,7 +449,7 @@ test "collectCensus omits the token whose history matches the live version exact
         );
     }
 
-    var census = collectCensus(allocator, fs_test_io, prefix);
+    var census = collectCensus(allocator, fs_test_io, prefix, unused_cache_dir);
     defer census.deinit(allocator);
 
     try testing.expectEqual(@as(usize, 0), census.entries.len);
@@ -460,7 +467,7 @@ test "collectCensus on a fresh prefix returns an empty census" {
     }
     try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
 
-    var census = collectCensus(allocator, fs_test_io, prefix);
+    var census = collectCensus(allocator, fs_test_io, prefix, unused_cache_dir);
     defer census.deinit(allocator);
 
     try testing.expectEqual(@as(usize, 0), census.entries.len);

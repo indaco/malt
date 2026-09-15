@@ -254,8 +254,8 @@ pub fn collectFindings(
 /// view of this data is emitted as one member of the merged document in
 /// `emitDoctorJson`, so this path is human-only. Held public so the
 /// integration test can drive the same path `execute` uses.
-pub fn emitCaskHistoryReport(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) void {
-    var census = cask_history.collectCensus(allocator, io, prefix);
+pub fn emitCaskHistoryReport(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8, cache_dir: []const u8) void {
+    var census = cask_history.collectCensus(allocator, io, prefix, cache_dir);
     defer census.deinit(allocator);
 
     if (census.entries.len == 0) return;
@@ -287,11 +287,11 @@ pub fn writeTapCacheHuman(w: *std.Io.Writer, usage: tap_cache_mod.Usage, max_age
     try w.print("  > Tap archive cache: {s} ({s} older than {d} days). Run: mt purge --cache\n", .{ total, reclaim, max_age_days });
 }
 
-/// Walk `<prefix>/cache/Tap` and emit its usage as a human line. The
+/// Walk `<cache>/Tap` and emit its usage as a human line. The
 /// `--json` view is a member of the merged document built in
 /// `emitDoctorJson`. Pure read; safe to invoke from `execute` post-checks.
-pub fn emitTapCacheReport(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) void {
-    const usage = collectTapCacheUsage(allocator, io, prefix);
+pub fn emitTapCacheReport(allocator: std.mem.Allocator, io: std.Io, cache_dir: []const u8) void {
+    const usage = collectTapCacheUsage(allocator, io, cache_dir);
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     writeTapCacheHuman(&aw.writer, usage, purge_args.default_cache_days) catch return;
@@ -300,9 +300,9 @@ pub fn emitTapCacheReport(allocator: std.mem.Allocator, io: std.Io, prefix: []co
 
 /// Measure the tap cache against the same retention window
 /// `mt purge --cache` applies by default.
-fn collectTapCacheUsage(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) tap_cache_mod.Usage {
+fn collectTapCacheUsage(allocator: std.mem.Allocator, io: std.Io, cache_dir: []const u8) tap_cache_mod.Usage {
     const now = std.Io.Clock.real.now(io).toSeconds();
-    return tap_cache_mod.usageUnder(io, allocator, prefix, now, purge_args.default_cache_days);
+    return tap_cache_mod.usageUnder(io, allocator, cache_dir, now, purge_args.default_cache_days);
 }
 
 /// Emit the registered-tap forge/host block doctor shows after the
@@ -405,10 +405,10 @@ pub fn writeDoctorJson(
 /// checks as one merged `--json` document. Best-effort: a writer failure
 /// drops the payload rather than aborting the run. Held public so the
 /// integration tests can drive the same path `execute` uses under `--json`.
-pub fn emitDoctorJson(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8, findings: []const render.Finding) void {
-    var census = cask_history.collectCensus(allocator, io, prefix);
+pub fn emitDoctorJson(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8, cache_dir: []const u8, findings: []const render.Finding) void {
+    var census = cask_history.collectCensus(allocator, io, prefix, cache_dir);
     defer census.deinit(allocator);
-    const tap_cache = collectTapCacheUsage(allocator, io, prefix);
+    const tap_cache = collectTapCacheUsage(allocator, io, cache_dir);
     // Free the collected slice even when empty-but-allocated; only the
     // collection-failed (`null`) case substitutes a static empty slice.
     const taps_opt = collectTaps(allocator, prefix);
@@ -472,11 +472,15 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // `--json` is one merged, versioned document; the human view keeps the
     // three reports split so each renders in its own place after the rows.
+    // The artefact figures must come from the directory `mt purge --cache`
+    // prunes, which is `MALT_CACHE` when set — not `{prefix}/cache`.
+    const cache_dir = try atomic.maltCacheDir(allocator);
+    defer allocator.free(cache_dir);
     if (want_checks_json) {
-        emitDoctorJson(allocator, ctx.io, prefix, walk.findings());
+        emitDoctorJson(allocator, ctx.io, prefix, cache_dir, walk.findings());
     } else {
-        emitCaskHistoryReport(allocator, ctx.io, prefix);
-        emitTapCacheReport(allocator, ctx.io, prefix);
+        emitCaskHistoryReport(allocator, ctx.io, prefix, cache_dir);
+        emitTapCacheReport(allocator, ctx.io, cache_dir);
         emitTapForgeReport(allocator, prefix);
     }
 
@@ -1888,7 +1892,7 @@ test "emitTapCacheReport: silent on stderr when cache is empty" {
     defer buf.deinit(allocator);
     output.beginStderrCapture(allocator, &buf);
     defer output.endStderrCapture();
-    emitTapCacheReport(allocator, std.Options.debug_io, prefix);
+    emitTapCacheReport(allocator, std.Options.debug_io, s.p("/cache"));
 
     try testing.expectEqualStrings("", buf.items);
 }
@@ -1897,10 +1901,8 @@ test "emitTapCacheReport: human one-liner when cache holds bytes" {
     const allocator = testing.allocator;
     var s = try Scratch.init("doctor_tap_full");
     defer s.deinit();
-    const prefix = s.base;
-
-    const cache_dir = s.p("/cache/Tap");
-    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, cache_dir);
+    const cache_dir = s.p("/cache");
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, s.p("/cache/Tap"));
 
     const entry = s.p("/cache/Tap/" ++ "ab" ** 32 ++ ".tar.gz");
     {
@@ -1913,7 +1915,7 @@ test "emitTapCacheReport: human one-liner when cache holds bytes" {
     defer buf.deinit(allocator);
     output.beginStderrCapture(allocator, &buf);
     defer output.endStderrCapture();
-    emitTapCacheReport(allocator, std.Options.debug_io, prefix);
+    emitTapCacheReport(allocator, std.Options.debug_io, cache_dir);
 
     // The entry was just written, so the sweep would free nothing: the
     // line must say so instead of naming a command that reclaims 0 B.

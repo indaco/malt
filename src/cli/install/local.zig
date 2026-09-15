@@ -448,7 +448,12 @@ fn installTapRb(
             .head_etag = fresh_head_etag,
         },
     };
-    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, download_only, prefetch_slot, sink);
+    const cache_dir = atomic.maltCacheDir(allocator) catch {
+        sink.err("Failed to resolve cache directory", .{});
+        return InstallError.DownloadFailed;
+    };
+    defer allocator.free(cache_dir);
+    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, cache_dir, dry_run, force, download_only, prefetch_slot, sink);
 }
 
 /// Install a formula from a local `.rb` file on disk. Gated by the
@@ -593,7 +598,12 @@ pub fn installLocalFormula(
     // `--local` is out of scope for `--download-only`: the user already
     // holds the archive on disk so warming a tap-cache entry adds no
     // value. Hard-wire false here rather than threading the flag.
-    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, false, null, sink);
+    const cache_dir = atomic.maltCacheDir(allocator) catch {
+        sink.err("Failed to resolve cache directory", .{});
+        return InstallError.DownloadFailed;
+    };
+    defer allocator.free(cache_dir);
+    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, cache_dir, dry_run, force, false, null, sink);
 }
 
 /// Whether any linker-visible dir under `keg_path` holds an entry - the same
@@ -784,6 +794,8 @@ pub fn formatTapDownloadName(
 /// Shared "from parsed `.rb` to linked keg" path, used by the tap and
 /// local installers. Does the network fetch for the archive, SHA256
 /// verification, cellar materialisation, and DB + linker commit.
+/// `cache_dir` is the resolved artefact root (`MALT_CACHE` or
+/// `{prefix}/cache`), so the tap/cask tiers land where purge prunes.
 /// `pub` so the integration tests can drive the materialise flow with
 /// a fabricated `ResolvedRubyFormula` (cache-hit fixtures, ndjson
 /// shape) without standing up a tap-resolution stub.
@@ -795,6 +807,7 @@ pub fn materializeRubyFormula(
     db: *sqlite.Database,
     linker: *linker_mod.Linker,
     prefix: []const u8,
+    cache_dir: []const u8,
     dry_run: bool,
     force: bool,
     download_only: bool,
@@ -816,7 +829,7 @@ pub fn materializeRubyFormula(
     // mounting, ditto, and `installer` live there. Tar.gz/tar.xz/zip
     // formula archives keep the simple-extract path below.
     if (tapCaskArtifactKind(resolved.url, resolved.app_name != null)) |kind| {
-        return materializeTapCask(ctx, allocator, resolved, db, kind, dry_run, force, download_only, prefetch_slot, sink);
+        return materializeTapCask(ctx, allocator, resolved, db, kind, cache_dir, dry_run, force, download_only, prefetch_slot, sink);
     }
 
     if (dry_run) {
@@ -838,7 +851,7 @@ pub fn materializeRubyFormula(
     if (!download_only) try installDeclaredDeps(ctx, allocator, resolved, sink);
 
     // Pick the archive kind early so the cache-or-fetch step below
-    // can compose `<prefix>/cache/Tap/<sha>.<ext>` before any HTTP
+    // can compose `<cache>/Tap/<sha>.<ext>` before any HTTP
     // work. An unrecognised suffix is not a rejection: many taps ship a
     // bare release binary. It provisionally takes the raw path and the
     // staged bytes decide, once they exist.
@@ -861,11 +874,11 @@ pub fn materializeRubyFormula(
     // as the on-disk source the extractor reads from below.
     var cache_path_buf: [512]u8 = undefined;
     const cache_path = blk: {
-        if (tap_cache.exists(ctx.io, prefix, resolved.sha256, archive_ext)) {
+        if (tap_cache.exists(ctx.io, cache_dir, resolved.sha256, archive_ext)) {
             // Warm cache: skip the fetch. SHA-keyed filename is its
             // own verification — a follow-up install of the same
             // formula consumes the warmed bytes instead of refetching.
-            break :blk tap_cache.cachePath(&cache_path_buf, prefix, resolved.sha256, archive_ext) catch
+            break :blk tap_cache.cachePath(&cache_path_buf, cache_dir, resolved.sha256, archive_ext) catch
                 return InstallError.DownloadFailed;
         }
 
@@ -927,7 +940,7 @@ pub fn materializeRubyFormula(
         errdefer std.Io.Dir.cwd().deleteFile(ctx.io, tmp_archive) catch {};
         break :blk tap_cache.promoteStagingToCache(
             ctx.io,
-            prefix,
+            cache_dir,
             resolved.sha256,
             archive_ext,
             tmp_archive,
@@ -1225,14 +1238,15 @@ test "pkgConfirmationDue asks once, on the pass that precedes the uninstall" {
 /// directives. Reuses every download/SHA/extract path the brew-API
 /// cask flow already exercises — the only thing the tap path adds is
 /// the JSON adapter. When `download_only` is set, the cask installer's
-/// `downloadOnly` seam reuses the existing `<prefix>/cache/Cask/`
-/// layout established by T-028 instead of writing to `cache/Tap/`.
+/// `downloadOnly` seam reuses the existing `<cache>/Cask/` layout
+/// instead of writing to `<cache>/Tap/`.
 fn materializeTapCask(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     resolved: ResolvedRubyFormula,
     db: *sqlite.Database,
     kind: cask_mod.ArtifactType,
+    cache_dir: []const u8,
     dry_run: bool,
     force: bool,
     download_only: bool,
@@ -1268,7 +1282,7 @@ fn materializeTapCask(
     };
     defer cask.deinit();
 
-    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix_z);
+    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix_z, cache_dir);
     installer.artifact_type_override = kind;
     installer.offline = ctx.offline;
 
@@ -1292,7 +1306,7 @@ fn materializeTapCask(
     }
 
     // `--download-only` for a cask-shaped tap entry reuses the cask
-    // cache established by T-028 (`<prefix>/cache/Cask/`). The shared
+    // cache (`<cache>/Cask/`). The shared
     // `downloadOnly` seam handles sha-verify against the archive
     // bytes; we stop before /Applications writes and DB inserts.
     if (download_only) {

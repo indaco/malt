@@ -31,8 +31,8 @@ fn expectFileBody(io: std.Io, path: []const u8, body: []const u8) !void {
     try testing.expectEqualStrings(body, got);
 }
 
-fn newInstaller(threaded: *std.Io.Threaded, db: *sqlite.Database, prefix: [:0]const u8) cask.CaskInstaller {
-    return cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, db, prefix);
+fn newInstaller(threaded: *std.Io.Threaded, db: *sqlite.Database, fx: *Fixture) cask.CaskInstaller {
+    return cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, db, fx.base, fx.p("cache"));
 }
 
 /// Scratch tree under a process-unique base, so overlapping test runs cannot
@@ -73,7 +73,6 @@ test "placeExtracted routes a font cask: places files and returns the Caskroom m
     // the test from the real ~/Library/Fonts.
     var fx = try Fixture.init("basic");
     defer fx.deinit();
-    const prefix = fx.base;
 
     const extract = fx.p("extract");
     try putFile(io, fx.p("extract/ttf/FiraCode-Bold.ttf"), "BOLD");
@@ -96,7 +95,7 @@ test "placeExtracted routes a font cask: places files and returns the Caskroom m
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = newInstaller(&threaded, &db, prefix);
+    var installer = newInstaller(&threaded, &db, &fx);
 
     // app_dir is irrelevant on the font path; pass a scratch one.
     const app_path = try installer.placeExtracted(extract, fx.p("Applications"), &c);
@@ -121,7 +120,6 @@ test "placeExtracted prefers the font branch when a cask carries both app and fo
     const io = std.Options.debug_io;
     var fx = try Fixture.init("mixed");
     defer fx.deinit();
-    const prefix = fx.base;
 
     const extract = fx.p("extract");
     try putFile(io, fx.p("extract/A.ttf"), "AAA");
@@ -142,7 +140,7 @@ test "placeExtracted prefers the font branch when a cask carries both app and fo
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = newInstaller(&threaded, &db, prefix);
+    var installer = newInstaller(&threaded, &db, &fx);
 
     const app_path = try installer.placeExtracted(extract, fx.p("Applications"), &c);
     defer testing.allocator.free(app_path);
@@ -155,7 +153,6 @@ test "placeExtracted drops a traversal entry and manifests only the safe font" {
     const io = std.Options.debug_io;
     var fx = try Fixture.init("evil");
     defer fx.deinit();
-    const prefix = fx.base;
 
     const extract = fx.p("extract");
     try putFile(io, fx.p("extract/Good.ttf"), "GOOD");
@@ -176,7 +173,7 @@ test "placeExtracted drops a traversal entry and manifests only the safe font" {
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = newInstaller(&threaded, &db, prefix);
+    var installer = newInstaller(&threaded, &db, &fx);
 
     const app_path = try installer.placeExtracted(extract, fx.p("Applications"), &c);
     defer testing.allocator.free(app_path);
@@ -191,7 +188,6 @@ test "placeExtracted on an all-unsafe font cask places nothing and records an em
     const io = std.Options.debug_io;
     var fx = try Fixture.init("allevil");
     defer fx.deinit();
-    const prefix = fx.base;
 
     const extract = fx.p("extract");
     try putFile(io, fx.p("extract/decoy.ttf"), "DECOY");
@@ -213,7 +209,7 @@ test "placeExtracted on an all-unsafe font cask places nothing and records an em
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = newInstaller(&threaded, &db, prefix);
+    var installer = newInstaller(&threaded, &db, &fx);
 
     const app_path = try installer.placeExtracted(extract, fx.p("Applications"), &c);
     defer testing.allocator.free(app_path);
@@ -229,7 +225,6 @@ test "placeExtracted leaves a normal app zip on the .app path and writes no font
     const io = std.Options.debug_io;
     var fx = try Fixture.init("app");
     defer fx.deinit();
-    const prefix = fx.base;
 
     const extract = fx.p("extract");
     const app_dir = fx.p("Applications");
@@ -250,7 +245,7 @@ test "placeExtracted leaves a normal app zip on the .app path and writes no font
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    var installer = newInstaller(&threaded, &db, prefix);
+    var installer = newInstaller(&threaded, &db, &fx);
 
     const app_path = try installer.placeExtracted(extract, app_dir, &c);
     defer testing.allocator.free(app_path);

@@ -437,7 +437,12 @@ fn dispatchCask(
     };
     defer lk.release(ctx.io);
 
-    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
+    const cache_dir = atomic.maltCacheDir(allocator) catch {
+        output.err("Failed to resolve cache directory", .{});
+        return error.Aborted;
+    };
+    defer allocator.free(cache_dir);
+    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, cache_dir);
     installer.offline = ctx.offline;
     installer.reinstallFromHistory(token, target_pkg_version) catch |e| {
         output.err("failed to reinstall {s} {s} ({s})", .{ token, target_pkg_version, @errorName(e) });

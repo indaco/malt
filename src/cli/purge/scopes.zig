@@ -400,7 +400,7 @@ pub fn runDownloads(ctx: *const AppCtx, cache_dir: []const u8, dry_run: bool) !T
 
 // ── Tier: --stale-casks ─────────────────────────────────────────────────────
 
-pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
+pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, cache_dir: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
     const io = ctx.io;
 
@@ -466,7 +466,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
 
     // Cask download cache
     var cask_cache_buf: [512]u8 = undefined;
-    const cask_cache_path = std.fmt.bufPrint(&cask_cache_buf, "{s}/cache/Cask", .{prefix}) catch return result;
+    const cask_cache_path = std.fmt.bufPrint(&cask_cache_buf, "{s}/Cask", .{cache_dir}) catch return result;
     if (std.Io.Dir.openDirAbsolute(io, cask_cache_path, .{ .iterate = true })) |dir_const| {
         var dir = dir_const;
         defer dir.close(io);
@@ -583,7 +583,7 @@ const OldVersionCandidate = struct {
     size: u64,
 };
 
-pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
+pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, cache_dir: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
     const io = ctx.io;
 
@@ -599,7 +599,7 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
     }
 
     try collectCellarOldVersions(io, allocator, prefix, &candidates);
-    collectCaskOldVersions(io, allocator, prefix, &candidates, &result);
+    collectCaskOldVersions(io, allocator, prefix, cache_dir, &candidates, &result);
 
     if (candidates.items.len == 0) {
         rep.empty("nothing to remove");
@@ -634,7 +634,7 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
             },
             .cask => {
                 if (!dry_run) {
-                    if (!sweepCaskOldVersion(io, prefix, c.name, c.version)) continue;
+                    if (!sweepCaskOldVersion(io, prefix, cache_dir, c.name, c.version)) continue;
                     if (db_opt) |*db| deleteCaskVersionRow(db, c.name, c.version);
                 }
                 rep.item(label);
@@ -810,6 +810,7 @@ fn collectCaskOldVersions(
     io: std.Io,
     allocator: std.mem.Allocator,
     prefix: []const u8,
+    cache_dir: []const u8,
     candidates: *std.ArrayList(OldVersionCandidate),
     result: *TierResult,
 ) void {
@@ -856,7 +857,7 @@ fn collectCaskOldVersions(
         // Size the on-disk footprint: Caskroom dir + every per-version
         // cache file we'd remove. Computed up front so the report's
         // freed-bytes counter is accurate even on dry-run.
-        const sz = caskVersionFootprint(io, allocator, prefix, token, version);
+        const sz = caskVersionFootprint(io, allocator, prefix, cache_dir, token, version);
 
         const tdup = allocator.dupe(u8, token) catch continue;
         const vdup = allocator.dupe(u8, version) catch {
@@ -884,7 +885,7 @@ fn reopenDbForRowDeletes(io: std.Io, prefix: []const u8, result: *TierResult) ?s
     };
 }
 
-fn caskVersionFootprint(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, token: []const u8, version: []const u8) u64 {
+fn caskVersionFootprint(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, cache_dir: []const u8, token: []const u8, version: []const u8) u64 {
     var total: u64 = 0;
     var path_buf: [512]u8 = undefined;
     if (std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
@@ -892,7 +893,7 @@ fn caskVersionFootprint(io: std.Io, allocator: std.mem.Allocator, prefix: []cons
     } else |_| {}
 
     for (cask_mod.cache_extensions) |ext| {
-        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/cache/Cask/{s}-{s}{s}", .{ prefix, token, version, ext }) catch continue;
+        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/Cask/{s}-{s}{s}", .{ cache_dir, token, version, ext }) catch continue;
         if (std.Io.Dir.cwd().statFile(io, cache_path, .{})) |st| {
             total += st.size;
         } else |_| {}
@@ -905,7 +906,7 @@ fn caskVersionFootprint(io: std.Io, allocator: std.mem.Allocator, prefix: []cons
 // the Caskroom dir and every per-version cache file are gone (either
 // removed here or already absent). A live file we cannot remove (e.g.
 // read-only mount) gates the row so a future writable run can finish.
-fn sweepCaskOldVersion(io: std.Io, prefix: []const u8, token: []const u8, version: []const u8) bool {
+fn sweepCaskOldVersion(io: std.Io, prefix: []const u8, cache_dir: []const u8, token: []const u8, version: []const u8) bool {
     var path_buf: [512]u8 = undefined;
     if (std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
         if (std.Io.Dir.accessAbsolute(io, caskroom_path, .{})) |_| {
@@ -913,7 +914,7 @@ fn sweepCaskOldVersion(io: std.Io, prefix: []const u8, token: []const u8, versio
         } else |_| {}
     } else |_| {}
 
-    return cask_mod.deletePerVersionCacheFile(io, prefix, token, version, null);
+    return cask_mod.deletePerVersionCacheFile(io, cache_dir, token, version, null);
 }
 
 fn deleteCaskVersionRow(db: *sqlite.Database, token: []const u8, version: []const u8) void {
@@ -998,7 +999,7 @@ test "runStaleCasks surfaces db prepare failure when the casks table shape is wr
     defer output.endStderrCapture();
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runStaleCasks(&ctx, allocator, prefix, true);
+    const result = try runStaleCasks(&ctx, allocator, prefix, s.p("/cache"), true);
 
     try testing.expectEqual(util.ScopeStatus.err, result.status);
     try testing.expectEqualStrings("db_prepare", result.error_kind orelse "");
@@ -1028,7 +1029,7 @@ test "runStaleCasks self-heals a schema-less db rather than reporting it as a fa
     defer output.endStderrCapture();
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runStaleCasks(&ctx, allocator, prefix, true);
+    const result = try runStaleCasks(&ctx, allocator, prefix, s.p("/cache"), true);
 
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     try testing.expect(result.error_kind == null);
@@ -1064,7 +1065,7 @@ test "runStaleCasks keeps every cached artefact shape of an installed cask" {
     for (kept) |rel| try touchFile(fs_test_io, s.p(rel));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runStaleCasks(&ctx, allocator, s.base, false);
+    const result = try runStaleCasks(&ctx, allocator, s.base, s.p("/cache"), false);
 
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     try testing.expectEqual(@as(u32, 0), result.removed);
@@ -1089,7 +1090,7 @@ test "runStaleCasks removes a per-version artefact whose token is no longer inst
     try touchFile(fs_test_io, s.p("/cache/Cask/ghost.tar.gz"));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runStaleCasks(&ctx, allocator, s.base, false);
+    const result = try runStaleCasks(&ctx, allocator, s.base, s.p("/cache"), false);
 
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     try testing.expectEqual(@as(u32, 2), result.removed);
@@ -1125,7 +1126,7 @@ test "runStaleCasks matches a cache stem on the token boundary, not a bare prefi
     for (kept ++ gone) |rel| try touchFile(fs_test_io, s.p(rel));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runStaleCasks(&ctx, allocator, s.base, false);
+    const result = try runStaleCasks(&ctx, allocator, s.base, s.p("/cache"), false);
 
     try testing.expectEqual(@as(u32, gone.len), result.removed);
     for (kept) |rel| try std.Io.Dir.accessAbsolute(fs_test_io, s.p(rel), .{});
@@ -1156,7 +1157,7 @@ test "runStaleCasks keeps a dash-prefixed sibling's artefact on its own token" {
     try touchFile(fs_test_io, s.p("/cache/Cask/git-2.39.0.dmg"));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runStaleCasks(&ctx, allocator, s.base, false);
+    const result = try runStaleCasks(&ctx, allocator, s.base, s.p("/cache"), false);
 
     try testing.expectEqual(@as(u32, 1), result.removed);
     try std.Io.Dir.accessAbsolute(fs_test_io, s.p("/cache/Cask/git-lfs-2.0.dmg"), .{});
@@ -1280,7 +1281,7 @@ test "runOldVersions sweeps non-current cask per-version cache + caskroom + hist
     try touchFile(fs_test_io, s.p("/Caskroom/flux/1.0/.metadata"));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runOldVersions(&ctx, allocator, prefix, false);
+    const result = try runOldVersions(&ctx, allocator, prefix, s.p("/cache"), false);
 
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     try testing.expect(result.removed >= 1);
@@ -1330,7 +1331,7 @@ test "runOldVersions --dry-run reports cask candidates without touching disk or 
     try touchFile(fs_test_io, s.p("/Caskroom/flux/1.0/.metadata"));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runOldVersions(&ctx, allocator, prefix, true);
+    const result = try runOldVersions(&ctx, allocator, prefix, s.p("/cache"), true);
 
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     try testing.expect(result.removed >= 1);
@@ -1369,8 +1370,8 @@ test "runOldVersions on already-swept cask state is a clean no-op" {
     try touchFile(fs_test_io, s.p("/Caskroom/flux/1.0/.metadata"));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    _ = try runOldVersions(&ctx, allocator, prefix, false);
-    const second = try runOldVersions(&ctx, allocator, prefix, false);
+    _ = try runOldVersions(&ctx, allocator, prefix, s.p("/cache"), false);
+    const second = try runOldVersions(&ctx, allocator, prefix, s.p("/cache"), false);
 
     try testing.expectEqual(util.ScopeStatus.ok, second.status);
     try testing.expectEqual(@as(u32, 0), second.removed);
@@ -1409,7 +1410,7 @@ test "runOldVersions ignores pin status when sweeping old cask versions" {
     try touchFile(fs_test_io, s.p("/Caskroom/flux/1.0/.metadata"));
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runOldVersions(&ctx, allocator, prefix, false);
+    const result = try runOldVersions(&ctx, allocator, prefix, s.p("/cache"), false);
 
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     try testing.expect(result.removed >= 1);
@@ -1432,6 +1433,9 @@ fn uniqueCellarPrefix(allocator: std.mem.Allocator, comptime tag: []const u8) ![
     std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
     return prefix;
 }
+
+/// Never reached: the cellar-only fixtures plant no cask artefact.
+const unused_cache_dir = "/nonexistent/malt_purge_scopes_cache";
 
 fn joinZ(allocator: std.mem.Allocator, base: []const u8, rest: []const u8) ![:0]u8 {
     return std.fmt.allocPrintSentinel(allocator, "{s}{s}", .{ base, rest }, 0);
@@ -1487,7 +1491,7 @@ test "runOldVersions keeps the DB-linked cellar keg even when a stale sibling ha
     try setMtimeSeconds(v1_dir, 2_000_000_000);
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runOldVersions(&ctx, allocator, prefix, false);
+    const result = try runOldVersions(&ctx, allocator, prefix, unused_cache_dir, false);
 
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     try std.Io.Dir.accessAbsolute(fs_test_io, v2_dir, .{}); // linked v2 survives
@@ -1534,7 +1538,7 @@ test "runOldVersions keeps every live version of a multi-keg formula" {
     }
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    _ = try runOldVersions(&ctx, allocator, prefix, false);
+    _ = try runOldVersions(&ctx, allocator, prefix, unused_cache_dir, false);
 
     const v2 = try joinZ(allocator, prefix, "/Cellar/openssl/2");
     defer allocator.free(v2);
@@ -1588,7 +1592,7 @@ test "runOldVersions keeps a revisioned linked keg whose dir name carries the re
     try setMtimeSeconds(stale_dir, 2_000_000_000); // stale looks newer
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    _ = try runOldVersions(&ctx, allocator, prefix, false);
+    _ = try runOldVersions(&ctx, allocator, prefix, unused_cache_dir, false);
 
     try std.Io.Dir.accessAbsolute(fs_test_io, live_dir, .{}); // revisioned live keg survives
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, stale_dir, .{}));
@@ -1636,7 +1640,7 @@ test "runOldVersions falls back to newest mtime when the live keg is absent on d
     try setMtimeSeconds(v2_dir, 2_000); // v2 newest
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    _ = try runOldVersions(&ctx, allocator, prefix, false);
+    _ = try runOldVersions(&ctx, allocator, prefix, unused_cache_dir, false);
 
     try std.Io.Dir.accessAbsolute(fs_test_io, v2_dir, .{}); // newest kept
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, v1_dir, .{}));

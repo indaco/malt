@@ -492,7 +492,7 @@ test "isOutdated detects version mismatch" {
     const prefix: [:0]const u8 = "/tmp/malt_test";
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .environ = malt.app_ctx.processEnviron() });
     defer threaded.deinit();
-    var installer = cask.CaskInstaller.init(threaded.io(), malt.app_ctx.processEnviron(), std.testing.allocator, &db, prefix);
+    var installer = cask.CaskInstaller.init(threaded.io(), malt.app_ctx.processEnviron(), std.testing.allocator, &db, prefix, prefix ++ "/cache");
 
     try std.testing.expect(try installer.isOutdated("firefox", "124.0"));
     try std.testing.expect(!try installer.isOutdated("firefox", "123.0"));
@@ -508,7 +508,7 @@ test "isOutdated surfaces SqliteError when schema is missing" {
     const prefix: [:0]const u8 = "/tmp/malt_test_isoutdated_noschema";
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .environ = malt.app_ctx.processEnviron() });
     defer threaded.deinit();
-    var installer = cask.CaskInstaller.init(threaded.io(), malt.app_ctx.processEnviron(), std.testing.allocator, &db, prefix);
+    var installer = cask.CaskInstaller.init(threaded.io(), malt.app_ctx.processEnviron(), std.testing.allocator, &db, prefix, prefix ++ "/cache");
 
     try std.testing.expectError(
         sqlite.SqliteError.PrepareFailed,
@@ -1064,7 +1064,7 @@ test "sweepOwnedVersionCache deletes only the token's own recorded versions" {
         try f.writeStreamingAll(io, "x");
     }
 
-    cask.sweepOwnedVersionCache(io, &db, fx.base, "git", null);
+    cask.sweepOwnedVersionCache(io, &db, fx.p("cache"), "git", null);
 
     // Recorded versions gone; the prefix sibling and legacy shape survive.
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, seeds[0], .{}));
@@ -1080,7 +1080,7 @@ test "sweepOwnedVersionCache is a no-op when the token has no history rows" {
     try schema.initSchema(&db);
 
     // No rows and an absent cache dir — the sweep must not error.
-    cask.sweepOwnedVersionCache(io, &db, "/tmp/malt_cask_sweep_missing", "git", null);
+    cask.sweepOwnedVersionCache(io, &db, "/tmp/malt_cask_sweep_missing/cache", "git", null);
 }
 
 test "sweepOwnedVersionCache handles a dash-bearing version without touching siblings" {
@@ -1105,7 +1105,7 @@ test "sweepOwnedVersionCache handles a dash-bearing version without touching sib
         try f.writeStreamingAll(io, "x");
     }
 
-    cask.sweepOwnedVersionCache(io, &db, fx.base, "git", null);
+    cask.sweepOwnedVersionCache(io, &db, fx.p("cache"), "git", null);
 
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, owned, .{}));
     try test_io.accessAbsolute(io, sibling, .{});
@@ -1134,7 +1134,7 @@ test "sweepOwnedVersionCache sweeps a pre-v7 row with NULL artifact_type" {
         try f.writeStreamingAll(io, "x");
     }
 
-    cask.sweepOwnedVersionCache(io, &db, fx.base, "git", null);
+    cask.sweepOwnedVersionCache(io, &db, fx.p("cache"), "git", null);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, owned, .{}));
 }
 
@@ -1149,7 +1149,7 @@ test "reinstallFromHistory refuses when no history row matches" {
     defer db.close();
     try schema.initSchema(&db);
 
-    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
     try testing.expectError(cask.CaskError.InstallFailed, installer.reinstallFromHistory("missing-token", "1.0"));
 }
 
@@ -1167,7 +1167,7 @@ test "reinstallFromHistory refuses on a history row whose artifact_type is unkno
         \\VALUES ('mystery', '1.0', 'https://x.invalid/m.bin', 'aa', 'unknown');
     );
 
-    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
     try testing.expectError(cask.CaskError.InstallFailed, installer.reinstallFromHistory("mystery", "1.0"));
 }
 
@@ -1363,7 +1363,7 @@ test "uninstall removes per-version cache files and drops every cask_versions ro
         try f.writeStreamingAll(io, "x");
     }
 
-    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base);
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
     // Uninstall paths the app via app_path; the test seed names a path
     // outside the sandbox so the real /Applications wipe is a no-op.
     installer.uninstall("flux-markdown") catch {};

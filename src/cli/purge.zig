@@ -226,8 +226,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 .store_orphans => scopes_mod.runStoreOrphans(ctx, allocator, prefix, dry_run),
                 .cache => scopes_mod.runCache(ctx, allocator, cache_dir, prefix, opts.cache_days, dry_run),
                 .downloads => scopes_mod.runDownloads(ctx, cache_dir, dry_run),
-                .stale_casks => scopes_mod.runStaleCasks(ctx, allocator, prefix, dry_run),
-                .old_versions => scopes_mod.runOldVersions(ctx, allocator, prefix, dry_run),
+                .stale_casks => scopes_mod.runStaleCasks(ctx, allocator, prefix, cache_dir, dry_run),
+                .old_versions => scopes_mod.runOldVersions(ctx, allocator, prefix, cache_dir, dry_run),
                 .broken_symlinks => scopes_mod.runBrokenSymlinks(ctx, prefix, dry_run),
             };
             try summary.add(allocator, .{

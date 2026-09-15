@@ -1668,8 +1668,13 @@ fn installCask(
     }
 
     const prefix = atomic.maltPrefixOrAbort();
+    const cache_dir = atomic.maltCacheDir(allocator) catch {
+        sink.err("Failed to resolve cache directory", .{});
+        return InstallError.DownloadFailed;
+    };
+    defer allocator.free(cache_dir);
 
-    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
+    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, cache_dir);
     installer.artifact_type_override = artifact_type;
     installer.offline = ctx.offline;
 

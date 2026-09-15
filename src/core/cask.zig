@@ -290,7 +290,7 @@ pub fn artifactTypeTag(t: ArtifactType) []const u8 {
 }
 
 /// Delete the per-version cache file for one `(token, version)` pair.
-/// Writes to the `<prefix>/cache/Cask/<token>-<version>.<ext>` naming and
+/// Writes to the `<cache>/Cask/<token>-<version>.<ext>` naming and
 /// stays surgical so `purge --old-versions` can drop a stale version
 /// without touching the current one. Iterates every known extension because
 /// `cask_versions.artifact_type` is nullable on rows backfilled
@@ -300,10 +300,10 @@ pub fn artifactTypeTag(t: ArtifactType) []const u8 {
 /// so a read-only mount doesn't orphan history.
 /// `keep` spares one already-fetched artefact, so an upgrade's uninstall
 /// cannot wipe the bytes it is about to install.
-pub fn deletePerVersionCacheFile(io: std.Io, prefix: []const u8, token: []const u8, version: []const u8, keep: ?[]const u8) bool {
+pub fn deletePerVersionCacheFile(io: std.Io, cache_dir: []const u8, token: []const u8, version: []const u8, keep: ?[]const u8) bool {
     for (cache_extensions) |ext| {
         var path_buf: [512]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "{s}/cache/Cask/{s}-{s}{s}", .{ prefix, token, version, ext }) catch continue;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/Cask/{s}-{s}{s}", .{ cache_dir, token, version, ext }) catch continue;
         if (keep) |k| if (std.mem.eql(u8, path, k)) continue;
         std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
         std.Io.Dir.cwd().deleteFile(io, path) catch return false;
@@ -321,14 +321,14 @@ pub fn deletePerVersionCacheFile(io: std.Io, prefix: []const u8, token: []const 
 /// history rows are deleted, or the version list is already empty.
 /// `keep` is an artefact an in-flight upgrade already fetched; wiping it would
 /// force a second download of bytes we are about to install.
-pub fn sweepOwnedVersionCache(io: std.Io, db: *sqlite.Database, prefix: []const u8, token: []const u8, keep: ?[]const u8) void {
+pub fn sweepOwnedVersionCache(io: std.Io, db: *sqlite.Database, cache_dir: []const u8, token: []const u8, keep: ?[]const u8) void {
     var stmt = db.prepare("SELECT version FROM cask_versions WHERE token = ?1;") catch return;
     defer stmt.finalize();
     stmt.bindText(1, token) catch return;
 
     while (stmt.step() catch false) {
         const ver_ptr = stmt.columnText(0) orelse continue;
-        _ = deletePerVersionCacheFile(io, prefix, token, std.mem.sliceTo(ver_ptr, 0), keep);
+        _ = deletePerVersionCacheFile(io, cache_dir, token, std.mem.sliceTo(ver_ptr, 0), keep);
     }
 }
 
@@ -599,6 +599,9 @@ pub const CaskInstaller = struct {
     io: std.Io,
     environ: std.process.Environ,
     prefix: [:0]const u8,
+    /// Root of the artefact cache (`<cache_dir>/Cask`), resolved by the
+    /// cli/ caller so `MALT_CACHE` is honoured without core/ reading env.
+    cache_dir: []const u8,
     db: *sqlite.Database,
     progress: ?client_mod.ProgressCallback,
     /// Pre-resolved type for extensionless URLs (HEAD fallback).
@@ -617,11 +620,11 @@ pub const CaskInstaller = struct {
     /// cask that pins no digest and so can never be validated from cache.
     prefetched_artifact: ?[]const u8 = null,
 
-    pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]const u8) CaskInstaller {
-        return .{ .allocator = allocator, .io = io, .environ = environ, .db = db, .prefix = prefix, .progress = null };
+    pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]const u8, cache_dir: []const u8) CaskInstaller {
+        return .{ .allocator = allocator, .io = io, .environ = environ, .db = db, .prefix = prefix, .cache_dir = cache_dir, .progress = null };
     }
 
-    /// Fetch + sha-verify the cask artefact into `<prefix>/cache/Cask/` and
+    /// Fetch + sha-verify the cask artefact into `<cache>/Cask/` and
     /// return the on-disk path. No `/Applications` writes, no DB inserts —
     /// the seam `mt install --download-only --cask <token>` reuses to warm
     /// the cache before going offline. Caller owns the returned slice.
@@ -630,12 +633,10 @@ pub const CaskInstaller = struct {
         if (artifact_type == .unknown) return CaskError.InstallFailed;
 
         var cache_buf: [512]u8 = undefined;
-        const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask", .{self.prefix}) catch
+        const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/Cask", .{self.cache_dir}) catch
             return CaskError.OutOfMemory;
-        std.Io.Dir.createDirAbsolute(self.io, cache_dir, .default_dir) catch |e| switch (e) {
-            error.PathAlreadyExists => {},
-            else => return CaskError.InstallFailed,
-        };
+        // Recursive: nothing creates `$MALT_CACHE` itself.
+        std.Io.Dir.cwd().createDirPath(self.io, cache_dir) catch return CaskError.InstallFailed;
 
         const fetched = self.downloadToCache(cask, cache_dir, self.progress) catch |e| switch (e) {
             // A retry re-fetches the same manifest and refuses identically, so
@@ -783,13 +784,13 @@ pub const CaskInstaller = struct {
         // since after uninstall there is no version left to roll back to.
         var cache_buf: [512]u8 = undefined;
         for (cache_extensions) |ext| {
-            const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask/{s}{s}", .{ self.prefix, token, ext }) catch continue;
+            const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/Cask/{s}{s}", .{ self.cache_dir, token, ext }) catch continue;
             if (self.prefetched_artifact) |k| if (std.mem.eql(u8, k, cache_file)) continue;
             std.Io.Dir.cwd().deleteFile(self.io, cache_file) catch {};
         }
         // Must precede the history wipe below — the sweep reads the version
         // list from `cask_versions`, which the DELETE would otherwise empty.
-        sweepOwnedVersionCache(self.io, self.db, self.prefix, token, self.prefetched_artifact);
+        sweepOwnedVersionCache(self.io, self.db, self.cache_dir, token, self.prefetched_artifact);
 
         // Drop every history row so a future install starts clean.
         if (self.db.prepare("DELETE FROM cask_versions WHERE token = ?1;")) |prepared| {
@@ -1137,7 +1138,7 @@ pub const CaskInstaller = struct {
     }
 
     /// Per-version sidecar of the placed font stanzas, co-located with the
-    /// cached artifact at `<prefix>/cache/Cask/<token>-<version>.fonts`. It
+    /// cached artifact at `<cache>/Cask/<token>-<version>.fonts`. It
     /// lets `reinstallFromHistory` re-place fonts offline without the cask
     /// JSON, which the synthetic rollback cask lacks. Format: one
     /// `source\ttarget` line per stanza; a tab-less line has no rename target.
@@ -1154,7 +1155,7 @@ pub const CaskInstaller = struct {
     };
 
     fn fontSpecPath(self: *CaskInstaller, token: []const u8, version: []const u8, buf: []u8) ![]const u8 {
-        return std.fmt.bufPrint(buf, "{s}/cache/Cask/{s}-{s}.fonts", .{ self.prefix, token, version });
+        return std.fmt.bufPrint(buf, "{s}/Cask/{s}-{s}.fonts", .{ self.cache_dir, token, version });
     }
 
     fn writeFontSpec(self: *CaskInstaller, token: []const u8, version: []const u8, entries: []const cask_font.FontEntry) !void {
@@ -1950,6 +1951,9 @@ test "parseCask accepts legitimate token and version" {
     }
 }
 
+/// Never reached: the tests below plant no cache artefact.
+const unused_cache_dir = "/nonexistent/malt_cask_test_cache";
+
 test "linkCaskBinary refuses a source symlink outside Caskroom" {
     const io = std.Options.debug_io;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1977,6 +1981,7 @@ test "linkCaskBinary refuses a source symlink outside Caskroom" {
         .io = io,
         .environ = .empty,
         .prefix = prefix,
+        .cache_dir = unused_cache_dir,
         .db = undefined,
         .progress = null,
     };
@@ -2011,6 +2016,7 @@ test "linkCaskBinary refuses a prefix path outside its Caskroom version" {
         .io = io,
         .environ = .empty,
         .prefix = prefix,
+        .cache_dir = unused_cache_dir,
         .db = undefined,
         .progress = null,
     };
@@ -2039,6 +2045,7 @@ test "linkCaskBinary links regular relative and in-prefix Caskroom sources" {
         .io = io,
         .environ = .empty,
         .prefix = prefix,
+        .cache_dir = unused_cache_dir,
         .db = undefined,
         .progress = null,
     };
@@ -2120,6 +2127,7 @@ test "installZip does not extract through a pre-existing predictable symlink" {
         .io = io,
         .environ = .empty,
         .prefix = prefix,
+        .cache_dir = unused_cache_dir,
         .db = undefined,
         .progress = null,
     };
@@ -2196,6 +2204,7 @@ test "installDmg does not adopt a predictable pre-existing mount point" {
         .io = io,
         .environ = .empty,
         .prefix = prefix,
+        .cache_dir = unused_cache_dir,
         .db = undefined,
         .progress = null,
     };
@@ -2221,6 +2230,7 @@ test "freshTempDir hands out a distinct private directory each call" {
         .io = io,
         .environ = .empty,
         .prefix = prefix,
+        .cache_dir = unused_cache_dir,
         .db = undefined,
         .progress = null,
     };
@@ -2253,6 +2263,7 @@ test "freshTempDir fails instead of creating a prefix tmp dir that is absent" {
         .io = io,
         .environ = .empty,
         .prefix = prefix,
+        .cache_dir = unused_cache_dir,
         .db = undefined,
         .progress = null,
     };
@@ -2290,6 +2301,7 @@ test "downloadToCache reuses a cached artifact only when its digest pins the byt
         .io = io,
         .environ = .empty,
         .prefix = "/tmp/malt_cask_cachehit_prefix",
+        .cache_dir = unused_cache_dir,
         .db = undefined,
         .progress = null,
     };
@@ -2350,7 +2362,8 @@ test "a failed install keeps a digest-pinned artefact in the cache" {
     const prefix = try std.fmt.allocPrintSentinel(a, "/tmp/malt_cask_keep_{d}", .{std.c.getpid()}, 0);
     std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
-    const cache_dir = try std.fmt.allocPrint(a, "{s}/cache/Cask", .{prefix});
+    const cache_root = try std.fs.path.join(a, &.{ prefix, "cache" });
+    const cache_dir = try std.fmt.allocPrint(a, "{s}/Cask", .{cache_root});
     try std.Io.Dir.cwd().createDirPath(io, cache_dir);
     try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/Applications", .{prefix}));
 
@@ -2374,6 +2387,7 @@ test "a failed install keeps a digest-pinned artefact in the cache" {
         .io = io,
         .environ = .empty,
         .prefix = prefix,
+        .cache_dir = cache_root,
         .db = undefined,
         .progress = null,
     };
@@ -2381,4 +2395,21 @@ test "a failed install keeps a digest-pinned artefact in the cache" {
 
     try std.testing.expectError(CaskError.InstallFailed, installer.install(&cask));
     try std.Io.Dir.accessAbsolute(io, dest, .{});
+}
+
+test "fontSpecPath composes the sidecar under the resolved cache dir, not the prefix" {
+    // The sidecar must sit next to the artefact `downloadOnly` wrote, and
+    // that lives under whatever the caller resolved (`MALT_CACHE` or
+    // `{prefix}/cache`); composing from the prefix would strand it.
+    var installer: CaskInstaller = .{
+        .allocator = std.testing.allocator,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .prefix = "/opt/h",
+        .cache_dir = "/alt",
+        .db = undefined,
+        .progress = null,
+    };
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("/alt/Cask/font-x-1.0.fonts", try installer.fontSpecPath("font-x", "1.0", &buf));
 }
