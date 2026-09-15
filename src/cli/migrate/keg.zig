@@ -21,6 +21,7 @@ const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
 const post_install_mod = @import("../install/post_install.zig");
 const record = @import("../install/record.zig");
+const schema = @import("../../db/schema.zig");
 const install_sink_mod = @import("../install/sink.zig");
 const post_install_queue_mod = @import("post_install_queue.zig");
 
@@ -192,41 +193,15 @@ pub fn migrateKeg(
     if (deps.db_mu) |m| m.lockUncancelable(ctx.io);
     defer if (deps.db_mu) |m| if (!db_mu_unlocked) m.unlock(ctx.io);
 
-    if (!formula.keg_only) {
-        const keg_id = record.recordKeg(deps.db, &formula, bottle.sha256, keg.path, install_reason, false, .{}) catch {
-            output.err("    {s}: failed to record in database", .{keg_name});
-            cellar_mod.remove(ctx.io, deps.prefix, formula.name, formula.pkg_version) catch {};
-            return .failed_install;
-        };
-
-        deps.linker.link(keg.path, formula.name, keg_id, false) catch {
-            output.warn("    {s}: some links could not be created", .{keg_name});
-            output.emitNdjsonEvent(.linked, keg_name, "failed");
-            // Rollback: unlink partial links and delete keg row; user already warned above.
-            deps.linker.unlink(keg_id) catch {};
-            deleteKeg(deps.db, keg_id) catch {};
-            cellar_mod.remove(ctx.io, deps.prefix, formula.name, formula.pkg_version) catch {};
-            return .failed_install;
-        };
-        // `recorded` after both succeed — link rollback above undoes
-        // the keg row, so an early emit would lie if link fails.
-        output.emitNdjsonEvent(.linked, keg_name, "ok");
-        output.emitNdjsonEvent(.recorded, keg_name, "ok");
-        deps.linker.linkOpt(formula.name, formula.pkg_version) catch |e| {
-            output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ formula.name, @errorName(e) });
-        };
-        recordDeps(deps.db, keg_id, &formula);
-    } else {
-        const keg_id = record.recordKeg(deps.db, &formula, bottle.sha256, keg.path, install_reason, false, .{}) catch {
-            cellar_mod.remove(ctx.io, deps.prefix, formula.name, formula.pkg_version) catch {};
-            return .failed_install;
-        };
-        output.emitNdjsonEvent(.recorded, keg_name, "ok");
-        deps.linker.linkOpt(formula.name, formula.pkg_version) catch |e| {
-            output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ formula.name, @errorName(e) });
-        };
-        recordDeps(deps.db, keg_id, &formula);
-    }
+    const keg_id = recordAndLink(ctx.io, deps, record.kegFields(&formula, bottle.sha256, keg.path, install_reason, false), keg_name, !formula.keg_only) catch |e| {
+        if (e == error.LinkFailed) output.emitNdjsonEvent(.linked, keg_name, "failed");
+        return .failed_install;
+    };
+    // `recorded` only once the links held — a failed link rolls the keg
+    // row back, so an early emit would lie.
+    if (!formula.keg_only) output.emitNdjsonEvent(.linked, keg_name, "ok");
+    output.emitNdjsonEvent(.recorded, keg_name, "ok");
+    recordDepsFromList(deps.db, keg_id, formula.dependencies);
 
     // Claim only once a keg row references the bytes: bumping before
     // materialise strands one claim per failed retry, and nothing can
@@ -344,7 +319,7 @@ fn migrateFromLocalCellar(
     var full_name_buf: [full_name_buf_len]u8 = undefined;
     const full_name = std.fmt.bufPrint(&full_name_buf, "{s}/{s}", .{ receipt.tap, keg_name }) catch keg_name;
 
-    const keg_id = record.recordKegFields(deps.db, .{
+    const keg_id = recordAndLink(ctx.io, deps, .{
         .name = keg_name,
         .full_name = full_name,
         .version = receipt.version,
@@ -354,22 +329,7 @@ fn migrateFromLocalCellar(
         .cellar_path = keg.path,
         .install_reason = if (receipt.on_request) "direct" else "dependency",
         .bin_isolated = false,
-    }, .{}) catch {
-        output.err("    {s}: failed to record in database", .{keg_name});
-        cellar_mod.remove(ctx.io, deps.prefix, keg_name, receipt.version) catch {};
-        return .failed_install;
-    };
-
-    deps.linker.link(keg.path, keg_name, keg_id, false) catch {
-        output.warn("    {s}: some links could not be created", .{keg_name});
-        deps.linker.unlink(keg_id) catch {};
-        deleteKeg(deps.db, keg_id) catch {};
-        cellar_mod.remove(ctx.io, deps.prefix, keg_name, receipt.version) catch {};
-        return .failed_install;
-    };
-    deps.linker.linkOpt(keg_name, receipt.version) catch |e| {
-        output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ keg_name, @errorName(e) });
-    };
+    }, keg_name, true) catch return .failed_install;
     recordDepsFromList(deps.db, keg_id, receipt.runtime_deps);
 
     // Tap kegs aren't reachable from the bottle DSL pipeline (its body
@@ -676,8 +636,9 @@ fn incrementRefLocked(
     };
 }
 
-// ── DB helpers (same pattern as install.zig) ────────────────────────
-
+/// One statement, not `record.deleteKeg`: that one clears `links` first and
+/// bails on its first error, so the DB fault that just failed `link` would
+/// leave the keg row behind.
 fn deleteKeg(db: *sqlite.Database, keg_id: i64) sqlite.SqliteError!void {
     var stmt = try db.prepare("DELETE FROM kegs WHERE id = ?1;");
     defer stmt.finalize();
@@ -685,15 +646,34 @@ fn deleteKeg(db: *sqlite.Database, keg_id: i64) sqlite.SqliteError!void {
     _ = try stmt.step();
 }
 
-/// Each row is independent; skip on per-row failure so a partial dep
-/// table is preferred to aborting a migration wholesale.
-fn recordDeps(db: *sqlite.Database, keg_id: i64, formula: *const formula_mod.Formula) void {
-    recordDepsFromList(db, keg_id, formula.dependencies);
+const RecordError = error{ RecordFailed, LinkFailed };
+
+/// One record → link → rollback path for every route, so an undo step
+/// cannot go missing from a copy; the caller only decides what to emit.
+fn recordAndLink(io: std.Io, deps: MigrateDeps, fields: record.KegFields, keg_name: []const u8, do_link: bool) RecordError!i64 {
+    // The Cellar dir is revision-tagged (`1.0_2`) while the row keeps the
+    // bare version, so the dir is addressed by its own name.
+    const keg_version = std.fs.path.basename(fields.cellar_path);
+    const keg_id = record.recordKegFields(deps.db, fields, .{}) catch {
+        output.err("    {s}: failed to record in database", .{keg_name});
+        cellar_mod.remove(io, deps.prefix, fields.name, keg_version) catch {};
+        return error.RecordFailed;
+    };
+    if (do_link) deps.linker.link(fields.cellar_path, fields.name, keg_id, fields.bin_isolated) catch {
+        output.warn("    {s}: some links could not be created", .{keg_name});
+        deps.linker.unlink(keg_id) catch {};
+        deleteKeg(deps.db, keg_id) catch {};
+        cellar_mod.remove(io, deps.prefix, fields.name, keg_version) catch {};
+        return error.LinkFailed;
+    };
+    deps.linker.linkOpt(fields.name, keg_version) catch |e| {
+        output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ fields.name, @errorName(e) });
+    };
+    return keg_id;
 }
 
-/// Same SQL as `recordDeps` but takes a pre-extracted list — used by
-/// the local-Cellar fallback whose dependency names come straight off
-/// `INSTALL_RECEIPT.json` rather than a parsed Formula.
+/// Each row is independent; skip on per-row failure so a partial dep
+/// table is preferred to aborting a migration wholesale.
 fn recordDepsFromList(db: *sqlite.Database, keg_id: i64, dep_names: []const []const u8) void {
     for (dep_names) |dep_name| {
         var stmt = db.prepare(
@@ -1025,7 +1005,6 @@ test "releaseDbMuForOomFallback is a no-op on the serial path (db_mu null)" {
 // and `incrementRefLocked` gives callers outside that region the same
 // guarantee.
 test "incrementRef under db_mu keeps each worker's keg_id bound to its own kegs row" {
-    const schema = @import("../../db/schema.zig");
 
     // Sharing one connection across threads is only sound in SQLite's
     // serialized mode — the same contract migrate --parallel enforces.
@@ -1112,7 +1091,6 @@ test "incrementRef under db_mu keeps each worker's keg_id bound to its own kegs 
 }
 
 test "incrementRefLocked on the serial path (db_mu null) still bumps the refcount" {
-    const schema = @import("../../db/schema.zig");
     const io = std.Options.debug_io;
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -1131,7 +1109,6 @@ test "incrementRefLocked on the serial path (db_mu null) still bumps the refcoun
 }
 
 test "migrate keg record through the shared seam preserves pin inheritance, bin_isolated=0, and own-txn commit" {
-    const schema = @import("../../db/schema.zig");
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
@@ -1167,4 +1144,82 @@ test "migrate keg record through the shared seam preserves pin inheritance, bin_
     try std.testing.expect(try q.step());
     try std.testing.expectEqual(@as(i64, 1), q.columnInt(0));
     try std.testing.expectEqual(@as(i64, 0), q.columnInt(1));
+}
+
+// A fault at either step must leave neither a keg row nor a Cellar dir
+// behind. The dir is revision-tagged while the row keeps the bare version,
+// so an undo keyed on the row's version would miss it.
+fn rollbackFixture(s: *Scratch, db: *sqlite.Database, linker: *linker_mod.Linker) !struct { deps: MigrateDeps, fields: record.KegFields } {
+    const keg_dir = s.p("/Cellar/wget/1.21_2");
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, keg_dir);
+    return .{
+        // The helper reads only `db`, `prefix` and `linker`.
+        .deps = .{
+            .api = undefined,
+            .ghcr = undefined,
+            .http = undefined,
+            .store = undefined,
+            .linker = linker,
+            .db = db,
+            .prefix = s.base,
+            .homebrew_prefix = "",
+            .use_system_ruby_scope = &.{},
+        },
+        .fields = .{
+            .name = "wget",
+            .full_name = "wget",
+            .version = "1.21",
+            .revision = 0,
+            .tap = "",
+            .store_sha256 = "",
+            .cellar_path = keg_dir,
+            .install_reason = "direct",
+            .bin_isolated = false,
+        },
+    };
+}
+
+test "recordAndLink undoes the Cellar dir when the keg row cannot be written" {
+    var s = try Scratch.init("migrate_rollback_record");
+    defer s.deinit();
+    // No schema at all: the row insert is the first thing to fail.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var linker = linker_mod.Linker.init(std.Options.debug_io, std.testing.allocator, &db, s.base);
+    const fx = try rollbackFixture(&s, &db, &linker);
+
+    try std.testing.expectError(error.RecordFailed, recordAndLink(std.Options.debug_io, fx.deps, fx.fields, "wget", true));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.Options.debug_io, fx.fields.cellar_path, .{}));
+}
+
+test "recordAndLink undoes the keg row and the Cellar dir when linking fails" {
+    var s = try Scratch.init("migrate_rollback_link");
+    defer s.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // The row lands, then the links ledger is gone: link fails after record.
+    try db.exec("DROP TABLE links;");
+    var linker = linker_mod.Linker.init(std.Options.debug_io, std.testing.allocator, &db, s.base);
+    const fx = try rollbackFixture(&s, &db, &linker);
+
+    try std.testing.expectError(error.LinkFailed, recordAndLink(std.Options.debug_io, fx.deps, fx.fields, "wget", true));
+    try std.testing.expect(!isInstalled(&db, "wget"));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.Options.debug_io, fx.fields.cellar_path, .{}));
+}
+
+test "recordAndLink skips linking for a keg-only bottle and keeps the row" {
+    var s = try Scratch.init("migrate_kegonly_record");
+    defer s.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // With the links ledger gone a link attempt would roll back; keg-only
+    // must never reach it.
+    try db.exec("DROP TABLE links;");
+    var linker = linker_mod.Linker.init(std.Options.debug_io, std.testing.allocator, &db, s.base);
+    const fx = try rollbackFixture(&s, &db, &linker);
+
+    _ = try recordAndLink(std.Options.debug_io, fx.deps, fx.fields, "wget", false);
+    try std.testing.expect(isInstalled(&db, "wget"));
 }
