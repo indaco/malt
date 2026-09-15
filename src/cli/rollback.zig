@@ -87,7 +87,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // one left open would pin this connection's read snapshot across the
     // lock wait, so the re-check below could never see a concurrent commit.
     var current_ver_buf: [128]u8 = undefined;
-    var current_cellar_buf: [512]u8 = undefined;
+    var current_cellar_buf: [std.fs.max_path_bytes]u8 = undefined;
     const current = (try readCurrentKeg(&db, name, &current_ver_buf, &current_cellar_buf)) orelse {
         // Cask path: not a keg, but the same token may name an
         // installed cask. The cask listing and reinstall flow live
@@ -168,9 +168,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer lk.release(ctx.io);
 
     // Everything above was read without the lock. A writer that landed in
-    // the meantime has moved the row, the Cellar dir and the store; nothing
+    // the meantime has moved the row, the Cellar dir or the store; nothing
     // on disk has been touched yet, so refusing is free.
-    if (!kegRowStillCurrent(&db, name, current.id, current.version, current.revision)) {
+    if (!kegRowStillCurrent(&db, name, current)) {
         output.err("{s} changed while waiting for the lock - re-run mt rollback", .{name});
         return error.Aborted;
     }
@@ -504,11 +504,15 @@ const CurrentKeg = struct {
     cellar_path: []const u8,
     bin_isolated: bool,
     on_request: bool,
+
+    fn eql(a: CurrentKeg, b: CurrentKeg) bool {
+        return a.id == b.id and a.revision == b.revision and
+            a.bin_isolated == b.bin_isolated and a.on_request == b.on_request and
+            std.mem.eql(u8, a.version, b.version) and std.mem.eql(u8, a.cellar_path, b.cellar_path);
+    }
 };
 
-/// Newest keg row for `name`, or null when none is installed. `version` and
-/// `cellar_path` land in the caller's buffers; the statement is finalized
-/// before returning.
+/// Newest keg row for `name`, or null when none is installed.
 fn readCurrentKeg(db: *sqlite.Database, name: []const u8, ver_buf: []u8, cellar_buf: []u8) error{Aborted}!?CurrentKeg {
     var stmt = db.prepare(
         "SELECT id, version, revision, store_sha256, cellar_path, bin_isolated, install_reason FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
@@ -521,7 +525,10 @@ fn readCurrentKeg(db: *sqlite.Database, name: []const u8, ver_buf: []u8, cellar_
     const cellar_path = if (stmt.columnText(4)) |c| std.mem.sliceTo(c, 0) else "";
     return .{
         .id = stmt.columnInt(0),
-        .version = std.fmt.bufPrint(ver_buf, "{s}", .{ver}) catch return error.Aborted,
+        .version = std.fmt.bufPrint(ver_buf, "{s}", .{ver}) catch {
+            output.err("{s}: version {s} is too long to roll back", .{ name, ver });
+            return error.Aborted;
+        },
         .revision = stmt.columnInt(2),
         .cellar_path = std.fmt.bufPrint(cellar_buf, "{s}", .{cellar_path}) catch return error.Aborted,
         .bin_isolated = stmt.columnInt(5) != 0,
@@ -530,17 +537,14 @@ fn readCurrentKeg(db: *sqlite.Database, name: []const u8, ver_buf: []u8, cellar_
     };
 }
 
-/// True while `name`'s newest keg row is still the one captured before the
-/// lock wait. Every writer that can change a keg's store entries also
-/// rewrites its row, so this one read detects a concurrent install,
-/// upgrade or migrate.
-pub fn kegRowStillCurrent(db: *sqlite.Database, name: []const u8, id: i64, version: []const u8, revision: i64) bool {
-    var stmt = db.prepare("SELECT id, version, revision FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;") catch return false;
-    defer stmt.finalize();
-    stmt.bindText(1, name) catch return false;
-    if (!(stmt.step() catch false)) return false;
-    const ver = if (stmt.columnText(1)) |v| std.mem.sliceTo(v, 0) else "unknown";
-    return stmt.columnInt(0) == id and stmt.columnInt(2) == revision and std.mem.eql(u8, ver, version);
+/// True while `name`'s newest keg row still reads as `seen`. Any concurrent
+/// install, upgrade, migrate, link or unlink moves at least one of those
+/// columns, so one read is enough to catch a writer that beat us to the lock.
+pub fn kegRowStillCurrent(db: *sqlite.Database, name: []const u8, seen: CurrentKeg) bool {
+    var ver_buf: [128]u8 = undefined;
+    var cellar_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const now = (readCurrentKeg(db, name, &ver_buf, &cellar_buf) catch return false) orelse return false;
+    return now.eql(seen);
 }
 
 /// Returns the `pinned` flag of the keg row identified by `keg_id`, or
@@ -1604,50 +1608,77 @@ fn seedKeg(db: *sqlite.Database, name: []const u8, version: []const u8, revision
     return sel.columnInt(0);
 }
 
+/// Seeds `tree` 2.1.0 and returns the row as rollback would capture it.
+fn seedAndCapture(db: *sqlite.Database, ver_buf: []u8, cellar_buf: []u8) !CurrentKeg {
+    try schema.initSchema(db);
+    _ = try seedKeg(db, "tree", "2.1.0", 0);
+    return (try readCurrentKeg(db, "tree", ver_buf, cellar_buf)).?;
+}
+
 test "kegRowStillCurrent is true while the captured row is untouched" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
-    try schema.initSchema(&db);
-    const id = try seedKeg(&db, "tree", "2.1.0", 1);
+    var vb: [128]u8 = undefined;
+    var cb: [std.fs.max_path_bytes]u8 = undefined;
+    const seen = try seedAndCapture(&db, &vb, &cb);
 
-    try testing.expect(kegRowStillCurrent(&db, "tree", id, "2.1.0", 1));
+    try testing.expect(kegRowStillCurrent(&db, "tree", seen));
 }
 
 test "kegRowStillCurrent is false once the row was replaced by a newer keg of the same name" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
-    try schema.initSchema(&db);
-    const id = try seedKeg(&db, "tree", "2.1.0", 0);
+    var vb: [128]u8 = undefined;
+    var cb: [std.fs.max_path_bytes]u8 = undefined;
+    const seen = try seedAndCapture(&db, &vb, &cb);
 
     // An upgrade inserts the new row and deletes the old one: the id moves.
     try db.exec("UPDATE kegs SET installed_at = '2000-01-01 00:00:00' WHERE name = 'tree';");
     _ = try seedKeg(&db, "tree", "2.2.0", 0);
     try db.exec("DELETE FROM kegs WHERE version = '2.1.0';");
 
-    try testing.expect(!kegRowStillCurrent(&db, "tree", id, "2.1.0", 0));
+    try testing.expect(!kegRowStillCurrent(&db, "tree", seen));
 }
 
 test "kegRowStillCurrent is false once the version or revision moved in place" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
-    try schema.initSchema(&db);
-    const id = try seedKeg(&db, "tree", "2.1.0", 0);
+    var vb: [128]u8 = undefined;
+    var cb: [std.fs.max_path_bytes]u8 = undefined;
+    const seen = try seedAndCapture(&db, &vb, &cb);
 
     try db.exec("UPDATE kegs SET revision = 1 WHERE name = 'tree';");
-    try testing.expect(!kegRowStillCurrent(&db, "tree", id, "2.1.0", 0));
+    try testing.expect(!kegRowStillCurrent(&db, "tree", seen));
 
     try db.exec("UPDATE kegs SET revision = 0, version = '2.2.0' WHERE name = 'tree';");
-    try testing.expect(!kegRowStillCurrent(&db, "tree", id, "2.1.0", 0));
+    try testing.expect(!kegRowStillCurrent(&db, "tree", seen));
+}
+
+test "kegRowStillCurrent is false once link, unlink or a re-install rewrote the row in place" {
+    // These writers leave id/version/revision alone, yet the swap links the
+    // new keg and writes its receipt from the captured isolation and reason.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var vb: [128]u8 = undefined;
+    var cb: [std.fs.max_path_bytes]u8 = undefined;
+    const seen = try seedAndCapture(&db, &vb, &cb);
+
+    try db.exec("UPDATE kegs SET bin_isolated = 1 WHERE name = 'tree';");
+    try testing.expect(!kegRowStillCurrent(&db, "tree", seen));
+
+    try db.exec("UPDATE kegs SET bin_isolated = 0, install_reason = 'dependency' WHERE name = 'tree';");
+    try testing.expect(!kegRowStillCurrent(&db, "tree", seen));
 }
 
 test "kegRowStillCurrent is false once the row is gone" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
-    try schema.initSchema(&db);
-    const id = try seedKeg(&db, "tree", "2.1.0", 0);
+    var vb: [128]u8 = undefined;
+    var cb: [std.fs.max_path_bytes]u8 = undefined;
+    const seen = try seedAndCapture(&db, &vb, &cb);
 
     try db.exec("DELETE FROM kegs WHERE name = 'tree';");
-    try testing.expect(!kegRowStillCurrent(&db, "tree", id, "2.1.0", 0));
+    try testing.expect(!kegRowStillCurrent(&db, "tree", seen));
 }
 
 test "execute re-validates the keg row between the lock and the first mutation" {
@@ -1681,7 +1712,7 @@ test "rollback re-validates the keg row under the lock after a concurrent commit
 
     // Connection A reads the row the way `execute` does before the lock.
     var ver_buf: [128]u8 = undefined;
-    var cellar_buf: [512]u8 = undefined;
+    var cellar_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cur = (try readCurrentKeg(&a, "tree", &ver_buf, &cellar_buf)).?;
     try testing.expectEqual(id, cur.id);
 
@@ -1693,7 +1724,7 @@ test "rollback re-validates the keg row under the lock after a concurrent commit
     // A must see B's commit and still be allowed to open a write
     // transaction: a snapshot pinned by a still-open statement would fail
     // here with a busy error instead of reaching the re-check.
-    try testing.expect(!kegRowStillCurrent(&a, "tree", cur.id, cur.version, cur.revision));
+    try testing.expect(!kegRowStillCurrent(&a, "tree", cur));
     try a.beginTransaction();
     a.rollback();
 }
@@ -1711,7 +1742,10 @@ test "a read statement left open across a concurrent commit hides it from the re
     var a = try sqlite.Database.open(db_path);
     defer a.close();
     try schema.initSchema(&a);
-    const id = try seedKeg(&a, "tree", "2.1.0", 0);
+    _ = try seedKeg(&a, "tree", "2.1.0", 0);
+    var ver_buf: [128]u8 = undefined;
+    var cellar_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cur = (try readCurrentKeg(&a, "tree", &ver_buf, &cellar_buf)).?;
 
     var open_stmt = try a.prepare("SELECT id FROM kegs WHERE name = 'tree';");
     defer open_stmt.finalize();
@@ -1721,6 +1755,6 @@ test "a read statement left open across a concurrent commit hides it from the re
     defer b.close();
     try b.exec("UPDATE kegs SET version = '2.2.0' WHERE name = 'tree';");
 
-    try testing.expect(kegRowStillCurrent(&a, "tree", id, "2.1.0", 0));
+    try testing.expect(kegRowStillCurrent(&a, "tree", cur));
     try testing.expectError(error.Busy, a.beginTransaction());
 }
