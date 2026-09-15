@@ -14,6 +14,7 @@ const formula_mod = @import("../../core/formula.zig");
 const steps_mod = @import("../../core/post_install_steps.zig");
 const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
+const atomic = @import("../../fs/atomic.zig");
 
 /// Check post_install DSL support status for installed formulae.
 /// Called when `malt doctor --post-install-status` is passed.
@@ -40,8 +41,10 @@ pub fn checkPostInstallStatus(ctx: *const AppCtx, allocator: std.mem.Allocator, 
     defer http.deinit();
     http.offline = ctx.offline;
 
-    var cache_buf: [512]u8 = undefined;
-    const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch return;
+    // Same resolution as `mt update`: with MALT_CACHE set, a bare
+    // `{prefix}/cache` is a second metadata cache that update never wipes.
+    const cache_dir = atomic.maltCacheDir(allocator) catch return;
+    defer allocator.free(cache_dir);
     var api = api_mod.BrewApi.init(io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
     api.offline = ctx.offline;
@@ -55,8 +58,8 @@ pub fn checkPostInstallStatus(ctx: *const AppCtx, allocator: std.mem.Allocator, 
             no_pi_count += 1;
             continue;
         };
+        defer allocator.free(formula_json);
         var formula = formula_mod.parseFormula(allocator, formula_json) catch {
-            allocator.free(formula_json);
             no_pi_count += 1;
             continue;
         };
