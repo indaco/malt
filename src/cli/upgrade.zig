@@ -353,8 +353,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer http.deinit();
     http.offline = ctx.offline;
 
-    var cache_dir_buf: [512]u8 = undefined;
-    const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
+    // Same resolution as `mt outdated`: with MALT_CACHE set, a bare
+    // `{prefix}/cache` would warm and prune a snapshot nobody reads.
+    const cache_dir = atomic.maltCacheDir(allocator) catch return;
+    defer allocator.free(cache_dir);
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
     api.offline = ctx.offline;
@@ -419,7 +421,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
         // Best-effort warm of the shared outdated snapshot from the dry-run's
         // own audit — a cache-write failure never changes exit code or output.
-        // Reuses the `{prefix}/cache` dir already resolved above.
+        // Reuses the cache dir already resolved above.
         if (warmsSnapshot(.{ .dry_run = dry_run, .full_keg = full_keg, .walk_failed = any_failed, .tainted = sink.tainted })) {
             outdated_mod.writeSnapshotEntries(ctx, allocator, cache_dir, sink.formulas.items, sink.casks.items) catch {};
         }

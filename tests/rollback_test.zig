@@ -1137,3 +1137,140 @@ test "a rollback still succeeds when the old cellar dir cannot be removed" {
     // ...and the user was told about it.
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Could not remove cellar entry") != null);
 }
+
+// --- outdated snapshot invalidation -----------------------------------------
+
+/// A fresh "nothing outdated" snapshot at the path `mt outdated` serves from.
+fn seedFreshSnapshot(prefix: [:0]const u8) !void {
+    const io = std.Options.debug_io;
+    var dir_buf: [512]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "{s}/cache", .{prefix});
+    try test_io.cwd().createDirPath(io, dir);
+    var path_buf: [600]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/outdated.json", .{dir});
+    const f = try test_io.createFileAbsolute(io, path, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, "{\"version\":2,\"generated_at_ms\":9999999999999,\"formulas\":[],\"casks\":[]}");
+}
+
+fn readSnapshotBytes(prefix: [:0]const u8, allocator: std.mem.Allocator) ![]u8 {
+    var path_buf: [600]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/cache/outdated.json", .{prefix});
+    return test_io.readFileAbsoluteAlloc(std.Options.debug_io, allocator, path, 4096);
+}
+
+// `mt outdated` and the TUI badge serve a present, fresh snapshot as-is. A
+// downgraded keg was current when the file was warmed, so it has no entry a
+// prune could drop: the only honest snapshot after a rollback is no snapshot.
+test "a completed rollback drops the outdated snapshot; a dry-run leaves it alone" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "snapshot_drop");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try installKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
+    try seedFreshSnapshot(prefix);
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    const before = try readSnapshotBytes(prefix, testing.allocator);
+    defer testing.allocator.free(before);
+
+    try rollback.execute(&ctx, testing.allocator, &.{ "--dry-run", "wget" });
+    const after_dry = try readSnapshotBytes(prefix, testing.allocator);
+    defer testing.allocator.free(after_dry);
+    try testing.expectEqualStrings(before, after_dry);
+
+    try rollback.execute(&ctx, testing.allocator, &.{"wget"});
+    const ver = try installedVersion(prefix, testing.allocator, "wget");
+    defer testing.allocator.free(ver);
+    try testing.expectEqualStrings("1.20", ver);
+    var path_buf: [600]u8 = undefined;
+    const snap = try std.fmt.bufPrint(&path_buf, "{s}/cache/outdated.json", .{prefix});
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, snap, .{}));
+}
+
+// The cache is outside the lock's contract: a rollback that changed nothing
+// must not cost the user a valid snapshot.
+test "an aborted rollback leaves the outdated snapshot untouched" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // chmod 000 doesn't bite root
+
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "snapshot_kept");
+    try makeSandbox(prefix);
+    defer {
+        denyAccess(prefix, sha_previous, "wget", "1.20", 0o755);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    }
+
+    try installKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
+    denyAccess(prefix, sha_previous, "wget", "1.20", 0o000);
+    try seedFreshSnapshot(prefix);
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    const before = try readSnapshotBytes(prefix, testing.allocator);
+    defer testing.allocator.free(before);
+
+    try testing.expectError(error.Aborted, rollback.execute(&ctx, testing.allocator, &.{"wget"}));
+
+    const after = try readSnapshotBytes(prefix, testing.allocator);
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(before, after);
+}
+
+// A cache path the readers would refuse is nothing to invalidate: the
+// rollback already committed, so it must finish and say so rather than
+// die on a best-effort cleanup.
+test "a completed rollback survives a malformed MALT_CACHE" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "bad_cache");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try installKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, sha_previous, "wget", "1.20", 0);
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+    _ = c.setenv("MALT_CACHE", "relative/cache", 1);
+    defer _ = c.unsetenv("MALT_CACHE");
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try rollback.execute(&ctx, testing.allocator, &.{"wget"});
+
+    const ver = try installedVersion(prefix, testing.allocator, "wget");
+    defer testing.allocator.free(ver);
+    try testing.expectEqualStrings("1.20", ver);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "rolled back to 1.20") != null);
+}

@@ -307,3 +307,63 @@ test "execute accepts a scoped --use-system-ruby on an empty prefix" {
     defer unquiet();
     try upgrade.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--use-system-ruby=wget,jq"});
 }
+
+// --- MALT_CACHE ---------------------------------------------------------
+
+// `mt outdated` reads `$MALT_CACHE/outdated.json`, so the snapshot upgrade
+// warms (dry-run) and prunes (real run) has to live there too, or the override
+// splits the cache into a file upgrade writes and a file nobody reads.
+test "execute honours MALT_CACHE for the API cache and the outdated snapshot" {
+    var s = try Scratch.init(testing.allocator, "malt_cache");
+    defer s.deinit(testing.allocator);
+
+    const alt = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/altcache", .{s.path}, 0);
+    defer testing.allocator.free(alt);
+    _ = c.setenv("MALT_CACHE", alt.ptr, 1);
+    defer _ = c.unsetenv("MALT_CACHE");
+
+    // Offline + a cached formula one version ahead of the keg: the only
+    // would-upgrade the audit can find, and only under $MALT_CACHE/api.
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{alt});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const cache_json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_regfoo.json", .{cache_api});
+    defer testing.allocator.free(cache_json);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, cache_json, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\{"name":"regfoo","versions":{"stable":"2.0"},"revision":0}
+        );
+    }
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+            \\VALUES ('regfoo', 'regfoo', '1.0', 0, '', '/c/regfoo/1.0');
+        );
+    }
+
+    output.setDryRun(true);
+    quiet();
+    defer {
+        output.setDryRun(false);
+        unquiet();
+    }
+    var ctx = malt.app_ctx.debug_ctx;
+    ctx.offline = true;
+    try upgrade.execute(&ctx, testing.allocator, &.{});
+
+    const io = std.Options.debug_io;
+    const snap = try std.fmt.allocPrint(testing.allocator, "{s}/outdated.json", .{alt});
+    defer testing.allocator.free(snap);
+    try test_io.accessAbsolute(io, snap, .{});
+
+    const wrong = try std.fmt.allocPrint(testing.allocator, "{s}/cache/outdated.json", .{s.path});
+    defer testing.allocator.free(wrong);
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, wrong, .{}));
+}
