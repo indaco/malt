@@ -537,7 +537,11 @@ fn readCurrentKeg(db: *sqlite.Database, name: []const u8, ver_buf: []u8, cellar_
 /// A row that cannot be read is not a row that changed: say what failed so
 /// the user is not sent to re-run into the same error.
 fn abortRowRead(db: *sqlite.Database, name: []const u8, e: anyerror) error{Aborted} {
-    output.err("Could not read the keg row for {s}: {s} ({s})", .{ name, @errorName(e), db.errMsg() });
+    switch (e) {
+        // A copy buffer overflowed; SQLite has nothing to add.
+        error.NoSpaceLeft => output.err("{s}: version is too long to roll back", .{name}),
+        else => output.err("Could not read the keg row for {s}: {s} ({s})", .{ name, @errorName(e), db.errMsg() }),
+    }
     return error.Aborted;
 }
 
@@ -1686,6 +1690,19 @@ test "kegRowStillCurrent surfaces a failed re-read instead of calling it a chang
 
     try db.exec("DROP TABLE kegs;");
     try testing.expectError(error.PrepareFailed, kegRowStillCurrent(&db, "tree", seen));
+}
+
+test "abortRowRead names an over-long version instead of quoting an idle SQLite" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    try testing.expectEqual(error.Aborted, abortRowRead(&db, "tree", error.NoSpaceLeft));
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "tree: version is too long to roll back") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "not an error") == null);
 }
 
 test "kegRowStillCurrent is false once the row is gone" {
