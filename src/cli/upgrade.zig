@@ -1496,7 +1496,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // rest of the batch proceed, as brew does.
     if (!parsed_cask.os_supported) {
         const req = parsed_cask.os_requirement.?;
-        output.warn("{s} requires macOS {s} {s}, skipped", .{ token, req.op, req.version });
+        output.warn("{s} requires macOS {s} {s}, skipped", .{ token, req.op, req.version() });
         output.emitNdjsonEvent(.unsupported, token, null);
         return .unsupported;
     }

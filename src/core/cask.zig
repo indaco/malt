@@ -2512,7 +2512,7 @@ test "depends_on macos >= gates os_supported" {
         defer c.deinit();
         try std.testing.expect(!c.os_supported);
         try std.testing.expectEqualStrings(">=", c.os_requirement.?.op);
-        try std.testing.expectEqualStrings("15", c.os_requirement.?.version);
+        try std.testing.expectEqualStrings("15", c.os_requirement.?.version());
     }
     {
         var c = try parseCaskWithMajor(a, ge, 15);

@@ -1619,7 +1619,7 @@ fn installCask(
     // here, so nothing about it is worth fetching.
     if (!cask.os_supported) {
         const req = cask.os_requirement.?;
-        sink.err("{s} requires macOS {s} {s}", .{ cask.token, req.op, req.version });
+        sink.err("{s} requires macOS {s} {s}", .{ cask.token, req.op, req.version() });
         return InstallError.CaskNotFound;
     }
 
