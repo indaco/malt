@@ -589,7 +589,7 @@ fn upgradeFormula(
     // ahead of the pin: a pin can be lifted, a missing upstream cannot, so
     // the keg reports the same way with or without --force.
     if (install_args_mod.isLocalTap(old.tap)) {
-        if (!bulk) output.skip("{s} was installed from a local formula; re-run mt install --local {s} to update it", .{ name, old.full_name });
+        if (!bulk) output.skip("{s} was installed from a local formula; re-run `mt install --local '{s}'` to update it", .{ name, old.full_name });
         output.emitNdjsonEvent(.local, name, null);
         return .local;
     }
@@ -2840,7 +2840,8 @@ test "a named local keg is skipped with the install --local way out, never route
 
     const outcome = try upgradeFormula(&ctx, alloc, "older", &db, &api, &http, "/opt/malt", false, false, false, false, &.{}, false, null);
     try std.testing.expectEqual(Outcome.local, outcome);
-    try std.testing.expect(std.mem.indexOf(u8, captured.items, "install --local /x/older.rb") != null);
+    // Quoted so the suggestion pastes even when the .rb lives under a path with spaces.
+    try std.testing.expect(std.mem.indexOf(u8, captured.items, "install --local '/x/older.rb'") != null);
     try std.testing.expect(std.mem.indexOf(u8, captured.items, "Cannot parse tap") == null);
 }
 
