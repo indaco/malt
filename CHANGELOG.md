@@ -4,6 +4,80 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.24.4 - 2026-09-16
+
+### Highlights
+
+v0.24.4 is a hardening release: `MALT_CACHE` is honoured everywhere, one `--local` install no longer blocks `outdated` or `upgrade`, a cask installs the build for the macOS you are running, and malt refuses to run as a setuid wrapper.
+
+- **One cache, wherever you put it.** With `MALT_CACHE` set, every command reads and writes the same tree, `purge --cache` reclaims what `doctor` reports, and artefacts left under the old `{prefix}/cache` are moved over automatically.
+- **Local kegs stay out of the way.** One `mt install --local` keg no longer fails every `mt upgrade` run or blocks the `mt outdated` snapshot; a rolled-back or uninstalled keg shows up in the list right away.
+- **The right cask, in a tighter fence.** `mt install` fetches the cask build for your macOS and refuses one that needs a newer release; post-install scripts lose the Mach services they do not need, and `mt` refuses to run under a setuid wrapper.
+
+#### Upgrading
+
+```bash
+mt version update             # standalone install
+brew upgrade --cask malt      # Homebrew install
+```
+
+New to malt? Use the installer or Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🩹 Fixes
+
+- **cli:** refuse to run under a setuid or setgid wrapper ([e608e4fc](https://github.com/indaco/malt/commit/e608e4fc)) ([#1055](https://github.com/indaco/malt/pull/1055))
+- **sandbox:** stop post_install scripts from reaching Mach services they do not need ([ef076677](https://github.com/indaco/malt/commit/ef076677)) ([#1054](https://github.com/indaco/malt/pull/1054))
+- **cask:** install the cask build that matches the running macOS ([9b1b3e70](https://github.com/indaco/malt/commit/9b1b3e70)) ([#1053](https://github.com/indaco/malt/pull/1053))
+- **db:** release the sqlite connection even when a statement outlives close ([9c2a33fa](https://github.com/indaco/malt/commit/9c2a33fa)) ([#1051](https://github.com/indaco/malt/pull/1051))
+- **db:** release the sqlite handle when a startup PRAGMA fails ([32eceb4f](https://github.com/indaco/malt/commit/32eceb4f)) ([#1050](https://github.com/indaco/malt/pull/1050))
+- **upgrade:** skip local kegs with a hint so one --local install no longer fails every upgrade run ([55017058](https://github.com/indaco/malt/commit/55017058)) ([#1048](https://github.com/indaco/malt/pull/1048))
+- **outdated:** treat local kegs as out of scope so one --local install no longer blocks the audit and the snapshot ([bfd9296f](https://github.com/indaco/malt/commit/bfd9296f)) ([#1047](https://github.com/indaco/malt/pull/1047))
+- **cache:** adopt artefacts left under {prefix}/cache once MALT_CACHE is set ([b5b5fd9d](https://github.com/indaco/malt/commit/b5b5fd9d)) ([#1045](https://github.com/indaco/malt/pull/1045))
+- **cache:** keep cask artefacts and tap archives under MALT_CACHE so purge --cache reclaims what doctor reports ([8a0684a2](https://github.com/indaco/malt/commit/8a0684a2)) ([#1044](https://github.com/indaco/malt/pull/1044))
+- **outdated:** keep the snapshot honest after uninstall and rollback ([182decce](https://github.com/indaco/malt/commit/182decce)) ([#1043](https://github.com/indaco/malt/pull/1043))
+- **cli:** honour MALT_CACHE for the API cache so mt update refreshes what install, run, migrate and doctor read ([40999df6](https://github.com/indaco/malt/commit/40999df6)) ([#1041](https://github.com/indaco/malt/pull/1041))
+- **rollback:** drop the outdated snapshot so a downgraded keg shows up in mt outdated ([576fd3f8](https://github.com/indaco/malt/commit/576fd3f8)) ([#1040](https://github.com/indaco/malt/pull/1040))
+- **rollback:** refuse to roll back a keg that changed while waiting for the lock ([867edde9](https://github.com/indaco/malt/commit/867edde9)) ([#1037](https://github.com/indaco/malt/pull/1037))
+- **purge:** reclaim store entries no keg holds, whatever the counter says ([6ff761a8](https://github.com/indaco/malt/commit/6ff761a8)) ([#1035](https://github.com/indaco/malt/pull/1035))
+- **outdated:** refuse to cache an all-clear from a database that could not be read ([61ed3049](https://github.com/indaco/malt/commit/61ed3049)) ([#1033](https://github.com/indaco/malt/pull/1033))
+
+### 💅 Refactors
+
+- **store:** keep store_refs as a claim set now that kegs decide what is reclaimable ([edc97c46](https://github.com/indaco/malt/commit/edc97c46)) ([#1038](https://github.com/indaco/malt/pull/1038))
+- **migrate:** route every keg through one record, link and rollback path ([dcd91012](https://github.com/indaco/malt/commit/dcd91012)) ([#1036](https://github.com/indaco/malt/pull/1036))
+
+### 📖 Documentation
+
+- **benchmark:** update results 2026-09-14 ([aec65a9c](https://github.com/indaco/malt/commit/aec65a9c)) ([#1032](https://github.com/indaco/malt/pull/1032))
+
+### ✅ Tests
+
+- **scripts:** sweep the install smokes' scratch prefixes and keep their logs diagnosable ([8c428e4e](https://github.com/indaco/malt/commit/8c428e4e)) ([#1042](https://github.com/indaco/malt/pull/1042))
+- **rollback:** pin that a completed rollback keeps the keg's intent and dependency edges ([f0f62eba](https://github.com/indaco/malt/commit/f0f62eba)) ([#1034](https://github.com/indaco/malt/pull/1034))
+- keep ship checks green across upstream version bumps and forking --help probes ([c903e7bf](https://github.com/indaco/malt/commit/c903e7bf)) ([#1031](https://github.com/indaco/malt/pull/1031))
+
+### 🏡 Chores
+
+- **bench:** list benchmarked releases above the tables ([cac67981](https://github.com/indaco/malt/commit/cac67981)) ([#1039](https://github.com/indaco/malt/pull/1039))
+
+### Other
+
+- **smoke:** stop tty-only tools from failing the migrate usability probe ([e2d2707a](https://github.com/indaco/malt/commit/e2d2707a)) ([#1056](https://github.com/indaco/malt/pull/1056))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+
 ## v0.24.3 - 2026-09-14
 
 ### Highlights
