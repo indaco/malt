@@ -118,10 +118,29 @@ pub fn currentUid() std.posix.uid_t {
     return std.c.getuid();
 }
 
+/// False under a setuid/setgid wrapper, where the env-driven prefix,
+/// PATH and tokens would be attacker input to a process running as the
+/// prefix owner. Pure so the refusal can be unit-tested.
+pub fn privilegeIdsMatch(uid: std.posix.uid_t, euid: std.posix.uid_t, gid: std.posix.gid_t, egid: std.posix.gid_t) bool {
+    return uid == euid and gid == egid;
+}
+
 // Re-exports for non-macOS callers that want the type-level surface
 // without pulling in the walker.
 comptime {
     if (builtin.os.tag != .macos) {
         @compileError("perms.zig is macOS-only for now");
     }
+}
+
+test "privilegeIdsMatch: equal real/effective ids are fine" {
+    try std.testing.expect(privilegeIdsMatch(501, 501, 20, 20));
+}
+
+test "privilegeIdsMatch: uid != euid is a setuid wrapper" {
+    try std.testing.expect(!privilegeIdsMatch(501, 0, 20, 20));
+}
+
+test "privilegeIdsMatch: gid != egid is a setgid wrapper" {
+    try std.testing.expect(!privilegeIdsMatch(501, 501, 20, 0));
 }
