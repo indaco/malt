@@ -93,7 +93,7 @@ fn pinnedHolds(row: outdated_mod.KegRow, force: bool, audit_mode: bool) bool {
 /// a cache prune without the upgrade functions knowing which. Failures stay
 /// on the error channel — `error.Aborted` / `error.AppRunning` — so the
 /// exit-code split survives untouched.
-const Outcome = enum { upgraded, would_upgrade, up_to_date, pinned };
+const Outcome = enum { upgraded, would_upgrade, up_to_date, pinned, local };
 
 /// Aggregate counters for a bulk `mt upgrade` run, folded from the
 /// per-package `Outcome`s. Whether to *print* per-package lines is a
@@ -105,6 +105,7 @@ const Tally = struct {
     would_upgrade: usize = 0,
     up_to_date: usize = 0,
     pinned: usize = 0,
+    local: usize = 0,
     failed: usize = 0,
 
     /// Fold one package's outcome into the run's counters — the single
@@ -116,26 +117,34 @@ const Tally = struct {
             .would_upgrade => self.would_upgrade += 1,
             .up_to_date => self.up_to_date += 1,
             .pinned => self.pinned += 1,
+            .local => self.local += 1,
         }
     }
 
     fn checked(self: Tally) usize {
-        return self.upgraded + self.would_upgrade + self.up_to_date + self.pinned + self.failed;
+        return self.upgraded + self.would_upgrade + self.up_to_date + self.pinned + self.local + self.failed;
     }
 
     /// Render the one-line footer into `buf`. Dry-run swaps "upgraded" for
-    /// "would upgrade"; the failed clause appears only when something failed.
-    /// `·` (U+00B7) separators match the dim-detail style and render under
-    /// both `NO_COLOR` and `MALT_NO_EMOJI`.
+    /// "would upgrade"; the local and failed clauses appear only when
+    /// non-zero so the common footer stays unchanged. `·` (U+00B7)
+    /// separators match the dim-detail style and render under both
+    /// `NO_COLOR` and `MALT_NO_EMOJI`.
     fn summaryLine(self: Tally, buf: []u8, dry_run: bool) []const u8 {
         const action_count = if (dry_run) self.would_upgrade else self.upgraded;
         const action_word = if (dry_run) "would upgrade" else "upgraded";
         const head = std.fmt.bufPrint(buf, "{d} checked · {d} {s} · {d} up to date · {d} pinned", .{
             self.checked(), action_count, action_word, self.up_to_date, self.pinned,
         }) catch return buf[0..0];
-        if (self.failed == 0) return head;
-        const tail = std.fmt.bufPrint(buf[head.len..], " · {d} failed", .{self.failed}) catch return head;
-        return buf[0 .. head.len + tail.len];
+        var len = head.len;
+        if (self.local > 0) len += clauseLen(buf[len..], " · {d} local", self.local);
+        if (self.failed > 0) len += clauseLen(buf[len..], " · {d} failed", self.failed);
+        return buf[0..len];
+    }
+
+    /// Bytes appended by one optional footer clause; zero when it does not fit.
+    fn clauseLen(buf: []u8, comptime fmt: []const u8, n: usize) usize {
+        return (std.fmt.bufPrint(buf, fmt, .{n}) catch return 0).len;
     }
 };
 
@@ -482,6 +491,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 /// immediately — see `readOldKeg`.
 const OldKeg = struct {
     keg_id: i64,
+    /// For a `--local` keg this is the `.rb` path it was installed from.
+    full_name: []const u8,
     version: []const u8,
     revision: i64,
     cellar_path: []const u8,
@@ -492,6 +503,7 @@ const OldKeg = struct {
     tap_commit_sha: ?[]const u8,
 
     fn deinit(self: *OldKeg, allocator: std.mem.Allocator) void {
+        allocator.free(self.full_name);
         allocator.free(self.version);
         allocator.free(self.cellar_path);
         allocator.free(self.tap);
@@ -507,12 +519,14 @@ const OldKeg = struct {
 /// snapshot to a writer (SQLITE_BUSY). Returns null when no row matches.
 fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !?OldKeg {
     var stmt = try db.prepare(
-        "SELECT id, version, revision, cellar_path, tap, bin_isolated, install_reason, tap_commit_sha FROM kegs WHERE name = ?1 LIMIT 1;",
+        "SELECT id, version, revision, cellar_path, tap, bin_isolated, install_reason, tap_commit_sha, full_name FROM kegs WHERE name = ?1 LIMIT 1;",
     );
     defer stmt.finalize();
     try stmt.bindText(1, name);
     if (!(try stmt.step())) return null;
 
+    const full_name = try allocator.dupe(u8, if (stmt.columnText(8)) |f| std.mem.sliceTo(f, 0) else name);
+    errdefer allocator.free(full_name);
     const version = try allocator.dupe(u8, if (stmt.columnText(1)) |v| std.mem.sliceTo(v, 0) else "unknown");
     errdefer allocator.free(version);
     const cellar_path = try allocator.dupe(u8, if (stmt.columnText(3)) |cp| std.mem.sliceTo(cp, 0) else "");
@@ -523,6 +537,7 @@ fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const 
 
     return .{
         .keg_id = stmt.columnInt(0),
+        .full_name = full_name,
         .version = version,
         .revision = stmt.columnInt(2),
         .cellar_path = cellar_path,
@@ -559,6 +574,26 @@ fn upgradeFormula(
     bulk: bool,
     sink: ?*EntrySink,
 ) !Outcome {
+    // Read the keg row into owned storage and release its read snapshot
+    // before the dep re-entry (why: see readOldKeg). `bin_isolated` replays
+    // the user's prior isolation intent without re-passing a flag.
+    var old = (readOldKeg(allocator, db, name) catch return error.Aborted) orelse {
+        output.err("{s} is not installed as a formula", .{name});
+        return error.Aborted;
+    };
+    defer old.deinit(allocator);
+
+    // A `--local` keg has no upstream to consult, so there is nothing to
+    // upgrade: skip it with the way out instead of failing the run. The
+    // bulk footer tallies it; only the named form narrates the hint. Checked
+    // ahead of the pin: a pin can be lifted, a missing upstream cannot, so
+    // the keg reports the same way with or without --force.
+    if (install_args_mod.isLocalTap(old.tap)) {
+        if (!bulk) output.skip("{s} was installed from a local formula; re-run `mt install --local '{s}'` to update it", .{ name, old.full_name });
+        output.emitNdjsonEvent(.local, name, null);
+        return .local;
+    }
+
     // Honor pins before any network or filesystem work — the whole
     // point is that a pinned keg never gets touched. Audit mode
     // (`--pinned --dry-run`) walks pinned kegs end-to-end so the user
@@ -571,15 +606,6 @@ fn upgradeFormula(
         output.emitNdjsonEvent(.pinned, name, null);
         return .pinned;
     }
-
-    // Read the keg row into owned storage and release its read snapshot
-    // before the dep re-entry (why: see readOldKeg). `bin_isolated` replays
-    // the user's prior isolation intent without re-passing a flag.
-    var old = (readOldKeg(allocator, db, name) catch return error.Aborted) orelse {
-        output.err("{s} is not installed as a formula", .{name});
-        return error.Aborted;
-    };
-    defer old.deinit(allocator);
 
     // Tap-installed formulas come from `<user>/<repo>` repos, not the
     // homebrew/core API. Route them through the tap-aware upgrade path
@@ -2755,4 +2781,169 @@ test "the dry-run cask snapshot follows the fetch, not the index, when the two s
     try std.testing.expectEqualStrings("3.0", sink.casks.items[0].latest);
     try std.testing.expectEqual(@as(usize, 1), tally.up_to_date); // now_current
     try std.testing.expectEqual(@as(usize, 1), tally.would_upgrade); // still_behind
+}
+
+test "Tally.fold counts a local keg so the footer still covers every package" {
+    var t: Tally = .{};
+    t.fold(.local);
+    t.fold(.up_to_date);
+    try std.testing.expectEqual(@as(usize, 1), t.local);
+    try std.testing.expectEqual(@as(usize, 0), t.failed);
+    try std.testing.expectEqual(@as(usize, 2), t.checked());
+}
+
+test "summaryLine shows the local column only when a local keg was skipped" {
+    var buf: [160]u8 = undefined;
+    const none: Tally = .{ .up_to_date = 2 };
+    try std.testing.expectEqualStrings(
+        "2 checked · 0 upgraded · 2 up to date · 0 pinned",
+        none.summaryLine(&buf, false),
+    );
+    const some: Tally = .{ .would_upgrade = 1, .local = 1, .failed = 1 };
+    try std.testing.expectEqualStrings(
+        "3 checked · 1 would upgrade · 0 up to date · 0 pinned · 1 local · 1 failed",
+        some.summaryLine(&buf, true),
+    );
+}
+
+/// Seed one `tap = "local"` keg whose `full_name` is the `.rb` it came from.
+fn insertLocalKeg(db: *sqlite.Database) !void {
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path)
+        \\VALUES ('older', '/x/older.rb', '1.0', 1, 'local', 'sha', '/cellar/older/1.0_1');
+    );
+}
+
+test "a named local keg is skipped with the install --local way out, never routed to a tap" {
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertLocalKeg(&db);
+
+    // Offline and cold: any fetch would fail, so a clean outcome proves no
+    // API call was made for the row.
+    var s = try Scratch.init("named_local_skip");
+    defer s.deinit();
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, s.base);
+    api.offline = true;
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(alloc);
+    output.beginStderrCapture(alloc, &captured);
+    defer output.endStderrCapture();
+
+    const outcome = try upgradeFormula(&ctx, alloc, "older", &db, &api, &http, "/opt/malt", false, false, false, false, &.{}, false, null);
+    try std.testing.expectEqual(Outcome.local, outcome);
+    // Quoted so the suggestion pastes even when the .rb lives under a path with spaces.
+    try std.testing.expect(std.mem.indexOf(u8, captured.items, "install --local '/x/older.rb'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, captured.items, "Cannot parse tap") == null);
+}
+
+test "a pinned local keg reports local on every path, since unpinning would not help" {
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertLocalKeg(&db);
+    try db.exec("UPDATE kegs SET pinned = 1 WHERE name = 'older';");
+
+    var s = try Scratch.init("pinned_local_skip");
+    defer s.deinit();
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, s.base);
+    api.offline = true;
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(alloc);
+    output.beginStderrCapture(alloc, &captured);
+    defer output.endStderrCapture();
+
+    // Default run, --force, and --pinned --dry-run must all agree: the pin
+    // is the only thing that differs between them, and it is not the reason.
+    const paths = [_]struct { force: bool, audit: bool }{
+        .{ .force = false, .audit = false },
+        .{ .force = true, .audit = false },
+        .{ .force = false, .audit = true },
+    };
+    for (paths) |p| {
+        const outcome = try upgradeFormula(&ctx, alloc, "older", &db, &api, &http, "/opt/malt", true, p.force, p.audit, false, &.{}, false, null);
+        try std.testing.expectEqual(Outcome.local, outcome);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, captured.items, "is pinned") == null);
+}
+
+test "a bulk run folds a local keg silently and leaves the hint to the named form" {
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertLocalKeg(&db);
+
+    var s = try Scratch.init("bulk_local_skip");
+    defer s.deinit();
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, s.base);
+    api.offline = true;
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(alloc);
+    output.beginStderrCapture(alloc, &captured);
+    defer output.endStderrCapture();
+
+    const outcome = try upgradeFormula(&ctx, alloc, "older", &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, true, null);
+    try std.testing.expectEqual(Outcome.local, outcome);
+    try std.testing.expect(std.mem.indexOf(u8, captured.items, "install --local") == null);
+}
+
+test "a local keg beside a core keg neither fails the bulk run nor taints the warm" {
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertLocalKeg(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES ('wget', 'wget', '1.20', 'sha2', '/cellar/wget/1.20');
+    );
+
+    var s = try Scratch.init("bulk_local_beside_core");
+    defer s.deinit();
+    try writeTestFormulaCache(s.base, "wget", "1.22");
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, s.base);
+    api.offline = true;
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .formula, .{});
+    defer plan.deinit(alloc);
+    var tally: Tally = .{};
+    var sink = EntrySink.init(alloc);
+    defer sink.deinit();
+    try upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, plan, &tally, &sink);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.local);
+    try std.testing.expectEqual(@as(usize, 1), tally.would_upgrade);
+    try std.testing.expectEqual(@as(usize, 0), tally.failed);
+    try std.testing.expectEqual(@as(usize, 2), tally.checked());
+    // The local row never reaches the sink, so the warm carries only wget.
+    try std.testing.expect(!sink.tainted);
+    try std.testing.expectEqual(@as(usize, 1), sink.formulas.items.len);
+    try std.testing.expectEqualStrings("wget", sink.formulas.items[0].name);
 }

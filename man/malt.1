@@ -155,9 +155,11 @@ Usage: malt upgrade [<package>...] [flags]
 
 Upgrade installed packages to latest versions. Pinned kegs and
 casks are skipped with a "pinned, skipped" line; pass --force to
-override. malt follows the tap: if the tap version differs from the
-installed one it is applied, even if that moves the version down
-(e.g. an upstream revert). A backward move is announced with a warning
+override. Kegs from `mt install --local` have no upstream and are
+skipped too; re-run the install to update one. malt follows the
+tap: if the tap version differs from the installed one it is
+applied, even if that moves the version down (e.g. an upstream
+revert). A backward move is announced with a warning
 that names both versions and points at `mt rollback`; it never blocks
 the upgrade, and stays quiet when the versions cannot be ranked.
 Formulas from a third-party tap are the exception: they upgrade when
