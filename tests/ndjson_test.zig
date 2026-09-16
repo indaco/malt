@@ -133,6 +133,7 @@ test "no-op skip event names are stable across mutating commands" {
         .would_install, // dry-run install / upgrade / migrate
         .up_to_date, // upgrade detects no version drift
         .pinned, // upgrade refuses a pinned package
+        .local, // upgrade has no upstream for a --local keg
     };
     const prior = setNdjsonOn();
     defer restoreNdjson(prior);

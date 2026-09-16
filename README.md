@@ -678,6 +678,7 @@ The supply-chain story:
 - **Constant-time compare.** The SHA256 check runs in constant time.
 - **Ownership warning.** An extra ⚠ line fires if the `.rb` is world-writable or owned by a different user.
 - **Flag conflicts refused.** Combining `--local` with `--cask`, `--formula`, or `--use-system-ruby` is refused up front.
+- **No upstream.** `mt upgrade` and `mt outdated` skip a local keg — there is nothing to fetch. Re-run `mt install --local <path>` to update it.
 
 For local installs, malt reads only the bottle-style `version` + `url` + `sha256` triple (optionally nested under `on_macos` / `on_arm` / `on_intel`). It does not evaluate `depends_on` or `post_install` - if you need either, publish the formula to a tap and install via `mt install user/tap/formula` instead.
 
