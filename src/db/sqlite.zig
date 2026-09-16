@@ -316,3 +316,53 @@ test "Database.open closes the handle when a PRAGMA fails after a successful ope
     defer _ = std.c.close(after);
     try testing.expectEqual(before, after);
 }
+
+// SQLite removes the WAL sidecars only on a clean close; a red run must not litter /tmp.
+fn deleteWithSidecars(io: std.Io, path: []const u8) void {
+    for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
+        var buf: [80]u8 = undefined;
+        const file = std.fmt.bufPrint(&buf, "{s}{s}", .{ path, suffix }) catch unreachable;
+        std.Io.Dir.cwd().deleteFile(io, file) catch {};
+    }
+}
+
+test "Database.close releases the connection at once when no statement is alive" {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-clean-close-{d}.db", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    defer deleteWithSidecars(io, path);
+
+    const before = std.c.dup(0);
+    _ = std.c.close(before);
+    try testing.expect(before >= 0);
+
+    var db = try Database.open(path);
+    db.close();
+
+    const after = std.c.dup(0);
+    defer _ = std.c.close(after);
+    try testing.expectEqual(before, after);
+}
+
+test "Database.close releases the connection once a straggling statement finalizes" {
+    // File-backed on purpose: an in-memory connection owns no fd, so the
+    // probe would pass vacuously against the legacy close.
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-close-{d}.db", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    defer deleteWithSidecars(io, path);
+
+    const before = std.c.dup(0);
+    _ = std.c.close(before);
+    try testing.expect(before >= 0);
+
+    var db = try Database.open(path);
+    try db.exec("CREATE TABLE t(x);");
+    var stmt = try db.prepare("SELECT x FROM t;");
+    db.close(); // straggler alive: the connection must outlive this call, not leak
+    stmt.finalize(); // last finalize reaps the zombie connection and its fds
+
+    const after = std.c.dup(0);
+    defer _ = std.c.close(after);
+    try testing.expectEqual(before, after);
+}
