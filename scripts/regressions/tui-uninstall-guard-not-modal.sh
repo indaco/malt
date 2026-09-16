@@ -23,17 +23,17 @@ fail() {
 }
 
 # 1. The latch must exist: a bare bool guard is the bug.
-if rg -q 'confirm_uninstall: bool' src/tui/installed_tab.zig; then
+if grep -q 'confirm_uninstall: bool' src/tui/installed_tab.zig; then
   fail "uninstall guard is still a target-less bool"
 fi
 
 # 2. The shell must not resolve the target live at confirmation time.
-if rg -A2 'fn doUninstall' src/tui/app.zig | rg -q 'selectedPkg'; then
+if grep -A2 'fn doUninstall' src/tui/app.zig | grep -q 'selectedPkg'; then
   fail "doUninstall still reads the live selection"
 fi
 
 # 3. The latch/modality unit tests must exist and pass.
-rg -q 'latches' src/tui/installed_tab.zig ||
+grep -q 'latches' src/tui/installed_tab.zig ||
   fail "guard-latch tests missing from installed_tab.zig"
 zig build test || fail "unit tests failed"
 

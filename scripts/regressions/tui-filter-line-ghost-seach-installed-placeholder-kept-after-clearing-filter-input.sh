@@ -21,7 +21,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 
 # The fix: the filter line must be painted with moveClear, not a moveTo-only
 # paint that leaves last frame's caret un-erased on a shrinking query.
-rg -q 'moveClear\(r\.filter\.row' "$ROOT/src/tui/app.zig" ||
+grep -qE 'moveClear\(r\.filter\.row' "$ROOT/src/tui/app.zig" ||
   {
     echo "FAIL: filter line no longer painted with moveClear — caret can ghost" >&2
     exit 1
@@ -29,7 +29,7 @@ rg -q 'moveClear\(r\.filter\.row' "$ROOT/src/tui/app.zig" ||
 
 # The behavioural guard: the inline frame test that asserts the filter row emits
 # `\x1b[K` must survive, or the fix could be reverted without a test noticing.
-rg -q 'self-erases the filter row' "$ROOT/src/tui/app.zig" ||
+grep -q 'self-erases the filter row' "$ROOT/src/tui/app.zig" ||
   {
     echo "FAIL: filter-row self-erase guard test is missing" >&2
     exit 1
