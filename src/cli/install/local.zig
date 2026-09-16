@@ -582,7 +582,7 @@ pub fn installLocalFormula(
     const resolved = ResolvedRubyFormula{
         .name = name,
         .full_name = realpath,
-        .tap_label = "local",
+        .tap_label = args.local_tap_label,
         .version = rb.version,
         .revision = rb.revision,
         .url = final_url,

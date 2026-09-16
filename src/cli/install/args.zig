@@ -59,12 +59,19 @@ pub fn isFormulaNameCharset(name: []const u8) bool {
 }
 
 pub fn tapSiblingSlug(buf: []u8, tap_label: []const u8, dep: []const u8) ?[]const u8 {
-    if (isCoreTap(tap_label) or std.mem.eql(u8, tap_label, "local")) return null;
+    if (isCoreTap(tap_label) or isLocalTap(tap_label)) return null;
     // The dep name comes from the tap's own `.rb` and reaches both a Cellar
     // path and a URL, so it has to clear both bars before we act on it.
     if (!path_component.isPathComponent(dep)) return null;
     if (!isFormulaNameCharset(dep)) return null;
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ tap_label, dep }) catch null;
+}
+
+/// Label a `--local` install records; not a tap.
+pub const local_tap_label = "local";
+
+pub fn isLocalTap(tap_label: []const u8) bool {
+    return std.mem.eql(u8, tap_label, local_tap_label);
 }
 
 /// True when `tap_label` represents one of Homebrew's core taps. Empty
@@ -666,6 +673,18 @@ test "isCoreTap is exact-match (not prefix)" {
     // `homebrew/core-staging` is a hypothetical fork; treat it as third-party.
     try std.testing.expect(!isCoreTap("homebrew/core-staging"));
     try std.testing.expect(!isCoreTap("homebrew/cask-fonts"));
+}
+
+test "isLocalTap recognises only the label a --local install wears" {
+    try std.testing.expect(isLocalTap("local"));
+    // Neither core nor a third-party tap: the label is its own class.
+    try std.testing.expect(!isLocalTap(""));
+    try std.testing.expect(!isLocalTap("homebrew/core"));
+    try std.testing.expect(!isLocalTap("user/repo"));
+    // Exact match only — no prefix, no case folding.
+    try std.testing.expect(!isLocalTap("local/"));
+    try std.testing.expect(!isLocalTap("Local"));
+    try std.testing.expect(!isCoreTap(local_tap_label));
 }
 
 test "tapSiblingSlug qualifies a bare dep with its owning tap" {
