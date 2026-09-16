@@ -308,6 +308,35 @@ test "collectOutdated resolves core rows from the version map with no per-keg ca
     try testing.expectEqualStrings("2.0", out[0].latest);
 }
 
+test "collectOutdated never consults a same-named core formula for a local keg" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init(testing.allocator, "local_keg_out_of_scope");
+    defer dir.deinit();
+
+    // Both routes hold a newer "older" — the index and the per-keg JSON. The
+    // installed `.rb` is the only description of a local keg, so a core
+    // formula that merely shares its name must never produce a verdict.
+    try seedFormula(&dir, "older", "9.0");
+    try seedFormula(&dir, "alpha", "2.0");
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+
+    const kegs = [_]outdated_mod.KegRow{
+        .{ .name = "older", .version = "1.0", .tap = "local" },
+        .{ .name = "alpha", .version = "1.0" },
+    };
+    var db = try openTestDb();
+    defer db.close();
+    const audit = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
+    defer freeEntries(testing.allocator, audit.entries);
+
+    try testing.expect(audit.complete);
+    try testing.expectEqual(@as(usize, 1), audit.entries.len);
+    try testing.expectEqualStrings("alpha", audit.entries[0].name);
+}
+
 test "collectOutdated detects an upstream revision bump" {
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
