@@ -576,6 +576,8 @@ pub const NdjsonEvent = enum {
     already_installed,
     up_to_date,
     pinned,
+    // upgrade has no upstream for a --local keg.
+    local,
 };
 
 /// Write one `{"event":...}\n` per state transition. No-op when ndjson

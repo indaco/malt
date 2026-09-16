@@ -93,7 +93,7 @@ fn pinnedHolds(row: outdated_mod.KegRow, force: bool, audit_mode: bool) bool {
 /// a cache prune without the upgrade functions knowing which. Failures stay
 /// on the error channel — `error.Aborted` / `error.AppRunning` — so the
 /// exit-code split survives untouched.
-const Outcome = enum { upgraded, would_upgrade, up_to_date, pinned };
+const Outcome = enum { upgraded, would_upgrade, up_to_date, pinned, local };
 
 /// Aggregate counters for a bulk `mt upgrade` run, folded from the
 /// per-package `Outcome`s. Whether to *print* per-package lines is a
@@ -105,6 +105,7 @@ const Tally = struct {
     would_upgrade: usize = 0,
     up_to_date: usize = 0,
     pinned: usize = 0,
+    local: usize = 0,
     failed: usize = 0,
 
     /// Fold one package's outcome into the run's counters — the single
@@ -116,26 +117,34 @@ const Tally = struct {
             .would_upgrade => self.would_upgrade += 1,
             .up_to_date => self.up_to_date += 1,
             .pinned => self.pinned += 1,
+            .local => self.local += 1,
         }
     }
 
     fn checked(self: Tally) usize {
-        return self.upgraded + self.would_upgrade + self.up_to_date + self.pinned + self.failed;
+        return self.upgraded + self.would_upgrade + self.up_to_date + self.pinned + self.local + self.failed;
     }
 
     /// Render the one-line footer into `buf`. Dry-run swaps "upgraded" for
-    /// "would upgrade"; the failed clause appears only when something failed.
-    /// `·` (U+00B7) separators match the dim-detail style and render under
-    /// both `NO_COLOR` and `MALT_NO_EMOJI`.
+    /// "would upgrade"; the local and failed clauses appear only when
+    /// non-zero so the common footer stays unchanged. `·` (U+00B7)
+    /// separators match the dim-detail style and render under both
+    /// `NO_COLOR` and `MALT_NO_EMOJI`.
     fn summaryLine(self: Tally, buf: []u8, dry_run: bool) []const u8 {
         const action_count = if (dry_run) self.would_upgrade else self.upgraded;
         const action_word = if (dry_run) "would upgrade" else "upgraded";
         const head = std.fmt.bufPrint(buf, "{d} checked · {d} {s} · {d} up to date · {d} pinned", .{
             self.checked(), action_count, action_word, self.up_to_date, self.pinned,
         }) catch return buf[0..0];
-        if (self.failed == 0) return head;
-        const tail = std.fmt.bufPrint(buf[head.len..], " · {d} failed", .{self.failed}) catch return head;
-        return buf[0 .. head.len + tail.len];
+        var len = head.len;
+        if (self.local > 0) len += clauseLen(buf[len..], " · {d} local", self.local);
+        if (self.failed > 0) len += clauseLen(buf[len..], " · {d} failed", self.failed);
+        return buf[0..len];
+    }
+
+    /// Bytes appended by one optional footer clause; zero when it does not fit.
+    fn clauseLen(buf: []u8, comptime fmt: []const u8, n: usize) usize {
+        return (std.fmt.bufPrint(buf, fmt, .{n}) catch return 0).len;
     }
 };
 
@@ -482,6 +491,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 /// immediately — see `readOldKeg`.
 const OldKeg = struct {
     keg_id: i64,
+    /// For a `--local` keg this is the `.rb` path it was installed from.
+    full_name: []const u8,
     version: []const u8,
     revision: i64,
     cellar_path: []const u8,
@@ -492,6 +503,7 @@ const OldKeg = struct {
     tap_commit_sha: ?[]const u8,
 
     fn deinit(self: *OldKeg, allocator: std.mem.Allocator) void {
+        allocator.free(self.full_name);
         allocator.free(self.version);
         allocator.free(self.cellar_path);
         allocator.free(self.tap);
@@ -507,12 +519,14 @@ const OldKeg = struct {
 /// snapshot to a writer (SQLITE_BUSY). Returns null when no row matches.
 fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !?OldKeg {
     var stmt = try db.prepare(
-        "SELECT id, version, revision, cellar_path, tap, bin_isolated, install_reason, tap_commit_sha FROM kegs WHERE name = ?1 LIMIT 1;",
+        "SELECT id, version, revision, cellar_path, tap, bin_isolated, install_reason, tap_commit_sha, full_name FROM kegs WHERE name = ?1 LIMIT 1;",
     );
     defer stmt.finalize();
     try stmt.bindText(1, name);
     if (!(try stmt.step())) return null;
 
+    const full_name = try allocator.dupe(u8, if (stmt.columnText(8)) |f| std.mem.sliceTo(f, 0) else name);
+    errdefer allocator.free(full_name);
     const version = try allocator.dupe(u8, if (stmt.columnText(1)) |v| std.mem.sliceTo(v, 0) else "unknown");
     errdefer allocator.free(version);
     const cellar_path = try allocator.dupe(u8, if (stmt.columnText(3)) |cp| std.mem.sliceTo(cp, 0) else "");
@@ -523,6 +537,7 @@ fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const 
 
     return .{
         .keg_id = stmt.columnInt(0),
+        .full_name = full_name,
         .version = version,
         .revision = stmt.columnInt(2),
         .cellar_path = cellar_path,
@@ -580,6 +595,15 @@ fn upgradeFormula(
         return error.Aborted;
     };
     defer old.deinit(allocator);
+
+    // A `--local` keg has no upstream to consult, so there is nothing to
+    // upgrade: skip it with the way out instead of failing the run. The
+    // bulk footer tallies it; only the named form narrates the hint.
+    if (install_args_mod.isLocalTap(old.tap)) {
+        if (!bulk) output.skip("{s} was installed from a local formula; re-run mt install --local {s} to update it", .{ name, old.full_name });
+        output.emitNdjsonEvent(.local, name, null);
+        return .local;
+    }
 
     // Tap-installed formulas come from `<user>/<repo>` repos, not the
     // homebrew/core API. Route them through the tap-aware upgrade path
