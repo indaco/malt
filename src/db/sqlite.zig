@@ -135,6 +135,7 @@ pub const Database = struct {
         }
 
         var self = Database{ ._handle = db.? };
+        errdefer self.close();
 
         // Set recommended pragmas.
         self.exec("PRAGMA journal_mode=WAL;") catch return SqliteError.OpenFailed;
@@ -286,4 +287,30 @@ test "bindText copies bound bytes at bind time, so caller may free before step" 
     try testing.expect(try read.step());
     const got = std.mem.sliceTo(read.columnText(0).?, 0);
     try testing.expectEqualStrings(original, got);
+}
+
+test "Database.open closes the handle when a PRAGMA fails after a successful open" {
+    // sqlite3_open_v2 never reads the header, so a non-database file fails the
+    // first PRAGMA - the only path that abandons a constructed Database.
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-notadb-{d}.db", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    {
+        const f = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, &[_]u8{0x5A} ** 4096);
+    }
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    // Lowest-free-fd rule: a leaked connection pushes the probe fd up by one.
+    const before = std.c.dup(0);
+    _ = std.c.close(before);
+    // A closed stdin would make both probes -1 and the check vacuous.
+    try testing.expect(before >= 0);
+
+    try testing.expectError(SqliteError.OpenFailed, Database.open(path));
+
+    const after = std.c.dup(0);
+    defer _ = std.c.close(after);
+    try testing.expectEqual(before, after);
 }
