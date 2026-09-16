@@ -13,6 +13,7 @@ const confined_source = @import("../fs/confined_source.zig");
 const hash_mod = @import("hash.zig");
 const child_mod = @import("child.zig");
 const cask_font = @import("cask_font.zig");
+const cask_variation = @import("../net/cask_variation.zig");
 
 pub const CaskError = error{
     ParseFailed,
@@ -63,11 +64,9 @@ pub const Cask = struct {
     /// The `depends_on.macos` clause, borrowed from `parsed`, for the
     /// refusal message. Null only when the cask declares none, so it is
     /// always set when `os_supported` is false.
-    os_requirement: ?OsRequirement = null,
+    os_requirement: ?cask_variation.Requirement = null,
 
     parsed: std.json.Parsed(std.json.Value),
-
-    pub const OsRequirement = struct { op: []const u8, version: []const u8 };
 
     pub fn deinit(self: *Cask) void {
         self.parsed.deinit();
@@ -76,7 +75,7 @@ pub const Cask = struct {
 
 /// Parse cask JSON from Homebrew API, resolved for the running macOS.
 pub fn parseCask(allocator: std.mem.Allocator, json_bytes: []const u8) !Cask {
-    return parseCaskWithMajor(allocator, json_bytes, runningMacosMajor());
+    return parseCaskWithMajor(allocator, json_bytes, cask_variation.runningMacosMajor());
 }
 
 /// `parseCask` with the macOS product major injected, so tests never depend
@@ -111,7 +110,8 @@ pub fn parseCaskWithMajor(allocator: std.mem.Allocator, json_bytes: []const u8, 
     // the same choke point rather than at each sink.
     try validateArtifactPaths(obj.*);
 
-    const requirement = macosRequirement(obj.*);
+    // Read after the overlay so a variation's own clause is the one judged.
+    const requirement = cask_variation.macosRequirement(obj.get("depends_on"));
     return .{
         .token = token,
         .name = getFirstName(obj.*) orelse token,
@@ -121,45 +121,10 @@ pub fn parseCaskWithMajor(allocator: std.mem.Allocator, json_bytes: []const u8, 
         .url = getStr(obj.*, "url") orelse return CaskError.ParseFailed,
         .sha256 = getStr(obj.*, "sha256"),
         .auto_updates = getBool(obj.*, "auto_updates") orelse false,
-        .os_supported = osSupported(requirement, macos_major),
+        .os_supported = cask_variation.osSupported(requirement, macos_major),
         .os_requirement = requirement,
         .parsed = parsed,
     };
-}
-
-/// Product major of the running macOS, or null when the sysctl is unreadable.
-/// Same five lines as `post_install_steps.sysctlMajor`, kept apart so the
-/// parser does not grow an edge into the step executor.
-fn runningMacosMajor() ?u32 {
-    var buf: [32]u8 = undefined;
-    var len: usize = buf.len;
-    if (std.c.sysctlbyname("kern.osproductversion", &buf, &len, null, 0) != 0) return null;
-    const text = std.mem.sliceTo(buf[0..len], 0);
-    const major = text[0 .. std.mem.indexOfScalar(u8, text, '.') orelse text.len];
-    return std.fmt.parseInt(u32, major, 10) catch null;
-}
-
-/// Homebrew's `MacOSVersion` symbol for a product major; null for a release
-/// the map does not know, which then falls back to the top-level fields.
-pub fn macosCodename(major: u32) ?[]const u8 {
-    return switch (major) {
-        11 => "big_sur",
-        12 => "monterey",
-        13 => "ventura",
-        14 => "sonoma",
-        15 => "sequoia",
-        26 => "tahoe",
-        27 => "golden_gate",
-        else => null,
-    };
-}
-
-/// The `variations` key for this host: `arm64_<codename>` on Apple silicon,
-/// the bare codename on Intel.
-pub fn variationKey(buf: []u8, major: u32) ?[]const u8 {
-    const codename = macosCodename(major) orelse return null;
-    const prefix: []const u8 = if (builtin.cpu.arch == .aarch64) "arm64_" else "";
-    return std.fmt.bufPrint(buf, "{s}{s}", .{ prefix, codename }) catch null;
 }
 
 /// Fields a variation may replace. Copied into the top-level object one by
@@ -169,54 +134,11 @@ const variation_fields = [_][]const u8{ "url", "sha256", "version", "artifacts",
 
 fn overlayVariation(arena: std.mem.Allocator, obj: *std.json.ObjectMap, major: u32) CaskError!void {
     var key_buf: [32]u8 = undefined;
-    const key = variationKey(&key_buf, major) orelse return;
-    const variations = switch (obj.get("variations") orelse return) {
-        .object => |o| o,
-        else => return,
-    };
-    const variation = switch (variations.get(key) orelse return) {
-        .object => |o| o,
-        else => return,
-    };
+    const key = cask_variation.variationKey(&key_buf, major) orelse return;
+    const variation = cask_variation.variationObject(obj.get("variations"), key) orelse return;
     for (variation_fields) |field| {
         if (variation.get(field)) |val| obj.put(arena, field, val) catch return CaskError.OutOfMemory;
     }
-}
-
-/// First `depends_on.macos` clause, e.g. `{">=": ["12"]}` → (`>=`, `12`).
-fn macosRequirement(obj: std.json.ObjectMap) ?Cask.OsRequirement {
-    const depends_on = switch (obj.get("depends_on") orelse return null) {
-        .object => |o| o,
-        else => return null,
-    };
-    const macos = switch (depends_on.get("macos") orelse return null) {
-        .object => |o| o,
-        else => return null,
-    };
-    var it = macos.iterator();
-    const entry = it.next() orelse return null;
-    const versions = switch (entry.value_ptr.*) {
-        .array => |a| a,
-        else => return null,
-    };
-    if (versions.items.len == 0) return null;
-    return switch (versions.items[0]) {
-        .string => |v| .{ .op = entry.key_ptr.*, .version = v },
-        else => null,
-    };
-}
-
-fn osSupported(requirement: ?Cask.OsRequirement, macos_major: ?u32) bool {
-    const req = requirement orelse return true;
-    const major = macos_major orelse return true;
-    // Requirement majors are bare ("12") or dotted ("10.15"); compare majors.
-    const text = req.version[0 .. std.mem.indexOfScalar(u8, req.version, '.') orelse req.version.len];
-    const required = std.fmt.parseInt(u32, text, 10) catch return true;
-    if (std.mem.eql(u8, req.op, ">=")) return major >= required;
-    if (std.mem.eql(u8, req.op, "==")) return major == required;
-    // ponytail: only the two operators the live API emits; an unknown one
-    // is left to the download rather than refused on a guess.
-    return true;
 }
 
 /// Record cask installation in database.
@@ -2635,10 +2557,10 @@ test "unknown macOS major skips variation lookup" {
     var c = try parseCaskWithMajor(std.testing.allocator, variation_fixture, 99);
     defer c.deinit();
     try std.testing.expectEqualStrings("https://e/Cocktail20GG.dmg", c.url);
-    try std.testing.expect(macosCodename(99) == null);
+    try std.testing.expect(cask_variation.macosCodename(99) == null);
     var buf: [32]u8 = undefined;
-    try std.testing.expect(variationKey(&buf, 99) == null);
-    const key = variationKey(&buf, 26).?;
+    try std.testing.expect(cask_variation.variationKey(&buf, 99) == null);
+    const key = cask_variation.variationKey(&buf, 26).?;
     try std.testing.expect(std.mem.endsWith(u8, key, "tahoe"));
     try std.testing.expectEqual(builtin.cpu.arch == .aarch64, std.mem.startsWith(u8, key, "arm64_"));
 }
