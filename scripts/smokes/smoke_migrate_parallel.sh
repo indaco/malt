@@ -72,18 +72,22 @@ export NO_COLOR=1
 export MALT_NO_EMOJI=1
 
 # Bound any single binary invocation. macOS lacks `timeout` by default;
-# perl is on every system. The child gets its own process group and the
-# alarm kills the whole group: a plain `alarm; exec` only reaps the
-# direct child, so a wrapper that forks (mvnDebug -> java parked on a
-# JDWP socket) leaves a grandchild holding our stdout pipe and the
-# `$(...)` capture never returns.
+# perl is on every system. The child gets its own session (setsid): that
+# is a fresh process group, so the alarm kills the whole group - a plain
+# `alarm; exec` only reaps the direct child, so a wrapper that forks
+# (mvnDebug -> java parked on a JDWP socket) leaves a grandchild holding
+# our stdout pipe and the `$(...)` capture never returns. It also drops
+# the controlling terminal: a TUI that ignores --help and opens /dev/tty
+# (terminal players, editors) would otherwise block on the operator's
+# terminal until the alarm and read as broken, while without one it
+# fails fast with ENXIO and its error line counts as output.
 run_with_timeout() {
   local secs="$1"
   shift
-  perl -e '
+  perl -MPOSIX -e '
     my $secs = shift;
     my $pid = fork // die "fork: $!";
-    if ($pid == 0) { setpgrp; exec @ARGV or exit 127 }
+    if ($pid == 0) { POSIX::setsid() // die "setsid: $!"; exec @ARGV or exit 127 }
     $SIG{ALRM} = sub { kill KILL => -$pid; waitpid $pid, 0; exit 124 };
     alarm $secs;
     waitpid $pid, 0;
