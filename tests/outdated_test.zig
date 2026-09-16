@@ -124,7 +124,10 @@ fn seedCask(dir: *TempCacheDir, token: []const u8, latest: []const u8) !void {
         .{ token, token, latest, token },
     );
     try dir.writeCacheFile(file, body);
-    try appendVersionsLine(dir, "versions_cask.txt", token, latest);
+    var host_buf: [32]u8 = undefined;
+    var side_car_buf: [64]u8 = undefined;
+    const side_car = try std.fmt.bufPrint(&side_car_buf, "versions_{s}.txt", .{api_mod.BrewApi.versionsKey(&host_buf, .cask)});
+    try appendVersionsLine(dir, side_car, token, latest);
 }
 
 test "collectOutdatedFormulas (small-N, single-client path) returns sorted outdated rows only" {
