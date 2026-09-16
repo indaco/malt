@@ -61,6 +61,8 @@ pub const Statement = struct {
     }
 
     /// Finalize (destroy) the prepared statement, releasing all resources.
+    /// The return is the last `step` error, already surfaced there; the
+    /// statement is destroyed regardless, so `defer` sites stay sound.
     pub fn finalize(self: *Statement) void {
         _ = c.sqlite3_finalize(self._stmt);
     }
