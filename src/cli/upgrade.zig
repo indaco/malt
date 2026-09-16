@@ -2756,3 +2756,130 @@ test "the dry-run cask snapshot follows the fetch, not the index, when the two s
     try std.testing.expectEqual(@as(usize, 1), tally.up_to_date); // now_current
     try std.testing.expectEqual(@as(usize, 1), tally.would_upgrade); // still_behind
 }
+
+test "Tally.fold counts a local keg so the footer still covers every package" {
+    var t: Tally = .{};
+    t.fold(.local);
+    t.fold(.up_to_date);
+    try std.testing.expectEqual(@as(usize, 1), t.local);
+    try std.testing.expectEqual(@as(usize, 0), t.failed);
+    try std.testing.expectEqual(@as(usize, 2), t.checked());
+}
+
+test "summaryLine shows the local column only when a local keg was skipped" {
+    var buf: [160]u8 = undefined;
+    const none: Tally = .{ .up_to_date = 2 };
+    try std.testing.expectEqualStrings(
+        "2 checked · 0 upgraded · 2 up to date · 0 pinned",
+        none.summaryLine(&buf, false),
+    );
+    const some: Tally = .{ .would_upgrade = 1, .local = 1, .failed = 1 };
+    try std.testing.expectEqualStrings(
+        "3 checked · 1 would upgrade · 0 up to date · 0 pinned · 1 local · 1 failed",
+        some.summaryLine(&buf, true),
+    );
+}
+
+/// Seed one `tap = "local"` keg whose `full_name` is the `.rb` it came from.
+fn insertLocalKeg(db: *sqlite.Database) !void {
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path)
+        \\VALUES ('older', '/x/older.rb', '1.0', 1, 'local', 'sha', '/cellar/older/1.0_1');
+    );
+}
+
+test "a named local keg is skipped with the install --local way out, never routed to a tap" {
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertLocalKeg(&db);
+
+    // Offline and cold: any fetch would fail, so a clean outcome proves no
+    // API call was made for the row.
+    var s = try Scratch.init("named_local_skip");
+    defer s.deinit();
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, s.base);
+    api.offline = true;
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(alloc);
+    output.beginStderrCapture(alloc, &captured);
+    defer output.endStderrCapture();
+
+    const outcome = try upgradeFormula(&ctx, alloc, "older", &db, &api, &http, "/opt/malt", false, false, false, false, &.{}, false, null);
+    try std.testing.expectEqual(Outcome.local, outcome);
+    try std.testing.expect(std.mem.indexOf(u8, captured.items, "install --local /x/older.rb") != null);
+    try std.testing.expect(std.mem.indexOf(u8, captured.items, "Cannot parse tap") == null);
+}
+
+test "a bulk run folds a local keg silently and leaves the hint to the named form" {
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertLocalKeg(&db);
+
+    var s = try Scratch.init("bulk_local_skip");
+    defer s.deinit();
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, s.base);
+    api.offline = true;
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(alloc);
+    output.beginStderrCapture(alloc, &captured);
+    defer output.endStderrCapture();
+
+    const outcome = try upgradeFormula(&ctx, alloc, "older", &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, true, null);
+    try std.testing.expectEqual(Outcome.local, outcome);
+    try std.testing.expect(std.mem.indexOf(u8, captured.items, "install --local") == null);
+}
+
+test "a local keg beside a core keg neither fails the bulk run nor taints the warm" {
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertLocalKeg(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES ('wget', 'wget', '1.20', 'sha2', '/cellar/wget/1.20');
+    );
+
+    var s = try Scratch.init("bulk_local_beside_core");
+    defer s.deinit();
+    try writeTestFormulaCache(s.base, "wget", "1.22");
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, s.base);
+    api.offline = true;
+
+    var plan = try audit_mod.audit(alloc, &db, &api, .formula, .{});
+    defer plan.deinit(alloc);
+    var tally: Tally = .{};
+    var sink = EntrySink.init(alloc);
+    defer sink.deinit();
+    try upgradeAllFormulas(&ctx, alloc, &db, &api, &http, "/opt/malt", true, false, false, false, &.{}, plan, &tally, &sink);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.local);
+    try std.testing.expectEqual(@as(usize, 1), tally.would_upgrade);
+    try std.testing.expectEqual(@as(usize, 0), tally.failed);
+    try std.testing.expectEqual(@as(usize, 2), tally.checked());
+    // The local row never reaches the sink, so the warm carries only wget.
+    try std.testing.expect(!sink.tainted);
+    try std.testing.expectEqual(@as(usize, 1), sink.formulas.items.len);
+    try std.testing.expectEqualStrings("wget", sink.formulas.items[0].name);
+}

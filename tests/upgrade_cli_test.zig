@@ -367,3 +367,55 @@ test "execute honours MALT_CACHE for the API cache and the outdated snapshot" {
     defer testing.allocator.free(wrong);
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, wrong, .{}));
 }
+
+// A `--local` install leaves a `tap = "local"` keg with no upstream to
+// consult. A bulk dry-run must skip it without failing the run, and still
+// warm the snapshot with the core kegs it did check.
+test "execute --dry-run skips a local keg and warms the snapshot with the core keg only" {
+    var s = try Scratch.init(testing.allocator, "local_keg");
+    defer s.deinit(testing.allocator);
+
+    const cache = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/cache", .{s.path}, 0);
+    defer testing.allocator.free(cache);
+    _ = c.setenv("MALT_CACHE", cache.ptr, 1);
+    defer _ = c.unsetenv("MALT_CACHE");
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{cache});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const cache_json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_wget.json", .{cache_api});
+    defer testing.allocator.free(cache_json);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, cache_json, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\{"name":"wget","versions":{"stable":"1.22"},"revision":0}
+        );
+    }
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path)
+            \\VALUES ('older', '/x/older.rb', '1.0', 1, 'local', 'sha', '/c/older/1.0_1');
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+            \\VALUES ('wget', 'wget', '1.20', 0, 'sha2', '/c/wget/1.20');
+        );
+    }
+
+    quiet();
+    defer unquiet();
+    var ctx = malt.app_ctx.debug_ctx;
+    ctx.offline = true;
+    try upgrade.execute(&ctx, testing.allocator, &.{"--dry-run"});
+
+    const snap = try std.fmt.allocPrint(testing.allocator, "{s}/outdated.json", .{cache});
+    defer testing.allocator.free(snap);
+    const body = try test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, snap, 4096);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "\"wget\"") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "older") == null);
+}
