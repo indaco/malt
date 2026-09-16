@@ -13,6 +13,7 @@ const confined_source = @import("../fs/confined_source.zig");
 const hash_mod = @import("hash.zig");
 const child_mod = @import("child.zig");
 const cask_font = @import("cask_font.zig");
+const cask_variation = @import("../net/cask_variation.zig");
 
 pub const CaskError = error{
     ParseFailed,
@@ -58,6 +59,12 @@ pub const Cask = struct {
     /// Borrowed from `parsed` when present.
     sha256: ?[]const u8,
     auto_updates: bool,
+    /// False when `depends_on.macos` rules out the running macOS.
+    os_supported: bool = true,
+    /// The `depends_on.macos` clause, borrowed from `parsed`, for the
+    /// refusal message. Null only when the cask declares none, so it is
+    /// always set when `os_supported` is false.
+    os_requirement: ?cask_variation.Requirement = null,
 
     parsed: std.json.Parsed(std.json.Value),
 
@@ -66,21 +73,32 @@ pub const Cask = struct {
     }
 };
 
-/// Parse cask JSON from Homebrew API.
+/// Parse cask JSON from Homebrew API, resolved for the running macOS.
 pub fn parseCask(allocator: std.mem.Allocator, json_bytes: []const u8) !Cask {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch
+    return parseCaskWithMajor(allocator, json_bytes, cask_variation.runningMacosMajor());
+}
+
+/// `parseCask` with the macOS product major injected, so tests never depend
+/// on the host. Null (unreadable sysctl) keeps the top-level fields and
+/// gates nothing, as brew does on an OS it does not know.
+pub fn parseCaskWithMajor(allocator: std.mem.Allocator, json_bytes: []const u8, macos_major: ?u32) !Cask {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch
         return CaskError.ParseFailed;
     errdefer parsed.deinit();
 
     // A non-object root is an inactive union field: reading a field off it
     // aborts the process instead of failing the command.
-    const obj = switch (parsed.value) {
-        .object => |o| o,
+    const obj: *std.json.ObjectMap = switch (parsed.value) {
+        .object => |*o| o,
         else => return CaskError.ParseFailed,
     };
 
-    const token = getStr(obj, "token") orelse return CaskError.ParseFailed;
-    const version = getStr(obj, "version") orelse "unknown";
+    // Overlay before any screening so a variation is held to the same
+    // path rules as the top-level fields it replaces.
+    if (macos_major) |major| try overlayVariation(parsed.arena.allocator(), obj, major);
+
+    const token = getStr(obj.*, "token") orelse return CaskError.ParseFailed;
+    const version = getStr(obj.*, "version") orelse "unknown";
     // `token` and `version` are interpolated verbatim into Caskroom,
     // cache, and mount paths, so a value that escapes its own path
     // component must be rejected here — the one ingestion choke point —
@@ -90,19 +108,37 @@ pub fn parseCask(allocator: std.mem.Allocator, json_bytes: []const u8) !Cask {
     // `app` lands in `<app_dir>/<name>` ahead of a `deleteTree`, and `binary`
     // resolves under the keg and symlinks into `<prefix>/bin`. Screen them at
     // the same choke point rather than at each sink.
-    try validateArtifactPaths(obj);
+    try validateArtifactPaths(obj.*);
 
+    // Read after the overlay so a variation's own clause is the one judged.
+    const requirement = cask_variation.macosRequirement(obj.get("depends_on"));
     return .{
         .token = token,
-        .name = getFirstName(obj) orelse token,
+        .name = getFirstName(obj.*) orelse token,
         .version = version,
-        .desc = getStr(obj, "desc") orelse "",
-        .homepage = getStr(obj, "homepage") orelse "",
-        .url = getStr(obj, "url") orelse return CaskError.ParseFailed,
-        .sha256 = getStr(obj, "sha256"),
-        .auto_updates = getBool(obj, "auto_updates") orelse false,
+        .desc = getStr(obj.*, "desc") orelse "",
+        .homepage = getStr(obj.*, "homepage") orelse "",
+        .url = getStr(obj.*, "url") orelse return CaskError.ParseFailed,
+        .sha256 = getStr(obj.*, "sha256"),
+        .auto_updates = getBool(obj.*, "auto_updates") orelse false,
+        .os_supported = cask_variation.osSupported(requirement, macos_major),
+        .os_requirement = requirement,
         .parsed = parsed,
     };
+}
+
+/// Fields a variation may replace. Copied into the top-level object one by
+/// one — a variation only carries what differs — so every later reader,
+/// including the artifact walkers, sees the resolved cask.
+const variation_fields = [_][]const u8{ "url", "sha256", "version", "artifacts", "depends_on" };
+
+fn overlayVariation(arena: std.mem.Allocator, obj: *std.json.ObjectMap, major: u32) CaskError!void {
+    var key_buf: [32]u8 = undefined;
+    const key = cask_variation.variationKey(&key_buf, major) orelse return;
+    const variation = cask_variation.variationObject(obj.get("variations"), key) orelse return;
+    for (variation_fields) |field| {
+        if (variation.get(field)) |val| obj.put(arena, field, val) catch return CaskError.OutOfMemory;
+    }
 }
 
 /// Record cask installation in database.
@@ -2412,4 +2448,119 @@ test "fontSpecPath composes the sidecar under the resolved cache dir, not the pr
     };
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings("/alt/Cask/font-x-1.0.fonts", try installer.fontSpecPath("font-x", "1.0", &buf));
+}
+
+// --- variations / depends_on ---
+
+/// Top-level `url` names the Golden Gate build; the running-OS variation
+/// names a different one. Both arch keys carry the same override so the
+/// test reads the same on an arm64 and an Intel host.
+const variation_fixture =
+    \\{"token":"cocktail","version":"20.0.2","url":"https://e/Cocktail20GG.dmg","sha256":"aa",
+    \\ "artifacts":[{"app":["Cocktail.app"]}],
+    \\ "variations":{
+    \\   "arm64_tahoe":{"url":"https://e/Cocktail19TE.dmg","sha256":"bb","version":"19.10"},
+    \\   "tahoe":{"url":"https://e/Cocktail19TE.dmg","sha256":"bb","version":"19.10"}}}
+;
+
+test "variation overlay picks arm64_<codename> url and sha256" {
+    var c = try parseCaskWithMajor(std.testing.allocator, variation_fixture, 26);
+    defer c.deinit();
+    try std.testing.expectEqualStrings("https://e/Cocktail19TE.dmg", c.url);
+    try std.testing.expectEqualStrings("bb", c.sha256.?);
+    try std.testing.expectEqualStrings("19.10", c.version);
+}
+
+test "variation overlay leaves top-level when key is absent" {
+    var c = try parseCaskWithMajor(std.testing.allocator, variation_fixture, 27);
+    defer c.deinit();
+    try std.testing.expectEqualStrings("https://e/Cocktail20GG.dmg", c.url);
+    try std.testing.expectEqualStrings("aa", c.sha256.?);
+    try std.testing.expectEqualStrings("20.0.2", c.version);
+}
+
+test "variation overlay copies artifacts when the variation redefines them" {
+    const json =
+        \\{"token":"t","version":"1","url":"https://e/x.dmg","artifacts":[{"app":["Old.app"]}],
+        \\ "variations":{"arm64_sonoma":{"artifacts":[{"app":["New.app"]}]},
+        \\               "sonoma":{"artifacts":[{"app":["New.app"]}]}}}
+    ;
+    var c = try parseCaskWithMajor(std.testing.allocator, json, 14);
+    defer c.deinit();
+    // The uninstall path reads artifacts back from the parsed object, so
+    // the resolved set must be what every reader sees.
+    try std.testing.expectEqualStrings("New.app", parseAppName(c.parsed.value.object).?);
+    try std.testing.expectEqualStrings("https://e/x.dmg", c.url);
+}
+
+test "variation overlay is screened like the top-level fields" {
+    const json =
+        \\{"token":"t","version":"1","url":"https://e/x.dmg",
+        \\ "variations":{"arm64_sonoma":{"artifacts":[{"app":["../Evil.app"]}]},
+        \\               "sonoma":{"artifacts":[{"app":["../Evil.app"]}]}}}
+    ;
+    try std.testing.expectError(CaskError.ParseFailed, parseCaskWithMajor(std.testing.allocator, json, 14));
+}
+
+test "depends_on macos >= gates os_supported" {
+    const a = std.testing.allocator;
+    const ge =
+        \\{"token":"t","version":"1","url":"https://e/x.dmg","depends_on":{"macos":{">=":["15"]}}}
+    ;
+    {
+        var c = try parseCaskWithMajor(a, ge, 14);
+        defer c.deinit();
+        try std.testing.expect(!c.os_supported);
+        try std.testing.expectEqualStrings(">=", c.os_requirement.?.op);
+        try std.testing.expectEqualStrings("15", c.os_requirement.?.version());
+    }
+    {
+        var c = try parseCaskWithMajor(a, ge, 15);
+        defer c.deinit();
+        try std.testing.expect(c.os_supported);
+    }
+    const eq =
+        \\{"token":"t","version":"1","url":"https://e/x.dmg","depends_on":{"macos":{"==":["14"]}}}
+    ;
+    {
+        var c = try parseCaskWithMajor(a, eq, 14);
+        defer c.deinit();
+        try std.testing.expect(c.os_supported);
+    }
+    {
+        var c = try parseCaskWithMajor(a, eq, 15);
+        defer c.deinit();
+        try std.testing.expect(!c.os_supported);
+    }
+    // A variation may tighten the requirement for the OS it targets.
+    const via_variation =
+        \\{"token":"t","version":"1","url":"https://e/x.dmg",
+        \\ "variations":{"arm64_sonoma":{"depends_on":{"macos":{">=":["15"]}}},
+        \\               "sonoma":{"depends_on":{"macos":{">=":["15"]}}}}}
+    ;
+    {
+        var c = try parseCaskWithMajor(a, via_variation, 14);
+        defer c.deinit();
+        try std.testing.expect(!c.os_supported);
+    }
+    {
+        var c = try parseCaskWithMajor(a,
+            \\{"token":"t","version":"1","url":"https://e/x.dmg"}
+        , 11);
+        defer c.deinit();
+        try std.testing.expect(c.os_supported);
+        try std.testing.expect(c.os_requirement == null);
+    }
+}
+
+test "unknown macOS major skips variation lookup" {
+    var c = try parseCaskWithMajor(std.testing.allocator, variation_fixture, 99);
+    defer c.deinit();
+    try std.testing.expectEqualStrings("https://e/Cocktail20GG.dmg", c.url);
+    try std.testing.expect(cask_variation.macosCodename(99) == null);
+    var buf: [32]u8 = undefined;
+    try std.testing.expect(cask_variation.variationKey(&buf, 99) == null);
+    const key = cask_variation.variationKey(&buf, 26).?;
+    try std.testing.expect(std.mem.endsWith(u8, key, "tahoe"));
+    try std.testing.expectEqual(builtin.cpu.arch == .aarch64, std.mem.startsWith(u8, key, "arm64_"));
 }

@@ -2,6 +2,7 @@
 //! Fetches formula and cask metadata from formulae.brew.sh with caching.
 
 const std = @import("std");
+const cask_variation = @import("cask_variation.zig");
 const atomic = @import("../fs/atomic.zig");
 const path_component = @import("../fs/path_component.zig");
 const client_mod = @import("client.zig");
@@ -100,17 +101,44 @@ pub fn extractNames(
     return out.toOwnedSlice(allocator);
 }
 
+/// What the running machine resolves a cask document against. Null on
+/// either field leaves the top-level fields in force.
+pub const CaskHost = struct {
+    variation_key: ?[]const u8,
+    macos_major: ?u32,
+
+    pub fn running(buf: []u8) CaskHost {
+        const major = cask_variation.runningMacosMajor();
+        return .{
+            .variation_key = if (major) |m| cask_variation.variationKey(buf, m) else null,
+            .macos_major = major,
+        };
+    }
+};
+
 /// Parse the same bulk dump as `extractNames`, but keep the data the
 /// outdated check needs: `<name>\t<versions.stable>\t<revision>` per line.
 /// Formulae carry `versions.stable` + integer `revision` (missing → 0);
-/// casks carry their top-level `version` (no revision, emitted as 0).
-/// Entries without a usable version string are skipped — an empty version
-/// can't be compared, so it never reaches the map. `ignore_unknown_fields`
-/// drops the megabytes we don't need; caller owns the returned bytes.
+/// casks carry their `version` resolved for this host (no revision, emitted
+/// as 0). Entries without a usable version string are skipped — an empty
+/// version can't be compared, so it never reaches the map. `ignore_unknown_fields`
+/// drops every field but the few named here; caller owns the returned bytes.
 pub fn extractVersions(
     allocator: std.mem.Allocator,
     kind: BrewApi.Kind,
     json_body: []const u8,
+) ![]const u8 {
+    var key_buf: [32]u8 = undefined;
+    return extractVersionsForHost(allocator, kind, json_body, CaskHost.running(&key_buf));
+}
+
+/// `extractVersions` with the host injected, so tests never depend on the
+/// machine they run on.
+pub fn extractVersionsForHost(
+    allocator: std.mem.Allocator,
+    kind: BrewApi.Kind,
+    json_body: []const u8,
+    host: CaskHost,
 ) ![]const u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -141,10 +169,15 @@ pub fn extractVersions(
             }
         },
         .cask => {
-            // Casks use a flat `version`; the dump carries no revision.
+            // Casks use a flat `version`; the dump carries no revision. The
+            // host's variation may replace `version` and `depends_on`, and a
+            // cask this macOS cannot install is left out: a token missing from
+            // a healthy map reads as "no upstream info" and is never reported.
             const Entry = struct {
                 token: []const u8 = "",
                 version: ?[]const u8 = null,
+                variations: ?std.json.Value = null,
+                depends_on: ?std.json.Value = null,
             };
             const parsed = try std.json.parseFromSliceLeaky(
                 []Entry,
@@ -153,8 +186,16 @@ pub fn extractVersions(
                 .{ .ignore_unknown_fields = true },
             );
             for (parsed) |e| {
-                const ver = e.version orelse continue;
-                try appendVersionLine(allocator, &out, e.token, ver, 0);
+                var ver = e.version;
+                var depends_on = e.depends_on;
+                if (cask_variation.variationObject(e.variations, host.variation_key)) |v| {
+                    if (v.get("version")) |vv| if (vv == .string) {
+                        ver = vv.string;
+                    };
+                    if (v.get("depends_on")) |d| depends_on = d;
+                }
+                if (!cask_variation.osSupported(cask_variation.macosRequirement(depends_on), host.macos_major)) continue;
+                try appendVersionLine(allocator, &out, e.token, ver orelse continue, 0);
             }
         },
     }
@@ -383,12 +424,24 @@ pub const BrewApi = struct {
         return now - mtime_secs <= cache_ttl_secs;
     }
 
-    /// Cache key infix for each `Kind`, shared by both side-cars.
+    /// Cache key infix for each `Kind`: the names side-car and the ETag.
     fn indexKey(kind: Kind) []const u8 {
         return switch (kind) {
             .formula => "formula",
             .cask => "cask",
         };
+    }
+
+    /// Key of the versions side-car. The cask one is resolved for the host
+    /// that wrote it, so it carries that host's variation key: another Mac
+    /// sharing the cache, or this one after a macOS upgrade, gets its own
+    /// file instead of a foreign resolution. Formulae are host-neutral.
+    pub fn versionsKey(buf: []u8, kind: Kind) []const u8 {
+        const key = indexKey(kind);
+        if (kind != .cask) return key;
+        var host_buf: [32]u8 = undefined;
+        const variation = CaskHost.running(&host_buf).variation_key orelse return key;
+        return std.fmt.bufPrint(buf, "{s}.{s}", .{ key, variation }) catch key;
     }
 
     /// Both side-cars from one bulk parse; caller owns both slices.
@@ -410,7 +463,8 @@ pub const BrewApi = struct {
             return ApiError.OfflineRequired;
         }
 
-        const pair = try self.fetchAndWriteIndex(kind, key);
+        var vkey_buf: [64]u8 = undefined;
+        const pair = try self.fetchAndWriteIndex(kind, key, versionsKey(&vkey_buf, kind));
         self.allocator.free(pair.versions);
         return pair.names;
     }
@@ -422,17 +476,18 @@ pub const BrewApi = struct {
     /// a tighter TTL (`versions_ttl_secs`) than the names list because an
     /// outdated report must reflect releases the search list can lag.
     pub fn fetchVersionsIndex(self: *BrewApi, kind: Kind) ApiError![]const u8 {
-        const key = indexKey(kind);
-        if (self.readIndexFile("versions_", key, versions_ttl_secs)) |cached| return cached;
+        var vkey_buf: [64]u8 = undefined;
+        const vkey = versionsKey(&vkey_buf, kind);
+        if (self.readIndexFile("versions_", vkey, versions_ttl_secs)) |cached| return cached;
 
         if (self.offline) {
             // Mirror names: serve a stale-but-present map rather than fail —
             // an offline user wants their last warmed versions, not an error.
-            if (self.readIndexFile("versions_", key, null)) |cached| return cached;
+            if (self.readIndexFile("versions_", vkey, null)) |cached| return cached;
             return ApiError.OfflineRequired;
         }
 
-        const pair = try self.fetchAndWriteIndex(kind, key);
+        const pair = try self.fetchAndWriteIndex(kind, indexKey(kind), vkey);
         self.allocator.free(pair.names);
         return pair.versions;
     }
@@ -447,11 +502,13 @@ pub const BrewApi = struct {
     /// marked fresh. A 200 (changed dump, or first-ever fetch) re-extracts
     /// both and persists the new ETag. The public dump needs no auth header,
     /// so none is sent — formulae.brew.sh is a CDN that ignores it.
-    fn fetchAndWriteIndex(self: *BrewApi, kind: Kind, key: []const u8) ApiError!IndexPair {
+    fn fetchAndWriteIndex(self: *BrewApi, kind: Kind, key: []const u8, vkey: []const u8) ApiError!IndexPair {
         var url_buf: [512]u8 = undefined;
         const url = try buildNamesIndexUrl(&url_buf, self.base_url, kind);
 
-        const stored_etag = self.readIndexEtag(key);
+        // A versions side-car this host never wrote cannot come back from a
+        // 304, so the GET goes out unconditional until one exists.
+        const stored_etag = if (self.indexFileExists("versions_", vkey)) self.readIndexEtag(key) else null;
         defer if (stored_etag) |e| self.allocator.free(e);
 
         var resp = self.http.getConditional(url, stored_etag, &.{}) catch return ApiError.ApiUnreachable;
@@ -461,9 +518,9 @@ pub const BrewApi = struct {
             // Unchanged upstream: restart both side-cars' TTL without a
             // rewrite and serve the bytes already on disk.
             self.touchIndex("names_", key);
-            self.touchIndex("versions_", key);
+            self.touchIndex("versions_", vkey);
             if (self.readIndexFile("names_", key, null)) |names| {
-                if (self.readIndexFile("versions_", key, null)) |versions| {
+                if (self.readIndexFile("versions_", vkey, null)) |versions| {
                     return .{ .names = names, .versions = versions };
                 }
                 self.allocator.free(names);
@@ -489,9 +546,16 @@ pub const BrewApi = struct {
         errdefer self.allocator.free(versions);
 
         self.writeIndexFile("names_", key, names);
-        self.writeIndexFile("versions_", key, versions);
+        self.writeIndexFile("versions_", vkey, versions);
         self.writeIndexEtag(key, resp.etag);
         return .{ .names = names, .versions = versions };
+    }
+
+    fn indexFileExists(self: *const BrewApi, infix: []const u8, key: []const u8) bool {
+        var path_buf: [512]u8 = undefined;
+        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return false;
+        _ = std.Io.Dir.cwd().statFile(self.io, p, .{}) catch return false;
+        return true;
     }
 
     /// Read an index side-car (`names_` / `versions_`) for `key`. `ttl`
@@ -866,6 +930,50 @@ test "extractVersions reads a cask's top-level version with revision 0" {
     const out = try extractVersions(testing.allocator, .cask, body);
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("firefox\t125.0\t0\n", out);
+}
+
+test "extractVersions writes the version the host's variation resolves to" {
+    // The dump's top-level `version` is whatever the generator's own platform
+    // saw; the side-car must carry what this host would actually install.
+    const body =
+        \\[{"token":"cocktail","version":"20.1","variations":{"arm64_tahoe":{"version":"19.10"}}},
+        \\ {"token":"plain","version":"1.0","variations":{"arm64_sonoma":{"version":"9.9"}}}]
+    ;
+    const out = try extractVersionsForHost(testing.allocator, .cask, body, .{ .variation_key = "arm64_tahoe", .macos_major = 26 });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("cocktail\t19.10\t0\nplain\t1.0\t0\n", out);
+}
+
+test "extractVersions omits a cask the host's macOS cannot install" {
+    // An omitted token resolves as `unknown` downstream, so the cask neither
+    // shows as outdated nor costs a per-cask fetch.
+    const body =
+        \\[{"token":"toonew","version":"2.0","depends_on":{"macos":{">=":["15"]}}},
+        \\ {"token":"tightened","version":"2.0","variations":{"sonoma":{"depends_on":{"macos":{">=":["15"]}}}}},
+        \\ {"token":"fine","version":"2.0","depends_on":{"macos":{">=":["14"]}}}]
+    ;
+    const out = try extractVersionsForHost(testing.allocator, .cask, body, .{ .variation_key = "sonoma", .macos_major = 14 });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("fine\t2.0\t0\n", out);
+}
+
+test "extractVersions screens a variation's version like a top-level one" {
+    const body =
+        \\[{"token":"bad","version":"1.0","variations":{"arm64_tahoe":{"version":"1.0\t2.0"}}},
+        \\ {"token":"ok","version":"1.0","variations":{"arm64_tahoe":{"version":"1.1"}}}]
+    ;
+    const out = try extractVersionsForHost(testing.allocator, .cask, body, .{ .variation_key = "arm64_tahoe", .macos_major = 26 });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("ok\t1.1\t0\n", out);
+}
+
+test "extractVersions keeps the top-level version on a host with no variation key" {
+    const body =
+        \\[{"token":"cocktail","version":"20.1","variations":{"arm64_tahoe":{"version":"19.10"}}}]
+    ;
+    const out = try extractVersionsForHost(testing.allocator, .cask, body, .{ .variation_key = null, .macos_major = null });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("cocktail\t20.1\t0\n", out);
 }
 
 test "extractVersions drops entries whose name or version embeds a delimiter" {

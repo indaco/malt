@@ -1029,11 +1029,12 @@ test "a 304 with a missing side-car drops the ETag and surfaces ApiUnreachable" 
     var dir = try TempCacheDir.init("etag_orphan");
     defer dir.deinit();
 
-    // ETag present but only one side-car on disk: the versions read-back
-    // after the 304 fails, so the cache is inconsistent.
-    try dir.writeCacheFile("names_formula.txt", "wget\n");
+    // ETag present but only one side-car on disk: the names read-back after
+    // the 304 fails, so the cache is inconsistent. (A missing *versions*
+    // side-car never reaches the 304: the GET goes out unconditional.)
+    try dir.writeCacheFile("versions_formula.txt", "wget\t1.0\t0\n");
     try dir.writeCacheFile("formula.etag", etag);
-    try backdateIndex(dir.path, "names_formula.txt");
+    try backdateIndex(dir.path, "versions_formula.txt");
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
     var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
@@ -1048,6 +1049,65 @@ test "a 304 with a missing side-car drops the ETag and surfaces ApiUnreachable" 
 
     // The orphaned ETag is dropped so the next run re-downloads cleanly.
     try testing.expect(try readCacheFileAlloc(testing.allocator, dir.path, "formula.etag") == null);
+}
+
+test "a 304 cannot serve a cask side-car this host never wrote" {
+    // The cask side-car is resolved for the host that wrote it. After an
+    // in-place macOS upgrade (or on the other Mac sharing a cache) the
+    // stored ETag still matches upstream, so a conditional GET would 304 and
+    // keep serving the previous host's resolution.
+    var key_buf: [32]u8 = undefined;
+    if (api_mod.CaskHost.running(&key_buf).variation_key == null) return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const etag = "W/\"other-host\"";
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = EtagServer{
+        .io = io,
+        .listener = &listener,
+        .body = "[{\"token\":\"firefox\",\"version\":\"126.0\"}]",
+        .etag = etag,
+        .count = std.atomic.Value(u32).init(0),
+        .conditional_count = std.atomic.Value(u32).init(0),
+    };
+    const thread = try std.Thread.spawn(.{}, EtagServer.serve, .{&srv});
+
+    var dir = try TempCacheDir.init("etag_other_host");
+    defer dir.deinit();
+
+    // A side-car under the unkeyed name is what an older malt (or an unknown
+    // macOS) writes; this host has none of its own.
+    try dir.writeCacheFile("versions_cask.txt", "firefox\t125.0\t0\n");
+    try dir.writeCacheFile("names_cask.txt", "firefox\n");
+    try dir.writeCacheFile("cask.etag", etag);
+    try backdateIndex(dir.path, "versions_cask.txt");
+    try backdateIndex(dir.path, "names_cask.txt");
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
+    var base_buf: [64]u8 = undefined;
+    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const versions = try api.fetchVersionsIndex(.cask);
+    defer testing.allocator.free(versions);
+
+    stopServer(io, &listener, &srv.stop, thread);
+
+    // Unconditional GET, freshly extracted for this host, under its own name.
+    try testing.expectEqual(@as(u32, 0), srv.conditional_count.load(.monotonic));
+    try testing.expectEqualStrings("firefox\t126.0\t0\n", versions);
+    var name_buf: [64]u8 = undefined;
+    const own = try std.fmt.bufPrint(&name_buf, "versions_{s}.txt", .{api_mod.BrewApi.versionsKey(&key_buf, .cask)});
+    const stored = (try readCacheFileAlloc(testing.allocator, dir.path, own)).?;
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings("firefox\t126.0\t0\n", stored);
 }
 
 test "the conditional refresh is kind-agnostic: a cask 304 refreshes and keeps cask.etag" {
@@ -1073,10 +1133,14 @@ test "the conditional refresh is kind-agnostic: a cask 304 refreshes and keeps c
     defer dir.deinit();
 
     const seeded = "firefox\t125.0\t0\n";
-    try dir.writeCacheFile("versions_cask.txt", seeded);
+    // The cask side-car carries the writing host in its name.
+    var key_buf: [32]u8 = undefined;
+    var name_buf: [64]u8 = undefined;
+    const versions_file = try std.fmt.bufPrint(&name_buf, "versions_{s}.txt", .{api_mod.BrewApi.versionsKey(&key_buf, .cask)});
+    try dir.writeCacheFile(versions_file, seeded);
     try dir.writeCacheFile("names_cask.txt", "firefox\n");
     try dir.writeCacheFile("cask.etag", etag);
-    try backdateIndex(dir.path, "versions_cask.txt");
+    try backdateIndex(dir.path, versions_file);
     try backdateIndex(dir.path, "names_cask.txt");
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };

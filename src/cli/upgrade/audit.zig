@@ -268,11 +268,10 @@ fn writeVersionsIndex(cache_dir: []const u8, kind: Kind, body: []const u8) !void
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = try std.fmt.bufPrint(&dir_buf, "{s}/api", .{cache_dir});
     std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir) catch {};
+    var key_buf: [64]u8 = undefined;
+    const key = api_mod.BrewApi.versionsKey(&key_buf, kind);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const p = try std.fmt.bufPrint(&path_buf, "{s}/api/versions_{s}.txt", .{
-        cache_dir,
-        @tagName(kind),
-    });
+    const p = try std.fmt.bufPrint(&path_buf, "{s}/api/versions_{s}.txt", .{ cache_dir, key });
     const f = try std.Io.Dir.cwd().createFile(std.Options.debug_io, p, .{});
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, body);
