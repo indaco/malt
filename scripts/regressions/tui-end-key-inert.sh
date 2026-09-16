@@ -22,17 +22,17 @@ fail() {
 
 # 1. Every tab's step must have a .end arm; else => {} swallowing it is the bug.
 for tab in installed_tab outdated_tab services_tab doctor_tab search_tab; do
-  rg -q '^\s*\.end\s*=>' "src/tui/${tab}.zig" ||
+  grep -qE '^[[:space:]]*\.end[[:space:]]*=>' "src/tui/${tab}.zig" ||
     fail "${tab}.zig step does not handle .end"
 done
 
 # 2. The shell must still defer .end to the tab (the row count lives there).
 #    Post-reify `routeToTab` returns the tab's `Cmd`, so the arm returns it.
-rg -q '\.space, \.end, \.esc => return routeToTab' src/tui/app.zig ||
+grep -q '\.space, \.end, \.esc => return routeToTab' src/tui/app.zig ||
   fail "app.zig no longer routes .end to the active tab"
 
 # 3. The last-row unit tests must exist and pass.
-rg -qi 'end.*last' src/tui/installed_tab.zig ||
+grep -qi 'end.*last' src/tui/installed_tab.zig ||
   fail "End-key last-row test missing from installed_tab.zig"
 zig build test || fail "unit tests failed"
 

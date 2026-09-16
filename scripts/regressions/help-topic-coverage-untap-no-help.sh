@@ -35,9 +35,9 @@ names=()
 while IFS= read -r name; do
   names+=("$name")
 done < <(
-  rg -o '\.names = &\.\{[^}]*\}' "$ROOT/src/main.zig" |
-    rg -o '"[^"]+"' | tr -d '"' |
-    rg -v '^(--help|-h|--version)$' | sort -u
+  grep -oE '\.names = &\.\{[^}]*\}' "$ROOT/src/main.zig" |
+    grep -oE '"[^"]+"' | tr -d '"' |
+    grep -vE '^(--help|-h|--version)$' | sort -u
 )
 
 if ((${#names[@]} <= 25)); then
@@ -60,7 +60,7 @@ for n in "${names[@]}"; do
 done
 
 # The stub is correct behaviour for a genuine typo; it must not be deleted.
-if ! "$BIN" help not-a-real-command 2>&1 | rg -q "$STUB"; then
+if ! "$BIN" help not-a-real-command 2>&1 | grep -q "$STUB"; then
   echo "FAIL: unknown-topic fallback disappeared" >&2
   exit 1
 fi

@@ -17,11 +17,11 @@ cd "$ROOT"
 SRC="src/tui/search_tab.zig"
 TEST_NAME="enter is inert in the basket view"
 # Guard against a vacuous green: the test and the view gate must both exist.
-rg -Fq -- "$TEST_NAME" "$SRC" || {
+grep -Fq -- "$TEST_NAME" "$SRC" || {
   echo "FAIL: basket-view Enter gate test missing from $SRC" >&2
   exit 1
 }
-rg -Fq -- "s.view != .results or" "$SRC" || {
+grep -Fq -- "s.view != .results or" "$SRC" || {
   echo "FAIL: the active row is not gated on the results view in $SRC" >&2
   exit 1
 }
@@ -32,7 +32,7 @@ zig build test-bin >/dev/null 2>&1 || {
 OUT=$("$ROOT/zig-out/test-bin/lib_tests" 2>&1) && STATUS=0 || STATUS=$?
 if [[ "$STATUS" -ne 0 ]]; then
   echo "FAIL: basket-view Enter acts on the hidden results list (inline suite red)" >&2
-  printf '%s\n' "$OUT" | rg -iE "failed|leaked|panic" >&2 || true
+  printf '%s\n' "$OUT" | grep -iE "failed|leaked|panic" >&2 || true
   exit 1
 fi
 echo "PASS: Enter in the basket view leaves the hidden results list alone"
