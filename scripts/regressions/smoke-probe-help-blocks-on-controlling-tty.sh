@@ -16,7 +16,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 SMOKE="scripts/smokes/smoke_migrate_parallel.sh"
 # Guard against a vacuous green: the detach must still be in the wrapper.
-rg -Fq -- "POSIX::setsid()" "$SMOKE" || {
+grep -Fq -- "POSIX::setsid()" "$SMOKE" || {
   echo "FAIL: run_with_timeout no longer detaches from the controlling tty in $SMOKE" >&2
   exit 1
 }

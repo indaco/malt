@@ -17,7 +17,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 DETECT="$ROOT/src/core/ruby/detect.zig"
 
-if rg -n '"HOME"|"PATH"|rbenv|asdf' "$DETECT"; then
+if grep -nE '"HOME"|"PATH"|rbenv|asdf' "$DETECT"; then
   echo "FAIL: detectRuby probes HOME/PATH again; the fence cannot run those Rubies" >&2
   exit 1
 fi
