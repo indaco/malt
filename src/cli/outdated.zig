@@ -179,6 +179,7 @@ pub fn cachedLatest(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const
         .cask => blk: {
             var cask = cask_mod.parseCask(allocator, json) catch break :blk null;
             defer cask.deinit();
+            if (!cask.os_supported) break :blk null;
             break :blk allocator.dupe(u8, cask.version) catch null;
         },
     };
@@ -620,6 +621,16 @@ test "cachedLatest reads a cask document's flat version" {
     const latest = cachedLatest(fs_test_io, std.testing.allocator, scratch.base, .cask, "foo") orelse return error.TestExpectedLatest;
     defer std.testing.allocator.free(latest);
     try std.testing.expectEqualStrings("2.0", latest);
+}
+
+test "cachedLatest yields null for a cask this macOS cannot install" {
+    // A snapshot entry would otherwise re-list the cask as outdated between
+    // audits. No real macOS reaches 99.
+    var scratch = try Scratch.init("cached_latest_unsupported");
+    defer scratch.deinit();
+    try seedApiDoc(&scratch, "cask_foo.json", "{\"token\":\"foo\",\"version\":\"2.0\",\"url\":\"https://x/y.dmg\",\"depends_on\":{\"macos\":{\">=\":[\"99\"]}}}", null);
+
+    try std.testing.expectEqual(@as(?[]u8, null), cachedLatest(fs_test_io, std.testing.allocator, scratch.base, .cask, "foo"));
 }
 
 test "cachedLatest refuses a document older than the cache TTL" {

@@ -249,6 +249,41 @@ test "collectOutdatedCasks (small-N) returns sorted outdated rows only" {
     try testing.expectEqualStrings("apptwo", out[1].name);
 }
 
+test "collectOutdatedCasks omits a cask whose newer version this macOS cannot install" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init(testing.allocator, "casks_unsupported");
+    defer dir.deinit();
+
+    // No version side-car: the host-resolved index already leaves such casks
+    // out (and a healthy map never refetches a miss), so this pins the other
+    // route, where every row resolves from its own document. No real macOS
+    // reaches 99.
+    try dir.writeCacheFile("cask_plain.json",
+        \\{"token":"plain","version":"2.0","url":"https://example.invalid/plain.dmg"}
+    );
+    try dir.writeCacheFile("cask_toonew.json",
+        \\{"token":"toonew","version":"2.0","url":"https://example.invalid/toonew.dmg",
+        \\ "depends_on":{"macos":{">=":["99"]}}}
+    );
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+
+    const kegs = [_]outdated_mod.KegRow{
+        .{ .name = "plain", .version = "1.0" },
+        .{ .name = "toonew", .version = "1.0" },
+    };
+
+    var db = try openTestDb();
+    defer db.close();
+    const out = (try outdated_mod.collectOutdatedCasks(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null)).entries;
+    defer freeEntries(testing.allocator, out);
+
+    try testing.expectEqual(@as(usize, 1), out.len);
+    try testing.expectEqualStrings("plain", out[0].name);
+}
+
 test "collectOutdatedCasks (large-N, pool path) preserves sorted order" {
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();

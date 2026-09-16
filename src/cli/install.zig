@@ -1615,6 +1615,14 @@ fn installCask(
         return;
     }
 
+    // Before the HEAD resolve and the download: the artifact would not run
+    // here, so nothing about it is worth fetching.
+    if (!cask.os_supported) {
+        const req = cask.os_requirement.?;
+        sink.err("{s} requires macOS {s} {s}", .{ cask.token, req.op, req.version });
+        return InstallError.CaskNotFound;
+    }
+
     var artifact_type = cask_mod.artifactTypeFromUrl(cask.url);
 
     // Extensionless URLs (e.g. download APIs that 302 to the real file):
@@ -1646,10 +1654,11 @@ fn installCask(
     }
 
     if (flags.dry_run) {
-        sink.info("Dry run: would install cask {s} {s} ({s})", .{
+        sink.info("Dry run: would install cask {s} {s} ({s}) from {s}", .{
             cask.token,
             cask.version,
             @tagName(artifact_type),
+            cask.url,
         });
         return;
     }

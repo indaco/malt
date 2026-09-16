@@ -608,6 +608,8 @@ fn upstreamLatest(
             defer alloc.free(json);
             var cask = cask_mod.parseCask(alloc, json) catch break :blk null;
             defer cask.deinit();
+            // Not installable here, so not outdated here either.
+            if (!cask.os_supported) break :blk null;
             break :blk alloc.dupe(u8, cask.version) catch null;
         },
     };

@@ -134,6 +134,7 @@ test "no-op skip event names are stable across mutating commands" {
         .up_to_date, // upgrade detects no version drift
         .pinned, // upgrade refuses a pinned package
         .local, // upgrade has no upstream for a --local keg
+        .unsupported, // upgrade skips a cask this macOS cannot run
     };
     const prior = setNdjsonOn();
     defer restoreNdjson(prior);

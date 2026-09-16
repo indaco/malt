@@ -1388,3 +1388,143 @@ test "uninstall removes per-version cache files and drops every cask_versions ro
     _ = try ck.step();
     try testing.expectEqual(@as(i64, 0), ck.columnInt(0));
 }
+
+// --- depends_on gating across the CLI ---
+
+/// Prefix + API cache seeded with one cached cask document per token, so
+/// the commands under test resolve entirely offline.
+fn seedCaskCache(fx: *Fixture, token: []const u8, json: []const u8) !void {
+    const api_dir = fx.p("cache/api");
+    try test_io.cwd().createDirPath(testIo(), api_dir);
+    const path = try std.fmt.allocPrint(fx.arena.allocator(), "{s}/cask_{s}.json", .{ api_dir, token });
+    const f = try test_io.createFileAbsolute(testIo(), path, .{ .truncate = true });
+    defer f.close(testIo());
+    try f.writeStreamingAll(testIo(), json);
+}
+
+fn insertInstalledCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &buf,
+        "INSERT INTO casks (token, name, version, url) VALUES ('{s}', '{s}', '{s}', 'https://example.invalid');",
+        .{ token, token, version },
+    );
+    try db.exec(sql);
+}
+
+/// No real macOS reaches 99, so the gate trips on every host without
+/// injecting a version through the CLI.
+const too_new_cask =
+    \\{"token":"toonew","version":"2.0","url":"https://example.invalid/toonew.dmg","sha256":"no_check",
+    \\ "artifacts":[{"app":["TooNew.app"]}],"depends_on":{"macos":{">=":["99"]}}}
+;
+const plain_cask =
+    \\{"token":"plain","version":"2.0","url":"https://example.invalid/plain.dmg","sha256":"no_check",
+    \\ "artifacts":[{"app":["Plain.app"]}]}
+;
+
+test "install refuses a cask whose depends_on is unmet" {
+    var fx = try Fixture.init("install_refuses_unmet");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    try seedCaskCache(&fx, "toonew", too_new_cask);
+    {
+        try test_io.cwd().createDirPath(testIo(), fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    // Offline: any attempt to reach the download URL fails with its own
+    // message, which the assertion below would catch as the wrong refusal.
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    try testing.expectError(error.PartialFailure, malt.install.execute(&ctx, testing.allocator, &.{ "--cask", "toonew" }));
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "toonew requires macOS >= 99") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "download") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "offline") == null);
+    // Nothing recorded, nothing staged in the cask cache.
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(testIo(), fx.p("cache/Cask"), .{}));
+}
+
+test "upgrade skips an incompatible cask and upgrades the rest" {
+    var fx = try Fixture.init("upgrade_skips_unmet");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    try seedCaskCache(&fx, "toonew", too_new_cask);
+    try seedCaskCache(&fx, "plain", plain_cask);
+    {
+        try test_io.cwd().createDirPath(testIo(), fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        try insertInstalledCask(&db, "toonew", "1.0");
+        try insertInstalledCask(&db, "plain", "1.0");
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    // The batch must not abort on the skipped cask.
+    try malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "--dry-run" });
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "toonew requires macOS >= 99") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade cask plain 1.0 -> 2.0") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade cask toonew") == null);
+}
+
+test "install --dry-run names the resolved download for a cask" {
+    var fx = try Fixture.init("install_dry_run_url");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    try seedCaskCache(&fx, "plain", plain_cask);
+    {
+        try test_io.cwd().createDirPath(testIo(), fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    try malt.install.execute(&ctx, testing.allocator, &.{ "--cask", "--dry-run", "plain" });
+
+    // The URL is what a per-OS variation changes, so the plan must show it.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would install cask plain 2.0 (dmg) from https://example.invalid/plain.dmg") != null);
+}

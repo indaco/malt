@@ -93,7 +93,7 @@ fn pinnedHolds(row: outdated_mod.KegRow, force: bool, audit_mode: bool) bool {
 /// a cache prune without the upgrade functions knowing which. Failures stay
 /// on the error channel — `error.Aborted` / `error.AppRunning` — so the
 /// exit-code split survives untouched.
-const Outcome = enum { upgraded, would_upgrade, up_to_date, pinned, local };
+const Outcome = enum { upgraded, would_upgrade, up_to_date, pinned, local, unsupported };
 
 /// Aggregate counters for a bulk `mt upgrade` run, folded from the
 /// per-package `Outcome`s. Whether to *print* per-package lines is a
@@ -106,6 +106,7 @@ const Tally = struct {
     up_to_date: usize = 0,
     pinned: usize = 0,
     local: usize = 0,
+    unsupported: usize = 0,
     failed: usize = 0,
 
     /// Fold one package's outcome into the run's counters — the single
@@ -118,11 +119,12 @@ const Tally = struct {
             .up_to_date => self.up_to_date += 1,
             .pinned => self.pinned += 1,
             .local => self.local += 1,
+            .unsupported => self.unsupported += 1,
         }
     }
 
     fn checked(self: Tally) usize {
-        return self.upgraded + self.would_upgrade + self.up_to_date + self.pinned + self.local + self.failed;
+        return self.upgraded + self.would_upgrade + self.up_to_date + self.pinned + self.local + self.unsupported + self.failed;
     }
 
     /// Render the one-line footer into `buf`. Dry-run swaps "upgraded" for
@@ -138,6 +140,7 @@ const Tally = struct {
         }) catch return buf[0..0];
         var len = head.len;
         if (self.local > 0) len += clauseLen(buf[len..], " · {d} local", self.local);
+        if (self.unsupported > 0) len += clauseLen(buf[len..], " · {d} unsupported", self.unsupported);
         if (self.failed > 0) len += clauseLen(buf[len..], " · {d} failed", self.failed);
         return buf[0..len];
     }
@@ -1489,6 +1492,15 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return .up_to_date;
     }
 
+    // The newer build does not run on this macOS: say so once and let the
+    // rest of the batch proceed, as brew does.
+    if (!parsed_cask.os_supported) {
+        const req = parsed_cask.os_requirement.?;
+        output.warn("{s} requires macOS {s} {s}, skipped", .{ token, req.op, req.version });
+        output.emitNdjsonEvent(.unsupported, token, null);
+        return .unsupported;
+    }
+
     warnIfBackward(token, installed_version, parsed_cask.version);
 
     if (dry_run) {
@@ -2803,6 +2815,12 @@ test "summaryLine shows the local column only when a local keg was skipped" {
     try std.testing.expectEqualStrings(
         "3 checked · 1 would upgrade · 0 up to date · 0 pinned · 1 local · 1 failed",
         some.summaryLine(&buf, true),
+    );
+    // A cask this macOS cannot run is neither current nor failed.
+    const unsupported: Tally = .{ .up_to_date = 1, .unsupported = 1 };
+    try std.testing.expectEqualStrings(
+        "2 checked · 0 upgraded · 1 up to date · 0 pinned · 1 unsupported",
+        unsupported.summaryLine(&buf, false),
     );
 }
 

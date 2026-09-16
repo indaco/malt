@@ -578,6 +578,8 @@ pub const NdjsonEvent = enum {
     pinned,
     // upgrade has no upstream for a --local keg.
     local,
+    // upgrade found a cask whose `depends_on` rules out this macOS.
+    unsupported,
 };
 
 /// Write one `{"event":...}\n` per state transition. No-op when ndjson
