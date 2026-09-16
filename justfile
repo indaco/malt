@@ -94,6 +94,7 @@ regressions-harness:
     @./scripts/regressions/ruby-fallback-ruby-fence-rejects-version-manager-and-path-rubies.sh
     @./scripts/regressions/sandbox-denies-launchservices.sh
     @./scripts/regressions/scaled-timeout-clamp-scaled-timeout-overflow-on-content-length.sh
+    @./scripts/regressions/smoke-probe-help-blocks-on-controlling-tty.sh
     @./scripts/regressions/term-sanitize-anti-injection-guarantee.sh
     @./scripts/regressions/tui-startup-outdated-network-freeze.sh
     @./scripts/regressions/tui-wrap-rune-boundary-tui-text-wrap-splits-utf8-sequence.sh
