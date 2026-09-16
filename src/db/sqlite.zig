@@ -130,7 +130,7 @@ pub const Database = struct {
         );
 
         if (rc != c.SQLITE_OK) {
-            if (db) |d| _ = c.sqlite3_close(d);
+            if (db) |d| _ = c.sqlite3_close_v2(d);
             return SqliteError.OpenFailed;
         }
 
@@ -145,9 +145,11 @@ pub const Database = struct {
         return self;
     }
 
-    /// Close the database connection and release resources.
+    /// Close the database connection and release resources. A statement that
+    /// outlives this call keeps the connection alive until its own `finalize`,
+    /// so a straggler cannot leak the connection.
     pub fn close(self: *Database) void {
-        _ = c.sqlite3_close(self._handle);
+        _ = c.sqlite3_close_v2(self._handle);
     }
 
     /// Last error message from this connection. Returns the SQLite-owned
