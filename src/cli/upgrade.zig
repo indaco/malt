@@ -574,19 +574,6 @@ fn upgradeFormula(
     bulk: bool,
     sink: ?*EntrySink,
 ) !Outcome {
-    // Honor pins before any network or filesystem work — the whole
-    // point is that a pinned keg never gets touched. Audit mode
-    // (`--pinned --dry-run`) walks pinned kegs end-to-end so the user
-    // sees the drift, but the dry-run gate still blocks any mutation.
-    if (pinSkip(db, name, force, audit_mode)) {
-        // `skip` (not `dim`) so the held-back pin shares the `·` glyph of
-        // the up-to-date family instead of the `▸` upgrade glyph.
-        output.skip("{s} is pinned, skipped", .{name});
-        // Distinguishes "skipped by policy" from "command never ran".
-        output.emitNdjsonEvent(.pinned, name, null);
-        return .pinned;
-    }
-
     // Read the keg row into owned storage and release its read snapshot
     // before the dep re-entry (why: see readOldKeg). `bin_isolated` replays
     // the user's prior isolation intent without re-passing a flag.
@@ -598,11 +585,26 @@ fn upgradeFormula(
 
     // A `--local` keg has no upstream to consult, so there is nothing to
     // upgrade: skip it with the way out instead of failing the run. The
-    // bulk footer tallies it; only the named form narrates the hint.
+    // bulk footer tallies it; only the named form narrates the hint. Checked
+    // ahead of the pin: a pin can be lifted, a missing upstream cannot, so
+    // the keg reports the same way with or without --force.
     if (install_args_mod.isLocalTap(old.tap)) {
         if (!bulk) output.skip("{s} was installed from a local formula; re-run mt install --local {s} to update it", .{ name, old.full_name });
         output.emitNdjsonEvent(.local, name, null);
         return .local;
+    }
+
+    // Honor pins before any network or filesystem work — the whole
+    // point is that a pinned keg never gets touched. Audit mode
+    // (`--pinned --dry-run`) walks pinned kegs end-to-end so the user
+    // sees the drift, but the dry-run gate still blocks any mutation.
+    if (pinSkip(db, name, force, audit_mode)) {
+        // `skip` (not `dim`) so the held-back pin shares the `·` glyph of
+        // the up-to-date family instead of the `▸` upgrade glyph.
+        output.skip("{s} is pinned, skipped", .{name});
+        // Distinguishes "skipped by policy" from "command never ran".
+        output.emitNdjsonEvent(.pinned, name, null);
+        return .pinned;
     }
 
     // Tap-installed formulas come from `<user>/<repo>` repos, not the
