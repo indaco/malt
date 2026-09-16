@@ -33,6 +33,7 @@ const uses = @import("cli/uses.zig");
 const version_update = @import("cli/version_update.zig");
 const which_cmd = @import("cli/which.zig");
 const signals = @import("core/signals.zig");
+const perms = @import("core/perms.zig");
 const child_mod = @import("core/child.zig");
 const mirror_mod = @import("net/mirror.zig");
 const offline_mod = @import("net/offline.zig");
@@ -508,6 +509,15 @@ test "applyGlobalFlag --output-format=ndjson does not flip --quiet" {
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
+    // A setuid/setgid wrapper would let an unprivileged caller feed MALT_PREFIX,
+    // PATH and tokens to a process running as the prefix owner. Refuse before
+    // anything reads the env, with the env-root validators' exit code. No bypass.
+    if (!perms.privilegeIdsMatch(std.c.getuid(), std.c.geteuid(), std.c.getgid(), std.c.getegid())) {
+        const msg = "malt: refusing to run with mismatched real/effective uid or gid\n";
+        _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+        std.process.exit(78); // EX_CONFIG
+    }
+
     // In debug builds, use GeneralPurposeAllocator as the backing
     // allocator for leak detection and use-after-free checks.
     var gpa: std.heap.DebugAllocator(.{}) = .init;

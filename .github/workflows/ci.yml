@@ -142,6 +142,11 @@ jobs:
       - name: Regression guard - subprocess extractors refuse escaping link targets
         run: ./scripts/regressions/xz-zip-extractors-lack-pax-linkpath-prescan.sh
 
+      # Needs root to mint the setuid copy; the runner's passwordless sudo
+      # keeps SUDO_USER set so the probe runs as the unprivileged caller.
+      - name: Regression guard - setuid wrapper is refused
+        run: sudo ./scripts/regressions/refuse-setuid-wrapper.sh
+
       - name: Build universal binary
         run: just build-universal
 
