@@ -150,14 +150,36 @@ pub fn renderRubyProfile(
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
+    // Mach is the one hole a file/network fence cannot see: any daemon that
+    // does work on the caller's behalf. The allowlist is Homebrew's, produced
+    // by running all of homebrew-core under it; SecurityServer/trustd/ocspd
+    // keep codesign working, opendirectoryd getpwuid, dirhelper Dir.tmpdir.
+    // Extend it for a formula that needs more; never reopen it. Denials are
+    // named in the unified log so a too-tight list fails loudly.
     const header =
         \\(version 1)
         \\(deny default)
+        \\(debug deny)
         \\(allow process-fork)
         \\(allow process-exec*)
         \\(allow signal (target self))
         \\(allow sysctl-read)
-        \\(allow mach-lookup)
+        \\(deny mach-lookup)
+        \\(allow mach-lookup
+        \\    (xpc-service-name "com.apple.MTLCompilerService")
+        \\    (global-name "com.apple.mobileassetd.v2")
+        \\    (global-name "com.apple.sysmond")
+        \\    (global-name "com.apple.bsd.dirhelper")
+        \\    (global-name "com.apple.system.opendirectoryd.libinfo")
+        \\    (global-name "com.apple.system.opendirectoryd.membership")
+        \\    (global-name "com.apple.PowerManagement.control")
+        \\    (global-name "com.apple.SecurityServer")
+        \\    (global-name "com.apple.networkd")
+        \\    (global-name "com.apple.ocspd")
+        \\    (global-name "com.apple.trustd.agent")
+        \\    (global-name "com.apple.SystemConfiguration.DNSConfiguration")
+        \\    (global-name "com.apple.SystemConfiguration.configd")
+        \\    )
         \\(allow iokit-open)
         \\(deny network*)
         \\(allow file-write-data
@@ -890,6 +912,24 @@ test "interpreterPrefix names the package manager prefix that owns a Ruby" {
     // The system Ruby lives in the always-readable /usr tree.
     try std.testing.expect(interpreterPrefix("/usr/bin/ruby") == null);
     try std.testing.expect(interpreterPrefix("/opt/ruby/bin/ruby") == null);
+}
+
+test "renderRubyProfile denies mach-lookup by default and allowlists the platform services" {
+    const profile = try renderRubyProfile(
+        std.testing.allocator,
+        "/opt/malt/Cellar/foo/1.0",
+        "/opt/malt",
+        .{},
+    );
+    defer std.testing.allocator.free(profile);
+    // A blanket grant lets a post_install reach any daemon (the pasteboard
+    // server, for one); the allowlist must follow the deny so it wins.
+    const deny = std.mem.indexOf(u8, profile, "(deny mach-lookup)") orelse return error.MissingDeny;
+    const allow = std.mem.indexOf(u8, profile, "(allow mach-lookup\n") orelse return error.MissingAllowlist;
+    try std.testing.expect(allow > deny);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(allow mach-lookup)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(global-name \"com.apple.bsd.dirhelper\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "(debug deny)") != null);
 }
 
 test "renderRubyProfile grants IPC only when allow_ipc is set" {
