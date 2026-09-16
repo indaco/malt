@@ -84,6 +84,7 @@ regressions-harness:
     @./scripts/regressions/dsl-chmod-mode-cast-panic-large-literal.sh
     @./scripts/regressions/dsl-popen-early-returns-abandon-a-live-child.sh
     @./scripts/regressions/extract-token-field-panics-on-non-object-json.sh
+    @./scripts/regressions/failing-pragma-closes-handle-failing-pragma-leaks-open-sqlite-handle.sh
     @./scripts/regressions/frame-putcontent-passes-lone-c1-bytes.sh
     @./scripts/regressions/ghcr-bearer-header-fixed-stack-buffer.sh
     @./scripts/regressions/post-install-run-step-gh804.sh
