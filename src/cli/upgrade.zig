@@ -2842,6 +2842,43 @@ test "a named local keg is skipped with the install --local way out, never route
     try std.testing.expect(std.mem.indexOf(u8, captured.items, "Cannot parse tap") == null);
 }
 
+test "a pinned local keg reports local on every path, since unpinning would not help" {
+    const alloc = std.testing.allocator;
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertLocalKeg(&db);
+    try db.exec("UPDATE kegs SET pinned = 1 WHERE name = 'older';");
+
+    var s = try Scratch.init("pinned_local_skip");
+    defer s.deinit();
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, alloc);
+    defer http.deinit();
+    http.offline = true;
+    var api = api_mod.BrewApi.init(ctx.io, alloc, &http, s.base);
+    api.offline = true;
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(alloc);
+    output.beginStderrCapture(alloc, &captured);
+    defer output.endStderrCapture();
+
+    // Default run, --force, and --pinned --dry-run must all agree: the pin
+    // is the only thing that differs between them, and it is not the reason.
+    const paths = [_]struct { force: bool, audit: bool }{
+        .{ .force = false, .audit = false },
+        .{ .force = true, .audit = false },
+        .{ .force = false, .audit = true },
+    };
+    for (paths) |p| {
+        const outcome = try upgradeFormula(&ctx, alloc, "older", &db, &api, &http, "/opt/malt", true, p.force, p.audit, false, &.{}, false, null);
+        try std.testing.expectEqual(Outcome.local, outcome);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, captured.items, "is pinned") == null);
+}
+
 test "a bulk run folds a local keg silently and leaves the hint to the named form" {
     const alloc = std.testing.allocator;
     const ctx = @import("../app_ctx.zig").debug_ctx;
