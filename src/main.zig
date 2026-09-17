@@ -655,6 +655,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const cmd_args = filtered.items;
 
     if (command_map.get(cmd_str)) |cmd| {
+        // Seed the egress proxy once so every net/* client honours it. A
+        // malformed URL is fatal: proceeding would send each fetch into the
+        // connect timeout the variable exists to avoid. Offline runs never
+        // dial, so a stray value must not block them.
+        if (!ctx.offline) if (try @import("net/client.zig").HttpClient.seedDefaultProxiesFromEnviron(ctx.io, allocator, init.environ)) |bad| {
+            output_mod.err("invalid proxy URL: {s}={s}", .{ bad.name, bad.value });
+            std.process.exit(1);
+        };
         // Any command can signal a user-facing failure by returning
         // `error.Aborted`; the message has already been emitted via
         // `output.err`, so we just exit non-zero without a stack trace.
@@ -897,6 +905,9 @@ fn printUsage(ctx: *const AppCtx) void {
         \\  MALT_GITEA_TOKEN  Codeberg/Forgejo/Gitea token for those taps
         \\  MALT_HTTP_IDLE_TIMEOUT_SECS
         \\                    HTTP idle read timeout, seconds (clamped to [5, 600])
+        \\  HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
+        \\                    Route every fetch through an HTTP proxy (CONNECT);
+        \\                    lower-case names work too, NO_PROXY is not read
         \\  MALT_API_DOMAIN   Override metadata API base URL (HTTPS only)
         \\  MALT_BOTTLE_DOMAIN
         \\                    Override bottle registry base URL (HTTPS only)

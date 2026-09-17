@@ -839,6 +839,9 @@ Environment:
   MALT_GITEA_TOKEN  Codeberg/Forgejo/Gitea token for those taps
   MALT_HTTP_IDLE_TIMEOUT_SECS
                     HTTP idle read timeout, seconds (clamped to [5, 600])
+  HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
+                    Route every fetch through an HTTP proxy (CONNECT);
+                    lower-case names work too, NO_PROXY is not read
   MALT_API_DOMAIN   Override metadata API base URL (HTTPS only)
   MALT_BOTTLE_DOMAIN
                     Override bottle registry base URL (HTTPS only)

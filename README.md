@@ -32,7 +32,7 @@ Installs to its own `/opt/malt` prefix; ~3 ms cold start. Designed by a human an
 </p>
 
 > [!IMPORTANT]
-> **malt is under active development.** The CLI surface is settled and significant breaking changes are unlikely - bugs are still likely.
+> **malt is experimental and under active development.** It works well for common packages and I use it daily as my primary package manager on macOS, but something may not work for you yet. The CLI surface is settled and significant breaking changes are unlikely - bugs are still likely.
 >
 > If you hit one, please [open an issue](https://github.com/indaco/malt/issues/new). User-reported bugs jump the queue and ship in patch releases.
 >
@@ -644,6 +644,7 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 | `MALT_GITLAB_TOKEN`                | GitLab token (PAT) sent as `PRIVATE-TOKEN` on tap commit + raw `.rb` calls for GitLab-hosted taps                                                        | unset                           |
 | `MALT_GITEA_TOKEN`                 | Codeberg/Forgejo (Gitea) token sent as `Authorization: token` on tap commit + raw `.rb` calls; covers Codeberg and self-hosted Forgejo/Gitea             | unset                           |
 | `MALT_HTTP_IDLE_TIMEOUT_SECS`      | HTTP idle (no-progress) read timeout in seconds (clamped to `[5, 600]`)                                                                                  | `30`                            |
+| `HTTP(S)_PROXY`, `ALL_PROXY`       | Route every fetch through an HTTP `CONNECT` proxy (`[http://][user:pass@]host:port`, lower-case names work). `NO_PROXY` is not read; `socks5://` ignored | unset                           |
 | `MALT_API_DOMAIN`                  | Override metadata API base URL; HTTPS only; falls back to `HOMEBREW_API_DOMAIN`                                                                          | `https://formulae.brew.sh/api`  |
 | `MALT_BOTTLE_DOMAIN`               | Override bottle registry base URL; HTTPS only; falls back to `HOMEBREW_BOTTLE_DOMAIN`                                                                    | `https://ghcr.io`               |
 | `MALT_OFFLINE`                     | Set to `1`/`true` to route every fetch through the snapshot cache; misses surface `OfflineRequired` instead of stalling on connect (mirrors `--offline`) | unset                           |
