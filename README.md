@@ -27,6 +27,9 @@ Installs to its own `/opt/malt` prefix; ~3 ms cold start. Designed by a human an
 <p align="center">
   <img src="https://raw.githubusercontent.com/indaco/gh-assets/main/malt/demo.gif" alt="malt install jq tree ripgrep - demo" width="800">
 </p>
+<p align="center">
+  <sub>The demo may lag behind the latest features - the workflow it shows is still how malt works.</sub>
+</p>
 
 > [!IMPORTANT]
 > **malt is under active development.** The CLI surface is settled and significant breaking changes are unlikely - bugs are still likely.
