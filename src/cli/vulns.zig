@@ -132,6 +132,8 @@ pub fn executeWith(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
     var pool = try pool_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, workers);
     defer pool.deinit();
     pool.setOfflineAll(ctx.offline);
+    var checking_buf: [128]u8 = undefined;
+    if (checkingMessage(&checking_buf, fetches.len, tap_kegs.len)) |msg| output.info("{s}", .{msg});
     try fetchAll(ctx, allocator, cache_dir, &pool, fetches);
     // Cancelled fetches all fail alike; the interrupt is the real story.
     if (signals.isInterrupted()) return error.UserInterrupted;
@@ -527,6 +529,21 @@ fn allClearMessage(buf: []u8, checked: usize, unchecked: usize) []const u8 {
     return std.fmt.bufPrint(buf, "No open advisories for {d} {s}.", .{ checked, noun }) catch "No open advisories.";
 }
 
+/// A cold cache pays one API fetch per formula plus the tap and OSV round
+/// trips, so say what the wait is for. Null when there is nothing to fetch.
+fn checkingMessage(buf: []u8, core: usize, taps: usize) ?[]const u8 {
+    if (core == 0 and taps == 0) return null;
+    const core_noun: []const u8 = if (core == 1) "formula" else "formulae";
+    const tap_noun: []const u8 = if (taps == 1) "tap formula" else "tap formulae";
+    const msg = if (taps == 0)
+        std.fmt.bufPrint(buf, "Checking {d} {s}...", .{ core, core_noun })
+    else if (core == 0)
+        std.fmt.bufPrint(buf, "Checking {d} {s}...", .{ taps, tap_noun })
+    else
+        std.fmt.bufPrint(buf, "Checking {d} {s} and {d} {s}...", .{ core, core_noun, taps, tap_noun });
+    return msg catch "Checking...";
+}
+
 fn coverageMessage(buf: []u8, skipped: usize) ?[]const u8 {
     if (skipped == 0) return null;
     const one = skipped == 1;
@@ -743,6 +760,16 @@ test "the all-clear line says how many formulae were checked" {
     try testing.expectEqualStrings("No formulae installed.", allClearMessage(&buf, 0, 0));
     // Nothing checked because every fetch failed is not "nothing installed".
     try testing.expectEqualStrings("No formulae could be checked.", allClearMessage(&buf, 0, 3));
+}
+
+test "the checking line counts what is about to be fetched, or stays silent" {
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("Checking 69 formulae...", checkingMessage(&buf, 69, 0).?);
+    try testing.expectEqualStrings("Checking 1 formula...", checkingMessage(&buf, 1, 0).?);
+    try testing.expectEqualStrings("Checking 65 formulae and 4 tap formulae...", checkingMessage(&buf, 65, 4).?);
+    try testing.expectEqualStrings("Checking 1 tap formula...", checkingMessage(&buf, 0, 1).?);
+    // Nothing to fetch means nothing to wait for; the all-clear line speaks.
+    try testing.expect(checkingMessage(&buf, 0, 0) == null);
 }
 
 test "the coverage line is only written when something was skipped" {
