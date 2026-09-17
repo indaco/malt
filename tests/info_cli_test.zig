@@ -237,9 +237,9 @@ test "execute --formula only inspects the kegs table" {
 
 // --- not-installed path -----------------------------------------------
 
-test "execute on a missing package without API cache prints not-installed" {
-    // No kegs, no cache → emitApiMetadata fails for both kinds, then
-    // emitNotFound runs.
+test "execute on a missing package offline is an error, not not-installed" {
+    // No kegs, no cache, no network: "not installed" would be a guess
+    // dressed as an answer, so the miss is reported the way install does.
     var s = try Scratch.init(testing.allocator, "missing");
     defer s.deinit(testing.allocator);
     {
@@ -253,10 +253,10 @@ test "execute on a missing package without API cache prints not-installed" {
     quiet();
     defer unquiet();
 
-    try info.execute(&offline_ctx, testing.allocator, &.{"definitely-not-a-real-package"});
+    try testing.expectError(error.Aborted, info.execute(&offline_ctx, testing.allocator, &.{"definitely-not-a-real-package"}));
 }
 
-test "execute on a missing package with --json emits a not-installed JSON object" {
+test "execute on a missing package offline with --json is the same error" {
     var s = try Scratch.init(testing.allocator, "missing_json");
     defer s.deinit(testing.allocator);
 
@@ -268,7 +268,76 @@ test "execute on a missing package with --json emits a not-installed JSON object
         output.setMode(prior_mode);
     }
 
-    try info.execute(&offline_ctx, testing.allocator, &.{"ghost-pkg"});
+    try testing.expectError(error.Aborted, info.execute(&offline_ctx, testing.allocator, &.{"ghost-pkg"}));
+}
+
+/// Answers every request with one fixed status and hangs up, so the API leg
+/// fails deterministically without a retry budget or a real network.
+const StatusServer = struct {
+    io: std.Io,
+    listener: *std.Io.net.Server,
+    status: std.http.Status,
+
+    fn serve(self: *StatusServer) void {
+        while (true) {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            var rbuf: [4096]u8 = undefined;
+            var wbuf: [4096]u8 = undefined;
+            var reader = stream.reader(self.io, &rbuf);
+            var writer = stream.writer(self.io, &wbuf);
+            var srv = std.http.Server.init(&reader.interface, &writer.interface);
+            // The stop knock connects and sends nothing: an empty head ends the loop.
+            var req = srv.receiveHead() catch return;
+            req.respond("", .{ .status = self.status }) catch return;
+        }
+    }
+};
+
+fn runInfoAgainstStatus(status: std.http.Status, name: []const u8) !void {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var base_buf: [64]u8 = undefined;
+    const base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+
+    var server: StatusServer = .{ .io = io, .listener = &listener, .status = status };
+    const thread = try std.Thread.spawn(.{}, StatusServer.serve, .{&server});
+    defer {
+        if (listener.socket.address.connect(io, .{ .mode = .stream })) |knock| knock.close(io) else |_| {}
+        thread.join();
+    }
+
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = io,
+        .environ = .empty,
+        .mirrors = .{ .api_base = base },
+    };
+    try info.execute(&ctx, testing.allocator, &.{name});
+}
+
+test "execute reports an API that cannot answer instead of not-installed" {
+    // A 400 is neither a hit nor a 404; the old fallthrough printed
+    // "not installed" and exited 0 for any transport failure.
+    var s = try Scratch.init(testing.allocator, "api_down");
+    defer s.deinit(testing.allocator);
+    quiet();
+    defer unquiet();
+
+    try testing.expectError(error.Aborted, runInfoAgainstStatus(.bad_request, "ghost-pkg"));
+}
+
+test "execute on a 404 from the API still prints not-installed" {
+    var s = try Scratch.init(testing.allocator, "api_404");
+    defer s.deinit(testing.allocator);
+    quiet();
+    defer unquiet();
+
+    try runInfoAgainstStatus(.not_found, "ghost-pkg");
 }
 
 // --- API-cache fallback path -------------------------------------------

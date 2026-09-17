@@ -264,8 +264,9 @@ fn emitNotFound(
 /// Fetch Homebrew API metadata for a not-locally-installed package and
 /// emit it. Honours the resolved kind selectors: formula first when
 /// selected, then cask. Returns true on any hit so the caller knows to stop.
-/// Silently returns false on network / parse failures — offline machines
-/// should still fall through cleanly to the "not installed" shape.
+/// Returns false only when the API answered and had no such package; an
+/// API that could not answer is reported, since "not installed" would then
+/// be a guess dressed as an answer.
 fn emitApiMetadata(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -294,6 +295,19 @@ fn emitApiMetadata(
     return false;
 }
 
+/// A 404 (or a name the API could never hold) is a real "no such package";
+/// an API that could not answer is reported instead.
+fn apiMiss(e: api_mod.ApiError, name: []const u8) !bool {
+    switch (e) {
+        error.NotFound, error.InvalidName => return false,
+        error.OfflineRequired => output.err("offline mode: '{s}' not cached", .{name}),
+        error.ApiUnreachable => output.err("could not reach the API to look up '{s}'", .{name}),
+        error.InvalidResponse => output.err("the API gave an unreadable answer for '{s}'", .{name}),
+        error.CacheError, error.OutOfMemory => return e,
+    }
+    return error.Aborted;
+}
+
 fn emitApiFormula(
     allocator: std.mem.Allocator,
     api: *api_mod.BrewApi,
@@ -302,7 +316,7 @@ fn emitApiFormula(
     json_mode: bool,
     colorize: bool,
 ) !bool {
-    const body = api.fetchFormula(name) catch return false;
+    const body = api.fetchFormula(name) catch |e| return apiMiss(e, name);
     defer allocator.free(body);
 
     var f = formula_mod.parseFormula(allocator, body) catch return false;
@@ -320,7 +334,7 @@ fn emitApiCask(
     json_mode: bool,
     colorize: bool,
 ) !bool {
-    const body = api.fetchCask(name) catch return false;
+    const body = api.fetchCask(name) catch |e| return apiMiss(e, name);
     defer allocator.free(body);
 
     var c = cask_mod.parseCask(allocator, body) catch return false;

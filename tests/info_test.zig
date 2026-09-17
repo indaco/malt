@@ -193,6 +193,22 @@ const Prefix = struct {
         allocator.free(self.path);
     }
 
+    // Record that the API already answered 404 for this name as both kinds,
+    // so an offline run reaches "not installed" through a real miss rather
+    // than an unanswered question.
+    fn seedNotFound(self: *Prefix, name: []const u8) !void {
+        const io = std.Options.debug_io;
+        var dir_buf: [512]u8 = undefined;
+        const dir = try std.fmt.bufPrint(&dir_buf, "{s}/cache/api", .{self.path});
+        try test_io.cwd().createDirPath(io, dir);
+        for ([_][]const u8{ "formula_", "cask_" }) |kind| {
+            var path_buf: [512]u8 = undefined;
+            const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}{s}.404", .{ dir, kind, name });
+            const f = try test_io.createFileAbsolute(io, path, .{ .truncate = true });
+            f.close(io);
+        }
+    }
+
     // Seed one installed formula keg so the local lookup has a real row.
     fn seedFormula(self: *Prefix, name: []const u8) !void {
         var db = try self.openSeedDb();
@@ -349,6 +365,7 @@ test "info --cask still skips the formula branch for an installed formula" {
     var p = try Prefix.init(testing.allocator, "cask_only_excludes_formula");
     defer p.deinit(testing.allocator);
     try p.seedFormula("wget");
+    try p.seedNotFound("wget");
 
     const prior = OutputState.save();
     defer prior.restore();
@@ -366,6 +383,7 @@ test "info --cask --formula on an absent token still reaches not-found" {
     var p = try Prefix.init(testing.allocator, "both_absent");
     defer p.deinit(testing.allocator);
     try p.seedFormula("wget");
+    try p.seedNotFound("ghost-pkg-xyz");
 
     const prior = OutputState.save();
     defer prior.restore();
