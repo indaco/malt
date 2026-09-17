@@ -37,8 +37,10 @@ if ! grep -Fqs -- "isFollowableRedirect(status)" "$SRC"; then
 fi
 
 # A bare `catch break` on a transport call is the swallow. The loop must
-# surface the failure instead.
-if grep -Eqs -- "(request|sendBodiless|receiveHead)\(.*\) catch break" "$SRC"; then
+# surface the failure instead. Loopback fixtures in the same file run a
+# `std.http.Server` whose `srv.receiveHead()` legitimately breaks on close;
+# only the client side is the loop under guard.
+if grep -Es -- "(request|sendBodiless|receiveHead)\(.*\) catch break" "$SRC" | grep -qv 'srv\.'; then
   echo "FAIL: a transport failure in the HEAD loop is still swallowed" >&2
   exit 1
 fi
