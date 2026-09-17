@@ -102,6 +102,7 @@ comptime {
     _ = @import("net_client_test.zig");
     _ = @import("net_get_to_writer_test.zig");
     _ = @import("net_redirect_auth_test.zig");
+    _ = @import("net_post_json_test.zig");
     _ = @import("notifier_probe_budget_test.zig");
     _ = @import("no_cli_in_core_test.zig");
     _ = @import("no_io_mod_in_src_test.zig");
