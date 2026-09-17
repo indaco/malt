@@ -898,62 +898,88 @@ pub fn patchTextFiles(
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
 
-        // Read-only: the rewrite is published by the atomic helper, not
-        // through this handle, so a 0o444 read-only config is still
-        // patchable.
-        const file = dir.openFile(io, entry.path, .{ .mode = .read_only }) catch continue;
-        defer file.close(io);
-
-        const stat = file.stat(io) catch continue;
-        if (stat.size > 10 * 1024 * 1024) continue; // Skip files > 10MB
-        if (stat.size == 0) continue;
-
-        const content = allocator.alloc(u8, stat.size) catch continue;
-        defer allocator.free(content);
-
-        const bytes_read = file.readPositionalAll(io, content, 0) catch continue;
-        if (bytes_read < content.len) continue;
-
-        // Check if binary (null bytes in first 8KB)
-        const check_len = @min(content.len, 8192);
-        if (std.mem.findScalar(u8, content[0..check_len], 0) != null) continue;
-
-        // Apply each replacement in sequence. `current` always points to
-        // either `content` or a freshly allocated buffer from replaceAll;
-        // when replaceAll returns a different pointer we free the previous
-        // buffer (unless it was the immutable `content` slice).
-        var current: []const u8 = content;
-        var modified = false;
-        var patch_failed = false;
-        for (replacements) |r| {
-            const next = replaceAll(allocator, current, r.old, r.new) catch {
-                patch_failed = true;
-                break;
-            };
-            if (next.ptr != current.ptr) {
-                if (current.ptr != content.ptr) allocator.free(current);
-                current = next;
-                modified = true;
-            }
-        }
-        if (patch_failed) {
-            if (current.ptr != content.ptr) allocator.free(current);
-            continue;
-        }
-
-        if (modified) {
-            defer if (current.ptr != content.ptr) allocator.free(current);
-            // Atomic rename keeps the file old-or-new on a mid-write
-            // failure; `Replace` (not `Write`) also preserves the exec
-            // bit on shebanged scripts and shell wrappers.
-            var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const abs_path = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
-            atomic.atomicReplaceFile(io, abs_path, current) catch continue;
-            count += 1;
-        }
+        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const abs_path = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
+        if (patchTextFile(io, allocator, abs_path, replacements)) count += 1;
     }
 
     return count;
+}
+
+/// `patchTextFiles` over the files a bottle receipt lists instead of a
+/// whole tree. Returns how many were rewritten.
+pub fn patchTextFileList(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    paths: []const []const u8,
+    replacements: []const Replacement,
+) u32 {
+    if (replacements.len == 0) return 0;
+    var count: u32 = 0;
+    for (paths) |p| if (patchTextFile(io, allocator, p, replacements)) {
+        count += 1;
+    };
+    return count;
+}
+
+/// True when the file was rewritten. Binary, oversized, empty and
+/// unreadable files are left alone.
+fn patchTextFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    abs_path: []const u8,
+    replacements: []const Replacement,
+) bool {
+    // Read-only: the rewrite is published by the atomic helper, not
+    // through this handle, so a 0o444 read-only config is still
+    // patchable.
+    const file = std.Io.Dir.openFileAbsolute(io, abs_path, .{ .mode = .read_only }) catch return false;
+    defer file.close(io);
+
+    const stat = file.stat(io) catch return false;
+    if (stat.size > 10 * 1024 * 1024) return false; // Skip files > 10MB
+    if (stat.size == 0) return false;
+
+    const content = allocator.alloc(u8, stat.size) catch return false;
+    defer allocator.free(content);
+
+    const bytes_read = file.readPositionalAll(io, content, 0) catch return false;
+    if (bytes_read < content.len) return false;
+
+    // Check if binary (null bytes in first 8KB)
+    const check_len = @min(content.len, 8192);
+    if (std.mem.findScalar(u8, content[0..check_len], 0) != null) return false;
+
+    // Apply each replacement in sequence. `current` always points to
+    // either `content` or a freshly allocated buffer from replaceAll;
+    // when replaceAll returns a different pointer we free the previous
+    // buffer (unless it was the immutable `content` slice).
+    var current: []const u8 = content;
+    var modified = false;
+    var patch_failed = false;
+    for (replacements) |r| {
+        const next = replaceAll(allocator, current, r.old, r.new) catch {
+            patch_failed = true;
+            break;
+        };
+        if (next.ptr != current.ptr) {
+            if (current.ptr != content.ptr) allocator.free(current);
+            current = next;
+            modified = true;
+        }
+    }
+    if (patch_failed) {
+        if (current.ptr != content.ptr) allocator.free(current);
+        return false;
+    }
+
+    if (!modified) return false;
+    defer if (current.ptr != content.ptr) allocator.free(current);
+    // Atomic rename keeps the file old-or-new on a mid-write
+    // failure; `Replace` (not `Write`) also preserves the exec
+    // bit on shebanged scripts and shell wrappers.
+    atomic.atomicReplaceFile(io, abs_path, current) catch return false;
+    return true;
 }
 
 fn hasPrefix(path: []const u8, prefix: []const u8) bool {

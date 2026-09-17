@@ -29,6 +29,7 @@ comptime {
     _ = @import("cask_revision_invariant_test.zig");
     _ = @import("cask_test.zig");
     _ = @import("cellar_test.zig");
+    _ = @import("cellar_receipt_lists_test.zig");
     _ = @import("child_test.zig");
     _ = @import("cleanup_cli_test.zig");
     _ = @import("cleanup_test.zig");

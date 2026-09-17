@@ -24,6 +24,7 @@ pub const PatchError = backend.PatchError;
 pub const FallbackError = backend.FallbackError;
 pub const patchPathsCollecting = backend.patchPathsCollecting;
 pub const patchTextFiles = backend.patchTextFiles;
+pub const patchTextFileList = backend.patchTextFileList;
 pub const flushOverflow = backend.flushOverflow;
 pub const external_tool_name = backend.external_tool_name;
 pub const external_tool_path = backend.external_tool_path;
@@ -43,6 +44,7 @@ test "facade re-exports the patcher surface cellar / doctor rely on" {
     _ = FallbackError;
     _ = patchPathsCollecting;
     _ = patchTextFiles;
+    _ = patchTextFileList;
     _ = flushOverflow;
     _ = external_tool_name;
     _ = external_tool_path;
