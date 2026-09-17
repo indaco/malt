@@ -38,35 +38,40 @@ const Stub = struct {
     flag_on_blob: ?usize = null,
 };
 
-// Keep-alive loop: every blob GET answers a retryable 500 so the install
-// loop treats each attempt as transient and would re-dial until it exhausts
-// its budget. Ends when the client closes and `receiveHead` fails.
+// Every blob GET answers a retryable 500, so the install loop re-dials until
+// its budget is spent - each attempt on a fresh connection, since a transient
+// status retires the old one. The harness's request-less knock ends the loop.
 fn serveStub(s: *Stub) void {
-    const stream = s.listener.accept(s.io) catch return;
-    defer stream.close(s.io);
-    var rbuf: [16 * 1024]u8 = undefined;
-    var wbuf: [16 * 1024]u8 = undefined;
-    var reader = stream.reader(s.io, &rbuf);
-    var writer = stream.writer(s.io, &wbuf);
-    var srv = std.http.Server.init(&reader.interface, &writer.interface);
     while (true) {
-        var req = srv.receiveHead() catch return;
-        const target = req.head.target;
-        if (std.mem.indexOf(u8, target, "/token") != null) {
-            req.respond("{\"token\":\"t1\"}", .{}) catch return;
-        } else if (std.mem.indexOf(u8, target, "/blobs/") != null) {
-            s.blob_count += 1;
-            if (s.flag_on_blob) |n| {
-                if (s.blob_count == n) malt.signals.setInterruptedForTest(true);
-            }
-            if (s.corrupt_body) {
-                req.respond("not-the-expected-bytes", .{}) catch return;
+        const stream = s.listener.accept(s.io) catch return;
+        defer stream.close(s.io);
+        var rbuf: [16 * 1024]u8 = undefined;
+        var wbuf: [16 * 1024]u8 = undefined;
+        var reader = stream.reader(s.io, &rbuf);
+        var writer = stream.writer(s.io, &wbuf);
+        var srv = std.http.Server.init(&reader.interface, &writer.interface);
+        var served_here = false;
+        while (true) {
+            var req = srv.receiveHead() catch break;
+            served_here = true;
+            const target = req.head.target;
+            if (std.mem.indexOf(u8, target, "/token") != null) {
+                req.respond("{\"token\":\"t1\"}", .{}) catch return;
+            } else if (std.mem.indexOf(u8, target, "/blobs/") != null) {
+                s.blob_count += 1;
+                if (s.flag_on_blob) |n| {
+                    if (s.blob_count == n) malt.signals.setInterruptedForTest(true);
+                }
+                if (s.corrupt_body) {
+                    req.respond("not-the-expected-bytes", .{}) catch return;
+                } else {
+                    req.respond("boom\n", .{ .status = .internal_server_error }) catch return;
+                }
             } else {
-                req.respond("boom\n", .{ .status = .internal_server_error }) catch return;
+                req.respond("not found\n", .{ .status = .not_found }) catch return;
             }
-        } else {
-            req.respond("not found\n", .{ .status = .not_found }) catch return;
         }
+        if (!served_here) return;
     }
 }
 
