@@ -340,7 +340,7 @@ const TapFetch = struct {
     }
 };
 
-const TapExtra = struct { ctx: *const AppCtx, forge_base: ?[]const u8 };
+const TapExtra = struct { ctx: *const AppCtx, forge_base: ?[]const u8, tripped: *tap_mod.TrippedHosts };
 const TapQueue = WorkQueue(TapFetch, TapExtra, resolveTapKeg);
 
 /// Recipe at the installed commit -> source url -> OSV query key. Mirrors
@@ -360,7 +360,7 @@ fn resolveTapKeg(x: TapExtra, http: *client_mod.HttpClient, f: *TapFetch) void {
             return f.fail(tap_mod.describeResolveError(&f.buf, e, urls.forge, urls.host));
         break :blk head.?.sha orelse return f.fail("could not resolve the tap HEAD");
     };
-    var fetch = tap_mod.fetchRawFile(http, x.ctx.environ, urls.forge, x.forge_base orelse urls.raw_base, sha, f.keg.name, tap_mod.keg_rb_subtrees) catch
+    var fetch = tap_mod.fetchRawFile(http, x.ctx.environ, urls.forge, x.forge_base orelse urls.raw_base, sha, f.keg.name, tap_mod.keg_rb_subtrees, x.tripped) catch
         return f.fail("could not fetch the recipe");
     switch (fetch) {
         .not_found => return f.fail("recipe not found in the tap"),
@@ -379,7 +379,9 @@ fn resolveTapKeg(x: TapExtra, http: *client_mod.HttpClient, f: *TapFetch) void {
 
 fn resolveTapKegs(ctx: *const AppCtx, allocator: std.mem.Allocator, pool: *pool_mod.HttpClientPool, forge_base: ?[]const u8, fetches: []TapFetch) !void {
     if (fetches.len == 0) return;
-    var queue: TapQueue = .{ .extra = .{ .ctx = ctx, .forge_base = forge_base }, .pool = pool, .items = fetches };
+    // One dead raw host is paid for once per run, not once per keg.
+    var tripped = tap_mod.TrippedHosts{};
+    var queue: TapQueue = .{ .extra = .{ .ctx = ctx, .forge_base = forge_base, .tripped = &tripped }, .pool = pool, .items = fetches };
     try fanOut(allocator, @min(pool.clients.len, fetches.len), TapQueue.worker, &queue);
 }
 

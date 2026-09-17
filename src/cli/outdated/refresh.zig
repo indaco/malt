@@ -635,6 +635,9 @@ pub const TapHeadResolve = struct {
     /// `null` value caches a known-failing resolve so sibling workers
     /// don't retry the same dead endpoint within one invocation.
     map: std.StringHashMap(?[]const u8),
+    /// Same idea for the raw `.rb` host, which the HEAD cache cannot shield
+    /// when the API and raw hosts differ: paid for once per run, not per keg.
+    tripped: tap_mod.TrippedHosts = .{},
 
     /// Bundled userdata + fn pointer — mirrors `client.ProgressCallback`'s
     /// shape so call sites read uniformly across the codebase.
@@ -946,7 +949,7 @@ fn tapRawLatestVersion(
 
     // Reuse the caller's pooled client (it already carries the correct
     // offline flag) so every tap row shares one kept-alive connection.
-    return tapVersionFromSubtrees(alloc, http, environ, urls.forge, urls.raw_base, fresh_sha, name, subtrees, noun, tap_label);
+    return tapVersionFromSubtrees(alloc, http, environ, urls.forge, urls.raw_base, fresh_sha, name, subtrees, noun, tap_label, &head_cache.tripped);
 }
 
 /// Fetch the `.rb` via the shared `tap.fetchRawFile` leaf (first 200 wins) and
@@ -964,8 +967,9 @@ fn tapVersionFromSubtrees(
     subtrees: []const forge.RawKind,
     noun: []const u8,
     tap_label: []const u8,
+    tripped: ?*tap_mod.TrippedHosts,
 ) ?[]u8 {
-    var fetch = tap_mod.fetchRawFile(http, environ, forge_kind, raw_base, sha, name, subtrees) catch {
+    var fetch = tap_mod.fetchRawFile(http, environ, forge_kind, raw_base, sha, name, subtrees, tripped) catch {
         warnTapCaskFetchFailed(tap_label, name, "Network failure while reading the .rb");
         return null;
     };
@@ -1647,7 +1651,7 @@ test "tapVersionFromSubtrees falls back to the root layout and parses the versio
     var base_buf: [64]u8 = undefined;
     const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
 
-    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, "formula", "user/repo");
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, "formula", "user/repo", null);
     listener.deinit(io);
     thread.join();
 
@@ -1685,7 +1689,7 @@ test "tapVersionFromSubtrees qualifies the resolved version with the .rb revisio
     var base_buf: [64]u8 = undefined;
     const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
 
-    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, "formula", "user/repo");
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, "formula", "user/repo", null);
     listener.deinit(io);
     thread.join();
 
@@ -1723,7 +1727,7 @@ test "tapVersionFromSubtrees discards the revision on the cask leg" {
     var base_buf: [64]u8 = undefined;
     const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
 
-    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{.cask}, "cask", "user/repo");
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{.cask}, "cask", "user/repo", null);
     listener.deinit(io);
     thread.join();
 
@@ -1757,7 +1761,7 @@ test "tapVersionFromSubtrees resolves a keg whose .rb lives under Casks/" {
     var base_buf: [64]u8 = undefined;
     const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
 
-    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.keg_rb_subtrees, "formula", "user/repo");
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.keg_rb_subtrees, "formula", "user/repo", null);
     listener.deinit(io);
     thread.join();
 
@@ -1795,7 +1799,7 @@ test "tapVersionFromSubtrees reads Formula/ before Casks/ when a tap ships both"
     var base_buf: [64]u8 = undefined;
     const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
 
-    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.keg_rb_subtrees, "formula", "user/repo");
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.keg_rb_subtrees, "formula", "user/repo", null);
     listener.deinit(io);
     thread.join();
 
@@ -1803,6 +1807,36 @@ test "tapVersionFromSubtrees reads Formula/ before Casks/ when a tap ships both"
     try std.testing.expect(v != null);
     try std.testing.expectEqualStrings("2.0.0", v.?);
     try std.testing.expectEqual(@as(usize, 1), srv.requests.load(.monotonic));
+}
+
+test "tapVersionFromSubtrees hands the breaker to the shared fetch so a dead host is paid once" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = tap_mod.DropServer{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, tap_mod.DropServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.retry_backoff_ms = &.{ 1, 1, 1 };
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    var tripped = tap_mod.TrippedHosts{};
+
+    const a = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg1", tap_mod.keg_rb_subtrees, "formula", "user/repo", &tripped);
+    const b = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg2", tap_mod.keg_rb_subtrees, "formula", "user/repo", &tripped);
+    listener.deinit(io);
+    thread.join();
+
+    try std.testing.expect(a == null and b == null);
+    // One budget for the first row; the second row never dialled.
+    try std.testing.expectEqual(http.retry_backoff_ms.len + 1, srv.accepts.load(.monotonic));
 }
 
 test "tap rows reuse the caller-supplied client (the tap path constructs no HttpClient)" {
