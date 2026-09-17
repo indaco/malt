@@ -154,7 +154,7 @@ else
 fi
 
 # Per-command --help on everything documented.
-for cmd in install reinstall uninstall upgrade update outdated list info search uses deps which \
+for cmd in install reinstall uninstall upgrade update outdated list info search uses deps which vulns \
   doctor purge cleanup tap untap migrate backup restore services bundle \
   rollback run link unlink pin unpin version completions shellenv; do
   run_ok "t1.help.$cmd" -- "$MT_BIN" "$cmd" --help
@@ -226,6 +226,20 @@ fi
 
 # Dry-run upgrade on empty prefix should succeed with nothing to do.
 run_ok t2.upgrade.dry -- "$MT_BIN" upgrade --dry-run
+
+# vulns: nothing installed reports nothing (exit 0); the live API decides
+# whether a named formula has open advisories, so only the JSON shape is pinned.
+run_ok t2.vulns.empty -- "$MT_BIN" vulns
+"$MT_BIN" --json vulns curl >"$LOGDIR/t2.vulns.json.log" 2>&1
+rc=$?
+if [[ ("$rc" == 0 || "$rc" == 1) ]] && grep -q '"schema_version":1' "$LOGDIR/t2.vulns.json.log"; then
+  printf '  PASS  [t2.vulns.json] exit=%s, schema present\n' "$rc"
+  PASS=$((PASS + 1))
+else
+  printf '  FAIL  [t2.vulns.json] exit=%s or schema missing\n' "$rc"
+  FAIL=$((FAIL + 1))
+  FAILURES+=("t2.vulns.json")
+fi
 
 # ── Tier 3: network installs (small, fast package: tree — 0 deps) ──────────
 

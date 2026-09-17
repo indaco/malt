@@ -45,6 +45,7 @@ pub const cli_update = @import("cli/update.zig");
 pub const upgrade = @import("cli/upgrade.zig");
 pub const cli_upgrade_audit = @import("cli/upgrade/audit.zig");
 pub const cli_uses = @import("cli/uses.zig");
+pub const cli_vulns = @import("cli/vulns.zig");
 pub const cli_version_update = @import("cli/version_update.zig");
 pub const cli_which = @import("cli/which.zig");
 pub const bottle = @import("core/bottle.zig");

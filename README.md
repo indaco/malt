@@ -264,6 +264,7 @@ Commands:
   uses          Show installed packages that depend on a formula
   deps          Show what a formula depends on (forward of `uses`)
   which         Resolve a prefix binary (or path) to its keg
+  vulns         Report open advisories for installed formulae
   doctor        System health check
   tap/untap     Manage taps
   migrate       Import existing Homebrew installation
@@ -373,6 +374,11 @@ mt deps ffmpeg                           # direct deps (forward of `uses`)
 mt deps --recursive ffmpeg               # full forward closure
 mt deps --installed -r node@20           # restrict to locally-resolved kegs
 mt which jq                              # reverse lookup: bin -> keg-path
+
+mt vulns                                 # open advisories for every installed formula
+mt vulns --severity high                 # high and critical only
+mt vulns abcde curl                      # just these formulae; exits 1 when anything is open, 2 if some could not be checked
+mt vulns --json
 ```
 
 `mt which` accepts a bare name (resolved through `{prefix}/bin/<name>`) or an absolute path to a malt-managed symlink. Output is `<name> <version> <keg-path>` (or `{"name", "version", "keg"}` with `--json`). It's read-only and offline; exits non-zero with a clear message when the binary is not owned by malt.

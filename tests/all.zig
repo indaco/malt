@@ -178,6 +178,7 @@ comptime {
     _ = @import("version_notify_test.zig");
     _ = @import("version_update_cli_test.zig");
     _ = @import("version_update_test.zig");
+    _ = @import("vulns_test.zig");
     _ = @import("which_test.zig");
     _ = @import("worker_arena_test.zig");
 }

@@ -87,7 +87,7 @@ pub const bash_script =
     \\    words=("${COMP_WORDS[@]}")
     \\    cword=$COMP_CWORD
     \\
-    \\    local commands="install reinstall uninstall remove upgrade update outdated list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services tui bundle help"
+    \\    local commands="install reinstall uninstall remove upgrade update outdated list ls info search uses deps which vulns doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services tui bundle help"
     \\    local global_flags="--verbose -v --debug --quiet -q --json --output-format=ndjson --dry-run --offline --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
@@ -166,6 +166,7 @@ pub const bash_script =
     \\        uses)             cmd_flags="--recursive -r --json --quiet -q" ;;
     \\        deps)             cmd_flags="--recursive -r --installed --json --quiet -q" ;;
     \\        which)            cmd_flags="--json" ;;
+    \\        vulns)            cmd_flags="--severity --json" ;;
     \\        migrate)          cmd_flags="--dry-run --parallel --use-system-ruby=" ;;
     \\        rollback)         cmd_flags="--dry-run --list --to --json" ;;
     \\        link)             cmd_flags="--overwrite --force -f --isolate --all" ;;
@@ -223,6 +224,7 @@ pub const zsh_script =
     \\        'uses:Show installed packages that depend on a formula'
     \\        'deps:Show what a formula depends on (forward of `uses`)'
     \\        'which:Resolve a prefix binary to its owning keg'
+    \\        'vulns:Report open advisories for installed formulae'
     \\        'doctor:System health check'
     \\        'tap:Manage taps'
     \\        'untap:Remove a tap'
@@ -338,6 +340,12 @@ pub const zsh_script =
     \\                    _arguments \
     \\                        '--json[Output as JSON]' \
     \\                        '*::name-or-path:'
+    \\                    ;;
+    \\                vulns)
+    \\                    _arguments \
+    \\                        '--severity[Only advisories at or above this level]:level:(low medium high critical)' \
+    \\                        '--json[Output as JSON]' \
+    \\                        '*::formula:'
     \\                    ;;
     \\                outdated)
     \\                    _arguments \
@@ -581,6 +589,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a uses        -d 'Show packages that depend on a formula'
     \\    complete -c $__malt_bin -n __malt_needs_command -a deps        -d 'Show what a formula depends on'
     \\    complete -c $__malt_bin -n __malt_needs_command -a which       -d 'Resolve a prefix binary to its owning keg'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a vulns       -d 'Report open advisories for installed formulae'
     \\    complete -c $__malt_bin -n __malt_needs_command -a doctor      -d 'System health check'
     \\    complete -c $__malt_bin -n __malt_needs_command -a tap         -d 'Manage taps'
     \\    complete -c $__malt_bin -n __malt_needs_command -a untap       -d 'Remove a tap'
@@ -707,6 +716,10 @@ pub const fish_script =
     \\    # which
     \\    complete -c $__malt_bin -n '__malt_using_command which' -l json -d 'JSON output'
     \\
+    \\    # vulns
+    \\    complete -c $__malt_bin -n '__malt_using_command vulns' -l severity -x -a 'low medium high critical' -d 'Only advisories at or above this level'
+    \\    complete -c $__malt_bin -n '__malt_using_command vulns' -l json -d 'JSON output'
+    \\
     \\    # doctor — --fix takes an optional safe-fix class id
     \\    complete -c $__malt_bin -n '__malt_using_command doctor' -l fix -r -a 'stale_lock orphaned_store broken_symlinks' -d 'Apply safe-class fixers; with <id>, only that class'
     \\    complete -c $__malt_bin -n '__malt_using_command doctor' -l dry-run -d 'Preview the fix plan without applying'
@@ -794,7 +807,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command services' -l follow -s f -d 'Tail appended bytes until SIGINT'
     \\
     \\    # help — command topic
-    \\    complete -c $__malt_bin -n '__malt_using_command help' -f -a 'install reinstall uninstall remove upgrade update outdated list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services tui bundle' -d 'Help topic'
+    \\    complete -c $__malt_bin -n '__malt_using_command help' -f -a 'install reinstall uninstall remove upgrade update outdated list ls info search uses deps which vulns doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services tui bundle' -d 'Help topic'
     \\
     \\    # bundle — sub-subcommands
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'install' -d 'Install Brewfile/Maltfile.json members'

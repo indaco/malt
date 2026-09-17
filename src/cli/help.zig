@@ -47,6 +47,7 @@ pub fn helpFor(command: []const u8) []const u8 {
         .{ "uses", uses_help },
         .{ "deps", deps_help },
         .{ "which", which_help },
+        .{ "vulns", vulns_help },
         .{ "pin", pin_help },
         .{ "unpin", unpin_help },
         .{ "bundle", bundle_help },
@@ -792,6 +793,38 @@ const which_help =
     \\  malt which jq
     \\  malt which /opt/malt/bin/jq
     \\  malt --json which jq
+    \\
+;
+
+const vulns_help =
+    \\Usage: malt vulns [<formula> ...] [flags]
+    \\
+    \\Report advisories the formula API lists as open for installed
+    \\formulae (all of them, or only the ones named). One row per
+    \\advisory: name, severity, id, summary - most severe first.
+    \\Exits 1 when anything is reported, 2 when some formulae could not
+    \\be checked (the rest is still reported), 0 when clean.
+    \\
+    \\Advisories are judged at the tap's current version, not the one
+    \\installed; a warning names each keg that is behind, since it may
+    \\carry more than the list shows. Metadata comes from the same
+    \\cached formula JSON `mt outdated` uses, so a run inside the cache
+    \\TTL is network-free. Casks, tap formulae and --local kegs are not
+    \\covered: the API carries no advisory data for them.
+    \\
+    \\Flags:
+    \\  --severity <level>  Only advisories at or above <level>
+    \\                      (low, medium, high, critical). Unlabelled
+    \\                      advisories rank as low.
+    \\  --json              `{"schema_version", "not_covered", "unchecked",
+    \\                      "formulae":[{"name", "installed_version",
+    \\                      "open":[...]}]}`
+    \\
+    \\Examples:
+    \\  malt vulns
+    \\  malt vulns --severity high
+    \\  malt vulns abcde curl
+    \\  malt --json vulns
     \\
 ;
 

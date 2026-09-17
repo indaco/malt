@@ -44,7 +44,7 @@ const all_commands = [_][]const u8{
     "run",      "version",   "completions", "shellenv",
     "backup",   "restore",   "purge",       "cleanup",
     "services", "bundle",    "which",       "deps",
-    "tui",
+    "tui",      "vulns",
 };
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
@@ -201,7 +201,7 @@ test "all completions expose cleanup as a top-level verb" {
     // `cleanup` already appears in every script as a `bundle cleanup`
     // subcommand, so substring presence isn't enough — pin the
     // top-level token shapes each shell uses for the verbs row.
-    try expectContains(completions.bash_script, "list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup");
+    try expectContains(completions.bash_script, "list ls info search uses deps which vulns doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup");
     try expectContains(completions.zsh_script, "'cleanup:");
     try expectContains(completions.fish_script, "__malt_needs_command -a cleanup");
 }
@@ -234,6 +234,14 @@ test "backup completions expose --services across every shell" {
     try expectContains(completions.bash_script, "--services");
     try expectContains(completions.zsh_script, "'--services[");
     try expectContains(completions.fish_script, "-l services");
+}
+
+test "vulns completions expose --severity with its four levels across every shell" {
+    // The level list is the flag's whole contract; a shell that offers the
+    // flag without its values leaves the user guessing at spellings.
+    try expectContains(completions.bash_script, "vulns)            cmd_flags=\"--severity --json\"");
+    try expectContains(completions.zsh_script, "'--severity[Only advisories at or above this level]:level:(low medium high critical)'");
+    try expectContains(completions.fish_script, "'__malt_using_command vulns' -l severity -x -a 'low medium high critical'");
 }
 
 test "help completions offer command topics across every shell" {

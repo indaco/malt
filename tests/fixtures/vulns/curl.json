@@ -1,0 +1,1 @@
+{"name":"curl","full_name":"curl","tap":"homebrew/core","desc":"Get a file from an HTTP, HTTPS or FTP server","homepage":"https://curl.se","versions":{"stable":"8.16.0","head":"HEAD","bottle":true},"revision":0,"dependencies":[],"keg_only":true,"post_install_defined":false,"post_install_steps":[]}
