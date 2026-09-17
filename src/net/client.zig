@@ -606,6 +606,48 @@ pub const HttpClient = struct {
         return self.doGetWithRetry(url, extra_headers, max_blob_bytes, progress);
     }
 
+    /// POST a JSON document and buffer the answer under `max_bytes`; the
+    /// client's one non-GET (OSV's batch query). A redirect is refused rather
+    /// than followed: replaying a body at an origin the caller never named is
+    /// not the same request. Retried on the GET policy - the query is
+    /// idempotent, and a pooled connection the peer has since dropped fails
+    /// exactly like a blip. Caller owns the returned `Response`.
+    pub fn postJson(self: *HttpClient, url: []const u8, body: []const u8, max_bytes: usize) GetError!Response {
+        if (self.offline) return error.OfflineRequired;
+        // Metadata with nothing else vouching for it, like every GET here.
+        try requireSecureOrigin(url, .transport_only);
+        return self.withRetry(postJsonOnce, .{ url, body, max_bytes });
+    }
+
+    fn postJsonOnce(self: *HttpClient, url: []const u8, body: []const u8, max_bytes: usize) GetError!Response {
+        const uri = std.Uri.parse(url) catch return error.InvalidUrl;
+        // stdlib streams the body straight out of the slice it is handed.
+        const sendable = try self.allocator.dupe(u8, body);
+        defer self.allocator.free(sendable);
+
+        var fired = std.atomic.Value(bool).init(false);
+        const hop_start_ns: u64 = nowNs(self.io);
+        var req = self.requestDeadlined(.POST, uri, .{
+            .extra_headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+            .redirect_behavior = .unhandled,
+        }, self.head_timeout_ns, &fired) catch |e| return self.headWalkError(&fired, e);
+        errdefer finishBodiless(&req);
+
+        var head_buf: [32 * 1024]u8 = undefined;
+        var response = self.receiveHeadDeadlined(&req, &head_buf, self.remainingHopBudget(hop_start_ns), &fired, sendable) catch |e|
+            return self.headWalkError(&fired, e);
+        const status: u16 = @intFromEnum(response.head.status);
+        if (isFollowableRedirect(status)) return error.RequestFailed;
+        if (statusHasNoBody(status)) {
+            const empty = try self.allocator.alloc(u8, 0);
+            finishBodiless(&req);
+            return .{ .status = status, .body = empty, .allocator = self.allocator };
+        }
+        const out = try self.readResponseBody(&req, &response, max_bytes, null, self.timeout_ns);
+        req.deinit();
+        return .{ .status = status, .body = out, .allocator = self.allocator };
+    }
+
     /// Streaming sibling of `getWithHeaders`: drains a 200 body straight into
     /// `sink` and returns only the status — no full-size body buffer. Non-200
     /// bodies go to a bounded throwaway so `sink` stays pristine until the
@@ -649,7 +691,7 @@ pub const HttpClient = struct {
         // 32 KiB — GHCR's multi-scope token + signed-URL redirects exceed
         // the 8 KiB default and tripped `HeaderBufferTooSmall`.
         var redirect_buf: [32 * 1024]u8 = undefined;
-        const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired) catch |e|
+        const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired, null) catch |e|
             return self.headWalkError(&fired, e);
 
         return @intFromEnum(response.head.status);
@@ -767,7 +809,7 @@ pub const HttpClient = struct {
             defer req.deinit();
 
             var redirect_buf: [32 * 1024]u8 = undefined;
-            const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired) catch |e|
+            const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired, null) catch |e|
                 return self.headWalkError(&fired, e);
 
             if (resolved.content_disposition == null) {
@@ -990,6 +1032,7 @@ pub const HttpClient = struct {
         buf: []u8,
         budget_ns: u64,
         fired: *std.atomic.Value(bool),
+        body: ?[]u8,
     ) !std.http.Client.Response {
         // The fd snapshot is only valid because stdlib cannot swap the
         // connection out from under it mid-flight.
@@ -1021,7 +1064,7 @@ pub const HttpClient = struct {
             retireIfFired(req, fired);
         }
 
-        try req.sendBodiless();
+        if (body) |b| try req.sendBodyComplete(b) else try req.sendBodiless();
         return try req.receiveHead(buf);
     }
 
@@ -1435,7 +1478,7 @@ pub const HttpClient = struct {
             errdefer finishBodiless(&req);
 
             var redirect_buf: [32 * 1024]u8 = undefined;
-            var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired) catch |e|
+            var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired, null) catch |e|
                 return self.headWalkError(&fired, e);
             const status: u16 = @intFromEnum(response.head.status);
 
@@ -1485,9 +1528,15 @@ pub const HttpClient = struct {
         max_bytes: usize,
         progress: ?ProgressCallback,
     ) GetError!Response {
+        return self.withRetry(doGetLimited, .{ url, extra_headers, max_bytes, progress });
+    }
+
+    /// One buffered attempt of `once`, re-run on the transient policy. Both
+    /// GET and the JSON POST share it so the backoff cannot drift.
+    fn withRetry(self: *HttpClient, comptime once: anytype, args: anytype) GetError!Response {
         var attempt: usize = 0;
         while (true) {
-            const result = self.doGetLimited(url, extra_headers, max_bytes, progress);
+            const result = @call(.auto, once, .{self} ++ args);
             if (result) |resp| {
                 if (classifyStatus(resp.status)) |dl_err| {
                     if (isTransientError(dl_err) and attempt < self.retry_backoff_ms.len) {
@@ -1601,7 +1650,7 @@ pub const HttpClient = struct {
             errdefer finishBodiless(&req);
 
             var redirect_buf: [32 * 1024]u8 = undefined;
-            var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired) catch |e|
+            var response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired, null) catch |e|
                 return self.headWalkError(&fired, e);
             const status: u16 = @intFromEnum(response.head.status);
 
@@ -2141,6 +2190,7 @@ test "every buffered GET entry point exposes a closed error set" {
         assertErrorSetFitsIn(HttpClient.getWithHeaders, GetError, "getWithHeaders");
         assertErrorSetFitsIn(HttpClient.getConditional, GetError, "getConditional");
         assertErrorSetFitsIn(HttpClient.getToWriter, GetError, "getToWriter");
+        assertErrorSetFitsIn(HttpClient.postJson, GetError, "postJson");
         assertErrorSetFitsIn(HttpClient.head, GetError, "head");
         assertErrorSetFitsIn(HttpClient.headResolved, HeadResolveError, "headResolved");
     }
@@ -2161,6 +2211,7 @@ test "every url entry point refuses a cleartext origin before dialling out" {
         "getConditional",
         "getWithHeaders",
         "getToWriter",
+        "postJson",
         "head",
         "headResolved",
     };
@@ -2189,6 +2240,7 @@ test "every url entry point refuses a cleartext origin before dialling out" {
     try std.testing.expectError(error.InsecureUrlScheme, http.getConditional(url, null, &.{}));
     try std.testing.expectError(error.InsecureUrlScheme, http.getWithHeaders(url, &.{}, null, .transport_only));
     try std.testing.expectError(error.InsecureUrlScheme, http.getToWriter(url, &.{}, &sink.writer, null));
+    try std.testing.expectError(error.InsecureUrlScheme, http.postJson(url, "{}", 1024));
     try std.testing.expectError(error.InsecureUrlScheme, http.head(url));
     try std.testing.expectError(error.InsecureUrlScheme, http.headResolved(url));
 }
