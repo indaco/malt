@@ -799,18 +799,21 @@ const which_help =
 const vulns_help =
     \\Usage: malt vulns [<formula> ...] [flags]
     \\
-    \\Report advisories the formula API lists as open for installed
-    \\formulae (all of them, or only the ones named). One row per
-    \\advisory: name, severity, id, summary - most severe first.
-    \\Exits 1 when anything is reported, 2 when some formulae could not
-    \\be checked (the rest is still reported), 0 when clean.
+    \\Report open advisories for installed formulae (all of them, or only
+    \\the ones named). One row per advisory: name, severity, id, summary
+    \\- most severe first. Exits 1 when anything is reported, 2 when some
+    \\formulae could not be checked (the rest is still reported), 0 when
+    \\clean.
     \\
-    \\Advisories are judged at the tap's current version, not the one
-    \\installed; a warning names each keg that is behind, since it may
-    \\carry more than the list shows. Metadata comes from the same
-    \\cached formula JSON `mt outdated` uses, so a run inside the cache
-    \\TTL is network-free. Casks, tap formulae and --local kegs are not
-    \\covered: the API carries no advisory data for them.
+    \\Core formulae use the advisories the formula API lists, judged at
+    \\the tap's current version rather than the one installed; a warning
+    \\names each keg that is behind, since it may carry more than the
+    \\list shows. That metadata is the same cached formula JSON `mt
+    \\outdated` uses, so a run inside the cache TTL is network-free for
+    \\them. Tap formulae are checked against OSV.dev from the source url
+    \\in their recipe, read at the installed commit; OSV is reached
+    \\directly (no mirror override) and `--offline` skips it, leaving
+    \\those kegs uncovered. Casks and --local kegs are not covered.
     \\
     \\Flags:
     \\  --severity <level>  Only advisories at or above <level>

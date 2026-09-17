@@ -1,5 +1,6 @@
 //! malt — vulns command
-//! Report open advisories for installed formulae from the formula API.
+//! Report open advisories for installed formulae: core kegs from the formula
+//! API, tap kegs from OSV.dev keyed on their recipe's source url.
 
 const std = @import("std");
 
@@ -11,6 +12,7 @@ const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const api_mod = @import("../net/api.zig");
+const client_mod = @import("../net/client.zig");
 const pool_mod = @import("../net/client_pool.zig");
 const outdated = @import("outdated.zig");
 const refresh = @import("outdated/refresh.zig");
@@ -18,13 +20,20 @@ const output = @import("../ui/output.zig");
 const term_sanitize = @import("../ui/term_sanitize.zig");
 const help = @import("help.zig");
 const install_args = @import("install/args.zig");
+const rb_parse = @import("install/rb_parse.zig");
+const identify = @import("vulns/identify.zig");
+const tap_mod = @import("../core/tap.zig");
+const osv = @import("../net/osv.zig");
 
-/// One queried formula with its parse kept alive for the rows that borrow it.
+/// One checked package. `vulns` borrows from `formula` for a core entry and
+/// from the arena for a tap entry.
 const Entry = struct {
     name: []const u8,
     /// Null when the name was asked for on the command line but is not installed.
     installed_version: ?[]const u8,
-    formula: formula_mod.Formula,
+    /// The API parse, kept alive for the rows; a tap entry has none.
+    formula: ?formula_mod.Formula,
+    vulns: []const formula_mod.Vuln,
 };
 
 /// Everything the writers need, so human and JSON output share one call.
@@ -33,11 +42,31 @@ const Report = struct {
     rows: []const Row,
     /// Names whose metadata could not be fetched; the scan is incomplete.
     unchecked: []const []const u8,
-    /// Tap and --local kegs the implicit walk left out.
+    /// Kegs the implicit walk could not attribute to any advisory source.
     not_covered: usize,
 };
 
+/// Where the tap phase reads recipes and advisories from. Production uses
+/// the defaults; tests point both at one loopback fixture, which is why the
+/// OSV base is not a `Mirrors` knob (those are https-only and env-driven).
+pub const Sources = struct {
+    osv_base: []const u8 = osv.default_base_url,
+    /// Replaces every tap's forge when set: raw recipes are read under it
+    /// and its HEAD is `<forge_base>/commits/HEAD`.
+    forge_base: ?[]const u8 = null,
+};
+
+/// Detail fetches are one GET per advisory; past this many the rest are
+/// listed by id alone so a widely-affected Cellar does not turn into a sweep.
+/// Only when nothing rides on the rank: a severity filter needs every row
+/// ranked, or the unranked ones would slip out of the report.
+const max_detail_fetches: usize = 20;
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    return executeWith(ctx, allocator, args, .{});
+}
+
+pub fn executeWith(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8, sources: Sources) !void {
     if (help.showIfRequested(ctx, args, "vulns")) return;
 
     var min_severity: ?Severity = null;
@@ -74,28 +103,48 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // Installed core formula -> pkg_version. Tap and --local kegs have no
-    // entry in the formula API, so they are never walked implicitly.
-    var installed: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
-    const skipped_kegs = try readInstalled(ctx.io, arena, &installed);
+    const installed = try readInstalled(ctx.io, arena);
     const walk_all = names.items.len == 0;
-    const targets: []const []const u8 = if (walk_all) installed.keys() else names.items;
+    // A named tap keg is asked of its tap, never of the API that cannot know it.
+    var targets: std.ArrayList([]const u8) = .empty;
+    var selected_taps: std.ArrayList(TapKeg) = .empty;
+    if (walk_all) {
+        try targets.appendSlice(arena, installed.core.keys());
+        try selected_taps.appendSlice(arena, installed.tap_kegs.items);
+    } else for (names.items) |name| {
+        if (installed.tapKeg(name)) |keg| try selected_taps.append(arena, keg) else try targets.append(arena, name);
+    }
+    // Tap kegs need the network for their recipe; offline they simply stay
+    // uncovered, the way the API tier degrades to its cache.
+    const tap_kegs: []const TapKeg = if (ctx.offline) &.{} else selected_taps.items;
 
-    const fetches = try allocator.alloc(Fetch, targets.len);
+    const fetches = try allocator.alloc(Fetch, targets.items.len);
     defer {
         for (fetches) |f| if (f.body) |b| std.heap.smp_allocator.free(b);
         allocator.free(fetches);
     }
-    for (fetches, targets) |*f, name| f.* = .{ .name = name };
+    for (fetches, targets.items) |*f, name| f.* = .{ .name = name };
     const cache_dir = try atomic.maltCacheDir(allocator);
     defer allocator.free(cache_dir);
-    try fetchAll(ctx, allocator, cache_dir, fetches);
+
+    // One pool for both phases; the main thread borrows a client for OSV.
+    const workers = @max(1, refresh.outdatedWorkerCount(@max(fetches.len, tap_kegs.len), null));
+    var pool = try pool_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, workers);
+    defer pool.deinit();
+    pool.setOfflineAll(ctx.offline);
+    try fetchAll(ctx, allocator, cache_dir, &pool, fetches);
     // Cancelled fetches all fail alike; the interrupt is the real story.
+    if (signals.isInterrupted()) return error.UserInterrupted;
+
+    const tap_fetches = try allocator.alloc(TapFetch, tap_kegs.len);
+    defer allocator.free(tap_fetches);
+    for (tap_fetches, tap_kegs) |*f, keg| f.* = .{ .keg = keg };
+    try resolveTapKegs(ctx, allocator, &pool, sources.forge_base, tap_fetches);
     if (signals.isInterrupted()) return error.UserInterrupted;
 
     var entries: std.ArrayList(Entry) = .empty;
     defer {
-        for (entries.items) |*e| e.formula.deinit();
+        for (entries.items) |*e| if (e.formula) |*f| f.deinit();
         entries.deinit(allocator);
     }
     var unchecked: std.ArrayList([]const u8) = .empty;
@@ -122,15 +171,24 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         };
         try entries.append(allocator, .{
             .name = name,
-            .installed_version = installed.get(name),
+            .installed_version = installed.core.get(name),
             .formula = f,
+            .vulns = f.vulns_open,
         });
     }
+
+    // Coverage counts what was actually asked for: the --local kegs only
+    // when everything was, tap kegs whenever they were selected.
+    var not_covered: usize = if (walk_all) installed.skipped else 0;
+    if (ctx.offline) not_covered += selected_taps.items.len;
+    const detail_cap: usize = if (min_severity != null) std.math.maxInt(usize) else max_detail_fetches;
+    not_covered += try scanTapKegs(allocator, arena, &pool, sources.osv_base, detail_cap, tap_fetches, &entries, &unchecked);
+    if (signals.isInterrupted()) return error.UserInterrupted;
 
     var rows: std.ArrayList(Row) = .empty;
     defer rows.deinit(allocator);
     for (entries.items) |e| {
-        for (e.formula.vulns_open) |v| {
+        for (e.vulns) |v| {
             if (keeps(min_severity, v)) try rows.append(allocator, .{ .name = e.name, .vuln = v });
         }
     }
@@ -140,8 +198,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         .entries = entries.items,
         .rows = rows.items,
         .unchecked = unchecked.items,
-        // Coverage only matters when the user asked for "everything installed".
-        .not_covered = if (walk_all) skipped_kegs else 0,
+        .not_covered = not_covered,
     });
     try exitStatus(rows.items.len, unchecked.items.len);
 }
@@ -158,11 +215,14 @@ fn report(ctx: *const AppCtx, r: Report) !void {
     try writeHuman(stdout, r.rows);
     var msg_buf: [256]u8 = undefined;
     for (r.entries) |e| {
-        if (staleNotice(&msg_buf, e.name, e.formula.pkg_version, e.installed_version, r.rows)) |msg|
+        // A tap recipe is read at the installed commit; only the API's
+        // current view can be ahead of a keg.
+        const f = e.formula orelse continue;
+        if (staleNotice(&msg_buf, e.name, f.pkg_version, e.installed_version, r.rows)) |msg|
             output.warnAlways("{s}", .{msg});
     }
     // Silence reads as "did it run?"; say what was checked, like `outdated`.
-    if (r.rows.len == 0) output.info("{s}", .{allClearMessage(&msg_buf, r.entries.len)});
+    if (r.rows.len == 0) output.info("{s}", .{allClearMessage(&msg_buf, r.entries.len, r.unchecked.len)});
     if (coverageMessage(&msg_buf, r.not_covered)) |msg| output.info("{s}", .{msg});
 }
 
@@ -185,63 +245,243 @@ const Fetch = struct {
     err: ?api_mod.ApiError = null,
 };
 
-const FetchQueue = struct {
-    ctx: *const AppCtx,
-    cache_dir: []const u8,
-    pool: *pool_mod.HttpClientPool,
-    fetches: []Fetch,
-    next: std.atomic.Value(usize) = .init(0),
+/// Atomic take-next over `items`; every take borrows one pooled client.
+fn WorkQueue(comptime Item: type, comptime Extra: type, comptime work: fn (Extra, *client_mod.HttpClient, *Item) void) type {
+    return struct {
+        extra: Extra,
+        pool: *pool_mod.HttpClientPool,
+        items: []Item,
+        next: std.atomic.Value(usize) = .init(0),
 
-    fn worker(q: *FetchQueue) void {
-        while (true) {
-            const i = q.next.fetchAdd(1, .acq_rel);
-            if (i >= q.fetches.len) return;
-            const http = q.pool.acquire();
-            defer q.pool.release(http);
-            var api = api_mod.BrewApi.init(q.ctx.io, std.heap.smp_allocator, http, q.cache_dir);
-            api.base_url = q.ctx.mirrors.api_base;
-            api.offline = q.ctx.offline;
-            const f = &q.fetches[i];
-            f.body = api.fetchFormula(f.name) catch |e| {
-                f.err = e;
-                continue;
-            };
+        fn worker(q: *@This()) void {
+            while (true) {
+                const i = q.next.fetchAdd(1, .acq_rel);
+                if (i >= q.items.len) return;
+                const http = q.pool.acquire();
+                defer q.pool.release(http);
+                work(q.extra, http, &q.items[i]);
+            }
         }
-    }
-};
+    };
+}
 
-/// A cold Cellar is one request per formula; serially that is seconds of
-/// silence, so fan out the way `outdated` does. Warm runs never leave the cache.
-fn fetchAll(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8, fetches: []Fetch) !void {
-    const workers = refresh.outdatedWorkerCount(fetches.len, null);
-    var pool = try pool_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, workers);
-    defer pool.deinit();
-    pool.setOfflineAll(ctx.offline);
+const FetchExtra = struct { ctx: *const AppCtx, cache_dir: []const u8 };
+const FetchQueue = WorkQueue(Fetch, FetchExtra, fetchOne);
 
-    var queue: FetchQueue = .{ .ctx = ctx, .cache_dir = cache_dir, .pool = &pool, .fetches = fetches };
-    const threads = try allocator.alloc(std.Thread, workers);
+fn fetchOne(x: FetchExtra, http: *client_mod.HttpClient, f: *Fetch) void {
+    var api = api_mod.BrewApi.init(x.ctx.io, std.heap.smp_allocator, http, x.cache_dir);
+    api.base_url = x.ctx.mirrors.api_base;
+    api.offline = x.ctx.offline;
+    f.body = api.fetchFormula(f.name) catch |e| {
+        f.err = e;
+        return;
+    };
+}
+
+/// Runs `worker` on `count` threads over a shared queue, draining on this
+/// thread when spawning fails; joins before returning.
+fn fanOut(allocator: std.mem.Allocator, count: usize, comptime worker: anytype, queue: anytype) !void {
+    const threads = try allocator.alloc(std.Thread, count);
     defer allocator.free(threads);
     var spawned: usize = 0;
     defer for (threads[0..spawned]) |t| t.join();
-    while (spawned < workers) : (spawned += 1) {
-        threads[spawned] = std.Thread.spawn(.{}, FetchQueue.worker, .{&queue}) catch {
+    while (spawned < count) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, worker, .{queue}) catch {
             // Out of threads is not out of luck: drain the queue on this one.
-            FetchQueue.worker(&queue);
+            worker(queue);
             break;
         };
     }
 }
 
-/// Fills `out` with the core kegs and returns how many tap or --local kegs
-/// were left out, so the summary can say what the report did not cover.
-fn readInstalled(io: std.Io, arena: std.mem.Allocator, out: *std.StringArrayHashMapUnmanaged([]const u8)) !usize {
+/// A cold Cellar is one request per formula; serially that is seconds of
+/// silence, so fan out the way `outdated` does. Warm runs never leave the cache.
+fn fetchAll(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8, pool: *pool_mod.HttpClientPool, fetches: []Fetch) !void {
+    var queue: FetchQueue = .{ .extra = .{ .ctx = ctx, .cache_dir = cache_dir }, .pool = pool, .items = fetches };
+    try fanOut(allocator, @min(pool.clients.len, fetches.len), FetchQueue.worker, &queue);
+}
+
+/// An installed keg attributed to a tap, with what the walk needs to find
+/// its recipe without going back to the database.
+const TapKeg = struct {
+    name: []const u8,
+    pkg_version: []const u8,
+    /// Null for a keg recorded before the column existed; the tap's HEAD
+    /// stands in for it.
+    sha: ?[]const u8,
+    /// Null when the tap's repository cannot be derived from its row or slug.
+    urls: ?tap_mod.TapBaseUrls,
+};
+
+/// What one tap keg resolved to; filled by a worker, read on the main thread.
+const TapFetch = struct {
+    keg: TapKeg,
+    outcome: enum { pending, identified, unidentified, failed } = .pending,
+    /// OSV query key, sliced out of `buf`.
+    repo_url: []const u8 = "",
+    tag: []const u8 = "",
+    /// Why the recipe could not be read, for the warning: a literal or `buf`.
+    reason: []const u8 = "",
+    buf: [768]u8 = undefined,
+
+    fn fail(f: *TapFetch, reason: []const u8) void {
+        f.outcome = .failed;
+        f.reason = reason;
+    }
+
+    fn identified(f: *TapFetch, target: identify.Target) void {
+        const n = target.repo_url.len + target.tag.len;
+        if (n > f.buf.len) return f.fail("recipe source url too long");
+        @memcpy(f.buf[0..target.repo_url.len], target.repo_url);
+        @memcpy(f.buf[target.repo_url.len..n], target.tag);
+        f.repo_url = f.buf[0..target.repo_url.len];
+        f.tag = f.buf[target.repo_url.len..n];
+        f.outcome = .identified;
+    }
+};
+
+const TapExtra = struct { ctx: *const AppCtx, forge_base: ?[]const u8 };
+const TapQueue = WorkQueue(TapFetch, TapExtra, resolveTapKeg);
+
+/// Recipe at the installed commit -> source url -> OSV query key. Mirrors
+/// the `outdated` tap audit's fetch shape; the parse and outcome stay here.
+fn resolveTapKeg(x: TapExtra, http: *client_mod.HttpClient, f: *TapFetch) void {
+    const urls = f.keg.urls orelse return f.fail("tap repository unknown");
+    var head: ?tap_mod.HeadResolution = null;
+    defer if (head) |*h| h.deinit();
+    const sha = f.keg.sha orelse blk: {
+        var head_url_buf: [512]u8 = undefined;
+        const head_url = if (x.forge_base) |b|
+            std.fmt.bufPrint(&head_url_buf, "{s}/commits/HEAD", .{b}) catch return f.fail("could not resolve the tap HEAD")
+        else
+            urls.api_head_url;
+        // The tap resolve hint every other command shows (rate limit, token).
+        head = tap_mod.resolveHeadCommit(x.ctx.io, x.ctx.environ, std.heap.smp_allocator, urls.forge, head_url, null) catch |e|
+            return f.fail(tap_mod.describeResolveError(&f.buf, e, urls.forge, urls.host));
+        break :blk head.?.sha orelse return f.fail("could not resolve the tap HEAD");
+    };
+    var fetch = tap_mod.fetchRawFile(http, x.ctx.environ, urls.forge, x.forge_base orelse urls.raw_base, sha, f.keg.name, tap_mod.keg_rb_subtrees) catch
+        return f.fail("could not fetch the recipe");
+    switch (fetch) {
+        .not_found => return f.fail("recipe not found in the tap"),
+        .found => |*resp| {
+            defer resp.deinit();
+            const rb = rb_parse.parseRubyFormula(resp.body) orelse return f.fail("unreadable recipe");
+            var buf: [512]u8 = undefined;
+            const target = identify.identify(&buf, rb.url, rb.version) orelse {
+                f.outcome = .unidentified;
+                return;
+            };
+            f.identified(target);
+        },
+    }
+}
+
+fn resolveTapKegs(ctx: *const AppCtx, allocator: std.mem.Allocator, pool: *pool_mod.HttpClientPool, forge_base: ?[]const u8, fetches: []TapFetch) !void {
+    if (fetches.len == 0) return;
+    var queue: TapQueue = .{ .extra = .{ .ctx = ctx, .forge_base = forge_base }, .pool = pool, .items = fetches };
+    try fanOut(allocator, @min(pool.clients.len, fetches.len), TapQueue.worker, &queue);
+}
+
+/// Turns the resolved tap kegs into entries: one OSV batch for every
+/// identified keg, then detail for the first `max_detail_fetches` hits.
+/// Returns how many kegs no source could be derived for.
+fn scanTapKegs(
+    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    pool: *pool_mod.HttpClientPool,
+    osv_base: []const u8,
+    detail_cap: usize,
+    fetches: []const TapFetch,
+    entries: *std.ArrayList(Entry),
+    unchecked: *std.ArrayList([]const u8),
+) !usize {
+    var not_covered: usize = 0;
+    var targets: std.ArrayList(osv.Target) = .empty;
+    var identified: std.ArrayList(*const TapFetch) = .empty;
+    for (fetches) |*f| switch (f.outcome) {
+        .identified => {
+            try targets.append(arena, .{ .repo_url = f.repo_url, .tag = f.tag });
+            try identified.append(arena, f);
+        },
+        // Quiet, like brew's skipped formulae: a non-forge source is not a failure.
+        .unidentified => not_covered += 1,
+        .failed => {
+            output.warnAlways("{s}: {s}", .{ f.keg.name, f.reason });
+            try unchecked.append(allocator, f.keg.name);
+        },
+        .pending => unreachable,
+    };
+    if (identified.items.len == 0) return not_covered;
+
+    const http = pool.acquire();
+    defer pool.release(http);
+    const ids_per_keg = osv.queryBatch(http, arena, osv_base, targets.items) catch |e| {
+        const noun: []const u8 = if (identified.items.len == 1) "keg" else "kegs";
+        switch (e) {
+            error.Canceled => return error.UserInterrupted,
+            error.RateLimited => output.warnAlways("OSV rate limit reached; {d} tap {s} not checked, retry later", .{ identified.items.len, noun }),
+            else => output.warnAlways("could not query OSV for {d} tap {s} ({s})", .{ identified.items.len, noun, @errorName(e) }),
+        }
+        for (identified.items) |f| try unchecked.append(allocator, f.keg.name);
+        return not_covered;
+    };
+
+    var details: std.StringHashMapUnmanaged(osv.Advisory) = .empty;
+    var fetched: usize = 0;
+    for (identified.items, ids_per_keg) |f, ids| {
+        const vulns = try arena.alloc(formula_mod.Vuln, ids.len);
+        for (vulns, ids) |*v, id| {
+            v.* = .{ .id = id, .upstream = &.{}, .severity = null, .summary = null };
+            const gop = try details.getOrPut(arena, id);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{ .id = id, .summary = null, .severity = null };
+                if (fetched < detail_cap) {
+                    fetched += 1;
+                    // A missing detail leaves the id-only row; the hit itself stands.
+                    if (osv.vulnerability(http, arena, osv_base, id)) |a| gop.value_ptr.* = a else |e| {
+                        if (e == error.Canceled) return error.UserInterrupted;
+                    }
+                }
+            }
+            v.severity = gop.value_ptr.severity;
+            v.summary = gop.value_ptr.summary;
+        }
+        try entries.append(allocator, .{
+            .name = f.keg.name,
+            .installed_version = f.keg.pkg_version,
+            .formula = null,
+            .vulns = vulns,
+        });
+    }
+    return not_covered;
+}
+
+/// The core kegs (name -> pkg_version), the tap kegs with their repository
+/// resolved, and how many kegs have no recipe to look up at all.
+const Installed = struct {
+    core: std.StringArrayHashMapUnmanaged([]const u8) = .empty,
+    tap_kegs: std.ArrayList(TapKeg) = .empty,
+    skipped: usize = 0,
+
+    fn tapKeg(self: Installed, name: []const u8) ?TapKeg {
+        for (self.tap_kegs.items) |keg| {
+            if (std.mem.eql(u8, keg.name, name)) return keg;
+        }
+        return null;
+    }
+};
+
+/// Everything on `arena`; the database is closed before this returns.
+fn readInstalled(io: std.Io, arena: std.mem.Allocator) !Installed {
+    var out: Installed = .{};
     const prefix = atomic.maltPrefixOrAbort();
     var db_path_buf: [512]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     // Only a missing `db/` reads as "nothing installed"; a database that is
     // there but will not open must never turn into a clean bill of health.
     var db = outdated.openPrefixDb(io, db_path) catch |e| switch (e) {
-        error.Absent => return 0,
+        error.Absent => return out,
         error.Unreadable => {
             output.err("cannot open {s}", .{db_path});
             return error.Aborted;
@@ -250,26 +490,37 @@ fn readInstalled(io: std.Io, arena: std.mem.Allocator, out: *std.StringArrayHash
     defer db.close();
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
 
-    var skipped: usize = 0;
-    var stmt = try db.prepare("SELECT name, version, revision, tap FROM kegs ORDER BY name;");
+    var stmt = try db.prepare("SELECT name, version, revision, tap, tap_commit_sha FROM kegs ORDER BY name;");
     defer stmt.finalize();
     while (try stmt.step()) {
-        const tap = std.mem.sliceTo(stmt.columnText(3) orelse "", 0);
-        if (!install_args.isCoreTap(tap)) {
-            skipped += 1;
-            continue;
-        }
         const name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
         const version = std.mem.sliceTo(stmt.columnText(1) orelse "", 0);
         var ver_buf: [256]u8 = undefined;
-        const pkg = try formula_mod.pkgVersion(&ver_buf, version, stmt.columnInt(2));
-        try out.put(arena, try arena.dupe(u8, name), try arena.dupe(u8, pkg));
+        const pkg = try arena.dupe(u8, try formula_mod.pkgVersion(&ver_buf, version, stmt.columnInt(2)));
+        const tap = std.mem.sliceTo(stmt.columnText(3) orelse "", 0);
+        if (install_args.isCoreTap(tap)) {
+            try out.core.put(arena, try arena.dupe(u8, name), pkg);
+            continue;
+        }
+        // A --local keg (or any label that is not a slug) has no tap to ask.
+        const slash = std.mem.indexOfScalar(u8, tap, '/') orelse {
+            out.skipped += 1;
+            continue;
+        };
+        const slug_ok = slash > 0 and slash < tap.len - 1;
+        const sha_col: ?[]const u8 = if (stmt.columnText(4)) |c| std.mem.sliceTo(c, 0) else null;
+        try out.tap_kegs.append(arena, .{
+            .name = try arena.dupe(u8, name),
+            .pkg_version = pkg,
+            .sha = if (sha_col) |c| (if (c.len > 0) try arena.dupe(u8, c) else null) else null,
+            .urls = if (slug_ok) tap_mod.resolveTapBaseUrls(arena, &db, tap) catch null else null,
+        });
     }
-    return skipped;
+    return out;
 }
 
-fn allClearMessage(buf: []u8, checked: usize) []const u8 {
-    if (checked == 0) return "No formulae installed.";
+fn allClearMessage(buf: []u8, checked: usize, unchecked: usize) []const u8 {
+    if (checked == 0) return if (unchecked == 0) "No formulae installed." else "No formulae could be checked.";
     const noun: []const u8 = if (checked == 1) "formula" else "formulae";
     return std.fmt.bufPrint(buf, "No open advisories for {d} {s}.", .{ checked, noun }) catch "No open advisories.";
 }
@@ -277,7 +528,7 @@ fn allClearMessage(buf: []u8, checked: usize) []const u8 {
 fn coverageMessage(buf: []u8, skipped: usize) ?[]const u8 {
     if (skipped == 0) return null;
     const one = skipped == 1;
-    return std.fmt.bufPrint(buf, "{d} tap or local {s} not covered: the API has no advisory data for {s}.", .{
+    return std.fmt.bufPrint(buf, "{d} local or unidentifiable {s} not covered: no advisory source for {s}.", .{
         skipped, @as([]const u8, if (one) "keg" else "kegs"), @as([]const u8, if (one) "it" else "them"),
     }) catch null;
 }
@@ -484,21 +735,23 @@ test "human rows scrub terminal escapes smuggled through API text" {
 
 test "the all-clear line says how many formulae were checked" {
     var buf: [128]u8 = undefined;
-    try testing.expectEqualStrings("No open advisories for 65 formulae.", allClearMessage(&buf, 65));
-    try testing.expectEqualStrings("No open advisories for 1 formula.", allClearMessage(&buf, 1));
+    try testing.expectEqualStrings("No open advisories for 65 formulae.", allClearMessage(&buf, 65, 0));
+    try testing.expectEqualStrings("No open advisories for 1 formula.", allClearMessage(&buf, 1, 2));
     // An empty walk is not a clean bill of health; say what was there.
-    try testing.expectEqualStrings("No formulae installed.", allClearMessage(&buf, 0));
+    try testing.expectEqualStrings("No formulae installed.", allClearMessage(&buf, 0, 0));
+    // Nothing checked because every fetch failed is not "nothing installed".
+    try testing.expectEqualStrings("No formulae could be checked.", allClearMessage(&buf, 0, 3));
 }
 
 test "the coverage line is only written when something was skipped" {
     var buf: [128]u8 = undefined;
     try testing.expect(coverageMessage(&buf, 0) == null);
     try testing.expectEqualStrings(
-        "1 tap or local keg not covered: the API has no advisory data for it.",
+        "1 local or unidentifiable keg not covered: no advisory source for it.",
         coverageMessage(&buf, 1).?,
     );
     try testing.expectEqualStrings(
-        "3 tap or local kegs not covered: the API has no advisory data for them.",
+        "3 local or unidentifiable kegs not covered: no advisory source for them.",
         coverageMessage(&buf, 3).?,
     );
 }
