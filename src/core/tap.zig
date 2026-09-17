@@ -1680,8 +1680,17 @@ pub fn fetchRawFile(
     return .{ .not_found = last_status };
 }
 
+// Connects to a test listener and hangs up without a request, so a serve loop
+// parked in `accept` returns. Closing the listener from under the thread is a
+// use-after-close panic whenever it has not re-entered `accept` yet.
+fn knockListener(io: std.Io, listener: *const std.Io.net.Server) void {
+    const stream = listener.socket.address.connect(io, .{ .mode = .stream }) catch return;
+    stream.close(io);
+}
+
 // Serves `status` for the first `misses` requests, then 200 with `body` — so a
 // test can exercise the layout fallback (404 → 404 → 200) or an all-miss run.
+// A connection carrying no request ends the loop (`knockListener`).
 const RawFileTestServer = struct {
     io: std.Io,
     listener: *std.Io.net.Server,
@@ -1739,8 +1748,9 @@ test "fetchRawFile returns the first 200 across layouts" {
     const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     var fetch = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, null);
-    listener.deinit(io);
+    knockListener(io, &listener);
     thread.join();
+    listener.deinit(io);
 
     switch (fetch) {
         .found => |*resp| {
@@ -1772,8 +1782,9 @@ test "fetchRawFile reports not_found when no layout hits" {
     const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
 
     const fetch = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, null);
-    listener.deinit(io);
+    knockListener(io, &listener);
     thread.join();
+    listener.deinit(io);
 
     try std.testing.expectEqual(@as(u16, 404), fetch.not_found);
 }
@@ -1809,13 +1820,23 @@ pub const DropServer = struct {
     io: std.Io,
     listener: *std.Io.net.Server,
     accepts: std.atomic.Value(usize) = .init(0),
+    stopping: std.atomic.Value(bool) = .init(false),
 
     pub fn serve(self: *DropServer) void {
         while (true) {
             const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            if (self.stopping.load(.acquire)) return;
+            // Count before the close the client is waiting on, or `stop` can
+            // land between them and the last real dial goes unrecorded.
             _ = self.accepts.fetchAdd(1, .monotonic);
-            stream.close(self.io);
         }
+    }
+
+    /// Ends `serve` with a knock that is not counted.
+    pub fn stop(self: *DropServer) void {
+        self.stopping.store(true, .release);
+        knockListener(self.io, self.listener);
     }
 };
 
@@ -1841,8 +1862,9 @@ test "fetchRawFile trips a raw host after one exhausted transport budget" {
 
     const first = fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg1", &.{.formula}, &tripped);
     const second = fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg2", &.{.formula}, &tripped);
-    listener.deinit(io);
+    srv.stop();
     thread.join();
+    listener.deinit(io);
 
     // The first keg pays every attempt of one budget; the second pays none
     // and replays the same failure.
@@ -1876,8 +1898,9 @@ test "fetchRawFile trips a raw host after an exhausted transient status" {
         // second keg pays none.
         const first = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg1", keg_rb_subtrees, &tripped);
         const second = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg2", keg_rb_subtrees, &tripped);
-        listener.deinit(io);
+        knockListener(io, &listener);
         thread.join();
+        listener.deinit(io);
 
         // The replay keeps naming the status so the caller's message is unchanged.
         try std.testing.expectEqual(@as(u16, @intFromEnum(status)), first.not_found);
@@ -1911,8 +1934,9 @@ test "fetchRawFile does not trip when a later layout answers 404: the host is up
     const subtrees: []const forge.RawKind = &.{ .formula, .formula_root };
     const first = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg1", subtrees, &tripped);
     const second = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg2", subtrees, &tripped);
-    listener.deinit(io);
+    knockListener(io, &listener);
     thread.join();
+    listener.deinit(io);
 
     try std.testing.expectEqual(@as(u16, 404), first.not_found);
     try std.testing.expectEqual(@as(usize, 0), tripped.len);
@@ -1943,8 +1967,9 @@ test "fetchRawFile does not trip on 404: the next keg may exist" {
     const subtrees: []const forge.RawKind = &.{ .formula, .formula_root };
     const first = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg1", subtrees, &tripped);
     const second = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg2", subtrees, &tripped);
-    listener.deinit(io);
+    knockListener(io, &listener);
     thread.join();
+    listener.deinit(io);
 
     try std.testing.expectEqual(@as(u16, 404), first.not_found);
     try std.testing.expectEqual(@as(u16, 404), second.not_found);
@@ -1994,8 +2019,9 @@ test "fetchRawFile does not trip on Ctrl-C: the user stopped the walk, the host 
     var tripped = TrippedHosts{};
 
     const r = fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{.formula}, &tripped);
-    listener.deinit(io);
+    srv.stop();
     thread.join();
+    listener.deinit(io);
 
     try std.testing.expectError(error.Canceled, r);
     try std.testing.expectEqual(@as(usize, 0), tripped.len);
