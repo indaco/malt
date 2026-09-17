@@ -1586,11 +1586,62 @@ pub const RawFetch = union(enum) {
 /// the audit must read the same file install did.
 pub const keg_rb_subtrees: []const forge.RawKind = &.{ .formula, .cask, .formula_root };
 
+/// Per-run memory of raw hosts whose first keg already exhausted the retry
+/// budget, so every later keg behind the same host fails at once. Keyed on
+/// the host: two taps on one instance share its fate. Only the first keg per
+/// dead host pays (one budget on a transport error, one per layout on a
+/// transient status); a worker already mid-retry when a sibling trips
+/// finishes on its own. A full table degrades to today's walk.
+pub const TrippedHosts = struct {
+    /// Replayed verbatim so the caller's failure reason matches the first keg's.
+    pub const Trip = union(enum) { err: anyerror, status: u16 };
+    const max_host = 256;
+    const Entry = struct { host: [max_host]u8, len: usize, trip: Trip };
+
+    mutex: std.Io.Mutex = .init,
+    entries: [4]Entry = undefined,
+    len: usize = 0,
+
+    /// Only `host[:port]` dials; the owner/repo path is per tap.
+    fn hostOf(raw_base: []const u8) []const u8 {
+        const start = if (std.mem.indexOf(u8, raw_base, "://")) |i| i + 3 else 0;
+        const rest = raw_base[start..];
+        return rest[0 .. std.mem.indexOfScalar(u8, rest, '/') orelse rest.len];
+    }
+
+    /// Caller holds the mutex.
+    fn lookup(self: *TrippedHosts, host: []const u8) ?*Entry {
+        for (self.entries[0..self.len]) |*e| {
+            if (std.mem.eql(u8, e.host[0..e.len], host)) return e;
+        }
+        return null;
+    }
+
+    pub fn find(self: *TrippedHosts, io: std.Io, raw_base: []const u8) ?Trip {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return if (self.lookup(hostOf(raw_base))) |e| e.trip else null;
+    }
+
+    pub fn record(self: *TrippedHosts, io: std.Io, raw_base: []const u8, trip: Trip) void {
+        const host = hostOf(raw_base);
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.lookup(host) != null or self.len == self.entries.len or host.len > max_host) return;
+        const e = &self.entries[self.len];
+        @memcpy(e.host[0..host.len], host);
+        e.len = host.len;
+        e.trip = trip;
+        self.len += 1;
+    }
+};
+
 /// Fetch a tap package's `.rb` by trying each `subtree` layout at `sha` in
 /// order; the first HTTP 200 wins. The "try the next layout" decision keys
 /// only on HTTP status, so the Ruby parse stays in the caller — keeping this
 /// leaf UI-agnostic and shared by both the outdated audit and the upgrade
 /// dry-run (a shared home avoids an `upgrade → outdated` command edge).
+/// `tripped` (optional) short-circuits a host that already failed this run.
 pub fn fetchRawFile(
     http: *client_mod.HttpClient,
     environ: std.process.Environ,
@@ -1599,17 +1650,33 @@ pub fn fetchRawFile(
     sha: []const u8,
     name: []const u8,
     subtrees: []const forge.RawKind,
+    tripped: ?*TrippedHosts,
 ) !RawFetch {
+    if (tripped) |t| if (t.find(http.io, raw_base)) |trip| return switch (trip) {
+        .err => |e| e,
+        .status => |s| .{ .not_found = s },
+    };
     var last_status: u16 = 0;
+    var host_answered = false;
     for (subtrees) |subtree| {
         var rb_url_buf: [512]u8 = undefined;
         const rb_url = forge.rawFileUrl(&rb_url_buf, forge_kind, raw_base, sha, subtree, name) catch continue;
 
-        var rb_resp = try getRawFile(http, environ, forge_kind, rb_url);
+        var rb_resp = getRawFile(http, environ, forge_kind, rb_url) catch |e| {
+            // Cancel and offline are the caller's choice, not the host's fault.
+            if (tripped) |t| if (e != error.Canceled and e != error.OfflineRequired) t.record(http.io, raw_base, .{ .err = e });
+            return e;
+        };
         if (rb_resp.status == 200) return .{ .found = rb_resp };
         last_status = rb_resp.status;
+        // A 4xx is a real answer: the host is up, this layout just lacks the file.
+        const transient = if (client_mod.classifyStatus(rb_resp.status)) |c| client_mod.isTransientError(c) else false;
+        if (!transient) host_answered = true;
         rb_resp.deinit();
     }
+    // Every layout exhausted a 5xx / 429 budget: the host is sick, not the
+    // recipe missing, and the next keg would pay the same again.
+    if (tripped) |t| if (last_status != 0 and !host_answered) t.record(http.io, raw_base, .{ .status = last_status });
     return .{ .not_found = last_status };
 }
 
@@ -1622,6 +1689,9 @@ const RawFileTestServer = struct {
     miss_status: std.http.Status,
     misses: usize,
     seen: std.atomic.Value(usize),
+    /// When set, request `n` answers `statuses[n]` (the last one repeats)
+    /// instead of the miss/hit split above - for mixed-status walks.
+    statuses: []const std.http.Status = &.{},
 
     fn serve(self: *RawFileTestServer) void {
         while (true) {
@@ -1634,8 +1704,13 @@ const RawFileTestServer = struct {
             var srv = std.http.Server.init(&reader.interface, &writer.interface);
             var req = srv.receiveHead() catch return;
             const n = self.seen.fetchAdd(1, .monotonic);
-            if (n < self.misses) {
-                req.respond("", .{ .status = self.miss_status }) catch return;
+            if (self.statuses.len > 0) {
+                const st = self.statuses[@min(n, self.statuses.len - 1)];
+                req.respond("", .{ .status = st, .keep_alive = false }) catch return;
+            } else if (n < self.misses) {
+                // The socket closes after this response; say so, or a retry
+                // reuses the pooled connection and reads EOF instead of the status.
+                req.respond("", .{ .status = self.miss_status, .keep_alive = false }) catch return;
             } else {
                 req.respond(self.body, .{ .status = .ok }) catch return;
             }
@@ -1663,7 +1738,7 @@ test "fetchRawFile returns the first 200 across layouts" {
     var base_buf: [64]u8 = undefined;
     const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
 
-    var fetch = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root });
+    var fetch = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, null);
     listener.deinit(io);
     thread.join();
 
@@ -1696,7 +1771,7 @@ test "fetchRawFile reports not_found when no layout hits" {
     var base_buf: [64]u8 = undefined;
     const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
 
-    const fetch = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root });
+    const fetch = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, null);
     listener.deinit(io);
     thread.join();
 
@@ -1723,7 +1798,258 @@ test "fetchRawFile surfaces a transport failure as an error, not not_found" {
     var base_buf: [64]u8 = undefined;
     const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
 
-    if (fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{.formula})) |_| {
+    if (fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{.formula}, null)) |_| {
         return error.TestExpectedTransportError; // a refused connect must not read as not_found
     } else |_| {}
+}
+
+/// Test fixture. Accepts and immediately drops every connection: a retriable
+/// transport failure with a countable dial, unlike a refused connect.
+pub const DropServer = struct {
+    io: std.Io,
+    listener: *std.Io.net.Server,
+    accepts: std.atomic.Value(usize) = .init(0),
+
+    pub fn serve(self: *DropServer) void {
+        while (true) {
+            const stream = self.listener.accept(self.io) catch return;
+            _ = self.accepts.fetchAdd(1, .monotonic);
+            stream.close(self.io);
+        }
+    }
+};
+
+test "fetchRawFile trips a raw host after one exhausted transport budget" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = DropServer{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, DropServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.retry_backoff_ms = &.{ 1, 1, 1 };
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    var tripped = TrippedHosts{};
+
+    const first = fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg1", &.{.formula}, &tripped);
+    const second = fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg2", &.{.formula}, &tripped);
+    listener.deinit(io);
+    thread.join();
+
+    // The first keg pays every attempt of one budget; the second pays none
+    // and replays the same failure.
+    try std.testing.expectEqual(http.retry_backoff_ms.len + 1, srv.accepts.load(.monotonic));
+    try std.testing.expectError(error.RequestFailed, first);
+    try std.testing.expectError(error.RequestFailed, second);
+}
+
+test "fetchRawFile trips a raw host after an exhausted transient status" {
+    for ([_]std.http.Status{ .service_unavailable, .too_many_requests }) |status| {
+        var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+
+        var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+        var listener = try addr.listen(io, .{ .reuse_address = true });
+        const port = listener.socket.address.getPort();
+        var srv = RawFileTestServer{ .io = io, .listener = &listener, .body = "", .miss_status = status, .misses = 64, .seen = std.atomic.Value(usize).init(0) };
+        const thread = try std.Thread.spawn(.{}, RawFileTestServer.serve, .{&srv});
+
+        var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+        var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+        defer http.deinit();
+        http.retry_backoff_ms = &.{ 1, 1, 1 };
+
+        var base_buf: [64]u8 = undefined;
+        const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+        var tripped = TrippedHosts{};
+
+        // Three layouts: the first keg walks every one (a budget each), the
+        // second keg pays none.
+        const first = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg1", keg_rb_subtrees, &tripped);
+        const second = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg2", keg_rb_subtrees, &tripped);
+        listener.deinit(io);
+        thread.join();
+
+        // The replay keeps naming the status so the caller's message is unchanged.
+        try std.testing.expectEqual(@as(u16, @intFromEnum(status)), first.not_found);
+        try std.testing.expectEqual(@as(u16, @intFromEnum(status)), second.not_found);
+        try std.testing.expectEqual(keg_rb_subtrees.len * (http.retry_backoff_ms.len + 1), srv.seen.load(.monotonic));
+    }
+}
+
+test "fetchRawFile does not trip when a later layout answers 404: the host is up" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    // Layout one exhausts a 503 budget (four attempts), layout two says 404.
+    const seq = [_]std.http.Status{ .service_unavailable, .service_unavailable, .service_unavailable, .service_unavailable, .not_found };
+    var srv = RawFileTestServer{ .io = io, .listener = &listener, .body = "", .miss_status = .not_found, .misses = 0, .seen = std.atomic.Value(usize).init(0), .statuses = &seq };
+    const thread = try std.Thread.spawn(.{}, RawFileTestServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.retry_backoff_ms = &.{ 1, 1, 1 };
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    var tripped = TrippedHosts{};
+
+    const subtrees: []const forge.RawKind = &.{ .formula, .formula_root };
+    const first = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg1", subtrees, &tripped);
+    const second = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg2", subtrees, &tripped);
+    listener.deinit(io);
+    thread.join();
+
+    try std.testing.expectEqual(@as(u16, 404), first.not_found);
+    try std.testing.expectEqual(@as(usize, 0), tripped.len);
+    // The second keg reached the server for both layouts (404, 404).
+    try std.testing.expectEqual(@as(u16, 404), second.not_found);
+    try std.testing.expectEqual(seq.len + subtrees.len, srv.seen.load(.monotonic));
+}
+
+test "fetchRawFile does not trip on 404: the next keg may exist" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = RawFileTestServer{ .io = io, .listener = &listener, .body = "", .miss_status = .not_found, .misses = 8, .seen = std.atomic.Value(usize).init(0) };
+    const thread = try std.Thread.spawn(.{}, RawFileTestServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    var tripped = TrippedHosts{};
+
+    const subtrees: []const forge.RawKind = &.{ .formula, .formula_root };
+    const first = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg1", subtrees, &tripped);
+    const second = try fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg2", subtrees, &tripped);
+    listener.deinit(io);
+    thread.join();
+
+    try std.testing.expectEqual(@as(u16, 404), first.not_found);
+    try std.testing.expectEqual(@as(u16, 404), second.not_found);
+    // Both kegs reached the server for every layout.
+    try std.testing.expectEqual(2 * subtrees.len, srv.seen.load(.monotonic));
+}
+
+test "fetchRawFile does not trip on offline mode: the host was never dialled" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.offline = true;
+    var tripped = TrippedHosts{};
+
+    try std.testing.expectError(error.OfflineRequired, fetchRawFile(&http, std.process.Environ.empty, .github, "http://127.0.0.1:1", "deadbeef", "pkg", &.{.formula}, &tripped));
+    try std.testing.expectEqual(@as(usize, 0), tripped.len);
+}
+
+test "fetchRawFile does not trip on Ctrl-C: the user stopped the walk, the host did not" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = DropServer{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, DropServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.retry_backoff_ms = &.{ 1, 1, 1 };
+    // The first dial fails; the backoff before the second sees the cancel.
+    http.cancel = &struct {
+        fn f() bool {
+            return true;
+        }
+    }.f;
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    var tripped = TrippedHosts{};
+
+    const r = fetchRawFile(&http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{.formula}, &tripped);
+    listener.deinit(io);
+    thread.join();
+
+    try std.testing.expectError(error.Canceled, r);
+    try std.testing.expectEqual(@as(usize, 0), tripped.len);
+}
+
+test "TrippedHosts dedups a host recorded by several workers at once" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var tripped = TrippedHosts{};
+    const io = threaded.io();
+
+    const Worker = struct {
+        fn run(t: *TrippedHosts, io_: std.Io) void {
+            t.record(io_, "http://127.0.0.1:1/a/tap/raw", .{ .err = error.ConnectionRefused });
+        }
+    };
+    var threads: [8]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Worker.run, .{ &tripped, io });
+    for (threads) |t| t.join();
+
+    try std.testing.expectEqual(@as(usize, 1), tripped.len);
+}
+
+test "TrippedHosts keys on the host so two taps on one instance share the fate" {
+    var tripped = TrippedHosts{};
+    const io = std.Options.debug_io;
+    tripped.record(io, "https://git.example.org/acme/tap/raw", .{ .err = error.ConnectionRefused });
+
+    try std.testing.expectEqual(TrippedHosts.Trip{ .err = error.ConnectionRefused }, tripped.find(io, "https://git.example.org/other/tap/raw"));
+    try std.testing.expectEqual(@as(?TrippedHosts.Trip, null), tripped.find(io, "https://git.example.org:8443/acme/tap/raw"));
+    try std.testing.expectEqual(@as(?TrippedHosts.Trip, null), tripped.find(io, "https://git.example.net/acme/tap/raw"));
+}
+
+test "TrippedHosts full table records nothing more and dedups a repeat host" {
+    var tripped = TrippedHosts{};
+    const io = std.Options.debug_io;
+    tripped.record(io, "http://a", .{ .err = error.ConnectionRefused });
+    tripped.record(io, "http://a", .{ .status = 503 });
+    try std.testing.expectEqual(@as(usize, 1), tripped.len);
+    try std.testing.expectEqual(TrippedHosts.Trip{ .err = error.ConnectionRefused }, tripped.find(io, "http://a"));
+
+    tripped.record(io, "http://b", .{ .status = 503 });
+    tripped.record(io, "http://c", .{ .status = 503 });
+    tripped.record(io, "http://d", .{ .status = 503 });
+    tripped.record(io, "http://e", .{ .status = 503 });
+    try std.testing.expectEqual(tripped.entries.len, tripped.len);
+    try std.testing.expectEqual(@as(?TrippedHosts.Trip, null), tripped.find(io, "http://e"));
+}
+
+test "TrippedHosts skips a host longer than its buffer rather than truncating it" {
+    var tripped = TrippedHosts{};
+    const io = std.Options.debug_io;
+    const long = "http://" ++ ("h" ** (TrippedHosts.max_host + 1)) ++ "/tap/raw";
+    tripped.record(io, long, .{ .status = 503 });
+    try std.testing.expectEqual(@as(usize, 0), tripped.len);
+    try std.testing.expectEqual(@as(?TrippedHosts.Trip, null), tripped.find(io, long));
 }

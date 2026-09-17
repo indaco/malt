@@ -192,6 +192,8 @@ const EntrySink = struct {
     formulas: std.ArrayList(OutdatedEntry) = .empty,
     casks: std.ArrayList(OutdatedEntry) = .empty,
     tainted: bool = false,
+    /// The warm walks tap rows serially; one dead raw host is paid for once.
+    tripped: tap_mod.TrippedHosts = .{},
 
     fn init(allocator: std.mem.Allocator) EntrySink {
         return .{ .allocator = allocator };
@@ -838,6 +840,35 @@ fn tapWarmDecision(upstream: ?[]const u8, installed: []const u8) TapWarmDecision
     return if (std.mem.eql(u8, up, installed)) .skip else .collect;
 }
 
+test "tapFormulaUpstreamVersion honours a tripped host so a bulk dry-run pays a dead host once" {
+    // The bulk warm walks tap rows serially through a fresh client each, so
+    // the breaker is the only thing that stops the second row re-dialling.
+    // A host tripped by the first row must not be dialled at all.
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = tap_mod.DropServer{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, tap_mod.DropServer.serve, .{&srv});
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+    var sink = EntrySink.init(std.testing.allocator);
+    defer sink.deinit();
+    sink.tripped.record(io, raw_base, .{ .err = error.RequestFailed });
+
+    const v = tapFormulaUpstreamVersion(&ctx, std.testing.allocator, .github, raw_base, "deadbeef", "pkg", &sink.tripped);
+    listener.deinit(io);
+    thread.join();
+
+    try std.testing.expect(v == null);
+    try std.testing.expectEqual(@as(usize, 0), srv.accepts.load(.monotonic));
+}
+
 test "tapWarmDecision: null taints, equal skips, differing collects" {
     try std.testing.expectEqual(TapWarmDecision.taint, tapWarmDecision(null, "1.2.0"));
     try std.testing.expectEqual(TapWarmDecision.skip, tapWarmDecision("1.2.0", "1.2.0"));
@@ -871,10 +902,11 @@ fn tapFormulaUpstreamVersion(
     raw_base: []const u8,
     sha: []const u8,
     name: []const u8,
+    tripped: ?*tap_mod.TrippedHosts,
 ) ?[]u8 {
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
-    var fetch = tap_mod.fetchRawFile(&http, ctx.environ, forge_kind, raw_base, sha, name, tap_mod.keg_rb_subtrees) catch return null;
+    var fetch = tap_mod.fetchRawFile(&http, ctx.environ, forge_kind, raw_base, sha, name, tap_mod.keg_rb_subtrees, tripped) catch return null;
     switch (fetch) {
         .not_found => return null,
         .found => |*resp| {
@@ -972,7 +1004,7 @@ fn upgradeTapFormula(
             // version can only be a row recorded without its revision.
             var qbuf: [256]u8 = undefined;
             const installed = formula_mod.pkgVersion(&qbuf, installed_version, installed_revision) catch installed_version;
-            if (tapFormulaUpstreamVersion(ctx, allocator, urls.forge, urls.raw_base, fresh_sha, name)) |upstream| {
+            if (tapFormulaUpstreamVersion(ctx, allocator, urls.forge, urls.raw_base, fresh_sha, name, null)) |upstream| {
                 defer allocator.free(upstream);
                 if (tapWarmDecision(upstream, installed) == .collect) {
                     var hint_buf: [512]u8 = undefined;
@@ -992,7 +1024,7 @@ fn upgradeTapFormula(
         if (sink) |s| {
             var qbuf: [256]u8 = undefined;
             const installed = formula_mod.pkgVersion(&qbuf, installed_version, installed_revision) catch installed_version;
-            const upstream = tapFormulaUpstreamVersion(ctx, allocator, urls.forge, urls.raw_base, fresh_sha, name);
+            const upstream = tapFormulaUpstreamVersion(ctx, allocator, urls.forge, urls.raw_base, fresh_sha, name, &s.tripped);
             defer if (upstream) |u| allocator.free(u);
             switch (tapWarmDecision(upstream, installed)) {
                 .taint => s.tainted = true, // fetch/parse failure → full recompute
