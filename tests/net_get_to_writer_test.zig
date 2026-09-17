@@ -52,8 +52,14 @@ const Stub = struct {
 
 // Serves the request sequence on one keep-alive connection, looping until the
 // client closes (which surfaces as a `receiveHead` error). The truncated mode
-// closes the connection itself after a short partial body.
+// closes the connection itself after a short partial body. A transient status
+// makes the client retire its connection, so the retry arrives on a new one.
 fn serve(s: *Stub) void {
+    serveConnection(s);
+    if (s.mode == .err_then_ok) serveConnection(s);
+}
+
+fn serveConnection(s: *Stub) void {
     const stream = s.listener.accept(s.io) catch return;
     defer stream.close(s.io);
     var rbuf: [16 * 1024]u8 = undefined;

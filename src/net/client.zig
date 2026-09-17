@@ -644,7 +644,7 @@ pub const HttpClient = struct {
             return .{ .status = status, .body = empty, .allocator = self.allocator };
         }
         const out = try self.readResponseBody(&req, &response, max_bytes, null, self.timeout_ns);
-        req.deinit();
+        finishTerminal(&req, status);
         return .{ .status = status, .body = out, .allocator = self.allocator };
     }
 
@@ -1365,6 +1365,17 @@ pub const HttpClient = struct {
         req.deinit();
     }
 
+    /// Release a terminal response whose body has been read. A transient
+    /// status retires the connection instead of pooling it: a peer that just
+    /// answered 5xx/429 may drop the socket next, and stdlib's pool would
+    /// only find out by spending the retry attempt on it.
+    fn finishTerminal(req: *std.http.Client.Request, status: u16) void {
+        if (classifyStatus(status)) |e| if (isTransientError(e)) if (req.connection) |conn| {
+            conn.closing = true;
+        };
+        req.deinit();
+    }
+
     /// Release a redirect hop. Its body is never read, and stdlib's `deinit`
     /// drains an unread one. Two different hazards live there, so two answers:
     /// a body that can only end at close is skipped outright, and any other is
@@ -1516,7 +1527,7 @@ pub const HttpClient = struct {
             else
                 self.timeout_ns;
             const body = try self.readResponseBody(&req, &response, max_bytes, progress, total_timeout);
-            req.deinit();
+            finishTerminal(&req, status);
             return .{ .status = status, .body = body, .etag = etag_owned, .not_modified = false };
         }
     }
@@ -1683,14 +1694,14 @@ pub const HttpClient = struct {
 
             // Non-200: drain the error body into a bounded discard so status
             // classification / pre-body retry behave as on the buffer path and
-            // the pooled connection stays reusable — all while `sink` is left
+            // the connection is released as there — all while `sink` is left
             // untouched.
             // Zero-length buffer: `CountingWriter` sits on top and delegates
             // every write straight to `drain`, so the discard never buffers.
             var discard_buf: [0]u8 = undefined;
             var discarding: std.Io.Writer.Discarding = .init(&discard_buf);
             try self.streamResponseBody(&req, &response, &discarding.writer, max_metadata_bytes, null, self.timeout_ns);
-            req.deinit();
+            finishTerminal(&req, status);
             return status;
         }
     }
@@ -3215,4 +3226,172 @@ test "retrySleep completes when no cancel predicate is wired" {
     http.cancel = null;
 
     try http.retrySleep(0);
+}
+
+// Loopback peer for the pool tests: answers `status` keep-alive, then either
+// drops the socket or keeps serving. `accepts` tells a dial from a pooled
+// reuse; a connection carrying no request is the knock that ends the loop.
+const PoolPeer = struct {
+    io: std.Io,
+    listener: *std.Io.net.Server,
+    status: std.http.Status,
+    drop_after_answer: bool,
+    accepts: usize = 0,
+
+    fn serve(self: *PoolPeer) void {
+        while (true) {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            var rbuf: [4 * 1024]u8 = undefined;
+            var wbuf: [4 * 1024]u8 = undefined;
+            var reader = stream.reader(self.io, &rbuf);
+            var writer = stream.writer(self.io, &wbuf);
+            var srv = std.http.Server.init(&reader.interface, &writer.interface);
+            var served_here = false;
+            while (true) {
+                var req = srv.receiveHead() catch break;
+                served_here = true;
+                req.respond("", .{ .status = self.status }) catch return;
+                if (self.drop_after_answer) break;
+            }
+            if (!served_here) return;
+            self.accepts += 1;
+        }
+    }
+
+    fn knock(self: *PoolPeer) void {
+        const stream = self.listener.socket.address.connect(self.io, .{ .mode = .stream }) catch return;
+        stream.close(self.io);
+    }
+};
+
+fn poolTestUrl(buf: []u8, listener: *const std.Io.net.Server, path: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "http://127.0.0.1:{d}{s}", .{ listener.socket.address.getPort(), path });
+}
+
+// Two sequential GETs, second status returned. Errors come back as a value so
+// the test can still stop its peer before judging them.
+fn getTwice(http: *HttpClient, url: []const u8) GetError!u16 {
+    var first = try http.get(url);
+    first.deinit();
+    var second = try http.get(url);
+    defer second.deinit();
+    return second.status;
+}
+
+test "transient status retires the connection so every retry dials" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var peer = PoolPeer{ .io = io, .listener = &listener, .status = .service_unavailable, .drop_after_answer = true };
+    const t = try std.Thread.spawn(.{}, PoolPeer.serve, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try poolTestUrl(&url_buf, &listener, "/x");
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    // Odd length on purpose: pre-fix, stale and fresh attempts alternate, so
+    // the last one is stale. The accept count fails whichever shape wins.
+    http.retry_backoff_ms = &.{ 1, 1, 1 };
+
+    const result = http.get(url);
+    peer.knock();
+    t.join();
+
+    var resp = try result;
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 503), resp.status);
+    try std.testing.expectEqual(http.retry_backoff_ms.len + 1, peer.accepts);
+}
+
+test "transient status on a JSON POST retires the connection so every retry dials" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var peer = PoolPeer{ .io = io, .listener = &listener, .status = .too_many_requests, .drop_after_answer = true };
+    const t = try std.Thread.spawn(.{}, PoolPeer.serve, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try poolTestUrl(&url_buf, &listener, "/q");
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.retry_backoff_ms = &.{ 1, 1, 1 };
+
+    const result = http.postJson(url, "{}", 1024);
+    peer.knock();
+    t.join();
+
+    var resp = try result;
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 429), resp.status);
+    try std.testing.expectEqual(http.retry_backoff_ms.len + 1, peer.accepts);
+}
+
+test "healthy keep-alive response is still pooled" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var peer = PoolPeer{ .io = io, .listener = &listener, .status = .ok, .drop_after_answer = false };
+    const t = try std.Thread.spawn(.{}, PoolPeer.serve, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try poolTestUrl(&url_buf, &listener, "/ok");
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{};
+
+    const result = getTwice(&http, url);
+    // Closing the pool frees the peer's serve loop to take the knock.
+    http.deinit();
+    peer.knock();
+    t.join();
+
+    try std.testing.expectEqual(@as(u16, 200), try result);
+    try std.testing.expectEqual(@as(usize, 1), peer.accepts);
+}
+
+test "non-transient error status keeps its keep-alive connection pooled" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var peer = PoolPeer{ .io = io, .listener = &listener, .status = .not_found, .drop_after_answer = false };
+    const t = try std.Thread.spawn(.{}, PoolPeer.serve, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try poolTestUrl(&url_buf, &listener, "/missing");
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{};
+
+    // A tap layout walk is 404, 404, 200 against one host; each miss must
+    // not cost the next probe a dial.
+    const result = getTwice(&http, url);
+    http.deinit();
+    peer.knock();
+    t.join();
+
+    try std.testing.expectEqual(@as(u16, 404), try result);
+    try std.testing.expectEqual(@as(usize, 1), peer.accepts);
 }

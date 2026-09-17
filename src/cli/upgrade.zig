@@ -862,8 +862,9 @@ test "tapFormulaUpstreamVersion honours a tripped host so a bulk dry-run pays a 
     sink.tripped.record(io, raw_base, .{ .err = error.RequestFailed });
 
     const v = tapFormulaUpstreamVersion(&ctx, std.testing.allocator, .github, raw_base, "deadbeef", "pkg", &sink.tripped);
-    listener.deinit(io);
+    srv.stop();
     thread.join();
+    listener.deinit(io);
 
     try std.testing.expect(v == null);
     try std.testing.expectEqual(@as(usize, 0), srv.accepts.load(.monotonic));
