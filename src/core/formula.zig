@@ -296,6 +296,15 @@ fn isPerl(candidate: []const u8) bool {
         candidate[perl_dep.len] == '@';
 }
 
+/// One open advisory from the API's `vulnerabilities.open` list. All
+/// strings borrow from the owning `Formula._parsed`.
+pub const Vuln = struct {
+    id: []const u8,
+    upstream: []const []const u8,
+    severity: ?[]const u8,
+    summary: ?[]const u8,
+};
+
 /// Parsed Homebrew formula. Every `[]const u8` and `[]const []const u8`
 /// field is owned by `_parsed` (either borrowed from the JSON source
 /// buffer or allocated through the parse arena); valid only until
@@ -344,6 +353,9 @@ pub const Formula = struct {
     /// JSON contains a `service` object with at least a `run` array.
     /// All string fields inside borrow from `_parsed`.
     service: ?ServiceDef = null,
+    /// Advisories still open at the tap's current version. Outer slice
+    /// allocated through `_parsed.arena`; strings live in `_parsed`.
+    vulns_open: []const Vuln = &.{},
 
     /// Holds the parsed JSON tree. Must stay alive as long as the Formula
     /// is in use because string fields point into the JSON source buffer.
@@ -389,6 +401,28 @@ fn getInt(obj: std.json.ObjectMap, key: []const u8) i64 {
         .integer => |i| i,
         else => 0,
     };
+}
+
+/// `vulnerabilities.open` entries with an id; anything else in the block
+/// reads as "no open advisories" so a malformed key can never fail an install.
+fn parseVulnsOpen(allocator: std.mem.Allocator, root: std.json.ObjectMap) ![]const Vuln {
+    const block = root.get("vulnerabilities") orelse return &.{};
+    if (block != .object) return &.{};
+    const open = block.object.get("open") orelse return &.{};
+    if (open != .array or open.array.items.len == 0) return &.{};
+
+    var out: std.ArrayList(Vuln) = .empty;
+    for (open.array.items) |item| {
+        if (item != .object) continue;
+        const id = getString(item.object, "id") orelse continue;
+        try out.append(allocator, .{
+            .id = id,
+            .upstream = try getStringArray(allocator, item.object, "upstream"),
+            .severity = getString(item.object, "severity"),
+            .summary = getString(item.object, "summary"),
+        });
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 /// Map a service block's `run_type` to a `Schedule`. Absent/`"immediate"`
@@ -582,6 +616,8 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         }
     }
 
+    const vulns_open = try parseVulnsOpen(arena, root);
+
     // Pre-compute the revision-aware path label once into the parse
     // arena so every downstream consumer can borrow a stable slice
     // instead of re-formatting per call site.
@@ -608,6 +644,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         .bottle_root_url = bottle_root_url,
         .oldnames = oldnames,
         .service = service_def,
+        .vulns_open = vulns_open,
         ._parsed = parsed,
     };
 }
@@ -1062,6 +1099,73 @@ test "parseFormula drops a bottle entry whose sha256 is not a store key" {
         defer formula.deinit();
         try testing.expectEqual(@as(usize, 0), formula.bottle_files.?.map.count());
         try testing.expectError(FormulaError.NoBottleAvailable, resolveBottle(&formula));
+    }
+}
+
+fn vulnsFormulaJson(vulns_json: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        testing.allocator,
+        \\{{"name":"advised","versions":{{"stable":"1.0"}},"vulnerabilities":{s}}}
+    ,
+        .{vulns_json},
+    );
+}
+
+test "parseFormula reads vulnerabilities.open with optional severity and summary" {
+    const json = try vulnsFormulaJson(
+        \\{"open":[
+        \\  {"id":"BREW-a-CVE-1","upstream":["CVE-1","GHSA-x"],"severity":"high"},
+        \\  {"id":"BREW-a-CPANSA-2","upstream":[],"summary":"a summary"},
+        \\  {"upstream":["no-id"]},
+        \\  "not-an-object"
+        \\],"patched":[],"fixed_count":11}
+    );
+    defer testing.allocator.free(json);
+    var formula = try parseFormula(testing.allocator, json);
+    defer formula.deinit();
+
+    // An entry without an id has nothing to report; it is dropped.
+    try testing.expectEqual(@as(usize, 2), formula.vulns_open.len);
+    const first = formula.vulns_open[0];
+    try testing.expectEqualStrings("BREW-a-CVE-1", first.id);
+    try testing.expectEqual(@as(usize, 2), first.upstream.len);
+    try testing.expectEqualStrings("GHSA-x", first.upstream[1]);
+    try testing.expectEqualStrings("high", first.severity.?);
+    try testing.expect(first.summary == null);
+    const second = formula.vulns_open[1];
+    try testing.expectEqualStrings("BREW-a-CPANSA-2", second.id);
+    try testing.expectEqual(@as(usize, 0), second.upstream.len);
+    try testing.expect(second.severity == null);
+    try testing.expectEqualStrings("a summary", second.summary.?);
+}
+
+test "parseFormula treats absent vulnerabilities as empty" {
+    const json =
+        \\{"name":"clean","versions":{"stable":"1.0"}}
+    ;
+    var formula = try parseFormula(testing.allocator, json);
+    defer formula.deinit();
+    try testing.expectEqual(@as(usize, 0), formula.vulns_open.len);
+}
+
+test "parseFormula tolerates a malformed vulnerabilities object" {
+    // The install path parses every formula; an odd advisory block must
+    // never turn into an install failure.
+    const shapes = [_][]const u8{
+        "\"string\"",
+        "42",
+        "null",
+        "{}",
+        "{\"open\":\"nope\"}",
+        "{\"open\":{}}",
+        "{\"open\":[]}",
+    };
+    for (shapes) |v| {
+        const json = try vulnsFormulaJson(v);
+        defer testing.allocator.free(json);
+        var formula = try parseFormula(testing.allocator, json);
+        defer formula.deinit();
+        try testing.expectEqual(@as(usize, 0), formula.vulns_open.len);
     }
 }
 
