@@ -31,6 +31,7 @@ const update = @import("cli/update.zig");
 const upgrade = @import("cli/upgrade.zig");
 const uses = @import("cli/uses.zig");
 const version_update = @import("cli/version_update.zig");
+const vulns = @import("cli/vulns.zig");
 const which_cmd = @import("cli/which.zig");
 const signals = @import("core/signals.zig");
 const perms = @import("core/perms.zig");
@@ -119,6 +120,7 @@ const Command = enum {
     uses,
     deps,
     which,
+    vulns,
     help,
     version_flag,
 };
@@ -161,6 +163,7 @@ const command_names = [_]struct {
     .{ .tag = .uses, .names = &.{"uses"} },
     .{ .tag = .deps, .names = &.{"deps"} },
     .{ .tag = .which, .names = &.{"which"} },
+    .{ .tag = .vulns, .names = &.{"vulns"} },
     .{ .tag = .help, .names = &.{ "help", "--help", "-h" } },
     .{ .tag = .version_flag, .names = &.{"--version"} },
 };
@@ -674,6 +677,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             // — that name is std's EINTR value and would silently map an I/O
             // hiccup onto a user-cancel exit code.
             error.UserInterrupted => std.process.exit(130), // 128 + SIGINT
+            // `vulns` could not check every formula: neither clean nor a finding.
+            error.ScanIncomplete => std.process.exit(2),
             error.Aborted => std.process.exit(1),
             else => if (install_family and install.isReportedInstallError(e)) std.process.exit(1) else return e,
         };
@@ -779,6 +784,7 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         .uses => try uses.execute(ctx, allocator, cmd_args),
         .deps => try deps_cmd.execute(ctx, allocator, cmd_args),
         .which => try which_cmd.execute(ctx, allocator, cmd_args),
+        .vulns => try vulns.execute(ctx, allocator, cmd_args),
         .version => {
             // Intercept -h/--help here: the updater must never start a
             // release lookup just because help was requested.
@@ -825,6 +831,7 @@ fn printUsage(ctx: *const AppCtx) void {
         \\  uses          Show installed packages that depend on a formula
         \\  deps          Show what a formula depends on (forward of `uses`)
         \\  which         Resolve a prefix binary (or path) to its keg
+        \\  vulns         Report open advisories for installed formulae
         \\  doctor        System health check
         \\  tap/untap     Manage taps
         \\  migrate       Import existing Homebrew installation

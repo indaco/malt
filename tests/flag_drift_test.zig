@@ -42,6 +42,7 @@ const commands = [_]Command{
     .{ .name = "uses", .sources = &.{"uses.zig"} },
     .{ .name = "deps", .sources = &.{"deps.zig"} },
     .{ .name = "which", .sources = &.{"which.zig"} },
+    .{ .name = "vulns", .sources = &.{"vulns.zig"} },
     .{ .name = "tap", .sources = &.{"tap.zig"} },
     .{ .name = "migrate", .sources = &.{ "migrate.zig", "migrate" } },
     .{ .name = "rollback", .sources = &.{"rollback.zig"} },
