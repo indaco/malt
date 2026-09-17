@@ -907,19 +907,14 @@ pub fn patchTextFiles(
 }
 
 /// `patchTextFiles` over the files a bottle receipt lists instead of a
-/// whole tree. Returns how many were rewritten.
+/// whole tree.
 pub fn patchTextFileList(
     io: std.Io,
     allocator: std.mem.Allocator,
     paths: []const []const u8,
     replacements: []const Replacement,
-) u32 {
-    if (replacements.len == 0) return 0;
-    var count: u32 = 0;
-    for (paths) |p| if (patchTextFile(io, allocator, p, replacements)) {
-        count += 1;
-    };
-    return count;
+) void {
+    for (paths) |p| _ = patchTextFile(io, allocator, p, replacements);
 }
 
 /// True when the file was rewritten. Binary, oversized, empty and
@@ -940,15 +935,49 @@ fn patchTextFile(
     if (stat.size > 10 * 1024 * 1024) return false; // Skip files > 10MB
     if (stat.size == 0) return false;
 
-    const content = allocator.alloc(u8, stat.size) catch return false;
+    var head_buf: [text_head_len]u8 = undefined;
+    const head_len = file.readPositionalAll(io, head_buf[0..@min(stat.size, text_head_len)], 0) catch return false;
+    const head = head_buf[0..head_len];
+    if (classifyHead(head) != .text) return false;
+    return patchTextFileHead(io, allocator, abs_path, file, stat.size, head, replacements);
+}
+
+/// How many leading bytes decide what a file is. Also the text pass's
+/// binary sniff window, so a NUL further in does not make a file binary.
+pub const text_head_len: usize = 8192;
+
+pub const FileKind = enum { macho, binary, text };
+
+/// One rule for every pass over a keg (relocation and doctor alike), so a
+/// file cannot be text to one and binary to another.
+pub fn classifyHead(head: []const u8) FileKind {
+    if (parser.isMachO(head)) return .macho;
+    if (std.mem.findScalar(u8, head[0..@min(head.len, text_head_len)], 0) != null) return .binary;
+    return .text;
+}
+
+/// Text patching for a file already open and sniffed: `head` is its first
+/// `head.len` bytes, read once by the caller. Reads only the remainder.
+pub fn patchTextFileHead(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    abs_path: []const u8,
+    file: std.Io.File,
+    size: u64,
+    head: []const u8,
+    replacements: []const Replacement,
+) bool {
+    if (size > 10 * 1024 * 1024) return false; // Skip files > 10MB
+    if (size == 0) return false;
+
+    const content = allocator.alloc(u8, size) catch return false;
     defer allocator.free(content);
 
-    const bytes_read = file.readPositionalAll(io, content, 0) catch return false;
-    if (bytes_read < content.len) return false;
-
-    // Check if binary (null bytes in first 8KB)
-    const check_len = @min(content.len, 8192);
-    if (std.mem.findScalar(u8, content[0..check_len], 0) != null) return false;
+    @memcpy(content[0..head.len], head);
+    if (head.len < content.len) {
+        const rest = file.readPositionalAll(io, content[head.len..], head.len) catch return false;
+        if (rest < content.len - head.len) return false;
+    }
 
     // Apply each replacement in sequence. `current` always points to
     // either `content` or a freshly allocated buffer from replaceAll;
@@ -1531,4 +1560,45 @@ test "verifyFile judges each slice of a fat binary against its own signature" {
         VerifyError.StaleCodeSignature,
         verifyFile(std.Options.debug_io, testing.allocator, try fixtureFile(&s, stale)),
     );
+}
+
+test "classifyHead tells Mach-O, binary and text apart from the first bytes" {
+    var magic64: [4]u8 = undefined;
+    std.mem.writeInt(u32, &magic64, std.macho.MH_MAGIC_64, .little);
+    try std.testing.expectEqual(FileKind.macho, classifyHead(&magic64));
+    var fat: [4]u8 = undefined;
+    std.mem.writeInt(u32, &fat, std.macho.FAT_CIGAM, .little);
+    try std.testing.expectEqual(FileKind.macho, classifyHead(&fat));
+    // A NUL anywhere in the window is the text pass's "not mine" rule.
+    try std.testing.expectEqual(FileKind.binary, classifyHead("\x7fELF\x00\x00@@HOMEBREW_PREFIX@@"));
+    try std.testing.expectEqual(FileKind.text, classifyHead("prefix=@@HOMEBREW_PREFIX@@\n"));
+    // Shorter than a magic number is still text, never a false Mach-O.
+    try std.testing.expectEqual(FileKind.text, classifyHead("hi"));
+}
+
+test "patchTextFileHead patches a token beyond the head it was handed" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("text_head_tail");
+    defer s.deinit();
+    const path = s.p("/tail.conf");
+
+    // Placeholder sits past the 8 KiB sniff window: the rest of the file
+    // must be read from where the head stopped, not from zero again.
+    const body = try testing.allocator.alloc(u8, text_head_len + 64);
+    defer testing.allocator.free(body);
+    @memset(body, 'x');
+    const tail = "\nprefix=@@HOMEBREW_PREFIX@@\n";
+    @memcpy(body[body.len - tail.len ..], tail);
+    try atomic.atomicWriteFile(io, path, body);
+
+    const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    const reps = [_]Replacement{.{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" }};
+    try testing.expect(patchTextFileHead(io, testing.allocator, path, file, body.len, body[0..text_head_len], &reps));
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(io, path, testing.allocator, .unlimited);
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.endsWith(u8, got, "\nprefix=/opt/malt\n"));
+    try testing.expectEqualSlices(u8, body[0..text_head_len], got[0..text_head_len]);
 }
