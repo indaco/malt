@@ -50,20 +50,22 @@ fn scanTree(scanned_root: []const u8) !usize {
         defer testing.allocator.free(content);
         _ = try file.readPositionalAll(io, content, 0);
 
-        hits += scanContent(scanned_root, entry.path, content);
+        hits += scanContent(scanned_root, entry.path, content, .report);
     }
     return hits;
 }
 
-/// Prints one line per hit and returns the count.
-fn scanContent(scanned_root: []const u8, rel_path: []const u8, content: []const u8) usize {
+/// Returns the hit count; `.report` also names each site on stderr. The
+/// self-test below scans synthetic content and stays quiet, or its hits
+/// read like real findings in the build output.
+fn scanContent(scanned_root: []const u8, rel_path: []const u8, content: []const u8, mode: enum { report, quiet }) usize {
     var hits: usize = 0;
     for (forbidden) |needle| {
         var cursor: usize = 0;
         while (std.mem.indexOfPos(u8, content, cursor, needle)) |start| {
             cursor = start + needle.len;
             const line = 1 + std.mem.count(u8, content[0..start], "\n");
-            std.debug.print("{s}/{s}:{d} builds the cache dir from the prefix; use atomic.maltCacheDir\n", .{ scanned_root, rel_path, line });
+            if (mode == .report) std.debug.print("{s}/{s}:{d} builds the cache dir from the prefix; use atomic.maltCacheDir\n", .{ scanned_root, rel_path, line });
             hits += 1;
         }
     }
@@ -71,9 +73,9 @@ fn scanContent(scanned_root: []const u8, rel_path: []const u8, content: []const 
 }
 
 test "scanContent flags both hand-built spellings and ignores the helper call" {
-    try testing.expectEqual(@as(usize, 0), scanContent("src/x", "ok.zig", "const d = atomic.maltCacheDir(allocator) catch return;\n"));
-    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "bad.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache\", .{prefix});\n"));
-    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "cask.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache/Cask/{s}\", .{ prefix, name });\n"));
-    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "tap.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache/Tap\", .{prefix});\n"));
-    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "join.zig", "const d = prefix_path.join(&buf, prefix, \"/cache\") catch return;\n"));
+    try testing.expectEqual(@as(usize, 0), scanContent("src/x", "ok.zig", "const d = atomic.maltCacheDir(allocator) catch return;\n", .quiet));
+    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "bad.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache\", .{prefix});\n", .quiet));
+    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "cask.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache/Cask/{s}\", .{ prefix, name });\n", .quiet));
+    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "tap.zig", "const d = std.fmt.bufPrint(&buf, \"{s}/cache/Tap\", .{prefix});\n", .quiet));
+    try testing.expectEqual(@as(usize, 1), scanContent("src/x", "join.zig", "const d = prefix_path.join(&buf, prefix, \"/cache\") catch return;\n", .quiet));
 }
