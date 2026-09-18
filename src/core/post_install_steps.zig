@@ -1094,7 +1094,7 @@ fn stepRemove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 }
 
 /// Retire a subtree this formula owns, so the `copy` that follows starts
-/// clean. Confinement keeps it inside the prefix; `sharedPrefixDir` keeps it
+/// clean. Confinement keeps it inside the prefix; `sharedDir` keeps it
 /// off the top-level directories every other package also writes into.
 fn removeTrees(ctx: StepsCtx, items: []const std.json.Value) bool {
     for (items) |item| {
@@ -1105,8 +1105,8 @@ fn removeTrees(ctx: StepsCtx, items: []const std.json.Value) bool {
         const paths = expandGlob(ctx, spec) orelse return false;
         for (paths) |path| {
             if (!confined(ctx, path)) return false;
-            if (sharedPrefixDir(ctx, path)) {
-                logUnsupported(ctx, "recursive remove of a shared prefix directory");
+            if (sharedDir(ctx, path)) {
+                logUnsupported(ctx, "recursive remove of a shared directory");
                 return false;
             }
             std.Io.Dir.cwd().deleteTree(ctx.io, path) catch {};
@@ -1115,13 +1115,28 @@ fn removeTrees(ctx: StepsCtx, items: []const std.json.Value) bool {
     return true;
 }
 
-/// True for the prefix itself and its immediate children (`<prefix>/lib`,
-/// `<prefix>/bin`, …) — shared ground, never one formula's to delete.
-fn sharedPrefixDir(ctx: StepsCtx, path: []const u8) bool {
-    const trimmed = std.mem.trimEnd(u8, path, "/");
-    if (std.mem.eql(u8, trimmed, ctx.prefix)) return true;
-    const parent = std.fs.path.dirname(trimmed) orelse return true;
-    return std.mem.eql(u8, parent, ctx.prefix);
+/// Shared ground no single package may delete: the prefix and its immediate
+/// children (`<prefix>/lib`, …); for a cask also `$HOME/Library` and its
+/// top-level dirs (`Keychains`, `Preferences`, …) and the applications dir
+/// itself — one app inside it is the cask's own to remove.
+fn sharedDir(ctx: StepsCtx, raw: []const u8) bool {
+    // Normalised so `<appdir>/.` reads as the appdir, not as a child of it.
+    const path = std.fs.path.resolvePosix(ctx.allocator, &.{raw}) catch return true;
+    if (selfOrChild(path, ctx.prefix)) return true;
+    switch (ctx.subject) {
+        .formula => return false,
+        .cask => |c| {
+            const home_lib = std.fs.path.join(ctx.allocator, &.{ c.home, "Library" }) catch return true;
+            return selfOrChild(path, home_lib) or std.mem.eql(u8, path, std.mem.trimEnd(u8, c.appdir, "/"));
+        },
+    }
+}
+
+fn selfOrChild(path: []const u8, root: []const u8) bool {
+    const r = std.mem.trimEnd(u8, root, "/");
+    if (std.mem.eql(u8, path, r)) return true;
+    const parent = std.fs.path.dirname(path) orelse return true;
+    return std.mem.eql(u8, parent, r);
 }
 
 fn stepLinkChildren(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
@@ -5200,6 +5215,67 @@ test "checkSteps names what would be refused without touching the filesystem" {
     try testing.expectEqualStrings("run with sudo", entries[0].detail);
     try testing.expectEqualStrings("terminate_process with match", entries[1].detail);
     try testing.expectEqualStrings("frobnicate", entries[2].detail);
+}
+
+test "a recursive remove refuses $HOME/Library and its top-level children" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    // `Keychains` stands in for every top-level dir the OS and other apps
+    // share; the cask's own subtree under `Application Support` is fair game.
+    const keychains = try std.fs.path.join(a, &.{ ch.home, "Library/Keychains" });
+    try std.Io.Dir.cwd().createDirPath(c.io, keychains);
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/login", .{keychains}), "k");
+    const own = try std.fs.path.join(a, &.{ ch.home, "Library/Application Support/box" });
+    try std.Io.Dir.cwd().createDirPath(c.io, own);
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/state", .{own}), "s");
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"remove","recursive":true,"paths":[{"base":"home","path":"Library/Application Support/box"}]},
+        \\ {"type":"remove","recursive":true,"paths":[{"base":"home","path":"Library/Keychains"}]},
+        \\ {"type":"remove","recursive":true,"paths":[{"base":"home","path":"Library"}]}]
+    ));
+    try testing.expect(!pathExists(c.io, own));
+    try testing.expect(dirExists(c.io, keychains));
+    try testing.expect(!ch.h.flog.hasFatal());
+    try testing.expectEqual(@as(usize, 2), ch.h.flog.entries().len);
+    try testing.expectEqual(@as(usize, 1), ch.h.flog.handled_top_level);
+}
+
+test "a recursive remove refuses the applications dir itself but not one app in it" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const appdir = try std.fmt.allocPrint(a, "{s}/Applications", .{ch.h.prefix});
+    const app = try std.fmt.allocPrint(a, "{s}/Box.app", .{appdir});
+    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/Contents", .{app}));
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/Contents/x", .{app}), "x");
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"remove","recursive":true,"paths":[{"base":"appdir","path":"."}]},
+        \\ {"type":"remove","recursive":true,"paths":[{"base":"appdir","path":"Box.app"}]}]
+    ));
+    try testing.expect(dirExists(c.io, appdir));
+    try testing.expect(!pathExists(c.io, app));
+    try testing.expectEqual(@as(usize, 1), ch.h.flog.entries().len);
+}
+
+test "with HOME unset every home step is refused and nothing lands relative to cwd" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    var c = ch.ctx();
+    c.subject.cask.home = "";
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"mkdir_p","path":{"base":"home","path":"Library/malt_home_unset_never"}}]
+    ));
+    try testing.expect(ch.h.flog.hasFatal());
+    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, ch.h.flog.entries()[0].reason);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(c.io, "Library/malt_home_unset_never", .{}));
+    try testing.expect(!dirExists(c.io, "/Library/malt_home_unset_never"));
 }
 
 fn fileMode(io: std.Io, path: []const u8) !std.posix.mode_t {
