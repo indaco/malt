@@ -1087,6 +1087,13 @@ fn upgradeTapFormula(
 /// the latter (a 404 against a recorded `casks.tap` is user-facing).
 const TapRouteError = error{ NotInTap, Aborted, AppRunning };
 
+/// The installer refuses to remove a live app, but only once its turn
+/// comes; the stored phases run before that and must not start at all.
+fn caskAppRunning(ctx: *const AppCtx, app_path: ?[]const u8) bool {
+    const p = app_path orelse return false;
+    return cask_mod.CaskInstaller.isAppRunningPub(ctx.io, p);
+}
+
 /// Upgrade a cask whose owning tap is known. Fetches the tap's
 /// `Casks/<token>.rb` once to read the new version, short-circuits when
 /// the cask is already at that version, and otherwise drives the same
@@ -1224,10 +1231,30 @@ fn upgradeRoutedTapCask(
     installer.offline = ctx.offline;
     // Spares the prefetched artefact from the uninstall's cache sweep.
     installer.prefetched_artifact = prefetched;
+    // The outgoing version's own uninstall steps, read before its row goes;
+    // the incoming version's phases run inside `installTapCask`.
+    var flight = post_install_mod.Flight.init(allocator);
+    defer flight.deinit();
+    installer.flight = flight.sink();
+    var stored = post_install_mod.storedFlight(db, allocator, token, install_sink_mod.terminal);
+    defer if (stored) |*s| s.deinit();
     db.beginTransaction() catch |txn_err| {
         output.err("Could not begin DB transaction for {s}: {s} ({s})", .{ token, @errorName(txn_err), db.errMsg() });
         return error.Aborted;
     };
+
+    // Same ordering as the core-API path: refuse before a stored step acts.
+    const row = cask_mod.lookupInstalled(db, token);
+    if (caskAppRunning(ctx, if (row) |*r| r.appPath() else null)) {
+        db.rollback();
+        output.err("Cannot upgrade {s}: the app is running. Quit it and try again.", .{token});
+        return error.AppRunning;
+    }
+    if (stored) |*s| if (!flight.runPhase(&installer, token, installed_version, s.get(.uninstall_preflight), "uninstall preflight", install_sink_mod.terminal)) {
+        db.rollback();
+        return error.Aborted;
+    };
+    if (stored) |*s| flight.runUninstallMode(&installer, token, installed_version, s, install_sink_mod.terminal);
 
     installer.uninstall(token) catch |un_err| {
         db.rollback();
@@ -1238,6 +1265,7 @@ fn upgradeRoutedTapCask(
         output.err("Failed to remove old version of {s}: {s}", .{ token, @errorName(un_err) });
         return error.Aborted;
     };
+    if (stored) |*s| _ = flight.runPhase(&installer, token, installed_version, s.get(.uninstall_postflight), "uninstall postflight", install_sink_mod.terminal);
 
     // Installs the bytes the prefetch fetched, so this never re-downloads.
     install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, &prefetched, install_sink_mod.terminal) catch |in_err| {
@@ -1598,6 +1626,14 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return error.Aborted;
     };
 
+    // Before any stored step runs: the phases below mutate on the old
+    // version's behalf, and the installer's own refusal comes too late to
+    // undo them.
+    if (caskAppRunning(ctx, installed.appPath())) {
+        db.rollback();
+        output.err("Cannot upgrade {s}: the app is running. Quit it and try again.", .{token});
+        return error.AppRunning;
+    }
     if (stored) |*s| if (!flight.runPhase(&installer, token, old_version, s.get(.uninstall_preflight), "uninstall preflight", install_sink_mod.terminal)) {
         db.rollback();
         return error.Aborted;
