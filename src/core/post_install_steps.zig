@@ -23,6 +23,7 @@ const glob_match = @import("../glob.zig");
 const patch = @import("patch.zig");
 const codesign = @import("../macho/codesign.zig");
 const system_tools = @import("../system_tools.zig");
+const child_mod = @import("child.zig");
 
 pub const FallbackLog = fallback_log.FallbackLog;
 
@@ -250,8 +251,11 @@ pub fn execute(ctx: StepsCtx, formula_json: []const u8) bool {
     return true;
 }
 
-/// Run an already-parsed steps array; the FallbackLog is the outcome.
+/// Run an already-parsed steps array; the FallbackLog is the outcome. Only
+/// the entries this run appends decide the abort, so a log shared across
+/// phases (upgrade) does not stop a later phase over an earlier one.
 pub fn runSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
+    const start = ctx.flog.entries().len;
     for (steps) |step_val| {
         ctx.flog.total_top_level += 1;
         const obj = switch (step_val) {
@@ -266,7 +270,7 @@ pub fn runSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
         // mirroring the Ruby post_install path (a raised step ends the run)
         // and the DSL interpreter's stop-on-violation. Unknown/unsupported
         // steps only warn, so they don't abort.
-        if (ctx.flog.hasFatal()) break;
+        if (ctx.flog.hasFatalSince(start)) break;
     }
 }
 
@@ -282,7 +286,8 @@ pub fn checkSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
             },
         };
         const tag = admitStep(ctx, obj) orelse continue;
-        if (tag == .run) _ = sudoRefused(ctx, obj);
+        // Command resolution only logs; nothing here touches the filesystem.
+        if (tag == .run and !sudoRefused(ctx, obj)) _ = resolveCommandPath(ctx, obj);
     }
 }
 
@@ -440,6 +445,7 @@ const cask_template_map = std.StaticStringMap(enum {
     staged_path,
     caskroom_path,
     appdir,
+    temp,
 }).initComptime(.{
     .{ "token", .token },
     .{ "name", .token },
@@ -451,6 +457,7 @@ const cask_template_map = std.StaticStringMap(enum {
     .{ "staged_path", .staged_path },
     .{ "caskroom_path", .caskroom_path },
     .{ "appdir", .appdir },
+    .{ "temp", .temp },
 });
 
 fn templateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
@@ -466,6 +473,7 @@ fn templateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
             .staged_path => c.staged_path,
             .caskroom_path => c.caskroom_path,
             .appdir => c.appdir,
+            .temp => std.fmt.allocPrint(ctx.allocator, "{s}/tmp", .{ctx.prefix}) catch null,
         },
     };
 }
@@ -554,6 +562,7 @@ const cask_base_map = std.StaticStringMap(enum {
     caskroom_path,
     appdir,
     homebrew_prefix,
+    temp,
     formula_pkgetc,
     formula_opt_prefix,
 }).initComptime(.{
@@ -562,6 +571,9 @@ const cask_base_map = std.StaticStringMap(enum {
     .{ "caskroom_path", .caskroom_path },
     .{ "appdir", .appdir },
     .{ "homebrew_prefix", .homebrew_prefix },
+    // Upstream's HOMEBREW_TEMP; `<prefix>/tmp` keeps it inside confinement
+    // and lets data parked by an uninstall survive to the next install.
+    .{ "temp", .temp },
     .{ "formula_pkgetc", .formula_pkgetc },
     .{ "formula_opt_prefix", .formula_opt_prefix },
 });
@@ -578,6 +590,7 @@ pub fn resolveBase(ctx: StepsCtx, base: []const u8, formula_ref: ?[]const u8) ?[
             .caskroom_path => c.caskroom_path,
             .appdir => c.appdir,
             .homebrew_prefix => ctx.prefix,
+            .temp => std.fmt.allocPrint(ctx.allocator, "{s}/tmp", .{ctx.prefix}) catch null,
             .formula_pkgetc, .formula_opt_prefix => resolveFormulaBase(ctx, base, formula_ref),
         },
     };
@@ -1853,17 +1866,27 @@ fn stepDeleteKeychainCertificate(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         logUnsupported(ctx, "delete_keychain_certificate with a name security would read as an option");
         return false;
     }
-    var child = std.process.spawn(ctx.io, .{
-        .argv = &.{ system_tools.security, "delete-certificate", "-c", name },
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch {
+    const report = child_mod.run(ctx.io, ctx.allocator, &.{ system_tools.security, "delete-certificate", "-c", name }) catch {
         logCmdFail(ctx, "security failed to spawn");
         return false;
     };
-    // Non-zero means no such certificate, the normal case on a fresh machine.
-    _ = child.wait(ctx.io) catch {};
-    return true;
+    return switch (securityOutcome(report.code, report.stderr)) {
+        .deleted, .absent => true,
+        .failed => {
+            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "security could not delete the {s} certificate", .{name}) catch "security failed");
+            return false;
+        },
+    };
+}
+
+const SecurityOutcome = enum { deleted, absent, failed };
+
+/// `security` exits non-zero both when nothing matched and when it could
+/// not delete (locked keychain, no interaction allowed); only its message
+/// tells them apart, and an absent certificate is the normal first-run case.
+fn securityOutcome(code: u8, stderr: []const u8) SecurityOutcome {
+    if (code == 0) return .deleted;
+    return if (std.mem.indexOf(u8, stderr, "Unable to delete certificate matching") != null) .absent else .failed;
 }
 
 // --- toolchain configuration -----------------------------------------------
@@ -2003,14 +2026,23 @@ fn resolveCommandPath(ctx: StepsCtx, obj: std.json.ObjectMap) ?[]const u8 {
         }
         return path;
     }
-    const tag = command_base_map.get(base) orelse {
-        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "run command base {s}", .{base}) catch base);
-        return null;
-    };
     if (path.len == 0) {
         logUnsupported(ctx, "run with an empty command path");
         return null;
     }
+    // A cask's command bases are its path bases: there is no keg to be
+    // relative to, and `bin`/`libexec` would name nothing.
+    if (ctx.subject == .cask) {
+        const root = resolveBase(ctx, base, null) orelse {
+            logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "run command base {s}", .{base}) catch base);
+            return null;
+        };
+        return std.fs.path.join(ctx.allocator, &.{ root, path }) catch null;
+    }
+    const tag = command_base_map.get(base) orelse {
+        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "run command base {s}", .{base}) catch base);
+        return null;
+    };
     const root = if (tag == .keg)
         ctx.keg_path
     else
@@ -5332,6 +5364,102 @@ test "a degenerate appdir or home never becomes a confinement root" {
         \\[{"type":"touch","path":{"base":"appdir","path":"ok"}}]
     ));
     try testing.expect(fileExists(c.io, try std.fs.path.join(a, &.{ c.subject.cask.appdir, "ok" })));
+}
+
+test "the temp base and template resolve inside the prefix so a cask can park data across an uninstall" {
+    // miniconda moves `base/envs` to `{{temp}}/{{token}}-envs` in its uninstall
+    // preflight and back in the next install's postflight.
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const tmp = try std.fmt.allocPrint(a, "{s}/tmp", .{ch.h.prefix});
+    try testing.expectEqualStrings(tmp, resolveBase(c, "temp", null).?);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/box-envs", .{tmp}), try expandTemplates(c, "{{temp}}/{{token}}-envs"));
+
+    const envs = try std.fmt.allocPrint(a, "{s}/Caskroom/box/base/envs", .{ch.h.prefix});
+    try std.Io.Dir.cwd().createDirPath(c.io, envs);
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/py311", .{envs}), "env");
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"move","source":{"base":"caskroom_path","path":"base/envs"},"target":{"path":"{{temp}}/{{token}}-envs"},"overwrite":true,
+        \\  "guards":[{"path":"{{caskroom_path}}/base/envs","condition":"if_exists"}]}]
+    ));
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expect(!pathExists(c.io, envs));
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"move","source":{"path":"{{temp}}/{{token}}-envs"},"target":{"base":"caskroom_path","path":"base/envs"},"overwrite":true,
+        \\  "guards":[{"path":"{{temp}}/{{token}}-envs","condition":"if_exists"}]}]
+    ));
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/py311", .{envs})));
+}
+
+test "a cask run command resolves the cask bases and still refuses a bare name" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const cases = [_]struct { spec: []const u8, want: []const u8 }{
+        .{ .spec =
+        \\{"command":{"base":"appdir","path":"K.app/Contents/install"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/Applications/K.app/Contents/install", .{ch.h.prefix}) },
+        .{ .spec =
+        \\{"command":{"base":"staged_path","path":"wrapper.sh"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/wrapper.sh", .{ch.h.prefix}) },
+        .{ .spec =
+        \\{"command":{"base":"homebrew_prefix","path":"share/sdk/bin/tool"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/share/sdk/bin/tool", .{ch.h.prefix}) },
+        .{ .spec =
+        \\{"command":{"path":"{{appdir}}/K.app/Contents/x"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/Applications/K.app/Contents/x", .{ch.h.prefix}) },
+    };
+    for (cases) |case| {
+        const got = resolveCommandPath(c, try parseStep(&ch.h, case.spec)) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.want, got);
+    }
+    try testing.expect(!ch.h.flog.hasErrors());
+    // Keg-shaped bases and bare names are still refused for a cask.
+    try testing.expect(resolveCommandPath(c, try parseStep(&ch.h,
+        \\{"command":{"base":"bin","path":"tool"}}
+    )) == null);
+    try testing.expect(resolveCommandPath(c, try parseStep(&ch.h,
+        \\{"command":{"path":"chflags"}}
+    )) == null);
+    try testing.expectEqual(@as(usize, 2), ch.h.flog.entries().len);
+}
+
+test "checkSteps names a run command it could not resolve" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    checkSteps(ch.ctx(), try parseSteps(&ch.h,
+        \\[{"type":"run","command":{"path":"chflags"},"args":["nohidden","x"]},
+        \\ {"type":"run","command":{"base":"appdir","path":"K.app/Contents/install"}}]
+    ));
+    const entries = ch.h.flog.entries();
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    try testing.expectEqualStrings("run with a relative command", entries[0].detail);
+}
+
+test "a fatal entry left by an earlier phase does not fail the next one" {
+    // Upgrade runs the outgoing uninstall phases and the incoming preflight
+    // through one log; each phase must be judged on its own entries.
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    ch.h.flog.log(.{ .formula = "box", .reason = .sandbox_violation, .detail = "/earlier", .loc = null });
+    const start = ch.h.flog.entries().len;
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"mkdir_p","path":{"base":"caskroom_path","path":"later"}}]
+    ));
+    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(ch.h.arena.allocator(), "{s}/Caskroom/box/later", .{ch.h.prefix})));
+    try testing.expect(!ch.h.flog.hasFatalSince(start));
+}
+
+test "securityOutcome separates an absent certificate from a failed deletion" {
+    try testing.expectEqual(SecurityOutcome.deleted, securityOutcome(0, ""));
+    try testing.expectEqual(SecurityOutcome.absent, securityOutcome(1, "Unable to delete certificate matching \"malt-no-such-certificate\""));
+    try testing.expectEqual(SecurityOutcome.failed, securityOutcome(1, "security: SecKeychainItemDelete: User interaction is not allowed.\n"));
+    try testing.expectEqual(SecurityOutcome.failed, securityOutcome(255, ""));
 }
 
 fn fileMode(io: std.Io, path: []const u8) !std.posix.mode_t {
