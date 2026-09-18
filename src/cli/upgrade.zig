@@ -1231,6 +1231,8 @@ fn upgradeRoutedTapCask(
     installer.offline = ctx.offline;
     // Spares the prefetched artefact from the uninstall's cache sweep.
     installer.prefetched_artifact = prefetched;
+    // Keep the old version reachable: a failed install below puts it back.
+    installer.retain_history = true;
     // The outgoing version's own uninstall steps, read before its row goes;
     // the incoming version's phases run inside `installTapCask`.
     var flight = post_install_mod.Flight.init(allocator);
@@ -1270,7 +1272,16 @@ fn upgradeRoutedTapCask(
     // Installs the bytes the prefetch fetched, so this never re-downloads.
     install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, &prefetched, install_sink_mod.terminal) catch |in_err| {
         output.err("Failed to upgrade tap cask {s}: {s}", .{ full_name, @errorName(in_err) });
+        // As on the core-API path: the rows come back with the rollback, the
+        // bundle does not. Drop the prefetch first or the reinstall would
+        // consume the new artefact instead of the old one.
         db.rollback();
+        installer.prefetched_artifact = null;
+        if (installer.reinstallFromHistory(token, installed_version)) |_| {
+            output.warn("{s} {s} is back in place", .{ token, installed_version });
+        } else |re_err| {
+            output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, installed_version, @errorName(re_err), token, installed_version });
+        }
         return error.Aborted;
     };
 

@@ -917,3 +917,45 @@ test "a tap-routed upgrade runs the outgoing version's stored steps around the s
     try testing.expectEqualStrings("2.0", row.version());
     try testing.expectEqualStrings("grp/tap", row.tap().?);
 }
+
+test "a tap-routed upgrade whose install fails puts the old version back" {
+    // The 2.0 payload names the wrong bundle, so placement fails after the
+    // old version is already gone.
+    const rig = try TapUpgradeRig.init("tap_upgrade_restore", plain_rb, "Other.app");
+    defer rig.deinit();
+    const io = rig.io();
+    var fx = &rig.fx;
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+
+    // What a real 1.0 install leaves behind for a restore: its history row
+    // and its digest-pinned artefact in the cache.
+    const sha1 = try seedZipArtifact(fx, io, "plain", "1.0", "Plain.app");
+    {
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try cask.recordCaskVersion(&db, "plain", "1.0", "https://example.invalid/plain-1.0.zip", &sha1, "zip", fx.p("cache/Cask/plain-1.0.zip"));
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = rig.environ, .offline = false };
+    try testing.expectError(error.Aborted, malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "plain" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "plain 1.0 is back in place") != null);
+
+    const bin = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Applications/Plain.app/Contents/MacOS/bin"), 64);
+    defer testing.allocator.free(bin);
+    try testing.expectEqualStrings("1.0", bin);
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    const row = cask.lookupInstalled(&db, "plain").?;
+    try testing.expectEqualStrings("1.0", row.version());
+    try testing.expectEqualStrings("grp/tap", row.tap().?);
+}
