@@ -257,6 +257,18 @@ pub const Flight = struct {
         return routeFlightOutcome(self.allocator, &self.log, token, phase, out);
     }
 
+    /// Drop what the stored install phases placed and asked to remove,
+    /// before the artefact itself goes. Reported only when a step acted.
+    pub fn runUninstallMode(self: *Flight, installer: *cask_mod.CaskInstaller, token: []const u8, version: []const u8, stored: *const cask_mod.StoredFlight, out: OutputSink) void {
+        self.log.deinit();
+        self.log = dsl.FallbackLog.init(self.allocator);
+        for ([_]cask_mod.FlightPhase{ .preflight, .postflight }) |phase| {
+            const s = stored.get(phase) orelse continue;
+            if (!installer.runFlightUninstall(token, version, s)) break;
+        }
+        if (self.log.total_top_level > 0 or self.log.hasErrors()) _ = self.route(token, "install-phase cleanup", out);
+    }
+
     /// Run one phase on a fresh log and report it. Null steps are a no-op.
     pub fn runPhase(self: *Flight, installer: *cask_mod.CaskInstaller, token: []const u8, version: []const u8, steps: ?[]const std.json.Value, phase: []const u8, out: OutputSink) bool {
         const s = steps orelse return true;

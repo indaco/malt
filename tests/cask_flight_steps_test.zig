@@ -63,6 +63,12 @@ fn exists(io: std.Io, path: []const u8) bool {
     return if (std.Io.Dir.accessAbsolute(io, path, .{})) |_| true else |_| false;
 }
 
+/// The link itself, not what it points at: `exists` follows it.
+fn linkExists(io: std.Io, path: []const u8) bool {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    return if (std.Io.Dir.readLinkAbsolute(io, path, &buf)) |_| true else |_| false;
+}
+
 const box_json =
     \\{"token":"box","name":["Box"],"version":"6.0","url":"https://example.invalid/box.zip","sha256":"no_check",
     \\ "artifacts":[
@@ -537,4 +543,52 @@ test "a cask without flight steps stores NULL and installs as before" {
     defer c.deinit();
     try cask.recordInstall(&db, &c, null, null);
     try testing.expect((try cask.readFlightSteps(&db, testing.allocator, "plain")) == null);
+}
+
+test "uninstall drops the symlink a postflight placed and declared for removal" {
+    var fx = try Fixture.init("uninstall_symlink");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const json =
+        \\{"token":"box","name":["Box"],"version":"6.0","url":"https://example.invalid/box.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Box.app"]},
+        \\  {"postflight_steps":[{"steps":[
+        \\    {"type":"symlink","source":{"base":"staged_path","path":"libbox.6.0.dylib"},"target":{"path":"{{HOMEBREW_PREFIX}}/lib/libbox.6.dylib"},"uninstall":true},
+        \\    {"type":"symlink","source":{"base":"staged_path","path":"box"},"target":{"path":"{{HOMEBREW_PREFIX}}/bin/box"}}]}]}]}
+    ;
+    const app_path = fx.p("Applications/Box.app");
+    try putFile(io, fx.p("Applications/Box.app/Contents/MacOS/box"), "bin");
+    try putFile(io, fx.p("Caskroom/box/6.0/libbox.6.0.dylib"), "lib");
+    {
+        try test_io.cwd().createDirPath(io, fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c = try cask.parseCaskWithMajor(testing.allocator, json, null);
+        defer c.deinit();
+        try cask.recordInstall(&db, &c, app_path, null);
+
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var flog = cask.FlightLog.init(testing.allocator);
+        defer flog.deinit();
+        var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+        installer.flight = .{ .log = &flog, .allocator = arena.allocator() };
+        try testing.expect(installer.runFlight("box", "6.0", c.flight_steps.get(.postflight).?, null));
+    }
+    try testing.expect(linkExists(io, fx.p("lib/libbox.6.dylib")));
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ, .offline = true };
+    try malt.cli_uninstall.execute(&ctx, testing.allocator, &.{ "--cask", "box" });
+
+    try testing.expect(!exists(io, app_path));
+    try testing.expect(!linkExists(io, fx.p("lib/libbox.6.dylib")));
+    // Declared without `uninstall`: upstream leaves it, so does malt.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(io, fx.p("bin/box"), &buf);
 }

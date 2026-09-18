@@ -1602,6 +1602,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         db.rollback();
         return error.Aborted;
     };
+    if (stored) |*s| flight.runUninstallMode(&installer, token, old_version, s, install_sink_mod.terminal);
 
     installer.uninstall(token) catch |un_err| {
         db.rollback();

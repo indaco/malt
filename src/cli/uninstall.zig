@@ -316,6 +316,7 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
     // A failed preflight aborts before anything is removed, as on install.
     if (stored) |*s| if (!flight.runPhase(&installer, token, info.version(), s.get(.uninstall_preflight), "uninstall preflight", sink_mod.terminal))
         return error.Aborted;
+    if (stored) |*s| flight.runUninstallMode(&installer, token, info.version(), s, sink_mod.terminal);
 
     installer.uninstall(token) catch |un_err| {
         if (un_err == error.AppRunning) {

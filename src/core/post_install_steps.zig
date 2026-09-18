@@ -160,7 +160,8 @@ fn honouredKeys(tag: StepTag) []const []const u8 {
         => &.{"path"},
         .gdk_pixbuf_query_loaders => &.{},
         .write => &.{ "path", "content", "overwrite" },
-        .symlink => &.{ "source", "target", "force", "source_glob" },
+        // `uninstall` is read by the uninstall-mode pass, not at install.
+        .symlink => &.{ "source", "target", "force", "source_glob", "uninstall" },
         // `force` needs no branch: copy always replaces, as `cp_r` does.
         .copy => &.{ "source", "target", "recursive", "force" },
         .link_dir => &.{ "source", "target" },
@@ -271,6 +272,36 @@ pub fn runSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
         // steps only warn, so they don't abort.
         if (ctx.flog.hasFatalSince(start)) break;
     }
+}
+
+/// Re-run an install-phase list the way upstream does at uninstall: guards
+/// and refusals are ignored, and the only step that acts is a `symlink`
+/// declared with `uninstall`, which drops its link if it still points at
+/// the declared source. Everything else is a silent no-op.
+pub fn runUninstallSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
+    for (steps) |step_val| {
+        const obj = if (step_val == .object) step_val.object else continue;
+        if (step_map.get(getString(obj, "type") orelse continue) != .symlink) continue;
+        if (!getFlag(obj, "uninstall")) continue;
+        ctx.flog.total_top_level += 1;
+        if (unlinkDeclaredSymlink(ctx, obj)) ctx.flog.handled_top_level += 1;
+        if (ctx.flog.hasFatal()) break;
+    }
+}
+
+/// A link that no longer points at the declared source belongs to something
+/// else now and must survive, as must a plain file at the same path.
+fn unlinkDeclaredSymlink(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    // Never placed (refused at install), so there is nothing to match.
+    if (getFlag(obj, "source_glob")) return true;
+    const target = resolvePathSpec(ctx, obj, "target") orelse return false;
+    if (!confined(ctx, target)) return false;
+    const source = resolvePathSpec(ctx, obj, "source") orelse return false;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = std.Io.Dir.readLinkAbsolute(ctx.io, target, &buf) catch return true;
+    if (!std.mem.eql(u8, buf[0..len], source)) return true;
+    std.Io.Dir.cwd().deleteFile(ctx.io, target) catch {};
+    return true;
 }
 
 /// Dry-run classifier: log every step this executor would refuse, run none.
@@ -923,7 +954,15 @@ fn stepSymlink(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         logUnsupported(ctx, "symlink with a relative source");
         return false;
     }
-    if (getFlag(obj, "source_glob")) return symlinkGlob(ctx, obj, source, target);
+    if (getFlag(obj, "source_glob")) {
+        // Uninstall mode matches one link against one source; a glob places
+        // many and would be half-honoured.
+        if (getFlag(obj, "uninstall")) {
+            logUnsupported(ctx, "symlink with source_glob and uninstall");
+            return false;
+        }
+        return symlinkGlob(ctx, obj, source, target);
+    }
     mkParent(ctx, target);
     if (getFlag(obj, "force")) std.Io.Dir.cwd().deleteFile(ctx.io, target) catch {};
     std.Io.Dir.symLinkAbsolute(ctx.io, source, target, .{}) catch {};
@@ -5440,6 +5479,107 @@ test "checkSteps names what would be refused without touching the filesystem" {
     try testing.expectEqual(@as(usize, 2), entries.len);
     try testing.expectEqualStrings("run with sudo", entries[0].detail);
     try testing.expectEqualStrings("frobnicate", entries[1].detail);
+}
+
+test "a symlink declared with uninstall is placed on install and removed in uninstall mode" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    const declared = try parseSteps(&ch.h,
+        \\[{"type":"symlink","source":{"base":"staged_path","path":"libx.1.2.3.dylib"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libx.1.dylib"},"uninstall":true}]
+    );
+    runSteps(c, declared);
+    try testing.expect(!ch.h.flog.hasErrors());
+    const link = try std.fmt.allocPrint(a, "{s}/lib/libx.1.dylib", .{ch.h.prefix});
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(c.io, link, &buf);
+
+    runUninstallSteps(c, declared);
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(c.io, link, &buf));
+    try testing.expectEqual(@as(usize, 2), ch.h.flog.total_top_level);
+    try testing.expectEqual(@as(usize, 2), ch.h.flog.handled_top_level);
+}
+
+test "uninstall mode leaves a repointed link and a plain file alone" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    // Whatever owns the target now, it is not the link this cask placed.
+    const link = try std.fmt.allocPrint(a, "{s}/lib/libx.1.dylib", .{ch.h.prefix});
+    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/lib", .{ch.h.prefix}));
+    try std.Io.Dir.symLinkAbsolute(c.io, "/elsewhere/libx.dylib", link, .{});
+    const plain = try std.fmt.allocPrint(a, "{s}/lib/libx.2.dylib", .{ch.h.prefix});
+    try atomic.atomicWriteFile(c.io, plain, "not a link");
+
+    runUninstallSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"symlink","source":{"base":"staged_path","path":"libx.1.2.3.dylib"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libx.1.dylib"},"uninstall":true},
+        \\ {"type":"symlink","source":{"base":"staged_path","path":"libx.1.2.3.dylib"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libx.2.dylib"},"uninstall":true}]
+    ));
+    try testing.expect(!ch.h.flog.hasErrors());
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings("/elsewhere/libx.dylib", buf[0..try std.Io.Dir.readLinkAbsolute(c.io, link, &buf)]);
+    try testing.expectEqualStrings("not a link", try fs_read.readFileAllAbsolute(c.io, a, plain, 64));
+}
+
+test "uninstall mode is a no-op for every other step and for a symlink without uninstall" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    const declared = try parseSteps(&ch.h,
+        \\[{"type":"symlink","source":{"base":"staged_path","path":"keep"},"target":{"base":"home","path":"Library/keep"}},
+        \\ {"type":"mkdir_p","path":{"base":"home","path":"Library/never"}},
+        \\ {"type":"frobnicate"}]
+    );
+    runSteps(c, declared);
+    ch.h.flog.deinit();
+    ch.h.flog = FallbackLog.init(testing.allocator);
+
+    // Guards are not consulted and refusals are not re-logged: upstream
+    // re-runs the install list in uninstall mode and ignores all of this.
+    runUninstallSteps(c, declared);
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 0), ch.h.flog.total_top_level);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(c.io, try std.fs.path.join(a, &.{ ch.home, "Library/keep" }), &buf);
+}
+
+test "a glob symlink cannot also ask for removal: it is refused rather than half-honoured" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    const staged = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3", .{ch.h.prefix});
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/a.dylib", .{staged}), "a");
+    const declared = try parseSteps(&ch.h,
+        \\[{"type":"symlink","source":{"base":"staged_path","path":"*.dylib"},"target":{"path":"{{HOMEBREW_PREFIX}}/lib"},"source_glob":true,"uninstall":true}]
+    );
+    runSteps(c, declared);
+    try testing.expectEqualStrings("symlink with source_glob and uninstall", ch.h.flog.entries()[0].detail);
+    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/lib/a.dylib", .{ch.h.prefix})));
+    runUninstallSteps(c, declared);
+    try testing.expectEqual(@as(usize, 1), ch.h.flog.entries().len);
+}
+
+test "uninstall mode refuses a target outside the cask's confinement" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+
+    runUninstallSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"symlink","source":{"base":"staged_path","path":"x"},"target":{"path":"/tmp/malt-never-here"},"uninstall":true}]
+    ));
+    try testing.expect(ch.h.flog.hasFatal());
 }
 
 test "a recursive remove refuses $HOME/Library and its top-level children" {
