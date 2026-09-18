@@ -785,6 +785,8 @@ Source for `homebrew-core` formulas is fetched on demand from GitHub if the tap 
 
 Homebrew v6 is migrating formulae from these Ruby blocks to a declarative `post_install_steps` array. malt runs those steps natively as well - across install, upgrade, and migrate - so packages keep configuring themselves as upstream converts.
 
+Casks declare the same step schema as `preflight_steps` / `postflight_steps` / `uninstall_preflight_steps` / `uninstall_postflight_steps` (Homebrew v7). `mt install --cask` runs the preflight over the staged artefact before anything is placed and the postflight once the cask is recorded; `mt uninstall` runs the steps stored at install time, so they match the version on disk. Cask steps are confined to the Caskroom, the malt prefix, `$HOME/Library` and the applications directory; steps that need `sudo` are reported and skipped, never escalated. `--dry-run` lists the steps a cask would run and which ones malt refuses.
+
 Every mutating filesystem operation - write, rm, chmod, symlink - is validated against the formula's Cellar prefix and the malt prefix; paths containing `..` or resolving outside the sandbox via symlinks are rejected immediately.
 
 When the interpreter hits an unsupported construct, the user is directed to `--use-system-ruby`, which delegates to a sandboxed Ruby subprocess scoped to the formula's cellar, with:
