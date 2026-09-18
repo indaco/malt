@@ -387,8 +387,60 @@ pub const HttpClient = struct {
         return default_cancel;
     }
 
+    /// Process-wide egress proxies, seeded like `default_cancel`: `main`
+    /// parses the standard env vars once and every `init` copies the
+    /// pointers, so net/ stays agnostic to where they came from.
+    var default_http_proxy: ?*std.http.Client.Proxy = null;
+    var default_https_proxy: ?*std.http.Client.Proxy = null;
+
+    fn setDefaultProxies(http: ?*std.http.Client.Proxy, https: ?*std.http.Client.Proxy) void {
+        default_http_proxy = http;
+        default_https_proxy = https;
+    }
+
+    const proxy_var_names = [_][]const u8{ "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" };
+
+    /// The variable whose value did not parse as a proxy URL, as the user set it.
+    pub const BadProxyVar = struct { name: []const u8, value: []const u8 };
+
+    /// Reads `http_proxy`/`https_proxy`/`all_proxy` (either case) through
+    /// the stdlib parser. `arena` must outlive every client: the `Proxy`
+    /// records and the env map they borrow from live there. Returns the
+    /// offending variable instead of an error so the caller can name it.
+    pub fn seedDefaultProxiesFromEnviron(io: std.Io, arena: std.mem.Allocator, environ: std.process.Environ) std.process.Environ.CreateMapError!?BadProxyVar {
+        const map = try arena.create(std.process.Environ.Map);
+        map.* = try environ.createMap(arena);
+        for (proxy_var_names) |name| {
+            // Copied: the put below frees the map's slot and the arena reuses it.
+            const raw = try arena.dupe(u8, map.get(name) orelse continue);
+            if (raw.len == 0) continue;
+            // curl reads a scheme-less `host:port` as http; raw, the stdlib
+            // parses the host as a URI scheme and the proxy silently vanishes.
+            if (std.mem.indexOf(u8, raw, "://") == null) try map.put(name, try std.mem.concat(arena, u8, &.{ "http://", raw }));
+            // The stdlib parses every variable in one call; a solo pass names
+            // the one that fails, with the value as the user set it.
+            var solo = std.process.Environ.Map.init(arena);
+            try solo.put(name, map.get(name).?);
+            var check: std.http.Client = .{ .allocator = arena, .io = io };
+            check.initDefaultProxies(arena, &solo) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return .{ .name = name, .value = raw },
+            };
+        }
+        var probe: std.http.Client = .{ .allocator = arena, .io = io };
+        probe.initDefaultProxies(arena, map) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable, // every set variable parsed solo above
+        };
+        setDefaultProxies(probe.http_proxy, probe.https_proxy);
+        return null;
+    }
+
     pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator) HttpClient {
         var c: std.http.Client = .{ .allocator = allocator, .io = io };
+        // Not in `initWith`: that seam takes a caller-built loopback client.
+        c.http_proxy = default_http_proxy;
+        c.https_proxy = default_https_proxy;
         return initWith(&c, io, environ, allocator);
     }
 
@@ -2327,6 +2379,127 @@ test "githubApiToken: empty MALT_GITHUB_TOKEN falls through to HOMEBREW_GITHUB_A
 test "githubApiToken: MALT_GITHUB_TOKEN alone is honoured" {
     const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=malt-tok".ptr};
     try std.testing.expectEqualStrings("malt-tok", HttpClient.githubApiToken(environFrom(&entries)).?);
+}
+
+test "seedDefaultProxiesFromEnviron: HTTPS_PROXY reaches every client built by init" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const entries = [_:null]?[*:0]const u8{"HTTPS_PROXY=http://user:pw@proxy.example:3128".ptr};
+    try std.testing.expect(try HttpClient.seedDefaultProxiesFromEnviron(threaded.io(), arena.allocator(), environFrom(&entries)) == null);
+    defer HttpClient.setDefaultProxies(null, null);
+
+    var http = HttpClient.init(threaded.io(), std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    const proxy = http.client.https_proxy.?;
+    try std.testing.expectEqualStrings("proxy.example", proxy.host.bytes);
+    try std.testing.expectEqual(3128, proxy.port);
+    try std.testing.expectEqual(std.http.Client.Protocol.plain, proxy.protocol);
+    try std.testing.expect(proxy.authorization != null);
+    // Only the https var was set: plain-http traffic must still dial direct.
+    try std.testing.expect(http.client.http_proxy == null);
+}
+
+test "seedDefaultProxiesFromEnviron: lower-case http_proxy is honoured" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const entries = [_:null]?[*:0]const u8{"http_proxy=http://proxy.example:8080".ptr};
+    try std.testing.expect(try HttpClient.seedDefaultProxiesFromEnviron(threaded.io(), arena.allocator(), environFrom(&entries)) == null);
+    defer HttpClient.setDefaultProxies(null, null);
+
+    var http = HttpClient.init(threaded.io(), std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    try std.testing.expectEqualStrings("proxy.example", http.client.http_proxy.?.host.bytes);
+    try std.testing.expect(http.client.https_proxy == null);
+}
+
+test "seedDefaultProxiesFromEnviron: a scheme-less host:port is an http proxy, as curl reads it" {
+    // `proxy.corp:3128` is the usual corporate form; parsed raw, the host
+    // reads as a URI scheme and the proxy silently vanishes.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const entries = [_:null]?[*:0]const u8{
+        "HTTPS_PROXY=proxy.corp:3128".ptr,
+        "http_proxy=127.0.0.1:8080".ptr,
+    };
+    try std.testing.expect(try HttpClient.seedDefaultProxiesFromEnviron(threaded.io(), arena.allocator(), environFrom(&entries)) == null);
+    defer HttpClient.setDefaultProxies(null, null);
+
+    var http = HttpClient.init(threaded.io(), std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    try std.testing.expectEqualStrings("proxy.corp", http.client.https_proxy.?.host.bytes);
+    try std.testing.expectEqual(3128, http.client.https_proxy.?.port);
+    try std.testing.expectEqualStrings("127.0.0.1", http.client.http_proxy.?.host.bytes);
+    try std.testing.expectEqual(8080, http.client.http_proxy.?.port);
+}
+
+test "seedDefaultProxiesFromEnviron: absent and empty vars leave both proxies unset" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // A leftover `HTTPS_PROXY=` in a shell rc must read as unset, not as a
+    // proxy at an empty host.
+    const entries = [_:null]?[*:0]const u8{"HTTPS_PROXY=".ptr};
+    try std.testing.expect(try HttpClient.seedDefaultProxiesFromEnviron(threaded.io(), arena.allocator(), environFrom(&entries)) == null);
+    defer HttpClient.setDefaultProxies(null, null);
+
+    var http = HttpClient.init(threaded.io(), std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    try std.testing.expect(http.client.http_proxy == null);
+    try std.testing.expect(http.client.https_proxy == null);
+}
+
+test "seedDefaultProxiesFromEnviron: a proxy URL without a host names the variable" {
+    // Fail loud at boot rather than let every fetch run into the connect
+    // timeout the user set the variable to avoid - and say which value to fix.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const entries = [_:null]?[*:0]const u8{"HTTPS_PROXY=:8080".ptr};
+    const bad = (try HttpClient.seedDefaultProxiesFromEnviron(threaded.io(), arena.allocator(), environFrom(&entries))).?;
+    defer HttpClient.setDefaultProxies(null, null);
+    try std.testing.expectEqualStrings("HTTPS_PROXY", bad.name);
+    try std.testing.expectEqualStrings(":8080", bad.value);
+}
+
+test "seedDefaultProxiesFromEnviron: blames the malformed variable, not the first one set" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const entries = [_:null]?[*:0]const u8{
+        "http_proxy=http://proxy.example:8080".ptr,
+        "ALL_PROXY=:9".ptr,
+    };
+    const bad = (try HttpClient.seedDefaultProxiesFromEnviron(threaded.io(), arena.allocator(), environFrom(&entries))).?;
+    defer HttpClient.setDefaultProxies(null, null);
+    try std.testing.expectEqualStrings("ALL_PROXY", bad.name);
+    try std.testing.expectEqualStrings(":9", bad.value);
+}
+
+test "initWith keeps the caller's client proxy-free" {
+    // The offline-test seam hands in a client aimed at a loopback server;
+    // forcing the process proxy onto it would break every such fixture.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const entries = [_:null]?[*:0]const u8{"ALL_PROXY=http://proxy.example:3128".ptr};
+    try std.testing.expect(try HttpClient.seedDefaultProxiesFromEnviron(threaded.io(), arena.allocator(), environFrom(&entries)) == null);
+    defer HttpClient.setDefaultProxies(null, null);
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = threaded.io() };
+    var http = HttpClient.initWith(&inner, threaded.io(), std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    try std.testing.expect(http.client.http_proxy == null);
+    try std.testing.expect(http.client.https_proxy == null);
 }
 
 test "githubApiToken: HOMEBREW_GITHUB_API_TOKEN alone still works (compat fallback)" {
