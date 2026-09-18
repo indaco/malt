@@ -187,6 +187,91 @@ test "a preflight that escapes its confinement aborts before the app is placed" 
     try testing.expect(!cask.isInstalled(&db, "evil"));
 }
 
+/// Point the CLI at the fixture prefix; the DB, lock and cache live there.
+fn enterPrefix(fx: *Fixture) !void {
+    for ([_][]const u8{ "db", "cache/api", "Applications" }) |sub| try test_io.cwd().createDirPath(std.Options.debug_io, fx.p(sub));
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+}
+
+test "uninstall aborts before removing anything when the stored preflight fails" {
+    var fx = try Fixture.init("cli_uninstall_abort");
+    defer fx.deinit();
+    try enterPrefix(&fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const app_path = fx.p("Applications/Evil.app");
+    try test_io.cwd().createDirPath(io, app_path);
+    {
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c = try cask.parseCaskWithMajor(testing.allocator,
+            \\{"token":"evil","name":["Evil"],"version":"1","url":"https://example.invalid/evil.zip","sha256":"no_check",
+            \\ "artifacts":[{"app":["Evil.app"]},
+            \\  {"uninstall_preflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":".ssh/config"},"content":"Host *"}]}]}]}
+        , null);
+        defer c.deinit();
+        try cask.recordInstall(&db, &c, app_path, null);
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ };
+    try testing.expectError(error.Aborted, malt.uninstall.execute(&ctx, arena.allocator(), &.{"evil"}));
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "uninstall preflight steps failed for evil") != null);
+    try testing.expect(exists(io, app_path));
+    try testing.expect(!exists(io, fx.h(".ssh/config")));
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    try testing.expect(cask.isInstalled(&db, "evil"));
+}
+
+test "install --dry-run lists the phases and names the steps malt refuses" {
+    var fx = try Fixture.init("cli_dry_run");
+    defer fx.deinit();
+    try enterPrefix(&fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+
+    // Cached cask JSON is all the dry run needs; offline keeps it honest.
+    try putFile(threaded.io(), fx.p("cache/api/cask_plan.json"),
+        \\{"token":"plan","name":["Plan"],"version":"2.1","url":"https://example.invalid/plan.zip","sha256":"no_check",
+        \\ "artifacts":[{"preflight_steps":[{"steps":[{"type":"mkdir_p","path":{"base":"home","path":"Library/plan"}}]}]},{"app":["Plan.app"]},
+        \\  {"postflight_steps":[{"steps":[{"type":"run","command":{"path":"/bin/echo"},"sudo":true},{"type":"terminate_process","name":"p","match":"full"}]}]}]}
+    );
+    {
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = fx.environ, .offline = true };
+    try malt.install.execute(&ctx, arena.allocator(), &.{ "--cask", "--dry-run", "plan" });
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would run 1 preflight step(s) for plan") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would run 2 postflight step(s) for plan") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: run with sudo") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: terminate_process with match") != null);
+    try testing.expect(!exists(threaded.io(), fx.h("Library/plan")));
+}
+
 test "a cask without flight steps stores NULL and installs as before" {
     var fx = try Fixture.init("plain");
     defer fx.deinit();
