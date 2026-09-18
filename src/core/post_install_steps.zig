@@ -169,7 +169,7 @@ fn honouredKeys(tag: StepTag) []const []const u8 {
         .remove => &.{ "paths", "recursive", "symlink_target_contains" },
         .inreplace => &.{ "path", "before", "after", "regexp" },
         .init_data_dir => &.{ "path", "using", "locale" },
-        .run => &.{ "command", "args", "sudo" },
+        .run => &.{ "command", "args", "sudo", "env" },
         // `force` is upstream's alias for `overwrite` on this step.
         .move => &.{ "source", "target", "overwrite", "force" },
         .move_contents => &.{ "source", "target" },
@@ -316,8 +316,17 @@ pub fn checkSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
             },
         };
         const tag = admitStep(ctx, obj) orelse continue;
-        // Command resolution only logs; nothing here touches the filesystem.
-        if (tag == .run and !sudoRefused(ctx, obj)) _ = resolveCommandPath(ctx, obj);
+        // Shape checks only log; nothing here touches the filesystem.
+        switch (tag) {
+            .run => if (!sudoRefused(ctx, obj)) {
+                _ = resolveCommandPath(ctx, obj);
+                _ = stepEnv(ctx, obj);
+            },
+            .terminate_process => if (getString(obj, "name")) |raw| {
+                _ = terminateShape(ctx, obj, expandTemplates(ctx, raw) catch raw);
+            },
+            else => {},
+        }
     }
 }
 
@@ -2195,7 +2204,47 @@ fn stepRun(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         return false;
     }
     if (nativeCaBundle(ctx, argv.items, cmd)) |_| return true;
-    return spawnFenced(ctx, argv.items, &.{}, std.fs.path.basename(cmd), .{});
+    const env = stepEnv(ctx, obj) orelse return false;
+    return spawnFenced(ctx, argv.items, env, std.fs.path.basename(cmd), .{});
+}
+
+/// The step's declared `env`, values template-expanded as upstream does.
+/// Layered onto the scrubbed base by `spawnFenced`, so the step can set what
+/// it names and nothing else leaks in.
+fn stepEnv(ctx: StepsCtx, obj: std.json.ObjectMap) ?[]const EnvVar {
+    const env_val = obj.get("env") orelse return &.{};
+    const map = switch (env_val) {
+        .object => |o| o,
+        else => {
+            logUnsupported(ctx, "run with a non-object env");
+            return null;
+        },
+    };
+    var vars: std.ArrayList(EnvVar) = .empty;
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        // `=` in a key smuggles a second variable into the block; NUL
+        // truncates it.
+        if (key.len == 0 or std.mem.indexOfAny(u8, key, "=\x00") != null) {
+            logUnsupported(ctx, "run with an env key that is not a variable name");
+            return null;
+        }
+        const raw = switch (entry.value_ptr.*) {
+            .string => |v| v,
+            else => {
+                logUnsupported(ctx, "run with a non-string env value");
+                return null;
+            },
+        };
+        const value = expandTemplates(ctx, raw) catch return null;
+        if (std.mem.indexOfScalar(u8, value, 0) != null) {
+            logUnsupported(ctx, "run with an env value that carries a NUL");
+            return null;
+        }
+        vars.append(ctx.allocator, .{ .key = key, .value = value }) catch return null;
+    }
+    return vars.items;
 }
 
 /// `ca-certificates`' post-install forks openssl and security once per
@@ -4218,6 +4267,68 @@ test "run hands the child a scrubbed environment, not malt's own" {
     try testing.expect(std.mem.indexOf(u8, dump, try std.fmt.allocPrint(a, "HOME={s}\n", .{h.prefix})) != null);
 }
 
+test "run passes the step's declared env to the child, expanded" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.io = threaded.io();
+    h.environ = test_secret_environ;
+    const a = h.arena.allocator();
+
+    const libexec = try std.fmt.allocPrint(a, "{s}/libexec", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, libexec);
+    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/etc", .{h.prefix}));
+    const seen = try std.fmt.allocPrint(a, "{s}/etc/seen.txt", .{h.prefix});
+    {
+        const f = try std.Io.Dir.createFileAbsolute(h.io, try std.fmt.allocPrint(a, "{s}/post-install", .{libexec}), .{});
+        defer f.close(h.io);
+        var w = f.writer(h.io, &.{});
+        try w.interface.print("#!" ++ "/bin/" ++ "sh\n/usr/bin/" ++ "env > '{s}'\n", .{seen});
+        try w.interface.flush();
+        try f.setPermissions(h.io, @enumFromInt(0o755));
+    }
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"run","command":{"base":"libexec","path":"post-install"},
+        \\  "env":{"CLOUDSDK_PYTHON":"{{HOMEBREW_PREFIX}}/opt/python/bin/python","PATH":"/step/bin"}}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+
+    var buf: [64 * 1024]u8 = undefined;
+    const f = try std.Io.Dir.openFileAbsolute(h.io, seen, .{});
+    defer f.close(h.io);
+    var r = f.reader(h.io, &.{});
+    const dump = buf[0..try r.interface.readSliceShort(&buf)];
+
+    try testing.expect(std.mem.indexOf(u8, dump, try std.fmt.allocPrint(a, "CLOUDSDK_PYTHON={s}/opt/python/bin/python\n", .{h.prefix})) != null);
+    // The step's value wins over the scrubbed base, as upstream lets it;
+    // the scrub itself still holds for everything the step did not name.
+    try testing.expect(std.mem.indexOf(u8, dump, "PATH=/step/bin\n") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "sentinel-must-not-leak") == null);
+}
+
+test "run refuses an env that is not a map of variable names to strings" {
+    for ([_][]const u8{
+        \\[{"type":"run","command":{"path":"/bin/echo"},"env":["A=1"]}]
+        ,
+        \\[{"type":"run","command":{"path":"/bin/echo"},"env":{"A":1}}]
+        ,
+        \\[{"type":"run","command":{"path":"/bin/echo"},"env":{"A=B":"1"}}]
+        ,
+        \\[{"type":"run","command":{"path":"/bin/echo"},"env":{"":"1"}}]
+        ,
+        \\[{"type":"run","command":{"path":"/bin/echo"},"env":{"A":"x\u0000y"}}]
+        ,
+    }) |steps| {
+        var h = try TestHarness.init();
+        defer h.deinit();
+        try testing.expect(execute(h.ctx(), try testFormulaJson(&h, steps)));
+        try testing.expect(h.flog.hasErrors());
+        try testing.expect(!h.flog.hasFatal());
+    }
+}
+
 test "a tool step's own env vars layer onto the scrubbed base" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = test_secret_environ });
     defer threaded.deinit();
@@ -4317,8 +4428,6 @@ test "run refuses the execution fields malt does not honour" {
         \\[{"type":"run","command":{"base":"bin","path":"t"},"sudo":true}]
         ,
         \\[{"type":"run","command":{"base":"bin","path":"t"},"sudo":"yes"}]
-        ,
-        \\[{"type":"run","command":{"base":"bin","path":"t"},"env":{"LC_ALL":"C"}}]
         ,
         \\[{"type":"run","command":{"base":"bin","path":"t"},"chdir":"/tmp"}]
         ,
@@ -5472,13 +5581,21 @@ test "checkSteps names what would be refused without touching the filesystem" {
         \\[{"type":"mkdir_p","path":{"base":"home","path":"Library/never"}},
         \\ {"type":"run","command":{"path":"/bin/echo"},"sudo":true},
         \\ {"type":"terminate_process","name":"x","match":"full","notices":["n"]},
+        \\ {"type":"terminate_process","name":"x","match":"regex"},
+        \\ {"type":"terminate_process","name":"-9"},
+        \\ {"type":"run","command":{"path":"/bin/echo"},"env":{"A":1}},
         \\ {"type":"frobnicate"}]
     ));
     try testing.expect(!dirExists(c.io, try std.fs.path.join(a, &.{ ch.home, "Library/never" })));
+    // A shape the executor cannot honour is reported by the plan, not
+    // discovered at install time.
     const entries = ch.h.flog.entries();
-    try testing.expectEqual(@as(usize, 2), entries.len);
+    try testing.expectEqual(@as(usize, 5), entries.len);
     try testing.expectEqualStrings("run with sudo", entries[0].detail);
-    try testing.expectEqualStrings("frobnicate", entries[1].detail);
+    try testing.expectEqualStrings("terminate_process with a match this executor cannot honour", entries[1].detail);
+    try testing.expectEqualStrings("terminate_process with a name killall would read as an option", entries[2].detail);
+    try testing.expectEqualStrings("run with a non-string env value", entries[3].detail);
+    try testing.expectEqualStrings("frobnicate", entries[4].detail);
 }
 
 test "a symlink declared with uninstall is placed on install and removed in uninstall mode" {
