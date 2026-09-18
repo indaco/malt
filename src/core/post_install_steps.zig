@@ -26,20 +26,40 @@ const system_tools = @import("../system_tools.zig");
 
 pub const FallbackLog = fallback_log.FallbackLog;
 
-/// Formula-scoped inputs for base-token resolution and confinement.
+/// What the steps belong to. Bases, templates and the confinement roots all
+/// switch on it; the formula arm is the pre-cask behaviour, unchanged.
+pub const Subject = union(enum) {
+    formula,
+    cask: CaskSubject,
+};
+
+pub const CaskSubject = struct {
+    /// Where the artefact was unpacked: the `staged_path` base and token.
+    staged_path: []const u8,
+    /// `<prefix>/Caskroom/<token>`.
+    caskroom_path: []const u8,
+    appdir: []const u8,
+    /// `$HOME`; only its `Library` subtree is writable by a step.
+    home: []const u8,
+};
+
+/// Inputs for base-token resolution and confinement.
 pub const StepsCtx = struct {
     io: std.Io,
     /// Arena-backed: owns every resolved path, parsed JSON node, and log
     /// detail until the caller finishes routing the FallbackLog.
     allocator: std.mem.Allocator,
+    /// Formula name or cask token.
     name: []const u8,
     /// Raw upstream version — template tokens read it; the revision-suffixed
     /// cellar label lives in `keg_path` already.
     version: []const u8,
     /// malt prefix (the upstream HOMEBREW_PREFIX analogue).
     prefix: []const u8,
-    /// `<prefix>/Cellar/<name>/<pkg_version>` — the `prefix` base token.
+    /// `<prefix>/Cellar/<name>/<pkg_version>` — the `prefix` base token. For
+    /// a cask it is the Caskroom dir: the run cwd and first confinement root.
     keg_path: []const u8,
+    subject: Subject = .formula,
     flog: *FallbackLog,
     suppress_child_stdout: bool = false,
     /// Only consulted for the data-dir initialisers (`--user=$USER`).
@@ -210,7 +230,12 @@ pub fn execute(ctx: StepsCtx, formula_json: []const u8) bool {
         else => return false,
     };
     if (steps.len == 0) return false;
+    runSteps(ctx, steps);
+    return true;
+}
 
+/// Run an already-parsed steps array; the FallbackLog is the outcome.
+pub fn runSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
     for (steps) |step_val| {
         ctx.flog.total_top_level += 1;
         const obj = switch (step_val) {
@@ -227,7 +252,6 @@ pub fn execute(ctx: StepsCtx, formula_json: []const u8) bool {
         // steps only warn, so they don't abort.
         if (ctx.flog.hasFatal()) break;
     }
-    return true;
 }
 
 fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
@@ -352,7 +376,49 @@ const template_map = std.StaticStringMap(enum {
     .{ "pwsh_completion", .pwsh_completion },
 });
 
+/// The tokens brew's cask runner expands; the keg-shaped ones above would
+/// resolve against a Caskroom dir and mean nothing, so they stay verbatim.
+const cask_template_map = std.StaticStringMap(enum {
+    token,
+    version,
+    version_major,
+    version_major_minor,
+    homebrew_prefix,
+    user,
+    staged_path,
+    caskroom_path,
+    appdir,
+}).initComptime(.{
+    .{ "token", .token },
+    .{ "name", .token },
+    .{ "version", .version },
+    .{ "version.major", .version_major },
+    .{ "version.major_minor", .version_major_minor },
+    .{ "HOMEBREW_PREFIX", .homebrew_prefix },
+    .{ "user", .user },
+    .{ "staged_path", .staged_path },
+    .{ "caskroom_path", .caskroom_path },
+    .{ "appdir", .appdir },
+});
+
 fn templateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
+    return switch (ctx.subject) {
+        .formula => formulaTemplateValue(ctx, token),
+        .cask => |c| switch (cask_template_map.get(token) orelse return null) {
+            .token => ctx.name,
+            .version => ctx.version,
+            .version_major => versionComponents(ctx.version, 1),
+            .version_major_minor => versionComponents(ctx.version, 2),
+            .homebrew_prefix => ctx.prefix,
+            .user => std.process.Environ.getPosix(ctx.environ, "USER"),
+            .staged_path => c.staged_path,
+            .caskroom_path => c.caskroom_path,
+            .appdir => c.appdir,
+        },
+    };
+}
+
+fn formulaTemplateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
     const a = ctx.allocator;
     return switch (template_map.get(token) orelse return null) {
         .name => ctx.name,
@@ -430,11 +496,43 @@ const base_map = std.StaticStringMap(BaseTag).initComptime(.{
     .{ "formula_opt_prefix", .formula_opt_prefix },
 });
 
-/// Map an upstream base token onto the malt prefix. Null means "no safe
-/// mapping" — `home` deliberately so (it escapes the prefix and would fail
-/// confinement anyway), formula-scoped bases without a formula, and any
-/// token this executor does not know.
+const cask_base_map = std.StaticStringMap(enum {
+    home,
+    staged_path,
+    caskroom_path,
+    appdir,
+    homebrew_prefix,
+    formula_pkgetc,
+    formula_opt_prefix,
+}).initComptime(.{
+    .{ "home", .home },
+    .{ "staged_path", .staged_path },
+    .{ "caskroom_path", .caskroom_path },
+    .{ "appdir", .appdir },
+    .{ "homebrew_prefix", .homebrew_prefix },
+    .{ "formula_pkgetc", .formula_pkgetc },
+    .{ "formula_opt_prefix", .formula_opt_prefix },
+});
+
+/// Map an upstream base token onto the subject. Null means "no safe
+/// mapping": a base the other subject owns, a formula-scoped base without
+/// a formula, and any token this executor does not know.
 pub fn resolveBase(ctx: StepsCtx, base: []const u8, formula_ref: ?[]const u8) ?[]const u8 {
+    return switch (ctx.subject) {
+        .formula => resolveFormulaBase(ctx, base, formula_ref),
+        .cask => |c| switch (cask_base_map.get(base) orelse return null) {
+            .home => c.home,
+            .staged_path => c.staged_path,
+            .caskroom_path => c.caskroom_path,
+            .appdir => c.appdir,
+            .homebrew_prefix => ctx.prefix,
+            .formula_pkgetc, .formula_opt_prefix => resolveFormulaBase(ctx, base, formula_ref),
+        },
+    };
+}
+
+/// `home` is null on purpose: it escapes the prefix a formula is confined to.
+fn resolveFormulaBase(ctx: StepsCtx, base: []const u8, formula_ref: ?[]const u8) ?[]const u8 {
     const a = ctx.allocator;
     return switch (base_map.get(base) orelse return null) {
         .homebrew_prefix => ctx.prefix,
@@ -490,6 +588,83 @@ fn resolveSpec(ctx: StepsCtx, spec: std.json.ObjectMap, key: ?[]const u8) ?[]con
     return std.fs.path.join(ctx.allocator, &.{ root, path }) catch null;
 }
 
+// --- confinement -----------------------------------------------------------
+
+/// The (a, b) root pairs the sandbox validators take; a path is in bounds
+/// when any pair admits it. A formula owns its keg and the prefix; a cask
+/// also owns `$HOME/Library` and the appdir — a different set, not a wider
+/// one, which is why the roots hang off the subject.
+const RootPairs = struct {
+    buf: [2][2][]const u8,
+    len: usize,
+
+    fn slice(self: *const RootPairs) []const [2][]const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+fn rootPairs(ctx: StepsCtx) RootPairs {
+    var out: RootPairs = .{ .buf = .{ .{ ctx.keg_path, ctx.prefix }, undefined }, .len = 1 };
+    switch (ctx.subject) {
+        .formula => {},
+        .cask => |c| {
+            // OOM narrows the set rather than widening it.
+            const home_lib = std.fs.path.join(ctx.allocator, &.{ c.home, "Library" }) catch return out;
+            out.buf[1] = .{ home_lib, c.appdir };
+            out.len = 2;
+        },
+    }
+    return out;
+}
+
+fn validatePath(ctx: StepsCtx, path: []const u8) sandbox.SandboxError!void {
+    for (rootPairs(ctx).slice()) |r| {
+        sandbox.validatePath(path, r[0], r[1]) catch continue;
+        return;
+    }
+    return error.PathSandboxViolation;
+}
+
+fn validateWriteDir(ctx: StepsCtx, path: []const u8) sandbox.SandboxError!void {
+    for (rootPairs(ctx).slice()) |r| {
+        sandbox.validateWriteDir(ctx.io, path, r[0], r[1]) catch continue;
+        return;
+    }
+    return error.PathSandboxViolation;
+}
+
+fn validateDirTarget(ctx: StepsCtx, path: []const u8) sandbox.SandboxError!void {
+    for (rootPairs(ctx).slice()) |r| {
+        sandbox.validateDirTarget(ctx.io, path, r[0], r[1]) catch continue;
+        return;
+    }
+    return error.PathSandboxViolation;
+}
+
+fn validateArgv(ctx: StepsCtx, argv: []const []const u8) sandbox.SandboxError!void {
+    for (rootPairs(ctx).slice()) |r| {
+        sandbox.validateArgv(argv, r[0], r[1]) catch continue;
+        return;
+    }
+    return error.PathSandboxViolation;
+}
+
+/// Only a confinement refusal moves on to the next pair; an open error is
+/// the answer for every root.
+fn openTargetNoFollow(ctx: StepsCtx, path: []const u8, intent: sandbox.OpenIntent) (sandbox.SandboxError || std.posix.OpenError)!std.Io.File {
+    for (rootPairs(ctx).slice()) |r| {
+        return sandbox.openTargetNoFollow(ctx.io, path, r[0], r[1], intent) catch |e| switch (e) {
+            error.PathSandboxViolation => continue,
+            else => return e,
+        };
+    }
+    return error.PathSandboxViolation;
+}
+
+fn openSourceNoFollow(ctx: StepsCtx, path: []const u8) (sandbox.SandboxError || std.posix.OpenError)!std.Io.File {
+    return openTargetNoFollow(ctx, path, .{ .write = false });
+}
+
 // --- filesystem tier -------------------------------------------------------
 
 /// Confinement gate shared by every write path. Resolves the parent chain
@@ -498,7 +673,7 @@ fn resolveSpec(ctx: StepsCtx, spec: std.json.ObjectMap, key: ?[]const u8) ?[]con
 /// same resolved-boundary guard the DSL `cp`/`mv` builtins use, applied
 /// before any filesystem mutation.
 fn confined(ctx: StepsCtx, path: []const u8) bool {
-    sandbox.validateWriteDir(ctx.io, path, ctx.keg_path, ctx.prefix) catch {
+    validateWriteDir(ctx, path) catch {
         logViolation(ctx, path);
         return false;
     };
@@ -524,7 +699,7 @@ fn stepTouch(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     mkParent(ctx, path);
     // Create (no truncate) through an O_NOFOLLOW handle, same as the DSL
     // touch builtin: a symlinked leaf must not reach outside the keg.
-    const file = sandbox.openTargetNoFollow(ctx.io, path, ctx.keg_path, ctx.prefix, .{ .create = true }) catch |e| {
+    const file = openTargetNoFollow(ctx, path, .{ .create = true }) catch |e| {
         if (e == error.PathSandboxViolation) logViolation(ctx, path);
         return e != error.PathSandboxViolation;
     };
@@ -543,7 +718,7 @@ fn stepWrite(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     if (!getFlag(obj, "overwrite") and fileExists(ctx.io, path)) return true;
     const content = expandTemplates(ctx, raw_content) catch return false;
     mkParent(ctx, path);
-    const file = sandbox.openTargetNoFollow(ctx.io, path, ctx.keg_path, ctx.prefix, .{
+    const file = openTargetNoFollow(ctx, path, .{
         .write = true,
         .create = true,
         .truncate = true,
@@ -619,13 +794,13 @@ fn stepCopy(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 /// source's own final component.
 fn confinedSource(ctx: StepsCtx, path: []const u8) bool {
     if (isDir(ctx, path)) {
-        sandbox.validateDirTarget(ctx.io, path, ctx.keg_path, ctx.prefix) catch {
+        validateDirTarget(ctx, path) catch {
             logViolation(ctx, path);
             return false;
         };
         return true;
     }
-    const f = sandbox.openTargetNoFollow(ctx.io, path, ctx.keg_path, ctx.prefix, .{ .write = false }) catch {
+    const f = openTargetNoFollow(ctx, path, .{ .write = false }) catch {
         logViolation(ctx, path);
         return false;
     };
@@ -795,7 +970,7 @@ fn stepInreplace(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         return false;
     }
 
-    const file = sandbox.openSourceNoFollow(ctx.io, path, ctx.keg_path, ctx.prefix) catch |e| {
+    const file = openSourceNoFollow(ctx, path) catch |e| {
         if (e == error.PathSandboxViolation) logViolation(ctx, path);
         return false;
     };
@@ -889,11 +1064,11 @@ fn stepLinkChildren(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     std.Io.Dir.cwd().createDirPath(ctx.io, target) catch {};
     // Same per-level guards as the DSL cp_r walk: neither side may resolve
     // out of the keg/prefix through a planted directory symlink.
-    sandbox.validateDirTarget(ctx.io, target, ctx.keg_path, ctx.prefix) catch {
+    validateDirTarget(ctx, target) catch {
         logViolation(ctx, target);
         return false;
     };
-    sandbox.validateDirTarget(ctx.io, source, ctx.keg_path, ctx.prefix) catch {
+    validateDirTarget(ctx, source) catch {
         logViolation(ctx, source);
         return false;
     };
@@ -926,11 +1101,11 @@ fn stepLinkDir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 /// level like the DSL cp_r walk.
 fn linkDirRecursive(ctx: StepsCtx, src: []const u8, dst: []const u8) void {
     std.Io.Dir.cwd().createDirPath(ctx.io, dst) catch {};
-    sandbox.validateDirTarget(ctx.io, dst, ctx.keg_path, ctx.prefix) catch {
+    validateDirTarget(ctx, dst) catch {
         logViolation(ctx, dst);
         return;
     };
-    sandbox.validateDirTarget(ctx.io, src, ctx.keg_path, ctx.prefix) catch {
+    validateDirTarget(ctx, src) catch {
         logViolation(ctx, src);
         return;
     };
@@ -1109,7 +1284,7 @@ fn resolveLink(ctx: StepsCtx, path: []const u8) []const u8 {
 
 fn chmodConfined(ctx: StepsCtx, named: []const u8, mode: Mode) bool {
     const path = resolveLink(ctx, named);
-    const file = sandbox.openTargetNoFollow(ctx.io, path, ctx.keg_path, ctx.prefix, .{ .write = false }) catch |e| {
+    const file = openTargetNoFollow(ctx, path, .{ .write = false }) catch |e| {
         if (e == error.PathSandboxViolation) {
             logViolation(ctx, path);
             return false;
@@ -1152,7 +1327,7 @@ fn chmodTree(ctx: StepsCtx, path: []const u8, mode: Mode) bool {
     defer dir.close(ctx.io);
     // Per-level guard, like the link_dir walk: a directory symlink must not
     // redirect the descent outside the prefix.
-    sandbox.validateDirTarget(ctx.io, path, ctx.keg_path, ctx.prefix) catch {
+    validateDirTarget(ctx, path) catch {
         logViolation(ctx, path);
         return false;
     };
@@ -1256,7 +1431,7 @@ fn logUnexpandable(ctx: StepsCtx, spec: []const u8) ?[]const []const u8 {
 /// re-deriving the prefix test: nothing here normalises a path, so a bare
 /// prefix comparison would accept `<prefix>/../../elsewhere`.
 fn withinBounds(ctx: StepsCtx, path: []const u8) bool {
-    sandbox.validatePath(path, ctx.keg_path, ctx.prefix) catch return false;
+    validatePath(ctx, path) catch return false;
     return true;
 }
 
@@ -1327,14 +1502,14 @@ fn stepInstallGzippedExecutable(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 const max_unpacked_bytes: u64 = 4 << 30;
 
 fn gunzipConfined(ctx: StepsCtx, source: []const u8, dest: []const u8) !void {
-    const in = try sandbox.openSourceNoFollow(ctx.io, source, ctx.keg_path, ctx.prefix);
+    const in = try openSourceNoFollow(ctx, source);
     defer in.close(ctx.io);
     var in_buf: [16 * 1024]u8 = undefined;
     var in_reader = in.reader(ctx.io, &in_buf);
     var window: [std.compress.flate.max_window_len]u8 = undefined;
     var decompress = std.compress.flate.Decompress.init(&in_reader.interface, .gzip, &window);
 
-    const out = try sandbox.openTargetNoFollow(ctx.io, dest, ctx.keg_path, ctx.prefix, .{
+    const out = try openTargetNoFollow(ctx, dest, .{
         .write = true,
         .create = true,
         .truncate = true,
@@ -1617,7 +1792,7 @@ fn stepRun(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     }
     // Lint before probing, so a traversal out of the keg reports as the
     // confinement violation it is rather than as a missing file.
-    sandbox.validateArgv(argv.items, ctx.keg_path, ctx.prefix) catch {
+    validateArgv(ctx, argv.items) catch {
         logViolation(ctx, cmd);
         return false;
     };
@@ -1665,13 +1840,13 @@ fn buildCaBundle(ctx: StepsCtx, argv: []const []const u8) !void {
     // formula can name this script. Running in-process skips the sandbox that
     // confined the spawned one, so the read and the write are confined here
     // instead — declining hands the step back to the fenced spawn.
-    try sandbox.validatePath(argv[2], ctx.keg_path, ctx.prefix);
+    try validatePath(ctx, argv[2]);
 
     // A lexical prefix check would let a link planted inside the keg read
     // whatever it points at, but refusing links outright is wrong too: malt's
     // own linker points `{prefix}/share/<name>` entries into the keg, and the
     // real source is one of them. Resolve first, then confine where it landed.
-    try sandbox.validatePath(argv[1], ctx.keg_path, ctx.prefix);
+    try validatePath(ctx, argv[1]);
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
     // Read the resolved path, not the one handed in: opening the link again
     // would follow whatever it points at now, not what was just confined.
@@ -1695,7 +1870,7 @@ fn buildCaBundle(ctx: StepsCtx, argv: []const []const u8) !void {
     // creating the tree first would plant directories wherever that link
     // points before the resolved check refuses. `validateWriteDir` resolves
     // the nearest ancestor that already exists, so it sees the link.
-    try sandbox.validateWriteDir(ctx.io, argv[2], ctx.keg_path, ctx.prefix);
+    try validateWriteDir(ctx, argv[2]);
     try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
     // 0644 explicitly: the script chmods it, and a restrictive umask would
     // otherwise leave the trust store unreadable to every other user.
@@ -1882,7 +2057,7 @@ fn buildChildEnv(ctx: StepsCtx, extra_env: []const EnvVar) error{OutOfMemory}!st
 /// The child always starts from the scrubbed formula environment; `extra_env`
 /// layers onto it, so no caller can fall back to inheriting malt's own.
 fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, extra_env: []const EnvVar, label: []const u8, opts: sandbox_macos.ProfileOpts) bool {
-    sandbox.validateArgv(argv, ctx.keg_path, ctx.prefix) catch {
+    validateArgv(ctx, argv) catch {
         logViolation(ctx, argv[0]);
         return false;
     };
@@ -2085,6 +2260,126 @@ const TestHarness = struct {
         self.arena.deinit();
     }
 };
+
+/// A cask subject over the same prefix: `box` staged under Caskroom, with
+/// `home` in a separate tree so escaping the prefix is observable.
+const CaskHarness = struct {
+    h: TestHarness,
+    home: []u8,
+
+    fn init() !CaskHarness {
+        var h = try TestHarness.init();
+        errdefer h.deinit();
+        const home = try uniquePrefix(h.io);
+        errdefer testing.allocator.free(home);
+        try std.Io.Dir.cwd().createDirPath(h.io, try std.fs.path.join(h.arena.allocator(), &.{ home, "Library" }));
+        try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/Caskroom/box/1.2.3", .{h.prefix}));
+        try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/Applications", .{h.prefix}));
+        return .{ .h = h, .home = home };
+    }
+
+    fn ctx(self: *CaskHarness) StepsCtx {
+        const a = self.h.arena.allocator();
+        var c = self.h.ctx();
+        c.name = "box";
+        c.keg_path = std.fmt.allocPrint(a, "{s}/Caskroom/box", .{self.h.prefix}) catch @panic("OOM");
+        c.subject = .{ .cask = .{
+            .staged_path = std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3", .{self.h.prefix}) catch @panic("OOM"),
+            .caskroom_path = c.keg_path,
+            .appdir = std.fmt.allocPrint(a, "{s}/Applications", .{self.h.prefix}) catch @panic("OOM"),
+            .home = self.home,
+        } };
+        return c;
+    }
+
+    fn deinit(self: *CaskHarness) void {
+        rmrf(self.home);
+        testing.allocator.free(self.home);
+        self.h.deinit();
+    }
+};
+
+fn parseSteps(h: *TestHarness, json: []const u8) ![]const std.json.Value {
+    const parsed = try std.json.parseFromSlice(std.json.Value, h.arena.allocator(), json, .{});
+    return parsed.value.array.items;
+}
+
+test "cask subject resolves home, appdir, caskroom_path and staged_path bases" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    try testing.expectEqualStrings(ch.home, resolveBase(c, "home", null).?);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Applications", .{ch.h.prefix}), resolveBase(c, "appdir", null).?);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Caskroom/box", .{ch.h.prefix}), resolveBase(c, "caskroom_path", null).?);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3", .{ch.h.prefix}), resolveBase(c, "staged_path", null).?);
+    try testing.expectEqualStrings(ch.h.prefix, resolveBase(c, "homebrew_prefix", null).?);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/etc/pg", .{ch.h.prefix}), resolveBase(c, "formula_pkgetc", "pg").?);
+    // Keg-shaped bases mean nothing for a cask: refuse rather than guess.
+    try testing.expect(resolveBase(c, "prefix", null) == null);
+    try testing.expect(resolveBase(c, "bin", null) == null);
+    try testing.expect(resolveBase(c, "pkgetc", null) == null);
+}
+
+test "home base refuses paths outside $HOME/Library" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"mkdir_p","path":{"base":"home","path":"Library/Application Support/box/roms"}},
+        \\ {"type":"write","path":{"base":"home","path":".ssh/config"},"content":"Host *"}]
+    ));
+    const roms = try std.fs.path.join(ch.h.arena.allocator(), &.{ ch.home, "Library/Application Support/box/roms" });
+    try testing.expect(dirExists(c.io, roms));
+    const ssh = try std.fs.path.join(ch.h.arena.allocator(), &.{ ch.home, ".ssh/config" });
+    try testing.expect(!pathExists(c.io, ssh));
+    try testing.expect(ch.h.flog.hasFatal());
+    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, ch.h.flog.entries()[0].reason);
+}
+
+test "the appdir root admits a write the prefix would not" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    var c = ch.ctx();
+    // Point appdir outside the prefix, as a real /Applications is.
+    const appdir = try std.fs.path.join(ch.h.arena.allocator(), &.{ ch.home, "Apps" });
+    try std.Io.Dir.cwd().createDirPath(c.io, appdir);
+    c.subject.cask.appdir = appdir;
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"touch","path":{"base":"appdir","path":"Box.app"}}]
+    ));
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expect(fileExists(c.io, try std.fs.path.join(ch.h.arena.allocator(), &.{ appdir, "Box.app" })));
+}
+
+test "{{version.major}} and {{version.major_minor}} expand from the cask version" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    try testing.expectEqualStrings("Box 1", try expandTemplates(c, "Box {{version.major}}"));
+    try testing.expectEqualStrings("j1.2/bin", try expandTemplates(c, "j{{version.major_minor}}/bin"));
+    try testing.expectEqualStrings("box-1.2.3", try expandTemplates(c, "{{token}}-{{version}}"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/x", .{ch.h.prefix}), try expandTemplates(c, "{{staged_path}}/x"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Caskroom/box/latest", .{ch.h.prefix}), try expandTemplates(c, "{{caskroom_path}}/latest"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Applications/A.app", .{ch.h.prefix}), try expandTemplates(c, "{{appdir}}/A.app"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/lib", .{ch.h.prefix}), try expandTemplates(c, "{{HOMEBREW_PREFIX}}/lib"));
+    // Keg-only tokens stay verbatim under a cask, so they surface as unresolved.
+    try testing.expectEqualStrings("{{bin}}/x", try expandTemplates(c, "{{bin}}/x"));
+}
+
+test "a formula subject still refuses the home base and the cask tokens" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const c = h.ctx();
+    try testing.expect(resolveBase(c, "home", null) == null);
+    try testing.expect(resolveBase(c, "appdir", null) == null);
+    try testing.expectEqualStrings("{{staged_path}}", try expandTemplates(c, "{{staged_path}}"));
+}
 
 fn testFormulaJson(h: *TestHarness, steps_json: []const u8) ![]const u8 {
     return std.fmt.allocPrint(
