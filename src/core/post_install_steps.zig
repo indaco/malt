@@ -1430,7 +1430,7 @@ fn chmodConfined(ctx: StepsCtx, named: []const u8, mode: Mode) bool {
         // A leaf that vanished between the walk and the open is a race, not a
         // refusal — `chmod -R` reports and keeps going rather than abandoning
         // the remaining paths. Visible, but it does not downgrade the install.
-        ctx.flog.note(chmodDetail(ctx, "post_install: skipped, could not open", path));
+        ctx.flog.note(pathDetail(ctx, "post_install: skipped, could not open", path));
         return true;
     };
     defer file.close(ctx.io);
@@ -1440,7 +1440,7 @@ fn chmodConfined(ctx: StepsCtx, named: []const u8, mode: Mode) bool {
             // A symbolic clause modifies what is already there, so an
             // unreadable mode would silently widen or narrow the result.
             const s = file.stat(ctx.io) catch {
-                logUnsupported(ctx, chmodDetail(ctx, "could not read the current mode of", path));
+                logUnsupported(ctx, pathDetail(ctx, "could not read the current mode of", path));
                 return false;
             };
             break :blk s.permissions.toMode() & 0o7777;
@@ -1449,18 +1449,20 @@ fn chmodConfined(ctx: StepsCtx, named: []const u8, mode: Mode) bool {
     file.setPermissions(ctx.io, .fromMode(applyMode(current, mode))) catch {
         // Reporting success here is how a private keg directory stays
         // world-readable with nothing in the log to say so.
-        logUnsupported(ctx, chmodDetail(ctx, "could not chmod", path));
+        logUnsupported(ctx, pathDetail(ctx, "could not chmod", path));
         return false;
     };
     return true;
 }
 
-fn chmodDetail(ctx: StepsCtx, what: []const u8, path: []const u8) []const u8 {
+fn pathDetail(ctx: StepsCtx, what: []const u8, path: []const u8) []const u8 {
     return std.fmt.allocPrint(ctx.allocator, "{s} {s}\n", .{ what, path }) catch what;
 }
 
-fn chmodTree(ctx: StepsCtx, path: []const u8, mode: Mode) bool {
-    if (!chmodConfined(ctx, path, mode)) return false;
+/// The `-R` walk `chmod` and `chown` share: `leaf.apply(ctx, path)` on the
+/// root and every file and directory below it.
+fn applyTree(ctx: StepsCtx, path: []const u8, leaf: anytype) bool {
+    if (!leaf.apply(ctx, path)) return false;
     var dir = std.Io.Dir.openDirAbsolute(ctx.io, path, .{ .iterate = true }) catch return true;
     defer dir.close(ctx.io);
     // Per-level guard, like the link_dir walk: a directory symlink must not
@@ -1471,15 +1473,22 @@ fn chmodTree(ctx: StepsCtx, path: []const u8, mode: Mode) bool {
     };
     var iter = dir.iterate();
     while (iter.next(ctx.io) catch null) |entry| {
-        // `chmod -R` walks past anything that is not a file or a directory;
+        // `-R` walks past anything that is not a file or a directory;
         // refusing a symlink here would fail the step over a keg's own links.
         if (entry.kind != .directory and entry.kind != .file) continue;
         const child = std.fs.path.join(ctx.allocator, &.{ path, entry.name }) catch continue;
-        const ok = if (entry.kind == .directory) chmodTree(ctx, child, mode) else chmodConfined(ctx, child, mode);
+        const ok = if (entry.kind == .directory) applyTree(ctx, child, leaf) else leaf.apply(ctx, child);
         if (!ok) return false;
     }
     return true;
 }
+
+const ChmodLeaf = struct {
+    mode: Mode,
+    fn apply(self: ChmodLeaf, ctx: StepsCtx, path: []const u8) bool {
+        return chmodConfined(ctx, path, self.mode);
+    }
+};
 
 /// `set_permissions`: chmod every path in the step's array that the formula
 /// actually shipped. Upstream passes `-R` *unless* `non_recursive` is set, so
@@ -1512,7 +1521,8 @@ fn stepSetPermissions(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
             // too: `existing_step_paths` filters before chmod runs.
             if (!pathExists(ctx.io, path)) continue;
             if (!confined(ctx, path)) return false;
-            const ok = if (recursive) chmodTree(ctx, path, mode) else chmodConfined(ctx, path, mode);
+            const leaf: ChmodLeaf = .{ .mode = mode };
+            const ok = if (recursive) applyTree(ctx, path, leaf) else leaf.apply(ctx, path);
             if (!ok) return false;
         }
     }
@@ -1545,36 +1555,26 @@ fn chownConfined(ctx: StepsCtx, named: []const u8, uid: std.posix.uid_t, gid: st
             logViolation(ctx, path);
             return false;
         }
-        ctx.flog.note(chmodDetail(ctx, "post_install: skipped, could not open", path));
+        ctx.flog.note(pathDetail(ctx, "post_install: skipped, could not open", path));
         return true;
     };
     defer file.close(ctx.io);
     // Upstream runs this under sudo; without it a foreign owner is EPERM,
     // and reporting success would hide exactly the change the cask needed.
     file.setOwner(ctx.io, uid, gid) catch {
-        logUnsupported(ctx, chmodDetail(ctx, "could not chown", path));
+        logUnsupported(ctx, pathDetail(ctx, "could not chown", path));
         return false;
     };
     return true;
 }
 
-fn chownTree(ctx: StepsCtx, path: []const u8, uid: std.posix.uid_t, gid: std.posix.gid_t) bool {
-    if (!chownConfined(ctx, path, uid, gid)) return false;
-    var dir = std.Io.Dir.openDirAbsolute(ctx.io, path, .{ .iterate = true }) catch return true;
-    defer dir.close(ctx.io);
-    validateDirTarget(ctx, path) catch {
-        logViolation(ctx, path);
-        return false;
-    };
-    var iter = dir.iterate();
-    while (iter.next(ctx.io) catch null) |entry| {
-        if (entry.kind != .directory and entry.kind != .file) continue;
-        const child = std.fs.path.join(ctx.allocator, &.{ path, entry.name }) catch continue;
-        const ok = if (entry.kind == .directory) chownTree(ctx, child, uid, gid) else chownConfined(ctx, child, uid, gid);
-        if (!ok) return false;
+const ChownLeaf = struct {
+    uid: std.posix.uid_t,
+    gid: std.posix.gid_t,
+    fn apply(self: ChownLeaf, ctx: StepsCtx, path: []const u8) bool {
+        return chownConfined(ctx, path, self.uid, self.gid);
     }
-    return true;
-}
+};
 
 /// `set_ownership`: upstream's `chown -R user:group`, with the same
 /// defaults (the invoking user, `staff`). Same walk and confinement as
@@ -1607,7 +1607,8 @@ fn stepSetOwnership(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         for (matches) |path| {
             if (!pathExists(ctx.io, path)) continue;
             if (!confined(ctx, path)) return false;
-            const ok = if (recursive) chownTree(ctx, path, uid, gid) else chownConfined(ctx, path, uid, gid);
+            const leaf: ChownLeaf = .{ .uid = uid, .gid = gid };
+            const ok = if (recursive) applyTree(ctx, path, leaf) else leaf.apply(ctx, path);
             if (!ok) return false;
         }
     }
