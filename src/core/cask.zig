@@ -812,8 +812,10 @@ pub const CaskInstaller = struct {
     /// after staging. False when a step was fatal; the sink's log says why.
     pub fn runFlight(self: *CaskInstaller, token: []const u8, version: []const u8, steps: []const std.json.Value, staged_path: ?[]const u8) bool {
         const ctx = self.flightCtx(token, version, staged_path) orelse return false;
+        // Judged on this phase's own entries: the log may carry an earlier one.
+        const start = ctx.flog.entries().len;
         steps_mod.runSteps(ctx, steps);
-        return !ctx.flog.hasFatal();
+        return !ctx.flog.hasFatalSince(start);
     }
 
     /// Re-run an install phase's steps in uninstall mode, before the
@@ -830,9 +832,17 @@ pub const CaskInstaller = struct {
         // No sink is a caller bug, and a silent pass would be the declared
         // gate skipped; fail the phase instead.
         const sink = self.flight orelse return null;
+        return self.flightCtxWith(sink, token, version, staged_path) catch {
+            // An empty log would read as a clean phase; say why nothing ran.
+            sink.log.log(.{ .formula = token, .reason = .system_command_failed, .detail = "could not build the step context", .loc = null });
+            return null;
+        };
+    }
+
+    fn flightCtxWith(self: *CaskInstaller, sink: FlightSink, token: []const u8, version: []const u8, staged_path: ?[]const u8) error{OutOfMemory}!steps_mod.StepsCtx {
         const a = sink.allocator;
         var app_dir_buf: [512]u8 = undefined;
-        const caskroom_path = std.fmt.allocPrint(a, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch return null;
+        const caskroom_path = try std.fmt.allocPrint(a, "{s}/Caskroom/{s}", .{ self.prefix, token });
         return .{
             .io = self.io,
             .allocator = a,
@@ -842,10 +852,10 @@ pub const CaskInstaller = struct {
             .keg_path = caskroom_path,
             .subject = .{
                 .cask = .{
-                    .staged_path = staged_path orelse (std.fmt.allocPrint(a, "{s}/{s}", .{ caskroom_path, version }) catch return null),
+                    .staged_path = staged_path orelse try std.fmt.allocPrint(a, "{s}/{s}", .{ caskroom_path, version }),
                     .caskroom_path = caskroom_path,
                     // Duped: the buffer dies with this frame, the log does not.
-                    .appdir = a.dupe(u8, applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf)) catch return null,
+                    .appdir = try a.dupe(u8, applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf)),
                     .home = std.process.Environ.getPosix(self.environ, "HOME") orelse "",
                 },
             },

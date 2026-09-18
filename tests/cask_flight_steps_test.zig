@@ -531,6 +531,23 @@ test "a rollback keeps the stored flight steps across its row swap" {
     try testing.expectEqual(@as(usize, 1), stored.get(.uninstall_postflight).?.len);
 }
 
+test "a phase whose context cannot be built is reported as a failure, not an empty success" {
+    var fx = try Fixture.init("ctx_oom");
+    defer fx.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var flog = cask.FlightLog.init(testing.allocator);
+    defer flog.deinit();
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var installer = cask.CaskInstaller.init(std.Options.debug_io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.flight = .{ .log = &flog, .allocator = failing.allocator() };
+    var c = try cask.parseCaskWithMajor(testing.allocator, box_json, null);
+    defer c.deinit();
+
+    try testing.expect(!installer.runFlight("box", "6.0", c.flight_steps.get(.preflight).?, null));
+    try testing.expect(flog.hasFatal());
+}
+
 test "a cask without flight steps stores NULL and installs as before" {
     var fx = try Fixture.init("plain");
     defer fx.deinit();

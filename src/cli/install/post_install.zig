@@ -272,10 +272,9 @@ pub const Flight = struct {
     /// Run one phase on a fresh log and report it. Null steps are a no-op.
     pub fn runPhase(self: *Flight, installer: *cask_mod.CaskInstaller, token: []const u8, version: []const u8, steps: ?[]const std.json.Value, phase: []const u8, out: OutputSink) bool {
         const s = steps orelse return true;
-        self.log.deinit();
-        self.log = dsl.FallbackLog.init(self.allocator);
-        _ = installer.runFlight(token, version, s, null);
-        return self.route(token, phase, out);
+        self.reset();
+        const ok = installer.runFlight(token, version, s, null);
+        return self.route(token, phase, out) and ok;
     }
 };
 
