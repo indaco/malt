@@ -403,6 +403,54 @@ test "a flight phase outcome reaches --ndjson consumers as a post_install event"
     try testing.expect(std.mem.indexOf(u8, out.items, "\"detail\":\"/etc/x\"") != null);
 }
 
+test "a rollback keeps the stored flight steps across its row swap" {
+    // The synthetic cask a rollback installs declares nothing, and the
+    // target version's own steps are not on record, so the row must carry
+    // over what the current install stored or the later uninstall runs none.
+    var fx = try Fixture.init("rollback");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try putFile(io, fx.p("src/Box.app/Contents/MacOS/box"), "bin");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    try test_io.cwd().createDirPath(io, fx.p("Applications"));
+    const zip = fx.p("cache/Cask/box-6.0.zip");
+    try runTar(&.{ "/usr/bin/ditto", "-c", "-k", "--keepParent", fx.p("src/Box.app"), zip });
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCaskWithMajor(testing.allocator, box_json, null);
+    defer c.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var flog = cask.FlightLog.init(testing.allocator);
+    defer flog.deinit();
+    var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.flight = .{ .log = &flog, .allocator = arena.allocator() };
+
+    // 6.0 installs and records its history row; the casks row then moves
+    // on to a newer version, as an upgrade does.
+    installer.prefetched_artifact = zip;
+    const app_path = try installer.install(&c);
+    defer testing.allocator.free(app_path);
+    try cask.recordInstall(&db, &c, app_path, null);
+    try db.exec("UPDATE casks SET version = '7.0' WHERE token = 'box';");
+
+    try installer.reinstallFromHistory("box", "6.0");
+
+    const info = cask.lookupInstalled(&db, "box") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("6.0", info.version());
+    var stored = (try cask.readFlightSteps(&db, testing.allocator, "box")) orelse return error.TestUnexpectedResult;
+    defer stored.deinit();
+    try testing.expectEqual(@as(usize, 1), stored.get(.uninstall_postflight).?.len);
+}
+
 test "a cask without flight steps stores NULL and installs as before" {
     var fx = try Fixture.init("plain");
     defer fx.deinit();
