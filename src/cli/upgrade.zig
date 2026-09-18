@@ -1565,6 +1565,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     artefact_cache.adoptLegacy(ctx.io, prefix, api.cache_dir);
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, api.cache_dir);
     installer.offline = ctx.offline;
+    installer.retain_history = true;
     var flight = post_install_mod.Flight.init(allocator);
     defer flight.deinit();
     installer.flight = flight.sink();
@@ -1625,7 +1626,15 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
             "Failed to install new version of {s}: {s}",
             .{ token, @errorName(in_err) },
         );
+        // The rollback restores the rows; the bundle it points at is gone,
+        // so put the old version back from its retained history.
         db.rollback();
+        installer.prefetched_artifact = null;
+        if (installer.reinstallFromHistory(token, old_version)) |_| {
+            output.warn("{s} {s} is back in place", .{ token, old_version });
+        } else |re_err| {
+            output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, old_version, @errorName(re_err), token, old_version });
+        }
         return error.Aborted;
     };
 

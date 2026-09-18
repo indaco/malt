@@ -235,6 +235,75 @@ test "uninstall aborts before removing anything when the stored preflight fails"
     try testing.expect(cask.isInstalled(&db, "evil"));
 }
 
+/// A digest-pinned zip of `Box.app` at `<cache>/Cask/box-<ver>.zip`; the
+/// installer reuses it without a network round trip.
+fn seedBoxZip(io: std.Io, fx: *Fixture, version: []const u8) ![]const u8 {
+    const a = fx.arena.allocator();
+    const src = try std.fmt.allocPrint(a, "src-{s}/Box.app", .{version});
+    try putFile(io, fx.p(try std.fmt.allocPrint(a, "{s}/Contents/MacOS/box", .{src})), version);
+    const zip = fx.p(try std.fmt.allocPrint(a, "cache/Cask/box-{s}.zip", .{version}));
+    try runTar(&.{ "/usr/bin/ditto", "-c", "-k", "--keepParent", fx.p(src), zip });
+    const digest = try cask.hashFileSha256(io, zip);
+    return try a.dupe(u8, &digest);
+}
+
+test "an upgrade whose incoming preflight fails puts the old version back" {
+    // The old bundle is gone by the time the new preflight runs, and SQLite
+    // cannot roll a directory back, so the upgrade reinstalls it from history.
+    var fx = try Fixture.init("cli_upgrade_restore");
+    defer fx.deinit();
+    try enterPrefix(&fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const a = fx.arena.allocator();
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+
+    const sha1 = try seedBoxZip(io, &fx, "1.0");
+    const sha2 = try seedBoxZip(io, &fx, "2.0");
+    const app_path = fx.p("Applications/Box.app");
+    try putFile(io, fx.p("Applications/Box.app/Contents/MacOS/box"), "1.0");
+    {
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c1 = try cask.parseCaskWithMajor(testing.allocator, try std.fmt.allocPrint(a,
+            \\{{"token":"box","name":["Box"],"version":"1.0","url":"https://example.invalid/box-1.0.zip","sha256":"{s}","artifacts":[{{"app":["Box.app"]}}]}}
+        , .{sha1}), null);
+        defer c1.deinit();
+        try cask.recordInstall(&db, &c1, app_path, null);
+        try cask.recordCaskVersion(&db, "box", "1.0", c1.url, c1.sha256, "zip", fx.p("cache/Cask/box-1.0.zip"));
+    }
+    // The API answer for the new version: its preflight escapes confinement.
+    try putFile(io, fx.p("cache/api/cask_box.json"), try std.fmt.allocPrint(a,
+        \\{{"token":"box","name":["Box"],"version":"2.0","url":"https://example.invalid/box-2.0.zip","sha256":"{s}",
+        \\ "artifacts":[{{"preflight_steps":[{{"steps":[{{"type":"write","path":{{"base":"home","path":".ssh/config"}},"content":"x"}}]}}]}},{{"app":["Box.app"]}}]}}
+    , .{sha2}));
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ, .offline = true };
+    try testing.expectError(error.Aborted, malt.upgrade.execute(&ctx, arena.allocator(), &.{ "--cask", "box" }));
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "preflight steps failed for box") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "box 1.0 is back in place") != null);
+    const body = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Applications/Box.app/Contents/MacOS/box"), 16);
+    defer testing.allocator.free(body);
+    try testing.expectEqualStrings("1.0", body);
+    try testing.expect(!exists(io, fx.h(".ssh/config")));
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    const info = cask.lookupInstalled(&db, "box") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("1.0", info.version());
+}
+
 test "install --dry-run lists the phases and names the steps malt refuses" {
     var fx = try Fixture.init("cli_dry_run");
     defer fx.deinit();

@@ -784,6 +784,10 @@ pub const CaskInstaller = struct {
     /// which is what lets an upgrade survive a failed download even for a
     /// cask that pins no digest and so can never be validated from cache.
     prefetched_artifact: ?[]const u8 = null,
+    /// An upgrade's uninstall is not the end of the cask: its history rows
+    /// and cached artefacts stay, so a failed install can put the old
+    /// version back and `mt rollback` can still reach it afterwards.
+    retain_history: bool = false,
     /// Where declared flight steps report. Null skips them, so callers that
     /// only stage or roll back are unaffected.
     flight: ?FlightSink = null,
@@ -1002,27 +1006,29 @@ pub const CaskInstaller = struct {
         const caskroom_path = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch "";
         if (caskroom_path.len > 0) std.Io.Dir.cwd().deleteTree(self.io, caskroom_path) catch {};
 
-        // Clean up cached artefacts. Two name shapes coexist: the legacy
-        // `<token>.<ext>` and the per-version `<token>-<version>.<ext>`
-        // shape that retains rollback targets. Wipe both for `uninstall`,
-        // since after uninstall there is no version left to roll back to.
-        var cache_buf: [512]u8 = undefined;
-        for (cache_extensions) |ext| {
-            const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/Cask/{s}{s}", .{ self.cache_dir, token, ext }) catch continue;
-            if (self.prefetched_artifact) |k| if (std.mem.eql(u8, k, cache_file)) continue;
-            std.Io.Dir.cwd().deleteFile(self.io, cache_file) catch {};
-        }
-        // Must precede the history wipe below — the sweep reads the version
-        // list from `cask_versions`, which the DELETE would otherwise empty.
-        sweepOwnedVersionCache(self.io, self.db, self.cache_dir, token, self.prefetched_artifact);
+        if (!self.retain_history) {
+            // Clean up cached artefacts. Two name shapes coexist: the legacy
+            // `<token>.<ext>` and the per-version `<token>-<version>.<ext>`
+            // shape that retains rollback targets. Wipe both for `uninstall`,
+            // since after uninstall there is no version left to roll back to.
+            var cache_buf: [512]u8 = undefined;
+            for (cache_extensions) |ext| {
+                const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/Cask/{s}{s}", .{ self.cache_dir, token, ext }) catch continue;
+                if (self.prefetched_artifact) |k| if (std.mem.eql(u8, k, cache_file)) continue;
+                std.Io.Dir.cwd().deleteFile(self.io, cache_file) catch {};
+            }
+            // Must precede the history wipe below — the sweep reads the version
+            // list from `cask_versions`, which the DELETE would otherwise empty.
+            sweepOwnedVersionCache(self.io, self.db, self.cache_dir, token, self.prefetched_artifact);
 
-        // Drop every history row so a future install starts clean.
-        if (self.db.prepare("DELETE FROM cask_versions WHERE token = ?1;")) |prepared| {
-            var hist_stmt = prepared;
-            defer hist_stmt.finalize();
-            hist_stmt.bindText(1, token) catch {};
-            _ = hist_stmt.step() catch false;
-        } else |_| {}
+            // Drop every history row so a future install starts clean.
+            if (self.db.prepare("DELETE FROM cask_versions WHERE token = ?1;")) |prepared| {
+                var hist_stmt = prepared;
+                defer hist_stmt.finalize();
+                hist_stmt.bindText(1, token) catch {};
+                _ = hist_stmt.step() catch false;
+            } else |_| {}
+        }
 
         // DB row cleanup. User-visible work is done; surfacing the
         // failure lets the CLI caller log `db.errMsg()` instead of
