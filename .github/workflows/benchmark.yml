@@ -110,10 +110,7 @@ jobs:
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
           ## Benchmark Results — macOS 14 (Apple Silicon)
 
-          - Benchmarked releases:
-            - malt `${STEPS_TREE_OUTPUTS_MT_VER}`
-            - nanobrew `${STEPS_TREE_OUTPUTS_NB_VER}`
-            - zerobrew `${STEPS_TREE_OUTPUTS_ZB_VER}`
+          - Benchmarked releases: malt `${STEPS_TREE_OUTPUTS_MT_VER}`, nanobrew `${STEPS_TREE_OUTPUTS_NB_VER}`, zerobrew `${STEPS_TREE_OUTPUTS_ZB_VER}`
 
           ### Binary Size
           | Tool | Size |
