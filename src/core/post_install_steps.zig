@@ -99,6 +99,7 @@ const StepTag = enum {
     install_gzipped_executable,
     change_dylib_id,
     terminate_process,
+    delete_keychain_certificate,
     configure_clang_system,
     configure_gcc_runtime,
 };
@@ -134,6 +135,7 @@ const step_map = std.StaticStringMap(StepTag).initComptime(.{
     .{ "install_gzipped_executable", .install_gzipped_executable },
     .{ "change_dylib_id", .change_dylib_id },
     .{ "terminate_process", .terminate_process },
+    .{ "delete_keychain_certificate", .delete_keychain_certificate },
     .{ "configure_clang_system", .configure_clang_system },
     .{ "configure_gcc_runtime", .configure_gcc_runtime },
 });
@@ -177,6 +179,9 @@ fn honouredKeys(tag: StepTag) []const []const u8 {
         // Deliberately narrow: `sudo`/`must_succeed` would change what the
         // step is allowed to do, so they must refuse rather than be dropped.
         .terminate_process => &.{"name"},
+        // `matching_certificate` narrows by fingerprint, which needs openssl
+        // and a sudo keychain read; nothing live sets it, so it refuses.
+        .delete_keychain_certificate => &.{"name"},
         .configure_clang_system, .configure_gcc_runtime => &.{},
     };
 }
@@ -318,6 +323,7 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         .install_gzipped_executable => stepInstallGzippedExecutable(ctx, obj),
         .change_dylib_id => stepChangeDylibId(ctx, obj),
         .terminate_process => stepTerminateProcess(ctx, obj),
+        .delete_keychain_certificate => stepDeleteKeychainCertificate(ctx, obj),
         .configure_clang_system => stepConfigureClangSystem(ctx),
         .configure_gcc_runtime => stepConfigureGccRuntime(ctx),
     };
@@ -1762,6 +1768,33 @@ fn stepTerminateProcess(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     };
     // A non-zero exit means nothing matched, which is the normal case on a
     // first install; only failing to spawn is a real failure.
+    _ = child.wait(ctx.io) catch {};
+    return true;
+}
+
+/// `delete_keychain_certificate`: drop a certificate the artefact installed,
+/// by common name, from the user's keychains. Upstream also reaches the
+/// System keychain under sudo; malt never escalates, so a certificate there
+/// stays, silently, the same way an absent one does.
+fn stepDeleteKeychainCertificate(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const raw = getString(obj, "name") orelse {
+        logUnsupported(ctx, "delete_keychain_certificate without a name");
+        return false;
+    };
+    const name = expandTemplates(ctx, raw) catch return false;
+    if (name.len == 0 or name[0] == '-') {
+        logUnsupported(ctx, "delete_keychain_certificate with a name security would read as an option");
+        return false;
+    }
+    var child = std.process.spawn(ctx.io, .{
+        .argv = &.{ system_tools.security, "delete-certificate", "-c", name },
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch {
+        logCmdFail(ctx, "security failed to spawn");
+        return false;
+    };
+    // Non-zero means no such certificate, the normal case on a fresh machine.
     _ = child.wait(ctx.io) catch {};
     return true;
 }
@@ -3790,13 +3823,14 @@ test "link_children honours the link-name prefix and treats a missing source as 
 
 test "supportedStepType matches the executable tier and rejects the rest" {
     const native = [_][]const u8{
-        "mkdir_p",                  "touch",                 "write",                     "symlink",
-        "link_dir",                 "link_children",         "compile_gsettings_schemas", "gio_querymodules",
-        "gdk_pixbuf_query_loaders", "gtk_update_icon_cache", "update_mime_database",      "update_desktop_database",
-        "init_data_dir",            "remove",                "inreplace",                 "run",
-        "move",                     "warn",                  "set_permissions",           "install_gzipped_executable",
-        "change_dylib_id",          "terminate_process",     "configure_clang_system",    "configure_gcc_runtime",
-        "set_ownership",            "mkdir",                 "move_children",             "move_contents",
+        "mkdir_p",                     "touch",                 "write",                     "symlink",
+        "link_dir",                    "link_children",         "compile_gsettings_schemas", "gio_querymodules",
+        "gdk_pixbuf_query_loaders",    "gtk_update_icon_cache", "update_mime_database",      "update_desktop_database",
+        "init_data_dir",               "remove",                "inreplace",                 "run",
+        "move",                        "warn",                  "set_permissions",           "install_gzipped_executable",
+        "change_dylib_id",             "terminate_process",     "configure_clang_system",    "configure_gcc_runtime",
+        "set_ownership",               "mkdir",                 "move_children",             "move_contents",
+        "delete_keychain_certificate",
     };
     for (native) |t| try testing.expect(supportedStepType(t));
     // Deliberate loud skips: php and the legacy python/pypy bootstrappers are
@@ -5094,6 +5128,33 @@ test "move_contents refuses a source or target outside the confinement roots" {
     try testing.expect(ch.h.flog.hasFatal());
     try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/f", .{outside})));
     try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/in", .{ch.h.prefix})));
+}
+
+test "delete_keychain_certificate treats an absent certificate as success" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    ch.h.io = threaded.io();
+
+    runSteps(ch.ctx(), try parseSteps(&ch.h,
+        \\[{"type":"delete_keychain_certificate","name":"malt-no-such-certificate"}]
+    ));
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 1), ch.h.flog.handled_top_level);
+}
+
+test "delete_keychain_certificate refuses a fingerprint match and an option-shaped name" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+
+    runSteps(ch.ctx(), try parseSteps(&ch.h,
+        \\[{"type":"delete_keychain_certificate","name":"x","matching_certificate":{"base":"staged_path","path":"c.pem"}},
+        \\ {"type":"delete_keychain_certificate","name":"-Z"}]
+    ));
+    try testing.expect(!ch.h.flog.hasFatal());
+    try testing.expectEqual(@as(usize, 2), ch.h.flog.entries().len);
+    try testing.expectEqual(@as(usize, 0), ch.h.flog.handled_top_level);
 }
 
 fn fileMode(io: std.Io, path: []const u8) !std.posix.mode_t {
