@@ -200,7 +200,7 @@ pub fn recordInstall(
     cask: *const Cask,
     app_path: ?[]const u8,
     tap: ?[]const u8,
-) sqlite.SqliteError!void {
+) (sqlite.SqliteError || error{OutOfMemory})!void {
     // No COALESCE on the steps: an upgrade whose new version dropped them
     // must not keep replaying the old ones. Rollback carries them over
     // explicitly instead.
@@ -219,22 +219,23 @@ pub fn recordInstall(
     try stmt.bindInt(7, if (cask.auto_updates) 1 else 0);
     if (tap) |t| try stmt.bindText(8, t) else try stmt.bindNull(8);
     // The parse arena owns the JSON so nothing outlives `cask.deinit`.
-    if (flightStepsJson(cask.parsed.arena.allocator(), cask.flight_steps)) |j| try stmt.bindText(9, j) else try stmt.bindNull(9);
+    // A row that lost its uninstall gates to an allocation miss must not exist.
+    if (try flightStepsJson(cask.parsed.arena.allocator(), cask.flight_steps)) |j| try stmt.bindText(9, j) else try stmt.bindNull(9);
     _ = try stmt.step();
 }
 
 /// The declared phases as one JSON object keyed by artifact name, or null
 /// when the cask declares none.
-fn flightStepsJson(allocator: std.mem.Allocator, steps: FlightSteps) ?[]const u8 {
+fn flightStepsJson(allocator: std.mem.Allocator, steps: FlightSteps) error{OutOfMemory}!?[]const u8 {
     var any = false;
     for (std.enums.values(FlightPhase)) |phase| any = any or steps.get(phase) != null;
     if (!any) return null;
-    return std.json.Stringify.valueAlloc(allocator, .{
+    return try std.json.Stringify.valueAlloc(allocator, .{
         .preflight_steps = steps.get(.preflight),
         .postflight_steps = steps.get(.postflight),
         .uninstall_preflight_steps = steps.get(.uninstall_preflight),
         .uninstall_postflight_steps = steps.get(.uninstall_postflight),
-    }, .{ .emit_null_optional_fields = false }) catch null;
+    }, .{ .emit_null_optional_fields = false });
 }
 
 /// The flight steps a cask's row stored at install time.
@@ -1102,10 +1103,10 @@ pub const CaskInstaller = struct {
         };
         // The target version's own steps are not on record; the ones the
         // current install stored are the best guide for its later uninstall.
-        // Unreadable is treated as none here: a rollback must not fail on it.
+        // Read now, attached only after the install below: they are recorded,
+        // never run, so a rollback needs no flight sink. Unreadable is none.
         var stored = readFlightSteps(self.db, self.allocator, token) catch null;
         defer if (stored) |*s| s.deinit();
-        if (stored) |*s| for (std.enums.values(FlightPhase)) |phase| synthetic.flight_steps.set(phase, s.get(phase));
 
         // Re-source font stanzas for this version from the sidecar: the
         // synthetic cask carries no artifacts, so without this a font cask
@@ -1120,6 +1121,7 @@ pub const CaskInstaller = struct {
 
         const app_path = try self.install(&synthetic);
         defer self.allocator.free(app_path);
+        if (stored) |*s| for (std.enums.values(FlightPhase)) |phase| synthetic.flight_steps.set(phase, s.get(phase));
 
         // Flip the `casks` row to the rolled-back version. `pinned`
         // survives via recordInstall's COALESCE; `auto_updates` and
@@ -2786,6 +2788,16 @@ test "unknown macOS major skips variation lookup" {
     const key = cask_variation.variationKey(&buf, 26).?;
     try std.testing.expect(std.mem.endsWith(u8, key, "tahoe"));
     try std.testing.expectEqual(builtin.cpu.arch == .aarch64, std.mem.startsWith(u8, key, "arm64_"));
+}
+
+test "flightStepsJson reports allocation failure instead of storing no steps" {
+    var c = try parseCaskWithMajor(std.testing.allocator,
+        \\{"token":"box","version":"1","url":"https://x/b.zip","artifacts":[{"uninstall_preflight_steps":[{"steps":[{"type":"warn","message":"m"}]}]}]}
+    , null);
+    defer c.deinit();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, flightStepsJson(failing.allocator(), c.flight_steps));
+    try std.testing.expect((try flightStepsJson(c.parsed.arena.allocator(), c.flight_steps)) != null);
 }
 
 test "parse keeps the four flight step arrays and ignores the rest" {

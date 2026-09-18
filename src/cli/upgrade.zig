@@ -1616,6 +1616,8 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     };
     if (stored) |*s| _ = flight.runPhase(&installer, token, old_version, s.get(.uninstall_postflight), "uninstall postflight", install_sink_mod.terminal);
 
+    // The incoming preflight reports on its own log, not the outgoing phase's.
+    flight.reset();
     const placed = installer.install(&parsed_cask);
     if (parsed_cask.flight_steps.get(.preflight) != null) _ = flight.route(token, "preflight", install_sink_mod.terminal);
     const app_path = placed catch |in_err| {

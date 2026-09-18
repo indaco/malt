@@ -442,6 +442,9 @@ test "a rollback keeps the stored flight steps across its row swap" {
     try cask.recordInstall(&db, &c, app_path, null);
     try db.exec("UPDATE casks SET version = '7.0' WHERE token = 'box';");
 
+    // rollback's own installer has no sink: the stored steps are recorded,
+    // never run, or a cask with a preflight could not be rolled back.
+    installer.flight = null;
     try installer.reinstallFromHistory("box", "6.0");
 
     const info = cask.lookupInstalled(&db, "box") orelse return error.TestUnexpectedResult;

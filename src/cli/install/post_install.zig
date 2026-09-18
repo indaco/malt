@@ -246,6 +246,12 @@ pub const Flight = struct {
         return .{ .log = &self.log, .allocator = self.arena.allocator() };
     }
 
+    /// Fresh log, so the next phase reports only its own entries.
+    pub fn reset(self: *Flight) void {
+        self.log.deinit();
+        self.log = dsl.FallbackLog.init(self.allocator);
+    }
+
     /// Report the phase the installer just ran through its sink.
     pub fn route(self: *Flight, token: []const u8, phase: []const u8, out: OutputSink) bool {
         return routeFlightOutcome(self.allocator, &self.log, token, phase, out);
