@@ -92,6 +92,7 @@ const StepTag = enum {
     init_data_dir,
     run,
     move,
+    move_contents,
     warn,
     set_permissions,
     set_ownership,
@@ -124,6 +125,9 @@ const step_map = std.StaticStringMap(StepTag).initComptime(.{
     .{ "init_data_dir", .init_data_dir },
     .{ "run", .run },
     .{ "move", .move },
+    .{ "move_contents", .move_contents },
+    // Deprecated upstream spelling of the same step.
+    .{ "move_children", .move_contents },
     .{ "warn", .warn },
     .{ "set_permissions", .set_permissions },
     .{ "set_ownership", .set_ownership },
@@ -164,6 +168,7 @@ fn honouredKeys(tag: StepTag) []const []const u8 {
         .run => &.{ "command", "args", "sudo" },
         // `force` is upstream's alias for `overwrite` on this step.
         .move => &.{ "source", "target", "overwrite", "force" },
+        .move_contents => &.{ "source", "target" },
         .warn => &.{"message"},
         .set_permissions => &.{ "paths", "permissions", "non_recursive" },
         .set_ownership => &.{ "paths", "user", "group", "non_recursive" },
@@ -306,6 +311,7 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         .init_data_dir => stepInitDataDir(ctx, obj),
         .run => stepRun(ctx, obj),
         .move => stepMove(ctx, obj),
+        .move_contents => stepMoveContents(ctx, obj),
         .warn => stepWarn(ctx, obj),
         .set_permissions => stepSetPermissions(ctx, obj),
         .set_ownership => stepSetOwnership(ctx, obj),
@@ -1197,6 +1203,43 @@ fn stepMove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not relocate {s}", .{source}) catch source);
         return false;
     };
+    return true;
+}
+
+/// `move_contents`: every entry of `source` into `target`, which is created
+/// first. The live shape folds a staged root into a subdirectory of itself,
+/// so the target is skipped when it is one of the entries.
+fn stepMoveContents(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    // Lexically normalised so `staged/.` compares equal to its own child.
+    const source = std.fs.path.resolvePosix(ctx.allocator, &.{resolvePathSpec(ctx, obj, "source") orelse return false}) catch return false;
+    const target = std.fs.path.resolvePosix(ctx.allocator, &.{resolvePathSpec(ctx, obj, "target") orelse return false}) catch return false;
+    // Source first: nothing is created until both ends are in bounds.
+    validateDirTarget(ctx, source) catch {
+        logViolation(ctx, source);
+        return false;
+    };
+    if (!confined(ctx, target)) return false;
+    std.Io.Dir.cwd().createDirPath(ctx.io, target) catch {};
+    validateDirTarget(ctx, target) catch {
+        logViolation(ctx, target);
+        return false;
+    };
+
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, source, .{ .iterate = true }) catch {
+        logUnsupported(ctx, "move_contents whose source the artefact did not ship");
+        return false;
+    };
+    defer dir.close(ctx.io);
+    var iter = dir.iterate();
+    while (iter.next(ctx.io) catch null) |entry| {
+        const child = std.fs.path.join(ctx.allocator, &.{ source, entry.name }) catch continue;
+        if (std.mem.eql(u8, child, target)) continue;
+        const dest = std.fs.path.join(ctx.allocator, &.{ target, entry.name }) catch continue;
+        std.Io.Dir.renameAbsolute(child, dest, ctx.io) catch {
+            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not relocate {s}", .{child}) catch child);
+            return false;
+        };
+    }
     return true;
 }
 
@@ -3753,15 +3796,14 @@ test "supportedStepType matches the executable tier and rejects the rest" {
         "init_data_dir",            "remove",                "inreplace",                 "run",
         "move",                     "warn",                  "set_permissions",           "install_gzipped_executable",
         "change_dylib_id",          "terminate_process",     "configure_clang_system",    "configure_gcc_runtime",
-        "set_ownership",            "mkdir",
+        "set_ownership",            "mkdir",                 "move_children",             "move_contents",
     };
     for (native) |t| try testing.expect(supportedStepType(t));
     // Deliberate loud skips: php and the legacy python/pypy bootstrappers are
     // whole projects, glibc never reaches a macOS bottle, and the rest have no
     // occurrence in homebrew-core to model against.
     const routed = [_][]const u8{
-        "move_children",     "move_contents",  "configure_php",
-        "bootstrap_cpython", "bootstrap_pypy", "configure_glibc_runtime",
+        "configure_php", "bootstrap_cpython", "bootstrap_pypy", "configure_glibc_runtime",
         "frobnicate",
     };
     for (routed) |t| try testing.expect(!supportedStepType(t));
@@ -5010,6 +5052,48 @@ test "mkdir refuses a path outside the confinement roots" {
     ));
     try testing.expect(h.flog.hasFatal());
     try testing.expect(!dirExists(h.io, "/tmp/malt_mkdir_escape_never_created"));
+}
+
+test "move_children moves entries not the directory" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    const staged = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3", .{ch.h.prefix});
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/a", .{staged}), "a");
+    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/sub", .{staged}));
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/sub/b", .{staged}), "b");
+
+    // The chatty/quakespasm shape: fold the staged root into a subdirectory
+    // of itself, so the target must be skipped as a child of the source.
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"move_contents","source":{"base":"staged_path","path":"."},"target":{"base":"staged_path","path":"Chatty"}},
+        \\ {"type":"move_children","source":{"base":"staged_path","path":"Chatty/sub"},"target":{"base":"caskroom_path","path":"flat"}}]
+    ));
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/Chatty/a", .{staged})));
+    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/a", .{staged})));
+    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/Chatty/sub", .{staged})));
+    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/Chatty/sub/b", .{staged})));
+    try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/Caskroom/box/flat/b", .{ch.h.prefix})));
+}
+
+test "move_contents refuses a source or target outside the confinement roots" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const outside = try std.fs.path.join(a, &.{ ch.home, "loose" });
+    try std.Io.Dir.cwd().createDirPath(c.io, outside);
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/f", .{outside}), "f");
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"move_contents","source":{"base":"home","path":"loose"},"target":{"base":"staged_path","path":"in"}}]
+    ));
+    try testing.expect(ch.h.flog.hasFatal());
+    try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/f", .{outside})));
+    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/in", .{ch.h.prefix})));
 }
 
 fn fileMode(io: std.Io, path: []const u8) !std.posix.mode_t {
