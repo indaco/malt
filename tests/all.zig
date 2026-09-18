@@ -21,6 +21,7 @@ comptime {
     _ = @import("bundle_cleanup_test.zig");
     _ = @import("bundle_cli_test.zig");
     _ = @import("bundle_test.zig");
+    _ = @import("cask_binary_zip_test.zig");
     _ = @import("cask_extra_test.zig");
     _ = @import("cask_font_install_test.zig");
     _ = @import("cask_font_rollback_test.zig");
