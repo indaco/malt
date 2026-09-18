@@ -11,6 +11,7 @@ const deps_mod = @import("../../core/deps.zig");
 const dsl = @import("../../core/dsl/root.zig");
 const formula_mod = @import("../../core/formula.zig");
 const cask_mod = @import("../../core/cask.zig");
+const sqlite = @import("../../db/sqlite.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
 const steps_mod = @import("../../core/post_install_steps.zig");
 const sandbox = @import("../../core/sandbox/macos.zig");
@@ -193,23 +194,80 @@ pub fn routePostInstallOutcomeWithBody(
 }
 
 /// Report one cask flight phase the way a formula's post_install is
-/// reported, minus the Ruby fallback a cask has no equivalent for. True when
-/// nothing in the phase was fatal.
-pub fn routeFlightOutcome(flog: *const dsl.FallbackLog, token: []const u8, phase: []const u8, sink: OutputSink) bool {
+/// reported, minus the Ruby fallback a cask has no equivalent for. The JSON
+/// event reuses the post_install shape so existing consumers see it. True
+/// when nothing in the phase was fatal.
+pub fn routeFlightOutcome(allocator: std.mem.Allocator, flog: *const dsl.FallbackLog, token: []const u8, phase: []const u8, sink: OutputSink) bool {
     renderNotes(flog);
-    if (flog.hasFatal()) {
-        sink.warn("{s} steps failed for {s}", .{ phase, token });
-        renderFatal(flog, token);
-        if (output.isDebug()) renderUnknown(flog, token);
-        return false;
+    const status: PostInstallStatus = blk: {
+        if (flog.hasFatal()) {
+            sink.warn("{s} steps failed for {s}", .{ phase, token });
+            renderFatal(flog, token);
+            if (output.isDebug()) renderUnknown(flog, token);
+            break :blk .fatal;
+        }
+        if (flog.hasErrors()) {
+            sink.warn("{s}: {s} steps partially skipped", .{ token, phase });
+            if (output.isVerbose()) renderUnknown(flog, token);
+            break :blk .partially_skipped;
+        }
+        if (flog.total_top_level > 0) sink.info("{s} steps completed for {s}", .{ phase, token });
+        break :blk .completed;
+    };
+    if (output.isNdjson()) {
+        emitPostInstallStreamLine(allocator, token, status, flog);
+    } else if (output.isJson()) {
+        switch (output.postInstallEmit()) {
+            .stream => emitPostInstallStreamLine(allocator, token, status, flog),
+            .embed => bufferPostInstallEvent(allocator, token, status, flog, sink),
+        }
     }
-    if (flog.hasErrors()) {
-        sink.warn("{s}: {s} steps partially skipped", .{ token, phase });
-        if (output.isVerbose()) renderUnknown(flog, token);
-        return true;
+    return status != .fatal;
+}
+
+/// One command's flight bookkeeping: the log every phase reports into and
+/// the arena its details live in, so the installer sites share one shape.
+pub const Flight = struct {
+    allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
+    log: dsl.FallbackLog,
+
+    pub fn init(allocator: std.mem.Allocator) Flight {
+        return .{ .allocator = allocator, .arena = std.heap.ArenaAllocator.init(allocator), .log = dsl.FallbackLog.init(allocator) };
     }
-    if (flog.total_top_level > 0) sink.info("{s} steps completed for {s}", .{ phase, token });
-    return true;
+
+    pub fn deinit(self: *Flight) void {
+        self.log.deinit();
+        self.arena.deinit();
+    }
+
+    /// Valid for as long as `self` stays put: the installer keeps the pointer.
+    pub fn sink(self: *Flight) cask_mod.CaskInstaller.FlightSink {
+        return .{ .log = &self.log, .allocator = self.arena.allocator() };
+    }
+
+    /// Report the phase the installer just ran through its sink.
+    pub fn route(self: *Flight, token: []const u8, phase: []const u8, out: OutputSink) bool {
+        return routeFlightOutcome(self.allocator, &self.log, token, phase, out);
+    }
+
+    /// Run one phase on a fresh log and report it. Null steps are a no-op.
+    pub fn runPhase(self: *Flight, installer: *cask_mod.CaskInstaller, token: []const u8, version: []const u8, steps: ?[]const std.json.Value, phase: []const u8, out: OutputSink) bool {
+        const s = steps orelse return true;
+        self.log.deinit();
+        self.log = dsl.FallbackLog.init(self.allocator);
+        _ = installer.runFlight(token, version, s, null);
+        return self.route(token, phase, out);
+    }
+};
+
+/// The stored uninstall phases, or null with a warning when the row cannot
+/// be read: silence here would hide that a declared gate did not run.
+pub fn storedFlight(db: *sqlite.Database, allocator: std.mem.Allocator, token: []const u8, out: OutputSink) ?cask_mod.StoredFlight {
+    return cask_mod.readFlightSteps(db, allocator, token) catch |e| {
+        out.warn("could not read the flight steps stored for {s}: {s}; its uninstall steps will not run", .{ token, @errorName(e) });
+        return null;
+    };
 }
 
 /// Dry-run view of a cask's declared phases: what would run and which steps

@@ -349,3 +349,18 @@ test "v17 adds the flight_steps column to casks once, fresh or upgraded" {
     try testing.expect(try casksHasColumn(&t.db, "flight_steps"));
     try testing.expectEqual(@as(i64, 17), try schema.currentVersion(&t.db));
 }
+
+test "v17 leaves a legacy cask row with no flight steps" {
+    var t = try TempDb.init("v17_legacy_null");
+    defer t.deinit();
+    try schema.initSchema(&t.db);
+    try t.db.exec("ALTER TABLE casks DROP COLUMN flight_steps;");
+    try t.db.exec("DELETE FROM schema_version WHERE version >= 17;");
+    try t.db.exec(
+        \\INSERT INTO casks(token, name, version, url)
+        \\VALUES ('firefox', 'firefox', '123.0', 'https://example.invalid');
+    );
+
+    try schema.migrate(&t.db);
+    try testing.expect((try malt.cask.readFlightSteps(&t.db, testing.allocator, "firefox")) == null);
+}

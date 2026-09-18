@@ -1565,6 +1565,14 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     artefact_cache.adoptLegacy(ctx.io, prefix, api.cache_dir);
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, api.cache_dir);
     installer.offline = ctx.offline;
+    var flight = post_install_mod.Flight.init(allocator);
+    defer flight.deinit();
+    installer.flight = flight.sink();
+    // The outgoing version's own uninstall steps, read before its row goes.
+    var stored = post_install_mod.storedFlight(db, allocator, token, install_sink_mod.terminal);
+    defer if (stored) |*s| s.deinit();
+    // `installed` copies the row, so its version outlives the uninstall.
+    const old_version = installed.version();
 
     // Fetch before destroying, as in `upgradeRoutedTapCask` above.
     const prefetched = installer.downloadOnly(&parsed_cask) catch |dl_err| {
@@ -1589,6 +1597,11 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return error.Aborted;
     };
 
+    if (stored) |*s| if (!flight.runPhase(&installer, token, old_version, s.get(.uninstall_preflight), "uninstall preflight", install_sink_mod.terminal)) {
+        db.rollback();
+        return error.Aborted;
+    };
+
     installer.uninstall(token) catch |un_err| {
         db.rollback();
         if (un_err == error.AppRunning) {
@@ -1601,8 +1614,11 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         );
         return error.Aborted;
     };
+    if (stored) |*s| _ = flight.runPhase(&installer, token, old_version, s.get(.uninstall_postflight), "uninstall postflight", install_sink_mod.terminal);
 
-    const app_path = installer.install(&parsed_cask) catch |in_err| {
+    const placed = installer.install(&parsed_cask);
+    if (parsed_cask.flight_steps.get(.preflight) != null) _ = flight.route(token, "preflight", install_sink_mod.terminal);
+    const app_path = placed catch |in_err| {
         output.err(
             "Failed to install new version of {s}: {s}",
             .{ token, @errorName(in_err) },
@@ -1638,6 +1654,11 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         // Best-effort: a missing pin restore is a UX regression, not data
         // loss — the cask itself is upgraded and recorded.
         _ = pin_mod.setPinned(db, token, true) catch {};
+    }
+
+    // After the commit, as on install: the new version is recorded either way.
+    if (!flight.runPhase(&installer, token, parsed_cask.version, parsed_cask.flight_steps.get(.postflight), "postflight", install_sink_mod.terminal)) {
+        output.warn("{s} is upgraded but its postflight steps failed; `mt uninstall {s}` and reinstall to retry them", .{ token, token });
     }
 
     output.success("{s} upgraded to {s}", .{ token, parsed_cask.version });

@@ -225,7 +225,7 @@ test "uninstall aborts before removing anything when the stored preflight fails"
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ };
-    try testing.expectError(error.Aborted, malt.uninstall.execute(&ctx, arena.allocator(), &.{"evil"}));
+    try testing.expectError(error.Aborted, malt.cli_uninstall.execute(&ctx, arena.allocator(), &.{"evil"}));
 
     try testing.expect(std.mem.indexOf(u8, captured.items, "uninstall preflight steps failed for evil") != null);
     try testing.expect(exists(io, app_path));
@@ -270,6 +270,137 @@ test "install --dry-run lists the phases and names the steps malt refuses" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: run with sudo") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: terminate_process with match") != null);
     try testing.expect(!exists(threaded.io(), fx.h("Library/plan")));
+}
+
+fn runTar(argv: []const []const u8) !void {
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{ .environ = malt.app_ctx.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var child = try std.process.spawn(io, .{ .argv = argv, .stdout = .ignore, .stderr = .ignore });
+    switch (try child.wait(io)) {
+        .exited => |code| if (code != 0) return error.TarFailed,
+        else => return error.TarFailed,
+    }
+}
+
+test "a tarball preflight that fails leaves no Caskroom dir behind" {
+    // The tarball stage IS the Caskroom version dir, so unlike zip and dmg
+    // there is no scratch dir whose defer cleans it up.
+    var fx = try Fixture.init("tar_abort");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try putFile(io, fx.p("src/tool"), "bin");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const tgz = fx.p("cache/Cask/tarcask-1.tar.gz");
+    try runTar(&.{ "/usr/bin/tar", "-czf", tgz, "-C", fx.p("src"), "tool" });
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCaskWithMajor(testing.allocator,
+        \\{"token":"tarcask","name":["Tar"],"version":"1","url":"https://example.invalid/t.tar.gz","sha256":"no_check",
+        \\ "artifacts":[{"preflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":".ssh/config"},"content":"x"}]}]},{"binary":["tool"]}]}
+    , null);
+    defer c.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var flog = cask.FlightLog.init(testing.allocator);
+    defer flog.deinit();
+    var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.prefetched_artifact = tgz;
+    installer.flight = .{ .log = &flog, .allocator = arena.allocator() };
+
+    try testing.expectError(cask.CaskError.PreflightFailed, installer.install(&c));
+    try testing.expect(!exists(io, fx.p("Caskroom/tarcask")));
+    try testing.expect(!exists(io, fx.p("bin/tool")));
+    try testing.expect(!cask.isInstalled(&db, "tarcask"));
+}
+
+test "a cask that declares a preflight cannot install through a path with no flight sink" {
+    // Every installer site must wire the sink; a silent pass here would let
+    // upgrade or a tap install skip the gate the cask declared.
+    var fx = try Fixture.init("no_sink");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCaskWithMajor(testing.allocator, box_json, null);
+    defer c.deinit();
+    try putFile(io, fx.p("extract/Box.app/Contents/MacOS/box"), "bin");
+    try test_io.cwd().createDirPath(io, fx.p("Applications"));
+
+    var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    try testing.expectError(cask.CaskError.PreflightFailed, installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c));
+    try testing.expect(!exists(io, fx.p("Applications/Box.app")));
+}
+
+test "uninstall warns about a corrupt stored row and still removes the cask" {
+    var fx = try Fixture.init("cli_uninstall_corrupt");
+    defer fx.deinit();
+    try enterPrefix(&fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const app_path = fx.p("Applications/Bent.app");
+    try test_io.cwd().createDirPath(io, app_path);
+    {
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c = try cask.parseCaskWithMajor(testing.allocator,
+            \\{"token":"bent","name":["Bent"],"version":"1","url":"https://example.invalid/b.zip","artifacts":[{"app":["Bent.app"]}]}
+        , null);
+        defer c.deinit();
+        try cask.recordInstall(&db, &c, app_path, null);
+        try db.exec("UPDATE casks SET flight_steps = '{\"uninstall_preflight_steps\": [' WHERE token = 'bent';");
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ };
+    try malt.cli_uninstall.execute(&ctx, arena.allocator(), &.{"bent"});
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "could not read the flight steps stored for bent") != null);
+    try testing.expect(!exists(io, app_path));
+}
+
+test "a flight phase outcome reaches --ndjson consumers as a post_install event" {
+    var flog = malt.dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "box", .reason = .sandbox_violation, .detail = "/etc/x", .loc = null });
+
+    const prior = malt.output.isNdjson();
+    malt.output.setNdjson(true);
+    defer malt.output.setNdjson(prior);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &out);
+    defer malt.output.endStdoutCapture();
+    var err: std.ArrayList(u8) = .empty;
+    defer err.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &err);
+    defer malt.output.endStderrCapture();
+
+    try testing.expect(!malt.install_post_install.routeFlightOutcome(testing.allocator, &flog, "box", "postflight", malt.install_sink.terminal));
+    try testing.expect(std.mem.indexOf(u8, out.items, "\"event\":\"post_install\",\"name\":\"box\",\"status\":\"fatal\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "\"detail\":\"/etc/x\"") != null);
 }
 
 test "a cask without flight steps stores NULL and installs as before" {

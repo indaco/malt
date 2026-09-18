@@ -201,12 +201,12 @@ pub fn recordInstall(
     app_path: ?[]const u8,
     tap: ?[]const u8,
 ) sqlite.SqliteError!void {
-    // Like `pinned`: a synthetic cask (rollback) carries no steps, so the
-    // row keeps the ones the original install stored.
+    // No COALESCE on the steps: an upgrade whose new version dropped them
+    // must not keep replaying the old ones. Rollback carries them over
+    // explicitly instead.
     var stmt = try db.prepare(
         "INSERT OR REPLACE INTO casks (token, name, version, url, sha256, app_path, auto_updates, pinned, tap, flight_steps)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE((SELECT pinned FROM casks WHERE token = ?1), 0), ?8," ++
-            " COALESCE(?9, (SELECT flight_steps FROM casks WHERE token = ?1)));",
+            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE((SELECT pinned FROM casks WHERE token = ?1), 0), ?8, ?9);",
     );
     defer stmt.finalize();
 
@@ -251,17 +251,22 @@ pub const StoredFlight = struct {
     }
 };
 
-/// Null when the row is missing or stored no steps.
-pub fn readFlightSteps(db: *sqlite.Database, allocator: std.mem.Allocator, token: []const u8) LookupError!?StoredFlight {
+pub const FlightReadError = LookupError || error{ParseFailed};
+
+/// Null when the row is missing or stored no steps. A row that holds
+/// something unreadable is an error, not "none": the uninstall phases exist
+/// to gate a removal, so the caller must know the gate did not run.
+pub fn readFlightSteps(db: *sqlite.Database, allocator: std.mem.Allocator, token: []const u8) FlightReadError!?StoredFlight {
     var stmt = try db.prepare("SELECT flight_steps FROM casks WHERE token = ?1 LIMIT 1;");
     defer stmt.finalize();
     try stmt.bindText(1, token);
     if (!try stmt.step()) return null;
     const raw = stmt.columnText(0) orelse return null;
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, std.mem.sliceTo(raw, 0), .{}) catch return null;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, std.mem.sliceTo(raw, 0), .{}) catch
+        return error.ParseFailed;
     if (parsed.value != .object) {
         parsed.deinit();
-        return null;
+        return error.ParseFailed;
     }
     return .{ .parsed = parsed };
 }
@@ -801,7 +806,9 @@ pub const CaskInstaller = struct {
     /// dir, which is where a tarball unpacks and what upstream means by it
     /// after staging. False when a step was fatal; the sink's log says why.
     pub fn runFlight(self: *CaskInstaller, token: []const u8, version: []const u8, steps: []const std.json.Value, staged_path: ?[]const u8) bool {
-        const sink = self.flight orelse return true;
+        // No sink is a caller bug, and a silent pass would be the declared
+        // gate skipped; fail the phase instead.
+        const sink = self.flight orelse return false;
         const a = sink.allocator;
         var app_dir_buf: [512]u8 = undefined;
         const caskroom_path = std.fmt.allocPrint(a, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch return false;
@@ -1082,7 +1089,7 @@ pub const CaskInstaller = struct {
             return CaskError.OutOfMemory;
         defer parsed_empty.deinit();
 
-        const synthetic: Cask = .{
+        var synthetic: Cask = .{
             .token = row.token,
             .name = row.token,
             .version = row.version,
@@ -1093,6 +1100,12 @@ pub const CaskInstaller = struct {
             .auto_updates = meta.auto_updates,
             .parsed = parsed_empty,
         };
+        // The target version's own steps are not on record; the ones the
+        // current install stored are the best guide for its later uninstall.
+        // Unreadable is treated as none here: a rollback must not fail on it.
+        var stored = readFlightSteps(self.db, self.allocator, token) catch null;
+        defer if (stored) |*s| s.deinit();
+        if (stored) |*s| for (std.enums.values(FlightPhase)) |phase| synthetic.flight_steps.set(phase, s.get(phase));
 
         // Re-source font stanzas for this version from the sidecar: the
         // synthetic cask carries no artifacts, so without this a font cask
@@ -1493,7 +1506,13 @@ pub const CaskInstaller = struct {
             .tar_xz => archive_mod.extractTarXzFile(self.io, archive_path, caskroom_ver),
             else => return error.InstallFailed,
         }) catch return error.InstallFailed;
-        try self.preflight(cask, caskroom_ver);
+        // The stage is the Caskroom dir itself, so nothing else reclaims it;
+        // the token dir goes too when this was its only version.
+        self.preflight(cask, caskroom_ver) catch |e| {
+            std.Io.Dir.cwd().deleteTree(self.io, caskroom_ver) catch {};
+            if (std.fs.path.dirname(caskroom_ver)) |token_dir| std.Io.Dir.deleteDirAbsolute(self.io, token_dir) catch {};
+            return e;
+        };
 
         // Same precedence as the zip dispatch: fonts first (they carry no
         // `.app` and no `binary`), then binaries, then a wrapped bundle.
