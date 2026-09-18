@@ -350,6 +350,19 @@ test "v17 adds the flight_steps column to casks once, fresh or upgraded" {
     try testing.expectEqual(@as(i64, 17), try schema.currentVersion(&t.db));
 }
 
+test "v17 tolerates a DB that never had a casks table" {
+    // Pinned on its own: the older migrations' partial-shape fixtures only
+    // cover this by accident, and an ALTER on a missing table aborts the chain.
+    var t = try TempDb.init("v17_no_casks_table");
+    defer t.deinit();
+    try t.db.exec(
+        \\CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied TEXT NOT NULL DEFAULT (datetime('now')));
+    );
+    try t.db.exec("INSERT INTO schema_version (version) VALUES (16);");
+    try schema.migrate(&t.db);
+    try testing.expectEqual(@as(i64, 17), try schema.currentVersion(&t.db));
+}
+
 test "v17 leaves a legacy cask row with no flight steps" {
     var t = try TempDb.init("v17_legacy_null");
     defer t.deinit();
