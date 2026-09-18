@@ -93,6 +93,7 @@ const StepTag = enum {
     move,
     warn,
     set_permissions,
+    set_ownership,
     install_gzipped_executable,
     change_dylib_id,
     terminate_process,
@@ -123,6 +124,7 @@ const step_map = std.StaticStringMap(StepTag).initComptime(.{
     .{ "move", .move },
     .{ "warn", .warn },
     .{ "set_permissions", .set_permissions },
+    .{ "set_ownership", .set_ownership },
     .{ "install_gzipped_executable", .install_gzipped_executable },
     .{ "change_dylib_id", .change_dylib_id },
     .{ "terminate_process", .terminate_process },
@@ -161,6 +163,7 @@ fn honouredKeys(tag: StepTag) []const []const u8 {
         .move => &.{ "source", "target", "overwrite", "force" },
         .warn => &.{"message"},
         .set_permissions => &.{ "paths", "permissions", "non_recursive" },
+        .set_ownership => &.{ "paths", "user", "group", "non_recursive" },
         .install_gzipped_executable => &.{ "source", "target" },
         .change_dylib_id => &.{ "source", "id", "resolve_source" },
         // Deliberately narrow: `sudo`/`must_succeed` would change what the
@@ -301,6 +304,7 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         .move => stepMove(ctx, obj),
         .warn => stepWarn(ctx, obj),
         .set_permissions => stepSetPermissions(ctx, obj),
+        .set_ownership => stepSetOwnership(ctx, obj),
         .install_gzipped_executable => stepInstallGzippedExecutable(ctx, obj),
         .change_dylib_id => stepChangeDylibId(ctx, obj),
         .terminate_process => stepTerminateProcess(ctx, obj),
@@ -1375,6 +1379,101 @@ fn stepSetPermissions(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
             if (!pathExists(ctx.io, path)) continue;
             if (!confined(ctx, path)) return false;
             const ok = if (recursive) chmodTree(ctx, path, mode) else chmodConfined(ctx, path, mode);
+            if (!ok) return false;
+        }
+    }
+    return true;
+}
+
+// --- ownership -------------------------------------------------------------
+
+// std declares getgrnam with the passwd shape; only `gid` is read here.
+extern "c" fn getgrnam(name: [*:0]const u8) ?*std.c.group;
+
+fn groupId(name: []const u8) ?std.posix.gid_t {
+    var buf: [256]u8 = undefined;
+    const z = std.fmt.bufPrintZ(&buf, "{s}", .{name}) catch return null;
+    const g = getgrnam(z) orelse return null;
+    return g.gid;
+}
+
+fn userId(name: []const u8) ?std.posix.uid_t {
+    var buf: [256]u8 = undefined;
+    const z = std.fmt.bufPrintZ(&buf, "{s}", .{name}) catch return null;
+    const pw = std.c.getpwnam(z) orelse return null;
+    return pw.uid;
+}
+
+fn chownConfined(ctx: StepsCtx, named: []const u8, uid: std.posix.uid_t, gid: std.posix.gid_t) bool {
+    const path = resolveLink(ctx, named);
+    const file = openTargetNoFollow(ctx, path, .{ .write = false }) catch |e| {
+        if (e == error.PathSandboxViolation) {
+            logViolation(ctx, path);
+            return false;
+        }
+        ctx.flog.note(chmodDetail(ctx, "post_install: skipped, could not open", path));
+        return true;
+    };
+    defer file.close(ctx.io);
+    // Upstream runs this under sudo; without it a foreign owner is EPERM,
+    // and reporting success would hide exactly the change the cask needed.
+    file.setOwner(ctx.io, uid, gid) catch {
+        logUnsupported(ctx, chmodDetail(ctx, "could not chown", path));
+        return false;
+    };
+    return true;
+}
+
+fn chownTree(ctx: StepsCtx, path: []const u8, uid: std.posix.uid_t, gid: std.posix.gid_t) bool {
+    if (!chownConfined(ctx, path, uid, gid)) return false;
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, path, .{ .iterate = true }) catch return true;
+    defer dir.close(ctx.io);
+    validateDirTarget(ctx, path) catch {
+        logViolation(ctx, path);
+        return false;
+    };
+    var iter = dir.iterate();
+    while (iter.next(ctx.io) catch null) |entry| {
+        if (entry.kind != .directory and entry.kind != .file) continue;
+        const child = std.fs.path.join(ctx.allocator, &.{ path, entry.name }) catch continue;
+        const ok = if (entry.kind == .directory) chownTree(ctx, child, uid, gid) else chownConfined(ctx, child, uid, gid);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// `set_ownership`: upstream's `chown -R user:group`, with the same
+/// defaults (the invoking user, `staff`). Same walk and confinement as
+/// `set_permissions`; a name the host cannot resolve refuses rather than
+/// guessing an id.
+fn stepSetOwnership(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const paths_val = obj.get("paths") orelse {
+        logUnsupported(ctx, "set_ownership without paths");
+        return false;
+    };
+    if (paths_val != .array) {
+        logUnsupported(ctx, "set_ownership with non-array paths");
+        return false;
+    }
+    const uid: std.posix.uid_t = if (getString(obj, "user")) |u| userId(u) orelse {
+        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "set_ownership user {s}", .{u}) catch "set_ownership user");
+        return false;
+    } else std.c.getuid();
+    const group = getString(obj, "group") orelse "staff";
+    const gid = groupId(group) orelse {
+        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "set_ownership group {s}", .{group}) catch "set_ownership group");
+        return false;
+    };
+    const recursive = !getFlag(obj, "non_recursive");
+
+    for (paths_val.array.items) |item| {
+        if (item != .object) continue;
+        const spec = resolveSpec(ctx, item.object, "paths") orelse return false;
+        const matches = expandGlob(ctx, spec) orelse return false;
+        for (matches) |path| {
+            if (!pathExists(ctx.io, path)) continue;
+            if (!confined(ctx, path)) return false;
+            const ok = if (recursive) chownTree(ctx, path, uid, gid) else chownConfined(ctx, path, uid, gid);
             if (!ok) return false;
         }
     }
@@ -3635,15 +3734,16 @@ test "supportedStepType matches the executable tier and rejects the rest" {
         "init_data_dir",            "remove",                "inreplace",                 "run",
         "move",                     "warn",                  "set_permissions",           "install_gzipped_executable",
         "change_dylib_id",          "terminate_process",     "configure_clang_system",    "configure_gcc_runtime",
+        "set_ownership",
     };
     for (native) |t| try testing.expect(supportedStepType(t));
     // Deliberate loud skips: php and the legacy python/pypy bootstrappers are
     // whole projects, glibc never reaches a macOS bottle, and the rest have no
     // occurrence in homebrew-core to model against.
     const routed = [_][]const u8{
-        "mkdir",         "move_children",     "move_contents",  "set_ownership",
-        "configure_php", "bootstrap_cpython", "bootstrap_pypy", "configure_glibc_runtime",
-        "frobnicate",
+        "mkdir",                   "move_children",     "move_contents",
+        "configure_php",           "bootstrap_cpython", "bootstrap_pypy",
+        "configure_glibc_runtime", "frobnicate",
     };
     for (routed) |t| try testing.expect(!supportedStepType(t));
 }
@@ -4801,6 +4901,66 @@ test "terminate_process refuses the privilege fields malt does not honour" {
 }
 
 // --- helpers for the step tests --------------------------------------------
+
+fn fileGid(io: std.Io, path: []const u8) !std.posix.gid_t {
+    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    var raw: std.c.Stat = undefined;
+    if (std.c.fstat(f.handle, &raw) != 0) return error.Unexpected;
+    return @intCast(raw.gid);
+}
+
+test "set_ownership chowns only inside the confinement roots" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    // `everyone` is a group every macOS user belongs to, so a non-root test
+    // can observe the change; `staff`, the default, is what a fresh file
+    // already carries.
+    const everyone = groupId("everyone") orelse return error.SkipZigTest;
+    const inside = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/tool", .{ch.h.prefix});
+    try atomic.atomicWriteFile(c.io, inside, "tool");
+    const nested = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/lib/x", .{ch.h.prefix});
+    try std.Io.Dir.cwd().createDirPath(c.io, std.fs.path.dirname(nested).?);
+    try atomic.atomicWriteFile(c.io, nested, "x");
+    const outside = try std.fs.path.join(a, &.{ ch.home, "outside" });
+    try atomic.atomicWriteFile(c.io, outside, "x");
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"set_ownership","paths":[{"base":"staged_path","path":"."},{"base":"staged_path","path":"missing"}],"group":"everyone"},
+        \\ {"type":"set_ownership","paths":[{"base":"home","path":"outside"}],"group":"everyone"}]
+    ));
+    try testing.expectEqual(everyone, try fileGid(c.io, inside));
+    try testing.expectEqual(everyone, try fileGid(c.io, nested));
+    try testing.expect(try fileGid(c.io, outside) != everyone);
+    try testing.expect(ch.h.flog.hasFatal());
+    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, ch.h.flog.entries()[0].reason);
+}
+
+test "set_ownership refuses a user or group it cannot resolve and honours non_recursive" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const everyone = groupId("everyone") orelse return error.SkipZigTest;
+
+    const dir = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/d", .{ch.h.prefix});
+    const child = try std.fmt.allocPrint(a, "{s}/child", .{dir});
+    try std.Io.Dir.cwd().createDirPath(c.io, dir);
+    try atomic.atomicWriteFile(c.io, child, "x");
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"set_ownership","paths":[{"base":"staged_path","path":"d"}],"group":"everyone","non_recursive":true},
+        \\ {"type":"set_ownership","paths":[{"base":"staged_path","path":"d"}],"user":"no-such-user-here"},
+        \\ {"type":"set_ownership","paths":[{"base":"staged_path","path":"d"}],"group":"no-such-group-here"}]
+    ));
+    try testing.expectEqual(everyone, try fileGid(c.io, dir));
+    try testing.expect(try fileGid(c.io, child) != everyone);
+    try testing.expect(!ch.h.flog.hasFatal());
+    try testing.expectEqual(@as(usize, 2), ch.h.flog.entries().len);
+}
 
 fn fileMode(io: std.Io, path: []const u8) !std.posix.mode_t {
     const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
