@@ -843,10 +843,7 @@ For installing malt from a local checkout (the end-user path), see [From source]
 <!-- BENCH:META:START -->
 
 - Install times on macOS 14 (Apple Silicon).
-- Benchmarked releases:
-  - malt `0.24.2`
-  - nanobrew `v0.1.211`
-  - zerobrew `v0.3.2`
+- Benchmarked releases: malt `0.24.2`, nanobrew `v0.1.211`, zerobrew `v0.3.2`
   <!-- BENCH:META:END -->
 
 <!-- BENCH:COLD:START -->
