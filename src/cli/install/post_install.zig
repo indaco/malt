@@ -327,7 +327,8 @@ fn renderEntries(flog: *const dsl.FallbackLog, tag: []const u8, comptime reasons
             std.fmt.bufPrint(&buf, "  {s}: [{s}] {s}\n", .{
                 tag, @tagName(entry.reason), entry.detail,
             }) catch continue;
-        output.writeStderrAll(formatted);
+        // `detail` can carry a tap-controlled name or path.
+        output.writeStderrAll(term_sanitize.scrubInPlace(buf[0..formatted.len]));
     }
 }
 
@@ -942,6 +943,23 @@ test "renderNotes drops terminal control bytes from a formula-authored note" {
     try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x07) == null);
     try std.testing.expect(std.mem.startsWith(u8, buf.items, "boom"));
     try std.testing.expect(std.mem.endsWith(u8, buf.items, " done\n"));
+}
+
+test "renderEntries drops terminal control bytes from a step-authored detail" {
+    var flog = dsl.FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+    // A `terminate_process` name or an out-of-prefix path lands here verbatim.
+    flog.log(.{ .formula = "box", .reason = .system_command_failed, .detail = "x\x1b]52;c;ZXZpbA==\x07 could not be terminated", .loc = null });
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    renderFatal(&flog, "box");
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x07) == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "could not be terminated") != null);
 }
 
 test "renderNotes keeps a codepoint that straddles the scrub buffer intact" {
