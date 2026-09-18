@@ -78,7 +78,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Check if it's a cask first (or if --cask was passed)
     if (force_cask or cask_mod.isInstalled(&db, name)) {
-        try uninstallCask(ctx, allocator, name, &db, prefix, force);
+        try uninstallCask(ctx, allocator, name, &db, prefix);
         return;
     }
 
@@ -280,19 +280,19 @@ test "finalizeDbRemoval leaves the kegs row when the delete is blocked" {
 }
 
 /// Uninstall a cask by token.
-fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, force: bool) !void {
+fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8) !void {
     const info = cask_mod.lookupInstalled(db, token) orelse {
         output.err("{s} is not installed as a cask", .{token});
         return error.Aborted;
     };
 
-    // Check if running (unless --force)
-    if (!force) {
-        if (info.appPath()) |app_path| {
-            if (cask_mod.CaskInstaller.isAppRunningPub(ctx.io, app_path)) {
-                output.err("{s} appears to be running. Quit the app first, or use --force.", .{token});
-                return error.Aborted;
-            }
+    // `--force` overrides dependents, not a live app: the installer refuses
+    // to remove one regardless, and by then the stored phases have already
+    // acted on the version that is staying.
+    if (info.appPath()) |app_path| {
+        if (cask_mod.CaskInstaller.isAppRunningPub(ctx.io, app_path)) {
+            output.err("{s} appears to be running. Quit the app first.", .{token});
+            return error.Aborted;
         }
     }
 

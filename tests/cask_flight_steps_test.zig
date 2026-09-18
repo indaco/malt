@@ -959,3 +959,52 @@ test "a tap-routed upgrade whose install fails puts the old version back" {
     try testing.expectEqualStrings("1.0", row.version());
     try testing.expectEqualStrings("grp/tap", row.tap().?);
 }
+
+test "uninstall --force still refuses a running app before any stored step acts" {
+    var fx = try Fixture.init("uninstall_force_running");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const json =
+        \\{"token":"live","name":["Live"],"version":"1.0","url":"https://example.invalid/live.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Live.app"]},
+        \\  {"postflight_steps":[{"steps":[{"type":"symlink","source":{"base":"staged_path","path":"liblive.1.0.dylib"},
+        \\    "target":{"path":"{{HOMEBREW_PREFIX}}/lib/liblive.1.dylib"},"uninstall":true}]}]},
+        \\  {"uninstall_preflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":"Library/live.pre"},"content":"ran"}]}]}]}
+    ;
+    const app_path = fx.p("Applications/Live.app");
+    const exe = fx.p("Applications/Live.app/Contents/MacOS/live");
+    try putFile(io, exe, "");
+    {
+        try test_io.cwd().createDirPath(io, fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c = try cask.parseCaskWithMajor(testing.allocator, json, null);
+        defer c.deinit();
+        try cask.recordInstall(&db, &c, app_path, null);
+        try test_io.cwd().createDirPath(io, fx.p("lib"));
+        try std.Io.Dir.symLinkAbsolute(io, fx.p("Caskroom/live/1.0/liblive.1.0.dylib"), fx.p("lib/liblive.1.dylib"), .{});
+    }
+    var child = try std.process.spawn(io, .{ .argv = &.{ "/usr/bin/tail", "-f", exe }, .stdout = .ignore, .stderr = .ignore });
+    defer child.kill(io); // kill also reaps
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(true);
+    defer malt.output.setQuiet(prior_quiet);
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ, .offline = true };
+    // `--force` overrides dependents; it never removed a live app, and now
+    // it does not run the stored phases on one either.
+    try testing.expectError(error.Aborted, malt.cli_uninstall.execute(&ctx, testing.allocator, &.{ "--cask", "--force", "live" }));
+
+    try testing.expect(linkExists(io, fx.p("lib/liblive.1.dylib")));
+    try testing.expect(!exists(io, fx.h("Library/live.pre")));
+    try testing.expect(exists(io, exe));
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    try testing.expect(cask.isInstalled(&db, "live"));
+}
