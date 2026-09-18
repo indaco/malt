@@ -14,6 +14,7 @@ const symlink = @import("../fs/symlink.zig");
 const path_component = @import("../fs/path_component.zig");
 const relocated_store = @import("relocated_store.zig");
 const store_path = @import("../fs/store_path.zig");
+const install_receipt = @import("install_receipt.zig");
 
 pub const CellarError = error{
     CloneFailed,
@@ -290,25 +291,9 @@ pub fn materializeWithCellar(
     };
 }
 
-/// Walk a cellar directory, apply every replacement in `replacements` to
-/// every Mach-O file found, and collect the paths of files that were
-/// actually mutated into `modified_out` so the caller can re-codesign
-/// only those.
-///
-/// `modified_out` is a caller-owned list; each appended entry is a
-/// freshly duplicated allocation (caller frees). Files whose load
-/// commands don't contain any of the needles are left untouched and
-/// are *not* added to the list — their ad-hoc signature is still valid
-/// and they don't need re-signing.
-///
-/// Slots that overflow their load-command region are deferred to
-/// `install_name_tool` — Homebrew bottles ship ~4 KiB of `__LINKEDIT`
-/// padding for that exact purpose, which the slow path uses to grow
-/// the slot. A non-zero subprocess exit that reports padding
-/// exhaustion surfaces `InsufficientHeaderPad` so the user can
-/// shorten MALT_PREFIX or rebuild the bottle; anything else falls
-/// through to the generic `PatchFailed`. Per-file I/O errors are
-/// skipped so a single bad binary does not abort the whole materialize.
+/// Mach-O-only walk of a keg: every binary found goes through
+/// `patchMachOFile`, text is left alone. Unlike `walkKegAndPatch` this is
+/// paired with a separate text pass and a separate verification walk.
 fn walkMachOAndPatch(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -323,59 +308,158 @@ fn walkMachOAndPatch(
     var walker = dir.walk(allocator) catch return;
     defer walker.deinit();
 
-    const parser_mod = @import("../macho/parser.zig");
-
     while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
 
         const full_path = std.fs.path.join(allocator, &.{ dir_path, entry.path }) catch continue;
+        defer allocator.free(full_path);
+        try patchOneMachO(io, allocator, full_path, replacements, modified_out, unrelocatable_out);
+    }
+}
+
+/// Patch `full_path` if its magic says Mach-O; anything else, including an
+/// unreadable file, is skipped. For callers that have not classified yet.
+fn patchOneMachO(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    full_path: []const u8,
+    replacements: []const patch.Replacement,
+    modified_out: *std.ArrayList([]const u8),
+    unrelocatable_out: *u32,
+) CellarError!void {
+    const file = std.Io.Dir.openFileAbsolute(io, full_path, .{}) catch return;
+    var magic: [4]u8 = undefined;
+    const n = file.readPositionalAll(io, &magic, 0) catch 0;
+    file.close(io);
+    if (patch.classifyHead(magic[0..n]) != .macho) return;
+    try patchMachOFile(io, allocator, full_path, replacements, modified_out, unrelocatable_out);
+}
+
+/// Rewrite one known Mach-O and queue it for re-signing if anything
+/// changed. Slots that overflow their load-command region go through
+/// `install_name_tool`, which grows into the `__LINKEDIT` padding bottles
+/// ship for that purpose; padding exhaustion surfaces as
+/// `InsufficientHeaderPad` so the user can shorten the prefix. Per-file I/O
+/// errors are skipped so one bad binary does not abort the materialize.
+fn patchMachOFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    full_path: []const u8,
+    replacements: []const patch.Replacement,
+    modified_out: *std.ArrayList([]const u8),
+    unrelocatable_out: *u32,
+) CellarError!void {
+    // One read/write per file for all replacements. Slots that fit
+    // are rewritten in process; slots that overflow are queued for
+    // the install_name_tool fallback below.
+    // The file is written before the overflow list is finalised, so an
+    // OOM here has already mutated a binary that must be re-signed.
+    var outcome = patch.patchPathsCollecting(io, allocator, full_path, replacements) catch |e| switch (e) {
+        patch.PatchError.OutOfMemory => return CellarError.OutOfMemory,
+        else => return,
+    };
+    defer outcome.deinit(allocator);
+
+    unrelocatable_out.* += outcome.unrelocatable_count;
+
+    if (outcome.overflow.len > 0) {
+        patch.flushOverflow(io, allocator, full_path, outcome.overflow) catch |e| switch (e) {
+            patch.FallbackError.InsufficientHeaderPad => return CellarError.InsufficientHeaderPad,
+            patch.FallbackError.InstallNameToolMissing => return CellarError.InstallNameToolMissing,
+            patch.FallbackError.OutOfMemory => return CellarError.OutOfMemory,
+            else => return CellarError.PatchFailed,
+        };
+    }
+
+    const any_modified = outcome.patched_count > 0 or outcome.overflow.len > 0;
+    if (any_modified) {
+        // The bytes on disk no longer match their signature, and only this
+        // list gets them re-signed, so an append failure aborts the
+        // materialize; the caller's errdefer wipes the keg.
+        const owned = allocator.dupe(u8, full_path) catch return CellarError.OutOfMemory;
+        modified_out.append(allocator, owned) catch {
+            allocator.free(owned);
+            return CellarError.OutOfMemory;
+        };
+    }
+}
+
+/// One pass over the keg for both relocation halves: a file's first bytes
+/// say what it is, so no file is read whole just to be skipped.
+/// The Mach-Os found feed the post-sign verification, sparing a third walk.
+fn walkKegAndPatch(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dir_path: []const u8,
+    macho_reps: []const patch.Replacement,
+    text_reps: []const patch.Replacement,
+    modified_out: *std.ArrayList([]const u8),
+    unrelocatable_out: *u32,
+    machos_out: *std.ArrayList([]const u8),
+) CellarError!void {
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    // This walk is also what decides which files get verified, so a file it
+    // could not reach must fail the keg rather than silently ship unchecked.
+    var walker = dir.walk(allocator) catch return CellarError.OutOfMemory;
+    defer walker.deinit();
+
+    while (walker.next(io) catch |e| switch (e) {
+        error.OutOfMemory => return CellarError.OutOfMemory,
+        else => return CellarError.PatchFailed,
+    }) |entry| {
+        if (entry.kind != .file) continue;
+
+        const full_path = std.fs.path.join(allocator, &.{ dir_path, entry.path }) catch return CellarError.OutOfMemory;
         var keep_path = false;
         defer if (!keep_path) allocator.free(full_path);
 
-        // Check if Mach-O by reading magic.
-        const file = std.Io.Dir.openFileAbsolute(io, full_path, .{}) catch continue;
-        var magic_buf: [4]u8 = undefined;
-        const n = file.readPositionalAll(io, &magic_buf, 0) catch {
-            file.close(io);
-            continue;
-        };
-        file.close(io);
-        if (n < 4) continue;
+        // Read-only: text rewrites are published by the atomic helper and
+        // Mach-O ones reopen for writing, so a 0o444 file is still patchable.
+        const file = std.Io.Dir.openFileAbsolute(io, full_path, .{ .mode = .read_only }) catch continue;
+        var closed = false;
+        defer if (!closed) file.close(io);
 
-        if (!parser_mod.isMachO(&magic_buf)) continue;
+        const stat = file.stat(io) catch continue;
+        if (stat.size == 0) continue;
 
-        // One read/write per file for all replacements. Slots that fit
-        // are rewritten in process; slots that overflow are queued for
-        // the install_name_tool fallback below.
-        // The file is written before the overflow list is finalised, so an
-        // OOM here has already mutated a binary that must be re-signed.
-        var outcome = patch.patchPathsCollecting(io, allocator, full_path, replacements) catch |e| switch (e) {
-            patch.PatchError.OutOfMemory => return CellarError.OutOfMemory,
-            else => continue,
-        };
-        defer outcome.deinit(allocator);
+        var head_buf: [patch.text_head_len]u8 = undefined;
+        const head_len = file.readPositionalAll(io, head_buf[0..@min(stat.size, patch.text_head_len)], 0) catch continue;
+        const head = head_buf[0..head_len];
 
-        unrelocatable_out.* += outcome.unrelocatable_count;
-
-        if (outcome.overflow.len > 0) {
-            patch.flushOverflow(io, allocator, full_path, outcome.overflow) catch |e| switch (e) {
-                patch.FallbackError.InsufficientHeaderPad => return CellarError.InsufficientHeaderPad,
-                patch.FallbackError.InstallNameToolMissing => return CellarError.InstallNameToolMissing,
-                patch.FallbackError.OutOfMemory => return CellarError.OutOfMemory,
-                else => return CellarError.PatchFailed,
-            };
-        }
-
-        const any_modified = outcome.patched_count > 0 or outcome.overflow.len > 0;
-        if (any_modified) {
-            // Transfer ownership of `full_path` into the modified list. The
-            // bytes on disk no longer match their signature, and only this
-            // list gets them re-signed, so an append failure aborts the
-            // materialize; the caller's errdefer wipes the keg.
-            modified_out.append(allocator, full_path) catch return CellarError.OutOfMemory;
-            keep_path = true;
+        switch (patch.classifyHead(head)) {
+            .macho => {
+                file.close(io);
+                closed = true;
+                try patchMachOFile(io, allocator, full_path, macho_reps, modified_out, unrelocatable_out);
+                machos_out.append(allocator, full_path) catch return CellarError.OutOfMemory;
+                keep_path = true;
+            },
+            .text => _ = patch.patchTextFileHead(io, allocator, full_path, file, stat.size, head, text_reps),
+            .binary => {},
         }
     }
+}
+
+/// `walkMachOAndVerify` over paths the walk already found.
+fn verifyMachOList(io: std.Io, allocator: std.mem.Allocator, paths: []const []const u8) CellarError!void {
+    for (paths) |p| {
+        patch.verifyFile(io, allocator, p) catch |e| {
+            std.log.debug("keg verification failed for {s}: {s}", .{ p, @errorName(e) });
+            return CellarError.VerifyFailed;
+        };
+    }
+}
+
+/// The bottle's own receipt, still in place between the clone and malt's
+/// overwrite. Null when unreadable or malformed; relocation then walks.
+fn readBottleReceipt(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8) ?install_receipt.Receipt {
+    var path_buf: [512]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/INSTALL_RECEIPT.json", .{cellar_path}) catch return null;
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch return null;
+    defer allocator.free(text);
+    return install_receipt.parseInstallReceipt(allocator, text) catch null;
 }
 
 /// Check every Mach-O under `dir_path` against the post-relocation
@@ -620,6 +704,74 @@ pub fn relocateUnbottledKeg(
     writeRelocStamp(io, allocator, cellar_path, .{ .version = relocated_store.RELOC_LOGIC_VERSION });
 }
 
+/// Absolute paths for the keg-relative entries a bottle receipt lists,
+/// deduplicated across `lists` and in list order. Null when an entry would
+/// leave the keg: the receipt is then not one to trust, and the caller walks
+/// the keg instead. Entries that are not regular files are dropped, as brew
+/// drops them. Caller frees with `freePaths`.
+fn resolveKegFiles(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    cellar_path: []const u8,
+    lists: []const []const []const u8,
+) CellarError!?[][]const u8 {
+    var keg_real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const keg_real_len = std.Io.Dir.cwd().realPathFile(io, cellar_path, &keg_real_buf) catch return null;
+    const keg_real = keg_real_buf[0..keg_real_len];
+
+    var seen: std.BufSet = .init(allocator);
+    defer seen.deinit();
+    var out: std.ArrayList([]const u8) = .empty;
+    var handed_over = false;
+    defer {
+        if (!handed_over) for (out.items) |p| allocator.free(p);
+        out.deinit(allocator);
+    }
+
+    for (lists) |list| for (list) |rel| {
+        if (!path_component.isRelativeSubpath(rel)) {
+            std.log.debug("{s}: receipt lists {s}; relocating by walk", .{ cellar_path, rel });
+            return null;
+        }
+        if (seen.contains(rel)) continue;
+        seen.insert(rel) catch return CellarError.OutOfMemory;
+
+        const full = std.fs.path.join(allocator, &.{ cellar_path, rel }) catch return CellarError.OutOfMemory;
+        errdefer allocator.free(full);
+
+        const st = std.Io.Dir.cwd().statFile(io, full, .{ .follow_symlinks = false }) catch {
+            allocator.free(full);
+            continue;
+        };
+        if (st.kind != .file) {
+            allocator.free(full);
+            continue;
+        }
+        // A symlinked parent directory can point anywhere; only the
+        // resolved path says whether the file is really in the keg.
+        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const real_len = std.Io.Dir.cwd().realPathFile(io, full, &real_buf) catch {
+            allocator.free(full);
+            continue;
+        };
+        const real = real_buf[0..real_len];
+        if (!std.mem.startsWith(u8, real, keg_real) or real.len <= keg_real.len or real[keg_real.len] != '/') {
+            std.log.debug("{s}: receipt lists {s} outside the keg; relocating by walk", .{ cellar_path, rel });
+            allocator.free(full);
+            return null;
+        }
+        out.append(allocator, full) catch return CellarError.OutOfMemory;
+    };
+    const owned = out.toOwnedSlice(allocator) catch return CellarError.OutOfMemory;
+    handed_over = true;
+    return owned;
+}
+
+fn freePaths(allocator: std.mem.Allocator, paths: []const []const u8) void {
+    for (paths) |p| allocator.free(p);
+    allocator.free(paths);
+}
+
 fn relocateKegTree(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -650,7 +802,7 @@ fn relocateKegTree(
         macho_reps_len = 4;
     }
 
-    // `walkMachOAndPatch` collects every file it actually mutated; only
+    // Whichever pass runs below records every file it actually mutated; only
     // those need re-signing. Bottles with no `/opt/homebrew` references
     // (`tree`, ...) come back with an empty list and skip the codesign
     // subprocess entirely.
@@ -660,15 +812,72 @@ fn relocateKegTree(
         modified_macho_paths.deinit(allocator);
     }
 
+    var new_library_buf: [256]u8 = undefined;
+    const new_library = std.fmt.bufPrint(&new_library_buf, "{s}/Library", .{new_prefix}) catch new_prefix;
+
+    // Resolved here rather than at each call site so install, upgrade, migrate
+    // and rollback cannot drift apart on it.
+    var perl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const perl = perlReplacement(io, allocator, &perl_buf, new_prefix, cellar_path);
+
+    // Last on purpose: text replacements run in sequence per file, so
+    // appending keeps the substituted path out of the prefix rewrites above.
+    var text_reps_buf: [8]patch.Replacement = undefined;
+    text_reps_buf[0] = .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix };
+    text_reps_buf[1] = .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar };
+    // malt has no separate repository checkout; shellenv reports the prefix.
+    text_reps_buf[2] = .{ .old = "@@HOMEBREW_REPOSITORY@@", .new = new_prefix };
+    text_reps_buf[3] = .{ .old = "@@HOMEBREW_LIBRARY@@", .new = new_library };
+    text_reps_buf[4] = .{ .old = "/opt/homebrew", .new = new_prefix };
+    text_reps_buf[5] = .{ .old = "/usr/local", .new = new_prefix };
+    text_reps_buf[6] = perl;
+    var text_reps_len: usize = 7;
+    if (extra_replacement) |r| {
+        text_reps_buf[7] = r;
+        text_reps_len = 8;
+    }
+    const text_reps = text_reps_buf[0..text_reps_len];
+    const macho_reps = macho_reps_buf[0..macho_reps_len];
+
+    // Bottles built by recent brew record which files they rewrote at bottle
+    // time; visiting only those saves opening every file in the keg. Load
+    // commands and string data are recorded in separate lists, and the
+    // Mach-O pass rewrites both, so it needs both to skip the walk.
+    var receipt = readBottleReceipt(io, allocator, cellar_path);
+    defer if (receipt) |*r| r.deinit();
+
+    const listed_macho: ?[][]const u8 = if (receipt) |r| blk: {
+        const linkage = r.linkage_files orelse break :blk null;
+        const binary = r.binary_relocation_files orelse break :blk null;
+        break :blk try resolveKegFiles(io, allocator, cellar_path, &.{ linkage, binary });
+    } else null;
+    defer if (listed_macho) |files| freePaths(allocator, files);
+
+    const listed_text: ?[][]const u8 = if (receipt) |r| blk: {
+        const changed = r.changed_files orelse break :blk null;
+        break :blk try resolveKegFiles(io, allocator, cellar_path, &.{changed});
+    } else null;
+    defer if (listed_text) |files| freePaths(allocator, files);
+
     var unrelocatable: u32 = 0;
-    walkMachOAndPatch(
-        io,
-        allocator,
-        cellar_path,
-        macho_reps_buf[0..macho_reps_len],
-        &modified_macho_paths,
-        &unrelocatable,
-    ) catch |e| switch (e) {
+    // Mach-O paths the walk saw; empty on the list path, which verifies by
+    // walking since the list is the very thing verification double-checks.
+    var walked_machos: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (walked_machos.items) |p| allocator.free(p);
+        walked_machos.deinit(allocator);
+    }
+
+    // Only a receipt with no lists at all takes the single walk; each half
+    // otherwise decides for itself.
+    const walked = listed_macho == null and listed_text == null;
+    const pass = if (walked)
+        walkKegAndPatch(io, allocator, cellar_path, macho_reps, text_reps, &modified_macho_paths, &unrelocatable, &walked_machos)
+    else if (listed_macho) |files| blk: {
+        for (files) |f| patchOneMachO(io, allocator, f, macho_reps, &modified_macho_paths, &unrelocatable) catch |e| break :blk e;
+        break :blk {};
+    } else walkMachOAndPatch(io, allocator, cellar_path, macho_reps, &modified_macho_paths, &unrelocatable);
+    pass catch |e| switch (e) {
         CellarError.PathTooLong => return CellarError.PathTooLong,
         CellarError.InsufficientHeaderPad => return CellarError.InsufficientHeaderPad,
         CellarError.InstallNameToolMissing => return CellarError.InstallNameToolMissing,
@@ -689,33 +898,15 @@ fn relocateKegTree(
         writeUnrelocatedMarker(io, allocator, cellar_path, unrelocatable);
     }
 
-    var new_library_buf: [256]u8 = undefined;
-    const new_library = std.fmt.bufPrint(&new_library_buf, "{s}/Library", .{new_prefix}) catch new_prefix;
-
-    // Resolved here rather than at each call site so install, upgrade, migrate
-    // and rollback cannot drift apart on it.
-    var perl_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const perl = perlReplacement(io, allocator, &perl_buf, new_prefix, cellar_path);
-
-    // Last on purpose: `patchTextFiles` runs sequential passes, so appending
-    // keeps the substituted path out of the prefix rewrites above.
-    var text_reps_buf: [8]patch.Replacement = undefined;
-    text_reps_buf[0] = .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix };
-    text_reps_buf[1] = .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar };
-    // malt has no separate repository checkout; shellenv reports the prefix.
-    text_reps_buf[2] = .{ .old = "@@HOMEBREW_REPOSITORY@@", .new = new_prefix };
-    text_reps_buf[3] = .{ .old = "@@HOMEBREW_LIBRARY@@", .new = new_library };
-    text_reps_buf[4] = .{ .old = "/opt/homebrew", .new = new_prefix };
-    text_reps_buf[5] = .{ .old = "/usr/local", .new = new_prefix };
-    text_reps_buf[6] = perl;
-    var text_reps_len: usize = 7;
-    if (extra_replacement) |r| {
-        text_reps_buf[7] = r;
-        text_reps_len = 8;
+    if (!walked) {
+        if (listed_text) |files| {
+            patch.patchTextFileList(io, allocator, files, text_reps);
+        } else {
+            _ = patch.patchTextFiles(io, allocator, cellar_path, text_reps) catch |e| {
+                std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
+            };
+        }
     }
-    _ = patch.patchTextFiles(io, allocator, cellar_path, text_reps_buf[0..text_reps_len]) catch |e| {
-        std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
-    };
 
     if (codesign.isArm64() and modified_macho_paths.items.len > 0) {
         codesign.adHocSignAll(io, allocator, modified_macho_paths.items) catch |e| switch (e) {
@@ -726,7 +917,10 @@ fn relocateKegTree(
 
     // Before the etc/var pour, which writes outside the keg: a failure here
     // must leave nothing behind but the caller's `errdefer` wipe.
-    try walkMachOAndVerify(io, allocator, cellar_path);
+    if (walked)
+        try verifyMachOList(io, allocator, walked_machos.items)
+    else
+        try walkMachOAndVerify(io, allocator, cellar_path);
 
     // After text patching, so the poured configs already carry the malt
     // prefix instead of the bottled `/opt/homebrew` paths.
@@ -1742,4 +1936,318 @@ test "remove deletes the keg it names" {
 
     const gone = s.p("/prefix/Cellar/openssl@3/3.2.1+dfsg");
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, gone, .{}));
+}
+
+/// Two prefix-linked binaries and two placeholdered configs under a keg, so
+/// a test can tell "patched the listed file" from "patched everything".
+fn stageReceiptKeg(s: *Scratch, receipt_json: []const u8) ![:0]const u8 {
+    const io = std.Options.debug_io;
+    const keg = s.p("/Cellar/tool/1.0");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/tool/1.0/bin"));
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/tool/1.0/etc"));
+
+    const image = try buildLoadDylibMachO(std.testing.allocator, "/opt/homebrew/opt/flac/lib/libFLAC.14.dylib", 128);
+    defer std.testing.allocator.free(image);
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/bin/a"), image);
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/bin/b"), image);
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/etc/a.conf"), "root=@@HOMEBREW_PREFIX@@/etc\n");
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/etc/b.conf"), "root=@@HOMEBREW_PREFIX@@/etc\n");
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/INSTALL_RECEIPT.json"), receipt_json);
+    return keg;
+}
+
+fn dylibPathIsRelocated(io: std.Io, bin: []const u8) !bool {
+    const got = try relocatedDylibPath(std.testing.allocator, io, bin);
+    defer std.testing.allocator.free(got);
+    return !std.mem.startsWith(u8, got, "/opt/homebrew/");
+}
+
+fn textIsRelocated(io: std.Io, path: []const u8) !bool {
+    const got = try std.Io.Dir.cwd().readFileAlloc(io, path, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(got);
+    return std.mem.indexOf(u8, got, "@@HOMEBREW_PREFIX@@") == null;
+}
+
+test "relocateKegTree patches only listed files when the receipt carries lists" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("reloc_receipt_lists");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s,
+        \\{"changed_files": ["etc/a.conf"], "linkage_files": ["bin/a"], "binary_relocation_files": []}
+    );
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/a")));
+    try testing.expect(!try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/b")));
+    try testing.expect(try textIsRelocated(io, s.p("/Cellar/tool/1.0/etc/a.conf")));
+    try testing.expect(!try textIsRelocated(io, s.p("/Cellar/tool/1.0/etc/b.conf")));
+}
+
+test "relocateKegTree honours the string-data list as well as the load-command one" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // brew records a binary that only carries the prefix in string data in
+    // the second list; malt's pass rewrites that data, so it must visit it.
+    var s = try Scratch.init("reloc_receipt_binary_list");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s,
+        \\{"changed_files": [], "linkage_files": [], "binary_relocation_files": ["bin/b"]}
+    );
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    try testing.expect(!try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/a")));
+    try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/b")));
+}
+
+test "relocateKegTree skips the walks when the receipt lists nothing" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // An empty list is the bottler saying "nothing to do" - not "unknown".
+    var s = try Scratch.init("reloc_receipt_empty");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s,
+        \\{"changed_files": [], "linkage_files": [], "binary_relocation_files": []}
+    );
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    try testing.expect(!try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/a")));
+    try testing.expect(!try textIsRelocated(io, s.p("/Cellar/tool/1.0/etc/a.conf")));
+}
+
+test "relocateKegTree falls back to the walk when the receipt has no lists" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // Older bottles carry the text list but not the Mach-O ones; each half
+    // decides on its own, so the text side may still take the short path.
+    var s = try Scratch.init("reloc_receipt_absent");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s,
+        \\{"changed_files": null, "linkage_files": null}
+    );
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/a")));
+    try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/b")));
+    try testing.expect(try textIsRelocated(io, s.p("/Cellar/tool/1.0/etc/a.conf")));
+    try testing.expect(try textIsRelocated(io, s.p("/Cellar/tool/1.0/etc/b.conf")));
+}
+
+test "relocateKegTree walks the Mach-O half when only one of its lists is missing" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // The Mach-O pass rewrites load commands and string data; it needs both
+    // lists to know every file it would touch.
+    var s = try Scratch.init("reloc_receipt_half");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s,
+        \\{"changed_files": ["etc/a.conf"], "linkage_files": ["bin/a"]}
+    );
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/b")));
+    try testing.expect(!try textIsRelocated(io, s.p("/Cellar/tool/1.0/etc/b.conf")));
+}
+
+test "relocateKegTree walks the text half when only changed_files is missing" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("reloc_receipt_text_half");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s,
+        \\{"linkage_files": ["bin/a"], "binary_relocation_files": []}
+    );
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/a")));
+    try testing.expect(!try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/b")));
+    try testing.expect(try textIsRelocated(io, s.p("/Cellar/tool/1.0/etc/a.conf")));
+    try testing.expect(try textIsRelocated(io, s.p("/Cellar/tool/1.0/etc/b.conf")));
+}
+
+test "relocateKegTree rejects a list entry escaping the keg and falls back" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("reloc_receipt_escape");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/outside"));
+    const image = try buildLoadDylibMachO(testing.allocator, "/opt/homebrew/opt/flac/lib/libFLAC.14.dylib", 128);
+    defer testing.allocator.free(image);
+    const victim = s.p("/outside/victim");
+    try atomic.atomicWriteFile(io, victim, image);
+    try atomic.atomicWriteFile(io, s.p("/outside/victim.conf"), "@@HOMEBREW_PREFIX@@\n");
+
+    const keg = try stageReceiptKeg(&s,
+        \\{"changed_files": ["../../../outside/victim.conf"],
+        \\ "linkage_files": ["bin/a", "../../../outside/victim"],
+        \\ "binary_relocation_files": []}
+    );
+
+    try relocateKegTree(io, testing.allocator, keg, "", null);
+
+    try testing.expect(!try dylibPathIsRelocated(io, victim));
+    try testing.expect(!try textIsRelocated(io, s.p("/outside/victim.conf")));
+    try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/a")));
+    try testing.expect(try dylibPathIsRelocated(io, s.p("/Cellar/tool/1.0/bin/b")));
+    try testing.expect(try textIsRelocated(io, s.p("/Cellar/tool/1.0/etc/b.conf")));
+}
+
+test "resolveKegFiles refuses entries that leave the keg through a symlink" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("reloc_receipt_symlink");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s, "{}");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/outside"));
+    try atomic.atomicWriteFile(io, s.p("/outside/victim"), "x");
+    try std.Io.Dir.cwd().symLink(io, s.p("/outside"), s.p("/Cellar/tool/1.0/lib"), .{});
+
+    const escaping = [_][]const u8{"lib/victim"};
+    try testing.expect(try resolveKegFiles(io, testing.allocator, keg, &.{&escaping}) == null);
+
+    const absolute = [_][]const u8{s.p("/Cellar/tool/1.0/bin/a")};
+    try testing.expect(try resolveKegFiles(io, testing.allocator, keg, &.{&absolute}) == null);
+}
+
+test "resolveKegFiles dedupes across lists and drops what is not a regular file" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("reloc_receipt_resolve");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s, "{}");
+    try std.Io.Dir.cwd().symLink(io, s.p("/Cellar/tool/1.0/bin/a"), s.p("/Cellar/tool/1.0/bin/a-link"), .{});
+
+    // `bin/a` appears in both lists; a file in both would otherwise be
+    // patched and counted twice.
+    const linkage = [_][]const u8{ "bin/a", "bin/gone", "bin/a-link", "bin" };
+    const binary = [_][]const u8{ "bin/a", "bin/b" };
+    const files = (try resolveKegFiles(io, testing.allocator, keg, &.{ &linkage, &binary })).?;
+    defer freePaths(testing.allocator, files);
+
+    try testing.expectEqual(@as(usize, 2), files.len);
+    try testing.expectEqualStrings(s.p("/Cellar/tool/1.0/bin/a"), files[0]);
+    try testing.expectEqualStrings(s.p("/Cellar/tool/1.0/bin/b"), files[1]);
+}
+
+test "relocateKegTree verifies every Mach-O in the keg, not only the ones it patched" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    if (!codesign.isArm64()) return error.SkipZigTest;
+
+    // A binary relocation never touched can still be unloadable; the check
+    // exists to catch exactly that, so narrowing it to the patched set would
+    // ship the keg anyway.
+    var s = try Scratch.init("reloc_verify_untouched");
+    defer s.deinit();
+    const keg = s.p("/Cellar/tool/1.0");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/tool/1.0/bin"));
+
+    const image = try buildLoadDylibMachO(testing.allocator, "@rpath/libself.dylib", 128);
+    defer testing.allocator.free(image);
+    const signed = try signedArm64Keg(testing.allocator, image);
+    defer testing.allocator.free(signed);
+    // Flip a padding byte inside the signed image: the bytes no longer hash
+    // to the signature, and no path needed relocation.
+    signed[image.len - 1] ^= 0xff;
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/bin/tool"), signed);
+
+    try testing.expectError(CellarError.VerifyFailed, relocateKegTree(io, testing.allocator, keg, "", null));
+}
+
+test "walkKegAndPatch never returns success having mutated a file it did not queue for re-signing" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    // Same window as the Mach-O-only walk, plus the second hand-over of the
+    // path into the verify list: neither may leak, double free, or report
+    // success for a rewritten binary that is on no list.
+    var s = try Scratch.init("reloc_keg_walk_oom");
+    defer s.deinit();
+    const keg = s.p("/Cellar/tool/1.0");
+    try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/tool/1.0/bin"));
+    const bin = s.p("/Cellar/tool/1.0/bin/tool");
+    try atomic.atomicWriteFile(io, s.p("/Cellar/tool/1.0/bin/tool.conf"), "root=@@HOMEBREW_PREFIX@@\n");
+
+    const bytes = try buildLoadDylibMachO(testing.allocator, "/opt/homebrew/opt/flac/lib/libFLAC.14.dylib", 128);
+    defer testing.allocator.free(bytes);
+    const macho_reps = [_]patch.Replacement{.{ .old = "/opt/homebrew", .new = "/opt/malt" }};
+    const text_reps = [_]patch.Replacement{.{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" }};
+
+    var saw_post_write_oom = false;
+    var fail_index: usize = 0;
+    while (fail_index < 64) : (fail_index += 1) {
+        try atomic.atomicWriteFile(io, bin, bytes);
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        const alloc = failing.allocator();
+
+        var modified: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (modified.items) |m| alloc.free(m);
+            modified.deinit(alloc);
+        }
+        var machos: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (machos.items) |m| alloc.free(m);
+            machos.deinit(alloc);
+        }
+        var unrelocatable: u32 = 0;
+        const result = walkKegAndPatch(io, alloc, keg, &macho_reps, &text_reps, &modified, &unrelocatable, &machos);
+
+        const got = try relocatedDylibPath(testing.allocator, io, bin);
+        defer testing.allocator.free(got);
+        const mutated = std.mem.startsWith(u8, got, "/opt/malt");
+
+        if (result) |_| {
+            if (mutated) try testing.expectEqual(@as(usize, 1), modified.items.len);
+            try testing.expectEqual(@as(usize, 1), machos.items.len);
+        } else |e| {
+            try testing.expectEqual(CellarError.OutOfMemory, e);
+            if (mutated) saw_post_write_oom = true;
+        }
+    }
+    try testing.expect(saw_post_write_oom);
+}
+
+test "resolveKegFiles under allocation failure either resolves fully or hands nothing back" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    var s = try Scratch.init("reloc_resolve_oom");
+    defer s.deinit();
+    const keg = try stageReceiptKeg(&s, "{}");
+
+    // Several allocations per entry; a failure at any one must not leak the
+    // paths already resolved or return a partial list.
+    const linkage = [_][]const u8{ "bin/a", "bin/b", "etc/a.conf" };
+    const binary = [_][]const u8{ "bin/a", "etc/b.conf" };
+    var saw_oom = false;
+    var fail_index: usize = 0;
+    while (fail_index < 32) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        const alloc = failing.allocator();
+        if (resolveKegFiles(io, alloc, keg, &.{ &linkage, &binary })) |maybe| {
+            const files = maybe.?;
+            defer freePaths(alloc, files);
+            try testing.expectEqual(@as(usize, 4), files.len);
+        } else |e| {
+            try testing.expectEqual(CellarError.OutOfMemory, e);
+            saw_oom = true;
+        }
+    }
+    try testing.expect(saw_oom);
 }

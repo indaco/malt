@@ -26,6 +26,12 @@ pub const Receipt = struct {
     /// `installed_on_request`. True when absent: very old brew receipts
     /// omit the pair, and metadata must never demote a keg.
     on_request: bool,
+    /// Keg-relative files the bottler rewrote, so relocation can visit only
+    /// those. `null` when the bottle predates the metadata (walk the keg);
+    /// empty when the bottler found nothing to rewrite.
+    changed_files: ?[]const []const u8,
+    linkage_files: ?[]const []const u8,
+    binary_relocation_files: ?[]const []const u8,
 
     arena: std.heap.ArenaAllocator,
 
@@ -145,8 +151,29 @@ pub fn parseInstallReceipt(parent: std.mem.Allocator, json_text: []const u8) Par
         .source_path = source_path,
         .runtime_deps = deps,
         .on_request = on_request,
+        .changed_files = try optionalStringList(a, root, "changed_files"),
+        .linkage_files = try optionalStringList(a, root, "linkage_files"),
+        .binary_relocation_files = try optionalStringList(a, root, "binary_relocation_files"),
         .arena = arena,
     };
+}
+
+/// Null unless `key` is an array of strings: a list malt cannot trust must
+/// read as "no list", never as a partial one.
+fn optionalStringList(a: std.mem.Allocator, root: std.json.ObjectMap, key: []const u8) ParseError!?[]const []const u8 {
+    const v = root.get(key) orelse return null;
+    const arr = switch (v) {
+        .array => |arr| arr,
+        else => return null,
+    };
+    const out = a.alloc([]const u8, arr.items.len) catch return ParseError.OutOfMemory;
+    for (arr.items, out) |item, *slot| {
+        slot.* = switch (item) {
+            .string => |s| a.dupe(u8, s) catch return ParseError.OutOfMemory,
+            else => return null,
+        };
+    }
+    return out;
 }
 
 /// True for `homebrew/core` (the stock tap) or an empty/missing tap.
@@ -312,5 +339,55 @@ test "parseInstallReceipt keeps the versions real formulae ship" {
         var r = try parseInstallReceipt(std.testing.allocator, json);
         defer r.deinit();
         try std.testing.expectEqualStrings(v, r.version);
+    }
+}
+
+test "parseInstallReceipt distinguishes absent, null and empty changed_files" {
+    // Absent or null: the bottle predates the metadata and the whole keg
+    // must be walked. Empty: the bottler checked and nothing needs it.
+    var absent = try parseInstallReceipt(std.testing.allocator, "{}");
+    defer absent.deinit();
+    try std.testing.expect(absent.changed_files == null);
+
+    var nulled = try parseInstallReceipt(std.testing.allocator, "{\"changed_files\": null}");
+    defer nulled.deinit();
+    try std.testing.expect(nulled.changed_files == null);
+
+    var empty = try parseInstallReceipt(std.testing.allocator, "{\"changed_files\": []}");
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty.changed_files.?.len);
+}
+
+test "parseInstallReceipt reads the relocation file lists in order" {
+    const src =
+        \\{
+        \\  "changed_files": ["bin/magick-config", "lib/pkgconfig/x.pc"],
+        \\  "linkage_files": ["bin/magick", "lib/libMagick.dylib"],
+        \\  "binary_relocation_files": ["lib/libMagickCore.dylib"]
+        \\}
+    ;
+    var r = try parseInstallReceipt(std.testing.allocator, src);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 2), r.changed_files.?.len);
+    try std.testing.expectEqualStrings("bin/magick-config", r.changed_files.?[0]);
+    try std.testing.expectEqualStrings("lib/pkgconfig/x.pc", r.changed_files.?[1]);
+    try std.testing.expectEqual(@as(usize, 2), r.linkage_files.?.len);
+    try std.testing.expectEqualStrings("bin/magick", r.linkage_files.?[0]);
+    try std.testing.expectEqualStrings("lib/libMagick.dylib", r.linkage_files.?[1]);
+    try std.testing.expectEqual(@as(usize, 1), r.binary_relocation_files.?.len);
+    try std.testing.expectEqualStrings("lib/libMagickCore.dylib", r.binary_relocation_files.?[0]);
+}
+
+test "parseInstallReceipt treats a malformed relocation list as absent" {
+    // A list malt cannot trust must send the keg down the full walk, never
+    // a partial one.
+    for ([_][]const u8{
+        "{\"linkage_files\": \"bin/magick\"}",
+        "{\"linkage_files\": [\"bin/magick\", 7]}",
+        "{\"linkage_files\": [null]}",
+    }) |src| {
+        var r = try parseInstallReceipt(std.testing.allocator, src);
+        defer r.deinit();
+        try std.testing.expect(r.linkage_files == null);
     }
 }

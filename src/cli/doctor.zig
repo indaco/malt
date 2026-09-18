@@ -1580,11 +1580,10 @@ fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {
 
 /// True when `content` is patchable text still carrying a relocation token.
 /// Matches `@@HOMEBREW_` generically: doctor only warns, so an unknown token
-/// is worth surfacing rather than ignoring. The NUL sniff mirrors
-/// `patchTextFiles` so doctor never flags a file the patcher would skip.
+/// is worth surfacing rather than ignoring. The patcher's own classifier
+/// decides "text", so doctor never flags a file relocation would skip.
 fn textCarriesPlaceholder(content: []const u8) bool {
-    const check_len = @min(content.len, 8192);
-    if (std.mem.findScalar(u8, content[0..check_len], 0) != null) return false;
+    if (patch.classifyHead(content) != .text) return false;
     return std.mem.indexOf(u8, content, "@@HOMEBREW_") != null;
 }
 
@@ -1600,17 +1599,17 @@ fn hasUnpatchedPlaceholder(
     var file = base_dir.openFile(io, rel_path, .{}) catch return false;
     defer file.close(io);
 
-    var magic: [4]u8 = undefined;
-    const n = file.readPositionalAll(io, &magic, 0) catch return false;
-    if (n < 4) return false;
-    const is_macho = parser.isMachO(&magic);
-
     const stat = file.stat(io) catch return false;
+    if (stat.size == 0) return false;
+
+    var head_buf: [patch.text_head_len]u8 = undefined;
+    const head_len = file.readPositionalAll(io, head_buf[0..@min(stat.size, patch.text_head_len)], 0) catch return false;
+    const kind = patch.classifyHead(head_buf[0..head_len]);
 
     // A wrapper script that kept a token is as broken as a dylib that did.
-    // The 10MB cap matches `patchTextFiles`: larger files were never patched.
-    if (!is_macho) {
-        if (stat.size == 0 or stat.size > 10 * 1024 * 1024) return false;
+    // The 10MB cap matches the text patcher: larger files were never patched.
+    if (kind != .macho) {
+        if (kind == .binary or stat.size > 10 * 1024 * 1024) return false;
         const text = allocator.alloc(u8, stat.size) catch return false;
         defer allocator.free(text);
         const got = file.readPositionalAll(io, text, 0) catch return false;
