@@ -573,7 +573,7 @@ pub fn resolveBase(ctx: StepsCtx, base: []const u8, formula_ref: ?[]const u8) ?[
     return switch (ctx.subject) {
         .formula => resolveFormulaBase(ctx, base, formula_ref),
         .cask => |c| switch (cask_base_map.get(base) orelse return null) {
-            .home => c.home,
+            .home => if (saneRoot(c.home)) c.home else null,
             .staged_path => c.staged_path,
             .caskroom_path => c.caskroom_path,
             .appdir => c.appdir,
@@ -633,8 +633,15 @@ fn resolveSpec(ctx: StepsCtx, spec: std.json.ObjectMap, key: ?[]const u8) ?[]con
     const base = getString(spec, "base") orelse "absolute";
     if (std.mem.eql(u8, base, "absolute") or std.mem.eql(u8, base, "relative")) return path;
     const root = resolveBase(ctx, base, getString(spec, "formula")) orelse {
-        if (key != null)
-            logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "base {s}", .{base}) catch base);
+        if (key != null) {
+            // A cask `home` base only fails for one reason, and "base home"
+            // alone would send the user looking at the cask.
+            const detail = if (ctx.subject == .cask and std.mem.eql(u8, base, "home"))
+                "base home (HOME is not set)"
+            else
+                std.fmt.allocPrint(ctx.allocator, "base {s}", .{base}) catch base;
+            logUnsupported(ctx, detail);
+        }
         return null;
     };
     return std.fs.path.join(ctx.allocator, &.{ root, path }) catch null;
@@ -660,13 +667,25 @@ fn rootPairs(ctx: StepsCtx) RootPairs {
     switch (ctx.subject) {
         .formula => {},
         .cask => |c| {
-            // OOM narrows the set rather than widening it.
-            const home_lib = std.fs.path.join(ctx.allocator, &.{ c.home, "Library" }) catch return out;
-            out.buf[1] = .{ home_lib, c.appdir };
+            // `pathHasPrefix(x, "/")` admits everything, so a root that is
+            // the disk, relative, or unset never enters the set. OOM and a
+            // bad root both narrow it rather than widen it.
+            const home_lib = if (saneRoot(c.home))
+                std.fs.path.join(ctx.allocator, &.{ c.home, "Library" }) catch null
+            else
+                null;
+            const appdir: ?[]const u8 = if (saneRoot(c.appdir)) c.appdir else null;
+            const first = home_lib orelse appdir orelse return out;
+            out.buf[1] = .{ first, appdir orelse first };
             out.len = 2;
         },
     }
     return out;
+}
+
+/// Absolute and below `/`: the only shape a confinement root may have.
+fn saneRoot(path: []const u8) bool {
+    return std.fs.path.isAbsolute(path) and std.mem.trimEnd(u8, path, "/").len > 0;
 }
 
 fn validatePath(ctx: StepsCtx, path: []const u8) sandbox.SandboxError!void {
@@ -5263,7 +5282,7 @@ test "a recursive remove refuses the applications dir itself but not one app in 
     try testing.expectEqual(@as(usize, 1), ch.h.flog.entries().len);
 }
 
-test "with HOME unset every home step is refused and nothing lands relative to cwd" {
+test "with HOME unset every home step is refused by name and nothing lands relative to cwd" {
     var ch = try CaskHarness.init();
     defer ch.deinit();
     var c = ch.ctx();
@@ -5272,10 +5291,46 @@ test "with HOME unset every home step is refused and nothing lands relative to c
     runSteps(c, try parseSteps(&ch.h,
         \\[{"type":"mkdir_p","path":{"base":"home","path":"Library/malt_home_unset_never"}}]
     ));
-    try testing.expect(ch.h.flog.hasFatal());
-    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, ch.h.flog.entries()[0].reason);
+    // Named, not a bare violation: the user has to learn it was HOME.
+    try testing.expect(!ch.h.flog.hasFatal());
+    try testing.expectEqualStrings("base home (HOME is not set)", ch.h.flog.entries()[0].detail);
     try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(c.io, "Library/malt_home_unset_never", .{}));
     try testing.expect(!dirExists(c.io, "/Library/malt_home_unset_never"));
+}
+
+test "a degenerate appdir or home never becomes a confinement root" {
+    // `pathHasPrefix(x, "/")` admits every path, so a `MALT_APPDIR=/` or
+    // `HOME=/` would turn the second root pair into the whole disk.
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const a = ch.h.arena.allocator();
+    const outside = try std.fs.path.join(a, &.{ ch.home, "escaped" });
+
+    const step = try std.fmt.allocPrint(a, "[{{\"type\":\"touch\",\"path\":{{\"path\":\"{s}\"}}}}]", .{outside});
+
+    const degenerate = [_][]const u8{ "/", "//", "relative/apps", "" };
+    for (degenerate) |bad| {
+        var c = ch.ctx();
+        c.subject.cask.appdir = bad;
+        runSteps(c, try parseSteps(&ch.h, step));
+        try testing.expect(ch.h.flog.hasFatal());
+        try testing.expect(!pathExists(c.io, outside));
+    }
+    for (degenerate) |bad| {
+        var c = ch.ctx();
+        c.subject.cask.home = bad;
+        runSteps(c, try parseSteps(&ch.h, step));
+        try testing.expect(!pathExists(c.io, outside));
+    }
+    // A sane appdir does admit its own tree, so the refusal above is the
+    // root, not the step.
+    var c = ch.ctx();
+    c.subject.cask.appdir = try std.fs.path.join(a, &.{ ch.home, "Apps" });
+    try std.Io.Dir.cwd().createDirPath(c.io, c.subject.cask.appdir);
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"touch","path":{"base":"appdir","path":"ok"}}]
+    ));
+    try testing.expect(fileExists(c.io, try std.fs.path.join(a, &.{ c.subject.cask.appdir, "ok" })));
 }
 
 fn fileMode(io: std.Io, path: []const u8) !std.posix.mode_t {
