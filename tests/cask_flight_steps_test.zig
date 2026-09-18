@@ -1008,3 +1008,65 @@ test "uninstall --force still refuses a running app before any stored step acts"
     defer db.close();
     try testing.expect(cask.isInstalled(&db, "live"));
 }
+
+test "rollback runs the outgoing version's uninstall steps and drops its declared symlink" {
+    var fx = try Fixture.init("rollback_phases");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    const a = fx.arena.allocator();
+    const appdir = fx.p("Applications");
+    const block = try a.allocSentinel(?[*:0]const u8, 2, null);
+    block[0] = (try std.fmt.allocPrintSentinel(a, "HOME={s}", .{fx.home}, 0)).ptr;
+    block[1] = (try std.fmt.allocPrintSentinel(a, "MALT_APPDIR={s}", .{appdir}, 0)).ptr;
+    const environ: std.process.Environ = .{ .block = .{ .slice = block } };
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // 2.0 is installed with steps on record; 1.0 is in history with its
+    // artefact cached, which is all a rollback needs.
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const sha1 = try seedZipArtifact(&fx, io, "plain", "1.0", "Plain.app");
+    const v2_json =
+        \\{"token":"plain","name":["Plain"],"version":"2.0","url":"https://example.invalid/plain-2.0.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Plain.app"]},
+        \\  {"postflight_steps":[{"steps":[{"type":"symlink","source":{"base":"staged_path","path":"libplain.{{version}}.dylib"},
+        \\    "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libplain.dylib"},"uninstall":true}]}]},
+        \\  {"uninstall_postflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":"Library/plain.gone"},"content":"{{version}}"}]}]}]}
+    ;
+    const app = try std.fmt.allocPrint(a, "{s}/Plain.app", .{appdir});
+    try putFile(io, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{app}), "2.0");
+    {
+        try test_io.cwd().createDirPath(io, fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c2 = try cask.parseCaskWithMajor(testing.allocator, v2_json, null);
+        defer c2.deinit();
+        try cask.recordInstall(&db, &c2, app, null);
+        try cask.recordCaskVersion(&db, "plain", "1.0", "https://example.invalid/plain-1.0.zip", &sha1, "zip", fx.p("cache/Cask/plain-1.0.zip"));
+        // The link 2.0's postflight placed, as the install left it.
+        try test_io.cwd().createDirPath(io, fx.p("lib"));
+        try std.Io.Dir.symLinkAbsolute(io, fx.p("Caskroom/plain/2.0/libplain.2.0.dylib"), fx.p("lib/libplain.dylib"), .{});
+    }
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(true);
+    defer malt.output.setQuiet(prior_quiet);
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = environ, .offline = true };
+    try malt.cli_rollback.execute(&ctx, testing.allocator, &.{ "plain", "--to", "1.0" });
+
+    // A later uninstall would expand the source with 1.0 and never match
+    // this link, so it has to go now, while 2.0 is the version leaving.
+    try testing.expect(!linkExists(io, fx.p("lib/libplain.dylib")));
+    const gone = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.h("Library/plain.gone"), 64);
+    defer testing.allocator.free(gone);
+    try testing.expectEqualStrings("2.0", gone);
+    const bin = try test_io.readFileAbsoluteAlloc(io, testing.allocator, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{app}), 64);
+    defer testing.allocator.free(bin);
+    try testing.expectEqualStrings("1.0", bin);
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    try testing.expectEqualStrings("1.0", cask.lookupInstalled(&db, "plain").?.version());
+}
