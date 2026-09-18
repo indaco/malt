@@ -956,7 +956,14 @@ fn stepSymlink(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const target = resolvePathSpec(ctx, obj, "target") orelse return false;
     if (!confined(ctx, target)) return false;
     const source = resolvePathSpec(ctx, obj, "source") orelse return false;
-    if (source.len == 0 or source[0] != '/') {
+    // A `relative` base is link content, not a location: written verbatim,
+    // as upstream does, so the link outlives the stage it was made in.
+    if (relativeSource(obj)) {
+        if (getFlag(obj, "source_glob")) {
+            logUnsupported(ctx, "symlink with a relative source_glob");
+            return false;
+        }
+    } else if (source.len == 0 or source[0] != '/') {
         // Still refused, but now only for a genuinely relative source. A
         // `{{bin}}`-style token used to land here because it survived
         // expansion unresolved, which read as relative.
@@ -974,8 +981,14 @@ fn stepSymlink(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     }
     mkParent(ctx, target);
     if (getFlag(obj, "force")) std.Io.Dir.cwd().deleteFile(ctx.io, target) catch {};
-    std.Io.Dir.symLinkAbsolute(ctx.io, source, target, .{}) catch {};
+    // Not `symLinkAbsolute`: that asserts absolute link content.
+    std.Io.Dir.cwd().symLink(ctx.io, source, target, .{}) catch {};
     return true;
+}
+
+fn relativeSource(obj: std.json.ObjectMap) bool {
+    const spec = getObject(obj, "source") orelse return false;
+    return std.mem.eql(u8, getString(spec, "base") orelse "", "relative");
 }
 
 /// `source_glob`: the source's last component is a pattern and `target` is the
@@ -5619,6 +5632,32 @@ test "a symlink declared with uninstall is placed on install and removed in unin
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(c.io, link, &buf));
     try testing.expectEqual(@as(usize, 2), ch.h.flog.total_top_level);
     try testing.expectEqual(@as(usize, 2), ch.h.flog.handled_top_level);
+}
+
+test "a symlink whose source base is relative is written verbatim and removed the same way" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    // The libcblite shape: the link content is a sibling name, resolved
+    // by the reader against the link's own directory.
+    const declared = try parseSteps(&ch.h,
+        \\[{"type":"symlink","source":{"base":"relative","path":"libx.{{version}}.dylib"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libx.{{version.major}}.dylib"},"uninstall":true},
+        \\ {"type":"symlink","source":{"base":"relative","path":"*.dylib"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib"},"source_glob":true}]
+    );
+    runSteps(c, declared);
+    const link = try std.fmt.allocPrint(a, "{s}/lib/libx.1.dylib", .{ch.h.prefix});
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings("libx.1.2.3.dylib", buf[0..try std.Io.Dir.readLinkAbsolute(c.io, link, &buf)]);
+    // A glob has nothing to expand against in link content.
+    try testing.expectEqual(@as(usize, 1), ch.h.flog.entries().len);
+    try testing.expectEqualStrings("symlink with a relative source_glob", ch.h.flog.entries()[0].detail);
+
+    runUninstallSteps(c, declared);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(c.io, link, &buf));
 }
 
 test "uninstall mode leaves a repointed link and a plain file alone" {
