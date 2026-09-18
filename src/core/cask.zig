@@ -65,6 +65,9 @@ pub const Cask = struct {
     /// refusal message. Null only when the cask declares none, so it is
     /// always set when `os_supported` is false.
     os_requirement: ?cask_variation.Requirement = null,
+    /// Declared `*_steps` per phase, borrowed from `parsed`; null when the
+    /// cask ships none for that phase.
+    flight_steps: FlightSteps = FlightSteps.initFill(null),
 
     parsed: std.json.Parsed(std.json.Value),
 
@@ -72,6 +75,43 @@ pub const Cask = struct {
         self.parsed.deinit();
     }
 };
+
+/// The four points at which a cask may declare steps, in install order.
+pub const FlightPhase = enum {
+    preflight,
+    postflight,
+    uninstall_preflight,
+    uninstall_postflight,
+
+    /// The artifact key the phase ships under.
+    pub fn key(self: FlightPhase) []const u8 {
+        return switch (self) {
+            inline else => |p| @tagName(p) ++ "_steps",
+        };
+    }
+};
+
+pub const FlightSteps = std.EnumArray(FlightPhase, ?[]const std.json.Value);
+
+/// Collect each phase's `steps` from its artifact entry. The DSL emits one
+/// entry per phase, so the first well-formed one wins.
+fn parseFlightSteps(obj: std.json.ObjectMap) FlightSteps {
+    var out = FlightSteps.initFill(null);
+    for (std.enums.values(FlightPhase)) |phase| {
+        const entries = firstArtifactArray(obj, phase.key()) orelse continue;
+        for (entries.items) |entry| {
+            const steps = switch (entry) {
+                .object => |o| o.get("steps") orelse continue,
+                else => continue,
+            };
+            if (steps == .array) {
+                out.set(phase, steps.array.items);
+                break;
+            }
+        }
+    }
+    return out;
+}
 
 /// Parse cask JSON from Homebrew API, resolved for the running macOS.
 pub fn parseCask(allocator: std.mem.Allocator, json_bytes: []const u8) !Cask {
@@ -123,6 +163,7 @@ pub fn parseCaskWithMajor(allocator: std.mem.Allocator, json_bytes: []const u8, 
         .auto_updates = getBool(obj.*, "auto_updates") orelse false,
         .os_supported = cask_variation.osSupported(requirement, macos_major),
         .os_requirement = requirement,
+        .flight_steps = parseFlightSteps(obj.*),
         .parsed = parsed,
     };
 }
@@ -2609,4 +2650,42 @@ test "unknown macOS major skips variation lookup" {
     const key = cask_variation.variationKey(&buf, 26).?;
     try std.testing.expect(std.mem.endsWith(u8, key, "tahoe"));
     try std.testing.expectEqual(builtin.cpu.arch == .aarch64, std.mem.startsWith(u8, key, "arm64_"));
+}
+
+test "parse keeps the four flight step arrays and ignores the rest" {
+    var c = try parseCaskWithMajor(std.testing.allocator,
+        \\{"token":"box","version":"6.0","url":"https://x/b.zip","artifacts":[
+        \\ {"preflight_steps":[{"steps":[{"type":"mkdir_p","path":{"base":"home","path":"Library/roms"}}]}]},
+        \\ {"app":["Box.app"]},
+        \\ {"postflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":"Library/a"},"content":"x"},{"type":"warn","message":"m"}]}]},
+        \\ {"uninstall_preflight_steps":[{"steps":[]}]},
+        \\ {"uninstall_postflight_steps":[{"steps":[{"type":"terminate_process","name":"boxd"}]}]},
+        \\ {"zap":[{"trash":["~/Library/Box"]}]}]}
+    , null);
+    defer c.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), c.flight_steps.get(.preflight).?.len);
+    try std.testing.expectEqual(@as(usize, 2), c.flight_steps.get(.postflight).?.len);
+    try std.testing.expectEqual(@as(usize, 0), c.flight_steps.get(.uninstall_preflight).?.len);
+    try std.testing.expectEqual(@as(usize, 1), c.flight_steps.get(.uninstall_postflight).?.len);
+    try std.testing.expectEqualStrings("terminate_process", c.flight_steps.get(.uninstall_postflight).?[0].object.get("type").?.string);
+}
+
+test "a cask without flight steps parses every phase as absent" {
+    var c = try parseCaskWithMajor(std.testing.allocator,
+        \\{"token":"plain","version":"1","url":"https://x/p.zip","artifacts":[{"app":["P.app"]},{"preflight_steps":[{"steps":"not-an-array"}]}]}
+    , null);
+    defer c.deinit();
+    for (std.enums.values(FlightPhase)) |phase| try std.testing.expect(c.flight_steps.get(phase) == null);
+}
+
+test "a variation's artifacts replace the flight steps too" {
+    var c = try parseCaskWithMajor(std.testing.allocator,
+        \\{"token":"v","version":"1","url":"https://x/v.zip",
+        \\ "artifacts":[{"postflight_steps":[{"steps":[{"type":"warn","message":"top"}]}]}],
+        \\ "variations":{"arm64_tahoe":{"artifacts":[{"postflight_steps":[{"steps":[{"type":"warn","message":"a"},{"type":"warn","message":"b"}]}]}]},
+        \\               "tahoe":{"artifacts":[{"postflight_steps":[{"steps":[{"type":"warn","message":"a"},{"type":"warn","message":"b"}]}]}]}}}
+    , 26);
+    defer c.deinit();
+    try std.testing.expectEqual(@as(usize, 2), c.flight_steps.get(.postflight).?.len);
 }
