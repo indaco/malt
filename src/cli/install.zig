@@ -1660,6 +1660,7 @@ fn installCask(
             @tagName(artifact_type),
             cask.url,
         });
+        post_install_mod.reportFlightPlan(allocator, &cask, sink);
         return;
     }
 
@@ -1688,6 +1689,12 @@ fn installCask(
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, cache_dir);
     installer.artifact_type_override = artifact_type;
     installer.offline = ctx.offline;
+    // Owns every step's log detail until the outcome is routed below.
+    var flight_arena = std.heap.ArenaAllocator.init(allocator);
+    defer flight_arena.deinit();
+    var flight_log = cask_mod.FlightLog.init(allocator);
+    defer flight_log.deinit();
+    installer.flight = .{ .log = &flight_log, .allocator = flight_arena.allocator() };
 
     // Progress bar for cask download, rendered as a one-line group so it
     // disables autowrap and restores on exit. A non-terminal sink (bundle)
@@ -1721,18 +1728,30 @@ fn installCask(
 
     const app_path = installer.install(&cask) catch |e| {
         if (sp) |*s| s.bar.finish();
+        if (e == cask_mod.CaskError.PreflightFailed) _ = post_install_mod.routeFlightOutcome(&flight_log, cask.token, "preflight", sink);
         // Surface the specific cause (Sha256Mismatch, DownloadFailed, …) —
         // users can't act on a bare "failed to install".
         sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
         return InstallError.CaskNotFound;
     };
     if (sp) |*s| s.bar.finish();
+    if (cask.flight_steps.get(.preflight) != null) _ = post_install_mod.routeFlightOutcome(&flight_log, cask.token, "preflight", sink);
 
     // Core API casks have no third-party tap origin to record.
     cask_mod.recordInstall(db, &cask, app_path, null) catch {
         sink.warn("Failed to record cask {s} in database", .{cask.token});
     };
     allocator.free(app_path);
+
+    // After the row: a postflight failure leaves an installed cask the user
+    // can uninstall, the same as a failed formula post_install.
+    if (cask.flight_steps.get(.postflight)) |steps| {
+        // Fresh log so preflight entries are not reported twice.
+        flight_log.deinit();
+        flight_log = cask_mod.FlightLog.init(allocator);
+        _ = installer.runFlight(cask.token, cask.version, steps, null);
+        _ = post_install_mod.routeFlightOutcome(&flight_log, cask.token, "postflight", sink);
+    }
 
     sink.success("{s} {s} installed", .{ cask.token, cask.version });
 }

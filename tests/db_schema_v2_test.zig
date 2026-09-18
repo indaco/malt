@@ -322,5 +322,30 @@ test "v16 drops the store_refs counter and keeps every claim row" {
     try testing.expect(try rows.step());
     try testing.expectEqualStrings("sha", std.mem.sliceTo(rows.columnText(0).?, 0));
     try testing.expect(!try rows.step());
-    try testing.expectEqual(@as(i64, 16), try schema.currentVersion(&t.db));
+    // The chain runs to the current head from v15, not just to v16.
+    try testing.expectEqual(schema.known_schema_version, try schema.currentVersion(&t.db));
+}
+
+fn casksHasColumn(db: *sqlite.Database, name: []const u8) !bool {
+    var stmt = try db.prepare("PRAGMA table_info(casks);");
+    defer stmt.finalize();
+    while (try stmt.step()) {
+        const col = stmt.columnText(1) orelse continue;
+        if (std.mem.eql(u8, std.mem.sliceTo(col, 0), name)) return true;
+    }
+    return false;
+}
+
+test "v17 adds the flight_steps column to casks once, fresh or upgraded" {
+    var t = try TempDb.init("v17_cask_flight_steps");
+    defer t.deinit();
+    try schema.initSchema(&t.db);
+    try testing.expect(try casksHasColumn(&t.db, "flight_steps"));
+
+    // Rerunning the step on a DB that already carries the column must not
+    // fail on a duplicate ALTER.
+    try t.db.exec("DELETE FROM schema_version WHERE version >= 17;");
+    try schema.migrate(&t.db);
+    try testing.expect(try casksHasColumn(&t.db, "flight_steps"));
+    try testing.expectEqual(@as(i64, 17), try schema.currentVersion(&t.db));
 }

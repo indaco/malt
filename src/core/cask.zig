@@ -14,8 +14,13 @@ const hash_mod = @import("hash.zig");
 const child_mod = @import("child.zig");
 const cask_font = @import("cask_font.zig");
 const cask_variation = @import("../net/cask_variation.zig");
+const steps_mod = @import("post_install_steps.zig");
+
+pub const FlightLog = steps_mod.FallbackLog;
 
 pub const CaskError = error{
+    /// A declared preflight step failed, so the artefact was never placed.
+    PreflightFailed,
     ParseFailed,
     DownloadFailed,
     InstallFailed,
@@ -196,9 +201,12 @@ pub fn recordInstall(
     app_path: ?[]const u8,
     tap: ?[]const u8,
 ) sqlite.SqliteError!void {
+    // Like `pinned`: a synthetic cask (rollback) carries no steps, so the
+    // row keeps the ones the original install stored.
     var stmt = try db.prepare(
-        "INSERT OR REPLACE INTO casks (token, name, version, url, sha256, app_path, auto_updates, pinned, tap)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE((SELECT pinned FROM casks WHERE token = ?1), 0), ?8);",
+        "INSERT OR REPLACE INTO casks (token, name, version, url, sha256, app_path, auto_updates, pinned, tap, flight_steps)" ++
+            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE((SELECT pinned FROM casks WHERE token = ?1), 0), ?8," ++
+            " COALESCE(?9, (SELECT flight_steps FROM casks WHERE token = ?1)));",
     );
     defer stmt.finalize();
 
@@ -210,7 +218,52 @@ pub fn recordInstall(
     if (app_path) |p| try stmt.bindText(6, p) else try stmt.bindNull(6);
     try stmt.bindInt(7, if (cask.auto_updates) 1 else 0);
     if (tap) |t| try stmt.bindText(8, t) else try stmt.bindNull(8);
+    // The parse arena owns the JSON so nothing outlives `cask.deinit`.
+    if (flightStepsJson(cask.parsed.arena.allocator(), cask.flight_steps)) |j| try stmt.bindText(9, j) else try stmt.bindNull(9);
     _ = try stmt.step();
+}
+
+/// The declared phases as one JSON object keyed by artifact name, or null
+/// when the cask declares none.
+fn flightStepsJson(allocator: std.mem.Allocator, steps: FlightSteps) ?[]const u8 {
+    var any = false;
+    for (std.enums.values(FlightPhase)) |phase| any = any or steps.get(phase) != null;
+    if (!any) return null;
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .preflight_steps = steps.get(.preflight),
+        .postflight_steps = steps.get(.postflight),
+        .uninstall_preflight_steps = steps.get(.uninstall_preflight),
+        .uninstall_postflight_steps = steps.get(.uninstall_postflight),
+    }, .{ .emit_null_optional_fields = false }) catch null;
+}
+
+/// The flight steps a cask's row stored at install time.
+pub const StoredFlight = struct {
+    parsed: std.json.Parsed(std.json.Value),
+
+    pub fn get(self: *const StoredFlight, phase: FlightPhase) ?[]const std.json.Value {
+        const v = self.parsed.value.object.get(phase.key()) orelse return null;
+        return if (v == .array) v.array.items else null;
+    }
+
+    pub fn deinit(self: *StoredFlight) void {
+        self.parsed.deinit();
+    }
+};
+
+/// Null when the row is missing or stored no steps.
+pub fn readFlightSteps(db: *sqlite.Database, allocator: std.mem.Allocator, token: []const u8) LookupError!?StoredFlight {
+    var stmt = try db.prepare("SELECT flight_steps FROM casks WHERE token = ?1 LIMIT 1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    if (!try stmt.step()) return null;
+    const raw = stmt.columnText(0) orelse return null;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, std.mem.sliceTo(raw, 0), .{}) catch return null;
+    if (parsed.value != .object) {
+        parsed.deinit();
+        return null;
+    }
+    return .{ .parsed = parsed };
 }
 
 /// Remove cask record from database.
@@ -725,6 +778,16 @@ pub const CaskInstaller = struct {
     /// which is what lets an upgrade survive a failed download even for a
     /// cask that pins no digest and so can never be validated from cache.
     prefetched_artifact: ?[]const u8 = null,
+    /// Where declared flight steps report. Null skips them, so callers that
+    /// only stage or roll back are unaffected.
+    flight: ?FlightSink = null,
+
+    /// The log borrows every detail from `allocator`, so both must outlive
+    /// the caller's routing of the outcome.
+    pub const FlightSink = struct {
+        log: *FlightLog,
+        allocator: std.mem.Allocator,
+    };
 
     pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]const u8, cache_dir: []const u8) CaskInstaller {
         return .{ .allocator = allocator, .io = io, .environ = environ, .db = db, .prefix = prefix, .cache_dir = cache_dir, .progress = null };
@@ -734,6 +797,43 @@ pub const CaskInstaller = struct {
     /// return the on-disk path. No `/Applications` writes, no DB inserts —
     /// the seam `mt install --download-only --cask <token>` reuses to warm
     /// the cache before going offline. Caller owns the returned slice.
+    /// Run one phase's steps. `staged_path` defaults to the Caskroom version
+    /// dir, which is where a tarball unpacks and what upstream means by it
+    /// after staging. False when a step was fatal; the sink's log says why.
+    pub fn runFlight(self: *CaskInstaller, token: []const u8, version: []const u8, steps: []const std.json.Value, staged_path: ?[]const u8) bool {
+        const sink = self.flight orelse return true;
+        const a = sink.allocator;
+        var app_dir_buf: [512]u8 = undefined;
+        const caskroom_path = std.fmt.allocPrint(a, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch return false;
+        const ctx: steps_mod.StepsCtx = .{
+            .io = self.io,
+            .allocator = a,
+            .name = token,
+            .version = version,
+            .prefix = self.prefix,
+            .keg_path = caskroom_path,
+            .subject = .{
+                .cask = .{
+                    .staged_path = staged_path orelse (std.fmt.allocPrint(a, "{s}/{s}", .{ caskroom_path, version }) catch return false),
+                    .caskroom_path = caskroom_path,
+                    // Duped: the buffer dies with this frame, the log does not.
+                    .appdir = a.dupe(u8, applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf)) catch return false,
+                    .home = std.process.Environ.getPosix(self.environ, "HOME") orelse "",
+                },
+            },
+            .flog = sink.log,
+            .environ = self.environ,
+        };
+        steps_mod.runSteps(ctx, steps);
+        return !sink.log.hasFatal();
+    }
+
+    /// Preflight over the staged tree, before any artifact moves.
+    fn preflight(self: *CaskInstaller, cask: *const Cask, staged_path: ?[]const u8) CaskError!void {
+        const steps = cask.flight_steps.get(.preflight) orelse return;
+        if (!self.runFlight(cask.token, cask.version, steps, staged_path)) return CaskError.PreflightFailed;
+    }
+
     pub fn downloadOnly(self: *CaskInstaller, cask: *const Cask) CaskError![]const u8 {
         const artifact_type = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
         if (artifact_type == .unknown) return CaskError.InstallFailed;
@@ -793,10 +893,15 @@ pub const CaskInstaller = struct {
 
         // Install based on type
         const app_path = switch (artifact_type) {
-            .dmg => self.installDmg(cache_path, app_dir, cask) catch return CaskError.InstallFailed,
-            .zip => self.installZip(cache_path, app_dir, cask) catch return CaskError.InstallFailed,
-            .pkg => self.installPkg(cache_path) catch return CaskError.InstallFailed,
-            .tar_gz, .tar_xz => self.installTarball(cache_path, app_dir, cask, artifact_type) catch return CaskError.InstallFailed,
+            .dmg => self.installDmg(cache_path, app_dir, cask) catch |e| return preflightOr(e),
+            .zip => self.installZip(cache_path, app_dir, cask) catch |e| return preflightOr(e),
+            .pkg => blk: {
+                // No staging for a package: upstream's staged_path is the
+                // Caskroom dir the .pkg would sit in.
+                try self.preflight(cask, null);
+                break :blk self.installPkg(cache_path) catch return CaskError.InstallFailed;
+            },
+            .tar_gz, .tar_xz => self.installTarball(cache_path, app_dir, cask, artifact_type) catch |e| return preflightOr(e),
             .unknown => return CaskError.InstallFailed,
         };
 
@@ -820,6 +925,11 @@ pub const CaskInstaller = struct {
 
         self.allocator.free(cache_path);
         return app_path;
+    }
+
+    /// A preflight refusal keeps its own name through the per-type catch-alls.
+    fn preflightOr(e: anyerror) CaskError {
+        return if (e == CaskError.PreflightFailed) CaskError.PreflightFailed else CaskError.InstallFailed;
     }
 
     /// Uninstall a cask by token. Looks up app_path from DB, removes app, cleans up.
@@ -1114,6 +1224,10 @@ pub const CaskInstaller = struct {
             std.Io.Dir.deleteDirAbsolute(self.io, mount_point) catch {};
         }
 
+        // A read-only mount is the staged tree here; a step that writes into
+        // it fails loudly, as it would on any read-only stage.
+        try self.preflight(cask, mount_point);
+
         // Find the .app bundle name (from JSON artifacts or by scanning mount point).
         // app_name_buf owns the fallback name past iterator teardown.
         var app_name_buf: [256]u8 = undefined;
@@ -1167,6 +1281,8 @@ pub const CaskInstaller = struct {
     /// the dispatch is exercisable in tests without driving ditto extraction
     /// or the network. Returns the path recorded as `app_path`.
     pub fn placeExtracted(self: *CaskInstaller, extract_dir: []const u8, app_dir: []const u8, cask: *const Cask) ![]const u8 {
+        try self.preflight(cask, extract_dir);
+
         // Rollback re-sources the stanzas via this override (the synthetic
         // cask's JSON is empty); a fresh install collects them from the JSON.
         if (self.font_entries_override) |entries| {
@@ -1377,6 +1493,7 @@ pub const CaskInstaller = struct {
             .tar_xz => archive_mod.extractTarXzFile(self.io, archive_path, caskroom_ver),
             else => return error.InstallFailed,
         }) catch return error.InstallFailed;
+        try self.preflight(cask, caskroom_ver);
 
         // Same precedence as the zip dispatch: fonts first (they carry no
         // `.app` and no `binary`), then binaries, then a wrapped bundle.

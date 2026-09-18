@@ -270,10 +270,28 @@ pub fn runSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
     }
 }
 
-fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+/// Dry-run classifier: log every step this executor would refuse, run none.
+/// Guards are not evaluated, so a step held back by one still counts.
+pub fn checkSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
+    for (steps) |step_val| {
+        const obj = switch (step_val) {
+            .object => |o| o,
+            else => {
+                logUnsupported(ctx, "malformed step (not an object)");
+                continue;
+            },
+        };
+        const tag = admitStep(ctx, obj) orelse continue;
+        if (tag == .run) _ = sudoRefused(ctx, obj);
+    }
+}
+
+/// The type/key screening every step passes before it runs: null (already
+/// logged) for a type or key this executor does not honour.
+fn admitStep(ctx: StepsCtx, obj: std.json.ObjectMap) ?StepTag {
     const step_type = getString(obj, "type") orelse {
         logUnsupported(ctx, "step without a type");
-        return false;
+        return null;
     };
 
     // Types with no entry above are refused here on purpose: php and the
@@ -281,9 +299,23 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // runtime never reaches a macOS bottle. A loud skip beats a stub.
     const tag = step_map.get(step_type) orelse {
         logUnsupported(ctx, step_type);
-        return false;
+        return null;
     };
-    if (unhonouredKey(ctx, tag, obj)) return false;
+    if (unhonouredKey(ctx, tag, obj)) return null;
+    return tag;
+}
+
+/// Only an explicit `false` — the compacted default — is a request malt can
+/// satisfy; malt never escalates.
+fn sudoRefused(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const v = obj.get("sudo") orelse return false;
+    if (v == .bool and !v.bool) return false;
+    logUnsupported(ctx, "run with sudo");
+    return true;
+}
+
+fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const tag = admitStep(ctx, obj) orelse return false;
 
     // Central, so a guard holds back every step type. Leaving this to each
     // step meant most of them ran regardless of what the formula declared.
@@ -1955,14 +1987,7 @@ fn resolveCommandPath(ctx: StepsCtx, obj: std.json.ObjectMap) ?[]const u8 {
 /// whose argv the formula supplies wholesale. It goes through the same argv
 /// lint and sandbox fence as every other spawn, with no extra grants.
 fn stepRun(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
-    // Only an explicit `false` — the compacted default — is a request malt can
-    // satisfy; malt never escalates.
-    if (obj.get("sudo")) |v| {
-        if (v != .bool or v.bool) {
-            logUnsupported(ctx, "run with sudo");
-            return false;
-        }
-    }
+    if (sudoRefused(ctx, obj)) return false;
 
     const cmd = resolveCommandPath(ctx, obj) orelse return false;
     var argv: std.ArrayList([]const u8) = .empty;
@@ -5155,6 +5180,26 @@ test "delete_keychain_certificate refuses a fingerprint match and an option-shap
     try testing.expect(!ch.h.flog.hasFatal());
     try testing.expectEqual(@as(usize, 2), ch.h.flog.entries().len);
     try testing.expectEqual(@as(usize, 0), ch.h.flog.handled_top_level);
+}
+
+test "checkSteps names what would be refused without touching the filesystem" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    checkSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"mkdir_p","path":{"base":"home","path":"Library/never"}},
+        \\ {"type":"run","command":{"path":"/bin/echo"},"sudo":true},
+        \\ {"type":"terminate_process","name":"x","match":"full","notices":["n"]},
+        \\ {"type":"frobnicate"}]
+    ));
+    try testing.expect(!dirExists(c.io, try std.fs.path.join(a, &.{ ch.home, "Library/never" })));
+    const entries = ch.h.flog.entries();
+    try testing.expectEqual(@as(usize, 3), entries.len);
+    try testing.expectEqualStrings("run with sudo", entries[0].detail);
+    try testing.expectEqualStrings("terminate_process with match", entries[1].detail);
+    try testing.expectEqualStrings("frobnicate", entries[2].detail);
 }
 
 fn fileMode(io: std.Io, path: []const u8) !std.posix.mode_t {

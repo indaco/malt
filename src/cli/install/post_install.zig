@@ -10,6 +10,7 @@ const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const deps_mod = @import("../../core/deps.zig");
 const dsl = @import("../../core/dsl/root.zig");
 const formula_mod = @import("../../core/formula.zig");
+const cask_mod = @import("../../core/cask.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
 const steps_mod = @import("../../core/post_install_steps.zig");
 const sandbox = @import("../../core/sandbox/macos.zig");
@@ -188,6 +189,50 @@ pub fn routePostInstallOutcomeWithBody(
             .stream => emitPostInstallStreamLine(allocator, name, status, flog),
             .embed => bufferPostInstallEvent(allocator, name, status, flog, sink),
         }
+    }
+}
+
+/// Report one cask flight phase the way a formula's post_install is
+/// reported, minus the Ruby fallback a cask has no equivalent for. True when
+/// nothing in the phase was fatal.
+pub fn routeFlightOutcome(flog: *const dsl.FallbackLog, token: []const u8, phase: []const u8, sink: OutputSink) bool {
+    renderNotes(flog);
+    if (flog.hasFatal()) {
+        sink.warn("{s} steps failed for {s}", .{ phase, token });
+        renderFatal(flog, token);
+        if (output.isDebug()) renderUnknown(flog, token);
+        return false;
+    }
+    if (flog.hasErrors()) {
+        sink.warn("{s}: {s} steps partially skipped", .{ token, phase });
+        if (output.isVerbose()) renderUnknown(flog, token);
+        return true;
+    }
+    if (flog.total_top_level > 0) sink.info("{s} steps completed for {s}", .{ phase, token });
+    return true;
+}
+
+/// Dry-run view of a cask's declared phases: what would run and which steps
+/// this executor would refuse, without touching the filesystem.
+pub fn reportFlightPlan(allocator: std.mem.Allocator, cask: *const cask_mod.Cask, sink: OutputSink) void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    for (std.enums.values(cask_mod.FlightPhase)) |phase| {
+        const steps = cask.flight_steps.get(phase) orelse continue;
+        var flog = dsl.FallbackLog.init(allocator);
+        defer flog.deinit();
+        steps_mod.checkSteps(.{
+            .io = std.Options.debug_io,
+            .allocator = arena.allocator(),
+            .name = cask.token,
+            .version = cask.version,
+            .prefix = "",
+            .keg_path = "",
+            .subject = .{ .cask = .{ .staged_path = "", .caskroom_path = "", .appdir = "", .home = "" } },
+            .flog = &flog,
+        }, steps);
+        sink.info("Dry run: would run {d} {s} step(s) for {s}", .{ steps.len, @tagName(phase), cask.token });
+        for (flog.entries()) |entry| sink.warn("  unsupported step: {s}", .{entry.detail});
     }
 }
 

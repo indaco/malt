@@ -1617,7 +1617,8 @@ test "finalizeTapCaskInstall persists the cask row on the happy path" {
         \\    app_path TEXT,
         \\    auto_updates INTEGER NOT NULL DEFAULT 0,
         \\    pinned INTEGER NOT NULL DEFAULT 0,
-        \\    tap TEXT
+        \\    tap TEXT,
+        \\    flight_steps TEXT
         \\);
     );
 
@@ -1662,7 +1663,8 @@ test "finalizeTapCaskInstall stamps the owning tap when tap_registration is set"
         \\    app_path TEXT,
         \\    auto_updates INTEGER NOT NULL DEFAULT 0,
         \\    pinned INTEGER NOT NULL DEFAULT 0,
-        \\    tap TEXT
+        \\    tap TEXT,
+        \\    flight_steps TEXT
         \\);
     );
     try db.exec(

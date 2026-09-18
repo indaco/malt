@@ -19,6 +19,8 @@ const supervisor_mod = @import("../core/services/supervisor.zig");
 const help = @import("help.zig");
 const lock_report = @import("lock_report.zig");
 const snap_mod = @import("outdated/snapshot.zig");
+const post_install = @import("install/post_install.zig");
+const sink_mod = @import("install/sink.zig");
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "uninstall")) return;
@@ -303,6 +305,26 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
     defer allocator.free(cache_dir);
     artefact_cache.adoptLegacy(ctx.io, prefix, cache_dir);
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, cache_dir);
+
+    // The steps the install stored, not today's API: they matched the
+    // version on disk.
+    var stored = cask_mod.readFlightSteps(db, allocator, token) catch null;
+    defer if (stored) |*s| s.deinit();
+    var flight_arena = std.heap.ArenaAllocator.init(allocator);
+    defer flight_arena.deinit();
+    var flight_log = cask_mod.FlightLog.init(allocator);
+    defer flight_log.deinit();
+    installer.flight = .{ .log = &flight_log, .allocator = flight_arena.allocator() };
+    if (stored) |*s| if (s.get(.uninstall_preflight)) |steps| {
+        // A failed preflight aborts before anything is removed, mirroring
+        // install's preflight.
+        if (!installer.runFlight(token, info.version(), steps, null)) {
+            _ = post_install.routeFlightOutcome(&flight_log, token, "uninstall preflight", sink_mod.terminal);
+            return error.Aborted;
+        }
+        _ = post_install.routeFlightOutcome(&flight_log, token, "uninstall preflight", sink_mod.terminal);
+    };
+
     installer.uninstall(token) catch |un_err| {
         if (un_err == error.AppRunning) {
             output.err("Cannot uninstall {s}: the app is running. Quit it and try again.", .{token});
@@ -315,6 +337,13 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
         return error.Aborted;
     };
     reconcileOutdated(ctx.io, allocator, .casks, token);
+
+    if (stored) |*s| if (s.get(.uninstall_postflight)) |steps| {
+        flight_log.deinit();
+        flight_log = cask_mod.FlightLog.init(allocator);
+        _ = installer.runFlight(token, info.version(), steps, null);
+        _ = post_install.routeFlightOutcome(&flight_log, token, "uninstall postflight", sink_mod.terminal);
+    };
 
     output.success("{s} uninstalled", .{token});
 }
