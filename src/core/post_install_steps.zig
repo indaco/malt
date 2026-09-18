@@ -177,9 +177,8 @@ fn honouredKeys(tag: StepTag) []const []const u8 {
         .set_ownership => &.{ "paths", "user", "group", "non_recursive" },
         .install_gzipped_executable => &.{ "source", "target" },
         .change_dylib_id => &.{ "source", "id", "resolve_source" },
-        // Deliberately narrow: `sudo`/`must_succeed` would change what the
-        // step is allowed to do, so they must refuse rather than be dropped.
-        .terminate_process => &.{"name"},
+        // `sudo` stays refused: malt never escalates.
+        .terminate_process => &.{ "name", "match", "attempts", "must_succeed", "notices", "failure_message" },
         // `matching_certificate` narrows by fingerprint, which needs openssl
         // and a sudo keychain read; nothing live sets it, so it refuses.
         .delete_keychain_certificate => &.{"name"},
@@ -1822,34 +1821,104 @@ fn dylibIdEntry(id: []const u8) patch.OverflowEntry {
     return .{ .cmd = @intFromEnum(std.macho.LC.ID_DYLIB), .old_path = "", .new_path = id };
 }
 
+const ProcessMatch = enum { name, full };
+
+const process_match_map = std.StaticStringMap(ProcessMatch).initComptime(.{
+    .{ "name", .name },
+    .{ "full", .full },
+});
+
 /// `terminate_process`: stop a daemon the previous version left running.
 /// Spawned directly rather than through `spawnFenced`: the fence governs
 /// filesystem reach, and this sends a signal without touching the filesystem,
 /// so it would constrain nothing. The argv is malt's own but for `name`, which
 /// is validated below.
 fn stepTerminateProcess(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
-    const name = getString(obj, "name") orelse {
+    const raw_name = getString(obj, "name") orelse {
         logUnsupported(ctx, "terminate_process without a name");
         return false;
     };
-    // The name is tap-controlled and killall has no `--` terminator, so a
+    const name = expandTemplates(ctx, raw_name) catch return false;
+    const shape = terminateShape(ctx, obj, name) orelse return false;
+    if (obj.get("notices")) |notices| if (notices == .array) for (notices.array.items) |item| {
+        if (item != .string) continue;
+        const line = expandTemplates(ctx, item.string) catch continue;
+        ctx.flog.note(std.fmt.allocPrint(ctx.allocator, "{s}\n", .{line}) catch line);
+    };
+
+    // `full` matches the whole command line, which is how an app bundle
+    // path names a process; `name` is the executable name alone.
+    const argv: []const []const u8 = switch (shape.match) {
+        .full => &.{ system_tools.pkill, "-f", regexLiteral(ctx.allocator, name) catch return false },
+        .name => &.{ system_tools.killall, name },
+    };
+    // A miss retries on purpose: the process the cask wants closed may still
+    // be starting (a pkg postinstall that launches the app), and `attempts`
+    // is how long the cask is willing to wait for it. On a fresh install
+    // that wait is paid for nothing; upstream pays it too.
+    for (0..shape.attempts) |attempt| {
+        if (attempt > 0) std.Io.sleep(ctx.io, std.Io.Duration.fromNanoseconds(std.time.ns_per_s), .awake) catch {};
+        var child = std.process.spawn(ctx.io, .{ .argv = argv, .stdout = .ignore, .stderr = .ignore }) catch {
+            logCmdFail(ctx, "terminate_process failed to spawn");
+            return false;
+        };
+        const term = child.wait(ctx.io) catch break;
+        if (term == .exited and term.exited == 0) return true;
+    }
+    // A miss is the normal case on a first install; only a step that
+    // declared it must succeed turns it into an abort.
+    if (getString(obj, "failure_message")) |raw| {
+        const line = expandTemplates(ctx, raw) catch raw;
+        ctx.flog.note(std.fmt.allocPrint(ctx.allocator, "{s}\n", .{line}) catch line);
+    }
+    if (getFlag(obj, "must_succeed")) {
+        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} could not be terminated", .{name}) catch name);
+        return false;
+    }
+    return true;
+}
+
+/// `pkill -f` reads its argument as an extended regex. A cask names a
+/// literal path, so every metacharacter is escaped: `.` must not become a
+/// wildcard that reaches unrelated processes.
+fn regexLiteral(allocator: std.mem.Allocator, name: []const u8) error{OutOfMemory}![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (name) |c| {
+        if (std.mem.indexOfScalar(u8, ".[]()*+?{}|^$\\", c) != null) try out.append(allocator, '\\');
+        try out.append(allocator, c);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+const TerminateShape = struct { match: ProcessMatch, attempts: u32 };
+
+/// Every miss sleeps a second, and on a fresh install nothing matches, so
+/// each step's retries are wall-clock the tap controls; keep them small.
+/// The step count itself is unbounded, as it is for every other step type.
+const max_terminate_attempts = 10;
+
+/// The `name`/`match`/`attempts` shape, or null (logged) when it cannot be
+/// honoured. Shared with the dry-run so the plan refuses exactly what the
+/// run would.
+fn terminateShape(ctx: StepsCtx, obj: std.json.ObjectMap, name: []const u8) ?TerminateShape {
+    // The name is tap-controlled and neither tool has a `--` terminator, so a
     // leading dash would arrive as an option rather than a process name.
     if (name.len == 0 or name[0] == '-') {
         logUnsupported(ctx, "terminate_process with a name killall would read as an option");
-        return false;
+        return null;
     }
-    var child = std.process.spawn(ctx.io, .{
-        .argv = &.{ system_tools.killall, name },
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch {
-        logCmdFail(ctx, "killall failed to spawn");
-        return false;
-    };
-    // A non-zero exit means nothing matched, which is the normal case on a
-    // first install; only failing to spawn is a real failure.
-    _ = child.wait(ctx.io) catch {};
-    return true;
+    const match = if (getString(obj, "match")) |m| process_match_map.get(m) orelse {
+        logUnsupported(ctx, "terminate_process with a match this executor cannot honour");
+        return null;
+    } else .name;
+    const attempts: u32 = if (obj.get("attempts")) |v| blk: {
+        if (v != .integer or v.integer < 1 or v.integer > max_terminate_attempts) {
+            logUnsupported(ctx, "terminate_process with an attempt count outside 1-10");
+            return null;
+        }
+        break :blk @intCast(v.integer);
+    } else 1;
+    return .{ .match = match, .attempts = attempts };
 }
 
 /// `delete_keychain_certificate`: drop a certificate the artefact installed,
@@ -5067,24 +5136,129 @@ test "terminate_process treats an absent process as success" {
     try testing.expectEqual(@as(usize, 1), h.flog.handled_top_level);
 }
 
-test "terminate_process refuses the privilege fields malt does not honour" {
+test "terminate_process refuses sudo, which malt never escalates to" {
     var h = try TestHarness.init();
     defer h.deinit();
 
-    // `sudo` and `must_succeed` change what the step is allowed to do; dropping
-    // them silently would be worse than not running the step at all.
-    for ([_][]const u8{
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
         \\[{"type":"terminate_process","name":"gpg-agent","sudo":true}]
+    )));
+    try testing.expect(h.flog.hasErrors());
+}
+
+test "terminate_process with a full match closes a process by its command line" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.io = threaded.io();
+    const a = h.arena.allocator();
+
+    // The marker path is process-unique, so `pkill -f` can only hit this
+    // child; `killall` matches on the executable name and would miss it.
+    const marker = try std.fmt.allocPrint(a, "{s}/tail-marker", .{h.prefix});
+    try atomic.atomicWriteFile(h.io, marker, "");
+    var child = try std.process.spawn(h.io, .{
+        .argv = &.{ "/usr/bin/tail", "-f", marker },
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h, try std.fmt.allocPrint(a,
+        \\[{{"type":"terminate_process","name":"{s}","match":"full","attempts":3,
+        \\  "notices":["closing {{{{version}}}}"],"failure_message":"still running"}}]
+    , .{marker}))));
+    try testing.expect(!h.flog.hasErrors());
+    const term = try child.wait(h.io);
+    try testing.expect(term == .signal);
+    try testing.expectEqualStrings("closing 1.2.3\n", h.flog.notes()[0]);
+    try testing.expectEqual(@as(usize, 1), h.flog.notes().len);
+}
+
+test "regexLiteral escapes every extended-regex metacharacter and nothing else" {
+    const got = try regexLiteral(testing.allocator, "/Applications/zoom.us.app (1)+x");
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("/Applications/zoom\\.us\\.app \\(1\\)\\+x", got);
+}
+
+test "terminate_process with a full match reads the name as a literal, not a pattern" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.io = threaded.io();
+    const a = h.arena.allocator();
+
+    // The name is the child's own marker path with its last byte replaced
+    // by `.`: as a regex that still matches the child, as a literal it does
+    // not, so the child must survive. Nothing else on the machine carries
+    // this path, so a wrong answer can only ever hit our own process.
+    const marker = try std.fmt.allocPrint(a, "{s}/tail-marker", .{h.prefix});
+    try atomic.atomicWriteFile(h.io, marker, "");
+    var child = try std.process.spawn(h.io, .{ .argv = &.{ "/usr/bin/tail", "-f", marker }, .stdout = .ignore, .stderr = .ignore });
+    defer child.kill(h.io);
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h, try std.fmt.allocPrint(a,
+        \\[{{"type":"terminate_process","name":"{s}.","match":"full"}}]
+    , .{marker[0 .. marker.len - 1]}))));
+    try testing.expect(!h.flog.hasErrors());
+    // A killed child lingers as a zombie, which a signal probe still finds;
+    // only a non-blocking reap tells a live child from a dead one.
+    var status: c_int = 0;
+    try testing.expectEqual(@as(std.c.pid_t, 0), std.c.waitpid(child.id.?, &status, std.posix.W.NOHANG));
+}
+
+test "terminate_process retries, then reports the failure message without failing" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.io = threaded.io();
+
+    // A miss after the last attempt is upstream's `opoo`: told, not fatal.
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"terminate_process","name":"malt-no-such-daemon","attempts":2,
+        \\  "failure_message":"gave up on {{version}}"},
+        \\ {"type":"mkdir_p","path":{"base":"etc","path":"after"}}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 2), h.flog.handled_top_level);
+    try testing.expectEqualStrings("gave up on 1.2.3\n", h.flog.notes()[0]);
+}
+
+test "terminate_process with must_succeed turns a miss into an abort" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var h = try TestHarness.init();
+    defer h.deinit();
+    h.io = threaded.io();
+    const a = h.arena.allocator();
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"terminate_process","name":"malt-no-such-daemon","must_succeed":true},
+        \\ {"type":"mkdir_p","path":{"base":"etc","path":"after"}}]
+    )));
+    try testing.expect(h.flog.hasFatal());
+    try testing.expect(!dirExists(h.io, try std.fmt.allocPrint(a, "{s}/etc/after", .{h.prefix})));
+}
+
+test "terminate_process refuses a match it cannot honour and an attempt count it will not wait for" {
+    for ([_][]const u8{
+        \\[{"type":"terminate_process","name":"x","match":"regex"}]
         ,
-        \\[{"type":"terminate_process","name":"gpg-agent","must_succeed":true}]
+        \\[{"type":"terminate_process","name":"x","attempts":0}]
+        ,
+        \\[{"type":"terminate_process","name":"x","attempts":11}]
+        ,
+        \\[{"type":"terminate_process","name":"x","attempts":"3"}]
         ,
     }) |steps| {
-        var fresh = try TestHarness.init();
-        defer fresh.deinit();
-        try testing.expect(execute(fresh.ctx(), try testFormulaJson(&fresh, steps)));
-        try testing.expect(fresh.flog.hasErrors());
+        var h = try TestHarness.init();
+        defer h.deinit();
+        try testing.expect(execute(h.ctx(), try testFormulaJson(&h, steps)));
+        try testing.expect(h.flog.hasErrors());
+        try testing.expect(!h.flog.hasFatal());
     }
-    try testing.expect(!h.flog.hasErrors());
 }
 
 // --- helpers for the step tests --------------------------------------------
@@ -5263,10 +5437,9 @@ test "checkSteps names what would be refused without touching the filesystem" {
     ));
     try testing.expect(!dirExists(c.io, try std.fs.path.join(a, &.{ ch.home, "Library/never" })));
     const entries = ch.h.flog.entries();
-    try testing.expectEqual(@as(usize, 3), entries.len);
+    try testing.expectEqual(@as(usize, 2), entries.len);
     try testing.expectEqualStrings("run with sudo", entries[0].detail);
-    try testing.expectEqualStrings("terminate_process with match", entries[1].detail);
-    try testing.expectEqualStrings("frobnicate", entries[2].detail);
+    try testing.expectEqualStrings("frobnicate", entries[1].detail);
 }
 
 test "a recursive remove refuses $HOME/Library and its top-level children" {

@@ -316,7 +316,7 @@ test "install --dry-run lists the phases and names the steps malt refuses" {
     try putFile(threaded.io(), fx.p("cache/api/cask_plan.json"),
         \\{"token":"plan","name":["Plan"],"version":"2.1","url":"https://example.invalid/plan.zip","sha256":"no_check",
         \\ "artifacts":[{"preflight_steps":[{"steps":[{"type":"mkdir_p","path":{"base":"home","path":"Library/plan"}}]}]},{"app":["Plan.app"]},
-        \\  {"postflight_steps":[{"steps":[{"type":"run","command":{"path":"/bin/echo"},"sudo":true},{"type":"terminate_process","name":"p","match":"full"}]}]}]}
+        \\  {"postflight_steps":[{"steps":[{"type":"run","command":{"path":"/bin/echo"},"sudo":true},{"type":"terminate_process","name":"p","match":"full"},{"type":"run","command":{"path":"/bin/echo"},"network_access":true}]}]}]}
     );
     {
         var db = try sqlite.Database.open(fx.p("db/malt.db"));
@@ -335,9 +335,11 @@ test "install --dry-run lists the phases and names the steps malt refuses" {
     try malt.install.execute(&ctx, arena.allocator(), &.{ "--cask", "--dry-run", "plan" });
 
     try testing.expect(std.mem.indexOf(u8, captured.items, "would run 1 preflight step(s) for plan") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would run 2 postflight step(s) for plan") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would run 3 postflight step(s) for plan") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: run with sudo") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: terminate_process with match") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: run with network_access") != null);
+    // A full-path match is honoured now, so the plan no longer flags it.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "terminate_process") == null);
     try testing.expect(!exists(threaded.io(), fx.h("Library/plan")));
 }
 
