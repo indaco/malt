@@ -15,7 +15,14 @@ pub const Forge = enum { github, gitlab, gitea, gogs };
 const github_browse_fmt = "https://github.com/{s}/{s}";
 // GitLab's browse, repo, and `/-/raw` URLs all share the instance host,
 // so the host (not a literal) prefixes each.
-const gitlab_browse_fmt = "https://{s}/{s}/{s}";
+const gitlab_browse_fmt = "{s}{s}/{s}/{s}";
+
+/// A self-hosted forge is https unless the row's host already names its
+/// scheme; a test writes a cleartext loopback host, which the fetch layer
+/// still refuses for anything but loopback.
+fn scheme(host: []const u8) []const u8 {
+    return if (std.mem.indexOf(u8, host, "://") != null) "" else "https://";
+}
 
 /// Browse URL for `taps.url`, written into a caller buffer. `host` is
 /// plumbed for non-github arms; the github arm's host is fixed.
@@ -29,7 +36,7 @@ pub fn repoBrowseUrl(
     return switch (forge) {
         .github => std.fmt.bufPrint(buf, github_browse_fmt, .{ owner, repo }),
         // gitlab, gitea, and gogs all browse at the instance host.
-        .gitlab, .gitea, .gogs => std.fmt.bufPrint(buf, gitlab_browse_fmt, .{ host, owner, repo }),
+        .gitlab, .gitea, .gogs => std.fmt.bufPrint(buf, gitlab_browse_fmt, .{ scheme(host), host, owner, repo }),
     };
 }
 
@@ -44,7 +51,7 @@ pub fn allocRepoBrowseUrl(
 ) std.mem.Allocator.Error![]const u8 {
     return switch (forge) {
         .github => std.fmt.allocPrint(allocator, github_browse_fmt, .{ owner, repo }),
-        .gitlab, .gitea, .gogs => std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ host, owner, repo }),
+        .gitlab, .gitea, .gogs => std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ scheme(host), host, owner, repo }),
     };
 }
 
@@ -220,15 +227,15 @@ pub fn buildBaseUrls(
 
             const api_head_url = try std.fmt.allocPrint(
                 allocator,
-                "https://{s}/api/v4/projects/{s}/repository/commits/HEAD",
-                .{ host, path },
+                "{s}{s}/api/v4/projects/{s}/repository/commits/HEAD",
+                .{ scheme(host), host, path },
             );
             errdefer allocator.free(api_head_url);
 
-            const repo_url = try std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ host, owner, repo });
+            const repo_url = try std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ scheme(host), host, owner, repo });
             errdefer allocator.free(repo_url);
 
-            const raw_base = try std.fmt.allocPrint(allocator, "https://{s}/{s}/{s}/-/raw", .{ host, owner, repo });
+            const raw_base = try std.fmt.allocPrint(allocator, "{s}{s}/{s}/{s}/-/raw", .{ scheme(host), host, owner, repo });
             errdefer allocator.free(raw_base);
 
             return .{ .forge = forge, .host = host_owned, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
@@ -242,15 +249,15 @@ pub fn buildBaseUrls(
             // three URLs ride the row's `host` for self-hosted Forgejo/Gogs.
             const api_head_url = try std.fmt.allocPrint(
                 allocator,
-                "https://{s}/api/v1/repos/{s}/{s}/commits?limit=1&stat=false",
-                .{ host, owner, repo },
+                "{s}{s}/api/v1/repos/{s}/{s}/commits?limit=1&stat=false",
+                .{ scheme(host), host, owner, repo },
             );
             errdefer allocator.free(api_head_url);
 
-            const repo_url = try std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ host, owner, repo });
+            const repo_url = try std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ scheme(host), host, owner, repo });
             errdefer allocator.free(repo_url);
 
-            const raw_base = try std.fmt.allocPrint(allocator, "https://{s}/{s}/{s}/raw", .{ host, owner, repo });
+            const raw_base = try std.fmt.allocPrint(allocator, "{s}{s}/{s}/{s}/raw", .{ scheme(host), host, owner, repo });
             errdefer allocator.free(raw_base);
 
             return .{ .forge = forge, .host = host_owned, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
@@ -287,8 +294,8 @@ pub fn commitUrl(
             const path = encodeProjectPath(enc, owner, repo) catch unreachable;
             return std.fmt.allocPrint(
                 allocator,
-                "https://{s}/api/v4/projects/{s}/repository/commits/{s}",
-                .{ host, path, sha },
+                "{s}{s}/api/v4/projects/{s}/repository/commits/{s}",
+                .{ scheme(host), host, path, sha },
             );
         },
         // Gitea/Forgejo serve a single commit at `git/commits/<sha>` (the
@@ -296,16 +303,16 @@ pub fn commitUrl(
         // plain owner/repo (no encoding) on the instance host.
         .gitea => return std.fmt.allocPrint(
             allocator,
-            "https://{s}/api/v1/repos/{s}/{s}/git/commits/{s}",
-            .{ host, owner, repo, sha },
+            "{s}{s}/api/v1/repos/{s}/{s}/git/commits/{s}",
+            .{ scheme(host), host, owner, repo, sha },
         ),
         // Gogs predates Gitea's git-data API: it has no `git/commits/<sha>`
         // route and serves the single commit at the bare `commits/<sha>`
         // (the inverse of Gitea, where that bare verb 404s).
         .gogs => return std.fmt.allocPrint(
             allocator,
-            "https://{s}/api/v1/repos/{s}/{s}/commits/{s}",
-            .{ host, owner, repo, sha },
+            "{s}{s}/api/v1/repos/{s}/{s}/commits/{s}",
+            .{ scheme(host), host, owner, repo, sha },
         ),
     }
 }
@@ -713,6 +720,21 @@ test "buildBaseUrls github: records the originating forge on the result" {
     defer urls.deinit(std.testing.allocator);
     try std.testing.expectEqual(Forge.github, urls.forge);
     try std.testing.expectEqualStrings("github.com", urls.host);
+}
+
+test "buildBaseUrls gitea: a host that names its scheme is used as-is" {
+    // A loopback fixture is the one legitimate cleartext forge; a bare host
+    // still gets https.
+    const urls = try buildBaseUrls(std.testing.allocator, .gitea, "http://127.0.0.1:8080", "grp", "tap");
+    defer urls.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8080/api/v1/repos/grp/tap/commits?limit=1&stat=false", urls.api_head_url);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8080/grp/tap/raw", urls.raw_base);
+    const bare = try buildBaseUrls(std.testing.allocator, .gitea, "codeberg.org", "grp", "tap");
+    defer bare.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("https://codeberg.org/grp/tap/raw", bare.raw_base);
+    const pin = try commitUrl(std.testing.allocator, .gitea, "http://127.0.0.1:8080", "grp", "tap", "abc");
+    defer std.testing.allocator.free(pin);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8080/api/v1/repos/grp/tap/git/commits/abc", pin);
 }
 
 test "buildBaseUrls github: builds the api-head / repo / raw triple" {
