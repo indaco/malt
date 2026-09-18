@@ -74,6 +74,7 @@ pub fn supportedStepType(step_type: []const u8) bool {
 
 const StepTag = enum {
     mkdir_p,
+    mkdir,
     touch,
     write,
     symlink,
@@ -105,6 +106,7 @@ const StepTag = enum {
 /// the doctor-facing `supportedStepType` classifier both read it.
 const step_map = std.StaticStringMap(StepTag).initComptime(.{
     .{ "mkdir_p", .mkdir_p },
+    .{ "mkdir", .mkdir },
     .{ "touch", .touch },
     .{ "write", .write },
     .{ "symlink", .symlink },
@@ -141,6 +143,7 @@ const common_keys = [_][]const u8{ "type", "guards", "id", "skip_audit" };
 fn honouredKeys(tag: StepTag) []const []const u8 {
     return switch (tag) {
         .mkdir_p,
+        .mkdir,
         .touch,
         .compile_gsettings_schemas,
         .gio_querymodules,
@@ -285,6 +288,7 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 
     return switch (tag) {
         .mkdir_p => stepMkdirP(ctx, obj),
+        .mkdir => stepMkdir(ctx, obj),
         .touch => stepTouch(ctx, obj),
         .write => stepWrite(ctx, obj),
         .symlink => stepSymlink(ctx, obj),
@@ -694,6 +698,21 @@ fn stepMkdirP(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const path = resolvePathSpec(ctx, obj, "path") orelse return false;
     if (!confined(ctx, path)) return false;
     std.Io.Dir.cwd().createDirPath(ctx.io, path) catch {};
+    return true;
+}
+
+/// `mkdir`: one level only, like upstream's `Dir.mkdir`. A missing parent
+/// raises there, so it is fatal here rather than quietly created.
+fn stepMkdir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const path = resolvePathSpec(ctx, obj, "path") orelse return false;
+    if (!confined(ctx, path)) return false;
+    std.Io.Dir.createDirAbsolute(ctx.io, path, .default_dir) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => {
+            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "mkdir {s}: {s}", .{ path, @errorName(e) }) catch "mkdir");
+            return false;
+        },
+    };
     return true;
 }
 
@@ -3734,16 +3753,16 @@ test "supportedStepType matches the executable tier and rejects the rest" {
         "init_data_dir",            "remove",                "inreplace",                 "run",
         "move",                     "warn",                  "set_permissions",           "install_gzipped_executable",
         "change_dylib_id",          "terminate_process",     "configure_clang_system",    "configure_gcc_runtime",
-        "set_ownership",
+        "set_ownership",            "mkdir",
     };
     for (native) |t| try testing.expect(supportedStepType(t));
     // Deliberate loud skips: php and the legacy python/pypy bootstrappers are
     // whole projects, glibc never reaches a macOS bottle, and the rest have no
     // occurrence in homebrew-core to model against.
     const routed = [_][]const u8{
-        "mkdir",                   "move_children",     "move_contents",
-        "configure_php",           "bootstrap_cpython", "bootstrap_pypy",
-        "configure_glibc_runtime", "frobnicate",
+        "move_children",     "move_contents",  "configure_php",
+        "bootstrap_cpython", "bootstrap_pypy", "configure_glibc_runtime",
+        "frobnicate",
     };
     for (routed) |t| try testing.expect(!supportedStepType(t));
 }
@@ -4960,6 +4979,37 @@ test "set_ownership refuses a user or group it cannot resolve and honours non_re
     try testing.expect(try fileGid(c.io, child) != everyone);
     try testing.expect(!ch.h.flog.hasFatal());
     try testing.expectEqual(@as(usize, 2), ch.h.flog.entries().len);
+}
+
+test "mkdir fails when the parent is missing and mkdir_p creates it" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const c = h.ctx();
+    const a = h.arena.allocator();
+
+    runSteps(c, try parseSteps(&h,
+        \\[{"type":"mkdir_p","path":{"base":"prefix","path":"deep/leaf"}},
+        \\ {"type":"mkdir","path":{"base":"prefix","path":"deep/leaf"}},
+        \\ {"type":"mkdir","path":{"base":"prefix","path":"flat"}},
+        \\ {"type":"mkdir","path":{"base":"prefix","path":"missing/child"}}]
+    ));
+    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/deep/leaf", .{h.keg})));
+    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/flat", .{h.keg})));
+    try testing.expect(!dirExists(c.io, try std.fmt.allocPrint(a, "{s}/missing", .{h.keg})));
+    // A repeat on an existing dir is a no-op, as upstream's `Dir.mkdir` is;
+    // a missing parent raises there, so it is fatal here.
+    try testing.expect(h.flog.hasFatal());
+    try testing.expectEqual(@as(usize, 3), h.flog.handled_top_level);
+}
+
+test "mkdir refuses a path outside the confinement roots" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    runSteps(h.ctx(), try parseSteps(&h,
+        \\[{"type":"mkdir","path":{"path":"/tmp/malt_mkdir_escape_never_created"}}]
+    ));
+    try testing.expect(h.flog.hasFatal());
+    try testing.expect(!dirExists(h.io, "/tmp/malt_mkdir_escape_never_created"));
 }
 
 fn fileMode(io: std.Io, path: []const u8) !std.posix.mode_t {
