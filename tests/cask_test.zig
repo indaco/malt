@@ -282,12 +282,12 @@ test "parseAppName returns null for no artifacts" {
     try std.testing.expect(app_name == null);
 }
 
-// --- parseBinaryName ---
+// --- collectBinaryArtifacts ---
 //
 // tar.gz casks ship a CLI: the installable is the first entry of an
-// `artifacts[].binary` array, not an `app` bundle. parseBinaryName must
-// skip past unrelated artifact blocks (`zap`, `uninstall`, …) and return
-// the binary's basename.
+// `artifacts[].binary` array, not an `app` bundle. The collector must
+// skip past unrelated artifact blocks (`zap`, `uninstall`, ...) and return
+// the binary's raw source; path resolution is the installer's job.
 
 const binary_cask_json =
     \\{
@@ -306,22 +306,37 @@ const binary_cask_json =
     \\}
 ;
 
-test "parseBinaryName extracts binary from artifacts" {
-    var c = try cask.parseCask(std.testing.allocator, binary_cask_json);
+fn onlyBinary(json: []const u8) !cask.BinaryEntry {
+    var c = try cask.parseCask(std.testing.allocator, json);
     defer c.deinit();
-
-    const name = cask.parseBinaryName(c.parsed.value.object);
-    try std.testing.expect(name != null);
-    try std.testing.expectEqualStrings("tool", name.?);
+    const entries = (try cask.collectBinaryArtifacts(std.testing.allocator, c.parsed.value.object)).?;
+    defer std.testing.allocator.free(entries);
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    // The slices borrow the cask's arena, so hand back copies.
+    return .{
+        .source = try std.testing.allocator.dupe(u8, entries[0].source),
+        .target = if (entries[0].target) |t| try std.testing.allocator.dupe(u8, t) else null,
+    };
 }
 
-test "parseBinaryName returns null for an app-only cask" {
-    // An app cask (Firefox) has no `binary` artifact — parseBinaryName
-    // must not mistakenly return the `app` entry.
+fn freeEntry(e: cask.BinaryEntry) void {
+    std.testing.allocator.free(e.source);
+    if (e.target) |t| std.testing.allocator.free(t);
+}
+
+test "collectBinaryArtifacts extracts the binary from artifacts" {
+    const e = try onlyBinary(binary_cask_json);
+    defer freeEntry(e);
+    try std.testing.expectEqualStrings("tool", e.source);
+    try std.testing.expect(e.target == null);
+}
+
+test "collectBinaryArtifacts is null for an app-only cask" {
+    // An app cask (Firefox) has no `binary` artifact; the `app` entry must
+    // not be mistaken for one.
     var c = try cask.parseCask(std.testing.allocator, test_cask_json);
     defer c.deinit();
-
-    try std.testing.expect(cask.parseBinaryName(c.parsed.value.object) == null);
+    try std.testing.expect((try cask.collectBinaryArtifacts(std.testing.allocator, c.parsed.value.object)) == null);
 }
 
 test "parseAppName returns null for a binary-only cask" {
@@ -333,57 +348,43 @@ test "parseAppName returns null for a binary-only cask" {
 }
 
 // Some casks ship a binary whose on-disk name differs from the command
-// users type — e.g. `codex` published as `codex-aarch64-apple-darwin`.
+// users type, e.g. `codex` published as `codex-aarch64-apple-darwin`.
 // The Homebrew shape is `"binary": ["<src>", {"target": "<alias>"}]`.
-test "parseBinaryTarget extracts the rename target" {
-    const json =
+test "collectBinaryArtifacts carries the rename target" {
+    const e = try onlyBinary(
         \\{"token":"t","name":["T"],"version":"1","url":"https://x.com/a.tar.gz",
         \\ "sha256":"no_check","homepage":"","desc":"","auto_updates":false,
         \\ "artifacts":[{"binary":["tool-aarch64-apple-darwin",{"target":"tool"}]}]}
-    ;
-    var c = try cask.parseCask(std.testing.allocator, json);
-    defer c.deinit();
-
-    try std.testing.expectEqualStrings("tool-aarch64-apple-darwin", cask.parseBinaryName(c.parsed.value.object).?);
-    try std.testing.expectEqualStrings("tool", cask.parseBinaryTarget(c.parsed.value.object).?);
-}
-
-test "parseBinaryTarget returns null when no rename is present" {
-    var c = try cask.parseCask(std.testing.allocator, binary_cask_json);
-    defer c.deinit();
-
-    try std.testing.expect(cask.parseBinaryTarget(c.parsed.value.object) == null);
+    );
+    defer freeEntry(e);
+    try std.testing.expectEqualStrings("tool-aarch64-apple-darwin", e.source);
+    try std.testing.expectEqualStrings("tool", e.target.?);
 }
 
 // Some casks encode the binary source as a relative path inside the
-// archive (e.g. `darwin-arm64/btp`). parseBinaryName must return the
-// raw source — path resolution is the installer's job.
-test "parseBinaryName preserves a path-qualified source" {
-    const json =
+// archive (e.g. `darwin-arm64/btp`); the raw source is preserved.
+test "collectBinaryArtifacts preserves a path-qualified source" {
+    const e = try onlyBinary(
         \\{"token":"t","name":["T"],"version":"1","url":"https://x.com/a.tar.gz",
         \\ "sha256":"no_check","homepage":"","desc":"","auto_updates":false,
         \\ "artifacts":[{"binary":["darwin-arm64/tool"]}]}
-    ;
-    var c = try cask.parseCask(std.testing.allocator, json);
-    defer c.deinit();
-
-    try std.testing.expectEqualStrings("darwin-arm64/tool", cask.parseBinaryName(c.parsed.value.object).?);
+    );
+    defer freeEntry(e);
+    try std.testing.expectEqualStrings("darwin-arm64/tool", e.source);
 }
 
-test "parseBinaryName skips non-binary artifact entries" {
+test "collectBinaryArtifacts skips non-binary artifact entries" {
     // Order-insensitive: the binary can sit behind uninstall/zap blocks.
-    const json =
+    const e = try onlyBinary(
         \\{"token":"t","name":["T"],"version":"1","url":"https://x.com/a.tar.gz",
         \\ "sha256":"no_check","homepage":"","desc":"","auto_updates":false,
         \\ "artifacts":[
         \\   {"uninstall":[{"delete":"/tmp/x"}]},
         \\   {"binary":["cli"]}
         \\ ]}
-    ;
-    var c = try cask.parseCask(std.testing.allocator, json);
-    defer c.deinit();
-
-    try std.testing.expectEqualStrings("cli", cask.parseBinaryName(c.parsed.value.object).?);
+    );
+    defer freeEntry(e);
+    try std.testing.expectEqualStrings("cli", e.source);
 }
 
 // --- DB operations ---

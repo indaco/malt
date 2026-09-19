@@ -438,7 +438,7 @@ pub fn artifactTypeTag(t: ArtifactType) []const u8 {
 /// `keep` spares one already-fetched artefact, so an upgrade's uninstall
 /// cannot wipe the bytes it is about to install.
 pub fn deletePerVersionCacheFile(io: std.Io, cache_dir: []const u8, token: []const u8, version: []const u8, keep: ?[]const u8) bool {
-    for (cache_extensions) |ext| {
+    for (cache_extensions ++ sidecar_extensions) |ext| {
         var path_buf: [512]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/Cask/{s}-{s}{s}", .{ cache_dir, token, version, ext }) catch continue;
         if (keep) |k| if (std.mem.eql(u8, path, k)) continue;
@@ -488,6 +488,9 @@ pub const ArtifactType = enum { dmg, zip, pkg, tar_gz, tar_xz, unknown };
 /// nullable on rows backfilled before v7. The `.tgz`/`.txz` aliases are
 /// absent on purpose: `downloadToCache` always stages the canonical name.
 pub const cache_extensions = [_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz", ".tar.xz" };
+
+/// Per-version stanza sidecars that travel with the artefact and go with it.
+pub const sidecar_extensions = [_][]const u8{ ".fonts", ".binaries" };
 
 /// Canonical suffix a downloaded artefact is staged under. Aliases collapse
 /// here (`.tgz` stages as `.tar.gz`) so the sweep only has to know one name
@@ -657,6 +660,58 @@ pub fn parseBinaryTarget(obj: std.json.ObjectMap) ?[]const u8 {
     return null;
 }
 
+/// One `binary` stanza: the file to link and, when the cask renames it,
+/// the link name it gets in `<prefix>/bin`.
+pub const BinaryEntry = struct {
+    source: []const u8,
+    target: ?[]const u8,
+};
+
+/// Every `binary` stanza in artifact order: a cask may declare one per
+/// command-line tool, and all of them must be placed and rolled back.
+/// Slices borrow `obj`'s arena; the caller owns the returned array.
+pub fn collectBinaryArtifacts(alloc: std.mem.Allocator, obj: std.json.ObjectMap) !?[]BinaryEntry {
+    const artifacts = switch (obj.get("artifacts") orelse return null) {
+        .array => |a| a,
+        else => return null,
+    };
+
+    var entries: std.ArrayList(BinaryEntry) = .empty;
+    errdefer entries.deinit(alloc);
+
+    for (artifacts.items) |item| {
+        const art = switch (item) {
+            .object => |o| o,
+            else => continue,
+        };
+        const arr = switch (art.get("binary") orelse continue) {
+            .array => |a| a,
+            else => continue,
+        };
+        if (arr.items.len == 0) continue;
+        const source = switch (arr.items[0]) {
+            .string => |s| s,
+            else => continue,
+        };
+        var target: ?[]const u8 = null;
+        if (art.get("target")) |tv| if (tv == .string) {
+            target = binaryLinkName(tv.string);
+        };
+        for (arr.items[1..]) |opt| if (opt == .object) {
+            if (opt.object.get("target")) |tv| if (tv == .string) {
+                target = binaryLinkName(tv.string);
+            };
+        };
+        try entries.append(alloc, .{ .source = source, .target = target });
+    }
+
+    if (entries.items.len == 0) {
+        entries.deinit(alloc);
+        return null;
+    }
+    return try entries.toOwnedSlice(alloc);
+}
+
 /// Homebrew lets a `binary` source name the prefix explicitly; the remainder is
 /// still a subpath and is screened as one.
 const homebrew_prefix_var = "$HOMEBREW_PREFIX/";
@@ -776,6 +831,8 @@ pub const CaskInstaller = struct {
     /// Set by `reinstallFromHistory` from the per-version sidecar so a
     /// rollback's synthetic, artifact-less cask still restores its fonts.
     font_entries_override: ?[]const cask_font.FontEntry = null,
+    /// Same contract for `binary` stanzas, read from the `.binaries` sidecar.
+    binary_entries_override: ?[]const BinaryEntry = null,
     /// Mirrors `ctx.offline` from the cli/ caller. Threaded onto the
     /// internal HttpClient so a download miss surfaces `OfflineRequired`
     /// instead of stalling on connect.
@@ -948,6 +1005,11 @@ pub const CaskInstaller = struct {
 
         // Caskroom dir is bookkeeping; app is already in place.
         self.recordCaskroom(cask) catch {};
+
+        // Persist the binary stanzas next to the cached artefact so a later
+        // rollback re-links offline without the cask JSON. Best-effort, as
+        // with the history row: a lost sidecar only degrades that rollback.
+        self.writeLinkedBinarySpec(cask) catch {};
 
         // History row for `mt rollback <cask> --list / --to`. Best-effort:
         // a failed history insert must not undo a successful install.
@@ -1153,6 +1215,10 @@ pub const CaskInstaller = struct {
         defer if (spec_opt) |*s| s.deinit(self.allocator);
         if (spec_opt) |*s| self.font_entries_override = s.entries;
         defer self.font_entries_override = null;
+        var bin_spec_opt = self.readBinarySpec(row.token, row.version) catch null;
+        defer if (bin_spec_opt) |*s| s.deinit(self.allocator);
+        if (bin_spec_opt) |*s| self.binary_entries_override = s.entries;
+        defer self.binary_entries_override = null;
 
         const app_path = try self.install(&synthetic);
         defer self.allocator.free(app_path);
@@ -1352,16 +1418,16 @@ pub const CaskInstaller = struct {
         // its binary sits inside the bundle and is not linked yet. The stage
         // is deleted on return, so the binary is kept under the Caskroom and
         // linked from there.
-        if (parseAppName(cask.parsed.value.object) == null) if (parseBinaryName(cask.parsed.value.object)) |src_name| {
-            const link_name = parseBinaryTarget(cask.parsed.value.object) orelse
-                std.fs.path.basename(src_name);
+        var stanzas = try self.binaryStanzas(cask);
+        defer stanzas.deinit(self.allocator);
+        if (parseAppName(cask.parsed.value.object) == null) if (stanzas.entries) |entries| {
             var caskroom_buf: [512]u8 = undefined;
             const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch
                 return error.InstallFailed;
             std.Io.Dir.cwd().createDirPath(self.io, caskroom_ver) catch return error.InstallFailed;
             const copy_argv = [_][]const u8{ system_tools.ditto, extract_dir, caskroom_ver };
             child_mod.runOrFail(self.io, self.allocator, &copy_argv) catch return error.InstallFailed;
-            return try self.linkCaskBinary(caskroom_ver, src_name, link_name);
+            return try self.linkCaskroomBinaries(caskroom_ver, entries);
         };
 
         // Find the .app. app_name_buf owns the fallback past iterator teardown.
@@ -1426,30 +1492,60 @@ pub const CaskInstaller = struct {
         return manifest_path;
     }
 
-    /// Per-version sidecar of the placed font stanzas, co-located with the
-    /// cached artifact at `<cache>/Cask/<token>-<version>.fonts`. It
-    /// lets `reinstallFromHistory` re-place fonts offline without the cask
+    /// Per-version sidecar of the placed stanzas, co-located with the
+    /// cached artifact at `<cache>/Cask/<token>-<version>.<ext>`. It
+    /// lets `reinstallFromHistory` re-place them offline without the cask
     /// JSON, which the synthetic rollback cask lacks. Format: one
     /// `source\ttarget` line per stanza; a tab-less line has no rename target.
-    /// Sanitization still runs in the leaf at placement, so the persisted
-    /// strings are re-validated there rather than trusted here.
-    pub const FontSpec = struct {
-        bytes: []u8,
-        entries: []cask_font.FontEntry,
+    /// Sanitization still runs at placement, so the persisted strings are
+    /// re-validated there rather than trusted here.
+    pub fn Spec(comptime Entry: type) type {
+        return struct {
+            bytes: []u8,
+            entries: []Entry,
 
-        pub fn deinit(self: *FontSpec, allocator: std.mem.Allocator) void {
-            allocator.free(self.entries);
-            allocator.free(self.bytes);
-        }
-    };
+            pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+                allocator.free(self.entries);
+                allocator.free(self.bytes);
+            }
+        };
+    }
+    pub const FontSpec = Spec(cask_font.FontEntry);
+    pub const BinarySpec = Spec(BinaryEntry);
 
-    fn fontSpecPath(self: *CaskInstaller, token: []const u8, version: []const u8, buf: []u8) ![]const u8 {
-        return std.fmt.bufPrint(buf, "{s}/Cask/{s}-{s}.fonts", .{ self.cache_dir, token, version });
+    fn specPath(self: *CaskInstaller, token: []const u8, version: []const u8, ext: []const u8, buf: []u8) ![]const u8 {
+        return std.fmt.bufPrint(buf, "{s}/Cask/{s}-{s}{s}", .{ self.cache_dir, token, version, ext });
     }
 
     fn writeFontSpec(self: *CaskInstaller, token: []const u8, version: []const u8, entries: []const cask_font.FontEntry) !void {
+        return self.writeSpec(token, version, ".fonts", entries);
+    }
+
+    fn writeBinarySpec(self: *CaskInstaller, token: []const u8, version: []const u8, entries: []const BinaryEntry) !void {
+        return self.writeSpec(token, version, ".binaries", entries);
+    }
+
+    /// Record only the stanzas this install linked. An app cask links its
+    /// `$APPDIR` binaries and nothing else, so recording the rest would send
+    /// its rollback down the binary-only branch and lose the bundle.
+    fn writeLinkedBinarySpec(self: *CaskInstaller, cask: *const Cask) !void {
+        var stanzas = try self.binaryStanzas(cask);
+        defer stanzas.deinit(self.allocator);
+        const entries = stanzas.entries orelse return;
+
+        var linked: std.ArrayList(BinaryEntry) = .empty;
+        defer linked.deinit(self.allocator);
+        const app_declared = parseAppName(cask.parsed.value.object) != null;
+        for (entries) |e| {
+            if (app_declared and !std.mem.startsWith(u8, e.source, appdir_var)) continue;
+            try linked.append(self.allocator, e);
+        }
+        if (linked.items.len != 0) try self.writeBinarySpec(cask.token, cask.version, linked.items);
+    }
+
+    fn writeSpec(self: *CaskInstaller, token: []const u8, version: []const u8, ext: []const u8, entries: anytype) !void {
         var path_buf: [512]u8 = undefined;
-        const path = try self.fontSpecPath(token, version, &path_buf);
+        const path = try self.specPath(token, version, ext, &path_buf);
 
         var bytes: std.ArrayList(u8) = .empty;
         defer bytes.deinit(self.allocator);
@@ -1469,11 +1565,19 @@ pub const CaskInstaller = struct {
     }
 
     /// Read the sidecar for `(token, version)`, or null when none was written
-    /// (a non-font cask, or a pre-sidecar install). Entries borrow the
-    /// returned `bytes`; free both via `FontSpec.deinit`.
+    /// (a cask without that stanza kind, or a pre-sidecar install). Entries
+    /// borrow the returned `bytes`; free both via `deinit`.
     pub fn readFontSpec(self: *CaskInstaller, token: []const u8, version: []const u8) !?FontSpec {
+        return self.readSpec(cask_font.FontEntry, token, version, ".fonts");
+    }
+
+    pub fn readBinarySpec(self: *CaskInstaller, token: []const u8, version: []const u8) !?BinarySpec {
+        return self.readSpec(BinaryEntry, token, version, ".binaries");
+    }
+
+    fn readSpec(self: *CaskInstaller, comptime Entry: type, token: []const u8, version: []const u8, ext: []const u8) !?Spec(Entry) {
         var path_buf: [512]u8 = undefined;
-        const path = try self.fontSpecPath(token, version, &path_buf);
+        const path = try self.specPath(token, version, ext, &path_buf);
 
         const file = std.Io.Dir.openFileAbsolute(self.io, path, .{}) catch |e| switch (e) {
             error.FileNotFound => return null,
@@ -1493,7 +1597,7 @@ pub const CaskInstaller = struct {
             if (line.len != 0) count += 1;
         }
 
-        const entries = try self.allocator.alloc(cask_font.FontEntry, count);
+        const entries = try self.allocator.alloc(Entry, count);
         errdefer self.allocator.free(entries);
 
         var i: usize = 0;
@@ -1561,11 +1665,9 @@ pub const CaskInstaller = struct {
             return self.installFontArtifacts(caskroom_ver, cask, entries);
         }
 
-        if (parseBinaryName(cask.parsed.value.object)) |src_name| {
-            const link_name = parseBinaryTarget(cask.parsed.value.object) orelse
-                std.fs.path.basename(src_name);
-            return try self.linkCaskBinary(caskroom_ver, src_name, link_name);
-        }
+        var stanzas = try self.binaryStanzas(cask);
+        defer stanzas.deinit(self.allocator);
+        if (stanzas.entries) |entries| return try self.linkCaskroomBinaries(caskroom_ver, entries);
 
         // Fallback: .app inside a tar.gz (uncommon but valid). Reuse the
         // zip path's "promote .app to app_dir" shape.
@@ -1586,6 +1688,35 @@ pub const CaskInstaller = struct {
         const mv_argv = [_][]const u8{ system_tools.ditto, src_app, dst_app };
         child_mod.runOrFail(self.io, self.allocator, &mv_argv) catch return error.InstallFailed;
         return dst_app;
+    }
+
+    /// The `binary` stanzas to place: rollback's override, else the cask
+    /// JSON. Only a collected list is owned.
+    const BinaryStanzas = struct {
+        entries: ?[]const BinaryEntry,
+        owned: ?[]BinaryEntry,
+
+        fn deinit(self: *BinaryStanzas, allocator: std.mem.Allocator) void {
+            if (self.owned) |o| allocator.free(o);
+        }
+    };
+
+    fn binaryStanzas(self: *CaskInstaller, cask: *const Cask) !BinaryStanzas {
+        if (self.binary_entries_override) |o| return .{ .entries = o, .owned = null };
+        const collected = try collectBinaryArtifacts(self.allocator, cask.parsed.value.object);
+        return .{ .entries = collected, .owned = collected };
+    }
+
+    /// Link every stanza from the Caskroom copy. Returns the first link
+    /// path, recorded as `app_path`.
+    fn linkCaskroomBinaries(self: *CaskInstaller, caskroom_ver: []const u8, entries: []const BinaryEntry) ![]const u8 {
+        var first: ?[]const u8 = null;
+        errdefer if (first) |f| self.allocator.free(f);
+        for (entries) |e| {
+            const link = try self.linkCaskBinary(caskroom_ver, e.source, e.target orelse std.fs.path.basename(e.source));
+            if (first == null) first = link else self.allocator.free(link);
+        }
+        return first orelse error.InstallFailed;
     }
 
     /// Resolve the source path of a `binary` artifact. Three shapes
@@ -2712,7 +2843,7 @@ test "a failed install keeps a digest-pinned artefact in the cache" {
     try std.Io.Dir.accessAbsolute(io, dest, .{});
 }
 
-test "fontSpecPath composes the sidecar under the resolved cache dir, not the prefix" {
+test "specPath composes the sidecar under the resolved cache dir, not the prefix" {
     // The sidecar must sit next to the artefact `downloadOnly` wrote, and
     // that lives under whatever the caller resolved (`MALT_CACHE` or
     // `{prefix}/cache`); composing from the prefix would strand it.
@@ -2726,7 +2857,8 @@ test "fontSpecPath composes the sidecar under the resolved cache dir, not the pr
         .progress = null,
     };
     var buf: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("/alt/Cask/font-x-1.0.fonts", try installer.fontSpecPath("font-x", "1.0", &buf));
+    try std.testing.expectEqualStrings("/alt/Cask/font-x-1.0.fonts", try installer.specPath("font-x", "1.0", ".fonts", &buf));
+    try std.testing.expectEqualStrings("/alt/Cask/tool-1.0.binaries", try installer.specPath("tool", "1.0", ".binaries", &buf));
 }
 
 // --- variations / depends_on ---
@@ -2890,4 +3022,43 @@ test "a variation's artifacts replace the flight steps too" {
     , 26);
     defer c.deinit();
     try std.testing.expectEqual(@as(usize, 2), c.flight_steps.get(.postflight).?.len);
+}
+
+test "collectBinaryArtifacts returns every binary stanza in artifact order with its link name" {
+    // The editor shape: two stanzas, each with a sibling full-path target.
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"artifacts":[{"app":["Editor.app"]},
+        \\ {"binary":["$APPDIR/Editor.app/Contents/Resources/app/bin/code"],"target":"$HOMEBREW_PREFIX/bin/code"},
+        \\ {"binary":["$APPDIR/Editor.app/Contents/Resources/app/bin/code-tunnel"],"target":"$HOMEBREW_PREFIX/bin/code-tunnel"},
+        \\ {"binary":["cli-aarch64",{"target":"cli"}]},
+        \\ {"binary":["plain"]}]}
+    , .{});
+    defer parsed.deinit();
+
+    const entries = (try collectBinaryArtifacts(std.testing.allocator, parsed.value.object)).?;
+    defer std.testing.allocator.free(entries);
+    try std.testing.expectEqual(@as(usize, 4), entries.len);
+    try std.testing.expectEqualStrings("$APPDIR/Editor.app/Contents/Resources/app/bin/code", entries[0].source);
+    try std.testing.expectEqualStrings("code", entries[0].target.?);
+    try std.testing.expectEqualStrings("code-tunnel", entries[1].target.?);
+    try std.testing.expectEqualStrings("cli-aarch64", entries[2].source);
+    try std.testing.expectEqualStrings("cli", entries[2].target.?);
+    try std.testing.expectEqualStrings("plain", entries[3].source);
+    try std.testing.expect(entries[3].target == null);
+}
+
+test "collectBinaryArtifacts is null when the cask declares no binary" {
+    for ([_][]const u8{
+        "{}",
+        \\{"artifacts":[{"app":["A.app"]}]}
+        ,
+        \\{"artifacts":[{"binary":[]}]}
+        ,
+        \\{"artifacts":"nope"}
+        ,
+    }) |json| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+        defer parsed.deinit();
+        try std.testing.expect((try collectBinaryArtifacts(std.testing.allocator, parsed.value.object)) == null);
+    }
 }

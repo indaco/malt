@@ -475,10 +475,8 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
         while (iter.next(io) catch null) |entry| {
             if (entry.kind == .directory) continue;
             const name = entry.name;
-            // `.fonts` stays local: it is a manifest, not an artefact, so it
-            // has no place in the deletion-driving `cache_extensions`.
             const stem = blk: {
-                for (cask_mod.cache_extensions ++ [_][]const u8{".fonts"}) |ext| {
+                for (cask_mod.cache_extensions ++ cask_mod.sidecar_extensions) |ext| {
                     if (std.mem.endsWith(u8, name, ext)) {
                         break :blk name[0 .. name.len - ext.len];
                     }
@@ -892,7 +890,7 @@ fn caskVersionFootprint(io: std.Io, allocator: std.mem.Allocator, prefix: []cons
         total += util.pathSize(io, allocator, caskroom_path);
     } else |_| {}
 
-    for (cask_mod.cache_extensions) |ext| {
+    for (cask_mod.cache_extensions ++ cask_mod.sidecar_extensions) |ext| {
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/Cask/{s}-{s}{s}", .{ cache_dir, token, version, ext }) catch continue;
         if (std.Io.Dir.cwd().statFile(io, cache_path, .{})) |st| {
             total += st.size;
