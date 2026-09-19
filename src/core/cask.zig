@@ -1840,13 +1840,14 @@ pub const CaskInstaller = struct {
             .tar_xz => archive_mod.extractTarXzFile(self.io, archive_path, caskroom_ver),
             else => return error.InstallFailed,
         }) catch return error.InstallFailed;
-        // The stage is the Caskroom dir itself, so nothing else reclaims it;
-        // the token dir goes too when this was its only version.
-        self.preflight(cask, caskroom_ver) catch |e| {
+        // The stage is the Caskroom dir itself, so nothing else reclaims it
+        // when anything after extraction fails; the token dir goes too when
+        // this was its only version.
+        errdefer {
             std.Io.Dir.cwd().deleteTree(self.io, caskroom_ver) catch {};
             if (std.fs.path.dirname(caskroom_ver)) |token_dir| std.Io.Dir.deleteDirAbsolute(self.io, token_dir) catch {};
-            return e;
-        };
+        }
+        try self.preflight(cask, caskroom_ver);
 
         // Same precedence as the zip dispatch: fonts first (they carry no
         // `.app` and no `binary`), then binaries, then a wrapped bundle.
