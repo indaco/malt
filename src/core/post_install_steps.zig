@@ -913,6 +913,11 @@ fn stepCopy(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // Always replace, as `cp_r` does — formulae omit `force` and rely on it.
     // Skipping an existing destination would leave a stale payload behind.
     // Swapped aside rather than deleted so a failed rename is recoverable.
+    // Only an existing destination is displaced; creating one is harmless.
+    if (pathExists(ctx.io, dest) and sharedDir(ctx, dest)) {
+        logUnsupported(ctx, "copy over a shared directory");
+        return false;
+    }
     const aside = asidePath(ctx, dest) orelse return false;
     std.Io.Dir.cwd().deleteTree(ctx.io, aside) catch {};
     // The rename doubles as the existence probe: a stat would follow a
@@ -1130,7 +1135,13 @@ fn stepInreplace(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     }
 
     const file = openSourceNoFollow(ctx, path) catch |e| {
-        if (e == error.PathSandboxViolation) logViolation(ctx, path);
+        switch (e) {
+            error.PathSandboxViolation => logViolation(ctx, path),
+            // Silent here would report the phase as completed with the
+            // declared edit never made.
+            error.FileNotFound => logUnsupported(ctx, "inreplace of a file the artefact did not ship"),
+            else => {},
+        }
         return false;
     };
     defer file.close(ctx.io);
@@ -1207,10 +1218,11 @@ fn removeTrees(ctx: StepsCtx, items: []const std.json.Value) bool {
     return true;
 }
 
-/// Shared ground no single package may delete: the prefix and its immediate
-/// children (`<prefix>/lib`, …); for a cask also `$HOME/Library` and its
-/// top-level dirs (`Keychains`, `Preferences`, …) and the applications dir
-/// itself — one app inside it is the cask's own to remove.
+/// Shared ground no single package may delete or relocate: the prefix and
+/// its immediate children (`<prefix>/lib`, …); for a cask also `$HOME/Library`,
+/// its top-level dirs (`Keychains`, `Preferences`, …), the trees under it
+/// that hold credentials and personal data at any depth, and the
+/// applications dir itself — one app inside it is the cask's own to remove.
 fn sharedDir(ctx: StepsCtx, raw: []const u8) bool {
     // Normalised so `<appdir>/.` reads as the appdir, not as a child of it.
     const path = std.fs.path.resolvePosix(ctx.allocator, &.{raw}) catch return true;
@@ -1219,10 +1231,22 @@ fn sharedDir(ctx: StepsCtx, raw: []const u8) bool {
         .formula => return false,
         .cask => |c| {
             const home_lib = std.fs.path.join(ctx.allocator, &.{ c.home, "Library" }) catch return true;
-            return selfOrChild(path, home_lib) or std.mem.eql(u8, path, std.mem.trimEnd(u8, c.appdir, "/"));
+            if (selfOrChild(path, home_lib)) return true;
+            // ponytail: a fixed deny-list; an ownership record of what this
+            // cask created would let the rest of `$HOME/Library` be refused too.
+            for (protected_home_trees) |sub| {
+                const tree = std.fs.path.join(ctx.allocator, &.{ home_lib, sub }) catch return true;
+                if (sandbox.pathHasPrefix(path, tree)) return true;
+            }
+            return std.mem.eql(u8, path, std.mem.trimEnd(u8, c.appdir, "/"));
         },
     }
 }
+
+/// `$HOME/Library` subtrees a cask never owns a piece of, however deep.
+const protected_home_trees = [_][]const u8{
+    "Keychains", "Mail", "Messages", "Safari", "Accounts", "Mobile Documents", "CloudStorage",
+};
 
 fn selfOrChild(path: []const u8, root: []const u8) bool {
     const r = std.mem.trimEnd(u8, root, "/");
@@ -1314,12 +1338,23 @@ fn stepMove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     }
     if (!confinedSource(ctx, source)) return false;
     if (!confined(ctx, target)) return false;
+    // A relocation removes its source: the same shared ground a recursive
+    // remove may not touch.
+    if (sharedDir(ctx, source)) {
+        logUnsupported(ctx, "move of a shared directory");
+        return false;
+    }
 
     if (pathExists(ctx.io, target)) {
         // Refused rather than skipped: the declared relocation did not happen
         // and the source is still sitting where the formula left it.
         if (!getFlag(obj, "overwrite") and !getFlag(obj, "force")) {
             logUnsupported(ctx, "move onto an existing target without overwrite");
+            return false;
+        }
+        // Overwrite is a delete; a target that does not exist yet is only created.
+        if (sharedDir(ctx, target)) {
+            logUnsupported(ctx, "move over a shared directory");
             return false;
         }
         // Swapped aside rather than deleted: if the relocation below fails,
@@ -1364,6 +1399,10 @@ fn stepMoveContents(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         return false;
     };
     if (!confined(ctx, target)) return false;
+    if (sharedDir(ctx, source)) {
+        logUnsupported(ctx, "move_contents out of a shared directory");
+        return false;
+    }
     std.Io.Dir.cwd().createDirPath(ctx.io, target) catch {};
     validateDirTarget(ctx, target) catch {
         logViolation(ctx, target);
@@ -1375,11 +1414,16 @@ fn stepMoveContents(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         return false;
     };
     defer dir.close(ctx.io);
+    // Names first, renames after: mutating a directory mid-readdir is
+    // unspecified, and a read error must not read as "nothing left".
+    var names: std.ArrayList([]const u8) = .empty;
     var iter = dir.iterate();
-    while (iter.next(ctx.io) catch null) |entry| {
-        const child = std.fs.path.join(ctx.allocator, &.{ source, entry.name }) catch continue;
+    while (iter.next(ctx.io) catch return false) |entry|
+        names.append(ctx.allocator, ctx.allocator.dupe(u8, entry.name) catch return false) catch return false;
+    for (names.items) |name| {
+        const child = std.fs.path.join(ctx.allocator, &.{ source, name }) catch continue;
         if (std.mem.eql(u8, child, target)) continue;
-        const dest = std.fs.path.join(ctx.allocator, &.{ target, entry.name }) catch continue;
+        const dest = std.fs.path.join(ctx.allocator, &.{ target, name }) catch continue;
         std.Io.Dir.renameAbsolute(child, dest, ctx.io) catch {
             logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not relocate {s}", .{child}) catch child);
             return false;
@@ -2507,6 +2551,32 @@ fn buildChildEnv(ctx: StepsCtx, extra_env: []const EnvVar) error{OutOfMemory}!st
     return map;
 }
 
+/// The trees a cask's confinement roots admit writes to, for the fence: the
+/// same set `rootPairs` lints against, plus the stage, `<prefix>/bin` where
+/// its `binary` artefacts live and `<prefix>/tmp`, its `temp` base. The
+/// `$HOME/Library` grant carries the same denies the native steps honour.
+/// Empty for a formula.
+const CaskWriteDirs = struct { allow: []const []const u8, deny: []const []const u8 };
+
+fn caskWriteDirs(ctx: StepsCtx) error{OutOfMemory}!CaskWriteDirs {
+    const c = switch (ctx.subject) {
+        .formula => return .{ .allow = &.{}, .deny = &.{} },
+        .cask => |c| c,
+    };
+    const a = ctx.allocator;
+    var allow: std.ArrayList([]const u8) = .empty;
+    var deny: std.ArrayList([]const u8) = .empty;
+    if (saneRoot(c.home)) {
+        const home_lib = try std.fs.path.join(a, &.{ c.home, "Library" });
+        try allow.append(a, home_lib);
+        for (protected_home_trees) |sub| try deny.append(a, try std.fs.path.join(a, &.{ home_lib, sub }));
+    }
+    if (saneRoot(c.appdir)) try allow.append(a, c.appdir);
+    if (saneRoot(c.staged_path)) try allow.append(a, c.staged_path);
+    for ([_][]const u8{ "bin", "tmp" }) |sub| try allow.append(a, try std.fs.path.join(a, &.{ ctx.prefix, sub }));
+    return .{ .allow = allow.items, .deny = deny.items };
+}
+
 /// Argv lint + sandbox fence + spawn + wait — the one exec chokepoint for
 /// every tool and initialiser step. `label` names the child in the log.
 /// `opts` carries per-spawn fence knobs (IPC only for the DB initialisers).
@@ -2519,6 +2589,14 @@ fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, extra_env: []const EnvVa
     };
     var profile_opts = opts;
     profile_opts.home = std.process.Environ.getPosix(ctx.environ, "HOME");
+    // The kernel fence must admit what the argv lint admits, or a cask's
+    // step is killed writing to the appdir the lint just approved.
+    const cask_dirs = caskWriteDirs(ctx) catch {
+        logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} failed to spawn", .{label}) catch label);
+        return false;
+    };
+    profile_opts.write_dirs = cask_dirs.allow;
+    profile_opts.deny_write_dirs = cask_dirs.deny;
     const fenced = sandbox.fenceArgv(ctx.allocator, argv, ctx.keg_path, ctx.prefix, profile_opts) catch {
         logViolation(ctx, argv[0]);
         return false;
@@ -2533,9 +2611,10 @@ fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, extra_env: []const EnvVa
     const raw = sandbox_macos.rawPassthroughEnabled(ctx.environ);
     // Run the step in its own keg. An inherited cwd is wherever the user
     // invoked malt from, which the sandbox profile does not grant: anything
-    // resolving it fails, and a relative path in a step is unusable.
-    const cwd: std.process.Child.Cwd =
-        if (ctx.keg_path.len > 0) .{ .path = ctx.keg_path } else .inherit;
+    // resolving it fails, and a relative path in a step is unusable. A
+    // cask's Caskroom dir only exists once the artefact is placed, so a
+    // preflight falls back to the prefix.
+    const cwd: std.process.Child.Cwd = .{ .path = if (dirExists(ctx.io, ctx.keg_path)) ctx.keg_path else ctx.prefix };
     var child = std.process.spawn(ctx.io, .{
         .argv = fenced,
         .cwd = cwd,
@@ -3030,6 +3109,20 @@ test "execute refuses inreplace through a source symlink outside the prefix" {
     try testing.expect(h.flog.hasFatal());
     var target_buf: [std.fs.max_path_bytes]u8 = undefined;
     _ = try std.Io.Dir.readLinkAbsolute(h.io, link, &target_buf);
+}
+
+test "execute reports an inreplace whose file was never shipped instead of passing silently" {
+    // The phase would otherwise read as completed with the declared edit
+    // never made — the postflight equivalent of a no-op that claims success.
+    var h = try TestHarness.init();
+    defer h.deinit();
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"inreplace","path":{"base":"etc","path":"absent.conf"},"before":"x","after":"y"}]
+    )));
+    try testing.expect(h.flog.hasErrors());
+    try testing.expect(!h.flog.hasFatal());
+    try testing.expectEqual(@as(usize, 0), h.flog.handled_top_level);
 }
 
 test "execute skips an inreplace whose if_exists guard is unmet" {
@@ -5563,6 +5656,11 @@ test "delete_keychain_certificate treats an absent certificate as success" {
     var ch = try CaskHarness.init();
     defer ch.deinit();
     ch.h.io = threaded.io();
+    // The real tool, against the real login keychain: a runner without a
+    // usable keychain would report `.failed` for reasons that are not ours.
+    const probe = child_mod.run(ch.h.io, testing.allocator, &.{ system_tools.security, "list-keychains" }) catch return error.SkipZigTest;
+    defer probe.deinit(testing.allocator);
+    if (probe.code != 0) return error.SkipZigTest;
 
     runSteps(ch.ctx(), try parseSteps(&ch.h,
         \\[{"type":"delete_keychain_certificate","name":"malt-no-such-certificate"}]
@@ -5765,6 +5863,88 @@ test "a recursive remove refuses $HOME/Library and its top-level children" {
     try testing.expectEqual(@as(usize, 1), ch.h.flog.handled_top_level);
 }
 
+test "a recursive remove refuses a credential tree under $HOME/Library at any depth" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    // Two levels down: past the top-level guard, yet still the user's
+    // login keychain and never a cask's to remove. An app's own state under
+    // `Application Support` stays fair game at the same depth.
+    const keychain = try std.fs.path.join(a, &.{ ch.home, "Library/Keychains/login.keychain-db" });
+    try std.Io.Dir.cwd().createDirPath(c.io, keychain);
+    const own = try std.fs.path.join(a, &.{ ch.home, "Library/Application Support/box/cache" });
+    try std.Io.Dir.cwd().createDirPath(c.io, own);
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"remove","recursive":true,"paths":[{"base":"home","path":"Library/Keychains/login.keychain-db"}]},
+        \\ {"type":"remove","recursive":true,"paths":[{"base":"home","path":"Library/Application Support/box/cache"}]}]
+    ));
+    try testing.expect(dirExists(c.io, keychain));
+    try testing.expect(!pathExists(c.io, own));
+    try testing.expect(!ch.h.flog.hasFatal());
+    try testing.expectEqual(@as(usize, 1), ch.h.flog.entries().len);
+}
+
+test "move and move_contents refuse to relocate $HOME/Library, and copy refuses to replace it" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    // Each shape passes confinement on its own: the roots admit `$HOME/Library`
+    // itself. Only the shared-ground guard stands between them and the
+    // user's whole Library being renamed aside and deleted.
+    const home_lib = try std.fs.path.join(a, &.{ ch.home, "Library" });
+    const marker = try std.fmt.allocPrint(a, "{s}/Preferences/keep.plist", .{home_lib});
+    try std.Io.Dir.cwd().createDirPath(c.io, std.fs.path.dirname(marker).?);
+    try atomic.atomicWriteFile(c.io, marker, "p");
+    const staged = c.subject.cask.staged_path;
+    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/empty", .{staged}));
+    // A copy into an existing directory lands as a child, so the replacing
+    // shape is a source named like one: `Keychains` over the user's own.
+    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/Keychains", .{staged}));
+    const login = try std.fmt.allocPrint(a, "{s}/Keychains/login", .{home_lib});
+    try std.Io.Dir.cwd().createDirPath(c.io, std.fs.path.dirname(login).?);
+    try atomic.atomicWriteFile(c.io, login, "k");
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"move","source":{"base":"staged_path","path":"empty"},"target":{"base":"home","path":"Library"},"overwrite":true},
+        \\ {"type":"move","source":{"base":"home","path":"Library"},"target":{"base":"staged_path","path":"lib"}},
+        \\ {"type":"move_contents","source":{"base":"home","path":"Library"},"target":{"base":"staged_path","path":"lib"}},
+        \\ {"type":"copy","source":{"base":"staged_path","path":"Keychains"},"target":{"base":"home","path":"Library"}}]
+    ));
+    try testing.expect(pathExists(c.io, marker));
+    try testing.expect(pathExists(c.io, login));
+    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/lib", .{staged})));
+    try testing.expectEqual(@as(usize, 0), ch.h.flog.handled_top_level);
+    try testing.expectEqual(@as(usize, 4), ch.h.flog.entries().len);
+}
+
+test "move and copy may still create a new top-level dir under $HOME/Library" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    // Nothing is displaced when the target does not exist: the guard is
+    // about replacing shared ground, not about where a cask may add to it.
+    const staged = c.subject.cask.staged_path;
+    for ([_][]const u8{ "a", "b" }) |n| {
+        try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/{s}", .{ staged, n }));
+        try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/{s}/f", .{ staged, n }), "x");
+    }
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"move","source":{"base":"staged_path","path":"a"},"target":{"base":"home","path":"Library/Box Moved"}},
+        \\ {"type":"copy","source":{"base":"staged_path","path":"b"},"target":{"base":"home","path":"Library/Box Copied"}}]
+    ));
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expect(pathExists(c.io, try std.fs.path.join(a, &.{ ch.home, "Library/Box Moved/f" })));
+    try testing.expect(pathExists(c.io, try std.fs.path.join(a, &.{ ch.home, "Library/Box Copied/f" })));
+}
+
 test "a recursive remove refuses the applications dir itself but not one app in it" {
     var ch = try CaskHarness.init();
     defer ch.deinit();
@@ -5895,6 +6075,53 @@ test "a cask run command resolves the cask bases and still refuses a bare name" 
         \\{"command":{"path":"chflags"}}
     )) == null);
     try testing.expectEqual(@as(usize, 2), ch.h.flog.entries().len);
+}
+
+test "a cask run step can write to the appdir and $HOME/Library the lint admits" {
+    // The lint and the kernel fence must agree, or an approved step dies
+    // with a sandbox kill and the install reports a failed step.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    ch.h.io = threaded.io();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    // The Caskroom dir does not exist at preflight time; the child must still
+    // find a working directory.
+    rmrf(c.keg_path);
+    // Exists up front: the fence only learns a root's resolved form once it is
+    // on disk, and this prefix sits under the `/tmp` symlink.
+    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/tmp", .{ch.h.prefix}));
+
+    const support = try std.fmt.allocPrint(a, "{s}/Library/Application Support/box", .{ch.home});
+    runSteps(c, try parseSteps(&ch.h, try std.fmt.allocPrint(a,
+        \\[{{"type":"run","command":{{"path":"/bin/mkdir"}},"args":["-p","{{{{appdir}}}}/Probe.app","{s}","{{{{temp}}}}/parked"]}}]
+    , .{support})));
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/Probe.app", .{c.subject.cask.appdir})));
+    try testing.expect(dirExists(c.io, support));
+    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/tmp/parked", .{ch.h.prefix})));
+}
+
+test "a cask run step is fenced off the credential trees under $HOME/Library" {
+    // The grant of `$HOME/Library` is what a native `remove` refuses for
+    // Keychains; a spawned tool must not be the way around that refusal.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    ch.h.io = threaded.io();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const keychains = try std.fs.path.join(a, &.{ ch.home, "Library/Keychains" });
+    try std.Io.Dir.cwd().createDirPath(c.io, keychains);
+
+    runSteps(c, try parseSteps(&ch.h, try std.fmt.allocPrint(a,
+        \\[{{"type":"run","command":{{"path":"/bin/mkdir"}},"args":["{s}/planted"]}}]
+    , .{keychains})));
+    try testing.expect(ch.h.flog.hasFatal());
+    try testing.expect(!dirExists(c.io, try std.fmt.allocPrint(a, "{s}/planted", .{keychains})));
 }
 
 test "checkSteps names a run command it could not resolve" {

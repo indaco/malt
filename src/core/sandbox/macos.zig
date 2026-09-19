@@ -133,6 +133,13 @@ pub const ProfileOpts = struct {
     /// covers every package-manager prefix, so a fenced Ruby installed by
     /// one cannot load its own dylibs without this.
     read_dirs: []const []const u8 = &.{},
+    /// Trees the child may read and write in full, beyond the cellar and
+    /// the prefix subtrees: a cask's steps land in the appdir and
+    /// `$HOME/Library`, which the deny list above otherwise takes whole.
+    write_dirs: []const []const u8 = &.{},
+    /// Subtrees of `write_dirs` the child may still not write: a cask's
+    /// grant of `$HOME/Library` must stop short of the user's keychains.
+    deny_write_dirs: []const []const u8 = &.{},
 };
 
 /// Render the deny-by-default SCL profile; writes limited to `cellar_path`
@@ -193,6 +200,8 @@ pub fn renderRubyProfile(
 
     for (opts.read_files) |path| try validatePathForProfile(path);
     for (opts.read_dirs) |path| try validatePathForProfile(path);
+    for (opts.write_dirs) |path| try validatePathForProfile(path);
+    for (opts.deny_write_dirs) |path| try validatePathForProfile(path);
 
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     const w = &aw.writer;
@@ -263,6 +272,7 @@ pub fn renderRubyProfile(
         if (resolvedForProfile(path, &real_buf)) |real|
             writeCellarRule(w, real) catch return SandboxError.ProfileBuildFailed;
     }
+    writeDirRules(w, opts.write_dirs) catch return SandboxError.ProfileBuildFailed;
     w.writeAll(")\n") catch return SandboxError.ProfileBuildFailed;
 
     // Database initialisers (postgres bootstrap) allocate SysV/POSIX shared
@@ -289,9 +299,24 @@ pub fn renderRubyProfile(
     writePrefixRules(w, malt_prefix) catch return SandboxError.ProfileBuildFailed;
     if (resolvedForProfile(malt_prefix, &prefix_real_buf)) |real|
         writePrefixRules(w, real) catch return SandboxError.ProfileBuildFailed;
+    writeDirRules(w, opts.write_dirs) catch return SandboxError.ProfileBuildFailed;
     w.writeAll(")\n") catch return SandboxError.ProfileBuildFailed;
+    // Later rules win in SBPL, so the denies follow the grant they narrow.
+    if (opts.deny_write_dirs.len > 0) {
+        w.writeAll("(deny file-write*") catch return SandboxError.ProfileBuildFailed;
+        writeDirRules(w, opts.deny_write_dirs) catch return SandboxError.ProfileBuildFailed;
+        w.writeAll(")\n") catch return SandboxError.ProfileBuildFailed;
+    }
 
     return aw.toOwnedSlice() catch SandboxError.ProfileBuildFailed;
+}
+
+fn writeDirRules(w: *std.Io.Writer, dirs: []const []const u8) !void {
+    for (dirs) |path| {
+        try writeCellarRule(w, path);
+        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (resolvedForProfile(path, &real_buf)) |real| try writeCellarRule(w, real);
+    }
 }
 
 fn writeCellarRule(w: *std.Io.Writer, root: []const u8) !void {
@@ -873,6 +898,36 @@ test "renderRubyProfile grants read-only access to read_dirs, never writes" {
     const grant = std.mem.indexOf(u8, profile, "(subpath \"/opt/homebrew/Cellar\")").?;
     try std.testing.expect(grant > read_start and grant < write_start);
     try std.testing.expect(std.mem.indexOf(u8, profile[write_start..], "/opt/homebrew/Cellar") == null);
+}
+
+test "renderRubyProfile grants write_dirs for reading and writing" {
+    const profile = try renderRubyProfile(
+        std.testing.allocator,
+        "/opt/malt/Caskroom/box",
+        "/opt/malt",
+        .{ .write_dirs = &.{ "/Users/me/Library", "/Applications" } },
+    );
+    defer std.testing.allocator.free(profile);
+    // Both roots sit under the read-data deny list, so a grant in only one
+    // section would leave a cask step unable to open what it may write.
+    const write_start = std.mem.indexOf(u8, profile, "(allow file-write*").?;
+    for ([_][]const u8{ "(subpath \"/Users/me/Library\")", "(subpath \"/Applications\")" }) |rule| {
+        try std.testing.expect(std.mem.indexOf(u8, profile[0..write_start], rule) != null);
+        try std.testing.expect(std.mem.indexOf(u8, profile[write_start..], rule) != null);
+    }
+}
+
+test "renderRubyProfile denies deny_write_dirs after the write grant they sit under" {
+    const profile = try renderRubyProfile(
+        std.testing.allocator,
+        "/opt/malt/Caskroom/box",
+        "/opt/malt",
+        .{ .write_dirs = &.{"/Users/me/Library"}, .deny_write_dirs = &.{"/Users/me/Library/Keychains"} },
+    );
+    defer std.testing.allocator.free(profile);
+    const grant = std.mem.lastIndexOf(u8, profile, "(subpath \"/Users/me/Library\")").?;
+    const deny = std.mem.indexOf(u8, profile, "(deny file-write*\n  (subpath \"/Users/me/Library/Keychains\")").?;
+    try std.testing.expect(deny > grant);
 }
 
 test "renderRubyProfile also grants read_dirs under their resolved form" {
