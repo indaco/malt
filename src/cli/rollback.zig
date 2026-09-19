@@ -23,6 +23,8 @@ const snap_mod = @import("outdated/snapshot.zig");
 const outdated_mod = @import("outdated.zig");
 const api_mod = @import("../net/api.zig");
 const install_args_mod = @import("install/args.zig");
+const post_install_mod = @import("install/post_install.zig");
+const install_sink_mod = @import("install/sink.zig");
 
 /// `error.Aborted` is returned on every user-facing failure. The caller has
 /// already emitted a message via `output.err`; main.zig catches it and exits
@@ -446,9 +448,24 @@ fn dispatchCask(
     artefact_cache.adoptLegacy(ctx.io, prefix, cache_dir);
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, cache_dir);
     installer.offline = ctx.offline;
+    // The outgoing version is uninstalled by the swap, so its stored
+    // uninstall steps run around it; the target version's own steps are not
+    // on record, so nothing runs for it.
+    var flight = post_install_mod.Flight.init(allocator);
+    defer flight.deinit();
+    installer.flight = flight.sink();
+    var stored = post_install_mod.storedFlight(db, allocator, token, install_sink_mod.terminal);
+    defer if (stored) |*s| s.deinit();
+    if (stored) |*s| if (cur_ver_opt) |cur| {
+        if (!flight.runPhase(&installer, token, cur, s.get(.uninstall_preflight), "uninstall preflight", install_sink_mod.terminal)) return error.Aborted;
+        flight.runUninstallMode(&installer, token, cur, s, install_sink_mod.terminal);
+    };
     installer.reinstallFromHistory(token, target_pkg_version) catch |e| {
         output.err("failed to reinstall {s} {s} ({s})", .{ token, target_pkg_version, @errorName(e) });
         return error.Aborted;
+    };
+    if (stored) |*s| if (cur_ver_opt) |cur| {
+        _ = flight.runPhase(&installer, token, cur, s.get(.uninstall_postflight), "uninstall postflight", install_sink_mod.terminal);
     };
     // See the keg path: the downgraded cask is not in the snapshot to prune.
     reconcileOutdatedSnapshot(ctx.io, allocator, db, .casks, token, target_pkg_version);

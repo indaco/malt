@@ -63,6 +63,12 @@ fn exists(io: std.Io, path: []const u8) bool {
     return if (std.Io.Dir.accessAbsolute(io, path, .{})) |_| true else |_| false;
 }
 
+/// The link itself, not what it points at: `exists` follows it.
+fn linkExists(io: std.Io, path: []const u8) bool {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    return if (std.Io.Dir.readLinkAbsolute(io, path, &buf)) |_| true else |_| false;
+}
+
 const box_json =
     \\{"token":"box","name":["Box"],"version":"6.0","url":"https://example.invalid/box.zip","sha256":"no_check",
     \\ "artifacts":[
@@ -316,7 +322,7 @@ test "install --dry-run lists the phases and names the steps malt refuses" {
     try putFile(threaded.io(), fx.p("cache/api/cask_plan.json"),
         \\{"token":"plan","name":["Plan"],"version":"2.1","url":"https://example.invalid/plan.zip","sha256":"no_check",
         \\ "artifacts":[{"preflight_steps":[{"steps":[{"type":"mkdir_p","path":{"base":"home","path":"Library/plan"}}]}]},{"app":["Plan.app"]},
-        \\  {"postflight_steps":[{"steps":[{"type":"run","command":{"path":"/bin/echo"},"sudo":true},{"type":"terminate_process","name":"p","match":"full"}]}]}]}
+        \\  {"postflight_steps":[{"steps":[{"type":"run","command":{"path":"/bin/echo"},"sudo":true},{"type":"terminate_process","name":"p","match":"full"},{"type":"run","command":{"path":"/bin/echo"},"network_access":true}]}]}]}
     );
     {
         var db = try sqlite.Database.open(fx.p("db/malt.db"));
@@ -335,9 +341,11 @@ test "install --dry-run lists the phases and names the steps malt refuses" {
     try malt.install.execute(&ctx, arena.allocator(), &.{ "--cask", "--dry-run", "plan" });
 
     try testing.expect(std.mem.indexOf(u8, captured.items, "would run 1 preflight step(s) for plan") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would run 2 postflight step(s) for plan") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would run 3 postflight step(s) for plan") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: run with sudo") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: terminate_process with match") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: run with network_access") != null);
+    // A full-path match is honoured now, so the plan no longer flags it.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "terminate_process") == null);
     try testing.expect(!exists(threaded.io(), fx.h("Library/plan")));
 }
 
@@ -535,4 +543,530 @@ test "a cask without flight steps stores NULL and installs as before" {
     defer c.deinit();
     try cask.recordInstall(&db, &c, null, null);
     try testing.expect((try cask.readFlightSteps(&db, testing.allocator, "plain")) == null);
+}
+
+/// A zip artefact for `token` whose top-level entry is `<App>.app`, placed
+/// where an upgrade's prefetch looks first, so the whole flow stays offline.
+fn seedZipArtifact(fx: *Fixture, io: std.Io, token: []const u8, version: []const u8, app: []const u8) ![64]u8 {
+    const a = fx.arena.allocator();
+    const stage = try std.fmt.allocPrint(a, "{s}/stage-{s}/{s}", .{ fx.base, version, app });
+    try putFile(io, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{stage}), version);
+    const zip = try std.fmt.allocPrint(a, "{s}/cache/Cask/{s}-{s}.zip", .{ fx.base, token, version });
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/usr/bin/ditto", "-c", "-k", test_io.path.dirname(stage).?, zip },
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    const term = try child.wait(io);
+    if (term != .exited or term.exited != 0) return error.ZipFixtureFailed;
+    const bytes = try test_io.readFileAbsoluteAlloc(io, testing.allocator, zip, 1 << 20);
+    defer testing.allocator.free(bytes);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+test "upgrade runs the outgoing version's uninstall steps and the new version's postflight" {
+    var fx = try Fixture.init("upgrade");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    const a = fx.arena.allocator();
+    // The appdir is pinned under the fixture so the swap never reaches the
+    // real /Applications.
+    const appdir = fx.p("Applications");
+    const block = try a.allocSentinel(?[*:0]const u8, 2, null);
+    block[0] = (try std.fmt.allocPrintSentinel(a, "HOME={s}", .{fx.home}, 0)).ptr;
+    block[1] = (try std.fmt.allocPrintSentinel(a, "MALT_APPDIR={s}", .{appdir}, 0)).ptr;
+    const environ: std.process.Environ = .{ .block = .{ .slice = block } };
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const v1_json =
+        \\{"token":"plain","name":["Plain"],"version":"1.0","url":"https://example.invalid/plain-1.0.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Plain.app"]},
+        \\  {"postflight_steps":[{"steps":[{"type":"symlink","source":{"base":"staged_path","path":"libplain.1.0.dylib"},
+        \\    "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libplain.1.dylib"},"uninstall":true}]}]},
+        \\  {"uninstall_postflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":"Library/plain.gone"},"content":"{{version}}"}]}]}]}
+    ;
+    // The installer stages under `<prefix>/tmp`, which `mt` creates at init.
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const sha = try seedZipArtifact(&fx, io, "plain", "2.0", "Plain.app");
+    const v2_json = try std.fmt.allocPrint(a,
+        \\{{"token":"plain","name":["Plain"],"version":"2.0","url":"https://example.invalid/plain-2.0.zip","sha256":"{s}",
+        \\ "artifacts":[{{"app":["Plain.app"]}},
+        \\  {{"postflight_steps":[{{"steps":[{{"type":"write","path":{{"base":"home","path":"Library/plain.conf"}},"content":"v={{{{version}}}}"}}]}}]}}]}}
+    , .{sha});
+    try putFile(io, fx.p("cache/api/cask_plain.json"), v2_json);
+
+    // The installed version on disk and in the row, steps stored as install does.
+    const old_app = try std.fmt.allocPrint(a, "{s}/Plain.app", .{appdir});
+    try putFile(io, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{old_app}), "1.0");
+    {
+        try test_io.cwd().createDirPath(io, fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c1 = try cask.parseCaskWithMajor(testing.allocator, v1_json, null);
+        defer c1.deinit();
+        try cask.recordInstall(&db, &c1, old_app, null);
+        // The link v1's postflight placed, as the install left it.
+        try test_io.cwd().createDirPath(io, fx.p("lib"));
+        try std.Io.Dir.symLinkAbsolute(io, fx.p("Caskroom/plain/1.0/libplain.1.0.dylib"), fx.p("lib/libplain.1.dylib"), .{});
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = environ, .offline = true };
+    malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "plain" }) catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+
+    const gone = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.h("Library/plain.gone"), 64);
+    defer testing.allocator.free(gone);
+    try testing.expectEqualStrings("1.0", gone);
+    const conf = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.h("Library/plain.conf"), 64);
+    defer testing.allocator.free(conf);
+    try testing.expectEqualStrings("v=2.0", conf);
+    const placed = try test_io.readFileAbsoluteAlloc(io, testing.allocator, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{old_app}), 64);
+    defer testing.allocator.free(placed);
+    try testing.expectEqualStrings("2.0", placed);
+    // v1 asked for its link to go with it.
+    try testing.expect(!linkExists(io, fx.p("lib/libplain.1.dylib")));
+}
+
+test "upgrade refuses a running app before any stored step can act" {
+    var fx = try Fixture.init("upgrade_running");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    const a = fx.arena.allocator();
+    const appdir = fx.p("Applications");
+    const block = try a.allocSentinel(?[*:0]const u8, 2, null);
+    block[0] = (try std.fmt.allocPrintSentinel(a, "HOME={s}", .{fx.home}, 0)).ptr;
+    block[1] = (try std.fmt.allocPrintSentinel(a, "MALT_APPDIR={s}", .{appdir}, 0)).ptr;
+    const environ: std.process.Environ = .{ .block = .{ .slice = block } };
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const v1_json =
+        \\{"token":"live","name":["Live"],"version":"1.0","url":"https://example.invalid/live-1.0.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Live.app"]},
+        \\  {"postflight_steps":[{"steps":[{"type":"symlink","source":{"base":"staged_path","path":"liblive.1.0.dylib"},
+        \\    "target":{"path":"{{HOMEBREW_PREFIX}}/lib/liblive.1.dylib"},"uninstall":true}]}]},
+        \\  {"uninstall_preflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":"Library/live.pre"},"content":"ran"}]}]}]}
+    ;
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const sha = try seedZipArtifact(&fx, io, "live", "2.0", "Live.app");
+    try putFile(io, fx.p("cache/api/cask_live.json"), try std.fmt.allocPrint(a,
+        \\{{"token":"live","name":["Live"],"version":"2.0","url":"https://example.invalid/live-2.0.zip","sha256":"{s}","artifacts":[{{"app":["Live.app"]}}]}}
+    , .{sha}));
+
+    const old_app = try std.fmt.allocPrint(a, "{s}/Live.app", .{appdir});
+    const exe = try std.fmt.allocPrint(a, "{s}/Contents/MacOS/live", .{old_app});
+    try putFile(io, exe, "");
+    {
+        try test_io.cwd().createDirPath(io, fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c1 = try cask.parseCaskWithMajor(testing.allocator, v1_json, null);
+        defer c1.deinit();
+        try cask.recordInstall(&db, &c1, old_app, null);
+        try test_io.cwd().createDirPath(io, fx.p("lib"));
+        try std.Io.Dir.symLinkAbsolute(io, fx.p("Caskroom/live/1.0/liblive.1.0.dylib"), fx.p("lib/liblive.1.dylib"), .{});
+    }
+
+    // What `isAppRunning` sees: a process whose command line names the bundle.
+    var child = try std.process.spawn(io, .{ .argv = &.{ "/usr/bin/tail", "-f", exe }, .stdout = .ignore, .stderr = .ignore });
+    defer child.kill(io); // kill also reaps
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(true);
+    defer malt.output.setQuiet(prior_quiet);
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = environ, .offline = true };
+    try testing.expectError(error.AppRunning, malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "live" }));
+
+    // Refused before the stored phases: the link and the row are as they were.
+    try testing.expect(linkExists(io, fx.p("lib/liblive.1.dylib")));
+    try testing.expect(!exists(io, fx.h("Library/live.pre")));
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    try testing.expectEqualStrings("1.0", cask.lookupInstalled(&db, "live").?.version());
+}
+
+test "uninstall drops the symlink a postflight placed and declared for removal" {
+    var fx = try Fixture.init("uninstall_symlink");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const json =
+        \\{"token":"box","name":["Box"],"version":"6.0","url":"https://example.invalid/box.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Box.app"]},
+        \\  {"postflight_steps":[{"steps":[
+        \\    {"type":"symlink","source":{"base":"staged_path","path":"libbox.6.0.dylib"},"target":{"path":"{{HOMEBREW_PREFIX}}/lib/libbox.6.dylib"},"uninstall":true},
+        \\    {"type":"symlink","source":{"base":"staged_path","path":"box"},"target":{"path":"{{HOMEBREW_PREFIX}}/bin/box"}}]}]}]}
+    ;
+    const app_path = fx.p("Applications/Box.app");
+    try putFile(io, fx.p("Applications/Box.app/Contents/MacOS/box"), "bin");
+    try putFile(io, fx.p("Caskroom/box/6.0/libbox.6.0.dylib"), "lib");
+    {
+        try test_io.cwd().createDirPath(io, fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c = try cask.parseCaskWithMajor(testing.allocator, json, null);
+        defer c.deinit();
+        try cask.recordInstall(&db, &c, app_path, null);
+
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var flog = cask.FlightLog.init(testing.allocator);
+        defer flog.deinit();
+        var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+        installer.flight = .{ .log = &flog, .allocator = arena.allocator() };
+        try testing.expect(installer.runFlight("box", "6.0", c.flight_steps.get(.postflight).?, null));
+    }
+    try testing.expect(linkExists(io, fx.p("lib/libbox.6.dylib")));
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ, .offline = true };
+    try malt.cli_uninstall.execute(&ctx, testing.allocator, &.{ "--cask", "box" });
+
+    try testing.expect(!exists(io, app_path));
+    try testing.expect(!linkExists(io, fx.p("lib/libbox.6.dylib")));
+    // Declared without `uninstall`: upstream leaves it, so does malt.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(io, fx.p("bin/box"), &buf);
+}
+
+// --- routed tap-cask upgrade over a loopback forge ---------------------------
+
+const net = std.Io.net;
+const head_sha = "0123456789abcdef0123456789abcdef01234567";
+
+/// A gitea-shaped forge on loopback: answers the HEAD probe and serves one
+/// cask `.rb`; anything else 404s. Runs until a connection carrying no
+/// request (the test's knock) tells it the client is done.
+const Forge = struct {
+    io: std.Io,
+    listener: *net.Server,
+    rb: []const u8,
+
+    fn serve(f: *Forge) void {
+        while (true) {
+            const stream = f.listener.accept(f.io) catch return;
+            defer stream.close(f.io);
+            var rbuf: [16 * 1024]u8 = undefined;
+            var wbuf: [16 * 1024]u8 = undefined;
+            var reader = stream.reader(f.io, &rbuf);
+            var writer = stream.writer(f.io, &wbuf);
+            var srv = std.http.Server.init(&reader.interface, &writer.interface);
+            // A connection carrying no request is the knock: the test is done.
+            var req = srv.receiveHead() catch return;
+            const target = req.head.target;
+            // One request per connection: an idle kept-alive one would park
+            // this single-threaded server and stall the next client's dial.
+            if (std.mem.indexOf(u8, target, "/api/v1/repos/grp/tap/commits") != null) {
+                req.respond("[{\"sha\":\"" ++ head_sha ++ "\"}]", .{ .keep_alive = false }) catch {};
+            } else if (std.mem.endsWith(u8, target, "/Casks/plain.rb")) {
+                req.respond(f.rb, .{ .keep_alive = false }) catch {};
+            } else {
+                req.respond("", .{ .status = .not_found, .keep_alive = false }) catch {};
+            }
+        }
+    }
+
+    fn knock(io: std.Io, port: u16) void {
+        var addr = net.IpAddress.parseIp4("127.0.0.1", port) catch return;
+        const s = addr.connect(io, .{ .mode = .stream }) catch return;
+        s.close(io);
+    }
+};
+
+/// The pieces every routed-upgrade test shares: a prefix whose appdir is
+/// pinned inside it, a loopback forge, a tap row aimed at it, and `plain`
+/// 1.0 installed from that tap with its flight steps stored.
+const TapUpgradeRig = struct {
+    fx: Fixture,
+    threaded: std.Io.Threaded,
+    environ: std.process.Environ,
+    listener: net.Server,
+    forge: Forge,
+    thread: std.Thread,
+    port: u16,
+
+    fn init(tag: []const u8, comptime rb_fmt: []const u8, zip_app: []const u8) !*TapUpgradeRig {
+        const rig = try testing.allocator.create(TapUpgradeRig);
+        errdefer testing.allocator.destroy(rig);
+        rig.fx = try Fixture.init(tag);
+        const a = rig.fx.arena.allocator();
+        const appdir = rig.fx.p("Applications");
+        const block = try a.allocSentinel(?[*:0]const u8, 2, null);
+        block[0] = (try std.fmt.allocPrintSentinel(a, "HOME={s}", .{rig.fx.home}, 0)).ptr;
+        block[1] = (try std.fmt.allocPrintSentinel(a, "MALT_APPDIR={s}", .{appdir}, 0)).ptr;
+        rig.environ = .{ .block = .{ .slice = block } };
+        rig.threaded = .init(testing.allocator, .{ .environ = rig.environ });
+        const io_ = rig.threaded.io();
+
+        var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+        rig.listener = try addr.listen(io_, .{ .reuse_address = true });
+        rig.port = rig.listener.socket.address.getPort();
+
+        // The 2.0 artefact is digest-pinned and already cached, so the
+        // forge never has to serve bytes and the prefetch is a cache hit.
+        try test_io.cwd().createDirPath(io_, rig.fx.p("tmp"));
+        const sha = try seedZipArtifact(&rig.fx, io_, "plain", "2.0", zip_app);
+        rig.forge = .{ .io = io_, .listener = &rig.listener, .rb = try std.fmt.allocPrint(a, rb_fmt, .{sha}) };
+        rig.thread = try std.Thread.spawn(.{}, Forge.serve, .{&rig.forge});
+
+        const v1_json =
+            \\{"token":"plain","name":["Plain"],"version":"1.0","url":"https://example.invalid/plain-1.0.zip","sha256":"no_check",
+            \\ "artifacts":[{"app":["Plain.app"]},
+            \\  {"postflight_steps":[{"steps":[{"type":"symlink","source":{"base":"staged_path","path":"libplain.1.0.dylib"},
+            \\    "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libplain.1.dylib"},"uninstall":true}]}]},
+            \\  {"uninstall_postflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":"Library/plain.gone"},"content":"{{version}}"}]}]}]}
+        ;
+        const old_app = try std.fmt.allocPrint(a, "{s}/Plain.app", .{appdir});
+        try putFile(io_, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{old_app}), "1.0");
+        try test_io.cwd().createDirPath(io_, rig.fx.p("db"));
+        var db = try sqlite.Database.open(rig.fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        const host = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{rig.port});
+        try malt.tap.addWithForge(&db, "grp/tap", "grp", "tap", host, .gitea, head_sha);
+        var c1 = try cask.parseCaskWithMajor(testing.allocator, v1_json, null);
+        defer c1.deinit();
+        try cask.recordInstall(&db, &c1, old_app, "grp/tap");
+        try test_io.cwd().createDirPath(io_, rig.fx.p("lib"));
+        try std.Io.Dir.symLinkAbsolute(io_, rig.fx.p("Caskroom/plain/1.0/libplain.1.0.dylib"), rig.fx.p("lib/libplain.1.dylib"), .{});
+        return rig;
+    }
+
+    fn io(rig: *TapUpgradeRig) std.Io {
+        return rig.threaded.io();
+    }
+
+    fn deinit(rig: *TapUpgradeRig) void {
+        Forge.knock(rig.io(), rig.port);
+        rig.thread.join();
+        rig.listener.deinit(rig.io());
+        rig.threaded.deinit();
+        rig.fx.deinit();
+        testing.allocator.destroy(rig);
+    }
+};
+
+// The artefact is digest-pinned and pre-cached, so its URL is never dialled.
+const plain_rb =
+    \\cask "plain" do
+    \\  version "2.0"
+    \\  sha256 "{s}"
+    \\  url "https://example.invalid/plain-2.0.zip"
+    \\  app "Plain.app"
+    \\end
+;
+
+test "a tap-routed upgrade runs the outgoing version's stored steps around the swap" {
+    const rig = try TapUpgradeRig.init("tap_upgrade", plain_rb, "Plain.app");
+    defer rig.deinit();
+    const io = rig.io();
+    var fx = &rig.fx;
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = rig.environ, .offline = false };
+    malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "plain" }) catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+
+    const gone = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.h("Library/plain.gone"), 64);
+    defer testing.allocator.free(gone);
+    try testing.expectEqualStrings("1.0", gone);
+    try testing.expect(!linkExists(io, fx.p("lib/libplain.1.dylib")));
+    const placed = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Applications/Plain.app/Contents/MacOS/bin"), 64);
+    defer testing.allocator.free(placed);
+    try testing.expectEqualStrings("2.0", placed);
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    const row = cask.lookupInstalled(&db, "plain").?;
+    try testing.expectEqualStrings("2.0", row.version());
+    try testing.expectEqualStrings("grp/tap", row.tap().?);
+}
+
+test "a tap-routed upgrade whose install fails puts the old version back" {
+    // The 2.0 payload names the wrong bundle, so placement fails after the
+    // old version is already gone.
+    const rig = try TapUpgradeRig.init("tap_upgrade_restore", plain_rb, "Other.app");
+    defer rig.deinit();
+    const io = rig.io();
+    var fx = &rig.fx;
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+
+    // What a real 1.0 install leaves behind for a restore: its history row
+    // and its digest-pinned artefact in the cache.
+    const sha1 = try seedZipArtifact(fx, io, "plain", "1.0", "Plain.app");
+    {
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try cask.recordCaskVersion(&db, "plain", "1.0", "https://example.invalid/plain-1.0.zip", &sha1, "zip", fx.p("cache/Cask/plain-1.0.zip"));
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = rig.environ, .offline = false };
+    try testing.expectError(error.Aborted, malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "plain" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "plain 1.0 is back in place") != null);
+
+    const bin = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Applications/Plain.app/Contents/MacOS/bin"), 64);
+    defer testing.allocator.free(bin);
+    try testing.expectEqualStrings("1.0", bin);
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    const row = cask.lookupInstalled(&db, "plain").?;
+    try testing.expectEqualStrings("1.0", row.version());
+    try testing.expectEqualStrings("grp/tap", row.tap().?);
+}
+
+test "uninstall --force still refuses a running app before any stored step acts" {
+    var fx = try Fixture.init("uninstall_force_running");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const json =
+        \\{"token":"live","name":["Live"],"version":"1.0","url":"https://example.invalid/live.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Live.app"]},
+        \\  {"postflight_steps":[{"steps":[{"type":"symlink","source":{"base":"staged_path","path":"liblive.1.0.dylib"},
+        \\    "target":{"path":"{{HOMEBREW_PREFIX}}/lib/liblive.1.dylib"},"uninstall":true}]}]},
+        \\  {"uninstall_preflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":"Library/live.pre"},"content":"ran"}]}]}]}
+    ;
+    const app_path = fx.p("Applications/Live.app");
+    const exe = fx.p("Applications/Live.app/Contents/MacOS/live");
+    try putFile(io, exe, "");
+    {
+        try test_io.cwd().createDirPath(io, fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c = try cask.parseCaskWithMajor(testing.allocator, json, null);
+        defer c.deinit();
+        try cask.recordInstall(&db, &c, app_path, null);
+        try test_io.cwd().createDirPath(io, fx.p("lib"));
+        try std.Io.Dir.symLinkAbsolute(io, fx.p("Caskroom/live/1.0/liblive.1.0.dylib"), fx.p("lib/liblive.1.dylib"), .{});
+    }
+    var child = try std.process.spawn(io, .{ .argv = &.{ "/usr/bin/tail", "-f", exe }, .stdout = .ignore, .stderr = .ignore });
+    defer child.kill(io); // kill also reaps
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(true);
+    defer malt.output.setQuiet(prior_quiet);
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ, .offline = true };
+    // `--force` overrides dependents; it never removed a live app, and now
+    // it does not run the stored phases on one either.
+    try testing.expectError(error.Aborted, malt.cli_uninstall.execute(&ctx, testing.allocator, &.{ "--cask", "--force", "live" }));
+
+    try testing.expect(linkExists(io, fx.p("lib/liblive.1.dylib")));
+    try testing.expect(!exists(io, fx.h("Library/live.pre")));
+    try testing.expect(exists(io, exe));
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    try testing.expect(cask.isInstalled(&db, "live"));
+}
+
+test "rollback runs the outgoing version's uninstall steps and drops its declared symlink" {
+    var fx = try Fixture.init("rollback_phases");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    const a = fx.arena.allocator();
+    const appdir = fx.p("Applications");
+    const block = try a.allocSentinel(?[*:0]const u8, 2, null);
+    block[0] = (try std.fmt.allocPrintSentinel(a, "HOME={s}", .{fx.home}, 0)).ptr;
+    block[1] = (try std.fmt.allocPrintSentinel(a, "MALT_APPDIR={s}", .{appdir}, 0)).ptr;
+    const environ: std.process.Environ = .{ .block = .{ .slice = block } };
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // 2.0 is installed with steps on record; 1.0 is in history with its
+    // artefact cached, which is all a rollback needs.
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const sha1 = try seedZipArtifact(&fx, io, "plain", "1.0", "Plain.app");
+    const v2_json =
+        \\{"token":"plain","name":["Plain"],"version":"2.0","url":"https://example.invalid/plain-2.0.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Plain.app"]},
+        \\  {"postflight_steps":[{"steps":[{"type":"symlink","source":{"base":"staged_path","path":"libplain.{{version}}.dylib"},
+        \\    "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libplain.dylib"},"uninstall":true}]}]},
+        \\  {"uninstall_postflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":"Library/plain.gone"},"content":"{{version}}"}]}]}]}
+    ;
+    const app = try std.fmt.allocPrint(a, "{s}/Plain.app", .{appdir});
+    try putFile(io, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{app}), "2.0");
+    {
+        try test_io.cwd().createDirPath(io, fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c2 = try cask.parseCaskWithMajor(testing.allocator, v2_json, null);
+        defer c2.deinit();
+        try cask.recordInstall(&db, &c2, app, null);
+        try cask.recordCaskVersion(&db, "plain", "1.0", "https://example.invalid/plain-1.0.zip", &sha1, "zip", fx.p("cache/Cask/plain-1.0.zip"));
+        // The link 2.0's postflight placed, as the install left it.
+        try test_io.cwd().createDirPath(io, fx.p("lib"));
+        try std.Io.Dir.symLinkAbsolute(io, fx.p("Caskroom/plain/2.0/libplain.2.0.dylib"), fx.p("lib/libplain.dylib"), .{});
+    }
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(true);
+    defer malt.output.setQuiet(prior_quiet);
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = environ, .offline = true };
+    try malt.cli_rollback.execute(&ctx, testing.allocator, &.{ "plain", "--to", "1.0" });
+
+    // A later uninstall would expand the source with 1.0 and never match
+    // this link, so it has to go now, while 2.0 is the version leaving.
+    try testing.expect(!linkExists(io, fx.p("lib/libplain.dylib")));
+    const gone = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.h("Library/plain.gone"), 64);
+    defer testing.allocator.free(gone);
+    try testing.expectEqualStrings("2.0", gone);
+    const bin = try test_io.readFileAbsoluteAlloc(io, testing.allocator, try std.fmt.allocPrint(a, "{s}/Contents/MacOS/bin", .{app}), 64);
+    defer testing.allocator.free(bin);
+    try testing.expectEqualStrings("1.0", bin);
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    try testing.expectEqualStrings("1.0", cask.lookupInstalled(&db, "plain").?.version());
 }

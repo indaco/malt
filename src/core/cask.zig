@@ -811,13 +811,29 @@ pub const CaskInstaller = struct {
     /// dir, which is where a tarball unpacks and what upstream means by it
     /// after staging. False when a step was fatal; the sink's log says why.
     pub fn runFlight(self: *CaskInstaller, token: []const u8, version: []const u8, steps: []const std.json.Value, staged_path: ?[]const u8) bool {
+        const ctx = self.flightCtx(token, version, staged_path) orelse return false;
+        steps_mod.runSteps(ctx, steps);
+        return !ctx.flog.hasFatal();
+    }
+
+    /// Re-run an install phase's steps in uninstall mode, before the
+    /// artefact goes, so a `staged_path` source still resolves to the
+    /// Caskroom version dir. That is where a tarball unpacked; a zip or dmg
+    /// preflight saw a temporary stage instead, so its links never match.
+    pub fn runFlightUninstall(self: *CaskInstaller, token: []const u8, version: []const u8, steps: []const std.json.Value) bool {
+        const ctx = self.flightCtx(token, version, null) orelse return false;
+        steps_mod.runUninstallSteps(ctx, steps);
+        return !ctx.flog.hasFatal();
+    }
+
+    fn flightCtx(self: *CaskInstaller, token: []const u8, version: []const u8, staged_path: ?[]const u8) ?steps_mod.StepsCtx {
         // No sink is a caller bug, and a silent pass would be the declared
         // gate skipped; fail the phase instead.
-        const sink = self.flight orelse return false;
+        const sink = self.flight orelse return null;
         const a = sink.allocator;
         var app_dir_buf: [512]u8 = undefined;
-        const caskroom_path = std.fmt.allocPrint(a, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch return false;
-        const ctx: steps_mod.StepsCtx = .{
+        const caskroom_path = std.fmt.allocPrint(a, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch return null;
+        return .{
             .io = self.io,
             .allocator = a,
             .name = token,
@@ -826,18 +842,16 @@ pub const CaskInstaller = struct {
             .keg_path = caskroom_path,
             .subject = .{
                 .cask = .{
-                    .staged_path = staged_path orelse (std.fmt.allocPrint(a, "{s}/{s}", .{ caskroom_path, version }) catch return false),
+                    .staged_path = staged_path orelse (std.fmt.allocPrint(a, "{s}/{s}", .{ caskroom_path, version }) catch return null),
                     .caskroom_path = caskroom_path,
                     // Duped: the buffer dies with this frame, the log does not.
-                    .appdir = a.dupe(u8, applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf)) catch return false,
+                    .appdir = a.dupe(u8, applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf)) catch return null,
                     .home = std.process.Environ.getPosix(self.environ, "HOME") orelse "",
                 },
             },
             .flog = sink.log,
             .environ = self.environ,
         };
-        steps_mod.runSteps(ctx, steps);
-        return !sink.log.hasFatal();
     }
 
     /// Preflight over the staged tree, before any artifact moves.

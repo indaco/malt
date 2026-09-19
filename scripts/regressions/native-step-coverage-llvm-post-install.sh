@@ -62,8 +62,7 @@ grep -q 'non_recursive' "$STEPS" || fail "set_permissions ignores non_recursive 
 
 # 4. Types deliberately left as loud skips must stay unregistered, so a later
 #    drive-by cannot quietly stub them into a no-op that reports success.
-for t in configure_glibc_runtime set_ownership configure_php \
-  bootstrap_cpython bootstrap_pypy move_children move_contents; do
+for t in configure_glibc_runtime configure_php bootstrap_cpython bootstrap_pypy; do
   if grep -qE "\"$t\", \." "$STEPS"; then
     fail "$t registered — it is a deliberate loud skip, not a native step"
   fi

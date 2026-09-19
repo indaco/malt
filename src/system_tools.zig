@@ -17,6 +17,7 @@ pub const ln = "/bin/ln";
 pub const launchctl = "/bin/launchctl";
 pub const pgrep = "/usr/bin/pgrep";
 pub const killall = "/usr/bin/killall";
+pub const pkill = "/usr/bin/pkill";
 pub const sw_vers = "/usr/bin/sw_vers";
 pub const security = "/usr/bin/security";
 
@@ -24,7 +25,7 @@ test "every trusted system tool uses an absolute path" {
     const paths = [_][]const u8{
         codesign,  install_name_tool, unzip, tar,       ditto, hdiutil, sudo,
         installer, install,           ln,    launchctl, pgrep, sw_vers, killall,
-        security,
+        pkill,     security,
     };
     for (paths) |path| {
         try std.testing.expect(std.fs.path.isAbsolute(path));
