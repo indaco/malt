@@ -25,6 +25,13 @@ pub const CaskError = error{
     ParseFailed,
     DownloadFailed,
     InstallFailed,
+    // Distinct from InstallFailed so callers can say *why*: `<prefix>/bin`
+    // already holds an entry this cask does not own, and taking it over
+    // would silently shadow a formula's executable.
+    LinkConflict,
+    // A restored version is back in place and recorded, but a command-line
+    // link it declares could not be created: the caller reports, not undoes.
+    LinksIncomplete,
     UninstallFailed,
     // Distinct from UninstallFailed so callers can say *why*: the app is live.
     AppRunning,
@@ -622,44 +629,6 @@ pub fn parseAppName(obj: std.json.ObjectMap) ?[]const u8 {
     };
 }
 
-/// Source name of the first `binary` artifact — the file to locate
-/// inside the extracted archive. Homebrew JSON shape:
-///   "artifacts": [{"binary": ["<source>"]}, ...]
-///   "artifacts": [{"binary": ["<source>", {"target": "<alias>"}]}, ...]
-pub fn parseBinaryName(obj: std.json.ObjectMap) ?[]const u8 {
-    const arr = firstArtifactArray(obj, "binary") orelse return null;
-    if (arr.items.len == 0) return null;
-    return switch (arr.items[0]) {
-        .string => |s| s,
-        else => null,
-    };
-}
-
-/// Rename hint for a `binary` artifact, e.g. the symlink should be
-/// `codex` while the file on disk is `codex-aarch64-apple-darwin`.
-/// Null when no target override is present.
-pub fn parseBinaryTarget(obj: std.json.ObjectMap) ?[]const u8 {
-    if (firstArtifactObject(obj, "binary")) |art| if (art.get("target")) |tv| switch (tv) {
-        .string => |t| return binaryLinkName(t),
-        else => {},
-    };
-    const arr = firstArtifactArray(obj, "binary") orelse return null;
-    for (arr.items[1..]) |item| {
-        switch (item) {
-            .object => |o| {
-                if (o.get("target")) |tv| {
-                    return switch (tv) {
-                        .string => |s| binaryLinkName(s),
-                        else => null,
-                    };
-                }
-            },
-            else => {},
-        }
-    }
-    return null;
-}
-
 /// One `binary` stanza: the file to link and, when the cask renames it,
 /// the link name it gets in `<prefix>/bin`.
 pub const BinaryEntry = struct {
@@ -716,13 +685,53 @@ pub fn collectBinaryArtifacts(alloc: std.mem.Allocator, obj: std.json.ObjectMap)
 /// still a subpath and is screened as one.
 const homebrew_prefix_var = "$HOMEBREW_PREFIX/";
 
+/// A `binary` source inside the placed bundle, e.g. `$APPDIR/X.app/Contents/MacOS/x`.
+const appdir_var = "$APPDIR/";
+
+/// Links an app cask placed beside its bundle, one absolute path per line
+/// under `Caskroom/<token>/<version>/`. A bundle has one `app_path`
+/// column, so the extra links need their own record for uninstall.
+pub const LINKS_MANIFEST_NAME = ".malt-links";
+
+/// The `binary` stanzas an install of this cask links: an app cask links
+/// its `$APPDIR` binaries and nothing else, so handing its other stanzas to
+/// a rollback would send it down the binary-only branch and lose the
+/// bundle. Caller owns the slice; null when nothing would be linked.
+pub fn linkedBinaryStanzas(alloc: std.mem.Allocator, obj: std.json.ObjectMap) !?[]BinaryEntry {
+    const entries = (try collectBinaryArtifacts(alloc, obj)) orelse return null;
+    if (parseAppName(obj) == null) return entries;
+    defer alloc.free(entries);
+    var linked: std.ArrayList(BinaryEntry) = .empty;
+    errdefer linked.deinit(alloc);
+    for (entries) |e| if (std.mem.startsWith(u8, e.source, appdir_var)) try linked.append(alloc, e);
+    if (linked.items.len == 0) {
+        linked.deinit(alloc);
+        return null;
+    }
+    return try linked.toOwnedSlice(alloc);
+}
+
+/// True when any stanza links from the Caskroom copy rather than from a
+/// placed bundle; that is what makes a cask "binary-only".
+fn hasCaskroomBinary(entries: []const BinaryEntry) bool {
+    for (entries) |e| if (!std.mem.startsWith(u8, e.source, appdir_var)) return true;
+    return false;
+}
+
 /// The link name a `binary` target denotes, or null when it names anywhere
 /// but one entry in `<prefix>/bin`: the API spells a target either as the
 /// bare name or as the full `$HOMEBREW_PREFIX/bin/<name>` path.
 fn binaryLinkName(target: []const u8) ?[]const u8 {
     const bin_dir = homebrew_prefix_var ++ "bin/";
     const name = if (std.mem.startsWith(u8, target, bin_dir)) target[bin_dir.len..] else target;
-    return if (path_component.isPathComponent(name)) name else null;
+    return if (path_component.isPathComponent(name) and !hasControlByte(name)) name else null;
+}
+
+/// The sidecar and the links manifest are line- and tab-framed, so a
+/// control byte in a name would split one record into two.
+fn hasControlByte(s: []const u8) bool {
+    for (s) |c| if (std.ascii.isControl(c)) return true;
+    return false;
 }
 
 /// Reject any `app` or `binary` artifact string that would escape the directory
@@ -758,7 +767,7 @@ fn validateArtifactPaths(obj: std.json.ObjectMap) CaskError!void {
                         s[homebrew_prefix_var.len..]
                     else
                         s;
-                    if (!path_component.isRelativeSubpath(rel)) return CaskError.ParseFailed;
+                    if (!path_component.isRelativeSubpath(rel) or hasControlByte(rel)) return CaskError.ParseFailed;
                 },
                 .object => |o| {
                     // Only the first element is the source; later objects are
@@ -832,7 +841,21 @@ pub const CaskInstaller = struct {
     /// rollback's synthetic, artifact-less cask still restores its fonts.
     font_entries_override: ?[]const cask_font.FontEntry = null,
     /// Same contract for `binary` stanzas, read from the `.binaries` sidecar.
+    /// A caller may pre-set it as a stand-in for a version with no sidecar.
     binary_entries_override: ?[]const BinaryEntry = null,
+    /// The `<prefix>/bin` entry a `LinkConflict` refused, for the caller's
+    /// message.
+    conflict_buf: [std.fs.max_path_bytes]u8 = undefined,
+    conflict_len: usize = 0,
+    /// The bundle the `casks` row names while `install` runs, so links into
+    /// it count as this cask's own even when the bundle name or app dir
+    /// changes between versions.
+    recorded_bundle: ?InstalledCask = null,
+    /// Set by `reinstallFromHistory`: the version being placed is one the
+    /// user already had, so a link that cannot be created is reported
+    /// rather than paid for with the bundle.
+    restoring: bool = false,
+    links_incomplete: bool = false,
     /// Mirrors `ctx.offline` from the cli/ caller. Threaded onto the
     /// internal HttpClient so a download miss surfaces `OfflineRequired`
     /// instead of stalling on connect.
@@ -971,6 +994,16 @@ pub const CaskInstaller = struct {
         const artifact_type = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
         if (artifact_type == .unknown) return CaskError.InstallFailed;
 
+        // Determine target: prefix-aware sandbox / /Applications / ~/Applications.
+        var app_dir_buf: [512]u8 = undefined;
+        const app_dir = applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf);
+
+        // A bin entry this cask cannot take over is refused now, while the
+        // version on disk is still whole: after placement the refusal would
+        // cost the user the bundle.
+        defer self.recorded_bundle = null;
+        try self.checkLinkConflicts(cask);
+
         const cache_path = if (self.prefetched_artifact) |p|
             try self.allocator.dupe(u8, p)
         else
@@ -985,22 +1018,39 @@ pub const CaskInstaller = struct {
             self.allocator.free(cache_path);
         }
 
-        // Determine target: prefix-aware sandbox / /Applications / ~/Applications.
-        var app_dir_buf: [512]u8 = undefined;
-        const app_dir = applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf);
-
         // Install based on type
         const app_path = switch (artifact_type) {
-            .dmg => self.installDmg(cache_path, app_dir, cask) catch |e| return preflightOr(e),
-            .zip => self.installZip(cache_path, app_dir, cask) catch |e| return preflightOr(e),
+            .dmg => self.installDmg(cache_path, app_dir, cask) catch |e| return installError(e),
+            .zip => self.installZip(cache_path, app_dir, cask) catch |e| return installError(e),
             .pkg => blk: {
                 // No staging for a package: upstream's staged_path is the
                 // Caskroom dir the .pkg would sit in.
                 try self.preflight(cask, null);
                 break :blk self.installPkg(cache_path) catch return CaskError.InstallFailed;
             },
-            .tar_gz, .tar_xz => self.installTarball(cache_path, app_dir, cask, artifact_type) catch |e| return preflightOr(e),
+            .tar_gz, .tar_xz => self.installTarball(cache_path, app_dir, cask, artifact_type) catch |e| return installError(e),
             .unknown => return CaskError.InstallFailed,
+        };
+        errdefer self.allocator.free(app_path);
+
+        // The command-line tools an app cask ships inside its bundle are
+        // linked once the bundle is in place, whatever container it came in.
+        // A pkg places its own files and a font cask places no bundle, so
+        // neither has anything of ours to link from.
+        const placed_bundle = artifact_type != .pkg and
+            !std.mem.eql(u8, std.fs.path.basename(app_path), cask_font.MANIFEST_NAME);
+        if (placed_bundle) self.linkAppDirBinaries(cask, app_path) catch |e| {
+            if (self.restoring) {
+                // The stanzas were recorded or guessed for a bundle that may
+                // differ from this one; the bundle stays, the gap is named.
+                self.links_incomplete = true;
+            } else {
+                // A placed bundle with no row is a half-install nothing can
+                // uninstall or roll back; the Caskroom copy or stage goes too.
+                std.Io.Dir.cwd().deleteTree(self.io, app_path) catch {};
+                self.wipeCaskroomVersion(cask);
+                return installError(e);
+            }
         };
 
         // Caskroom dir is bookkeeping; app is already in place.
@@ -1009,7 +1059,8 @@ pub const CaskInstaller = struct {
         // Persist the binary stanzas next to the cached artefact so a later
         // rollback re-links offline without the cask JSON. Best-effort, as
         // with the history row: a lost sidecar only degrades that rollback.
-        self.writeLinkedBinarySpec(cask) catch {};
+        // A record that just failed to link is not worth keeping.
+        if (!self.links_incomplete) self.writeLinkedBinarySpec(cask) catch {};
 
         // History row for `mt rollback <cask> --list / --to`. Best-effort:
         // a failed history insert must not undo a successful install.
@@ -1030,9 +1081,99 @@ pub const CaskInstaller = struct {
         return app_path;
     }
 
-    /// A preflight refusal keeps its own name through the per-type catch-alls.
-    fn preflightOr(e: anyerror) CaskError {
-        return if (e == CaskError.PreflightFailed) CaskError.PreflightFailed else CaskError.InstallFailed;
+    /// The refusals a caller can act on keep their names through the
+    /// per-type catch-alls.
+    fn installError(e: anyerror) CaskError {
+        return switch (e) {
+            error.PreflightFailed => CaskError.PreflightFailed,
+            error.LinkConflict => CaskError.LinkConflict,
+            else => CaskError.InstallFailed,
+        };
+    }
+
+    /// The `<prefix>/bin` entry the last `LinkConflict` refused.
+    pub fn conflictPath(self: *const CaskInstaller) ?[]const u8 {
+        return if (self.conflict_len == 0) null else self.conflict_buf[0..self.conflict_len];
+    }
+
+    /// Refuse, before anything is placed, every link name this install
+    /// would create over an entry that is not this cask's own. Public so an
+    /// upgrade can ask before it removes the old version.
+    pub fn checkLinkConflicts(self: *CaskInstaller, cask: *const Cask) CaskError!void {
+        // Only the stanzas the install will link are screened: a pkg and a
+        // font cask link none, an app cask only its `$APPDIR` ones.
+        const obj = cask.parsed.value.object;
+        if ((self.artifact_type_override orelse artifactTypeFromUrl(cask.url)) == .pkg) return;
+        if (try cask_font.collectFontArtifacts(self.allocator, obj)) |fonts| {
+            self.allocator.free(fonts);
+            return;
+        }
+        const entries = if (self.binary_entries_override) |o|
+            try self.allocator.dupe(BinaryEntry, o)
+        else
+            (try linkedBinaryStanzas(self.allocator, obj)) orelse return;
+        defer self.allocator.free(entries);
+        // Stays set for the link pass that follows; `install` clears it.
+        self.recorded_bundle = lookupInstalled(self.db, cask.token);
+        // The bundle this install will place, when the cask names it; the
+        // one on record covers a rollback's synthetic cask.
+        var app_dir_buf: [512]u8 = undefined;
+        var root_buf: [512]u8 = undefined;
+        const root: ?[]const u8 = if (parseAppName(cask.parsed.value.object)) |name|
+            std.fmt.bufPrint(&root_buf, "{s}/{s}", .{ applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf), name }) catch null
+        else
+            null;
+        for (entries) |e| {
+            const name = e.target orelse std.fs.path.basename(e.source);
+            var link_buf: [512]u8 = undefined;
+            const link_path = std.fmt.bufPrint(&link_buf, "{s}/bin/{s}", .{ self.prefix, name }) catch return CaskError.InstallFailed;
+            if (self.binEntryOwner(cask.token, root, link_path) == .foreign) return self.linkConflict(link_path);
+        }
+    }
+
+    fn linkConflict(self: *CaskInstaller, link_path: []const u8) error{LinkConflict} {
+        self.conflict_len = @min(link_path.len, self.conflict_buf.len);
+        @memcpy(self.conflict_buf[0..self.conflict_len], link_path[0..self.conflict_len]);
+        return error.LinkConflict;
+    }
+
+    const BinEntry = enum { absent, owned, foreign };
+
+    /// Whether a `<prefix>/bin` entry is this cask's to replace or remove: a
+    /// symlink resolving into its Caskroom, into the bundle on record, or
+    /// into `root`. Anything else is a formula's link or the user's own file
+    /// and is refused, as brew does. Links store resolved paths, so every
+    /// root is resolved before the boundary-aware compare.
+    fn binEntryOwner(self: *CaskInstaller, token: []const u8, root: ?[]const u8, link_path: []const u8) BinEntry {
+        var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const target = if (std.Io.Dir.readLinkAbsolute(self.io, link_path, &target_buf)) |n|
+            target_buf[0..n]
+        else |e|
+            return if (e == error.FileNotFound) .absent else .foreign;
+        var caskroom_buf: [512]u8 = undefined;
+        const caskroom = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch return .foreign;
+        const recorded: ?[]const u8 = if (self.recorded_bundle) |*r| r.appPath() else null;
+        for ([_]?[]const u8{ caskroom, root, recorded }) |candidate| {
+            // The root itself may already be gone (a wiped Caskroom, a
+            // replaced bundle) while its link still counts as ours, so the
+            // parent is what gets resolved.
+            const c = candidate orelse continue;
+            var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const n = std.Io.Dir.realPathFileAbsolute(self.io, std.fs.path.dirname(c) orelse continue, &real_buf) catch continue;
+            var owned_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const owned = std.fmt.bufPrint(&owned_buf, "{s}/{s}", .{ real_buf[0..n], std.fs.path.basename(c) }) catch continue;
+            if (confined_source.pathHasPrefix(target, owned)) return .owned;
+        }
+        return .foreign;
+    }
+
+    /// Remove `Caskroom/<token>/<version>` and the token dir when that was
+    /// its only version.
+    fn wipeCaskroomVersion(self: *CaskInstaller, cask: *const Cask) void {
+        var buf: [512]u8 = undefined;
+        const caskroom_ver = std.fmt.bufPrint(&buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch return;
+        std.Io.Dir.cwd().deleteTree(self.io, caskroom_ver) catch {};
+        if (std.fs.path.dirname(caskroom_ver)) |token_dir| std.Io.Dir.deleteDirAbsolute(self.io, token_dir) catch {};
     }
 
     /// Uninstall a cask by token. Looks up app_path from DB, removes app, cleans up.
@@ -1045,9 +1186,11 @@ pub const CaskInstaller = struct {
         // "not an error", blanking the message the caller wants to log.
         var app_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var app_path_len: usize = 0;
+        var version_buf: [256]u8 = undefined;
+        var version_len: usize = 0;
         {
             var stmt = self.db.prepare(
-                "SELECT app_path FROM casks WHERE token = ?1 LIMIT 1;",
+                "SELECT app_path, version FROM casks WHERE token = ?1 LIMIT 1;",
             ) catch return CaskError.UninstallFailed;
             defer stmt.finalize();
             stmt.bindText(1, token) catch return CaskError.UninstallFailed;
@@ -1065,6 +1208,13 @@ pub const CaskInstaller = struct {
                 app_path_len = @min(slice.len, app_path_buf.len);
                 @memcpy(app_path_buf[0..app_path_len], slice[0..app_path_len]);
             }
+            if (stmt.columnText(1)) |v| {
+                // A truncated version would silently miss the links manifest.
+                const slice = std.mem.sliceTo(v, 0);
+                if (slice.len > version_buf.len) return CaskError.UninstallFailed;
+                version_len = slice.len;
+                @memcpy(version_buf[0..version_len], slice);
+            }
         }
 
         // A PKG cask records its cached artefact as `app_path`, so this can name
@@ -1081,12 +1231,15 @@ pub const CaskInstaller = struct {
                 // Font cask: app_path is the manifest, not a removable bundle.
                 // Unlink each placed font; the Caskroom wipe below removes the
                 // manifest itself.
-                self.removeManifestedFonts(app_path);
+                self.removeManifestedPaths(app_path);
             } else {
                 // Refuse while the app is live: removing the old bundle would
                 // yank a running app. Distinct error so the caller can say so.
                 if (isAppRunning(self.io, app_path)) return CaskError.AppRunning;
 
+                // The links this cask placed, while their targets still
+                // resolve; the manifest goes with the Caskroom wipe below.
+                self.removeOwnedLinks(token, version_buf[0..version_len], app_path, null);
                 // app may already be gone (manual delete); continue to DB cleanup.
                 std.Io.Dir.cwd().deleteTree(self.io, app_path) catch {};
             }
@@ -1127,23 +1280,54 @@ pub const CaskInstaller = struct {
         try removeRecord(self.db, token);
     }
 
-    /// Unlink every font recorded in the `.malt-fonts` manifest at
-    /// `manifest_path`. Best-effort by contract: a missing manifest (manual
-    /// Caskroom deletion) reads as empty and an already-removed font unlinks
-    /// as a no-op, so uninstall always proceeds to DB cleanup. The manifest
-    /// file itself is left for the caller's Caskroom wipe to remove.
-    fn removeManifestedFonts(self: *CaskInstaller, manifest_path: []const u8) void {
-        // A read error (e.g. permissions) leaves the fonts in place rather
+    /// Unlink every path recorded in the manifest at `manifest_path` (placed
+    /// fonts, or the links of an app cask). Best-effort by contract: a
+    /// missing manifest (manual Caskroom deletion) reads as empty and an
+    /// already-removed path unlinks as a no-op, so uninstall always proceeds
+    /// to DB cleanup. The manifest file itself is left for the caller's
+    /// Caskroom wipe to remove.
+    fn removeManifestedPaths(self: *CaskInstaller, manifest_path: []const u8) void {
+        // A read error (e.g. permissions) leaves the paths in place rather
         // than aborting uninstall — drift is recoverable, a stuck row is not.
         const bytes = cask_font.readManifest(self.io, self.allocator, manifest_path) catch return;
         defer self.allocator.free(bytes);
 
         var it = std.mem.splitScalar(u8, bytes, '\n');
         while (it.next()) |line| {
-            if (line.len == 0) continue;
-            // Stale entry (font already gone) is a no-op; never abort here.
+            // Only absolute paths were ever written; anything else is damage,
+            // and `deleteFileAbsolute` asserts rather than erroring on it.
+            if (line.len == 0 or line[0] != '/') continue;
+            // Stale entry (already gone) is a no-op; never abort here.
             std.Io.Dir.deleteFileAbsolute(self.io, line) catch {};
         }
+    }
+
+    /// Unlink the `<prefix>/bin` entries the `(token, version)` links
+    /// manifest names, but only those that still resolve into this cask:
+    /// an archive can plant the manifest, and a formula may have taken a
+    /// name over since. `keep` are lines to leave alone. Best-effort, like
+    /// the font manifest.
+    fn removeOwnedLinks(self: *CaskInstaller, token: []const u8, version: []const u8, bundle: ?[]const u8, keep: ?[]const u8) void {
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}/{s}", .{ self.prefix, token, version, LINKS_MANIFEST_NAME }) catch return;
+        const bytes = cask_font.readManifest(self.io, self.allocator, path) catch return;
+        defer self.allocator.free(bytes);
+
+        var bin_buf: [512]u8 = undefined;
+        const bin_dir = std.fmt.bufPrint(&bin_buf, "{s}/bin/", .{self.prefix}) catch return;
+        var it = std.mem.splitScalar(u8, bytes, '\n');
+        while (it.next()) |line| {
+            if (!std.mem.startsWith(u8, line, bin_dir) or !path_component.isPathComponent(line[bin_dir.len..])) continue;
+            if (keep) |k| if (manifestHasLine(k, line)) continue;
+            if (self.binEntryOwner(token, bundle, line) != .owned) continue;
+            std.Io.Dir.deleteFileAbsolute(self.io, line) catch {};
+        }
+    }
+
+    fn manifestHasLine(bytes: []const u8, line: []const u8) bool {
+        var it = std.mem.splitScalar(u8, bytes, '\n');
+        while (it.next()) |l| if (std.mem.eql(u8, l, line)) return true;
+        return false;
     }
 
     /// Reinstall a previously-installed cask version from history. Drives
@@ -1215,19 +1399,41 @@ pub const CaskInstaller = struct {
         defer if (spec_opt) |*s| s.deinit(self.allocator);
         if (spec_opt) |*s| self.font_entries_override = s.entries;
         defer self.font_entries_override = null;
+        // A caller's stand-in stays when the version predates the sidecar.
         var bin_spec_opt = self.readBinarySpec(row.token, row.version) catch null;
         defer if (bin_spec_opt) |*s| s.deinit(self.allocator);
         if (bin_spec_opt) |*s| self.binary_entries_override = s.entries;
         defer self.binary_entries_override = null;
 
+        self.restoring = true;
+        self.links_incomplete = false;
+        defer {
+            self.restoring = false;
+            self.links_incomplete = false;
+        }
         const app_path = try self.install(&synthetic);
         defer self.allocator.free(app_path);
+
+        // The swap installs over the outgoing version without uninstalling
+        // it, so a link the target version does not declare would otherwise
+        // survive, pointing at a helper the older bundle no longer ships.
+        // Only after the install: a failed one must leave the outgoing
+        // version whole.
+        if (lookupInstalled(self.db, token)) |*cur| {
+            var new_buf: [512]u8 = undefined;
+            const new_manifest = std.fmt.bufPrint(&new_buf, "{s}/Caskroom/{s}/{s}/{s}", .{ self.prefix, token, row.version, LINKS_MANIFEST_NAME }) catch "";
+            const keep = if (new_manifest.len == 0) null else cask_font.readManifest(self.io, self.allocator, new_manifest) catch null;
+            defer if (keep) |k| self.allocator.free(k);
+            self.removeOwnedLinks(token, cur.version(), cur.appPath(), keep);
+        }
         if (stored) |*s| for (std.enums.values(FlightPhase)) |phase| synthetic.flight_steps.set(phase, s.get(phase));
 
         // Flip the `casks` row to the rolled-back version. `pinned`
         // survives via recordInstall's COALESCE; `auto_updates` and
         // `tap` survive via the preserved values above.
         recordInstall(self.db, &synthetic, app_path, meta.tap) catch return CaskError.InstallFailed;
+        // Read before the defer above clears it.
+        if (self.links_incomplete) return CaskError.LinksIncomplete;
     }
 
     /// Check installed version vs API version. Returns true if outdated.
@@ -1414,20 +1620,22 @@ pub const CaskInstaller = struct {
         }
 
         // A bare executable and nothing else, as the tarball path already
-        // handles. A cask that also declares an `app` keeps the bundle path:
-        // its binary sits inside the bundle and is not linked yet. The stage
-        // is deleted on return, so the binary is kept under the Caskroom and
-        // linked from there.
-        var stanzas = try self.binaryStanzas(cask);
-        defer stanzas.deinit(self.allocator);
-        if (parseAppName(cask.parsed.value.object) == null) if (stanzas.entries) |entries| {
+        // handles. The stage is deleted on return, so the binary is kept
+        // under the Caskroom and linked from there. A cask that declares an
+        // `app` takes the bundle path below; the binaries inside its bundle
+        // are linked by `install` once the bundle is placed.
+        const stanzas = try self.binaryStanzas(cask);
+        defer if (stanzas) |e| self.allocator.free(e);
+        if (parseAppName(cask.parsed.value.object) == null) if (stanzas) |entries| if (hasCaskroomBinary(entries)) {
             var caskroom_buf: [512]u8 = undefined;
             const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch
                 return error.InstallFailed;
             std.Io.Dir.cwd().createDirPath(self.io, caskroom_ver) catch return error.InstallFailed;
+            // Nothing else reclaims the copy if a link below fails.
+            errdefer self.wipeCaskroomVersion(cask);
             const copy_argv = [_][]const u8{ system_tools.ditto, extract_dir, caskroom_ver };
             child_mod.runOrFail(self.io, self.allocator, &copy_argv) catch return error.InstallFailed;
-            return try self.linkCaskroomBinaries(caskroom_ver, entries);
+            return (try self.linkStanzas(cask, caskroom_ver, .caskroom, entries)) orelse error.InstallFailed;
         };
 
         // Find the .app. app_name_buf owns the fallback past iterator teardown.
@@ -1487,7 +1695,7 @@ pub const CaskInstaller = struct {
         // Persist the stanzas next to the cached artifact so a later rollback
         // restores them offline. Best-effort: a failed sidecar only degrades a
         // future rollback, never this install (as with recordCaskVersion).
-        self.writeFontSpec(cask.token, cask.version, entries) catch {};
+        self.writeSpec(cask.token, cask.version, ".fonts", entries) catch {};
 
         return manifest_path;
     }
@@ -1517,30 +1725,15 @@ pub const CaskInstaller = struct {
         return std.fmt.bufPrint(buf, "{s}/Cask/{s}-{s}{s}", .{ self.cache_dir, token, version, ext });
     }
 
-    fn writeFontSpec(self: *CaskInstaller, token: []const u8, version: []const u8, entries: []const cask_font.FontEntry) !void {
-        return self.writeSpec(token, version, ".fonts", entries);
-    }
-
-    fn writeBinarySpec(self: *CaskInstaller, token: []const u8, version: []const u8, entries: []const BinaryEntry) !void {
-        return self.writeSpec(token, version, ".binaries", entries);
-    }
-
-    /// Record only the stanzas this install linked. An app cask links its
-    /// `$APPDIR` binaries and nothing else, so recording the rest would send
-    /// its rollback down the binary-only branch and lose the bundle.
+    /// Record only the stanzas this install linked, so a rollback re-drives
+    /// the same branch. Rollback's own override is recorded back as-is.
     fn writeLinkedBinarySpec(self: *CaskInstaller, cask: *const Cask) !void {
-        var stanzas = try self.binaryStanzas(cask);
-        defer stanzas.deinit(self.allocator);
-        const entries = stanzas.entries orelse return;
-
-        var linked: std.ArrayList(BinaryEntry) = .empty;
-        defer linked.deinit(self.allocator);
-        const app_declared = parseAppName(cask.parsed.value.object) != null;
-        for (entries) |e| {
-            if (app_declared and !std.mem.startsWith(u8, e.source, appdir_var)) continue;
-            try linked.append(self.allocator, e);
-        }
-        if (linked.items.len != 0) try self.writeBinarySpec(cask.token, cask.version, linked.items);
+        const entries = if (self.binary_entries_override) |o|
+            try self.allocator.dupe(BinaryEntry, o)
+        else
+            (try linkedBinaryStanzas(self.allocator, cask.parsed.value.object)) orelse return;
+        defer self.allocator.free(entries);
+        if (entries.len != 0) try self.writeSpec(cask.token, cask.version, ".binaries", entries);
     }
 
     fn writeSpec(self: *CaskInstaller, token: []const u8, version: []const u8, ext: []const u8, entries: anytype) !void {
@@ -1665,9 +1858,10 @@ pub const CaskInstaller = struct {
             return self.installFontArtifacts(caskroom_ver, cask, entries);
         }
 
-        var stanzas = try self.binaryStanzas(cask);
-        defer stanzas.deinit(self.allocator);
-        if (stanzas.entries) |entries| return try self.linkCaskroomBinaries(caskroom_ver, entries);
+        const stanzas = try self.binaryStanzas(cask);
+        defer if (stanzas) |e| self.allocator.free(e);
+        if (stanzas) |entries| if (hasCaskroomBinary(entries))
+            return (try self.linkStanzas(cask, caskroom_ver, .caskroom, entries)) orelse error.InstallFailed;
 
         // Fallback: .app inside a tar.gz (uncommon but valid). Reuse the
         // zip path's "promote .app to app_dir" shape.
@@ -1691,35 +1885,56 @@ pub const CaskInstaller = struct {
     }
 
     /// The `binary` stanzas to place: rollback's override, else the cask
-    /// JSON. Only a collected list is owned.
-    const BinaryStanzas = struct {
-        entries: ?[]const BinaryEntry,
-        owned: ?[]BinaryEntry,
-
-        fn deinit(self: *BinaryStanzas, allocator: std.mem.Allocator) void {
-            if (self.owned) |o| allocator.free(o);
-        }
-    };
-
-    fn binaryStanzas(self: *CaskInstaller, cask: *const Cask) !BinaryStanzas {
-        if (self.binary_entries_override) |o| return .{ .entries = o, .owned = null };
-        const collected = try collectBinaryArtifacts(self.allocator, cask.parsed.value.object);
-        return .{ .entries = collected, .owned = collected };
+    /// JSON. Caller owns the slice.
+    fn binaryStanzas(self: *CaskInstaller, cask: *const Cask) !?[]BinaryEntry {
+        if (self.binary_entries_override) |o| return try self.allocator.dupe(BinaryEntry, o);
+        return collectBinaryArtifacts(self.allocator, cask.parsed.value.object);
     }
 
-    /// Link every stanza from the Caskroom copy. Returns the first link
-    /// path, recorded as `app_path`.
-    fn linkCaskroomBinaries(self: *CaskInstaller, caskroom_ver: []const u8, entries: []const BinaryEntry) ![]const u8 {
+    /// Link the `$APPDIR/...` binaries of an app cask from the bundle just
+    /// placed at `app_path`. Other stanza shapes are left to the binary-only
+    /// branches. Public so the pass is testable without ditto.
+    pub fn linkAppDirBinaries(self: *CaskInstaller, cask: *const Cask, app_path: []const u8) !void {
+        const entries = (try self.binaryStanzas(cask)) orelse return;
+        defer self.allocator.free(entries);
+        if (try self.linkStanzas(cask, app_path, .bundle, entries)) |first| self.allocator.free(first);
+    }
+
+    /// Link the stanzas that resolve against `root`, unwinding them all if
+    /// one fails, and record every link under the Caskroom so `uninstall`
+    /// removes them all: `app_path` can carry only one. Returns the first
+    /// link (owned by the caller), or null when no stanza applied.
+    fn linkStanzas(self: *CaskInstaller, cask: *const Cask, root: []const u8, root_kind: BinaryRoot, entries: []const BinaryEntry) !?[]const u8 {
+        var manifest: std.ArrayList(u8) = .empty;
+        defer manifest.deinit(self.allocator);
+        errdefer {
+            var it = std.mem.splitScalar(u8, manifest.items, '\n');
+            while (it.next()) |line| if (line.len != 0) std.Io.Dir.deleteFileAbsolute(self.io, line) catch {};
+        }
         var first: ?[]const u8 = null;
         errdefer if (first) |f| self.allocator.free(f);
         for (entries) |e| {
-            const link = try self.linkCaskBinary(caskroom_ver, e.source, e.target orelse std.fs.path.basename(e.source));
+            if (std.mem.startsWith(u8, e.source, appdir_var) != (root_kind == .bundle)) continue;
+            const link = try self.linkCaskBinary(cask.token, root, root_kind, e.source, e.target orelse std.fs.path.basename(e.source));
+            try manifest.appendSlice(self.allocator, link);
+            try manifest.append(self.allocator, '\n');
             if (first == null) first = link else self.allocator.free(link);
         }
-        return first orelse error.InstallFailed;
+        if (first == null) return null;
+
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}/{s}", .{
+            self.prefix, cask.token, cask.version, LINKS_MANIFEST_NAME,
+        }) catch return error.InstallFailed;
+        cask_font.writeManifest(self.io, path, manifest.items) catch return error.InstallFailed;
+        return first;
     }
 
-    /// Resolve the source path of a `binary` artifact. Three shapes
+    /// What a `binary` source resolves against: the Caskroom copy of a
+    /// binary-only cask, or the bundle an app cask just placed.
+    const BinaryRoot = enum { caskroom, bundle };
+
+    /// Resolve the source path of a `binary` artifact. Four shapes
     /// appear in the wild:
     ///   - Bare name (`copilot`) — walk the extraction tree.
     ///   - Relative path (`darwin-arm64/btp`) — join to the extraction
@@ -1727,8 +1942,22 @@ pub const CaskInstaller = struct {
     ///   - Homebrew `$HOMEBREW_PREFIX/...` absolute path — rewrite the
     ///     prefix to malt's active one; the tail already points at the
     ///     extracted file since Caskroom lives under the prefix.
+    ///   - `$APPDIR/<Name>.app/...` - inside the bundle at `root`, and only
+    ///     that bundle; the other shapes never resolve against a bundle.
     /// Returned slice is owned by the caller.
-    fn resolveCaskBinaryPath(self: *CaskInstaller, root: []const u8, src: []const u8) ![]u8 {
+    fn resolveCaskBinaryPath(self: *CaskInstaller, root: []const u8, root_kind: BinaryRoot, src: []const u8) ![]u8 {
+        if (std.mem.startsWith(u8, src, appdir_var)) {
+            if (root_kind != .bundle) return error.InstallFailed;
+            const rel = src[appdir_var.len..];
+            if (!path_component.isRelativeSubpath(rel)) return error.InstallFailed;
+            // Second line of defence, as below: a stanza naming a neighbour
+            // bundle would otherwise be opened read-write and chmod'd.
+            const bundle_name = rel[0 .. std.mem.indexOfScalar(u8, rel, '/') orelse rel.len];
+            if (!std.mem.eql(u8, bundle_name, std.fs.path.basename(root))) return error.InstallFailed;
+            const app_dir = std.fs.path.dirname(root) orelse return error.InstallFailed;
+            return try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ app_dir, rel });
+        }
+        if (root_kind == .bundle) return error.InstallFailed;
         const env_prefix = "$HOMEBREW_PREFIX/";
         if (std.mem.startsWith(u8, src, env_prefix)) {
             const rel = src[env_prefix.len..];
@@ -1750,24 +1979,26 @@ pub const CaskInstaller = struct {
             error.InstallFailed;
     }
 
-    /// Resolve `src_name` inside `caskroom_ver`, chmod +x, and symlink
-    /// it at `<prefix>/bin/<link_name>`. `src_name` and `link_name`
-    /// diverge when the cask uses the `binary [..., {target: ...}]`
-    /// rename form. Returns the symlink path — stored as `app_path` so
-    /// `uninstall` knows what to remove.
+    /// Resolve `src_name` inside `root`, chmod +x, and symlink it at
+    /// `<prefix>/bin/<link_name>`. `src_name` and `link_name` diverge when
+    /// the cask uses the `binary [..., {target: ...}]` rename form. Returns
+    /// the symlink path, which the caller records so `uninstall` knows what
+    /// to remove.
     fn linkCaskBinary(
         self: *CaskInstaller,
-        caskroom_ver: []const u8,
+        cask_token: []const u8,
+        root: []const u8,
+        root_kind: BinaryRoot,
         src_name: []const u8,
         link_name: []const u8,
     ) ![]const u8 {
-        const candidate = try self.resolveCaskBinaryPath(caskroom_ver, src_name);
+        const candidate = try self.resolveCaskBinaryPath(root, root_kind, src_name);
         defer self.allocator.free(candidate);
 
         var source = confined_source.openFile(
             self.io,
             self.allocator,
-            caskroom_ver,
+            root,
             candidate,
             .read_write,
         ) catch return error.InstallFailed;
@@ -1789,7 +2020,9 @@ pub const CaskInstaller = struct {
         const link_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ bin_parent, link_name });
         errdefer self.allocator.free(link_path);
 
-        // stale link may not exist (fresh install); symLink below is authoritative.
+        // Second look at the same rule `checkLinkConflicts` applied: the
+        // entry may have changed hands since.
+        if (self.binEntryOwner(cask_token, root, link_path) == .foreign) return self.linkConflict(link_path);
         std.Io.Dir.cwd().deleteFile(self.io, link_path) catch {};
         std.Io.Dir.symLinkAbsolute(self.io, source.path, link_path, .{}) catch return error.InstallFailed;
         return link_path;
@@ -2433,7 +2666,7 @@ test "linkCaskBinary refuses a source symlink outside Caskroom" {
     };
     try std.testing.expectError(
         error.InstallFailed,
-        installer.linkCaskBinary(root, "bin/tool", "tool"),
+        installer.linkCaskBinary("tool", root, .caskroom, "bin/tool", "tool"),
     );
 }
 
@@ -2468,8 +2701,50 @@ test "linkCaskBinary refuses a prefix path outside its Caskroom version" {
     };
     try std.testing.expectError(
         error.InstallFailed,
-        installer.linkCaskBinary(root, "$HOMEBREW_PREFIX/etc/private", "tool"),
+        installer.linkCaskBinary("tool", root, .caskroom, "$HOMEBREW_PREFIX/etc/private", "tool"),
     );
+}
+
+test "resolveCaskBinaryPath resolves an APPDIR source only inside the placed bundle" {
+    var installer: CaskInstaller = .{
+        .allocator = std.testing.allocator,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .prefix = "/opt/h",
+        .cache_dir = "/alt",
+        .db = undefined,
+        .progress = null,
+    };
+    const bundle = "/opt/h/Applications/Editor.app";
+
+    const inside = try installer.resolveCaskBinaryPath(bundle, .bundle, "$APPDIR/Editor.app/Contents/MacOS/editor");
+    defer std.testing.allocator.free(inside);
+    try std.testing.expectEqualStrings("/opt/h/Applications/Editor.app/Contents/MacOS/editor", inside);
+
+    // A neighbour bundle, a traversal, and the Caskroom root are all refused;
+    // so is any other shape against a bundle root.
+    for ([_]struct { root_kind: CaskInstaller.BinaryRoot, src: []const u8 }{
+        .{ .root_kind = .bundle, .src = "$APPDIR/Other.app/Contents/MacOS/x" },
+        .{ .root_kind = .bundle, .src = "$APPDIR/Editor.app/../Other.app/x" },
+        .{ .root_kind = .bundle, .src = "$APPDIR//Editor.app/x" },
+        .{ .root_kind = .bundle, .src = "$APPDIR/" },
+        .{ .root_kind = .caskroom, .src = "$APPDIR/Editor.app/Contents/MacOS/editor" },
+        .{ .root_kind = .bundle, .src = "editor" },
+        .{ .root_kind = .bundle, .src = "$HOMEBREW_PREFIX/bin/editor" },
+    }) |case| {
+        try std.testing.expectError(error.InstallFailed, installer.resolveCaskBinaryPath(bundle, case.root_kind, case.src));
+    }
+}
+
+test "hasCaskroomBinary is false when every stanza lives inside the bundle" {
+    const inside = [_]BinaryEntry{
+        .{ .source = "$APPDIR/A.app/Contents/MacOS/a", .target = "a" },
+        .{ .source = "$APPDIR/A.app/Contents/MacOS/b", .target = null },
+    };
+    try std.testing.expect(!hasCaskroomBinary(&inside));
+    try std.testing.expect(!hasCaskroomBinary(&.{}));
+    const mixed = inside ++ [_]BinaryEntry{.{ .source = "cli", .target = null }};
+    try std.testing.expect(hasCaskroomBinary(&mixed));
 }
 
 test "linkCaskBinary links regular relative and in-prefix Caskroom sources" {
@@ -2516,7 +2791,7 @@ test "linkCaskBinary links regular relative and in-prefix Caskroom sources" {
             try f.writeStreamingAll(io, "binary");
         }
 
-        const linked = try installer.linkCaskBinary(root, case.src_name, case.link_name);
+        const linked = try installer.linkCaskBinary("tool", root, .caskroom, case.src_name, case.link_name);
         const expected_link = try std.fmt.allocPrint(a, "{s}/bin/{s}", .{ prefix, case.link_name });
         try std.testing.expectEqualStrings(expected_link, linked);
         var target_buf: [std.fs.max_path_bytes]u8 = undefined;

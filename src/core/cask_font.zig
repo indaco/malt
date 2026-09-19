@@ -165,7 +165,11 @@ pub const MANIFEST_NAME = ".malt-fonts";
 /// parent directory as needed.
 pub fn writeManifest(io: std.Io, path: []const u8, bytes: []const u8) !void {
     if (std.fs.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(io, dir);
-    const file = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
+    // The manifest lands in a directory an archive populated, so an entry
+    // planted under its name (a symlink out of the tree) is replaced, never
+    // written through.
+    std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const file = try std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true });
     defer file.close(io);
     try file.writeStreamingAll(io, bytes);
 }
