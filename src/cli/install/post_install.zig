@@ -182,46 +182,68 @@ pub fn routePostInstallOutcomeWithBody(
     // ndjson always streams; --json picks per-command between streaming
     // and buffering for embed in a final summary doc.
     if (output.isNdjson()) {
-        emitPostInstallStreamLine(allocator, name, status, flog);
+        emitPostInstallStreamLine(allocator, name, status, flog, null);
         return;
     }
     if (output.isJson()) {
         switch (output.postInstallEmit()) {
-            .stream => emitPostInstallStreamLine(allocator, name, status, flog),
-            .embed => bufferPostInstallEvent(allocator, name, status, flog, sink),
+            .stream => emitPostInstallStreamLine(allocator, name, status, flog, null),
+            .embed => bufferPostInstallEvent(allocator, name, status, flog, null, sink),
         }
     }
 }
 
+/// A cask phase as it is reported: the tag is the JSON `phase` key, the
+/// label the human line. One upgrade emits several of these for one
+/// token, so the key is what tells a consumer them apart.
+pub const FlightPhase = enum {
+    preflight,
+    postflight,
+    uninstall_preflight,
+    uninstall_postflight,
+    install_phase_cleanup,
+
+    pub fn label(self: FlightPhase) []const u8 {
+        return switch (self) {
+            .preflight => "preflight",
+            .postflight => "postflight",
+            .uninstall_preflight => "uninstall preflight",
+            .uninstall_postflight => "uninstall postflight",
+            .install_phase_cleanup => "install-phase cleanup",
+        };
+    }
+};
+
 /// Report one cask flight phase the way a formula's post_install is
 /// reported, minus the Ruby fallback a cask has no equivalent for. The JSON
-/// event reuses the post_install shape so existing consumers see it. True
-/// when nothing in the phase was fatal.
-pub fn routeFlightOutcome(allocator: std.mem.Allocator, flog: *const dsl.FallbackLog, token: []const u8, phase: []const u8, sink: OutputSink) bool {
+/// event reuses the post_install shape so existing consumers see it, plus
+/// a `phase` key a formula's event does not carry. True when nothing in
+/// the phase was fatal.
+pub fn routeFlightOutcome(allocator: std.mem.Allocator, flog: *const dsl.FallbackLog, token: []const u8, phase: FlightPhase, sink: OutputSink) bool {
     renderNotes(flog);
     const status: PostInstallStatus = blk: {
         if (flog.hasFatal()) {
             // An error, not a warning: `--quiet` keeps it, and when the
             // phase aborts the command this line is the reason it exits 1.
-            sink.err("{s} steps failed for {s}", .{ phase, token });
+            sink.err("{s} steps failed for {s}", .{ phase.label(), token });
             renderFatal(flog, token);
             if (output.isDebug()) renderUnknown(flog, token);
             break :blk .fatal;
         }
         if (flog.hasErrors()) {
-            sink.warn("{s}: {s} steps partially skipped", .{ token, phase });
+            sink.warn("{s}: {s} steps partially skipped", .{ token, phase.label() });
             if (output.isVerbose()) renderUnknown(flog, token);
             break :blk .partially_skipped;
         }
-        if (flog.total_top_level > 0) sink.info("{s} steps completed for {s}", .{ phase, token });
+        if (flog.total_top_level > 0) sink.info("{s} steps completed for {s}", .{ phase.label(), token });
         break :blk .completed;
     };
     if (output.isNdjson()) {
-        emitPostInstallStreamLine(allocator, token, status, flog);
+        emitPostInstallStreamLine(allocator, token, status, flog, phase);
     } else if (output.isJson()) {
         switch (output.postInstallEmit()) {
-            .stream => emitPostInstallStreamLine(allocator, token, status, flog),
-            .embed => bufferPostInstallEvent(allocator, token, status, flog, sink),
+            .stream => emitPostInstallStreamLine(allocator, token, status, flog, phase),
+            .embed => bufferPostInstallEvent(allocator, token, status, flog, phase, sink),
         }
     }
     return status != .fatal;
@@ -255,7 +277,7 @@ pub const Flight = struct {
     }
 
     /// Report the phase the installer just ran through its sink.
-    pub fn route(self: *Flight, token: []const u8, phase: []const u8, out: OutputSink) bool {
+    pub fn route(self: *Flight, token: []const u8, phase: FlightPhase, out: OutputSink) bool {
         return routeFlightOutcome(self.allocator, &self.log, token, phase, out);
     }
 
@@ -268,11 +290,11 @@ pub const Flight = struct {
             const s = stored.get(phase) orelse continue;
             if (!installer.runFlightUninstall(token, version, s)) break;
         }
-        if (self.log.total_top_level > 0 or self.log.hasErrors()) _ = self.route(token, "install-phase cleanup", out);
+        if (self.log.total_top_level > 0 or self.log.hasErrors()) _ = self.route(token, .install_phase_cleanup, out);
     }
 
     /// Run one phase on a fresh log and report it. Null steps are a no-op.
-    pub fn runPhase(self: *Flight, installer: *cask_mod.CaskInstaller, token: []const u8, version: []const u8, steps: ?[]const std.json.Value, phase: []const u8, out: OutputSink) bool {
+    pub fn runPhase(self: *Flight, installer: *cask_mod.CaskInstaller, token: []const u8, version: []const u8, steps: ?[]const std.json.Value, phase: FlightPhase, out: OutputSink) bool {
         const s = steps orelse return true;
         self.reset();
         const ok = installer.runFlight(token, version, s, null);
@@ -380,6 +402,7 @@ fn emitPostInstallStreamLine(
     name: []const u8,
     status: PostInstallStatus,
     flog: *const dsl.FallbackLog,
+    phase: ?FlightPhase,
 ) void {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
@@ -388,7 +411,7 @@ fn emitPostInstallStreamLine(
     w.writeAll("{\"event\":\"") catch return;
     w.writeAll(@tagName(output.NdjsonEvent.post_install)) catch return;
     w.writeAll("\",") catch return;
-    writePostInstallBody(w, allocator, name, status, flog) catch return;
+    writePostInstallBody(w, allocator, name, status, flog, phase) catch return;
     w.writeAll("}\n") catch return;
     output.writeStdoutAll(aw.written());
 }
@@ -399,13 +422,14 @@ fn bufferPostInstallEvent(
     name: []const u8,
     status: PostInstallStatus,
     flog: *const dsl.FallbackLog,
+    phase: ?FlightPhase,
     sink: OutputSink,
 ) void {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     const w = &aw.writer;
     w.writeAll("{") catch return;
-    writePostInstallBody(w, allocator, name, status, flog) catch return;
+    writePostInstallBody(w, allocator, name, status, flog, phase) catch return;
     w.writeAll("}") catch return;
     // Surface push errors loudly so a half-populated summary is obvious.
     output.pushPostInstallEvent(aw.written()) catch |e|
@@ -413,16 +437,23 @@ fn bufferPostInstallEvent(
 }
 
 /// Shared payload writer so the streaming line and buffered embed
-/// stay byte-equivalent at the field level.
+/// stay byte-equivalent at the field level. `phase` is a cask's only;
+/// a formula's event keeps its pinned shape.
 fn writePostInstallBody(
     w: *std.Io.Writer,
     allocator: std.mem.Allocator,
     name: []const u8,
     status: PostInstallStatus,
     flog: *const dsl.FallbackLog,
+    phase: ?FlightPhase,
 ) !void {
     try w.writeAll("\"name\":");
     try output.jsonStr(w, name);
+    if (phase) |ph| {
+        try w.writeAll(",\"phase\":\"");
+        try w.writeAll(@tagName(ph));
+        try w.writeAll("\"");
+    }
     try w.writeAll(",\"status\":\"");
     try w.writeAll(@tagName(status));
     try w.writeAll("\",\"entries\":");

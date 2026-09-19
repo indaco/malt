@@ -457,7 +457,7 @@ fn dispatchCask(
     var stored = post_install_mod.storedFlight(db, allocator, token, install_sink_mod.terminal);
     defer if (stored) |*s| s.deinit();
     if (stored) |*s| if (cur_ver_opt) |cur| {
-        if (!flight.runPhase(&installer, token, cur, s.get(.uninstall_preflight), "uninstall preflight", install_sink_mod.terminal)) return error.Aborted;
+        if (!flight.runPhase(&installer, token, cur, s.get(.uninstall_preflight), .uninstall_preflight, install_sink_mod.terminal)) return error.Aborted;
         flight.runUninstallMode(&installer, token, cur, s, install_sink_mod.terminal);
     };
     installer.reinstallFromHistory(token, target_pkg_version) catch |e| {
@@ -465,7 +465,7 @@ fn dispatchCask(
         return error.Aborted;
     };
     if (stored) |*s| if (cur_ver_opt) |cur| {
-        _ = flight.runPhase(&installer, token, cur, s.get(.uninstall_postflight), "uninstall postflight", install_sink_mod.terminal);
+        _ = flight.runPhase(&installer, token, cur, s.get(.uninstall_postflight), .uninstall_postflight, install_sink_mod.terminal);
     };
     // See the keg path: the downgraded cask is not in the snapshot to prune.
     reconcileOutdatedSnapshot(ctx.io, allocator, db, .casks, token, target_pkg_version);

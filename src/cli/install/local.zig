@@ -1346,7 +1346,7 @@ fn materializeTapCask(
 
     const placed = installer.install(&cask);
     if (sp) |*s| s.bar.finish();
-    if (installer.preflight_ran) _ = flight.route(cask.token, "preflight", sink);
+    if (installer.preflight_ran) _ = flight.route(cask.token, .preflight, sink);
     const app_path = placed catch |e| {
         sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
         return switch (e) {
@@ -1360,7 +1360,7 @@ fn materializeTapCask(
 
     // `try` is the invariant: success line never fires without a row.
     try finalizeTapCaskInstall(allocator, db, &cask, app_path, resolved.tap_label, resolved.tap_registration, sink);
-    if (!flight.runPhase(&installer, cask.token, cask.version, cask.flight_steps.get(.postflight), "postflight", sink)) {
+    if (!flight.runPhase(&installer, cask.token, cask.version, cask.flight_steps.get(.postflight), .postflight, sink)) {
         sink.warn("{s} is installed but its postflight steps failed; `mt uninstall {s}` and reinstall to retry them", .{ cask.token, cask.token });
     }
 

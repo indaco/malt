@@ -552,8 +552,9 @@ test "a flight phase outcome reaches --ndjson consumers as a post_install event"
     malt.output.beginStderrCapture(testing.allocator, &err);
     defer malt.output.endStderrCapture();
 
-    try testing.expect(!malt.install_post_install.routeFlightOutcome(testing.allocator, &flog, "box", "postflight", malt.install_sink.terminal));
-    try testing.expect(std.mem.indexOf(u8, out.items, "\"event\":\"post_install\",\"name\":\"box\",\"status\":\"fatal\"") != null);
+    try testing.expect(!malt.install_post_install.routeFlightOutcome(testing.allocator, &flog, "box", .uninstall_postflight, malt.install_sink.terminal));
+    // The phase key is what tells one upgrade's several events apart.
+    try testing.expect(std.mem.indexOf(u8, out.items, "\"event\":\"post_install\",\"name\":\"box\",\"phase\":\"uninstall_postflight\",\"status\":\"fatal\"") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "\"detail\":\"/etc/x\"") != null);
 }
 

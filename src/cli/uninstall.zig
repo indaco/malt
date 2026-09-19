@@ -316,7 +316,7 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
     // A failed preflight aborts before anything is removed, as on install.
     // The steps are frozen in the row, so without `--force` a preflight that
     // can never pass would keep the cask on disk for good.
-    if (stored) |*s| if (!flight.runPhase(&installer, token, info.version(), s.get(.uninstall_preflight), "uninstall preflight", sink_mod.terminal)) {
+    if (stored) |*s| if (!flight.runPhase(&installer, token, info.version(), s.get(.uninstall_preflight), .uninstall_preflight, sink_mod.terminal)) {
         if (!force) return error.Aborted;
         output.warn("--force: removing {s} although its uninstall preflight failed", .{token});
     };
@@ -335,7 +335,7 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
     };
     reconcileOutdated(ctx.io, allocator, .casks, token);
 
-    if (stored) |*s| _ = flight.runPhase(&installer, token, info.version(), s.get(.uninstall_postflight), "uninstall postflight", sink_mod.terminal);
+    if (stored) |*s| _ = flight.runPhase(&installer, token, info.version(), s.get(.uninstall_postflight), .uninstall_postflight, sink_mod.terminal);
 
     output.success("{s} uninstalled", .{token});
 }

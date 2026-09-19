@@ -1725,7 +1725,7 @@ fn installCask(
 
     const installed = installer.install(&cask);
     if (sp) |*s| s.bar.finish();
-    if (installer.preflight_ran) _ = flight.route(cask.token, "preflight", sink);
+    if (installer.preflight_ran) _ = flight.route(cask.token, .preflight, sink);
     const app_path = installed catch |e| {
         // Surface the specific cause (Sha256Mismatch, DownloadFailed, …) —
         // users can't act on a bare "failed to install".
@@ -1741,7 +1741,7 @@ fn installCask(
 
     // After the row: the cask is installed either way, and "already
     // installed" blocks a plain re-run, so say what does retry the steps.
-    if (!flight.runPhase(&installer, cask.token, cask.version, cask.flight_steps.get(.postflight), "postflight", sink)) {
+    if (!flight.runPhase(&installer, cask.token, cask.version, cask.flight_steps.get(.postflight), .postflight, sink)) {
         sink.warn("{s} is installed but its postflight steps failed; `mt uninstall {s}` and reinstall to retry them", .{ cask.token, cask.token });
     }
 
