@@ -931,6 +931,14 @@ test "resolveAppDir: MALT_APPDIR env override wins regardless of prefix" {
     try testing.expectEqualStrings("/elsewhere", got2);
 }
 
+test "resolveAppDir: a relative MALT_APPDIR falls through to the default" {
+    // The wrapper creates the chosen dir with createDirAbsolute, which
+    // asserts on a relative path: honouring one would abort mid-command.
+    var buf: [128]u8 = undefined;
+    const got = cask.resolveAppDir("/opt/malt", "Apps", "/Users/me", true, &buf);
+    try testing.expectEqualStrings("/Applications", got);
+}
+
 test "resolveAppDir: non-default prefix routes to <prefix>/Applications" {
     var buf: [128]u8 = undefined;
     const got = cask.resolveAppDir("/tmp/mt.abc", null, "/Users/me", true, &buf);

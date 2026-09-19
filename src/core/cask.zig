@@ -1835,7 +1835,8 @@ pub fn isDefaultPrefix(prefix: []const u8) bool {
 
 /// Pure resolver for "where do cask `.app` bundles go?" — split from
 /// the FS-touching wrapper so the policy is unit-testable. Priority:
-///   1. `MALT_APPDIR` env override (caller passes the value).
+///   1. `MALT_APPDIR` env override (caller passes the value); a relative
+///      value is ignored, since `createDirAbsolute` below would assert on it.
 ///   2. Non-default prefix → `<prefix>/Applications` (sandboxed).
 ///   3. Default prefix + writable system `/Applications` → `/Applications`.
 ///   4. Default prefix + per-user `HOME` → `<HOME>/Applications`.
@@ -1849,7 +1850,7 @@ pub fn resolveAppDir(
 ) []const u8 {
     if (env_appdir) |dir| {
         const slice = std.mem.sliceTo(dir, 0);
-        if (slice.len > 0 and slice.len <= out.len) {
+        if (std.fs.path.isAbsolute(slice) and slice.len <= out.len) {
             @memcpy(out[0..slice.len], slice);
             return out[0..slice.len];
         }
