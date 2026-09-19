@@ -939,6 +939,34 @@ test "resolveAppDir: a relative MALT_APPDIR falls through to the default" {
     try testing.expectEqualStrings("/Applications", got);
 }
 
+test "resolveAppDir: a root MALT_APPDIR falls back to the default" {
+    // `/` would place - and on reinstall delete - `/<Name>.app`; the
+    // steps side already refuses a bare root, so placement must agree.
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("/tmp/mt.abc/Applications", cask.resolveAppDir("/tmp/mt.abc", "/", "/Users/me", true, &buf));
+    try testing.expectEqualStrings("/tmp/mt.abc/Applications", cask.resolveAppDir("/tmp/mt.abc", "//", "/Users/me", true, &buf));
+}
+
+test "resolveAppDir: a traversal or empty-component MALT_APPDIR falls back to the default" {
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("/tmp/mt.abc/Applications", cask.resolveAppDir("/tmp/mt.abc", "/x/../y", "/Users/me", true, &buf));
+    try testing.expectEqualStrings("/tmp/mt.abc/Applications", cask.resolveAppDir("/tmp/mt.abc", "/x//y", "/Users/me", true, &buf));
+}
+
+test "resolveAppDir: trailing slashes on MALT_APPDIR are trimmed" {
+    // `<appdir>//<Name>.app` never matches a running app's argv, so the
+    // AppRunning refusal silently stops firing for that row.
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("/custom/Apps", cask.resolveAppDir("/tmp/mt.abc", "/custom/Apps/", "/Users/me", true, &buf));
+    try testing.expectEqualStrings("/custom/Apps", cask.resolveAppDir("/tmp/mt.abc", "/custom/Apps//", "/Users/me", true, &buf));
+}
+
+test "resolveAppDir: a MALT_APPDIR that overflows the buffer falls back to the default" {
+    var buf: [8]u8 = undefined;
+    const got = cask.resolveAppDir("/opt/malt", "/a/path/too/long/", "/Users/me", true, &buf);
+    try testing.expectEqualStrings("/Applications", got);
+}
+
 test "resolveAppDir: non-default prefix routes to <prefix>/Applications" {
     var buf: [128]u8 = undefined;
     const got = cask.resolveAppDir("/tmp/mt.abc", null, "/Users/me", true, &buf);

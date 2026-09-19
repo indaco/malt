@@ -133,6 +133,9 @@ jobs:
       - name: Regression guard - malformed MALT_CACHE is refused before wipe
         run: ./scripts/regressions/malt-cache-validated-before-wipe-malt-cache-unvalidated-and-wiped.sh
 
+      - name: Regression guard - a degenerate MALT_APPDIR never becomes the cask placement directory
+        run: ./scripts/regressions/appdir-env-shape-validated-cask-appdir-env-accepted-unvalidated-for-placement.sh
+
       - name: Regression guard - a patched Mach-O always reaches the re-sign list
         run: ./scripts/regressions/walk-refuses-to-drop-a-mutated-macho-mutated-macho-can-skip-resigning-on-append-failure.sh
 

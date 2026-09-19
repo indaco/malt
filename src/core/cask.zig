@@ -10,6 +10,7 @@ const client_mod = @import("../net/client.zig");
 const archive_mod = @import("../fs/archive.zig");
 const path_component = @import("../fs/path_component.zig");
 const confined_source = @import("../fs/confined_source.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const hash_mod = @import("hash.zig");
 const child_mod = @import("child.zig");
 const cask_font = @import("cask_font.zig");
@@ -1791,14 +1792,21 @@ const ere_meta = "\\.[]()*+?{}|^$";
 pub fn pgrepPattern(buf: []u8, app_path: []const u8) ?[]const u8 {
     if (app_path.len == 0) return null;
     var w: std.Io.Writer = .fixed(buf); // a short path only overruns on absurd input
-    if (std.mem.indexOfAny(u8, app_path, ere_meta) != null) {
-        for (app_path) |c| {
+    const quote = std.mem.indexOfAny(u8, app_path, ere_meta) != null;
+    var prev: u8 = 0;
+    for (app_path, 0..) |c, i| {
+        // Rows recorded before trailing slashes were trimmed carry `//`; argv never does.
+        if (c == '/' and prev == '/') continue;
+        prev = c;
+        if (quote) {
             if (std.mem.indexOfScalar(u8, ere_meta, c) != null) w.writeByte('\\') catch return null;
             w.writeByte(c) catch return null;
+        } else if (i == 0) {
+            // Nothing to quote, so the pattern still reads as itself: class the first byte.
+            w.print("[{c}]", .{c}) catch return null;
+        } else {
+            w.writeByte(c) catch return null;
         }
-    } else {
-        // Nothing to quote, so the pattern still reads as itself: class the first byte.
-        w.print("[{c}]{s}", .{ app_path[0], app_path[1..] }) catch return null;
     }
     return w.buffered();
 }
@@ -1835,8 +1843,8 @@ pub fn isDefaultPrefix(prefix: []const u8) bool {
 
 /// Pure resolver for "where do cask `.app` bundles go?" — split from
 /// the FS-touching wrapper so the policy is unit-testable. Priority:
-///   1. `MALT_APPDIR` env override (caller passes the value); a relative
-///      value is ignored, since `createDirAbsolute` below would assert on it.
+///   1. `MALT_APPDIR` env override (caller passes the value): absolute,
+///      non-root, traversal-free; anything else is ignored.
 ///   2. Non-default prefix → `<prefix>/Applications` (sandboxed).
 ///   3. Default prefix + writable system `/Applications` → `/Applications`.
 ///   4. Default prefix + per-user `HOME` → `<HOME>/Applications`.
@@ -1849,8 +1857,11 @@ pub fn resolveAppDir(
     out: []u8,
 ) []const u8 {
     if (env_appdir) |dir| {
-        const slice = std.mem.sliceTo(dir, 0);
-        if (std.fs.path.isAbsolute(slice) and slice.len <= out.len) {
+        // Trailing slashes are trimmed so `app_path` keeps one separator and
+        // the running-app guard still matches it; a bare `/` trims to empty.
+        const slice = std.mem.trimEnd(u8, std.mem.sliceTo(dir, 0), "/");
+        const ok = if (prefix_path.validateShape(slice)) true else |_| false;
+        if (ok and slice.len <= out.len) {
             @memcpy(out[0..slice.len], slice);
             return out[0..slice.len];
         }
@@ -2026,6 +2037,14 @@ test "pgrepPattern quotes the metacharacters a bundle name can hold" {
         "/A/Foo \\(2\\)\\.app",
         pgrepPattern(&buf, "/A/Foo (2).app").?,
     );
+}
+
+test "pgrepPattern collapses a doubled separator so rows recorded with one still match" {
+    // A trailing-slash MALT_APPDIR used to store `<appdir>//<Name>.app`; the
+    // live argv never carries `//`, so the guard silently missed those rows.
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("/A/Foo\\.app", pgrepPattern(&buf, "/A//Foo.app").?);
+    try std.testing.expectEqualStrings("[/]tmp/plain", pgrepPattern(&buf, "/tmp///plain").?);
 }
 
 test "pgrepPattern classes the first byte when a path has nothing to quote" {
