@@ -41,14 +41,14 @@ trap 'rm -rf "$PFX"' EXIT
 db() { sqlite3 "$PFX/db/malt.db" "$1"; }
 SHA=$(printf 'a%.0s' {1..64})
 
-# (1) fresh DB: no counter column, schema 16. A dry run creates the schema
-#     without touching the store.
+# (1) fresh DB: no counter column, schema 16 or later. A dry run creates the
+#     schema without touching the store.
 mkdir -p "$PFX/db"
 "$BIN" purge --store-orphans --dry-run </dev/null >/dev/null 2>&1 || true
 [[ -f "$PFX/db/malt.db" ]] || fail "no DB was created under $PFX/db"
 ! db "PRAGMA table_info(store_refs);" | grep -q refcount ||
   fail "fresh DB still carries store_refs.refcount"
-[[ "$(db 'SELECT MAX(version) FROM schema_version;')" == 16 ]] ||
+[[ "$(db 'SELECT MAX(version) FROM schema_version;')" -ge 16 ]] ||
   fail "fresh DB did not reach schema 16"
 
 # (2) a v15-shaped DB migrates and keeps its claim rows. Seeded as v15 on

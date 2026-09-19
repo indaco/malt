@@ -791,6 +791,9 @@ pub const CaskInstaller = struct {
     /// Where declared flight steps report. Null skips them, so callers that
     /// only stage or roll back are unaffected.
     flight: ?FlightSink = null,
+    /// Set once `install` reaches the preflight, so a caller reports that
+    /// phase only when it ran: a download that failed first has no phase.
+    preflight_ran: bool = false,
 
     /// The log borrows every detail from `allocator`, so both must outlive
     /// the caller's routing of the outcome.
@@ -867,6 +870,7 @@ pub const CaskInstaller = struct {
     /// Preflight over the staged tree, before any artifact moves.
     fn preflight(self: *CaskInstaller, cask: *const Cask, staged_path: ?[]const u8) CaskError!void {
         const steps = cask.flight_steps.get(.preflight) orelse return;
+        self.preflight_ran = true;
         if (!self.runFlight(cask.token, cask.version, steps, staged_path)) return CaskError.PreflightFailed;
     }
 
@@ -1831,7 +1835,8 @@ pub fn isDefaultPrefix(prefix: []const u8) bool {
 
 /// Pure resolver for "where do cask `.app` bundles go?" — split from
 /// the FS-touching wrapper so the policy is unit-testable. Priority:
-///   1. `MALT_APPDIR` env override (caller passes the value).
+///   1. `MALT_APPDIR` env override (caller passes the value); a relative
+///      value is ignored, since `createDirAbsolute` below would assert on it.
 ///   2. Non-default prefix → `<prefix>/Applications` (sandboxed).
 ///   3. Default prefix + writable system `/Applications` → `/Applications`.
 ///   4. Default prefix + per-user `HOME` → `<HOME>/Applications`.
@@ -1845,7 +1850,7 @@ pub fn resolveAppDir(
 ) []const u8 {
     if (env_appdir) |dir| {
         const slice = std.mem.sliceTo(dir, 0);
-        if (slice.len > 0 and slice.len <= out.len) {
+        if (std.fs.path.isAbsolute(slice) and slice.len <= out.len) {
             @memcpy(out[0..slice.len], slice);
             return out[0..slice.len];
         }

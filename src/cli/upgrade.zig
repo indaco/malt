@@ -1252,7 +1252,7 @@ fn upgradeRoutedTapCask(
         output.err("Cannot upgrade {s}: the app is running. Quit it and try again.", .{token});
         return error.AppRunning;
     }
-    if (stored) |*s| if (!flight.runPhase(&installer, token, installed_version, s.get(.uninstall_preflight), "uninstall preflight", install_sink_mod.terminal)) {
+    if (stored) |*s| if (!flight.runPhase(&installer, token, installed_version, s.get(.uninstall_preflight), .uninstall_preflight, install_sink_mod.terminal)) {
         db.rollback();
         return error.Aborted;
     };
@@ -1267,7 +1267,7 @@ fn upgradeRoutedTapCask(
         output.err("Failed to remove old version of {s}: {s}", .{ token, @errorName(un_err) });
         return error.Aborted;
     };
-    if (stored) |*s| _ = flight.runPhase(&installer, token, installed_version, s.get(.uninstall_postflight), "uninstall postflight", install_sink_mod.terminal);
+    if (stored) |*s| _ = flight.runPhase(&installer, token, installed_version, s.get(.uninstall_postflight), .uninstall_postflight, install_sink_mod.terminal);
 
     // Installs the bytes the prefetch fetched, so this never re-downloads.
     install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, &prefetched, install_sink_mod.terminal) catch |in_err| {
@@ -1645,7 +1645,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         output.err("Cannot upgrade {s}: the app is running. Quit it and try again.", .{token});
         return error.AppRunning;
     }
-    if (stored) |*s| if (!flight.runPhase(&installer, token, old_version, s.get(.uninstall_preflight), "uninstall preflight", install_sink_mod.terminal)) {
+    if (stored) |*s| if (!flight.runPhase(&installer, token, old_version, s.get(.uninstall_preflight), .uninstall_preflight, install_sink_mod.terminal)) {
         db.rollback();
         return error.Aborted;
     };
@@ -1663,12 +1663,12 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         );
         return error.Aborted;
     };
-    if (stored) |*s| _ = flight.runPhase(&installer, token, old_version, s.get(.uninstall_postflight), "uninstall postflight", install_sink_mod.terminal);
+    if (stored) |*s| _ = flight.runPhase(&installer, token, old_version, s.get(.uninstall_postflight), .uninstall_postflight, install_sink_mod.terminal);
 
     // The incoming preflight reports on its own log, not the outgoing phase's.
     flight.reset();
     const placed = installer.install(&parsed_cask);
-    if (parsed_cask.flight_steps.get(.preflight) != null) _ = flight.route(token, "preflight", install_sink_mod.terminal);
+    if (installer.preflight_ran) _ = flight.route(token, .preflight, install_sink_mod.terminal);
     const app_path = placed catch |in_err| {
         output.err(
             "Failed to install new version of {s}: {s}",
@@ -1716,7 +1716,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     }
 
     // After the commit, as on install: the new version is recorded either way.
-    if (!flight.runPhase(&installer, token, parsed_cask.version, parsed_cask.flight_steps.get(.postflight), "postflight", install_sink_mod.terminal)) {
+    if (!flight.runPhase(&installer, token, parsed_cask.version, parsed_cask.flight_steps.get(.postflight), .postflight, install_sink_mod.terminal)) {
         output.warn("{s} is upgraded but its postflight steps failed; `mt uninstall {s}` and reinstall to retry them", .{ token, token });
     }
 
