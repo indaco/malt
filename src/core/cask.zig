@@ -535,13 +535,17 @@ pub fn parseBinaryName(obj: std.json.ObjectMap) ?[]const u8 {
 /// `codex` while the file on disk is `codex-aarch64-apple-darwin`.
 /// Null when no target override is present.
 pub fn parseBinaryTarget(obj: std.json.ObjectMap) ?[]const u8 {
+    if (firstArtifactObject(obj, "binary")) |art| if (art.get("target")) |tv| switch (tv) {
+        .string => |t| return binaryLinkName(t),
+        else => {},
+    };
     const arr = firstArtifactArray(obj, "binary") orelse return null;
     for (arr.items[1..]) |item| {
         switch (item) {
             .object => |o| {
                 if (o.get("target")) |tv| {
                     return switch (tv) {
-                        .string => |s| s,
+                        .string => |s| binaryLinkName(s),
                         else => null,
                     };
                 }
@@ -555,6 +559,15 @@ pub fn parseBinaryTarget(obj: std.json.ObjectMap) ?[]const u8 {
 /// Homebrew lets a `binary` source name the prefix explicitly; the remainder is
 /// still a subpath and is screened as one.
 const homebrew_prefix_var = "$HOMEBREW_PREFIX/";
+
+/// The link name a `binary` target denotes, or null when it names anywhere
+/// but one entry in `<prefix>/bin`: the API spells a target either as the
+/// bare name or as the full `$HOMEBREW_PREFIX/bin/<name>` path.
+fn binaryLinkName(target: []const u8) ?[]const u8 {
+    const bin_dir = homebrew_prefix_var ++ "bin/";
+    const name = if (std.mem.startsWith(u8, target, bin_dir)) target[bin_dir.len..] else target;
+    return if (path_component.isPathComponent(name)) name else null;
+}
 
 /// Reject any `app` or `binary` artifact string that would escape the directory
 /// it is resolved against. Only the artifact kinds malt actually turns into
@@ -596,15 +609,31 @@ fn validateArtifactPaths(obj: std.json.ObjectMap) CaskError!void {
                     // option hashes, and `target` is the one malt honours.
                     if (i == 0) continue;
                     if (o.get("target")) |tv| switch (tv) {
-                        // The link name is a single entry in `<prefix>/bin`.
-                        .string => |t| if (!path_component.isPathComponent(t)) return CaskError.ParseFailed,
+                        .string => |t| if (binaryLinkName(t) == null) return CaskError.ParseFailed,
                         else => {},
                     };
                 },
                 else => {},
             };
+            // The API also emits `target` beside `binary`, as a full path.
+            if (art.get("target")) |tv| switch (tv) {
+                .string => |t| if (binaryLinkName(t) == null) return CaskError.ParseFailed,
+                else => {},
+            };
         };
     }
+}
+
+/// The artifact object carrying `key`, for the option keys that sit beside
+/// the array rather than inside it.
+fn firstArtifactObject(obj: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {
+    const artifacts_val = obj.get("artifacts") orelse return null;
+    if (artifacts_val != .array) return null;
+    for (artifacts_val.array.items) |item| {
+        if (item != .object) continue;
+        if (item.object.get(key)) |val| if (val == .array) return item.object;
+    }
+    return null;
 }
 
 fn firstArtifactArray(obj: std.json.ObjectMap, key: []const u8) ?std.json.Array {
@@ -1110,6 +1139,23 @@ pub const CaskInstaller = struct {
             defer self.allocator.free(entries);
             return self.installFontArtifacts(extract_dir, cask, entries);
         }
+
+        // A bare executable and nothing else, as the tarball path already
+        // handles. A cask that also declares an `app` keeps the bundle path:
+        // its binary sits inside the bundle and is not linked yet. The stage
+        // is deleted on return, so the binary is kept under the Caskroom and
+        // linked from there.
+        if (parseAppName(cask.parsed.value.object) == null) if (parseBinaryName(cask.parsed.value.object)) |src_name| {
+            const link_name = parseBinaryTarget(cask.parsed.value.object) orelse
+                std.fs.path.basename(src_name);
+            var caskroom_buf: [512]u8 = undefined;
+            const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch
+                return error.InstallFailed;
+            std.Io.Dir.cwd().createDirPath(self.io, caskroom_ver) catch return error.InstallFailed;
+            const copy_argv = [_][]const u8{ system_tools.ditto, extract_dir, caskroom_ver };
+            child_mod.runOrFail(self.io, self.allocator, &copy_argv) catch return error.InstallFailed;
+            return try self.linkCaskBinary(caskroom_ver, src_name, link_name);
+        };
 
         // Find the .app. app_name_buf owns the fallback past iterator teardown.
         var app_name_buf: [256]u8 = undefined;
