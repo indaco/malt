@@ -17,6 +17,7 @@ pub const PrefixError = error{
     Empty,
     NotAbsolute,
     DotDotComponent,
+    DotComponent,
     EmbeddedNul,
     TooLong,
     EmptyComponent,
@@ -73,6 +74,7 @@ fn validateComponents(path: []const u8) PrefixError!void {
     while (it.next()) |comp| {
         if (comp.len == 0) return PrefixError.EmptyComponent;
         if (std.mem.eql(u8, comp, "..")) return PrefixError.DotDotComponent;
+        if (std.mem.eql(u8, comp, ".")) return PrefixError.DotComponent;
     }
 }
 
@@ -81,6 +83,7 @@ pub fn describePrefixError(e: PrefixError) []const u8 {
         PrefixError.Empty => "empty",
         PrefixError.NotAbsolute => "not an absolute path",
         PrefixError.DotDotComponent => "contains '..' component",
+        PrefixError.DotComponent => "contains '.' component",
         PrefixError.EmbeddedNul => "contains NUL byte",
         PrefixError.TooLong => "exceeds 512 bytes",
         PrefixError.EmptyComponent => "contains empty path component ('//')",
@@ -191,6 +194,16 @@ test "validatePrefix: .. component rejected" {
     try std.testing.expectError(error.DotDotComponent, validatePrefix("/opt/malt/.."));
 }
 
+test "validatePrefix: '.' component rejected" {
+    // `/opt/malt/.` names the same directory in a different spelling, so
+    // every later prefix comparison against the canonical form would miss.
+    try std.testing.expectError(error.DotComponent, validatePrefix("/opt/malt/."));
+    try std.testing.expectError(error.DotComponent, validatePrefix("/opt/./malt"));
+    try std.testing.expectError(error.DotComponent, validatePrefix("/."));
+    // A dotfile component is a real name, not a self-reference.
+    try validatePrefix("/opt/.malt");
+}
+
 test "validatePrefix: NUL byte rejected" {
     try std.testing.expectError(error.EmbeddedNul, validatePrefix("/opt/\x00malt"));
     try std.testing.expectError(error.EmbeddedNul, validatePrefix("/opt/malt\x00"));
@@ -225,13 +238,6 @@ test "validateShape: still refuses what every reader relies on" {
     try std.testing.expectError(PrefixError.DotDotComponent, validateShape("/tmp/a b/../etc"));
     try std.testing.expectError(PrefixError.EmptyComponent, validateShape("/tmp//cache"));
     try std.testing.expectError(PrefixError.Empty, validateShape(""));
-}
-
-test "validatePrefix: single dot component is permitted (not our job to canonicalise)" {
-    // A lone `.` is a valid filesystem path component; we only reject
-    // the traversal primitive `..`. Keeping this permissive avoids
-    // surprising users on paths like /opt/./malt.
-    try validatePrefix("/opt/./malt");
 }
 
 test "validatePrefix: dotdot-like-but-not-exact component accepted" {
@@ -307,6 +313,7 @@ test "describePrefixError: every error has a descriptive string" {
         error.Empty,
         error.NotAbsolute,
         error.DotDotComponent,
+        error.DotComponent,
         error.EmbeddedNul,
         error.TooLong,
         error.EmptyComponent,
