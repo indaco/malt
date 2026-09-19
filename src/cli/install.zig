@@ -1660,7 +1660,7 @@ fn installCask(
             @tagName(artifact_type),
             cask.url,
         });
-        post_install_mod.reportFlightPlan(allocator, &cask, sink);
+        post_install_mod.reportFlightPlan(allocator, ctx.environ, &cask, sink);
         return;
     }
 
@@ -1725,7 +1725,7 @@ fn installCask(
 
     const installed = installer.install(&cask);
     if (sp) |*s| s.bar.finish();
-    if (cask.flight_steps.get(.preflight) != null) _ = flight.route(cask.token, "preflight", sink);
+    if (installer.preflight_ran) _ = flight.route(cask.token, "preflight", sink);
     const app_path = installed catch |e| {
         // Surface the specific cause (Sha256Mismatch, DownloadFailed, …) —
         // users can't act on a bare "failed to install".

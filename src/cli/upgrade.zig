@@ -1668,7 +1668,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // The incoming preflight reports on its own log, not the outgoing phase's.
     flight.reset();
     const placed = installer.install(&parsed_cask);
-    if (parsed_cask.flight_steps.get(.preflight) != null) _ = flight.route(token, "preflight", install_sink_mod.terminal);
+    if (installer.preflight_ran) _ = flight.route(token, "preflight", install_sink_mod.terminal);
     const app_path = placed catch |in_err| {
         output.err(
             "Failed to install new version of {s}: {s}",

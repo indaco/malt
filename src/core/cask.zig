@@ -791,6 +791,9 @@ pub const CaskInstaller = struct {
     /// Where declared flight steps report. Null skips them, so callers that
     /// only stage or roll back are unaffected.
     flight: ?FlightSink = null,
+    /// Set once `install` reaches the preflight, so a caller reports that
+    /// phase only when it ran: a download that failed first has no phase.
+    preflight_ran: bool = false,
 
     /// The log borrows every detail from `allocator`, so both must outlive
     /// the caller's routing of the outcome.
@@ -867,6 +870,7 @@ pub const CaskInstaller = struct {
     /// Preflight over the staged tree, before any artifact moves.
     fn preflight(self: *CaskInstaller, cask: *const Cask, staged_path: ?[]const u8) CaskError!void {
         const steps = cask.flight_steps.get(.preflight) orelse return;
+        self.preflight_ran = true;
         if (!self.runFlight(cask.token, cask.version, steps, staged_path)) return CaskError.PreflightFailed;
     }
 

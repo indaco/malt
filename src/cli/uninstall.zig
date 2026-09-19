@@ -78,7 +78,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Check if it's a cask first (or if --cask was passed)
     if (force_cask or cask_mod.isInstalled(&db, name)) {
-        try uninstallCask(ctx, allocator, name, &db, prefix);
+        try uninstallCask(ctx, allocator, name, &db, prefix, force);
         return;
     }
 
@@ -280,7 +280,7 @@ test "finalizeDbRemoval leaves the kegs row when the delete is blocked" {
 }
 
 /// Uninstall a cask by token.
-fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8) !void {
+fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, force: bool) !void {
     const info = cask_mod.lookupInstalled(db, token) orelse {
         output.err("{s} is not installed as a cask", .{token});
         return error.Aborted;
@@ -314,8 +314,12 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
     defer flight.deinit();
     installer.flight = flight.sink();
     // A failed preflight aborts before anything is removed, as on install.
-    if (stored) |*s| if (!flight.runPhase(&installer, token, info.version(), s.get(.uninstall_preflight), "uninstall preflight", sink_mod.terminal))
-        return error.Aborted;
+    // The steps are frozen in the row, so without `--force` a preflight that
+    // can never pass would keep the cask on disk for good.
+    if (stored) |*s| if (!flight.runPhase(&installer, token, info.version(), s.get(.uninstall_preflight), "uninstall preflight", sink_mod.terminal)) {
+        if (!force) return error.Aborted;
+        output.warn("--force: removing {s} although its uninstall preflight failed", .{token});
+    };
     if (stored) |*s| flight.runUninstallMode(&installer, token, info.version(), s, sink_mod.terminal);
 
     installer.uninstall(token) catch |un_err| {

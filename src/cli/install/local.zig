@@ -1346,7 +1346,7 @@ fn materializeTapCask(
 
     const placed = installer.install(&cask);
     if (sp) |*s| s.bar.finish();
-    if (cask.flight_steps.get(.preflight) != null) _ = flight.route(cask.token, "preflight", sink);
+    if (installer.preflight_ran) _ = flight.route(cask.token, "preflight", sink);
     const app_path = placed catch |e| {
         sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
         return switch (e) {

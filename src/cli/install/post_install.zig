@@ -201,7 +201,9 @@ pub fn routeFlightOutcome(allocator: std.mem.Allocator, flog: *const dsl.Fallbac
     renderNotes(flog);
     const status: PostInstallStatus = blk: {
         if (flog.hasFatal()) {
-            sink.warn("{s} steps failed for {s}", .{ phase, token });
+            // An error, not a warning: `--quiet` keeps it, and when the
+            // phase aborts the command this line is the reason it exits 1.
+            sink.err("{s} steps failed for {s}", .{ phase, token });
             renderFatal(flog, token);
             if (output.isDebug()) renderUnknown(flog, token);
             break :blk .fatal;
@@ -289,7 +291,7 @@ pub fn storedFlight(db: *sqlite.Database, allocator: std.mem.Allocator, token: [
 
 /// Dry-run view of a cask's declared phases: what would run and which steps
 /// this executor would refuse, without touching the filesystem.
-pub fn reportFlightPlan(allocator: std.mem.Allocator, cask: *const cask_mod.Cask, sink: OutputSink) void {
+pub fn reportFlightPlan(allocator: std.mem.Allocator, environ: std.process.Environ, cask: *const cask_mod.Cask, sink: OutputSink) void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     for (std.enums.values(cask_mod.FlightPhase)) |phase| {
@@ -303,7 +305,9 @@ pub fn reportFlightPlan(allocator: std.mem.Allocator, cask: *const cask_mod.Cask
             .version = cask.version,
             .prefix = "",
             .keg_path = "",
-            .subject = .{ .cask = .{ .staged_path = "", .caskroom_path = "", .appdir = "", .home = "" } },
+            // The real HOME: a `home`-based command is in bounds on the real
+            // install, so an empty root here would lint it as unsupported.
+            .subject = .{ .cask = .{ .staged_path = "", .caskroom_path = "", .appdir = "", .home = std.process.Environ.getPosix(environ, "HOME") orelse "" } },
             .flog = &flog,
         }, steps);
         sink.info("Dry run: would run {d} {s} step(s) for {s}", .{ steps.len, @tagName(phase), cask.token });

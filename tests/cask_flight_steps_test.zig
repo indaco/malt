@@ -124,6 +124,35 @@ test "preflight runs before the app is placed and postflight after the row is wr
     try testing.expect(!flog.hasErrors());
 }
 
+test "an install that fails before staging reports no preflight" {
+    // The caller routes the preflight only when it ran: a cask that declares
+    // one but never downloaded has no phase to report, and an empty log
+    // would read as a completed one.
+    var fx = try Fixture.init("no_preflight");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCaskWithMajor(testing.allocator, box_json, null);
+    defer c.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var flog = cask.FlightLog.init(testing.allocator);
+    defer flog.deinit();
+    var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.flight = .{ .log = &flog, .allocator = arena.allocator() };
+    installer.offline = true;
+
+    try testing.expectError(error.DownloadFailed, installer.install(&c));
+    try testing.expect(!installer.preflight_ran);
+    try testing.expect(!exists(io, fx.h("Library/Application Support/box/roms")));
+}
+
 test "uninstall postflight runs from the stored row and its effect is visible" {
     var fx = try Fixture.init("uninstall");
     defer fx.deinit();
@@ -241,6 +270,51 @@ test "uninstall aborts before removing anything when the stored preflight fails"
     try testing.expect(cask.isInstalled(&db, "evil"));
 }
 
+test "uninstall --force removes the cask past a stored preflight that cannot pass" {
+    // The steps are frozen at install time: a preflight that fails forever
+    // would otherwise wedge the cask with no CLI way out.
+    var fx = try Fixture.init("cli_uninstall_force");
+    defer fx.deinit();
+    try enterPrefix(&fx);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const app_path = fx.p("Applications/Stuck.app");
+    try test_io.cwd().createDirPath(io, app_path);
+    {
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c = try cask.parseCaskWithMajor(testing.allocator,
+            \\{"token":"stuck","name":["Stuck"],"version":"1","url":"https://example.invalid/stuck.zip","sha256":"no_check",
+            \\ "artifacts":[{"app":["Stuck.app"]},
+            \\  {"uninstall_preflight_steps":[{"steps":[{"type":"run","command":{"base":"staged_path","path":"uninstall.sh"}}]}]}]}
+        , null);
+        defer c.deinit();
+        try cask.recordInstall(&db, &c, app_path, null);
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ };
+    try testing.expectError(error.Aborted, malt.cli_uninstall.execute(&ctx, arena.allocator(), &.{"stuck"}));
+    try testing.expect(exists(io, app_path));
+
+    try malt.cli_uninstall.execute(&ctx, arena.allocator(), &.{ "stuck", "--force" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--force: removing stuck") != null);
+    try testing.expect(!exists(io, app_path));
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    try testing.expect(!cask.isInstalled(&db, "stuck"));
+}
+
 /// A digest-pinned zip of `Box.app` at `<cache>/Cask/box-<ver>.zip`; the
 /// installer reuses it without a network round trip.
 fn seedBoxZip(io: std.Io, fx: *Fixture, version: []const u8) ![]const u8 {
@@ -322,7 +396,8 @@ test "install --dry-run lists the phases and names the steps malt refuses" {
     try putFile(threaded.io(), fx.p("cache/api/cask_plan.json"),
         \\{"token":"plan","name":["Plan"],"version":"2.1","url":"https://example.invalid/plan.zip","sha256":"no_check",
         \\ "artifacts":[{"preflight_steps":[{"steps":[{"type":"mkdir_p","path":{"base":"home","path":"Library/plan"}}]}]},{"app":["Plan.app"]},
-        \\  {"postflight_steps":[{"steps":[{"type":"run","command":{"path":"/bin/echo"},"sudo":true},{"type":"terminate_process","name":"p","match":"full"},{"type":"run","command":{"path":"/bin/echo"},"network_access":true}]}]}]}
+        \\  {"postflight_steps":[{"steps":[{"type":"run","command":{"path":"/bin/echo"},"sudo":true},{"type":"terminate_process","name":"p","match":"full"},{"type":"run","command":{"path":"/bin/echo"},"network_access":true},
+        \\   {"type":"run","command":{"base":"home","path":"Library/plan/hook"}}]}]}]}
     );
     {
         var db = try sqlite.Database.open(fx.p("db/malt.db"));
@@ -341,11 +416,13 @@ test "install --dry-run lists the phases and names the steps malt refuses" {
     try malt.install.execute(&ctx, arena.allocator(), &.{ "--cask", "--dry-run", "plan" });
 
     try testing.expect(std.mem.indexOf(u8, captured.items, "would run 1 preflight step(s) for plan") != null);
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would run 3 postflight step(s) for plan") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would run 4 postflight step(s) for plan") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: run with sudo") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "unsupported step: run with network_access") != null);
     // A full-path match is honoured now, so the plan no longer flags it.
     try testing.expect(std.mem.indexOf(u8, captured.items, "terminate_process") == null);
+    // The plan lints against the real HOME, as the install will resolve it.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "run command base home") == null);
     try testing.expect(!exists(threaded.io(), fx.h("Library/plan")));
 }
 
