@@ -951,6 +951,7 @@ test "resolveAppDir: a traversal or empty-component MALT_APPDIR falls back to th
     var buf: [128]u8 = undefined;
     try testing.expectEqualStrings("/tmp/mt.abc/Applications", cask.resolveAppDir("/tmp/mt.abc", "/x/../y", "/Users/me", true, &buf));
     try testing.expectEqualStrings("/tmp/mt.abc/Applications", cask.resolveAppDir("/tmp/mt.abc", "/x//y", "/Users/me", true, &buf));
+    try testing.expectEqualStrings("/tmp/mt.abc/Applications", cask.resolveAppDir("/tmp/mt.abc", "/Applications/.", "/Users/me", true, &buf));
 }
 
 test "resolveAppDir: trailing slashes on MALT_APPDIR are trimmed" {
