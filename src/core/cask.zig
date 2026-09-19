@@ -1792,14 +1792,21 @@ const ere_meta = "\\.[]()*+?{}|^$";
 pub fn pgrepPattern(buf: []u8, app_path: []const u8) ?[]const u8 {
     if (app_path.len == 0) return null;
     var w: std.Io.Writer = .fixed(buf); // a short path only overruns on absurd input
-    if (std.mem.indexOfAny(u8, app_path, ere_meta) != null) {
-        for (app_path) |c| {
+    const quote = std.mem.indexOfAny(u8, app_path, ere_meta) != null;
+    var prev: u8 = 0;
+    for (app_path, 0..) |c, i| {
+        // Rows recorded before trailing slashes were trimmed carry `//`; argv never does.
+        if (c == '/' and prev == '/') continue;
+        prev = c;
+        if (quote) {
             if (std.mem.indexOfScalar(u8, ere_meta, c) != null) w.writeByte('\\') catch return null;
             w.writeByte(c) catch return null;
+        } else if (i == 0) {
+            // Nothing to quote, so the pattern still reads as itself: class the first byte.
+            w.print("[{c}]", .{c}) catch return null;
+        } else {
+            w.writeByte(c) catch return null;
         }
-    } else {
-        // Nothing to quote, so the pattern still reads as itself: class the first byte.
-        w.print("[{c}]{s}", .{ app_path[0], app_path[1..] }) catch return null;
     }
     return w.buffered();
 }
@@ -2030,6 +2037,14 @@ test "pgrepPattern quotes the metacharacters a bundle name can hold" {
         "/A/Foo \\(2\\)\\.app",
         pgrepPattern(&buf, "/A/Foo (2).app").?,
     );
+}
+
+test "pgrepPattern collapses a doubled separator so rows recorded with one still match" {
+    // A trailing-slash MALT_APPDIR used to store `<appdir>//<Name>.app`; the
+    // live argv never carries `//`, so the guard silently missed those rows.
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("/A/Foo\\.app", pgrepPattern(&buf, "/A//Foo.app").?);
+    try std.testing.expectEqualStrings("[/]tmp/plain", pgrepPattern(&buf, "/tmp///plain").?);
 }
 
 test "pgrepPattern classes the first byte when a path has nothing to quote" {
