@@ -1660,6 +1660,7 @@ fn installCask(
             @tagName(artifact_type),
             cask.url,
         });
+        post_install_mod.reportFlightPlan(allocator, &cask, sink);
         return;
     }
 
@@ -1688,6 +1689,9 @@ fn installCask(
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, cache_dir);
     installer.artifact_type_override = artifact_type;
     installer.offline = ctx.offline;
+    var flight = post_install_mod.Flight.init(allocator);
+    defer flight.deinit();
+    installer.flight = flight.sink();
 
     // Progress bar for cask download, rendered as a one-line group so it
     // disables autowrap and restores on exit. A non-terminal sink (bundle)
@@ -1719,20 +1723,27 @@ fn installCask(
 
     sink.info("Installing cask {s} {s}...", .{ cask.token, cask.version });
 
-    const app_path = installer.install(&cask) catch |e| {
-        if (sp) |*s| s.bar.finish();
+    const installed = installer.install(&cask);
+    if (sp) |*s| s.bar.finish();
+    if (cask.flight_steps.get(.preflight) != null) _ = flight.route(cask.token, "preflight", sink);
+    const app_path = installed catch |e| {
         // Surface the specific cause (Sha256Mismatch, DownloadFailed, …) —
         // users can't act on a bare "failed to install".
         sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
         return InstallError.CaskNotFound;
     };
-    if (sp) |*s| s.bar.finish();
 
     // Core API casks have no third-party tap origin to record.
     cask_mod.recordInstall(db, &cask, app_path, null) catch {
         sink.warn("Failed to record cask {s} in database", .{cask.token});
     };
     allocator.free(app_path);
+
+    // After the row: the cask is installed either way, and "already
+    // installed" blocks a plain re-run, so say what does retry the steps.
+    if (!flight.runPhase(&installer, cask.token, cask.version, cask.flight_steps.get(.postflight), "postflight", sink)) {
+        sink.warn("{s} is installed but its postflight steps failed; `mt uninstall {s}` and reinstall to retry them", .{ cask.token, cask.token });
+    }
 
     sink.success("{s} {s} installed", .{ cask.token, cask.version });
 }

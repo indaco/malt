@@ -629,6 +629,7 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
 | `MALT_PREFIX`                      | Override install prefix                                                                                                                                  | `/opt/malt`                     |
 | `MALT_CACHE`                       | Override cache directory                                                                                                                                 | `{prefix}/cache`                |
+| `MALT_APPDIR`                      | Where cask `app` bundles land and what the `appdir` base of a cask's flight steps resolves to (brew's `--appdir`); absolute path only                    | `/Applications`                 |
 | `MALT_BREW_PATH`                   | Override the real `brew` binary that unknown commands fall back to (custom install prefix)                                                               | probes standard install paths   |
 | `NO_COLOR`                         | Disable colored output. Unconditional veto: it wins over `CLICOLOR_FORCE`                                                                                | unset                           |
 | `CLICOLOR`                         | Set to `0` to disable colored output                                                                                                                     | unset                           |
@@ -784,6 +785,8 @@ When a formula defines `post_install`, malt tries its native interpreter first. 
 Source for `homebrew-core` formulas is fetched on demand from GitHub if the tap isn't cloned locally.
 
 Homebrew v6 is migrating formulae from these Ruby blocks to a declarative `post_install_steps` array. malt runs those steps natively as well - across install, upgrade, and migrate - so packages keep configuring themselves as upstream converts.
+
+Casks declare the same step schema as `preflight_steps` / `postflight_steps` / `uninstall_preflight_steps` / `uninstall_postflight_steps` (Homebrew v7). `mt install --cask` runs the preflight over the staged artefact before anything is placed and the postflight once the cask is recorded; `mt uninstall` runs the steps stored at install time, so they match the version on disk. Cask steps are confined to the Caskroom, the malt prefix, `$HOME/Library` and the applications directory; steps that need `sudo` are reported and skipped, never escalated. `--dry-run` lists the steps a cask would run and which ones malt refuses.
 
 Every mutating filesystem operation - write, rm, chmod, symlink - is validated against the formula's Cellar prefix and the malt prefix; paths containing `..` or resolving outside the sandbox via symlinks are rejected immediately.
 

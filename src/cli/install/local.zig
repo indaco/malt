@@ -37,6 +37,7 @@ const tapCaskArtifactKind = rb_parse.tapCaskArtifactKind;
 const record = @import("record.zig");
 const InstallError = record.InstallError;
 const sink_mod = @import("sink.zig");
+const post_install_mod = @import("post_install.zig");
 const OutputSink = sink_mod.OutputSink;
 
 /// Maximum size of a `.rb` formula file that `malt install --local`
@@ -1287,6 +1288,11 @@ fn materializeTapCask(
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix_z, cache_dir);
     installer.artifact_type_override = kind;
     installer.offline = ctx.offline;
+    // A tap `.rb` yields no steps today, but a declared preflight refuses
+    // to install through an installer without a sink, so wire it anyway.
+    var flight = post_install_mod.Flight.init(allocator);
+    defer flight.deinit();
+    installer.flight = flight.sink();
 
     // A non-terminal sink (bundle) skips the bar — the global progress
     // mode is set-once and can't be quieted mid-run. Rendered as a
@@ -1338,8 +1344,10 @@ fn materializeTapCask(
     // once its old version is gone.
     if (prefetch_slot) |slot| installer.prefetched_artifact = slot.*;
 
-    const app_path = installer.install(&cask) catch |e| {
-        if (sp) |*s| s.bar.finish();
+    const placed = installer.install(&cask);
+    if (sp) |*s| s.bar.finish();
+    if (cask.flight_steps.get(.preflight) != null) _ = flight.route(cask.token, "preflight", sink);
+    const app_path = placed catch |e| {
         sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
         return switch (e) {
             error.DownloadFailed, error.Sha256Mismatch, error.Sha256Missing => InstallError.DownloadFailed,
@@ -1348,11 +1356,13 @@ fn materializeTapCask(
             else => InstallError.CaskNotFound,
         };
     };
-    if (sp) |*s| s.bar.finish();
     defer allocator.free(app_path);
 
     // `try` is the invariant: success line never fires without a row.
     try finalizeTapCaskInstall(allocator, db, &cask, app_path, resolved.tap_label, resolved.tap_registration, sink);
+    if (!flight.runPhase(&installer, cask.token, cask.version, cask.flight_steps.get(.postflight), "postflight", sink)) {
+        sink.warn("{s} is installed but its postflight steps failed; `mt uninstall {s}` and reinstall to retry them", .{ cask.token, cask.token });
+    }
 
     sink.success("{s} {s} installed", .{ cask.token, cask.version });
 }
@@ -1617,7 +1627,8 @@ test "finalizeTapCaskInstall persists the cask row on the happy path" {
         \\    app_path TEXT,
         \\    auto_updates INTEGER NOT NULL DEFAULT 0,
         \\    pinned INTEGER NOT NULL DEFAULT 0,
-        \\    tap TEXT
+        \\    tap TEXT,
+        \\    flight_steps TEXT
         \\);
     );
 
@@ -1662,7 +1673,8 @@ test "finalizeTapCaskInstall stamps the owning tap when tap_registration is set"
         \\    app_path TEXT,
         \\    auto_updates INTEGER NOT NULL DEFAULT 0,
         \\    pinned INTEGER NOT NULL DEFAULT 0,
-        \\    tap TEXT
+        \\    tap TEXT,
+        \\    flight_steps TEXT
         \\);
     );
     try db.exec(

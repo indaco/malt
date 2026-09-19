@@ -1565,6 +1565,15 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     artefact_cache.adoptLegacy(ctx.io, prefix, api.cache_dir);
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, api.cache_dir);
     installer.offline = ctx.offline;
+    installer.retain_history = true;
+    var flight = post_install_mod.Flight.init(allocator);
+    defer flight.deinit();
+    installer.flight = flight.sink();
+    // The outgoing version's own uninstall steps, read before its row goes.
+    var stored = post_install_mod.storedFlight(db, allocator, token, install_sink_mod.terminal);
+    defer if (stored) |*s| s.deinit();
+    // `installed` copies the row, so its version outlives the uninstall.
+    const old_version = installed.version();
 
     // Fetch before destroying, as in `upgradeRoutedTapCask` above.
     const prefetched = installer.downloadOnly(&parsed_cask) catch |dl_err| {
@@ -1589,6 +1598,11 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return error.Aborted;
     };
 
+    if (stored) |*s| if (!flight.runPhase(&installer, token, old_version, s.get(.uninstall_preflight), "uninstall preflight", install_sink_mod.terminal)) {
+        db.rollback();
+        return error.Aborted;
+    };
+
     installer.uninstall(token) catch |un_err| {
         db.rollback();
         if (un_err == error.AppRunning) {
@@ -1601,13 +1615,26 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         );
         return error.Aborted;
     };
+    if (stored) |*s| _ = flight.runPhase(&installer, token, old_version, s.get(.uninstall_postflight), "uninstall postflight", install_sink_mod.terminal);
 
-    const app_path = installer.install(&parsed_cask) catch |in_err| {
+    // The incoming preflight reports on its own log, not the outgoing phase's.
+    flight.reset();
+    const placed = installer.install(&parsed_cask);
+    if (parsed_cask.flight_steps.get(.preflight) != null) _ = flight.route(token, "preflight", install_sink_mod.terminal);
+    const app_path = placed catch |in_err| {
         output.err(
             "Failed to install new version of {s}: {s}",
             .{ token, @errorName(in_err) },
         );
+        // The rollback restores the rows; the bundle it points at is gone,
+        // so put the old version back from its retained history.
         db.rollback();
+        installer.prefetched_artifact = null;
+        if (installer.reinstallFromHistory(token, old_version)) |_| {
+            output.warn("{s} {s} is back in place", .{ token, old_version });
+        } else |re_err| {
+            output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, old_version, @errorName(re_err), token, old_version });
+        }
         return error.Aborted;
     };
 
@@ -1638,6 +1665,11 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         // Best-effort: a missing pin restore is a UX regression, not data
         // loss — the cask itself is upgraded and recorded.
         _ = pin_mod.setPinned(db, token, true) catch {};
+    }
+
+    // After the commit, as on install: the new version is recorded either way.
+    if (!flight.runPhase(&installer, token, parsed_cask.version, parsed_cask.flight_steps.get(.postflight), "postflight", install_sink_mod.terminal)) {
+        output.warn("{s} is upgraded but its postflight steps failed; `mt uninstall {s}` and reinstall to retry them", .{ token, token });
     }
 
     output.success("{s} upgraded to {s}", .{ token, parsed_cask.version });

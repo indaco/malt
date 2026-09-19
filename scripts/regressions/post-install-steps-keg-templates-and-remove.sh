@@ -57,9 +57,9 @@ if ! grep -q 'readLinkAbsolute' "$STEPS"; then
 fi
 
 # 3b. The recursive form retires a subtree the formula owns. Its boundary is
-#     `sharedPrefixDir`: without it, confinement alone would let formula data
+#     `sharedDir`: without it, confinement alone would let formula data
 #     delete `<prefix>/lib` and every other package's files inside it.
-if ! grep -q 'fn sharedPrefixDir' "$STEPS"; then
+if ! grep -q 'fn sharedDir' "$STEPS"; then
   echo "FAIL: recursive remove no longer refuses shared top-level prefix directories" >&2
   exit 1
 fi

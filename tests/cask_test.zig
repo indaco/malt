@@ -1264,6 +1264,43 @@ test "readReinstallMeta + recordInstall preserves auto_updates and tap across a 
     try testing.expect(stmt.columnBool(3));
 }
 
+test "a fresh parse that declares no flight steps clears the stored ones" {
+    // An upgrade's new version may have dropped its steps; replaying the
+    // old version's uninstall steps would run automation the tap retired.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var old = try cask.parseCask(testing.allocator,
+        \\{"token":"tidy","name":["Tidy"],"version":"1","url":"https://example.invalid/1.zip",
+        \\ "artifacts":[{"uninstall_postflight_steps":[{"steps":[{"type":"terminate_process","name":"tidyd"}]}]}]}
+    );
+    defer old.deinit();
+    try cask.recordInstall(&db, &old, null, null);
+    var before = (try cask.readFlightSteps(&db, testing.allocator, "tidy")) orelse return error.TestUnexpectedResult;
+    before.deinit();
+
+    var new = try cask.parseCask(testing.allocator,
+        \\{"token":"tidy","name":["Tidy"],"version":"2","url":"https://example.invalid/2.zip","artifacts":[{"app":["Tidy.app"]}]}
+    );
+    defer new.deinit();
+    try cask.recordInstall(&db, &new, null, null);
+    try testing.expect((try cask.readFlightSteps(&db, testing.allocator, "tidy")) == null);
+}
+
+test "readFlightSteps reports a corrupt stored row instead of reading it as none" {
+    // `uninstall_preflight` exists to abort an unsafe removal; "could not
+    // read it" must not collapse into "nothing to run".
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url, flight_steps)
+        \\VALUES ('bent', 'bent', '1', 'https://example.invalid', '{"preflight_steps": [');
+    );
+    try testing.expectError(cask.CaskError.ParseFailed, cask.readFlightSteps(&db, testing.allocator, "bent"));
+}
+
 // --- coverage: migration tolerates a broken `casks` shape ----------------
 
 test "v6→v7 migration leaves cask_versions empty when casks has a broken shape" {

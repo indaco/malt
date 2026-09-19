@@ -23,23 +23,44 @@ const glob_match = @import("../glob.zig");
 const patch = @import("patch.zig");
 const codesign = @import("../macho/codesign.zig");
 const system_tools = @import("../system_tools.zig");
+const child_mod = @import("child.zig");
 
 pub const FallbackLog = fallback_log.FallbackLog;
 
-/// Formula-scoped inputs for base-token resolution and confinement.
+/// What the steps belong to. Bases, templates and the confinement roots all
+/// switch on it; the formula arm is the pre-cask behaviour, unchanged.
+pub const Subject = union(enum) {
+    formula,
+    cask: CaskSubject,
+};
+
+pub const CaskSubject = struct {
+    /// Where the artefact was unpacked: the `staged_path` base and token.
+    staged_path: []const u8,
+    /// `<prefix>/Caskroom/<token>`.
+    caskroom_path: []const u8,
+    appdir: []const u8,
+    /// `$HOME`; only its `Library` subtree is writable by a step.
+    home: []const u8,
+};
+
+/// Inputs for base-token resolution and confinement.
 pub const StepsCtx = struct {
     io: std.Io,
     /// Arena-backed: owns every resolved path, parsed JSON node, and log
     /// detail until the caller finishes routing the FallbackLog.
     allocator: std.mem.Allocator,
+    /// Formula name or cask token.
     name: []const u8,
     /// Raw upstream version — template tokens read it; the revision-suffixed
     /// cellar label lives in `keg_path` already.
     version: []const u8,
     /// malt prefix (the upstream HOMEBREW_PREFIX analogue).
     prefix: []const u8,
-    /// `<prefix>/Cellar/<name>/<pkg_version>` — the `prefix` base token.
+    /// `<prefix>/Cellar/<name>/<pkg_version>` — the `prefix` base token. For
+    /// a cask it is the Caskroom dir: the run cwd and first confinement root.
     keg_path: []const u8,
+    subject: Subject = .formula,
     flog: *FallbackLog,
     suppress_child_stdout: bool = false,
     /// Only consulted for the data-dir initialisers (`--user=$USER`).
@@ -54,6 +75,7 @@ pub fn supportedStepType(step_type: []const u8) bool {
 
 const StepTag = enum {
     mkdir_p,
+    mkdir,
     touch,
     write,
     symlink,
@@ -71,11 +93,14 @@ const StepTag = enum {
     init_data_dir,
     run,
     move,
+    move_contents,
     warn,
     set_permissions,
+    set_ownership,
     install_gzipped_executable,
     change_dylib_id,
     terminate_process,
+    delete_keychain_certificate,
     configure_clang_system,
     configure_gcc_runtime,
 };
@@ -84,6 +109,7 @@ const StepTag = enum {
 /// the doctor-facing `supportedStepType` classifier both read it.
 const step_map = std.StaticStringMap(StepTag).initComptime(.{
     .{ "mkdir_p", .mkdir_p },
+    .{ "mkdir", .mkdir },
     .{ "touch", .touch },
     .{ "write", .write },
     .{ "symlink", .symlink },
@@ -101,11 +127,16 @@ const step_map = std.StaticStringMap(StepTag).initComptime(.{
     .{ "init_data_dir", .init_data_dir },
     .{ "run", .run },
     .{ "move", .move },
+    .{ "move_contents", .move_contents },
+    // Deprecated upstream spelling of the same step.
+    .{ "move_children", .move_contents },
     .{ "warn", .warn },
     .{ "set_permissions", .set_permissions },
+    .{ "set_ownership", .set_ownership },
     .{ "install_gzipped_executable", .install_gzipped_executable },
     .{ "change_dylib_id", .change_dylib_id },
     .{ "terminate_process", .terminate_process },
+    .{ "delete_keychain_certificate", .delete_keychain_certificate },
     .{ "configure_clang_system", .configure_clang_system },
     .{ "configure_gcc_runtime", .configure_gcc_runtime },
 });
@@ -119,6 +150,7 @@ const common_keys = [_][]const u8{ "type", "guards", "id", "skip_audit" };
 fn honouredKeys(tag: StepTag) []const []const u8 {
     return switch (tag) {
         .mkdir_p,
+        .mkdir,
         .touch,
         .compile_gsettings_schemas,
         .gio_querymodules,
@@ -139,13 +171,18 @@ fn honouredKeys(tag: StepTag) []const []const u8 {
         .run => &.{ "command", "args", "sudo" },
         // `force` is upstream's alias for `overwrite` on this step.
         .move => &.{ "source", "target", "overwrite", "force" },
+        .move_contents => &.{ "source", "target" },
         .warn => &.{"message"},
         .set_permissions => &.{ "paths", "permissions", "non_recursive" },
+        .set_ownership => &.{ "paths", "user", "group", "non_recursive" },
         .install_gzipped_executable => &.{ "source", "target" },
         .change_dylib_id => &.{ "source", "id", "resolve_source" },
         // Deliberately narrow: `sudo`/`must_succeed` would change what the
         // step is allowed to do, so they must refuse rather than be dropped.
         .terminate_process => &.{"name"},
+        // `matching_certificate` narrows by fingerprint, which needs openssl
+        // and a sudo keychain read; nothing live sets it, so it refuses.
+        .delete_keychain_certificate => &.{"name"},
         .configure_clang_system, .configure_gcc_runtime => &.{},
     };
 }
@@ -210,7 +247,15 @@ pub fn execute(ctx: StepsCtx, formula_json: []const u8) bool {
         else => return false,
     };
     if (steps.len == 0) return false;
+    runSteps(ctx, steps);
+    return true;
+}
 
+/// Run an already-parsed steps array; the FallbackLog is the outcome. Only
+/// the entries this run appends decide the abort, so a log shared across
+/// phases (upgrade) does not stop a later phase over an earlier one.
+pub fn runSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
+    const start = ctx.flog.entries().len;
     for (steps) |step_val| {
         ctx.flog.total_top_level += 1;
         const obj = switch (step_val) {
@@ -225,15 +270,33 @@ pub fn execute(ctx: StepsCtx, formula_json: []const u8) bool {
         // mirroring the Ruby post_install path (a raised step ends the run)
         // and the DSL interpreter's stop-on-violation. Unknown/unsupported
         // steps only warn, so they don't abort.
-        if (ctx.flog.hasFatal()) break;
+        if (ctx.flog.hasFatalSince(start)) break;
     }
-    return true;
 }
 
-fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+/// Dry-run classifier: log every step this executor would refuse, run none.
+/// Guards are not evaluated, so a step held back by one still counts.
+pub fn checkSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
+    for (steps) |step_val| {
+        const obj = switch (step_val) {
+            .object => |o| o,
+            else => {
+                logUnsupported(ctx, "malformed step (not an object)");
+                continue;
+            },
+        };
+        const tag = admitStep(ctx, obj) orelse continue;
+        // Command resolution only logs; nothing here touches the filesystem.
+        if (tag == .run and !sudoRefused(ctx, obj)) _ = resolveCommandPath(ctx, obj);
+    }
+}
+
+/// The type/key screening every step passes before it runs: null (already
+/// logged) for a type or key this executor does not honour.
+fn admitStep(ctx: StepsCtx, obj: std.json.ObjectMap) ?StepTag {
     const step_type = getString(obj, "type") orelse {
         logUnsupported(ctx, "step without a type");
-        return false;
+        return null;
     };
 
     // Types with no entry above are refused here on purpose: php and the
@@ -241,9 +304,23 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // runtime never reaches a macOS bottle. A loud skip beats a stub.
     const tag = step_map.get(step_type) orelse {
         logUnsupported(ctx, step_type);
-        return false;
+        return null;
     };
-    if (unhonouredKey(ctx, tag, obj)) return false;
+    if (unhonouredKey(ctx, tag, obj)) return null;
+    return tag;
+}
+
+/// Only an explicit `false` — the compacted default — is a request malt can
+/// satisfy; malt never escalates.
+fn sudoRefused(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const v = obj.get("sudo") orelse return false;
+    if (v == .bool and !v.bool) return false;
+    logUnsupported(ctx, "run with sudo");
+    return true;
+}
+
+fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const tag = admitStep(ctx, obj) orelse return false;
 
     // Central, so a guard holds back every step type. Leaving this to each
     // step meant most of them ran regardless of what the formula declared.
@@ -258,6 +335,7 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 
     return switch (tag) {
         .mkdir_p => stepMkdirP(ctx, obj),
+        .mkdir => stepMkdir(ctx, obj),
         .touch => stepTouch(ctx, obj),
         .write => stepWrite(ctx, obj),
         .symlink => stepSymlink(ctx, obj),
@@ -275,11 +353,14 @@ fn runStep(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         .init_data_dir => stepInitDataDir(ctx, obj),
         .run => stepRun(ctx, obj),
         .move => stepMove(ctx, obj),
+        .move_contents => stepMoveContents(ctx, obj),
         .warn => stepWarn(ctx, obj),
         .set_permissions => stepSetPermissions(ctx, obj),
+        .set_ownership => stepSetOwnership(ctx, obj),
         .install_gzipped_executable => stepInstallGzippedExecutable(ctx, obj),
         .change_dylib_id => stepChangeDylibId(ctx, obj),
         .terminate_process => stepTerminateProcess(ctx, obj),
+        .delete_keychain_certificate => stepDeleteKeychainCertificate(ctx, obj),
         .configure_clang_system => stepConfigureClangSystem(ctx),
         .configure_gcc_runtime => stepConfigureGccRuntime(ctx),
     };
@@ -352,7 +433,52 @@ const template_map = std.StaticStringMap(enum {
     .{ "pwsh_completion", .pwsh_completion },
 });
 
+/// The tokens brew's cask runner expands; the keg-shaped ones above would
+/// resolve against a Caskroom dir and mean nothing, so they stay verbatim.
+const cask_template_map = std.StaticStringMap(enum {
+    token,
+    version,
+    version_major,
+    version_major_minor,
+    homebrew_prefix,
+    user,
+    staged_path,
+    caskroom_path,
+    appdir,
+    temp,
+}).initComptime(.{
+    .{ "token", .token },
+    .{ "name", .token },
+    .{ "version", .version },
+    .{ "version.major", .version_major },
+    .{ "version.major_minor", .version_major_minor },
+    .{ "HOMEBREW_PREFIX", .homebrew_prefix },
+    .{ "user", .user },
+    .{ "staged_path", .staged_path },
+    .{ "caskroom_path", .caskroom_path },
+    .{ "appdir", .appdir },
+    .{ "temp", .temp },
+});
+
 fn templateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
+    return switch (ctx.subject) {
+        .formula => formulaTemplateValue(ctx, token),
+        .cask => |c| switch (cask_template_map.get(token) orelse return null) {
+            .token => ctx.name,
+            .version => ctx.version,
+            .version_major => versionComponents(ctx.version, 1),
+            .version_major_minor => versionComponents(ctx.version, 2),
+            .homebrew_prefix => ctx.prefix,
+            .user => std.process.Environ.getPosix(ctx.environ, "USER"),
+            .staged_path => c.staged_path,
+            .caskroom_path => c.caskroom_path,
+            .appdir => c.appdir,
+            .temp => std.fmt.allocPrint(ctx.allocator, "{s}/tmp", .{ctx.prefix}) catch null,
+        },
+    };
+}
+
+fn formulaTemplateValue(ctx: StepsCtx, token: []const u8) ?[]const u8 {
     const a = ctx.allocator;
     return switch (template_map.get(token) orelse return null) {
         .name => ctx.name,
@@ -430,11 +556,48 @@ const base_map = std.StaticStringMap(BaseTag).initComptime(.{
     .{ "formula_opt_prefix", .formula_opt_prefix },
 });
 
-/// Map an upstream base token onto the malt prefix. Null means "no safe
-/// mapping" — `home` deliberately so (it escapes the prefix and would fail
-/// confinement anyway), formula-scoped bases without a formula, and any
-/// token this executor does not know.
+const cask_base_map = std.StaticStringMap(enum {
+    home,
+    staged_path,
+    caskroom_path,
+    appdir,
+    homebrew_prefix,
+    temp,
+    formula_pkgetc,
+    formula_opt_prefix,
+}).initComptime(.{
+    .{ "home", .home },
+    .{ "staged_path", .staged_path },
+    .{ "caskroom_path", .caskroom_path },
+    .{ "appdir", .appdir },
+    .{ "homebrew_prefix", .homebrew_prefix },
+    // Upstream's HOMEBREW_TEMP; `<prefix>/tmp` keeps it inside confinement
+    // and lets data parked by an uninstall survive to the next install.
+    .{ "temp", .temp },
+    .{ "formula_pkgetc", .formula_pkgetc },
+    .{ "formula_opt_prefix", .formula_opt_prefix },
+});
+
+/// Map an upstream base token onto the subject. Null means "no safe
+/// mapping": a base the other subject owns, a formula-scoped base without
+/// a formula, and any token this executor does not know.
 pub fn resolveBase(ctx: StepsCtx, base: []const u8, formula_ref: ?[]const u8) ?[]const u8 {
+    return switch (ctx.subject) {
+        .formula => resolveFormulaBase(ctx, base, formula_ref),
+        .cask => |c| switch (cask_base_map.get(base) orelse return null) {
+            .home => if (saneRoot(c.home)) c.home else null,
+            .staged_path => c.staged_path,
+            .caskroom_path => c.caskroom_path,
+            .appdir => c.appdir,
+            .homebrew_prefix => ctx.prefix,
+            .temp => std.fmt.allocPrint(ctx.allocator, "{s}/tmp", .{ctx.prefix}) catch null,
+            .formula_pkgetc, .formula_opt_prefix => resolveFormulaBase(ctx, base, formula_ref),
+        },
+    };
+}
+
+/// `home` is null on purpose: it escapes the prefix a formula is confined to.
+fn resolveFormulaBase(ctx: StepsCtx, base: []const u8, formula_ref: ?[]const u8) ?[]const u8 {
     const a = ctx.allocator;
     return switch (base_map.get(base) orelse return null) {
         .homebrew_prefix => ctx.prefix,
@@ -483,11 +646,107 @@ fn resolveSpec(ctx: StepsCtx, spec: std.json.ObjectMap, key: ?[]const u8) ?[]con
     const base = getString(spec, "base") orelse "absolute";
     if (std.mem.eql(u8, base, "absolute") or std.mem.eql(u8, base, "relative")) return path;
     const root = resolveBase(ctx, base, getString(spec, "formula")) orelse {
-        if (key != null)
-            logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "base {s}", .{base}) catch base);
+        if (key != null) {
+            // A cask `home` base only fails for one reason, and "base home"
+            // alone would send the user looking at the cask.
+            const detail = if (ctx.subject == .cask and std.mem.eql(u8, base, "home"))
+                "base home (HOME is not set)"
+            else
+                std.fmt.allocPrint(ctx.allocator, "base {s}", .{base}) catch base;
+            logUnsupported(ctx, detail);
+        }
         return null;
     };
     return std.fs.path.join(ctx.allocator, &.{ root, path }) catch null;
+}
+
+// --- confinement -----------------------------------------------------------
+
+/// The (a, b) root pairs the sandbox validators take; a path is in bounds
+/// when any pair admits it. A formula owns its keg and the prefix; a cask
+/// also owns `$HOME/Library` and the appdir — a different set, not a wider
+/// one, which is why the roots hang off the subject.
+const RootPairs = struct {
+    buf: [2][2][]const u8,
+    len: usize,
+
+    fn slice(self: *const RootPairs) []const [2][]const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+fn rootPairs(ctx: StepsCtx) RootPairs {
+    var out: RootPairs = .{ .buf = .{ .{ ctx.keg_path, ctx.prefix }, undefined }, .len = 1 };
+    switch (ctx.subject) {
+        .formula => {},
+        .cask => |c| {
+            // `pathHasPrefix(x, "/")` admits everything, so a root that is
+            // the disk, relative, or unset never enters the set. OOM and a
+            // bad root both narrow it rather than widen it.
+            const home_lib = if (saneRoot(c.home))
+                std.fs.path.join(ctx.allocator, &.{ c.home, "Library" }) catch null
+            else
+                null;
+            const appdir: ?[]const u8 = if (saneRoot(c.appdir)) c.appdir else null;
+            const first = home_lib orelse appdir orelse return out;
+            out.buf[1] = .{ first, appdir orelse first };
+            out.len = 2;
+        },
+    }
+    return out;
+}
+
+/// Absolute and below `/`: the only shape a confinement root may have.
+fn saneRoot(path: []const u8) bool {
+    return std.fs.path.isAbsolute(path) and std.mem.trimEnd(u8, path, "/").len > 0;
+}
+
+fn validatePath(ctx: StepsCtx, path: []const u8) sandbox.SandboxError!void {
+    for (rootPairs(ctx).slice()) |r| {
+        sandbox.validatePath(path, r[0], r[1]) catch continue;
+        return;
+    }
+    return error.PathSandboxViolation;
+}
+
+fn validateWriteDir(ctx: StepsCtx, path: []const u8) sandbox.SandboxError!void {
+    for (rootPairs(ctx).slice()) |r| {
+        sandbox.validateWriteDir(ctx.io, path, r[0], r[1]) catch continue;
+        return;
+    }
+    return error.PathSandboxViolation;
+}
+
+fn validateDirTarget(ctx: StepsCtx, path: []const u8) sandbox.SandboxError!void {
+    for (rootPairs(ctx).slice()) |r| {
+        sandbox.validateDirTarget(ctx.io, path, r[0], r[1]) catch continue;
+        return;
+    }
+    return error.PathSandboxViolation;
+}
+
+fn validateArgv(ctx: StepsCtx, argv: []const []const u8) sandbox.SandboxError!void {
+    for (rootPairs(ctx).slice()) |r| {
+        sandbox.validateArgv(argv, r[0], r[1]) catch continue;
+        return;
+    }
+    return error.PathSandboxViolation;
+}
+
+/// Only a confinement refusal moves on to the next pair; an open error is
+/// the answer for every root.
+fn openTargetNoFollow(ctx: StepsCtx, path: []const u8, intent: sandbox.OpenIntent) (sandbox.SandboxError || std.posix.OpenError)!std.Io.File {
+    for (rootPairs(ctx).slice()) |r| {
+        return sandbox.openTargetNoFollow(ctx.io, path, r[0], r[1], intent) catch |e| switch (e) {
+            error.PathSandboxViolation => continue,
+            else => return e,
+        };
+    }
+    return error.PathSandboxViolation;
+}
+
+fn openSourceNoFollow(ctx: StepsCtx, path: []const u8) (sandbox.SandboxError || std.posix.OpenError)!std.Io.File {
+    return openTargetNoFollow(ctx, path, .{ .write = false });
 }
 
 // --- filesystem tier -------------------------------------------------------
@@ -498,7 +757,7 @@ fn resolveSpec(ctx: StepsCtx, spec: std.json.ObjectMap, key: ?[]const u8) ?[]con
 /// same resolved-boundary guard the DSL `cp`/`mv` builtins use, applied
 /// before any filesystem mutation.
 fn confined(ctx: StepsCtx, path: []const u8) bool {
-    sandbox.validateWriteDir(ctx.io, path, ctx.keg_path, ctx.prefix) catch {
+    validateWriteDir(ctx, path) catch {
         logViolation(ctx, path);
         return false;
     };
@@ -518,13 +777,28 @@ fn stepMkdirP(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     return true;
 }
 
+/// `mkdir`: one level only, like upstream's `Dir.mkdir`. A missing parent
+/// raises there, so it is fatal here rather than quietly created.
+fn stepMkdir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const path = resolvePathSpec(ctx, obj, "path") orelse return false;
+    if (!confined(ctx, path)) return false;
+    std.Io.Dir.createDirAbsolute(ctx.io, path, .default_dir) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => {
+            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "mkdir {s}: {s}", .{ path, @errorName(e) }) catch "mkdir");
+            return false;
+        },
+    };
+    return true;
+}
+
 fn stepTouch(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const path = resolvePathSpec(ctx, obj, "path") orelse return false;
     if (!confined(ctx, path)) return false;
     mkParent(ctx, path);
     // Create (no truncate) through an O_NOFOLLOW handle, same as the DSL
     // touch builtin: a symlinked leaf must not reach outside the keg.
-    const file = sandbox.openTargetNoFollow(ctx.io, path, ctx.keg_path, ctx.prefix, .{ .create = true }) catch |e| {
+    const file = openTargetNoFollow(ctx, path, .{ .create = true }) catch |e| {
         if (e == error.PathSandboxViolation) logViolation(ctx, path);
         return e != error.PathSandboxViolation;
     };
@@ -543,7 +817,7 @@ fn stepWrite(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     if (!getFlag(obj, "overwrite") and fileExists(ctx.io, path)) return true;
     const content = expandTemplates(ctx, raw_content) catch return false;
     mkParent(ctx, path);
-    const file = sandbox.openTargetNoFollow(ctx.io, path, ctx.keg_path, ctx.prefix, .{
+    const file = openTargetNoFollow(ctx, path, .{
         .write = true,
         .create = true,
         .truncate = true,
@@ -619,13 +893,13 @@ fn stepCopy(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 /// source's own final component.
 fn confinedSource(ctx: StepsCtx, path: []const u8) bool {
     if (isDir(ctx, path)) {
-        sandbox.validateDirTarget(ctx.io, path, ctx.keg_path, ctx.prefix) catch {
+        validateDirTarget(ctx, path) catch {
             logViolation(ctx, path);
             return false;
         };
         return true;
     }
-    const f = sandbox.openTargetNoFollow(ctx.io, path, ctx.keg_path, ctx.prefix, .{ .write = false }) catch {
+    const f = openTargetNoFollow(ctx, path, .{ .write = false }) catch {
         logViolation(ctx, path);
         return false;
     };
@@ -795,7 +1069,7 @@ fn stepInreplace(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         return false;
     }
 
-    const file = sandbox.openSourceNoFollow(ctx.io, path, ctx.keg_path, ctx.prefix) catch |e| {
+    const file = openSourceNoFollow(ctx, path) catch |e| {
         if (e == error.PathSandboxViolation) logViolation(ctx, path);
         return false;
     };
@@ -852,7 +1126,7 @@ fn stepRemove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 }
 
 /// Retire a subtree this formula owns, so the `copy` that follows starts
-/// clean. Confinement keeps it inside the prefix; `sharedPrefixDir` keeps it
+/// clean. Confinement keeps it inside the prefix; `sharedDir` keeps it
 /// off the top-level directories every other package also writes into.
 fn removeTrees(ctx: StepsCtx, items: []const std.json.Value) bool {
     for (items) |item| {
@@ -863,8 +1137,8 @@ fn removeTrees(ctx: StepsCtx, items: []const std.json.Value) bool {
         const paths = expandGlob(ctx, spec) orelse return false;
         for (paths) |path| {
             if (!confined(ctx, path)) return false;
-            if (sharedPrefixDir(ctx, path)) {
-                logUnsupported(ctx, "recursive remove of a shared prefix directory");
+            if (sharedDir(ctx, path)) {
+                logUnsupported(ctx, "recursive remove of a shared directory");
                 return false;
             }
             std.Io.Dir.cwd().deleteTree(ctx.io, path) catch {};
@@ -873,13 +1147,28 @@ fn removeTrees(ctx: StepsCtx, items: []const std.json.Value) bool {
     return true;
 }
 
-/// True for the prefix itself and its immediate children (`<prefix>/lib`,
-/// `<prefix>/bin`, …) — shared ground, never one formula's to delete.
-fn sharedPrefixDir(ctx: StepsCtx, path: []const u8) bool {
-    const trimmed = std.mem.trimEnd(u8, path, "/");
-    if (std.mem.eql(u8, trimmed, ctx.prefix)) return true;
-    const parent = std.fs.path.dirname(trimmed) orelse return true;
-    return std.mem.eql(u8, parent, ctx.prefix);
+/// Shared ground no single package may delete: the prefix and its immediate
+/// children (`<prefix>/lib`, …); for a cask also `$HOME/Library` and its
+/// top-level dirs (`Keychains`, `Preferences`, …) and the applications dir
+/// itself — one app inside it is the cask's own to remove.
+fn sharedDir(ctx: StepsCtx, raw: []const u8) bool {
+    // Normalised so `<appdir>/.` reads as the appdir, not as a child of it.
+    const path = std.fs.path.resolvePosix(ctx.allocator, &.{raw}) catch return true;
+    if (selfOrChild(path, ctx.prefix)) return true;
+    switch (ctx.subject) {
+        .formula => return false,
+        .cask => |c| {
+            const home_lib = std.fs.path.join(ctx.allocator, &.{ c.home, "Library" }) catch return true;
+            return selfOrChild(path, home_lib) or std.mem.eql(u8, path, std.mem.trimEnd(u8, c.appdir, "/"));
+        },
+    }
+}
+
+fn selfOrChild(path: []const u8, root: []const u8) bool {
+    const r = std.mem.trimEnd(u8, root, "/");
+    if (std.mem.eql(u8, path, r)) return true;
+    const parent = std.fs.path.dirname(path) orelse return true;
+    return std.mem.eql(u8, parent, r);
 }
 
 fn stepLinkChildren(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
@@ -889,11 +1178,11 @@ fn stepLinkChildren(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     std.Io.Dir.cwd().createDirPath(ctx.io, target) catch {};
     // Same per-level guards as the DSL cp_r walk: neither side may resolve
     // out of the keg/prefix through a planted directory symlink.
-    sandbox.validateDirTarget(ctx.io, target, ctx.keg_path, ctx.prefix) catch {
+    validateDirTarget(ctx, target) catch {
         logViolation(ctx, target);
         return false;
     };
-    sandbox.validateDirTarget(ctx.io, source, ctx.keg_path, ctx.prefix) catch {
+    validateDirTarget(ctx, source) catch {
         logViolation(ctx, source);
         return false;
     };
@@ -926,11 +1215,11 @@ fn stepLinkDir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 /// level like the DSL cp_r walk.
 fn linkDirRecursive(ctx: StepsCtx, src: []const u8, dst: []const u8) void {
     std.Io.Dir.cwd().createDirPath(ctx.io, dst) catch {};
-    sandbox.validateDirTarget(ctx.io, dst, ctx.keg_path, ctx.prefix) catch {
+    validateDirTarget(ctx, dst) catch {
         logViolation(ctx, dst);
         return;
     };
-    sandbox.validateDirTarget(ctx.io, src, ctx.keg_path, ctx.prefix) catch {
+    validateDirTarget(ctx, src) catch {
         logViolation(ctx, src);
         return;
     };
@@ -999,6 +1288,43 @@ fn stepMove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not relocate {s}", .{source}) catch source);
         return false;
     };
+    return true;
+}
+
+/// `move_contents`: every entry of `source` into `target`, which is created
+/// first. The live shape folds a staged root into a subdirectory of itself,
+/// so the target is skipped when it is one of the entries.
+fn stepMoveContents(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    // Lexically normalised so `staged/.` compares equal to its own child.
+    const source = std.fs.path.resolvePosix(ctx.allocator, &.{resolvePathSpec(ctx, obj, "source") orelse return false}) catch return false;
+    const target = std.fs.path.resolvePosix(ctx.allocator, &.{resolvePathSpec(ctx, obj, "target") orelse return false}) catch return false;
+    // Source first: nothing is created until both ends are in bounds.
+    validateDirTarget(ctx, source) catch {
+        logViolation(ctx, source);
+        return false;
+    };
+    if (!confined(ctx, target)) return false;
+    std.Io.Dir.cwd().createDirPath(ctx.io, target) catch {};
+    validateDirTarget(ctx, target) catch {
+        logViolation(ctx, target);
+        return false;
+    };
+
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, source, .{ .iterate = true }) catch {
+        logUnsupported(ctx, "move_contents whose source the artefact did not ship");
+        return false;
+    };
+    defer dir.close(ctx.io);
+    var iter = dir.iterate();
+    while (iter.next(ctx.io) catch null) |entry| {
+        const child = std.fs.path.join(ctx.allocator, &.{ source, entry.name }) catch continue;
+        if (std.mem.eql(u8, child, target)) continue;
+        const dest = std.fs.path.join(ctx.allocator, &.{ target, entry.name }) catch continue;
+        std.Io.Dir.renameAbsolute(child, dest, ctx.io) catch {
+            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not relocate {s}", .{child}) catch child);
+            return false;
+        };
+    }
     return true;
 }
 
@@ -1109,7 +1435,7 @@ fn resolveLink(ctx: StepsCtx, path: []const u8) []const u8 {
 
 fn chmodConfined(ctx: StepsCtx, named: []const u8, mode: Mode) bool {
     const path = resolveLink(ctx, named);
-    const file = sandbox.openTargetNoFollow(ctx.io, path, ctx.keg_path, ctx.prefix, .{ .write = false }) catch |e| {
+    const file = openTargetNoFollow(ctx, path, .{ .write = false }) catch |e| {
         if (e == error.PathSandboxViolation) {
             logViolation(ctx, path);
             return false;
@@ -1117,7 +1443,7 @@ fn chmodConfined(ctx: StepsCtx, named: []const u8, mode: Mode) bool {
         // A leaf that vanished between the walk and the open is a race, not a
         // refusal — `chmod -R` reports and keeps going rather than abandoning
         // the remaining paths. Visible, but it does not downgrade the install.
-        ctx.flog.note(chmodDetail(ctx, "post_install: skipped, could not open", path));
+        ctx.flog.note(pathDetail(ctx, "post_install: skipped, could not open", path));
         return true;
     };
     defer file.close(ctx.io);
@@ -1127,7 +1453,7 @@ fn chmodConfined(ctx: StepsCtx, named: []const u8, mode: Mode) bool {
             // A symbolic clause modifies what is already there, so an
             // unreadable mode would silently widen or narrow the result.
             const s = file.stat(ctx.io) catch {
-                logUnsupported(ctx, chmodDetail(ctx, "could not read the current mode of", path));
+                logUnsupported(ctx, pathDetail(ctx, "could not read the current mode of", path));
                 return false;
             };
             break :blk s.permissions.toMode() & 0o7777;
@@ -1136,37 +1462,46 @@ fn chmodConfined(ctx: StepsCtx, named: []const u8, mode: Mode) bool {
     file.setPermissions(ctx.io, .fromMode(applyMode(current, mode))) catch {
         // Reporting success here is how a private keg directory stays
         // world-readable with nothing in the log to say so.
-        logUnsupported(ctx, chmodDetail(ctx, "could not chmod", path));
+        logUnsupported(ctx, pathDetail(ctx, "could not chmod", path));
         return false;
     };
     return true;
 }
 
-fn chmodDetail(ctx: StepsCtx, what: []const u8, path: []const u8) []const u8 {
+fn pathDetail(ctx: StepsCtx, what: []const u8, path: []const u8) []const u8 {
     return std.fmt.allocPrint(ctx.allocator, "{s} {s}\n", .{ what, path }) catch what;
 }
 
-fn chmodTree(ctx: StepsCtx, path: []const u8, mode: Mode) bool {
-    if (!chmodConfined(ctx, path, mode)) return false;
+/// The `-R` walk `chmod` and `chown` share: `leaf.apply(ctx, path)` on the
+/// root and every file and directory below it.
+fn applyTree(ctx: StepsCtx, path: []const u8, leaf: anytype) bool {
+    if (!leaf.apply(ctx, path)) return false;
     var dir = std.Io.Dir.openDirAbsolute(ctx.io, path, .{ .iterate = true }) catch return true;
     defer dir.close(ctx.io);
     // Per-level guard, like the link_dir walk: a directory symlink must not
     // redirect the descent outside the prefix.
-    sandbox.validateDirTarget(ctx.io, path, ctx.keg_path, ctx.prefix) catch {
+    validateDirTarget(ctx, path) catch {
         logViolation(ctx, path);
         return false;
     };
     var iter = dir.iterate();
     while (iter.next(ctx.io) catch null) |entry| {
-        // `chmod -R` walks past anything that is not a file or a directory;
+        // `-R` walks past anything that is not a file or a directory;
         // refusing a symlink here would fail the step over a keg's own links.
         if (entry.kind != .directory and entry.kind != .file) continue;
         const child = std.fs.path.join(ctx.allocator, &.{ path, entry.name }) catch continue;
-        const ok = if (entry.kind == .directory) chmodTree(ctx, child, mode) else chmodConfined(ctx, child, mode);
+        const ok = if (entry.kind == .directory) applyTree(ctx, child, leaf) else leaf.apply(ctx, child);
         if (!ok) return false;
     }
     return true;
 }
+
+const ChmodLeaf = struct {
+    mode: Mode,
+    fn apply(self: ChmodLeaf, ctx: StepsCtx, path: []const u8) bool {
+        return chmodConfined(ctx, path, self.mode);
+    }
+};
 
 /// `set_permissions`: chmod every path in the step's array that the formula
 /// actually shipped. Upstream passes `-R` *unless* `non_recursive` is set, so
@@ -1199,7 +1534,94 @@ fn stepSetPermissions(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
             // too: `existing_step_paths` filters before chmod runs.
             if (!pathExists(ctx.io, path)) continue;
             if (!confined(ctx, path)) return false;
-            const ok = if (recursive) chmodTree(ctx, path, mode) else chmodConfined(ctx, path, mode);
+            const leaf: ChmodLeaf = .{ .mode = mode };
+            const ok = if (recursive) applyTree(ctx, path, leaf) else leaf.apply(ctx, path);
+            if (!ok) return false;
+        }
+    }
+    return true;
+}
+
+// --- ownership -------------------------------------------------------------
+
+// std declares getgrnam with the passwd shape; only `gid` is read here.
+extern "c" fn getgrnam(name: [*:0]const u8) ?*std.c.group;
+
+fn groupId(name: []const u8) ?std.posix.gid_t {
+    var buf: [256]u8 = undefined;
+    const z = std.fmt.bufPrintZ(&buf, "{s}", .{name}) catch return null;
+    const g = getgrnam(z) orelse return null;
+    return g.gid;
+}
+
+fn userId(name: []const u8) ?std.posix.uid_t {
+    var buf: [256]u8 = undefined;
+    const z = std.fmt.bufPrintZ(&buf, "{s}", .{name}) catch return null;
+    const pw = std.c.getpwnam(z) orelse return null;
+    return pw.uid;
+}
+
+fn chownConfined(ctx: StepsCtx, named: []const u8, uid: std.posix.uid_t, gid: std.posix.gid_t) bool {
+    const path = resolveLink(ctx, named);
+    const file = openTargetNoFollow(ctx, path, .{ .write = false }) catch |e| {
+        if (e == error.PathSandboxViolation) {
+            logViolation(ctx, path);
+            return false;
+        }
+        ctx.flog.note(pathDetail(ctx, "post_install: skipped, could not open", path));
+        return true;
+    };
+    defer file.close(ctx.io);
+    // Upstream runs this under sudo; without it a foreign owner is EPERM,
+    // and reporting success would hide exactly the change the cask needed.
+    file.setOwner(ctx.io, uid, gid) catch {
+        logUnsupported(ctx, pathDetail(ctx, "could not chown", path));
+        return false;
+    };
+    return true;
+}
+
+const ChownLeaf = struct {
+    uid: std.posix.uid_t,
+    gid: std.posix.gid_t,
+    fn apply(self: ChownLeaf, ctx: StepsCtx, path: []const u8) bool {
+        return chownConfined(ctx, path, self.uid, self.gid);
+    }
+};
+
+/// `set_ownership`: upstream's `chown -R user:group`, with the same
+/// defaults (the invoking user, `staff`). Same walk and confinement as
+/// `set_permissions`; a name the host cannot resolve refuses rather than
+/// guessing an id.
+fn stepSetOwnership(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const paths_val = obj.get("paths") orelse {
+        logUnsupported(ctx, "set_ownership without paths");
+        return false;
+    };
+    if (paths_val != .array) {
+        logUnsupported(ctx, "set_ownership with non-array paths");
+        return false;
+    }
+    const uid: std.posix.uid_t = if (getString(obj, "user")) |u| userId(u) orelse {
+        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "set_ownership user {s}", .{u}) catch "set_ownership user");
+        return false;
+    } else std.c.getuid();
+    const group = getString(obj, "group") orelse "staff";
+    const gid = groupId(group) orelse {
+        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "set_ownership group {s}", .{group}) catch "set_ownership group");
+        return false;
+    };
+    const recursive = !getFlag(obj, "non_recursive");
+
+    for (paths_val.array.items) |item| {
+        if (item != .object) continue;
+        const spec = resolveSpec(ctx, item.object, "paths") orelse return false;
+        const matches = expandGlob(ctx, spec) orelse return false;
+        for (matches) |path| {
+            if (!pathExists(ctx.io, path)) continue;
+            if (!confined(ctx, path)) return false;
+            const leaf: ChownLeaf = .{ .uid = uid, .gid = gid };
+            const ok = if (recursive) applyTree(ctx, path, leaf) else leaf.apply(ctx, path);
             if (!ok) return false;
         }
     }
@@ -1256,7 +1678,7 @@ fn logUnexpandable(ctx: StepsCtx, spec: []const u8) ?[]const []const u8 {
 /// re-deriving the prefix test: nothing here normalises a path, so a bare
 /// prefix comparison would accept `<prefix>/../../elsewhere`.
 fn withinBounds(ctx: StepsCtx, path: []const u8) bool {
-    sandbox.validatePath(path, ctx.keg_path, ctx.prefix) catch return false;
+    validatePath(ctx, path) catch return false;
     return true;
 }
 
@@ -1327,14 +1749,14 @@ fn stepInstallGzippedExecutable(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 const max_unpacked_bytes: u64 = 4 << 30;
 
 fn gunzipConfined(ctx: StepsCtx, source: []const u8, dest: []const u8) !void {
-    const in = try sandbox.openSourceNoFollow(ctx.io, source, ctx.keg_path, ctx.prefix);
+    const in = try openSourceNoFollow(ctx, source);
     defer in.close(ctx.io);
     var in_buf: [16 * 1024]u8 = undefined;
     var in_reader = in.reader(ctx.io, &in_buf);
     var window: [std.compress.flate.max_window_len]u8 = undefined;
     var decompress = std.compress.flate.Decompress.init(&in_reader.interface, .gzip, &window);
 
-    const out = try sandbox.openTargetNoFollow(ctx.io, dest, ctx.keg_path, ctx.prefix, .{
+    const out = try openTargetNoFollow(ctx, dest, .{
         .write = true,
         .create = true,
         .truncate = true,
@@ -1428,6 +1850,43 @@ fn stepTerminateProcess(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // first install; only failing to spawn is a real failure.
     _ = child.wait(ctx.io) catch {};
     return true;
+}
+
+/// `delete_keychain_certificate`: drop a certificate the artefact installed,
+/// by common name, from the user's keychains. Upstream also reaches the
+/// System keychain under sudo; malt never escalates, so a certificate there
+/// stays, silently, the same way an absent one does.
+fn stepDeleteKeychainCertificate(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
+    const raw = getString(obj, "name") orelse {
+        logUnsupported(ctx, "delete_keychain_certificate without a name");
+        return false;
+    };
+    const name = expandTemplates(ctx, raw) catch return false;
+    if (name.len == 0 or name[0] == '-') {
+        logUnsupported(ctx, "delete_keychain_certificate with a name security would read as an option");
+        return false;
+    }
+    const report = child_mod.run(ctx.io, ctx.allocator, &.{ system_tools.security, "delete-certificate", "-c", name }) catch {
+        logCmdFail(ctx, "security failed to spawn");
+        return false;
+    };
+    return switch (securityOutcome(report.code, report.stderr)) {
+        .deleted, .absent => true,
+        .failed => {
+            logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "security could not delete the {s} certificate", .{name}) catch "security failed");
+            return false;
+        },
+    };
+}
+
+const SecurityOutcome = enum { deleted, absent, failed };
+
+/// `security` exits non-zero both when nothing matched and when it could
+/// not delete (locked keychain, no interaction allowed); only its message
+/// tells them apart, and an absent certificate is the normal first-run case.
+fn securityOutcome(code: u8, stderr: []const u8) SecurityOutcome {
+    if (code == 0) return .deleted;
+    return if (std.mem.indexOf(u8, stderr, "Unable to delete certificate matching") != null) .absent else .failed;
 }
 
 // --- toolchain configuration -----------------------------------------------
@@ -1567,14 +2026,23 @@ fn resolveCommandPath(ctx: StepsCtx, obj: std.json.ObjectMap) ?[]const u8 {
         }
         return path;
     }
-    const tag = command_base_map.get(base) orelse {
-        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "run command base {s}", .{base}) catch base);
-        return null;
-    };
     if (path.len == 0) {
         logUnsupported(ctx, "run with an empty command path");
         return null;
     }
+    // A cask's command bases are its path bases: there is no keg to be
+    // relative to, and `bin`/`libexec` would name nothing.
+    if (ctx.subject == .cask) {
+        const root = resolveBase(ctx, base, null) orelse {
+            logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "run command base {s}", .{base}) catch base);
+            return null;
+        };
+        return std.fs.path.join(ctx.allocator, &.{ root, path }) catch null;
+    }
+    const tag = command_base_map.get(base) orelse {
+        logUnsupported(ctx, std.fmt.allocPrint(ctx.allocator, "run command base {s}", .{base}) catch base);
+        return null;
+    };
     const root = if (tag == .keg)
         ctx.keg_path
     else
@@ -1586,14 +2054,7 @@ fn resolveCommandPath(ctx: StepsCtx, obj: std.json.ObjectMap) ?[]const u8 {
 /// whose argv the formula supplies wholesale. It goes through the same argv
 /// lint and sandbox fence as every other spawn, with no extra grants.
 fn stepRun(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
-    // Only an explicit `false` — the compacted default — is a request malt can
-    // satisfy; malt never escalates.
-    if (obj.get("sudo")) |v| {
-        if (v != .bool or v.bool) {
-            logUnsupported(ctx, "run with sudo");
-            return false;
-        }
-    }
+    if (sudoRefused(ctx, obj)) return false;
 
     const cmd = resolveCommandPath(ctx, obj) orelse return false;
     var argv: std.ArrayList([]const u8) = .empty;
@@ -1617,7 +2078,7 @@ fn stepRun(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     }
     // Lint before probing, so a traversal out of the keg reports as the
     // confinement violation it is rather than as a missing file.
-    sandbox.validateArgv(argv.items, ctx.keg_path, ctx.prefix) catch {
+    validateArgv(ctx, argv.items) catch {
         logViolation(ctx, cmd);
         return false;
     };
@@ -1665,13 +2126,13 @@ fn buildCaBundle(ctx: StepsCtx, argv: []const []const u8) !void {
     // formula can name this script. Running in-process skips the sandbox that
     // confined the spawned one, so the read and the write are confined here
     // instead — declining hands the step back to the fenced spawn.
-    try sandbox.validatePath(argv[2], ctx.keg_path, ctx.prefix);
+    try validatePath(ctx, argv[2]);
 
     // A lexical prefix check would let a link planted inside the keg read
     // whatever it points at, but refusing links outright is wrong too: malt's
     // own linker points `{prefix}/share/<name>` entries into the keg, and the
     // real source is one of them. Resolve first, then confine where it landed.
-    try sandbox.validatePath(argv[1], ctx.keg_path, ctx.prefix);
+    try validatePath(ctx, argv[1]);
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
     // Read the resolved path, not the one handed in: opening the link again
     // would follow whatever it points at now, not what was just confined.
@@ -1695,7 +2156,7 @@ fn buildCaBundle(ctx: StepsCtx, argv: []const []const u8) !void {
     // creating the tree first would plant directories wherever that link
     // points before the resolved check refuses. `validateWriteDir` resolves
     // the nearest ancestor that already exists, so it sees the link.
-    try sandbox.validateWriteDir(ctx.io, argv[2], ctx.keg_path, ctx.prefix);
+    try validateWriteDir(ctx, argv[2]);
     try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
     // 0644 explicitly: the script chmods it, and a restrictive umask would
     // otherwise leave the trust store unreadable to every other user.
@@ -1882,7 +2343,7 @@ fn buildChildEnv(ctx: StepsCtx, extra_env: []const EnvVar) error{OutOfMemory}!st
 /// The child always starts from the scrubbed formula environment; `extra_env`
 /// layers onto it, so no caller can fall back to inheriting malt's own.
 fn spawnFenced(ctx: StepsCtx, argv: []const []const u8, extra_env: []const EnvVar, label: []const u8, opts: sandbox_macos.ProfileOpts) bool {
-    sandbox.validateArgv(argv, ctx.keg_path, ctx.prefix) catch {
+    validateArgv(ctx, argv) catch {
         logViolation(ctx, argv[0]);
         return false;
     };
@@ -2085,6 +2546,126 @@ const TestHarness = struct {
         self.arena.deinit();
     }
 };
+
+/// A cask subject over the same prefix: `box` staged under Caskroom, with
+/// `home` in a separate tree so escaping the prefix is observable.
+const CaskHarness = struct {
+    h: TestHarness,
+    home: []u8,
+
+    fn init() !CaskHarness {
+        var h = try TestHarness.init();
+        errdefer h.deinit();
+        const home = try uniquePrefix(h.io);
+        errdefer testing.allocator.free(home);
+        try std.Io.Dir.cwd().createDirPath(h.io, try std.fs.path.join(h.arena.allocator(), &.{ home, "Library" }));
+        try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/Caskroom/box/1.2.3", .{h.prefix}));
+        try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/Applications", .{h.prefix}));
+        return .{ .h = h, .home = home };
+    }
+
+    fn ctx(self: *CaskHarness) StepsCtx {
+        const a = self.h.arena.allocator();
+        var c = self.h.ctx();
+        c.name = "box";
+        c.keg_path = std.fmt.allocPrint(a, "{s}/Caskroom/box", .{self.h.prefix}) catch @panic("OOM");
+        c.subject = .{ .cask = .{
+            .staged_path = std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3", .{self.h.prefix}) catch @panic("OOM"),
+            .caskroom_path = c.keg_path,
+            .appdir = std.fmt.allocPrint(a, "{s}/Applications", .{self.h.prefix}) catch @panic("OOM"),
+            .home = self.home,
+        } };
+        return c;
+    }
+
+    fn deinit(self: *CaskHarness) void {
+        rmrf(self.home);
+        testing.allocator.free(self.home);
+        self.h.deinit();
+    }
+};
+
+fn parseSteps(h: *TestHarness, json: []const u8) ![]const std.json.Value {
+    const parsed = try std.json.parseFromSlice(std.json.Value, h.arena.allocator(), json, .{});
+    return parsed.value.array.items;
+}
+
+test "cask subject resolves home, appdir, caskroom_path and staged_path bases" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    try testing.expectEqualStrings(ch.home, resolveBase(c, "home", null).?);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Applications", .{ch.h.prefix}), resolveBase(c, "appdir", null).?);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Caskroom/box", .{ch.h.prefix}), resolveBase(c, "caskroom_path", null).?);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3", .{ch.h.prefix}), resolveBase(c, "staged_path", null).?);
+    try testing.expectEqualStrings(ch.h.prefix, resolveBase(c, "homebrew_prefix", null).?);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/etc/pg", .{ch.h.prefix}), resolveBase(c, "formula_pkgetc", "pg").?);
+    // Keg-shaped bases mean nothing for a cask: refuse rather than guess.
+    try testing.expect(resolveBase(c, "prefix", null) == null);
+    try testing.expect(resolveBase(c, "bin", null) == null);
+    try testing.expect(resolveBase(c, "pkgetc", null) == null);
+}
+
+test "home base refuses paths outside $HOME/Library" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"mkdir_p","path":{"base":"home","path":"Library/Application Support/box/roms"}},
+        \\ {"type":"write","path":{"base":"home","path":".ssh/config"},"content":"Host *"}]
+    ));
+    const roms = try std.fs.path.join(ch.h.arena.allocator(), &.{ ch.home, "Library/Application Support/box/roms" });
+    try testing.expect(dirExists(c.io, roms));
+    const ssh = try std.fs.path.join(ch.h.arena.allocator(), &.{ ch.home, ".ssh/config" });
+    try testing.expect(!pathExists(c.io, ssh));
+    try testing.expect(ch.h.flog.hasFatal());
+    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, ch.h.flog.entries()[0].reason);
+}
+
+test "the appdir root admits a write the prefix would not" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    var c = ch.ctx();
+    // Point appdir outside the prefix, as a real /Applications is.
+    const appdir = try std.fs.path.join(ch.h.arena.allocator(), &.{ ch.home, "Apps" });
+    try std.Io.Dir.cwd().createDirPath(c.io, appdir);
+    c.subject.cask.appdir = appdir;
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"touch","path":{"base":"appdir","path":"Box.app"}}]
+    ));
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expect(fileExists(c.io, try std.fs.path.join(ch.h.arena.allocator(), &.{ appdir, "Box.app" })));
+}
+
+test "{{version.major}} and {{version.major_minor}} expand from the cask version" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    try testing.expectEqualStrings("Box 1", try expandTemplates(c, "Box {{version.major}}"));
+    try testing.expectEqualStrings("j1.2/bin", try expandTemplates(c, "j{{version.major_minor}}/bin"));
+    try testing.expectEqualStrings("box-1.2.3", try expandTemplates(c, "{{token}}-{{version}}"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/x", .{ch.h.prefix}), try expandTemplates(c, "{{staged_path}}/x"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Caskroom/box/latest", .{ch.h.prefix}), try expandTemplates(c, "{{caskroom_path}}/latest"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/Applications/A.app", .{ch.h.prefix}), try expandTemplates(c, "{{appdir}}/A.app"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/lib", .{ch.h.prefix}), try expandTemplates(c, "{{HOMEBREW_PREFIX}}/lib"));
+    // Keg-only tokens stay verbatim under a cask, so they surface as unresolved.
+    try testing.expectEqualStrings("{{bin}}/x", try expandTemplates(c, "{{bin}}/x"));
+}
+
+test "a formula subject still refuses the home base and the cask tokens" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const c = h.ctx();
+    try testing.expect(resolveBase(c, "home", null) == null);
+    try testing.expect(resolveBase(c, "appdir", null) == null);
+    try testing.expectEqualStrings("{{staged_path}}", try expandTemplates(c, "{{staged_path}}"));
+}
 
 fn testFormulaJson(h: *TestHarness, steps_json: []const u8) ![]const u8 {
     return std.fmt.allocPrint(
@@ -3334,19 +3915,20 @@ test "link_children honours the link-name prefix and treats a missing source as 
 
 test "supportedStepType matches the executable tier and rejects the rest" {
     const native = [_][]const u8{
-        "mkdir_p",                  "touch",                 "write",                     "symlink",
-        "link_dir",                 "link_children",         "compile_gsettings_schemas", "gio_querymodules",
-        "gdk_pixbuf_query_loaders", "gtk_update_icon_cache", "update_mime_database",      "update_desktop_database",
-        "init_data_dir",            "remove",                "inreplace",                 "run",
-        "move",                     "warn",                  "set_permissions",           "install_gzipped_executable",
-        "change_dylib_id",          "terminate_process",     "configure_clang_system",    "configure_gcc_runtime",
+        "mkdir_p",                     "touch",                 "write",                     "symlink",
+        "link_dir",                    "link_children",         "compile_gsettings_schemas", "gio_querymodules",
+        "gdk_pixbuf_query_loaders",    "gtk_update_icon_cache", "update_mime_database",      "update_desktop_database",
+        "init_data_dir",               "remove",                "inreplace",                 "run",
+        "move",                        "warn",                  "set_permissions",           "install_gzipped_executable",
+        "change_dylib_id",             "terminate_process",     "configure_clang_system",    "configure_gcc_runtime",
+        "set_ownership",               "mkdir",                 "move_children",             "move_contents",
+        "delete_keychain_certificate",
     };
     for (native) |t| try testing.expect(supportedStepType(t));
     // Deliberate loud skips: php and the legacy python/pypy bootstrappers are
     // whole projects, glibc never reaches a macOS bottle, and the rest have no
     // occurrence in homebrew-core to model against.
     const routed = [_][]const u8{
-        "mkdir",         "move_children",     "move_contents",  "set_ownership",
         "configure_php", "bootstrap_cpython", "bootstrap_pypy", "configure_glibc_runtime",
         "frobnicate",
     };
@@ -4506,6 +5088,379 @@ test "terminate_process refuses the privilege fields malt does not honour" {
 }
 
 // --- helpers for the step tests --------------------------------------------
+
+fn fileGid(io: std.Io, path: []const u8) !std.posix.gid_t {
+    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    var raw: std.c.Stat = undefined;
+    if (std.c.fstat(f.handle, &raw) != 0) return error.Unexpected;
+    return @intCast(raw.gid);
+}
+
+test "set_ownership chowns only inside the confinement roots" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    // `everyone` is a group every macOS user belongs to, so a non-root test
+    // can observe the change; `staff`, the default, is what a fresh file
+    // already carries.
+    const everyone = groupId("everyone") orelse return error.SkipZigTest;
+    const inside = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/tool", .{ch.h.prefix});
+    try atomic.atomicWriteFile(c.io, inside, "tool");
+    const nested = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/lib/x", .{ch.h.prefix});
+    try std.Io.Dir.cwd().createDirPath(c.io, std.fs.path.dirname(nested).?);
+    try atomic.atomicWriteFile(c.io, nested, "x");
+    const outside = try std.fs.path.join(a, &.{ ch.home, "outside" });
+    try atomic.atomicWriteFile(c.io, outside, "x");
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"set_ownership","paths":[{"base":"staged_path","path":"."},{"base":"staged_path","path":"missing"}],"group":"everyone"},
+        \\ {"type":"set_ownership","paths":[{"base":"home","path":"outside"}],"group":"everyone"}]
+    ));
+    try testing.expectEqual(everyone, try fileGid(c.io, inside));
+    try testing.expectEqual(everyone, try fileGid(c.io, nested));
+    try testing.expect(try fileGid(c.io, outside) != everyone);
+    try testing.expect(ch.h.flog.hasFatal());
+    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, ch.h.flog.entries()[0].reason);
+}
+
+test "set_ownership refuses a user or group it cannot resolve and honours non_recursive" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const everyone = groupId("everyone") orelse return error.SkipZigTest;
+
+    const dir = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/d", .{ch.h.prefix});
+    const child = try std.fmt.allocPrint(a, "{s}/child", .{dir});
+    try std.Io.Dir.cwd().createDirPath(c.io, dir);
+    try atomic.atomicWriteFile(c.io, child, "x");
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"set_ownership","paths":[{"base":"staged_path","path":"d"}],"group":"everyone","non_recursive":true},
+        \\ {"type":"set_ownership","paths":[{"base":"staged_path","path":"d"}],"user":"no-such-user-here"},
+        \\ {"type":"set_ownership","paths":[{"base":"staged_path","path":"d"}],"group":"no-such-group-here"}]
+    ));
+    try testing.expectEqual(everyone, try fileGid(c.io, dir));
+    try testing.expect(try fileGid(c.io, child) != everyone);
+    try testing.expect(!ch.h.flog.hasFatal());
+    try testing.expectEqual(@as(usize, 2), ch.h.flog.entries().len);
+}
+
+test "mkdir fails when the parent is missing and mkdir_p creates it" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const c = h.ctx();
+    const a = h.arena.allocator();
+
+    runSteps(c, try parseSteps(&h,
+        \\[{"type":"mkdir_p","path":{"base":"prefix","path":"deep/leaf"}},
+        \\ {"type":"mkdir","path":{"base":"prefix","path":"deep/leaf"}},
+        \\ {"type":"mkdir","path":{"base":"prefix","path":"flat"}},
+        \\ {"type":"mkdir","path":{"base":"prefix","path":"missing/child"}}]
+    ));
+    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/deep/leaf", .{h.keg})));
+    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/flat", .{h.keg})));
+    try testing.expect(!dirExists(c.io, try std.fmt.allocPrint(a, "{s}/missing", .{h.keg})));
+    // A repeat on an existing dir is a no-op, as upstream's `Dir.mkdir` is;
+    // a missing parent raises there, so it is fatal here.
+    try testing.expect(h.flog.hasFatal());
+    try testing.expectEqual(@as(usize, 3), h.flog.handled_top_level);
+}
+
+test "mkdir refuses a path outside the confinement roots" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    runSteps(h.ctx(), try parseSteps(&h,
+        \\[{"type":"mkdir","path":{"path":"/tmp/malt_mkdir_escape_never_created"}}]
+    ));
+    try testing.expect(h.flog.hasFatal());
+    try testing.expect(!dirExists(h.io, "/tmp/malt_mkdir_escape_never_created"));
+}
+
+test "move_children moves entries not the directory" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    const staged = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3", .{ch.h.prefix});
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/a", .{staged}), "a");
+    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/sub", .{staged}));
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/sub/b", .{staged}), "b");
+
+    // The chatty/quakespasm shape: fold the staged root into a subdirectory
+    // of itself, so the target must be skipped as a child of the source.
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"move_contents","source":{"base":"staged_path","path":"."},"target":{"base":"staged_path","path":"Chatty"}},
+        \\ {"type":"move_children","source":{"base":"staged_path","path":"Chatty/sub"},"target":{"base":"caskroom_path","path":"flat"}}]
+    ));
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/Chatty/a", .{staged})));
+    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/a", .{staged})));
+    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(a, "{s}/Chatty/sub", .{staged})));
+    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/Chatty/sub/b", .{staged})));
+    try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/Caskroom/box/flat/b", .{ch.h.prefix})));
+}
+
+test "move_contents refuses a source or target outside the confinement roots" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const outside = try std.fs.path.join(a, &.{ ch.home, "loose" });
+    try std.Io.Dir.cwd().createDirPath(c.io, outside);
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/f", .{outside}), "f");
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"move_contents","source":{"base":"home","path":"loose"},"target":{"base":"staged_path","path":"in"}}]
+    ));
+    try testing.expect(ch.h.flog.hasFatal());
+    try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/f", .{outside})));
+    try testing.expect(!pathExists(c.io, try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/in", .{ch.h.prefix})));
+}
+
+test "delete_keychain_certificate treats an absent certificate as success" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    ch.h.io = threaded.io();
+
+    runSteps(ch.ctx(), try parseSteps(&ch.h,
+        \\[{"type":"delete_keychain_certificate","name":"malt-no-such-certificate"}]
+    ));
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 1), ch.h.flog.handled_top_level);
+}
+
+test "delete_keychain_certificate refuses a fingerprint match and an option-shaped name" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+
+    runSteps(ch.ctx(), try parseSteps(&ch.h,
+        \\[{"type":"delete_keychain_certificate","name":"x","matching_certificate":{"base":"staged_path","path":"c.pem"}},
+        \\ {"type":"delete_keychain_certificate","name":"-Z"}]
+    ));
+    try testing.expect(!ch.h.flog.hasFatal());
+    try testing.expectEqual(@as(usize, 2), ch.h.flog.entries().len);
+    try testing.expectEqual(@as(usize, 0), ch.h.flog.handled_top_level);
+}
+
+test "checkSteps names what would be refused without touching the filesystem" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    checkSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"mkdir_p","path":{"base":"home","path":"Library/never"}},
+        \\ {"type":"run","command":{"path":"/bin/echo"},"sudo":true},
+        \\ {"type":"terminate_process","name":"x","match":"full","notices":["n"]},
+        \\ {"type":"frobnicate"}]
+    ));
+    try testing.expect(!dirExists(c.io, try std.fs.path.join(a, &.{ ch.home, "Library/never" })));
+    const entries = ch.h.flog.entries();
+    try testing.expectEqual(@as(usize, 3), entries.len);
+    try testing.expectEqualStrings("run with sudo", entries[0].detail);
+    try testing.expectEqualStrings("terminate_process with match", entries[1].detail);
+    try testing.expectEqualStrings("frobnicate", entries[2].detail);
+}
+
+test "a recursive remove refuses $HOME/Library and its top-level children" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+
+    // `Keychains` stands in for every top-level dir the OS and other apps
+    // share; the cask's own subtree under `Application Support` is fair game.
+    const keychains = try std.fs.path.join(a, &.{ ch.home, "Library/Keychains" });
+    try std.Io.Dir.cwd().createDirPath(c.io, keychains);
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/login", .{keychains}), "k");
+    const own = try std.fs.path.join(a, &.{ ch.home, "Library/Application Support/box" });
+    try std.Io.Dir.cwd().createDirPath(c.io, own);
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/state", .{own}), "s");
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"remove","recursive":true,"paths":[{"base":"home","path":"Library/Application Support/box"}]},
+        \\ {"type":"remove","recursive":true,"paths":[{"base":"home","path":"Library/Keychains"}]},
+        \\ {"type":"remove","recursive":true,"paths":[{"base":"home","path":"Library"}]}]
+    ));
+    try testing.expect(!pathExists(c.io, own));
+    try testing.expect(dirExists(c.io, keychains));
+    try testing.expect(!ch.h.flog.hasFatal());
+    try testing.expectEqual(@as(usize, 2), ch.h.flog.entries().len);
+    try testing.expectEqual(@as(usize, 1), ch.h.flog.handled_top_level);
+}
+
+test "a recursive remove refuses the applications dir itself but not one app in it" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const appdir = try std.fmt.allocPrint(a, "{s}/Applications", .{ch.h.prefix});
+    const app = try std.fmt.allocPrint(a, "{s}/Box.app", .{appdir});
+    try std.Io.Dir.cwd().createDirPath(c.io, try std.fmt.allocPrint(a, "{s}/Contents", .{app}));
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/Contents/x", .{app}), "x");
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"remove","recursive":true,"paths":[{"base":"appdir","path":"."}]},
+        \\ {"type":"remove","recursive":true,"paths":[{"base":"appdir","path":"Box.app"}]}]
+    ));
+    try testing.expect(dirExists(c.io, appdir));
+    try testing.expect(!pathExists(c.io, app));
+    try testing.expectEqual(@as(usize, 1), ch.h.flog.entries().len);
+}
+
+test "with HOME unset every home step is refused by name and nothing lands relative to cwd" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    var c = ch.ctx();
+    c.subject.cask.home = "";
+
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"mkdir_p","path":{"base":"home","path":"Library/malt_home_unset_never"}}]
+    ));
+    // Named, not a bare violation: the user has to learn it was HOME.
+    try testing.expect(!ch.h.flog.hasFatal());
+    try testing.expectEqualStrings("base home (HOME is not set)", ch.h.flog.entries()[0].detail);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(c.io, "Library/malt_home_unset_never", .{}));
+    try testing.expect(!dirExists(c.io, "/Library/malt_home_unset_never"));
+}
+
+test "a degenerate appdir or home never becomes a confinement root" {
+    // `pathHasPrefix(x, "/")` admits every path, so a `MALT_APPDIR=/` or
+    // `HOME=/` would turn the second root pair into the whole disk.
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const a = ch.h.arena.allocator();
+    const outside = try std.fs.path.join(a, &.{ ch.home, "escaped" });
+
+    const step = try std.fmt.allocPrint(a, "[{{\"type\":\"touch\",\"path\":{{\"path\":\"{s}\"}}}}]", .{outside});
+
+    const degenerate = [_][]const u8{ "/", "//", "relative/apps", "" };
+    for (degenerate) |bad| {
+        var c = ch.ctx();
+        c.subject.cask.appdir = bad;
+        runSteps(c, try parseSteps(&ch.h, step));
+        try testing.expect(ch.h.flog.hasFatal());
+        try testing.expect(!pathExists(c.io, outside));
+    }
+    for (degenerate) |bad| {
+        var c = ch.ctx();
+        c.subject.cask.home = bad;
+        runSteps(c, try parseSteps(&ch.h, step));
+        try testing.expect(!pathExists(c.io, outside));
+    }
+    // A sane appdir does admit its own tree, so the refusal above is the
+    // root, not the step.
+    var c = ch.ctx();
+    c.subject.cask.appdir = try std.fs.path.join(a, &.{ ch.home, "Apps" });
+    try std.Io.Dir.cwd().createDirPath(c.io, c.subject.cask.appdir);
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"touch","path":{"base":"appdir","path":"ok"}}]
+    ));
+    try testing.expect(fileExists(c.io, try std.fs.path.join(a, &.{ c.subject.cask.appdir, "ok" })));
+}
+
+test "the temp base and template resolve inside the prefix so a cask can park data across an uninstall" {
+    // miniconda moves `base/envs` to `{{temp}}/{{token}}-envs` in its uninstall
+    // preflight and back in the next install's postflight.
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const tmp = try std.fmt.allocPrint(a, "{s}/tmp", .{ch.h.prefix});
+    try testing.expectEqualStrings(tmp, resolveBase(c, "temp", null).?);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/box-envs", .{tmp}), try expandTemplates(c, "{{temp}}/{{token}}-envs"));
+
+    const envs = try std.fmt.allocPrint(a, "{s}/Caskroom/box/base/envs", .{ch.h.prefix});
+    try std.Io.Dir.cwd().createDirPath(c.io, envs);
+    try atomic.atomicWriteFile(c.io, try std.fmt.allocPrint(a, "{s}/py311", .{envs}), "env");
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"move","source":{"base":"caskroom_path","path":"base/envs"},"target":{"path":"{{temp}}/{{token}}-envs"},"overwrite":true,
+        \\  "guards":[{"path":"{{caskroom_path}}/base/envs","condition":"if_exists"}]}]
+    ));
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expect(!pathExists(c.io, envs));
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"move","source":{"path":"{{temp}}/{{token}}-envs"},"target":{"base":"caskroom_path","path":"base/envs"},"overwrite":true,
+        \\  "guards":[{"path":"{{temp}}/{{token}}-envs","condition":"if_exists"}]}]
+    ));
+    try testing.expect(!ch.h.flog.hasErrors());
+    try testing.expect(fileExists(c.io, try std.fmt.allocPrint(a, "{s}/py311", .{envs})));
+}
+
+test "a cask run command resolves the cask bases and still refuses a bare name" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const cases = [_]struct { spec: []const u8, want: []const u8 }{
+        .{ .spec =
+        \\{"command":{"base":"appdir","path":"K.app/Contents/install"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/Applications/K.app/Contents/install", .{ch.h.prefix}) },
+        .{ .spec =
+        \\{"command":{"base":"staged_path","path":"wrapper.sh"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/Caskroom/box/1.2.3/wrapper.sh", .{ch.h.prefix}) },
+        .{ .spec =
+        \\{"command":{"base":"homebrew_prefix","path":"share/sdk/bin/tool"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/share/sdk/bin/tool", .{ch.h.prefix}) },
+        .{ .spec =
+        \\{"command":{"path":"{{appdir}}/K.app/Contents/x"}}
+        , .want = try std.fmt.allocPrint(a, "{s}/Applications/K.app/Contents/x", .{ch.h.prefix}) },
+    };
+    for (cases) |case| {
+        const got = resolveCommandPath(c, try parseStep(&ch.h, case.spec)) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.want, got);
+    }
+    try testing.expect(!ch.h.flog.hasErrors());
+    // Keg-shaped bases and bare names are still refused for a cask.
+    try testing.expect(resolveCommandPath(c, try parseStep(&ch.h,
+        \\{"command":{"base":"bin","path":"tool"}}
+    )) == null);
+    try testing.expect(resolveCommandPath(c, try parseStep(&ch.h,
+        \\{"command":{"path":"chflags"}}
+    )) == null);
+    try testing.expectEqual(@as(usize, 2), ch.h.flog.entries().len);
+}
+
+test "checkSteps names a run command it could not resolve" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    checkSteps(ch.ctx(), try parseSteps(&ch.h,
+        \\[{"type":"run","command":{"path":"chflags"},"args":["nohidden","x"]},
+        \\ {"type":"run","command":{"base":"appdir","path":"K.app/Contents/install"}}]
+    ));
+    const entries = ch.h.flog.entries();
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    try testing.expectEqualStrings("run with a relative command", entries[0].detail);
+}
+
+test "a fatal entry left by an earlier phase does not fail the next one" {
+    // Upgrade runs the outgoing uninstall phases and the incoming preflight
+    // through one log; each phase must be judged on its own entries.
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    ch.h.flog.log(.{ .formula = "box", .reason = .sandbox_violation, .detail = "/earlier", .loc = null });
+    const start = ch.h.flog.entries().len;
+    runSteps(c, try parseSteps(&ch.h,
+        \\[{"type":"mkdir_p","path":{"base":"caskroom_path","path":"later"}}]
+    ));
+    try testing.expect(dirExists(c.io, try std.fmt.allocPrint(ch.h.arena.allocator(), "{s}/Caskroom/box/later", .{ch.h.prefix})));
+    try testing.expect(!ch.h.flog.hasFatalSince(start));
+}
+
+test "securityOutcome separates an absent certificate from a failed deletion" {
+    try testing.expectEqual(SecurityOutcome.deleted, securityOutcome(0, ""));
+    try testing.expectEqual(SecurityOutcome.absent, securityOutcome(1, "Unable to delete certificate matching \"malt-no-such-certificate\""));
+    try testing.expectEqual(SecurityOutcome.failed, securityOutcome(1, "security: SecKeychainItemDelete: User interaction is not allowed.\n"));
+    try testing.expectEqual(SecurityOutcome.failed, securityOutcome(255, ""));
+}
 
 fn fileMode(io: std.Io, path: []const u8) !std.posix.mode_t {
     const f = try std.Io.Dir.openFileAbsolute(io, path, .{});

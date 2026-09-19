@@ -128,7 +128,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 16;
+pub const known_schema_version: i64 = 17;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -154,6 +154,7 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 14) try migrateV13toV14(db);
     if (ver < 15) try migrateV14toV15(db);
     if (ver < 16) try migrateV15toV16(db);
+    if (ver < 17) try migrateV16toV17(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -776,6 +777,37 @@ fn migrateV15toV16(db: *sqlite.Database) sqlite.SqliteError!void {
     }
 
     try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (16);");
+
+    try db.commit();
+}
+
+/// v17 — casks keep the flight steps that matched the installed version,
+/// so uninstall runs what the install saw rather than today's API.
+fn migrateV16toV17(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    // Zero rows also means no table: the partial-shape fixtures the older
+    // migrations tolerate must not abort the chain here.
+    var have_table = false;
+    var have_column = false;
+    {
+        var stmt = try db.prepare("PRAGMA table_info(casks);");
+        defer stmt.finalize();
+        while (try stmt.step()) {
+            have_table = true;
+            const name = stmt.columnText(1) orelse continue;
+            if (std.mem.eql(u8, std.mem.sliceTo(name, 0), "flight_steps")) {
+                have_column = true;
+                break;
+            }
+        }
+    }
+    if (have_table and !have_column) {
+        try db.exec("ALTER TABLE casks ADD COLUMN flight_steps TEXT;");
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (17);");
 
     try db.commit();
 }

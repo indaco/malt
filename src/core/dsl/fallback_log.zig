@@ -102,7 +102,13 @@ pub const FallbackLog = struct {
     }
 
     pub fn hasFatal(self: *const FallbackLog) bool {
-        for (self._entries.items) |entry| {
+        return self.hasFatalSince(0);
+    }
+
+    /// Fatal among the entries appended after the first `start`, so one log
+    /// can carry several phases and each is judged on its own.
+    pub fn hasFatalSince(self: *const FallbackLog, start: usize) bool {
+        for (self._entries.items[@min(start, self._entries.items.len)..]) |entry| {
             switch (entry.reason) {
                 .sandbox_violation, .system_command_failed => return true,
                 else => {},

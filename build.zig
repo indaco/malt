@@ -240,6 +240,7 @@ pub fn build(b: *std.Build) void {
         "tests/install_local_test.zig",
         "tests/cask_extra_test.zig",
         "tests/cask_font_install_test.zig",
+        "tests/cask_flight_steps_test.zig",
         "tests/cask_font_uninstall_test.zig",
         "tests/cask_font_rollback_test.zig",
         "tests/cask_resolve_test.zig",
