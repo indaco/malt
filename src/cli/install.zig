@@ -1478,6 +1478,7 @@ fn maybeRegisterService(
         .stderr_path = stderr_path,
         .schedule = def.schedule,
         .keep_alive = def.keep_alive,
+        .stop_timeout = def.stop_timeout,
     };
 
     supervisor_mod.register(.{ .allocator = allocator, .io = io, .db = db }, spec, formula.name, false, cellar_path, prefix) catch |err| {

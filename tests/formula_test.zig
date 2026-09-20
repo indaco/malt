@@ -451,3 +451,32 @@ test "parseFormula's pkg_version equals version when revision is zero" {
     try testing.expectEqualStrings("1.24.5", f.version);
     try testing.expectEqualStrings("1.24.5", f.pkg_version);
 }
+
+test "parse stop_timeout from the service block" {
+    var arena = testArena();
+    defer arena.deinit();
+    var formula = try parseWithService(arena.allocator(), ", \"stop_timeout\": 120");
+    defer formula.deinit();
+    try testing.expectEqual(@as(?u32, 120), formula.service.?.stop_timeout);
+}
+
+test "service block without stop_timeout parses as null" {
+    var arena = testArena();
+    defer arena.deinit();
+    var formula = try parseWithService(arena.allocator(), "");
+    defer formula.deinit();
+    try testing.expectEqual(@as(?u32, null), formula.service.?.stop_timeout);
+}
+
+test "out-of-range stop_timeout falls back to launchd default" {
+    var arena = testArena();
+    defer arena.deinit();
+    // launchd reads zero as "wait forever", which can stall system shutdown;
+    // an over-cap value is the same hazard through the front door. All fall
+    // back to launchd's default instead of failing the install.
+    for ([_][]const u8{ ", \"stop_timeout\": 0", ", \"stop_timeout\": -5", ", \"stop_timeout\": \"120\"", ", \"stop_timeout\": 601", ", \"stop_timeout\": 4294967296" }) |block| {
+        var formula = try parseWithService(arena.allocator(), block);
+        defer formula.deinit();
+        try testing.expectEqual(@as(?u32, null), formula.service.?.stop_timeout);
+    }
+}

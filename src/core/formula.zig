@@ -46,6 +46,8 @@ pub const ServiceDef = struct {
     error_log_path: ?[]const u8 = null,
     keep_alive: bool = true,
     schedule: Schedule = .immediate,
+    /// See `plist.ServiceSpec.stop_timeout`.
+    stop_timeout: ?u32 = null,
 };
 
 /// Format Homebrew's canonical on-disk version label into `buf`.
@@ -449,6 +451,18 @@ fn parseSchedule(arena: std.mem.Allocator, so: std.json.ObjectMap) !Schedule {
     return .{ .interval = @intCast(secs) };
 }
 
+/// A `stop_timeout` in `1..=max_stop_timeout_secs`; anything else is a
+/// formula bug and falls back to launchd's default rather than failing the
+/// install - unlike a bad schedule, a missing timeout still yields a working
+/// service. Zero is excluded on purpose: launchd reads it as "wait forever".
+fn parseStopTimeout(so: std.json.ObjectMap) ?u32 {
+    const v = so.get("stop_timeout") orelse return null;
+    return switch (v) {
+        .integer => |n| if (n > 0 and n <= service_types.max_stop_timeout_secs) @intCast(n) else null,
+        else => null,
+    };
+}
+
 fn getStringArray(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]const []const u8 {
     const v = obj.get(key) orelse return &.{};
     const arr = switch (v) {
@@ -568,6 +582,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
                         else
                             true,
                         .schedule = try parseSchedule(arena, so),
+                        .stop_timeout = parseStopTimeout(so),
                     };
                 };
             }
@@ -1650,4 +1665,23 @@ test "declaredInstallDependencies keeps a dep whose comment mentions :optional" 
     const got = try declaredInstallDependencies(&buf, rb);
     try std.testing.expectEqual(@as(usize, 1), got.len);
     try std.testing.expectEqualStrings("libfoo", got[0]);
+}
+
+test "parseStopTimeout keeps only a value inside the cap" {
+    // Zero means "wait forever" to launchd; negatives, strings and over-cap
+    // values are formula bugs. All read as unset.
+    for ([_]struct { json: []const u8, want: ?u32 }{
+        .{ .json = "{}", .want = null },
+        .{ .json = "{\"stop_timeout\": 120}", .want = 120 },
+        .{ .json = "{\"stop_timeout\": 0}", .want = null },
+        .{ .json = "{\"stop_timeout\": -5}", .want = null },
+        .{ .json = "{\"stop_timeout\": \"120\"}", .want = null },
+        .{ .json = "{\"stop_timeout\": 4294967296}", .want = null },
+        .{ .json = "{\"stop_timeout\": 600}", .want = 600 },
+        .{ .json = "{\"stop_timeout\": 601}", .want = null },
+    }) |case| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, case.json, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(case.want, parseStopTimeout(parsed.value.object));
+    }
 }
