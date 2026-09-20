@@ -221,14 +221,12 @@ pub fn register(
         return SupervisorError.OutOfMemory;
     defer allocator.free(plist_path);
 
-    var file = std.Io.Dir.createFileAbsolute(ctx.io, plist_path, .{ .truncate = true }) catch
-        return SupervisorError.IoFailed;
-    defer file.close(ctx.io);
-
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     plist_mod.render(spec, &aw.writer) catch return SupervisorError.IoFailed;
-    file.writeStreamingAll(ctx.io, aw.written()) catch return SupervisorError.IoFailed;
+    // Re-registering overwrites a plist launchd may still load; a failed
+    // write must leave the previous one intact, not a truncated file.
+    atomic.atomicReplaceFile(ctx.io, plist_path, aw.written()) catch return SupervisorError.IoFailed;
 
     // Cache the schedule as a human label so `services list` shows why a
     // service exists without re-parsing the plist.
@@ -236,9 +234,16 @@ pub fn register(
         return SupervisorError.OutOfMemory;
     defer allocator.free(schedule_label);
 
+    // Re-registering (upgrade, reinstall) refreshes what the formula owns;
+    // auto_start, last_status and last_started_at belong to the user and the
+    // running job, so an existing row keeps them.
     var stmt = ctx.db.prepare(
-        \\INSERT OR REPLACE INTO services(name, keg_name, plist_path, auto_start, last_status, schedule)
-        \\VALUES (?, ?, ?, ?, 'registered', ?);
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start, last_status, schedule)
+        \\VALUES (?, ?, ?, ?, 'registered', ?)
+        \\ON CONFLICT(name) DO UPDATE SET
+        \\    keg_name = excluded.keg_name,
+        \\    plist_path = excluded.plist_path,
+        \\    schedule = excluded.schedule;
     ) catch return SupervisorError.DatabaseError;
     defer stmt.finalize();
     stmt.bindText(1, spec.label) catch return SupervisorError.DatabaseError;

@@ -159,6 +159,57 @@ test "register writes a plist and a DB row that list reports back" {
     f.close(std.Options.debug_io);
 }
 
+test "re-registering rewrites the plist but keeps the row's user-intent columns" {
+    var fx = try Fixture.init("reregister");
+    defer fx.deinit();
+    const prefix = fx.base;
+    const cellar = fx.p("Cellar/testkeg/1.0");
+    _ = c.setenv("MALT_PREFIX", prefix, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var spec = plist_mod.ServiceSpec{
+        .label = "com.malt.test.rereg",
+        .program_args = &.{fx.p("Cellar/testkeg/1.0/bin/echo")},
+        .stdout_path = fx.p("out.log"),
+        .stderr_path = fx.p("err.log"),
+        .stop_timeout = 5,
+    };
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
+    try supervisor.register(ctx, spec, "testkeg", false, cellar, prefix);
+
+    // Columns the formula does not own: a running job sets last_status and
+    // last_started_at; auto_start has no product writer yet, so set it by hand.
+    try db.exec("UPDATE services SET auto_start=1, last_status='running', last_started_at=42 WHERE name='com.malt.test.rereg';");
+
+    // Upgrade path: same label, new service definition.
+    spec.stop_timeout = 90;
+    spec.schedule = .{ .interval = 300 };
+    try supervisor.register(ctx, spec, "testkeg", false, cellar, prefix);
+
+    const list = try supervisor.list(ctx);
+    defer supervisor.freeServiceInfos(testing.allocator, list);
+    try testing.expectEqual(@as(usize, 1), list.len);
+    try testing.expect(list[0].auto_start);
+    try testing.expectEqualStrings("running", list[0].last_status);
+    // What the formula owns does follow the new definition.
+    try testing.expectEqualStrings("interval 300s", list[0].schedule);
+
+    var stmt = try db.prepare("SELECT last_started_at FROM services WHERE name='com.malt.test.rereg';");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqual(@as(i64, 42), stmt.columnInt(0));
+
+    var f = try test_io.openFileAbsolute(std.Options.debug_io, list[0].plist_path, .{});
+    defer f.close(std.Options.debug_io);
+    var buf: [4096]u8 = undefined;
+    const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
+    try testing.expect(std.mem.indexOf(u8, buf[0..n], "<key>ExitTimeOut</key>\n    <integer>90</integer>") != null);
+}
+
 test "register writes an interval plist with StartInterval and RunAtLoad false" {
     var fx = try Fixture.init("interval");
     defer fx.deinit();
