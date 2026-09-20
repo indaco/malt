@@ -139,6 +139,9 @@ jobs:
       - name: Regression guard - a binary cask rolls back to a linked executable and app casks link their declared binaries
         run: ./scripts/regressions/binary-cask-rollback-and-appdir-links-cask-binary-artifacts-rollback-and-appdir-sources.sh
 
+      - name: Regression guard - an app cask links the helpers it ships beside its bundle
+        run: ./scripts/regressions/app-cask-staged-binary-links-app-cask-staged-path-binaries-never-linked.sh
+
       - name: Regression guard - a patched Mach-O always reaches the re-sign list
         run: ./scripts/regressions/walk-refuses-to-drop-a-mutated-macho-mutated-macho-can-skip-resigning-on-append-failure.sh
 

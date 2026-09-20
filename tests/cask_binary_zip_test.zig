@@ -366,7 +366,7 @@ test "links an APPDIR binary into the placed bundle" {
     var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
 
     // Every stanza is linked, in order, from the bundle just placed.
-    try installer.linkAppDirBinaries(&c, fx.p("Applications/Editor.app"));
+    try installer.linkPlacedBinaries(&c, fx.p("Applications/Editor.app"));
     try expectLinkInto(io, fx.p("bin/editor"), fx.p("Applications/Editor.app/Contents/MacOS/editor"));
     try expectLinkInto(io, fx.p("bin/editor-tunnel"), fx.p("Applications/Editor.app/Contents/MacOS/editor-tunnel"));
     const st = try std.Io.Dir.cwd().statFile(io, fx.p("Applications/Editor.app/Contents/MacOS/editor"), .{});
@@ -402,7 +402,7 @@ test "an APPDIR binary naming a bundle other than the placed one is refused" {
 
     // Only the bundle this install placed is a legitimate link source; a
     // stanza reaching into a neighbour is an error, not a skip.
-    try testing.expectError(error.InstallFailed, installer.linkAppDirBinaries(&c, fx.p("Applications/Editor.app")));
+    try testing.expectError(error.InstallFailed, installer.linkPlacedBinaries(&c, fx.p("Applications/Editor.app")));
     try testing.expect(!exists(io, fx.p("bin/x")));
 }
 
@@ -422,7 +422,7 @@ test "uninstall removes every placed link" {
     try putFile(io, fx.p("Applications/Editor.app/Contents/MacOS/editor"), "bin");
     try putFile(io, fx.p("Applications/Editor.app/Contents/MacOS/editor-tunnel"), "tunnel");
     var installer = cask.CaskInstaller.init(io, malt.app_ctx.processEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
-    try installer.linkAppDirBinaries(&c, fx.p("Applications/Editor.app"));
+    try installer.linkPlacedBinaries(&c, fx.p("Applications/Editor.app"));
     try cask.recordInstall(&db, &c, fx.p("Applications/Editor.app"), null);
     // A manifest line that is not an absolute path is skipped, never asserted on.
     {
@@ -554,7 +554,7 @@ test "an app cask whose declared binary is missing installs nothing" {
     try testing.expect((try installer.readBinarySpec("editor", "1.0")) == null);
 }
 
-test "an app cask with a staged-path binary still rolls back to its bundle" {
+test "an app cask with a staged-path binary rolls back with its bundle and its link" {
     var fx = try Fixture.init("staged_rollback");
     defer fx.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -594,20 +594,235 @@ test "an app cask with a staged-path binary still rolls back to its bundle" {
     defer testing.allocator.free(app_path);
     try testing.expectEqualStrings(fx.p("Applications/Pad.app"), app_path);
     try cask.recordInstall(&db, &c, app_path, null);
-    // Nothing was linked, so nothing is recorded: the sidecar only ever
-    // describes what the install placed.
-    try testing.expect((try installer.readBinarySpec("pad", "1.0")) == null);
+    // The helper is linked from a Caskroom copy of the stage, and the
+    // sidecar records it so the rollback can re-link it offline.
+    try expectLinkInto(io, fx.p("bin/pad"), fx.p("Caskroom/pad/1.0/pad-cli"));
+    var spec = (try installer.readBinarySpec("pad", "1.0")) orelse return error.TestUnexpectedResult;
+    defer spec.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), spec.entries.len);
+    try testing.expectEqualStrings("pad-cli", spec.entries[0].source);
+    try testing.expectEqualStrings("pad", spec.entries[0].target.?);
 
     try db.exec("UPDATE casks SET version = '2.0' WHERE token = 'pad';");
     try test_io.deleteTreeAbsolute(io, fx.p("Applications/Pad.app"));
+    try std.Io.Dir.deleteFileAbsolute(io, fx.p("bin/pad"));
 
     // The rollback must take the bundle path the install took, not the
-    // binary-only one: the record cannot turn an app cask into a CLI cask.
+    // binary-only one: the record cannot turn an app cask into a CLI cask,
+    // and the helper comes back with the bundle.
     installer.prefetched_artifact = null;
     try installer.reinstallFromHistory("pad", "1.0");
     const info = cask.lookupInstalled(&db, "pad") orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings(fx.p("Applications/Pad.app"), info.appPath().?);
     try testing.expect(exists(io, fx.p("Applications/Pad.app/Contents/MacOS/pad")));
+    try expectLinkInto(io, fx.p("bin/pad"), fx.p("Caskroom/pad/1.0/pad-cli"));
+}
+
+// The live shape of a few editors: the bundle plus a helper that sits
+// beside it in the archive rather than inside it.
+const pad_json =
+    \\{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.zip","sha256":"no_check",
+    \\ "artifacts":[{"app":["Pad.app"]},{"binary":["pad-cli"],"target":"$HOMEBREW_PREFIX/bin/pad"}]}
+;
+
+test "an app cask links a relative binary from the Caskroom copy beside its placed bundle" {
+    var fx = try Fixture.init("staged_link");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, pad_json);
+    defer c.deinit();
+
+    try putFile(io, fx.p("extract/Pad.app/Contents/MacOS/pad"), "bin");
+    try putFile(io, fx.p("extract/pad-cli"), "cli");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+
+    const placed = try installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c);
+    defer testing.allocator.free(placed);
+    try testing.expectEqualStrings(fx.p("Applications/Pad.app"), placed);
+    try installer.linkPlacedBinaries(&c, placed);
+
+    // The stage is gone after a real install, so the helper lives on in a
+    // Caskroom copy that holds the stage minus the promoted bundle.
+    try expectLinkInto(io, fx.p("bin/pad"), fx.p("Caskroom/pad/1.0/pad-cli"));
+    try testing.expect(!exists(io, fx.p("Caskroom/pad/1.0/Pad.app")));
+    const manifest = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Caskroom/pad/1.0/" ++ cask.LINKS_MANIFEST_NAME), 4096);
+    defer testing.allocator.free(manifest);
+    const want = try std.fmt.allocPrint(testing.allocator, "{s}\n", .{fx.p("bin/pad")});
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, manifest);
+}
+
+test "an app cask links APPDIR and relative binaries in one pass" {
+    var fx = try Fixture.init("two_roots");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Pad.app"]},
+        \\  {"binary":["$APPDIR/Pad.app/Contents/MacOS/pad"],"target":"pad"},
+        \\  {"binary":["pad-cli"]}]}
+    );
+    defer c.deinit();
+
+    try putFile(io, fx.p("extract/Pad.app/Contents/MacOS/pad"), "bin");
+    try putFile(io, fx.p("extract/pad-cli"), "cli");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+
+    const placed = try installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c);
+    defer testing.allocator.free(placed);
+    try installer.linkPlacedBinaries(&c, placed);
+
+    // Each source resolves against its own root, and one manifest records
+    // both so uninstall removes both.
+    try expectLinkInto(io, fx.p("bin/pad"), fx.p("Applications/Pad.app/Contents/MacOS/pad"));
+    try expectLinkInto(io, fx.p("bin/pad-cli"), fx.p("Caskroom/pad/1.0/pad-cli"));
+    const manifest = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Caskroom/pad/1.0/" ++ cask.LINKS_MANIFEST_NAME), 4096);
+    defer testing.allocator.free(manifest);
+    const want = try std.fmt.allocPrint(testing.allocator, "{s}\n{s}\n", .{ fx.p("bin/pad"), fx.p("bin/pad-cli") });
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, manifest);
+}
+
+test "an app cask whose relative binary is missing from the stage installs nothing" {
+    var fx = try Fixture.init("staged_partial");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, pad_json);
+    defer c.deinit();
+
+    // The archive ships the bundle but not the declared helper.
+    try putFile(io, fx.p("stage/Pad.app/Contents/MacOS/pad"), "bin");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    try test_io.cwd().createDirPath(io, fx.p("Applications"));
+    const zip = fx.p("cache/Cask/pad-1.0.zip");
+    try runTool(&.{ "/usr/bin/ditto", "-c", "-k", fx.p("stage"), zip });
+
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.prefetched_artifact = zip;
+
+    // A declared helper that is missing is an error, not a skip: no bundle,
+    // no link, no Caskroom copy left behind.
+    try testing.expectError(error.InstallFailed, installer.install(&c));
+    try testing.expect(!exists(io, fx.p("Applications/Pad.app")));
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/pad"), &buf));
+    try testing.expect(!exists(io, fx.p("Caskroom/pad")));
+}
+
+test "uninstall removes the relative link, the bundle and the Caskroom copy" {
+    var fx = try Fixture.init("staged_uninstall");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = malt.app_ctx.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator, pad_json);
+    defer c.deinit();
+
+    try putFile(io, fx.p("extract/Pad.app/Contents/MacOS/pad"), "bin");
+    try putFile(io, fx.p("extract/pad-cli"), "cli");
+    var installer = cask.CaskInstaller.init(io, malt.app_ctx.processEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
+    const placed = try installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c);
+    defer testing.allocator.free(placed);
+    try installer.linkPlacedBinaries(&c, placed);
+    try cask.recordInstall(&db, &c, placed, null);
+
+    try installer.uninstall("pad");
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/pad"), &buf));
+    try testing.expect(!exists(io, fx.p("Applications/Pad.app")));
+    try testing.expect(!exists(io, fx.p("Caskroom/pad")));
+    try testing.expect(!cask.isInstalled(&db, "pad"));
+}
+
+test "a tarball cask with an app and a relative binary promotes the bundle and links the binary" {
+    var fx = try Fixture.init("staged_tar");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.tar.gz","sha256":"no_check",
+        \\ "artifacts":[{"app":["Pad.app"]},{"binary":["pad-cli"],"target":"$HOMEBREW_PREFIX/bin/pad"}]}
+    );
+    defer c.deinit();
+
+    try putFile(io, fx.p("src/Pad.app/Contents/MacOS/pad"), "bin");
+    try putFile(io, fx.p("src/pad-cli"), "cli");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    try test_io.cwd().createDirPath(io, fx.p("Applications"));
+    const tgz = fx.p("cache/Cask/pad-1.0.tar.gz");
+    try runTool(&.{ "/usr/bin/tar", "-czf", tgz, "-C", fx.p("src"), "Pad.app", "pad-cli" });
+
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.prefetched_artifact = tgz;
+
+    // The bundle wins the dispatch; the helper is linked from the extracted
+    // tree, which for a tarball already is the Caskroom version dir. That
+    // dir ends up as the stage minus the bundle, the same as zip and dmg.
+    const app_path = try installer.install(&c);
+    defer testing.allocator.free(app_path);
+    try testing.expectEqualStrings(fx.p("Applications/Pad.app"), app_path);
+    try testing.expect(exists(io, fx.p("Applications/Pad.app/Contents/MacOS/pad")));
+    try expectLinkInto(io, fx.p("bin/pad"), fx.p("Caskroom/pad/1.0/pad-cli"));
+    try testing.expect(!exists(io, fx.p("Caskroom/pad/1.0/Pad.app")));
+}
+
+test "a binary-only cask whose archive also holds an app still takes the binary-only branch" {
+    var fx = try Fixture.init("binary_with_stray_app");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"tool","name":["Tool"],"version":"1.0","url":"https://example.invalid/tool.zip","sha256":"no_check",
+        \\ "artifacts":[{"binary":["tool"]}]}
+    );
+    defer c.deinit();
+
+    // A fresh install trusts the declaration, not the archive: only a
+    // rollback's artifact-less cask lets the stage decide.
+    try putFile(io, fx.p("extract/tool"), "tool");
+    try putFile(io, fx.p("extract/Stray.app/Contents/Info.plist"), "plist");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    const placed = try installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c);
+    defer testing.allocator.free(placed);
+    try testing.expectEqualStrings(fx.p("bin/tool"), placed);
+    try testing.expect(!exists(io, fx.p("Applications/Stray.app")));
 }
 
 const two_tools_json =
@@ -741,14 +956,14 @@ test "a bin entry this cask does not own is refused, not replaced" {
     // same. The first stanza linked fine and must be unwound.
     try test_io.cwd().createDirPath(io, fx.p("bin"));
     try std.Io.Dir.symLinkAbsolute(io, fx.p("Cellar/tool/1.0/bin/editor-tunnel"), fx.p("bin/editor-tunnel"), .{});
-    try testing.expectError(error.LinkConflict, installer.linkAppDirBinaries(&c, fx.p("Applications/Editor.app")));
+    try testing.expectError(error.LinkConflict, installer.linkPlacedBinaries(&c, fx.p("Applications/Editor.app")));
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(fx.p("Cellar/tool/1.0/bin/editor-tunnel"), try linkTarget(io, fx.p("bin/editor-tunnel"), &buf));
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/editor"), &buf));
 
     try std.Io.Dir.cwd().deleteFile(io, fx.p("bin/editor-tunnel"));
     try putFile(io, fx.p("bin/editor-tunnel"), "user's own");
-    try testing.expectError(error.LinkConflict, installer.linkAppDirBinaries(&c, fx.p("Applications/Editor.app")));
+    try testing.expectError(error.LinkConflict, installer.linkPlacedBinaries(&c, fx.p("Applications/Editor.app")));
     const body = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("bin/editor-tunnel"), 64);
     defer testing.allocator.free(body);
     try testing.expectEqualStrings("user's own", body);
@@ -803,7 +1018,7 @@ test "uninstall removes only bin links that still resolve into this cask" {
     try putFile(io, fx.p("Cellar/tool/1.0/bin/editor-tunnel"), "formula");
     try putFile(io, fx.p("secret"), "SECRET");
     var installer = cask.CaskInstaller.init(io, malt.app_ctx.processEnviron(), testing.allocator, &db, fx.base, fx.p("cache"));
-    try installer.linkAppDirBinaries(&c, fx.p("Applications/Editor.app"));
+    try installer.linkPlacedBinaries(&c, fx.p("Applications/Editor.app"));
     try cask.recordInstall(&db, &c, fx.p("Applications/Editor.app"), null);
 
     // Since the install, a formula took over `editor-tunnel`, and the
@@ -874,7 +1089,7 @@ test "a failed rollback leaves the current version's links in place" {
     try putFile(io, fx.p("Applications/Editor.app/Contents/MacOS/editor"), "bin");
     try putFile(io, fx.p("Applications/Editor.app/Contents/MacOS/editor-tunnel"), "tunnel");
     var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
-    try installer.linkAppDirBinaries(&c, fx.p("Applications/Editor.app"));
+    try installer.linkPlacedBinaries(&c, fx.p("Applications/Editor.app"));
     try cask.recordInstall(&db, &c, fx.p("Applications/Editor.app"), null);
 
     // 0.9 is on record but its artefact is gone and we are offline.
@@ -920,7 +1135,7 @@ test "a caller-supplied override stands in when a version predates the sidecar" 
 
     var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
     installer.offline = true;
-    const entries = (try cask.linkedBinaryStanzas(testing.allocator, c.parsed.value.object)).?;
+    const entries = (try cask.collectBinaryArtifacts(testing.allocator, c.parsed.value.object)).?;
     defer testing.allocator.free(entries);
     installer.binary_entries_override = &.{};
     try testing.expectError(error.InstallFailed, installer.reinstallFromHistory("rabbit", "0.7.8"));
@@ -1047,18 +1262,16 @@ test "the conflict check screens only the links the install will create" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
-    // The staged-path shape: `pad-cli` is declared but never linked.
-    var c = try cask.parseCask(testing.allocator,
-        \\{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.zip","sha256":"no_check",
-        \\ "artifacts":[{"app":["Pad.app"]},{"binary":["pad-cli"],"target":"$HOMEBREW_PREFIX/bin/pad"}]}
-    );
+    // The staged-path shape: `pad-cli` is linked from the Caskroom copy, so
+    // a formula holding the name is a conflict, not a skip.
+    var c = try cask.parseCask(testing.allocator, pad_json);
     defer c.deinit();
 
     try putFile(io, fx.p("Cellar/pad/1.0/bin/pad"), "formula");
     try test_io.cwd().createDirPath(io, fx.p("bin"));
     try std.Io.Dir.symLinkAbsolute(io, fx.p("Cellar/pad/1.0/bin/pad"), fx.p("bin/pad"), .{});
     var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
-    try installer.checkLinkConflicts(&c);
+    try testing.expectError(error.LinkConflict, installer.checkLinkConflicts(&c));
 
     // A pkg never links, whatever it declares.
     var pkg = try cask.parseCask(testing.allocator,
@@ -1067,4 +1280,319 @@ test "the conflict check screens only the links the install will create" {
     );
     defer pkg.deinit();
     try installer.checkLinkConflicts(&pkg);
+}
+
+test "an upgrade repoints the relative link at the new Caskroom copy and drops the old one" {
+    var fx = try Fixture.init("staged_upgrade");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    const a = fx.arena.allocator();
+    // The appdir is pinned under the fixture so the swap never reaches the
+    // real /Applications.
+    const block = try a.allocSentinel(?[*:0]const u8, 1, null);
+    block[0] = (try std.fmt.allocPrintSentinel(a, "MALT_APPDIR={s}/Applications", .{fx.base}, 0)).ptr;
+    const environ: std.process.Environ = .{ .block = .{ .slice = block } };
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // 1.0 as the fixed install leaves it: bundle, Caskroom copy, link, row.
+    try putFile(io, fx.p("Applications/Pad.app/Contents/MacOS/pad"), "1.0");
+    try putFile(io, fx.p("Caskroom/pad/1.0/pad-cli"), "1.0");
+    try test_io.cwd().createDirPath(io, fx.p("bin"));
+    // An install links the resolved source path, and ownership is judged
+    // on resolved paths.
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real_cli = real_buf[0..try std.Io.Dir.cwd().realPathFile(io, fx.p("Caskroom/pad/1.0/pad-cli"), &real_buf)];
+    try std.Io.Dir.symLinkAbsolute(io, real_cli, fx.p("bin/pad"), .{});
+    try putFile(io, fx.p("Caskroom/pad/1.0/" ++ cask.LINKS_MANIFEST_NAME), try std.fmt.allocPrint(a, "{s}\n", .{fx.p("bin/pad")}));
+    {
+        try test_io.cwd().createDirPath(io, fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        var c1 = try cask.parseCask(testing.allocator, pad_json);
+        defer c1.deinit();
+        try cask.recordInstall(&db, &c1, fx.p("Applications/Pad.app"), null);
+    }
+
+    // 2.0 in the offline API cache, its zip in the artefact cache.
+    try putFile(io, fx.p("stage/Pad.app/Contents/MacOS/pad"), "2.0");
+    try putFile(io, fx.p("stage/pad-cli"), "2.0");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const zip = fx.p("cache/Cask/pad-2.0.zip");
+    try runTool(&.{ "/usr/bin/ditto", "-c", "-k", fx.p("stage"), zip });
+    const zip_bytes = try test_io.readFileAbsoluteAlloc(io, testing.allocator, zip, 1 << 20);
+    defer testing.allocator.free(zip_bytes);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(zip_bytes, &digest, .{});
+    try putFile(io, fx.p("cache/api/cask_pad.json"), try std.fmt.allocPrint(a,
+        \\{{"token":"pad","name":["Pad"],"version":"2.0","url":"https://example.invalid/pad-2.0.zip","sha256":"{x}",
+        \\ "artifacts":[{{"app":["Pad.app"]}},{{"binary":["pad-cli"],"target":"$HOMEBREW_PREFIX/bin/pad"}}]}}
+    , .{digest}));
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = environ, .offline = true };
+    malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "pad" }) catch |e| {
+        std.debug.print("{s}\n", .{captured.items});
+        return e;
+    };
+
+    // The outgoing link is this cask's own, so the swap takes it over rather
+    // than refusing it, and the outgoing copy goes with the outgoing version.
+    try expectLinkInto(io, fx.p("bin/pad"), fx.p("Caskroom/pad/2.0/pad-cli"));
+    const helper = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("bin/pad"), 64);
+    defer testing.allocator.free(helper);
+    try testing.expectEqualStrings("2.0", helper);
+    const placed = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Applications/Pad.app/Contents/MacOS/pad"), 64);
+    defer testing.allocator.free(placed);
+    try testing.expectEqualStrings("2.0", placed);
+    try testing.expect(!exists(io, fx.p("Caskroom/pad/1.0")));
+    try testing.expect(!exists(io, fx.p("Caskroom/pad/2.0/Pad.app")));
+}
+
+test "the Caskroom copy holds only the entries the linked helpers need" {
+    var fx = try Fixture.init("copy_scope");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Pad.app"]},{"binary":["pad-cli"]},{"binary":["Extras/pad.sh"],"target":"pad-sh"}]}
+    );
+    defer c.deinit();
+
+    // A dmg volume's usual clutter beside the declared helpers.
+    try putFile(io, fx.p("extract/Pad.app/Contents/MacOS/pad"), "bin");
+    try putFile(io, fx.p("extract/pad-cli"), "cli");
+    try putFile(io, fx.p("extract/Extras/pad.sh"), "sh");
+    try putFile(io, fx.p("extract/Extras/Manual.pdf"), "pdf");
+    try putFile(io, fx.p("extract/Other.app/Contents/Info.plist"), "plist");
+    try putFile(io, fx.p("extract/.Trashes/x"), "x");
+    try std.Io.Dir.symLinkAbsolute(io, "/Applications", fx.p("extract/Applications"), .{});
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    const placed = try installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c);
+    defer testing.allocator.free(placed);
+    try installer.linkPlacedBinaries(&c, placed);
+
+    try expectLinkInto(io, fx.p("bin/pad-cli"), fx.p("Caskroom/pad/1.0/pad-cli"));
+    try expectLinkInto(io, fx.p("bin/pad-sh"), fx.p("Caskroom/pad/1.0/Extras/pad.sh"));
+    // The named entry comes whole; nothing else from the stage does.
+    try testing.expect(exists(io, fx.p("Caskroom/pad/1.0/Extras/Manual.pdf")));
+    try testing.expect(!exists(io, fx.p("Caskroom/pad/1.0/Pad.app")));
+    try testing.expect(!exists(io, fx.p("Caskroom/pad/1.0/Other.app")));
+    try testing.expect(!exists(io, fx.p("Caskroom/pad/1.0/.Trashes")));
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("Caskroom/pad/1.0/Applications"), &buf));
+}
+
+test "a bundle reached through a stage symlink is never deleted from where the link points" {
+    var fx = try Fixture.init("symlink_bundle");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // A nested `app` name whose first component the archive plants as a
+    // symlink to a directory the user owns.
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Applications/Victim.app"]},{"binary":["pad-cli"]}]}
+    );
+    defer c.deinit();
+
+    try putFile(io, fx.p("victim/Victim.app/Contents/MacOS/victim"), "precious");
+    try putFile(io, fx.p("extract/pad-cli"), "cli");
+    try std.Io.Dir.symLinkAbsolute(io, fx.p("victim"), fx.p("extract/Applications"), .{});
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    const placed = try installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c);
+    defer testing.allocator.free(placed);
+    try installer.linkPlacedBinaries(&c, placed);
+
+    try testing.expect(exists(io, fx.p("victim/Victim.app/Contents/MacOS/victim")));
+    try expectLinkInto(io, fx.p("bin/pad-cli"), fx.p("Caskroom/pad/1.0/pad-cli"));
+}
+
+test "a tarball bundle reached through an archive symlink is left in place, not deleted through it" {
+    var fx = try Fixture.init("symlink_tar");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.tar.gz","sha256":"no_check",
+        \\ "artifacts":[{"app":["Applications/Pad.app"]}]}
+    );
+    defer c.deinit();
+
+    try putFile(io, fx.p("src/Real/Pad.app/Contents/MacOS/pad"), "bin");
+    {
+        // A relative link, as an archive carries it.
+        var src_dir = try std.Io.Dir.openDirAbsolute(io, fx.p("src"), .{});
+        defer src_dir.close(io);
+        try src_dir.symLink(io, "Real", "Applications", .{});
+    }
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    try test_io.cwd().createDirPath(io, fx.p("Applications"));
+    const tgz = fx.p("cache/Cask/pad-1.0.tar.gz");
+    try runTool(&.{ "/usr/bin/tar", "-czf", tgz, "-C", fx.p("src"), "Real", "Applications" });
+
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.prefetched_artifact = tgz;
+    const app_path = try installer.install(&c);
+    defer testing.allocator.free(app_path);
+    try testing.expectEqualStrings("Pad.app", std.fs.path.basename(app_path));
+    // The duplicate under the Caskroom is only reclaimed when the name is a
+    // single component; a nested name could resolve through a symlink.
+    try testing.expect(exists(io, fx.p("Caskroom/pad/1.0/Real/Pad.app/Contents/MacOS/pad")));
+}
+
+test "a staged-relative binary inside the declared bundle links from the placed bundle" {
+    var fx = try Fixture.init("bundle_relative");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // The live shape of a CLI shipped as a bundle: the source names the
+    // bundle by its staged name, not through `$APPDIR`.
+    var c = try cask.parseCask(testing.allocator,
+        \\{"token":"clean","name":["Clean"],"version":"5.0","url":"https://example.invalid/clean.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Clean.app"]},{"binary":["Clean.app/Contents/MacOS/clean",{"target":"cmm"}]}]}
+    );
+    defer c.deinit();
+
+    try putFile(io, fx.p("extract/Clean.app/Contents/MacOS/clean"), "bin");
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    const placed = try installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c);
+    defer testing.allocator.free(placed);
+    try installer.linkPlacedBinaries(&c, placed);
+
+    try expectLinkInto(io, fx.p("bin/cmm"), fx.p("Applications/Clean.app/Contents/MacOS/clean"));
+    try testing.expect(!exists(io, fx.p("Caskroom/clean/5.0/Clean.app")));
+}
+
+test "a binary-only cask whose archive holds an app rolls back to its links, not to a bundle" {
+    var fx = try Fixture.init("binary_stray_app_rollback");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // The live shape: a CLI whose archive root is a `.app` the cask never
+    // declares, with every binary inside it.
+    try putFile(io, fx.p("stage/Tool.app/Contents/MacOS/tool"), "1.0");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    try test_io.cwd().createDirPath(io, fx.p("Applications"));
+    const zip = fx.p("cache/Cask/tool-1.0.zip");
+    try runTool(&.{ "/usr/bin/ditto", "-c", "-k", fx.p("stage"), zip });
+    const zip_bytes = try test_io.readFileAbsoluteAlloc(io, testing.allocator, zip, 1 << 20);
+    defer testing.allocator.free(zip_bytes);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(zip_bytes, &digest, .{});
+    const json = try std.fmt.allocPrint(testing.allocator,
+        \\{{"token":"tool","name":["Tool"],"version":"1.0","url":"https://example.invalid/tool.zip","sha256":"{x}",
+        \\ "artifacts":[{{"binary":["Tool.app/Contents/MacOS/tool"]}}]}}
+    , .{digest});
+    defer testing.allocator.free(json);
+    var c = try cask.parseCask(testing.allocator, json);
+    defer c.deinit();
+
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.prefetched_artifact = zip;
+    const app_path = try installer.install(&c);
+    defer testing.allocator.free(app_path);
+    try testing.expectEqualStrings(fx.p("bin/tool"), app_path);
+    try cask.recordInstall(&db, &c, app_path, null);
+    try db.exec("UPDATE casks SET version = '2.0' WHERE token = 'tool';");
+
+    // The record says this cask links binaries; the stage's `.app` must not
+    // turn the rollback into a bundle install that drops every link.
+    installer.prefetched_artifact = null;
+    try installer.reinstallFromHistory("tool", "1.0");
+    try expectLinkInto(io, fx.p("bin/tool"), fx.p("Caskroom/tool/1.0/Tool.app/Contents/MacOS/tool"));
+    try testing.expect(!exists(io, fx.p("Applications/Tool.app")));
+    const info = cask.lookupInstalled(&db, "tool") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(fx.p("bin/tool"), info.appPath().?);
+}
+
+test "a successful rollback reclaims the outgoing version's Caskroom dir" {
+    var fx = try Fixture.init("rollback_reclaim");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try putFile(io, fx.p("stage/Pad.app/Contents/MacOS/pad"), "1.0");
+    try putFile(io, fx.p("stage/pad-cli"), "1.0");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    try test_io.cwd().createDirPath(io, fx.p("Applications"));
+    const zip = fx.p("cache/Cask/pad-1.0.zip");
+    try runTool(&.{ "/usr/bin/ditto", "-c", "-k", fx.p("stage"), zip });
+    const zip_bytes = try test_io.readFileAbsoluteAlloc(io, testing.allocator, zip, 1 << 20);
+    defer testing.allocator.free(zip_bytes);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(zip_bytes, &digest, .{});
+    const json = try std.fmt.allocPrint(testing.allocator,
+        \\{{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.zip","sha256":"{x}",
+        \\ "artifacts":[{{"app":["Pad.app"]}},{{"binary":["pad-cli"],"target":"$HOMEBREW_PREFIX/bin/pad"}}]}}
+    , .{digest});
+    defer testing.allocator.free(json);
+    var c = try cask.parseCask(testing.allocator, json);
+    defer c.deinit();
+
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.prefetched_artifact = zip;
+    const app_path = try installer.install(&c);
+    defer testing.allocator.free(app_path);
+    try cask.recordInstall(&db, &c, app_path, null);
+    // 2.0 as an install left it: its own Caskroom copy and the row.
+    try putFile(io, fx.p("Caskroom/pad/2.0/pad-cli"), "2.0");
+    try db.exec("UPDATE casks SET version = '2.0' WHERE token = 'pad';");
+
+    // The cached artefact is what a roll-forward re-installs from, so the
+    // outgoing copy has nothing left to serve.
+    installer.prefetched_artifact = null;
+    try installer.reinstallFromHistory("pad", "1.0");
+    try testing.expect(!exists(io, fx.p("Caskroom/pad/2.0")));
+    try expectLinkInto(io, fx.p("bin/pad"), fx.p("Caskroom/pad/1.0/pad-cli"));
 }

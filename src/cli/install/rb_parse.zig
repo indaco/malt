@@ -414,16 +414,29 @@ pub fn extractQuoted(line: []const u8, prefix: []const u8) ?[]const u8 {
 /// Homebrew's cask DSL promotes that file to `$PREFIX/bin/<name>`, so
 /// tap casks whose archive binary does not match the cask token
 /// (e.g. `longbridge-terminal` ships a `longbridge` binary) need this
-/// override to land a working symlink. Returns null for formulas or
-/// casks that omit the directive. Anchored to the trimmed line start
-/// so a stray mention in a comment or `desc` string does not match.
+/// override to land a working symlink. A `#{staged_path}/` prefix is
+/// dropped: the API renders that source relative, and so does malt.
+/// Returns null for formulas or casks that omit the directive.
 pub fn parseCaskBinary(rb_content: []const u8) ?[]const u8 {
+    const line = caskBinaryLine(rb_content) orelse return null;
+    const source = extractQuoted(line, "binary \"") orelse return null;
+    const staged = "#{staged_path}/";
+    return if (std.mem.startsWith(u8, source, staged)) source[staged.len..] else source;
+}
+
+/// The `target: "<name>"` sibling on the `binary` line, or null.
+pub fn parseCaskBinaryTarget(rb_content: []const u8) ?[]const u8 {
+    const line = caskBinaryLine(rb_content) orelse return null;
+    return extractQuoted(line, "target: \"");
+}
+
+/// Anchored to the trimmed line start so a stray mention in a comment
+/// or `desc` string does not match.
+fn caskBinaryLine(rb_content: []const u8) ?[]const u8 {
     var it = std.mem.splitScalar(u8, rb_content, '\n');
     while (it.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len == 0) continue;
-        if (!std.mem.startsWith(u8, line, "binary \"")) continue;
-        if (extractQuoted(line, "binary \"")) |b| return b;
+        if (std.mem.startsWith(u8, line, "binary \"")) return line;
     }
     return null;
 }
@@ -620,6 +633,45 @@ test "parseCaskBinary: returns null on formulas with no binary directive" {
         \\end
     ;
     try std.testing.expect(parseCaskBinary(rb) == null);
+}
+
+test "parseCaskBinary: a staged_path source is returned relative, the API form" {
+    const rb =
+        \\cask "textadept" do
+        \\  app "Textadept.app"
+        \\  binary "#{staged_path}/ta"
+        \\end
+    ;
+    try std.testing.expectEqualStrings("ta", parseCaskBinary(rb).?);
+}
+
+test "parseCaskBinary: an appdir source is returned as spelled, for the serializer to translate" {
+    const rb =
+        \\cask "zed" do
+        \\  app "Zed.app"
+        \\  binary "#{appdir}/Zed.app/Contents/MacOS/cli", target: "zed"
+        \\end
+    ;
+    try std.testing.expectEqualStrings("#{appdir}/Zed.app/Contents/MacOS/cli", parseCaskBinary(rb).?);
+}
+
+test "parseCaskBinaryTarget: reads the target sibling off the binary line" {
+    const rb =
+        \\cask "zed" do
+        \\  binary "#{appdir}/Zed.app/Contents/MacOS/cli", target: "zed"
+        \\end
+    ;
+    try std.testing.expectEqualStrings("zed", parseCaskBinaryTarget(rb).?);
+}
+
+test "parseCaskBinaryTarget: null when the directive names no target" {
+    const rb =
+        \\cask "demo" do
+        \\  binary "longbridge"
+        \\  # target: "not this line"
+        \\end
+    ;
+    try std.testing.expect(parseCaskBinaryTarget(rb) == null);
 }
 
 test "parseCaskApp: extracts the .app bundle name" {
