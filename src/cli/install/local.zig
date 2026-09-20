@@ -76,6 +76,8 @@ pub const ResolvedRubyFormula = struct {
     /// `longbridge-terminal` cask ships a `longbridge` binary). Null
     /// for formulas and for casks that omit the directive.
     binary_name: ?[]const u8 = null,
+    /// The `target: "<name>"` of that directive, when it renames the link.
+    binary_target: ?[]const u8 = null,
     /// Cask DSL `app "<x>.app"` directive. Disambiguates `.zip` casks
     /// (which ship a bundle) from formula bottles (which ship a binary
     /// tree). Null for formulas and for casks that omit the directive.
@@ -431,6 +433,7 @@ fn installTapRb(
     // hits the right per-platform asset.
     var final_url_buf: [512]u8 = undefined;
     const final_url = args.interpolateUrl(&final_url_buf, rb.url, rb.version, rb.arch_token);
+    var binary_buf: [512]u8 = undefined;
 
     const resolved = ResolvedRubyFormula{
         .name = parts.formula,
@@ -440,7 +443,8 @@ fn installTapRb(
         .revision = rb.revision,
         .url = final_url,
         .sha256 = rb.sha256,
-        .binary_name = parseCaskBinary(resp.body),
+        .binary_name = resolvedCaskBinary(&binary_buf, resp.body, rb.version, rb.arch_token),
+        .binary_target = rb_parse.parseCaskBinaryTarget(resp.body),
         .app_name = parseCaskApp(resp.body),
         .dependencies = deps,
         .recommended = recommended,
@@ -1318,6 +1322,19 @@ fn materializeTapCask(
     // `downloadOnly` seam handles sha-verify against the archive
     // bytes; we stop before /Applications writes and DB inserts.
     if (download_only) {
+        // An upgrade prefetches through here before it removes the installed
+        // version, so a bin entry this cask cannot take over is refused now,
+        // while that version is still whole, as the core-API path does.
+        installer.checkLinkConflicts(&cask) catch |e| {
+            if (sp) |*s| s.bar.finish();
+            sink.err("Failed to prepare cask {s}: {s}", .{ cask.token, @errorName(e) });
+            if (installer.conflictPath()) |p| sink.err("{s} is not this cask's link; remove it first", .{p});
+            return switch (e) {
+                error.LinkConflict => InstallError.LinkFailed,
+                error.OutOfMemory => InstallError.RecordFailed,
+                else => InstallError.CaskNotFound,
+            };
+        };
         output.emitNdjsonEvent(.download_started, cask.token, null);
         const cache_path = installer.downloadOnly(&cask) catch |e| {
             if (sp) |*s| s.bar.finish();
@@ -1370,8 +1387,10 @@ fn materializeTapCask(
 
 /// Serialize a Homebrew-cask-API-shaped JSON document so the existing
 /// `parseCask` + `CaskInstaller` pipeline can consume a tap-DSL cask.
-/// `app` wins over `binary` when both directives appear because the
-/// `.app` bundle is what `installDmg`/`installZip` look up first.
+/// Both directives are emitted when both appear: the installer places the
+/// bundle and links the binary beside or inside it. The DSL's `#{appdir}`
+/// interpolation becomes the API's `$APPDIR`; any other `#{...}` is left
+/// to fail at resolution.
 fn buildSyntheticCaskJson(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
@@ -1392,16 +1411,44 @@ fn buildSyntheticCaskJson(
         try out.appendSlice(allocator, "{\"app\":[");
         try writeJsonString(allocator, out, app);
         try out.appendSlice(allocator, "]}");
-    } else if (resolved.binary_name) |bin| {
-        try out.appendSlice(allocator, "{\"binary\":[");
-        try writeJsonString(allocator, out, bin);
-        try out.appendSlice(allocator, "]}");
+    }
+    if (resolved.binary_name) |bin| {
+        if (resolved.app_name != null) try out.append(allocator, ',');
+        try out.appendSlice(allocator, "{\"binary\":[\"");
+        const appdir = "#{appdir}/";
+        if (std.mem.startsWith(u8, bin, appdir)) {
+            try out.appendSlice(allocator, "$APPDIR/");
+            try writeJsonBody(allocator, out, bin[appdir.len..]);
+        } else {
+            try writeJsonBody(allocator, out, bin);
+        }
+        try out.appendSlice(allocator, "\"]");
+        // A target that is not one `bin` entry is dropped, as it always was,
+        // rather than failing a cask that installed before.
+        if (resolved.binary_target) |t| if (path_component.isPathComponent(t)) {
+            try out.appendSlice(allocator, ",\"target\":\"$HOMEBREW_PREFIX/bin/");
+            try writeJsonBody(allocator, out, t);
+            try out.append(allocator, '"');
+        };
+        try out.append(allocator, '}');
     }
     try out.appendSlice(allocator, "]}");
 }
 
 fn writeJsonString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
     try out.append(allocator, '"');
+    try writeJsonBody(allocator, out, s);
+    try out.append(allocator, '"');
+}
+
+/// The cask's `binary` source with `#{version}` and `#{arch}` expanded the
+/// way the url is, so a helper in a versioned or per-arch dir resolves.
+fn resolvedCaskBinary(buf: []u8, rb_content: []const u8, version: []const u8, arch_token: []const u8) ?[]const u8 {
+    const raw = parseCaskBinary(rb_content) orelse return null;
+    return args.interpolateUrl(buf, raw, version, arch_token);
+}
+
+fn writeJsonBody(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
     for (s) |c| {
         switch (c) {
             '"' => try out.appendSlice(allocator, "\\\""),
@@ -1417,7 +1464,6 @@ fn writeJsonString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []c
             else => try out.append(allocator, c),
         }
     }
-    try out.append(allocator, '"');
 }
 
 /// Map `tap_mod` resolve errors to specific `InstallError` tags so the
@@ -1720,6 +1766,71 @@ test "finalizeTapCaskInstall stamps the owning tap when tap_registration is set"
     try std.testing.expect(try stmt.step());
     try std.testing.expectEqualStrings(sha, std.mem.sliceTo(stmt.columnText(0) orelse "", 0));
     try std.testing.expectEqualStrings("\"etag-abc\"", std.mem.sliceTo(stmt.columnText(1) orelse "", 0));
+}
+
+test "buildSyntheticCaskJson emits both the app and the binary a tap cask declares" {
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(std.testing.allocator);
+    try buildSyntheticCaskJson(std.testing.allocator, &json_buf, .{
+        .name = "zed",
+        .full_name = "zed-industries/zed/zed",
+        .tap_label = "zed-industries/zed",
+        .version = "0.1.0",
+        .url = "https://example.com/Zed.dmg",
+        .sha256 = "deadbeefcafe",
+        .app_name = "Zed.app",
+        .binary_name = "#{appdir}/Zed.app/Contents/MacOS/cli",
+        .binary_target = "zed",
+    });
+
+    // The API shape is what the installer understands: `$APPDIR/...` for a
+    // source inside the bundle, the target as a prefix bin path.
+    var cask = try cask_mod.parseCask(std.testing.allocator, json_buf.items);
+    defer cask.deinit();
+    try std.testing.expectEqualStrings("Zed.app", cask_mod.parseAppName(cask.parsed.value.object).?);
+    const entries = (try cask_mod.collectBinaryArtifacts(std.testing.allocator, cask.parsed.value.object)).?;
+    defer std.testing.allocator.free(entries);
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings("$APPDIR/Zed.app/Contents/MacOS/cli", entries[0].source);
+    try std.testing.expectEqualStrings("zed", entries[0].target.?);
+}
+
+test "a tap binary source carries the same interpolations as the url" {
+    // The GoReleaser layout: the helper sits in a versioned, per-arch dir.
+    const rb =
+        \\cask "foo" do
+        \\  version "1.2.3"
+        \\  app "Foo.app"
+        \\  binary "#{staged_path}/foo-#{version}-#{arch}/foo"
+        \\end
+    ;
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("foo-1.2.3-arm64/foo", resolvedCaskBinary(&buf, rb, "1.2.3", "arm64").?);
+    try std.testing.expect(resolvedCaskBinary(&buf, "cask \"x\" do\nend", "1", "arm64") == null);
+}
+
+test "buildSyntheticCaskJson keeps a binary-only tap cask and an unusable target as before" {
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(std.testing.allocator);
+    // A target that is not one bin entry is dropped rather than refused, so
+    // a tap cask that installed before keeps installing.
+    try buildSyntheticCaskJson(std.testing.allocator, &json_buf, .{
+        .name = "longbridge-terminal",
+        .full_name = "longbridge/tap/longbridge-terminal",
+        .tap_label = "longbridge/tap",
+        .version = "1.0",
+        .url = "https://example.com/lb.tar.gz",
+        .sha256 = "deadbeefcafe",
+        .binary_name = "longbridge",
+        .binary_target = "/usr/local/bin/lb",
+    });
+    var cask = try cask_mod.parseCask(std.testing.allocator, json_buf.items);
+    defer cask.deinit();
+    try std.testing.expect(cask_mod.parseAppName(cask.parsed.value.object) == null);
+    const entries = (try cask_mod.collectBinaryArtifacts(std.testing.allocator, cask.parsed.value.object)).?;
+    defer std.testing.allocator.free(entries);
+    try std.testing.expectEqualStrings("longbridge", entries[0].source);
+    try std.testing.expect(entries[0].target == null);
 }
 
 test "finalizeTapCaskInstall fails loud when the cask DB row cannot persist" {

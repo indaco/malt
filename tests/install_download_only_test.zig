@@ -1602,3 +1602,83 @@ test "a tap PKG cask upgrade refuses before its prefetch fills the slot" {
     ));
     try testing.expect(slot == null);
 }
+
+test "--download-only on a tap app cask refuses a bin entry the cask cannot take over" {
+    // The upgrade's prefetch pass runs this before it removes the installed
+    // version, so a link conflict must surface here, while that version is
+    // still whole, and before any bytes are fetched.
+    const prefix = try setupPrefix("tap_cask_conflict");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // A formula owns the name the cask's `binary` would take.
+    const formula_bin = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/zed/1.0/bin/zed", .{prefix});
+    defer testing.allocator.free(formula_bin);
+    try test_io.cwd().createDirPath(std.Options.debug_io, test_io.path.dirname(formula_bin).?);
+    {
+        const f = try test_io.cwd().createFile(std.Options.debug_io, formula_bin, .{});
+        f.close(std.Options.debug_io);
+    }
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/bin/zed", .{prefix});
+    defer testing.allocator.free(link);
+    try test_io.cwd().createDirPath(std.Options.debug_io, test_io.path.dirname(link).?);
+    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, formula_bin, link, .{});
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    // A host that never resolves: reaching the fetch would fail differently.
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "zed",
+        .full_name = "zed-industries/zed/zed",
+        .tap_label = "zed-industries/zed",
+        .version = "0.1.0",
+        .url = "https://malt-tap-test.invalid/Zed.zip",
+        .sha256 = "ee" ** 32,
+        .app_name = "Zed.app",
+        .binary_name = "$APPDIR/Zed.app/Contents/MacOS/cli",
+        .binary_target = "zed",
+    };
+    try testing.expectError(error.LinkFailed, malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix}),
+        false, // dry_run
+        false, // force
+        true, // download_only
+        null, // prefetch_slot
+        malt.install_sink.terminal,
+    ));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "is not this cask's link") != null);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.readLinkAbsolute(std.Options.debug_io, link, &buf);
+    try testing.expectEqualStrings(formula_bin, buf[0..n]);
+}
