@@ -1279,8 +1279,9 @@ fn upgradeRoutedTapCask(
         installer.prefetched_artifact = null;
         if (installer.reinstallFromHistory(token, installed_version)) |_| {
             output.warn("{s} {s} is back in place", .{ token, installed_version });
-        } else |re_err| {
-            output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, installed_version, @errorName(re_err), token, installed_version });
+        } else |re_err| switch (re_err) {
+            error.LinksIncomplete => output.warn("{s} {s} is back in place, but its command-line links could not be created", .{ token, installed_version }),
+            else => output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, installed_version, @errorName(re_err), token, installed_version }),
         }
         return error.Aborted;
     };
@@ -1651,6 +1652,16 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     };
     if (stored) |*s| flight.runUninstallMode(&installer, token, old_version, s, install_sink_mod.terminal);
 
+    // A bin entry the new version cannot take over is refused while the
+    // old version is still whole; after the uninstall the fallback below
+    // would hit the same refusal.
+    installer.checkLinkConflicts(&parsed_cask) catch |e| {
+        db.rollback();
+        output.err("Cannot upgrade {s}: {s}", .{ token, @errorName(e) });
+        if (installer.conflictPath()) |p| output.err("{s} is not this cask's link; remove it first", .{p});
+        return error.Aborted;
+    };
+
     installer.uninstall(token) catch |un_err| {
         db.rollback();
         if (un_err == error.AppRunning) {
@@ -1674,14 +1685,21 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
             "Failed to install new version of {s}: {s}",
             .{ token, @errorName(in_err) },
         );
+        if (installer.conflictPath()) |p| output.err("{s} is not this cask's link; remove it first", .{p});
         // The rollback restores the rows; the bundle it points at is gone,
         // so put the old version back from its retained history.
         db.rollback();
         installer.prefetched_artifact = null;
+        // A version installed before the sidecar existed has no record of
+        // its binaries; the current stanzas are the closest stand-in.
+        const stand_in = cask_mod.linkedBinaryStanzas(allocator, parsed_cask.parsed.value.object) catch null;
+        defer if (stand_in) |entries| allocator.free(entries);
+        installer.binary_entries_override = stand_in;
         if (installer.reinstallFromHistory(token, old_version)) |_| {
             output.warn("{s} {s} is back in place", .{ token, old_version });
-        } else |re_err| {
-            output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, old_version, @errorName(re_err), token, old_version });
+        } else |re_err| switch (re_err) {
+            error.LinksIncomplete => output.warn("{s} {s} is back in place, but its command-line links could not be created", .{ token, old_version }),
+            else => output.err("{s} {s} could not be reinstalled ({s}); run `mt rollback {s} --to {s}`", .{ token, old_version, @errorName(re_err), token, old_version }),
         }
         return error.Aborted;
     };

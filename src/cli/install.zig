@@ -1730,6 +1730,7 @@ fn installCask(
         // Surface the specific cause (Sha256Mismatch, DownloadFailed, …) —
         // users can't act on a bare "failed to install".
         sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
+        if (installer.conflictPath()) |p| sink.err("{s} is not this cask's link; remove it first", .{p});
         return InstallError.CaskNotFound;
     };
 

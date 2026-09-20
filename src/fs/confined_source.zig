@@ -105,7 +105,8 @@ fn openCanonicalDirNoFollow(io: std.Io, path: []const u8) !std.Io.Dir {
     return dir;
 }
 
-fn pathHasPrefix(path: []const u8, prefix: []const u8) bool {
+/// Prefix match on a path boundary: `/a/b` is under `/a`, `/a/bc` is not.
+pub fn pathHasPrefix(path: []const u8, prefix: []const u8) bool {
     if (prefix.len == 0 or !std.mem.startsWith(u8, path, prefix)) return false;
     return path.len == prefix.len or prefix[prefix.len - 1] == '/' or path[prefix.len] == '/';
 }

@@ -9,6 +9,7 @@
 const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
 const bytes = @import("../../ui/bytes.zig");
+const cask_mod = @import("../../core/cask.zig");
 
 pub const Entry = struct {
     token: []const u8,
@@ -114,7 +115,7 @@ fn perVersionFootprint(
         total += pathSize(io, allocator, caskroom_path);
     } else |_| {}
 
-    for ([_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz" }) |ext| {
+    for (cask_mod.cache_extensions ++ cask_mod.sidecar_extensions) |ext| {
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/Cask/{s}-{s}{s}", .{ cache_dir, token, version, ext }) catch continue;
         if (std.Io.Dir.cwd().statFile(io, cache_path, .{})) |st| {
             total += st.size;

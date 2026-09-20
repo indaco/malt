@@ -460,9 +460,14 @@ fn dispatchCask(
         if (!flight.runPhase(&installer, token, cur, s.get(.uninstall_preflight), .uninstall_preflight, install_sink_mod.terminal)) return error.Aborted;
         flight.runUninstallMode(&installer, token, cur, s, install_sink_mod.terminal);
     };
-    installer.reinstallFromHistory(token, target_pkg_version) catch |e| {
-        output.err("failed to reinstall {s} {s} ({s})", .{ token, target_pkg_version, @errorName(e) });
-        return error.Aborted;
+    installer.reinstallFromHistory(token, target_pkg_version) catch |e| switch (e) {
+        // The version is back and recorded; only its links are missing.
+        error.LinksIncomplete => output.warn("{s} {s} is in place, but its command-line links could not be created", .{ token, target_pkg_version }),
+        else => {
+            output.err("failed to reinstall {s} {s} ({s})", .{ token, target_pkg_version, @errorName(e) });
+            if (installer.conflictPath()) |p| output.err("{s} is not this cask's link; remove it first", .{p});
+            return error.Aborted;
+        },
     };
     if (stored) |*s| if (cur_ver_opt) |cur| {
         _ = flight.runPhase(&installer, token, cur, s.get(.uninstall_postflight), .uninstall_postflight, install_sink_mod.terminal);

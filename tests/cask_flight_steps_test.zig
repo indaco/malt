@@ -476,6 +476,72 @@ test "a tarball preflight that fails leaves no Caskroom dir behind" {
     try testing.expect(!cask.isInstalled(&db, "tarcask"));
 }
 
+test "a tarball that yields neither a binary nor an app leaves no Caskroom dir behind" {
+    // Same stage-is-the-Caskroom shape as the preflight case above, but the
+    // failure comes after extraction: a rollback of a version whose stanzas
+    // are not on record, or a payload without the promised executable.
+    var fx = try Fixture.init("tar_no_artifact");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try putFile(io, fx.p("src/README"), "no executable here");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    const tgz = fx.p("cache/Cask/tarcask-1.tar.gz");
+    try runTar(&.{ "/usr/bin/tar", "-czf", tgz, "-C", fx.p("src"), "README" });
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCaskWithMajor(testing.allocator,
+        \\{"token":"tarcask","name":["Tar"],"version":"1","url":"https://example.invalid/t.tar.gz","sha256":"no_check"}
+    , null);
+    defer c.deinit();
+
+    var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.prefetched_artifact = tgz;
+
+    try testing.expectError(cask.CaskError.InstallFailed, installer.install(&c));
+    try testing.expect(!exists(io, fx.p("Caskroom/tarcask")));
+}
+
+test "a tarball app cask whose declared binary is missing leaves no Caskroom dir behind" {
+    // The tarball stage is the Caskroom version dir and stays after the
+    // bundle is promoted, so a link failure one frame up must reclaim it.
+    var fx = try Fixture.init("tar_appdir_partial");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try putFile(io, fx.p("src/Editor.app/Contents/MacOS/editor"), "bin");
+    try test_io.cwd().createDirPath(io, fx.p("cache/Cask"));
+    try test_io.cwd().createDirPath(io, fx.p("tmp"));
+    try test_io.cwd().createDirPath(io, fx.p("Applications"));
+    const tgz = fx.p("cache/Cask/editor-1.tar.gz");
+    try runTar(&.{ "/usr/bin/tar", "-czf", tgz, "-C", fx.p("src"), "Editor.app" });
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCaskWithMajor(testing.allocator,
+        \\{"token":"editor","name":["Editor"],"version":"1","url":"https://example.invalid/e.tar.gz","sha256":"no_check",
+        \\ "artifacts":[{"app":["Editor.app"]},{"binary":["$APPDIR/Editor.app/Contents/MacOS/missing"],"target":"missing"}]}
+    , null);
+    defer c.deinit();
+
+    var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.offline = true;
+    installer.prefetched_artifact = tgz;
+
+    try testing.expectError(cask.CaskError.InstallFailed, installer.install(&c));
+    try testing.expect(!exists(io, fx.p("Applications/Editor.app")));
+    try testing.expect(!exists(io, fx.p("Caskroom/editor")));
+}
+
 test "a cask that declares a preflight cannot install through a path with no flight sink" {
     // Every installer site must wire the sink; a silent pass here would let
     // upgrade or a tap install skip the gate the cask declared.
