@@ -210,6 +210,10 @@ test "re-registering rewrites the plist but keeps the row's user-intent columns"
     try testing.expect(std.mem.indexOf(u8, buf[0..n], "<key>ExitTimeOut</key>\n    <integer>90</integer>") != null);
 }
 
+test "stopGrace is null for a label launchd has never heard of" {
+    try testing.expect(supervisor.stopGrace(std.Options.debug_io, testing.allocator, "com.malt.test.never-bootstrapped") == null);
+}
+
 test "register writes an interval plist with StartInterval and RunAtLoad false" {
     var fx = try Fixture.init("interval");
     defer fx.deinit();

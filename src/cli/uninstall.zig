@@ -9,6 +9,7 @@ const schema_report = @import("schema_report.zig");
 const atomic = @import("../fs/atomic.zig");
 const symlink = @import("../fs/symlink.zig");
 const output = @import("../ui/output.zig");
+const services_mod = @import("services.zig");
 const lock_mod = @import("../db/lock.zig");
 const linker = @import("../core/linker.zig");
 const cellar = @import("../core/cellar.zig");
@@ -126,6 +127,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Stop and unregister any associated launchd service before tearing down
     // files. The service name we register matches the formula name.
+    services_mod.announceStop(ctx.io, allocator, &db, name);
     supervisor_mod.stopAndUnregister(.{ .allocator = allocator, .io = ctx.io, .db = &db }, name);
 
     // Unlink symlinks
