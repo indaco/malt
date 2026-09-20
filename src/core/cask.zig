@@ -693,29 +693,22 @@ const appdir_var = "$APPDIR/";
 /// column, so the extra links need their own record for uninstall.
 pub const LINKS_MANIFEST_NAME = ".malt-links";
 
-/// The `binary` stanzas an install of this cask links: an app cask links
-/// its `$APPDIR` binaries and nothing else, so handing its other stanzas to
-/// a rollback would send it down the binary-only branch and lose the
-/// bundle. Caller owns the slice; null when nothing would be linked.
-pub fn linkedBinaryStanzas(alloc: std.mem.Allocator, obj: std.json.ObjectMap) !?[]BinaryEntry {
-    const entries = (try collectBinaryArtifacts(alloc, obj)) orelse return null;
-    if (parseAppName(obj) == null) return entries;
-    defer alloc.free(entries);
-    var linked: std.ArrayList(BinaryEntry) = .empty;
-    errdefer linked.deinit(alloc);
-    for (entries) |e| if (std.mem.startsWith(u8, e.source, appdir_var)) try linked.append(alloc, e);
-    if (linked.items.len == 0) {
-        linked.deinit(alloc);
-        return null;
-    }
-    return try linked.toOwnedSlice(alloc);
-}
-
 /// True when any stanza links from the Caskroom copy rather than from a
-/// placed bundle; that is what makes a cask "binary-only".
+/// placed bundle: a binary-only cask links everything from there, an app
+/// cask keeps a copy of its stage for these.
 fn hasCaskroomBinary(entries: []const BinaryEntry) bool {
     for (entries) |e| if (!std.mem.startsWith(u8, e.source, appdir_var)) return true;
     return false;
+}
+
+/// A source the Caskroom copy of the stage must hold: neither inside the
+/// placed bundle nor an explicit prefix path.
+fn linksFromCaskroom(source: []const u8) bool {
+    return !std.mem.startsWith(u8, source, appdir_var) and !std.mem.startsWith(u8, source, homebrew_prefix_var);
+}
+
+fn firstComponent(path: []const u8) []const u8 {
+    return path[0 .. std.mem.indexOfScalar(u8, path, '/') orelse path.len];
 }
 
 /// The link name a `binary` target denotes, or null when it names anywhere
@@ -1033,13 +1026,15 @@ pub const CaskInstaller = struct {
         };
         errdefer self.allocator.free(app_path);
 
-        // The command-line tools an app cask ships inside its bundle are
-        // linked once the bundle is in place, whatever container it came in.
-        // A pkg places its own files and a font cask places no bundle, so
-        // neither has anything of ours to link from.
+        // An app cask's helpers are linked once its bundle is in place,
+        // whatever container it came in. A pkg, a font cask and a binary-only
+        // cask (which returns its first link) have nothing left to link.
+        var bin_dir_buf: [512]u8 = undefined;
+        const bin_dir = std.fmt.bufPrint(&bin_dir_buf, "{s}/bin/", .{self.prefix}) catch return CaskError.InstallFailed;
         const placed_bundle = artifact_type != .pkg and
-            !std.mem.eql(u8, std.fs.path.basename(app_path), cask_font.MANIFEST_NAME);
-        if (placed_bundle) self.linkAppDirBinaries(cask, app_path) catch |e| {
+            !std.mem.eql(u8, std.fs.path.basename(app_path), cask_font.MANIFEST_NAME) and
+            !std.mem.startsWith(u8, app_path, bin_dir);
+        if (placed_bundle) self.linkPlacedBinaries(cask, app_path) catch |e| {
             if (self.restoring) {
                 // The stanzas were recorded or guessed for a bundle that may
                 // differ from this one; the bundle stays, the gap is named.
@@ -1101,7 +1096,7 @@ pub const CaskInstaller = struct {
     /// upgrade can ask before it removes the old version.
     pub fn checkLinkConflicts(self: *CaskInstaller, cask: *const Cask) CaskError!void {
         // Only the stanzas the install will link are screened: a pkg and a
-        // font cask link none, an app cask only its `$APPDIR` ones.
+        // font cask link none.
         const obj = cask.parsed.value.object;
         if ((self.artifact_type_override orelse artifactTypeFromUrl(cask.url)) == .pkg) return;
         if (try cask_font.collectFontArtifacts(self.allocator, obj)) |fonts| {
@@ -1111,7 +1106,7 @@ pub const CaskInstaller = struct {
         const entries = if (self.binary_entries_override) |o|
             try self.allocator.dupe(BinaryEntry, o)
         else
-            (try linkedBinaryStanzas(self.allocator, obj)) orelse return;
+            (try collectBinaryArtifacts(self.allocator, obj)) orelse return;
         defer self.allocator.free(entries);
         // Stays set for the link pass that follows; `install` clears it.
         self.recorded_bundle = lookupInstalled(self.db, cask.token);
@@ -1425,6 +1420,14 @@ pub const CaskInstaller = struct {
             const keep = if (new_manifest.len == 0) null else cask_font.readManifest(self.io, self.allocator, new_manifest) catch null;
             defer if (keep) |k| self.allocator.free(k);
             self.removeOwnedLinks(token, cur.version(), cur.appPath(), keep);
+            // A roll-forward re-installs from the cached artefact, so the
+            // outgoing version's Caskroom dir has nothing left to serve.
+            if (!std.mem.eql(u8, cur.version(), row.version)) {
+                var out_buf: [512]u8 = undefined;
+                if (std.fmt.bufPrint(&out_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, token, cur.version() })) |outgoing| {
+                    std.Io.Dir.cwd().deleteTree(self.io, outgoing) catch {};
+                } else |_| {}
+            }
         }
         if (stored) |*s| for (std.enums.values(FlightPhase)) |phase| synthetic.flight_steps.set(phase, s.get(phase));
 
@@ -1557,22 +1560,11 @@ pub const CaskInstaller = struct {
             findAppInDir(self.io, mount_point, &app_name_buf) orelse
             return error.InstallFailed;
 
-        // Source and destination paths
-        var src_buf: [512]u8 = undefined;
-        const src_app = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ mount_point, app_name }) catch
-            return error.InstallFailed;
-
-        const dst_app = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ app_dir, app_name });
-        errdefer self.allocator.free(dst_app);
-
-        // existing app may not be present (fresh install).
-        std.Io.Dir.cwd().deleteTree(self.io, dst_app) catch {};
-
-        // Copy .app bundle using ditto (preserves resource forks, xattrs)
-        const ditto_argv = [_][]const u8{ system_tools.ditto, src_app, dst_app };
-        child_mod.runOrFail(self.io, self.allocator, &ditto_argv) catch return error.InstallFailed;
-
-        return dst_app;
+        // A helper beside the bundle is unmounted with the volume unless the
+        // stage is copied first.
+        const stanzas = try self.binaryStanzas(cask);
+        defer if (stanzas) |e| self.allocator.free(e);
+        return self.promoteBundle(mount_point, app_name, app_dir, cask, stanzas);
     }
 
     fn installZip(self: *CaskInstaller, zip_path: []const u8, app_dir: []const u8, cask: *const Cask) ![]const u8 {
@@ -1621,12 +1613,14 @@ pub const CaskInstaller = struct {
 
         // A bare executable and nothing else, as the tarball path already
         // handles. The stage is deleted on return, so the binary is kept
-        // under the Caskroom and linked from there. A cask that declares an
-        // `app` takes the bundle path below; the binaries inside its bundle
-        // are linked by `install` once the bundle is placed.
+        // under the Caskroom and linked from there. A cask that places a
+        // bundle takes the path below; `install` links its binaries once the
+        // bundle is placed.
         const stanzas = try self.binaryStanzas(cask);
         defer if (stanzas) |e| self.allocator.free(e);
-        if (parseAppName(cask.parsed.value.object) == null) if (stanzas) |entries| if (hasCaskroomBinary(entries)) {
+        var app_name_buf: [256]u8 = undefined;
+        const bundle_name = self.placedBundleName(cask, extract_dir, &app_name_buf);
+        if (bundle_name == null) if (stanzas) |entries| if (hasCaskroomBinary(entries)) {
             var caskroom_buf: [512]u8 = undefined;
             const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch
                 return error.InstallFailed;
@@ -1635,17 +1629,48 @@ pub const CaskInstaller = struct {
             errdefer self.wipeCaskroomVersion(cask);
             const copy_argv = [_][]const u8{ system_tools.ditto, extract_dir, caskroom_ver };
             child_mod.runOrFail(self.io, self.allocator, &copy_argv) catch return error.InstallFailed;
-            return (try self.linkStanzas(cask, caskroom_ver, .caskroom, entries)) orelse error.InstallFailed;
+            return (try self.linkStanzas(cask, null, caskroom_ver, entries)) orelse error.InstallFailed;
         };
 
-        // Find the .app. app_name_buf owns the fallback past iterator teardown.
-        var app_name_buf: [256]u8 = undefined;
-        const app_name = parseAppName(cask.parsed.value.object) orelse
+        const app_name = bundle_name orelse
             findAppInDir(self.io, extract_dir, &app_name_buf) orelse
             return error.InstallFailed;
+        return self.promoteBundle(extract_dir, app_name, app_dir, cask, stanzas);
+    }
+
+    /// The bundle this install places, when known before the stage is read:
+    /// the one the cask declares, or on a rollback (whose synthetic cask
+    /// declares nothing) the one the stage holds - but only when the row
+    /// says the outgoing version placed a bundle. A binary-only cask's
+    /// archive may carry a `.app` that was never meant to be installed.
+    fn placedBundleName(self: *CaskInstaller, cask: *const Cask, stage: []const u8, buf: []u8) ?[]const u8 {
+        if (parseAppName(cask.parsed.value.object)) |name| return name;
+        if (!self.restoring) return null;
+        if (lookupInstalled(self.db, cask.token)) |*cur| {
+            var bin_buf: [512]u8 = undefined;
+            const bin_dir = std.fmt.bufPrint(&bin_buf, "{s}/bin/", .{self.prefix}) catch return null;
+            if (std.mem.startsWith(u8, cur.appPath() orelse "", bin_dir)) return null;
+        }
+        return findAppInDir(self.io, stage, buf);
+    }
+
+    /// Copy `<stage>/<app_name>` to `<app_dir>/<app_name>`, keeping under
+    /// the Caskroom whatever the `binary` stanzas link from the stage.
+    /// Returns the placed bundle path, owned by the caller.
+    fn promoteBundle(
+        self: *CaskInstaller,
+        stage: []const u8,
+        app_name: []const u8,
+        app_dir: []const u8,
+        cask: *const Cask,
+        stanzas: ?[]const BinaryEntry,
+    ) ![]const u8 {
+        // Before the bundle moves, so a failed copy leaves nothing placed.
+        const kept_copy = try self.keepStageCopy(cask, stage, app_name, stanzas orelse &.{});
+        errdefer if (kept_copy) self.wipeCaskroomVersion(cask);
 
         var src_buf: [512]u8 = undefined;
-        const src_app = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ extract_dir, app_name }) catch
+        const src_app = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ stage, app_name }) catch
             return error.InstallFailed;
 
         const dst_app = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ app_dir, app_name });
@@ -1654,11 +1679,62 @@ pub const CaskInstaller = struct {
         // existing app may not be present.
         std.Io.Dir.cwd().deleteTree(self.io, dst_app) catch {};
 
-        // Move .app to /Applications
-        const mv_argv = [_][]const u8{ system_tools.ditto, src_app, dst_app };
-        child_mod.runOrFail(self.io, self.allocator, &mv_argv) catch return error.InstallFailed;
-
+        // Copy .app bundle using ditto (preserves resource forks, xattrs)
+        const ditto_argv = [_][]const u8{ system_tools.ditto, src_app, dst_app };
+        child_mod.runOrFail(self.io, self.allocator, &ditto_argv) catch return error.InstallFailed;
         return dst_app;
+    }
+
+    /// Copy the top-level stage entries the caskroom-rooted stanzas live
+    /// under to `Caskroom/<token>/<version>`: the root a relative `binary`
+    /// source resolves against once the zip stage is deleted or the dmg
+    /// detached. Only those entries, never the whole stage: the bundle is
+    /// linked from where it lands, a dmg volume carries dot-directories no
+    /// stanza names, and a symlinked entry can host no link source. Nothing
+    /// is deleted inside the copy, so a planted symlink cannot redirect a
+    /// removal. Returns whether a copy was made.
+    fn keepStageCopy(self: *CaskInstaller, cask: *const Cask, stage: []const u8, app_name: []const u8, entries: []const BinaryEntry) !bool {
+        var caskroom_buf: [512]u8 = undefined;
+        const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch
+            return error.InstallFailed;
+        const bundle_top = firstComponent(app_name);
+        var copied = false;
+        errdefer if (copied) self.wipeCaskroomVersion(cask);
+        for (entries) |e| {
+            if (!linksFromCaskroom(e.source)) continue;
+            var top_buf: [256]u8 = undefined;
+            const top = try self.stageEntryOf(stage, e.source, &top_buf);
+            if (std.mem.eql(u8, top, bundle_top)) continue;
+            var dst_buf: [512]u8 = undefined;
+            const dst = std.fmt.bufPrint(&dst_buf, "{s}/{s}", .{ caskroom_ver, top }) catch return error.InstallFailed;
+            if (std.Io.Dir.accessAbsolute(self.io, dst, .{})) |_| continue else |_| {}
+            var src_buf: [512]u8 = undefined;
+            const src = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ stage, top }) catch return error.InstallFailed;
+            const st = std.Io.Dir.cwd().statFile(self.io, src, .{ .follow_symlinks = false }) catch return error.InstallFailed;
+            if (st.kind == .sym_link) return error.InstallFailed;
+            if (!copied) {
+                std.Io.Dir.cwd().createDirPath(self.io, caskroom_ver) catch return error.InstallFailed;
+                copied = true;
+            }
+            const copy_argv = [_][]const u8{ system_tools.ditto, src, dst };
+            child_mod.runOrFail(self.io, self.allocator, &copy_argv) catch return error.InstallFailed;
+        }
+        return copied;
+    }
+
+    /// The top-level stage entry a caskroom-rooted source lives under: its
+    /// first component, or for a bare name the first component of where
+    /// the stage holds it. A name the stage lacks is the missing helper
+    /// `install` refuses to ship without.
+    fn stageEntryOf(self: *CaskInstaller, stage: []const u8, source: []const u8, buf: []u8) ![]const u8 {
+        if (std.mem.indexOfScalar(u8, source, '/') != null) return firstComponent(source);
+        const found = (findFileInTree(self.io, self.allocator, stage, source) catch null) orelse return error.InstallFailed;
+        defer self.allocator.free(found);
+        const rel = found[stage.len + 1 ..];
+        const top = firstComponent(rel);
+        if (top.len > buf.len) return error.InstallFailed;
+        @memcpy(buf[0..top.len], top);
+        return buf[0..top.len];
     }
 
     /// Font branch of the zip dispatch. Wires the installer's environ,
@@ -1725,13 +1801,10 @@ pub const CaskInstaller = struct {
         return std.fmt.bufPrint(buf, "{s}/Cask/{s}-{s}{s}", .{ self.cache_dir, token, version, ext });
     }
 
-    /// Record only the stanzas this install linked, so a rollback re-drives
-    /// the same branch. Rollback's own override is recorded back as-is.
+    /// Record the stanzas this install linked, so a rollback re-links them
+    /// offline. Rollback's own override is recorded back as-is.
     fn writeLinkedBinarySpec(self: *CaskInstaller, cask: *const Cask) !void {
-        const entries = if (self.binary_entries_override) |o|
-            try self.allocator.dupe(BinaryEntry, o)
-        else
-            (try linkedBinaryStanzas(self.allocator, cask.parsed.value.object)) orelse return;
+        const entries = (try self.binaryStanzas(cask)) orelse return;
         defer self.allocator.free(entries);
         if (entries.len != 0) try self.writeSpec(cask.token, cask.version, ".binaries", entries);
     }
@@ -1861,13 +1934,16 @@ pub const CaskInstaller = struct {
 
         const stanzas = try self.binaryStanzas(cask);
         defer if (stanzas) |e| self.allocator.free(e);
-        if (stanzas) |entries| if (hasCaskroomBinary(entries))
-            return (try self.linkStanzas(cask, caskroom_ver, .caskroom, entries)) orelse error.InstallFailed;
+        var app_name_buf: [256]u8 = undefined;
+        const bundle_name = self.placedBundleName(cask, caskroom_ver, &app_name_buf);
+        if (bundle_name == null) if (stanzas) |entries| if (hasCaskroomBinary(entries))
+            return (try self.linkStanzas(cask, null, caskroom_ver, entries)) orelse error.InstallFailed;
 
         // Fallback: .app inside a tar.gz (uncommon but valid). Reuse the
-        // zip path's "promote .app to app_dir" shape.
-        var app_name_buf: [256]u8 = undefined;
-        const app_name = parseAppName(cask.parsed.value.object) orelse
+        // zip path's "promote .app to app_dir" shape; the stage already is
+        // the Caskroom dir, so a helper beside the bundle links from there
+        // without a copy.
+        const app_name = bundle_name orelse
             findAppInDir(self.io, caskroom_ver, &app_name_buf) orelse
             return error.InstallFailed;
 
@@ -1882,6 +1958,11 @@ pub const CaskInstaller = struct {
         std.Io.Dir.cwd().deleteTree(self.io, dst_app) catch {};
         const mv_argv = [_][]const u8{ system_tools.ditto, src_app, dst_app };
         child_mod.runOrFail(self.io, self.allocator, &mv_argv) catch return error.InstallFailed;
+        // The duplicate bundle under the Caskroom is only wasted disk, so
+        // reclaiming it never fails an install whose bundle is in place. A
+        // nested name is left alone: its parent could be an archive symlink
+        // and the removal would follow it.
+        if (std.mem.indexOfScalar(u8, app_name, '/') == null) std.Io.Dir.cwd().deleteTree(self.io, src_app) catch {};
         return dst_app;
     }
 
@@ -1892,20 +1973,25 @@ pub const CaskInstaller = struct {
         return collectBinaryArtifacts(self.allocator, cask.parsed.value.object);
     }
 
-    /// Link the `$APPDIR/...` binaries of an app cask from the bundle just
-    /// placed at `app_path`. Other stanza shapes are left to the binary-only
-    /// branches. Public so the pass is testable without ditto.
-    pub fn linkAppDirBinaries(self: *CaskInstaller, cask: *const Cask, app_path: []const u8) !void {
+    /// Link every binary of an app cask once its bundle sits at `app_path`:
+    /// `$APPDIR/...` sources from the bundle, the rest from the Caskroom copy
+    /// of its stage. Public so the pass is testable without ditto.
+    pub fn linkPlacedBinaries(self: *CaskInstaller, cask: *const Cask, app_path: []const u8) !void {
         const entries = (try self.binaryStanzas(cask)) orelse return;
         defer self.allocator.free(entries);
-        if (try self.linkStanzas(cask, app_path, .bundle, entries)) |first| self.allocator.free(first);
+        var caskroom_buf: [512]u8 = undefined;
+        const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch
+            return error.InstallFailed;
+        if (try self.linkStanzas(cask, app_path, caskroom_ver, entries)) |first| self.allocator.free(first);
     }
 
-    /// Link the stanzas that resolve against `root`, unwinding them all if
+    /// Link every stanza, each against its own root, unwinding them all if
     /// one fails, and record every link under the Caskroom so `uninstall`
-    /// removes them all: `app_path` can carry only one. Returns the first
-    /// link (owned by the caller), or null when no stanza applied.
-    fn linkStanzas(self: *CaskInstaller, cask: *const Cask, root: []const u8, root_kind: BinaryRoot, entries: []const BinaryEntry) !?[]const u8 {
+    /// removes them all: `app_path` can carry only one. One pass for both
+    /// roots because the manifest is written with replace semantics.
+    /// Returns the first link (owned by the caller), or null when no stanza
+    /// applied.
+    fn linkStanzas(self: *CaskInstaller, cask: *const Cask, bundle: ?[]const u8, caskroom_ver: []const u8, entries: []const BinaryEntry) !?[]const u8 {
         var manifest: std.ArrayList(u8) = .empty;
         defer manifest.deinit(self.allocator);
         errdefer {
@@ -1915,7 +2001,15 @@ pub const CaskInstaller = struct {
         var first: ?[]const u8 = null;
         errdefer if (first) |f| self.allocator.free(f);
         for (entries) |e| {
-            if (std.mem.startsWith(u8, e.source, appdir_var) != (root_kind == .bundle)) continue;
+            // A source inside the bundle - spelled `$APPDIR/X.app/...` or by
+            // its staged name `X.app/...` - is linked from where the bundle
+            // landed, as upstream's post-move symlink lets it resolve. With
+            // no bundle placed it is a declaration this install cannot
+            // honour, not a skip.
+            const in_bundle = std.mem.startsWith(u8, e.source, appdir_var) or
+                (bundle != null and std.mem.eql(u8, firstComponent(e.source), std.fs.path.basename(bundle.?)));
+            const root = if (in_bundle) bundle orelse return error.InstallFailed else caskroom_ver;
+            const root_kind: BinaryRoot = if (in_bundle) .bundle else .caskroom;
             const link = try self.linkCaskBinary(cask.token, root, root_kind, e.source, e.target orelse std.fs.path.basename(e.source));
             try manifest.appendSlice(self.allocator, link);
             try manifest.append(self.allocator, '\n');
@@ -1931,8 +2025,8 @@ pub const CaskInstaller = struct {
         return first;
     }
 
-    /// What a `binary` source resolves against: the Caskroom copy of a
-    /// binary-only cask, or the bundle an app cask just placed.
+    /// What a `binary` source resolves against: the Caskroom copy of the
+    /// stage, or the bundle an app cask just placed.
     const BinaryRoot = enum { caskroom, bundle };
 
     /// Resolve the source path of a `binary` artifact. Four shapes
@@ -1947,9 +2041,8 @@ pub const CaskInstaller = struct {
     ///     that bundle; the other shapes never resolve against a bundle.
     /// Returned slice is owned by the caller.
     fn resolveCaskBinaryPath(self: *CaskInstaller, root: []const u8, root_kind: BinaryRoot, src: []const u8) ![]u8 {
-        if (std.mem.startsWith(u8, src, appdir_var)) {
-            if (root_kind != .bundle) return error.InstallFailed;
-            const rel = src[appdir_var.len..];
+        if (root_kind == .bundle) {
+            const rel = if (std.mem.startsWith(u8, src, appdir_var)) src[appdir_var.len..] else src;
             if (!path_component.isRelativeSubpath(rel)) return error.InstallFailed;
             // Second line of defence, as below: a stanza naming a neighbour
             // bundle would otherwise be opened read-write and chmod'd.
@@ -1958,7 +2051,7 @@ pub const CaskInstaller = struct {
             const app_dir = std.fs.path.dirname(root) orelse return error.InstallFailed;
             return try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ app_dir, rel });
         }
-        if (root_kind == .bundle) return error.InstallFailed;
+        if (std.mem.startsWith(u8, src, appdir_var)) return error.InstallFailed;
         const env_prefix = "$HOMEBREW_PREFIX/";
         if (std.mem.startsWith(u8, src, env_prefix)) {
             const rel = src[env_prefix.len..];
@@ -2803,6 +2896,76 @@ test "linkCaskBinary links regular relative and in-prefix Caskroom sources" {
         const stat = try std.Io.Dir.cwd().statFile(io, source, .{});
         try std.testing.expectEqual(@as(std.posix.mode_t, 0o755), stat.permissions.toMode() & 0o777);
     }
+}
+
+test "keepStageCopy copies only the stage entries the caskroom-rooted stanzas need" {
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try std.fmt.allocPrintSentinel(a, "/tmp/malt_cask_stage_copy_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const prefix = try std.fmt.allocPrintSentinel(a, "{s}/prefix", .{base}, 0);
+    const stage = try std.fmt.allocPrint(a, "{s}/stage", .{base});
+    for ([_][]const u8{ "Pad.app/Contents/MacOS/pad", "pad-cli", "Extras/pad.sh", "Extras/Manual.pdf", "Other.app/Contents/Info.plist", ".Trashes/x" }) |rel| {
+        const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ stage, rel });
+        try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(path).?);
+        const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        f.close(io);
+    }
+    try std.Io.Dir.symLinkAbsolute(io, "/Applications", try std.fmt.allocPrint(a, "{s}/Applications", .{stage}), .{});
+
+    var cask = try parseCask(a,
+        \\{"token":"pad","name":["Pad"],"version":"1.0","url":"https://example.invalid/pad.dmg","sha256":"no_check","artifacts":[{"app":["Pad.app"]}]}
+    );
+    defer cask.deinit();
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .cache_dir = unused_cache_dir,
+        .db = undefined,
+        .progress = null,
+    };
+    const copy = try std.fmt.allocPrint(a, "{s}/Caskroom/pad/1.0", .{prefix});
+
+    // Both containers share this copy, so what a relative source resolves
+    // against is pinned here: the named entries, whole, and nothing else.
+    const stanzas = [_]BinaryEntry{
+        .{ .source = "pad-cli", .target = null },
+        .{ .source = "Extras/pad.sh", .target = "pad-sh" },
+        .{ .source = "Pad.app/Contents/MacOS/pad", .target = null },
+        .{ .source = "$APPDIR/Pad.app/Contents/MacOS/pad", .target = "pad2" },
+        .{ .source = "$HOMEBREW_PREFIX/bin/pad3", .target = null },
+    };
+    try std.testing.expect(try installer.keepStageCopy(&cask, stage, "Pad.app", &stanzas));
+    for ([_][]const u8{ "pad-cli", "Extras/pad.sh", "Extras/Manual.pdf" }) |rel| {
+        try std.Io.Dir.accessAbsolute(io, try std.fmt.allocPrint(a, "{s}/{s}", .{ copy, rel }), .{});
+    }
+    for ([_][]const u8{ "Pad.app", "Other.app", ".Trashes", "Applications" }) |rel| {
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, try std.fmt.allocPrint(a, "{s}/{s}", .{ copy, rel }), .{}));
+    }
+    try std.Io.Dir.accessAbsolute(io, try std.fmt.allocPrint(a, "{s}/Pad.app/Contents/MacOS/pad", .{stage}), .{});
+
+    // Nothing to copy when every stanza resolves elsewhere.
+    std.Io.Dir.cwd().deleteTree(io, copy) catch {};
+    try std.testing.expect(!try installer.keepStageCopy(&cask, stage, "Pad.app", stanzas[2..]));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, copy, .{}));
+
+    // A helper the stage lacks, or one reachable only through a symlink, is
+    // refused before the bundle moves, and leaves no Caskroom dir behind.
+    const token_dir = try std.fmt.allocPrint(a, "{s}/Caskroom/pad", .{prefix});
+    const missing = [_]BinaryEntry{ .{ .source = "pad-cli", .target = null }, .{ .source = "gone", .target = null } };
+    try std.testing.expectError(error.InstallFailed, installer.keepStageCopy(&cask, stage, "Pad.app", &missing));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, token_dir, .{}));
+    const through_link = [_]BinaryEntry{.{ .source = "Applications/Utilities/x", .target = null }};
+    try std.testing.expectError(error.InstallFailed, installer.keepStageCopy(&cask, stage, "Pad.app", &through_link));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, token_dir, .{}));
 }
 
 test "installZip does not extract through a pre-existing predictable symlink" {

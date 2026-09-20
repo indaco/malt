@@ -1692,7 +1692,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         installer.prefetched_artifact = null;
         // A version installed before the sidecar existed has no record of
         // its binaries; the current stanzas are the closest stand-in.
-        const stand_in = cask_mod.linkedBinaryStanzas(allocator, parsed_cask.parsed.value.object) catch null;
+        const stand_in = cask_mod.collectBinaryArtifacts(allocator, parsed_cask.parsed.value.object) catch null;
         defer if (stand_in) |entries| allocator.free(entries);
         installer.binary_entries_override = stand_in;
         if (installer.reinstallFromHistory(token, old_version)) |_| {
