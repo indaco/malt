@@ -22,9 +22,9 @@
 //!   on non-macOS. `list`/`status`/`logs`/`tailLog` work everywhere because
 //!   they only touch the DB and the local filesystem.
 //! - **Formula integration**: registering a service when a formula carries a
-//!   `service:` field happens in `cli/install.zig` after a successful keg
-//!   write. `cli/uninstall.zig` calls `stopAndUnregister` before deleting
-//!   files.
+//!   `service:` field happens in `cli/install/service.zig`, shared by install
+//!   and upgrade. `cli/uninstall.zig` calls `stopAndUnregister` before
+//!   deleting files.
 
 const std = @import("std");
 const system_tools = @import("../../system_tools.zig");
@@ -209,7 +209,7 @@ pub fn register(
 
     // launchd fails the spawn with EX_CONFIG (78) when WorkingDirectory does
     // not exist — before exec, so StandardErrorPath is never created and the
-    // user gets a bare "errored" with no log to read. `install.zig` already
+    // user gets a bare "errored" with no log to read. `install/service.zig` already
     // pre-creates the log directory for the same reason; the working dir was
     // the half that got missed. `plist_mod.validate` above has already
     // confined it to the keg or the prefix, so creating it is in-bounds.
