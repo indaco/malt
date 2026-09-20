@@ -235,3 +235,34 @@ test "keep_alive false omits KeepAlive dict" {
 
     try testing.expect(std.mem.indexOf(u8, aw.written(), "KeepAlive") == null);
 }
+
+test "stop_timeout renders ExitTimeOut so launchd waits before SIGKILL" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    const spec: plist.ServiceSpec = .{
+        .label = "com.malt.postgresql@17",
+        .program_args = &.{"/opt/malt/opt/postgresql@17/bin/postgres"},
+        .stdout_path = "/tmp/o",
+        .stderr_path = "/tmp/e",
+        .stop_timeout = 120,
+    };
+    try plist.render(spec, &aw.writer);
+
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "    <key>ExitTimeOut</key>\n    <integer>120</integer>\n") != null);
+}
+
+test "absent stop_timeout leaves ExitTimeOut to launchd's default" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    const spec: plist.ServiceSpec = .{
+        .label = "com.malt.redis",
+        .program_args = &.{"/opt/malt/opt/redis/bin/redis-server"},
+        .stdout_path = "/tmp/o",
+        .stderr_path = "/tmp/e",
+    };
+    try plist.render(spec, &aw.writer);
+
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "ExitTimeOut") == null);
+}

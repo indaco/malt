@@ -223,3 +223,21 @@ test "validate: out-of-range calendar field rejected" {
     try testing.expectError(error.BadSchedule, validateWithSchedule(.{ .calendar = &.{.{ .minute = 60 }} }));
     try testing.expectError(error.BadSchedule, validateWithSchedule(.{ .calendar = &.{.{ .weekday = 8 }} }));
 }
+
+test "validate: stop_timeout above the cap rejected, at the cap passes" {
+    const good = plist.ServiceSpec{
+        .label = "com.malt.foo",
+        .program_args = &.{"/opt/malt/Cellar/foo/1.0/bin/foo"},
+        .stdout_path = good_out,
+        .stderr_path = good_err,
+        .stop_timeout = plist.max_stop_timeout_secs,
+    };
+    try plist.validate(good, cellar, prefix);
+
+    var bad = good;
+    bad.stop_timeout = plist.max_stop_timeout_secs + 1;
+    try testing.expectError(error.BadStopTimeout, plist.validate(bad, cellar, prefix));
+    // Zero is launchd's "wait forever"; the parser nulls it, validate must too.
+    bad.stop_timeout = 0;
+    try testing.expectError(error.BadStopTimeout, plist.validate(bad, cellar, prefix));
+}

@@ -31,6 +31,12 @@ pub const Schedule = union(enum) {
 /// the same value gates both the parser and `plist.validate`.
 pub const max_interval_secs: u32 = 365 * 24 * 60 * 60;
 
+/// Cap on `ExitTimeOut`, in seconds: launchd treats zero as wait-forever and
+/// warns it can stall shutdown, and `launchctl bootout` blocks for the whole
+/// grace, so `mt services stop` would hang that long. Ten minutes is far above
+/// any real daemon (brew's largest is 120). Gates both the parser and `plist.validate`.
+pub const max_stop_timeout_secs: u32 = 10 * 60;
+
 /// Cap on enumerated `StartCalendarInterval` entries. A pathological cron
 /// expansion (e.g. `*/1` across two fields) would otherwise produce a huge
 /// plist; 60 covers every real formula ("every 5 minutes" is 12 entries)

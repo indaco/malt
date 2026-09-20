@@ -27,6 +27,8 @@ pub const ServiceSpec = struct {
     stderr_path: []const u8,
     schedule: Schedule = .immediate,
     keep_alive: bool = true,
+    /// Emitted as ExitTimeOut; null leaves launchd's 20 s SIGTERM grace.
+    stop_timeout: ?u32 = null,
 };
 
 pub const ValidationError = error{
@@ -54,6 +56,9 @@ pub const ValidationError = error{
     RelativeExecutable,
     /// schedule is `.interval` with a zero or out-of-range second count.
     BadSchedule,
+    /// stop_timeout is zero (launchd: wait forever) or above the cap; either
+    /// way SIGKILL may never come and shutdown can stall.
+    BadStopTimeout,
 };
 
 /// Cap on argv count. Real launchd services carry fewer than a dozen.
@@ -62,6 +67,8 @@ pub const max_program_args: usize = 64;
 pub const max_arg_len: usize = 4096;
 /// Upper bound on an interval schedule, in seconds (shared with the parser).
 pub const max_interval_secs = types.max_interval_secs;
+/// Upper bound on ExitTimeOut, in seconds (shared with the parser).
+pub const max_stop_timeout_secs = types.max_stop_timeout_secs;
 /// Cap on calendar entries (shared with the cron parser).
 pub const max_calendar_entries = types.max_calendar_entries;
 
@@ -131,6 +138,9 @@ pub fn validate(
             for (entries) |ci| if (!calInRange(ci)) return ValidationError.BadSchedule;
         },
     }
+
+    if (spec.stop_timeout) |secs| if (secs == 0 or secs > max_stop_timeout_secs)
+        return ValidationError.BadStopTimeout;
 
     for (spec.program_args) |a| try checkString(a);
     try checkString(spec.label);
@@ -271,6 +281,10 @@ pub fn render(spec: ServiceSpec, writer: *std.Io.Writer) !void {
                 try writer.writeAll("    </array>\n");
             }
         },
+    }
+
+    if (spec.stop_timeout) |secs| {
+        try writer.print("    <key>ExitTimeOut</key>\n    <integer>{d}</integer>\n", .{secs});
     }
 
     try writer.writeAll("</dict>\n</plist>\n");
