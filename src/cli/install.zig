@@ -17,8 +17,6 @@ const cellar_mod = @import("../core/cellar.zig");
 const deps_mod = @import("../core/deps.zig");
 const formula_mod = @import("../core/formula.zig");
 const linker_mod = @import("../core/linker.zig");
-const plist_mod = @import("../core/services/plist.zig");
-const supervisor_mod = @import("../core/services/supervisor.zig");
 const signals = @import("../core/signals.zig");
 const store_mod = @import("../core/store.zig");
 const tap_slug = @import("../tap_slug.zig");
@@ -72,6 +70,7 @@ const recordDeps = record_mod.recordDeps;
 const ensureDirs = record_mod.ensureDirs;
 const localErrorIsAnnounced = record_mod.localErrorIsAnnounced;
 const sink_mod = @import("install/sink.zig");
+const service_mod = @import("install/service.zig");
 const OutputSink = sink_mod.OutputSink;
 
 // Internal aliases for names the orchestrator body uses. Names not in
@@ -1406,84 +1405,11 @@ fn linkAndRecord(
         };
         recordDeps(db, keg_id, formula);
     }
-    maybeRegisterService(io, allocator, db, formula, prefix, sink);
+    service_mod.register(io, allocator, db, formula, prefix, sink);
     // Annotate keg-only packages inline so the single line reads as success,
     // not as a "not linking" warning paired with a separate ✓.
     const keg_only_suffix: []const u8 = if (job.keg_only) " (keg-only — dependency only)" else "";
     sink.success("{s} {s} installed{s}", .{ job.name, job.version_str, keg_only_suffix });
-}
-
-/// Register a launchd service when the formula carries a `service:` block.
-/// Best-effort: failures warn but don't fail the install.
-fn maybeRegisterService(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
-    formula: *const formula_mod.Formula,
-    prefix: []const u8,
-    sink: OutputSink,
-) void {
-    const def = formula.service orelse return;
-    if (def.run.len == 0) return;
-
-    // The Homebrew API renders service paths as `$HOMEBREW_PREFIX/…`; launchd
-    // does not expand the token and the validator rejects it, so resolve it to
-    // malt's prefix here. Scratch strings live in a scoped arena — `register`
-    // renders them into the plist and DB before it returns.
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const aa = arena.allocator();
-
-    var label_buf: [256]u8 = undefined;
-    const label = std.fmt.bufPrint(&label_buf, "com.malt.{s}", .{formula.name}) catch return;
-
-    const run = aa.alloc([]const u8, def.run.len) catch return;
-    for (def.run, 0..) |arg, i| run[i] = plist_mod.expandPrefix(aa, arg, prefix) catch return;
-
-    const working_dir = if (def.working_dir) |wd|
-        (plist_mod.expandPrefix(aa, wd, prefix) catch return)
-    else
-        null;
-
-    var stdout_buf: [512]u8 = undefined;
-    var stderr_buf: [512]u8 = undefined;
-    const stdout_path = if (def.log_path) |lp|
-        (plist_mod.expandPrefix(aa, lp, prefix) catch return)
-    else
-        (std.fmt.bufPrint(&stdout_buf, "{s}/var/log/{s}.out", .{ prefix, formula.name }) catch return);
-    const stderr_path = if (def.error_log_path) |elp|
-        (plist_mod.expandPrefix(aa, elp, prefix) catch return)
-    else
-        (std.fmt.bufPrint(&stderr_buf, "{s}/var/log/{s}.err", .{ prefix, formula.name }) catch return);
-
-    // Ensure the log directory exists.
-    var log_dir_buf: [512]u8 = undefined;
-    if (std.fmt.bufPrint(&log_dir_buf, "{s}/var/log", .{prefix})) |dir| {
-        // launchd creates the file on first run; missing dir surfaces there.
-        std.Io.Dir.cwd().createDirPath(io, dir) catch {};
-    } else |_| {}
-
-    var cellar_buf: [512]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(
-        &cellar_buf,
-        "{s}/Cellar/{s}/{s}",
-        .{ prefix, formula.name, formula.pkg_version },
-    ) catch return;
-
-    const spec: plist_mod.ServiceSpec = .{
-        .label = label,
-        .program_args = run,
-        .working_dir = working_dir,
-        .stdout_path = stdout_path,
-        .stderr_path = stderr_path,
-        .schedule = def.schedule,
-        .keep_alive = def.keep_alive,
-        .stop_timeout = def.stop_timeout,
-    };
-
-    supervisor_mod.register(.{ .allocator = allocator, .io = io, .db = db }, spec, formula.name, false, cellar_path, prefix) catch |err| {
-        sink.warn("could not register service for {s}: {s}", .{ formula.name, @errorName(err) });
-    };
 }
 
 /// Classify a Homebrew-API fetch failure. Network-layer failures map

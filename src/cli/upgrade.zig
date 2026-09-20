@@ -34,6 +34,7 @@ const install_record_mod = @import("install/record.zig");
 const InstallError = install_record_mod.InstallError;
 const install_sink_mod = @import("install/sink.zig");
 const post_install_mod = @import("install/post_install.zig");
+const service_mod = @import("install/service.zig");
 const install_mod = @import("install.zig");
 const outdated_mod = @import("outdated.zig");
 const audit_mod = @import("upgrade/audit.zig");
@@ -817,6 +818,9 @@ fn upgradeFormula(
         post_install_mod.drive(ctx, allocator, name, formula.pkg_version, formula_json, prefix, use_system_ruby, null, install_sink_mod.terminal);
     }
     post_install_mod.provisionShippedCaBundle(ctx.io, prefix, name);
+    // The new version may change argv, schedule or timeouts; re-render the
+    // plist from it so the service does not stay frozen at install time.
+    service_mod.register(ctx.io, allocator, db, &formula, prefix, install_sink_mod.terminal);
 
     output.success("{s} upgraded to {s}", .{ name, formula.pkg_version });
     return .upgraded;

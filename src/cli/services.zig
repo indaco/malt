@@ -107,12 +107,22 @@ fn cmdOne(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, rest: 
     }
     const name = rest[0];
     const ctx: supervisor.SupervisorCtx = .{ .allocator = allocator, .io = io, .db = db };
+    if (op != .start) announceStop(io, allocator, db, name);
     switch (op) {
         .start => try supervisor.start(ctx, name),
         .stop => try supervisor.stop(ctx, name),
         .restart => try supervisor.restart(ctx, name),
     }
     output.success("services {s}: {s}", .{ @tagName(op), name });
+}
+
+/// bootout blocks silently for the loaded job's whole exit-timeout grace;
+/// say so before any stop. Silent when nothing is loaded.
+pub fn announceStop(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) void {
+    const label = supervisor.resolveLabel(allocator, db, name) catch return;
+    defer allocator.free(label);
+    if (supervisor.stopGrace(io, allocator, label)) |secs|
+        output.info("stopping {s} (may take up to {d}s)", .{ name, secs });
 }
 
 fn cmdList(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database) !void {

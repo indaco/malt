@@ -119,6 +119,8 @@ cat >"$PLIST" <<EOF
         <key>SuccessfulExit</key>
         <false/>
     </dict>
+    <key>ExitTimeOut</key>
+    <integer>7</integer>
 </dict>
 </plist>
 EOF
@@ -141,8 +143,13 @@ sleep 5
 echo "=== status"
 "$BIN" services status smoke-echo
 
-echo "=== stop"
-"$BIN" services stop smoke-echo
+echo "=== stop (expect the grace notice read back from the loaded job)"
+STOP_OUT=$("$BIN" services stop smoke-echo 2>&1)
+printf '%s\n' "$STOP_OUT"
+grep -q "stopping smoke-echo (may take up to 7s)" <<<"$STOP_OUT" || {
+  echo "FAIL: stop did not announce the loaded job's exit-timeout grace"
+  exit 1
+}
 
 echo "=== final list (expect status=not-loaded after bootout)"
 "$BIN" services list

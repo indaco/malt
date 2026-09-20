@@ -22,9 +22,9 @@
 //!   on non-macOS. `list`/`status`/`logs`/`tailLog` work everywhere because
 //!   they only touch the DB and the local filesystem.
 //! - **Formula integration**: registering a service when a formula carries a
-//!   `service:` field happens in `cli/install.zig` after a successful keg
-//!   write. `cli/uninstall.zig` calls `stopAndUnregister` before deleting
-//!   files.
+//!   `service:` field happens in `cli/install/service.zig`, shared by install
+//!   and upgrade. `cli/uninstall.zig` calls `stopAndUnregister` before
+//!   deleting files.
 
 const std = @import("std");
 const system_tools = @import("../../system_tools.zig");
@@ -209,7 +209,7 @@ pub fn register(
 
     // launchd fails the spawn with EX_CONFIG (78) when WorkingDirectory does
     // not exist — before exec, so StandardErrorPath is never created and the
-    // user gets a bare "errored" with no log to read. `install.zig` already
+    // user gets a bare "errored" with no log to read. `install/service.zig` already
     // pre-creates the log directory for the same reason; the working dir was
     // the half that got missed. `plist_mod.validate` above has already
     // confined it to the keg or the prefix, so creating it is in-bounds.
@@ -221,14 +221,12 @@ pub fn register(
         return SupervisorError.OutOfMemory;
     defer allocator.free(plist_path);
 
-    var file = std.Io.Dir.createFileAbsolute(ctx.io, plist_path, .{ .truncate = true }) catch
-        return SupervisorError.IoFailed;
-    defer file.close(ctx.io);
-
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     plist_mod.render(spec, &aw.writer) catch return SupervisorError.IoFailed;
-    file.writeStreamingAll(ctx.io, aw.written()) catch return SupervisorError.IoFailed;
+    // Re-registering overwrites a plist launchd may still load; a failed
+    // write must leave the previous one intact, not a truncated file.
+    atomic.atomicReplaceFile(ctx.io, plist_path, aw.written()) catch return SupervisorError.IoFailed;
 
     // Cache the schedule as a human label so `services list` shows why a
     // service exists without re-parsing the plist.
@@ -236,9 +234,16 @@ pub fn register(
         return SupervisorError.OutOfMemory;
     defer allocator.free(schedule_label);
 
+    // Re-registering (upgrade, reinstall) refreshes what the formula owns;
+    // auto_start, last_status and last_started_at belong to the user and the
+    // running job, so an existing row keeps them.
     var stmt = ctx.db.prepare(
-        \\INSERT OR REPLACE INTO services(name, keg_name, plist_path, auto_start, last_status, schedule)
-        \\VALUES (?, ?, ?, ?, 'registered', ?);
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start, last_status, schedule)
+        \\VALUES (?, ?, ?, ?, 'registered', ?)
+        \\ON CONFLICT(name) DO UPDATE SET
+        \\    keg_name = excluded.keg_name,
+        \\    plist_path = excluded.plist_path,
+        \\    schedule = excluded.schedule;
     ) catch return SupervisorError.DatabaseError;
     defer stmt.finalize();
     stmt.bindText(1, spec.label) catch return SupervisorError.DatabaseError;
@@ -349,6 +354,36 @@ pub fn stop(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
     try runLaunchctl(ctx.io, &.{ system_tools.launchctl, "bootout", domain, plist_path });
     // Status is a UI hint; launchctl is the source of truth for liveness.
     setStatus(ctx.db, label, "stopped") catch {};
+}
+
+/// The exit-timeout grace launchd will honour when `label`'s loaded job is
+/// stopped, or null when nothing is loaded. Asked of launchd rather than
+/// read from the plist: a re-registered plist changes nothing until the
+/// job is bootstrapped again, and launchd clamps what the plist declares.
+pub fn stopGrace(io: std.Io, allocator: std.mem.Allocator, label: []const u8) ?u32 {
+    if (builtin.os.tag != .macos) return null;
+    const domain = userDomain(allocator) catch return null;
+    defer allocator.free(domain);
+    const target = std.fmt.allocPrint(allocator, "{s}/{s}", .{ domain, label }) catch return null;
+    defer allocator.free(target);
+    // One job's dump is a few KiB; the cap only guards a runaway launchd.
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ system_tools.launchctl, "print", target },
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    }) catch return null;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    return parseLoadedExitTimeout(result.stdout);
+}
+
+/// Pull `exit timeout = N` out of `launchctl print` output.
+fn parseLoadedExitTimeout(stdout: []const u8) ?u32 {
+    const needle = "exit timeout = ";
+    const at = std.mem.indexOf(u8, stdout, needle) orelse return null;
+    const rest = stdout[at + needle.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    return std.fmt.parseInt(u32, std.mem.trim(u8, rest[0..end], " \t\r"), 10) catch null;
 }
 
 pub fn restart(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
@@ -520,6 +555,17 @@ pub fn followLog(
 }
 
 const testing = std.testing;
+
+test "parseLoadedExitTimeout reads the grace launchctl print reports" {
+    const stdout = "com.malt.redis = {\n\tactive count = 1\n\tstate = running\n\texit timeout = 45\n\truns = 1\n}\n";
+    try testing.expectEqual(@as(?u32, 45), parseLoadedExitTimeout(stdout));
+}
+
+test "parseLoadedExitTimeout is null when launchctl printed nothing usable" {
+    try testing.expect(parseLoadedExitTimeout("") == null);
+    try testing.expect(parseLoadedExitTimeout("com.malt.redis = {\n\tstate = running\n}") == null);
+    try testing.expect(parseLoadedExitTimeout("\texit timeout = soon\n") == null);
+}
 
 // Static state lets the interrupt callback drive a deterministic follow-loop
 // scenario in tests without spawning a real thread or signal.
