@@ -492,10 +492,11 @@ pub const RubyServiceBlock = struct {
     pub const RunType = enum { immediate, interval, cron };
 };
 
-const ServiceDirective = enum { run, keep_alive, working_dir, log_path, error_log_path, run_type, interval, cron };
+const ServiceDirective = enum { run, name, keep_alive, working_dir, log_path, error_log_path, run_type, interval, cron };
 
 const service_directives = std.StaticStringMap(ServiceDirective).initComptime(.{
     .{ "run", .run },
+    .{ "name", .name },
     .{ "keep_alive", .keep_alive },
     .{ "working_dir", .working_dir },
     .{ "log_path", .log_path },
@@ -505,16 +506,22 @@ const service_directives = std.StaticStringMap(ServiceDirective).initComptime(.{
     .{ "cron", .cron },
 });
 
+pub const ServiceParseError = error{ Unsupported, ShipsOwnPlist };
+
 /// Lift the `service do ... end` block. Null when the formula has none;
 /// `Unsupported` when it has one but `run` did not lift (absent, empty, over
 /// `max_service_args`, or a shape this scanner cannot follow), so the caller
-/// can warn instead of reading it as "declares no service". Directives are
+/// can warn instead of reading it as "declares no service". A run-less block
+/// that only `name`s a label is `ShipsOwnPlist`: the formula installs the
+/// plist itself, which malt deliberately does not adopt. Directives are
 /// read only at the block's own body indentation, so a nested `on_macos do`
 /// / `if` is skipped without tracking depth; the block closes at the first
 /// `end` back at the opener's indentation. Anything not in
 /// `service_directives` (`sudo`, `environment_variables`, ...) is ignored.
-pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const u8) error{Unsupported}!?RubyServiceBlock {
+pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const u8) ServiceParseError!?RubyServiceBlock {
     var block: RubyServiceBlock = .{ .run = &.{} };
+    var saw_name = false;
+    var saw_run = false;
     var block_indent: ?usize = null;
     var body_indent: ?usize = null;
     var pos: usize = 0;
@@ -533,6 +540,10 @@ pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const
             continue;
         };
         if (indent == opener and std.mem.eql(u8, line, "end")) break;
+        // Counted before the indent skip: a `run` nested under `on_macos do`
+        // or spelled `run(...)` is one the scanner cannot follow, not a
+        // formula that ships its own plist.
+        if (isRunDirective(line)) saw_run = true;
         const body = body_indent orelse blk: {
             body_indent = indent;
             break :blk indent;
@@ -552,6 +563,8 @@ pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const
                 block.run = splitArgv(buf, argv_src) orelse return error.Unsupported;
                 pos = @max(pos, start + consumed);
             },
+            // The label is irrelevant: malt keeps its own `com.malt.<name>`.
+            .name => saw_name = true,
             .keep_alive => block.keep_alive = !std.mem.eql(u8, arg, "false"),
             .working_dir => block.working_dir = arg,
             .log_path => block.log_path = arg,
@@ -567,8 +580,26 @@ pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const
         }
     }
     if (block_indent == null) return null;
-    if (block.run.len == 0) return error.Unsupported;
+    if (block.run.len == 0) return if (saw_name and !saw_run) error.ShipsOwnPlist else error.Unsupported;
     return block;
+}
+
+fn isRunDirective(line: []const u8) bool {
+    if (!std.mem.startsWith(u8, line, "run")) return false;
+    // Not `run_type`.
+    return line.len == 3 or switch (line[3]) {
+        ' ', '(', '[' => true,
+        else => false,
+    };
+}
+
+/// The reason suffix of the install warning, kept here so both Ruby-DSL
+/// call sites print the same words for the same refusal.
+pub fn serviceRefusalReason(err: ServiceParseError) []const u8 {
+    return switch (err) {
+        error.Unsupported => "unsupported service block",
+        error.ShipsOwnPlist => "formula ships its own plist, which malt does not adopt",
+    };
 }
 
 /// The macOS argv source of a `run` directive: the bracket body of `run [...]`
@@ -1632,6 +1663,66 @@ test "parseServiceBlock: no block yields null, a block without a usable run is U
         \\  end
     ;
     try std.testing.expectError(error.Unsupported, parseServiceBlock(&buf, too_many));
+}
+
+test "parseServiceBlock: a run-less block that names a shipped plist is refused for that reason" {
+    // Homebrew's second service shape: the formula installs
+    // `<keg>/<label>.plist` itself and only names it. Malt does not adopt
+    // shipped plists, but that refusal must not read as a parser gap.
+    var buf: [max_service_args][]const u8 = undefined;
+    const ships_plist =
+        \\  service do
+        \\    name macos: "#{plist_name}"
+        \\  end
+    ;
+    try std.testing.expectError(error.ShipsOwnPlist, parseServiceBlock(&buf, ships_plist));
+
+    // `name` may also just rename the label next to a real `run`; that
+    // block lifts exactly as before.
+    const renamed =
+        \\  service do
+        \\    name macos: "x"
+        \\    run [opt_bin/"x"]
+        \\  end
+    ;
+    const got = (try parseServiceBlock(&buf, renamed)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(usize, 1), got.run.len);
+    try std.testing.expectEqualStrings("opt_bin/\"x\"", got.run[0]);
+
+    // A `name` beside a `run` the scanner cannot follow is still a
+    // parser limitation, not a shipped plist.
+    const name_with_bad_run =
+        \\  service do
+        \\    name macos: "x"
+        \\    run
+        \\  end
+    ;
+    try std.testing.expectError(error.Unsupported, parseServiceBlock(&buf, name_with_bad_run));
+
+    // A `run` the scanner skips - nested under `on_macos do`, or spelled
+    // with parens - is still a run the formula declares, so the block is
+    // a scanner limitation, not a shipped plist.
+    const name_with_nested_run =
+        \\  service do
+        \\    name macos: "x"
+        \\    on_macos do
+        \\      run [opt_bin/"x"]
+        \\    end
+        \\  end
+    ;
+    try std.testing.expectError(error.Unsupported, parseServiceBlock(&buf, name_with_nested_run));
+    const name_with_paren_run =
+        \\  service do
+        \\    name macos: "x"
+        \\    run([opt_bin/"x"])
+        \\  end
+    ;
+    try std.testing.expectError(error.Unsupported, parseServiceBlock(&buf, name_with_paren_run));
+}
+
+test "serviceRefusalReason names each refusal for the install warning" {
+    try std.testing.expectEqualStrings("unsupported service block", serviceRefusalReason(error.Unsupported));
+    try std.testing.expectEqualStrings("formula ships its own plist, which malt does not adopt", serviceRefusalReason(error.ShipsOwnPlist));
 }
 
 test "parseServiceBlock: a trailing Ruby comment does not reach the directive value" {

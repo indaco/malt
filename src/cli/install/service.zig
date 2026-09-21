@@ -154,7 +154,10 @@ pub fn registerRuby(
     sink: sink_mod.OutputSink,
 ) void {
     const b = block orelse {
-        if (!declared) retireDropped(io, allocator, db, name, pkg_version, sink);
+        if (!declared) return retireDropped(io, allocator, db, name, pkg_version, sink);
+        // The parse site said why the block was refused; without this the
+        // user would read that as "no service" while the old row lives on.
+        if (hasKegService(db, name)) sink.warn("{s} {s}: kept the service registration from the previous version", .{ name, pkg_version });
         return;
     };
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -627,8 +630,10 @@ test "retireDropped ignores a registration that only shares the formula's name a
 }
 
 test "registerRuby keeps the row when the block is declared but could not be read" {
-    // The parse site already warned about the unsupported block; retiring
-    // here would delete a service the formula still declares.
+    // The parse site already warned about the refused block; retiring
+    // here would delete a service the formula still declares. Say the
+    // old registration survived, or the parse-time warning reads as if
+    // the keg now has no service at all.
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
@@ -642,5 +647,23 @@ test "registerRuby keeps the row when the block is declared but could not be rea
     registerRuby(std.Options.debug_io, testing.allocator, &db, null, true, "tree", "2.2.1", "/p", sink_mod.terminal);
 
     try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
+}
+
+test "registerRuby says nothing about a refused block on a fresh install" {
+    // No previous registration to keep, and the parse site already said
+    // why the block was refused.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    registerRuby(std.Options.debug_io, testing.allocator, &db, null, true, "tree", "2.2.1", "/p", sink_mod.terminal);
+
+    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
     try testing.expectEqual(@as(usize, 0), buf.items.len);
 }

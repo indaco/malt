@@ -157,6 +157,9 @@ jobs:
       - name: Regression guard - a tap or local formula's service block is registered on install
         run: ./scripts/regressions/tap-service-registered-on-install-tap-formula-service-block-never-parsed-or-registered.sh
 
+      - name: Regression guard - a formula that ships its own plist is refused for that reason
+        run: ./scripts/regressions/shipped-plist-service-warns-why-tap-formula-shipped-plist-not-registered.sh
+
       - name: Regression guard - upgrade retires a service the new version no longer declares
         run: ./scripts/regressions/upgrade-retires-dropped-service-upgrade-to-a-version-without-a-service-block-keeps-the-old-registration.sh
 
