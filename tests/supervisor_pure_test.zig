@@ -412,3 +412,41 @@ test "register creates the working directory launchd needs before it will spawn"
     // Present after registration, so the later bootstrap can actually spawn.
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, workdir, .{});
 }
+
+test "register pre-creates a working dir only under the keg, var or etc" {
+    // Any other prefix subtree is a slot some other formula will want: a
+    // formula naming `opt/<victim>` or `bin/<tool>` must not squat it at
+    // register time, before the user ever starts the service.
+    var fx = try Fixture.init("wd-precreate");
+    defer fx.deinit();
+    const prefix = fx.base;
+    const cellar = fx.p("Cellar/testkeg/1.0");
+    _ = c.setenv("MALT_PREFIX", prefix, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
+
+    var spec = plist_mod.ServiceSpec{
+        .label = "com.malt.test.svc",
+        .program_args = &.{fx.p("Cellar/testkeg/1.0/bin/echo")},
+        .env = &.{},
+        .stdout_path = fx.p("out.log"),
+        .stderr_path = fx.p("err.log"),
+    };
+
+    inline for (.{ "var/testkeg", "etc/testkeg", "Cellar/testkeg/1.0/work" }) |sub| {
+        spec.working_dir = fx.p(sub);
+        try supervisor.register(ctx, spec, "testkeg", false, cellar, prefix);
+        try test_io.accessAbsolute(std.Options.debug_io, spec.working_dir.?, .{});
+    }
+
+    inline for (.{ "opt/victim", "bin/tool", "Cellar/victim/9.9", "var/malt/services/com.malt.victim" }) |sub| {
+        spec.working_dir = fx.p(sub);
+        // Still registers: launchd reports the missing dir at start.
+        try supervisor.register(ctx, spec, "testkeg", false, cellar, prefix);
+        try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, spec.working_dir.?, .{}));
+    }
+}
