@@ -420,6 +420,16 @@ pub fn stopAndUnregister(ctx: SupervisorCtx, name: []const u8) void {
     stmt.bindText(1, label) catch return;
     // Row may not exist; DELETE is idempotent either way.
     _ = stmt.step() catch {};
+    removeServiceDir(ctx, label);
+}
+
+/// Drop the plist directory `register` created for `label`. Best-effort:
+/// the row is already gone, and a leftover dir only costs a later
+/// `register` an overwrite.
+pub fn removeServiceDir(ctx: SupervisorCtx, label: []const u8) void {
+    const dir = serviceDir(ctx.allocator, label) catch return;
+    defer ctx.allocator.free(dir);
+    std.Io.Dir.cwd().deleteTree(ctx.io, dir) catch {};
 }
 
 fn setStatus(db: *sqlite.Database, name: []const u8, status: []const u8) SupervisorError!void {
@@ -906,4 +916,35 @@ test "parseRuntime: finds the target row past earlier non-matching services" {
         "-\t0\tcom.other\n" ++
         "4321\t2\tcom.target\n";
     try testing.expectEqual(RuntimeState.errored, parseRuntime(out, "com.target"));
+}
+
+test "stopAndUnregister removes the service directory its registration owned" {
+    // Uninstall must not leave a plist behind that a later install of the
+    // same name would silently inherit.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec(
+        \\CREATE TABLE services (name TEXT PRIMARY KEY, keg_name TEXT NOT NULL, plist_path TEXT NOT NULL,
+        \\  auto_start INTEGER NOT NULL DEFAULT 0, last_started_at INTEGER, last_status TEXT, schedule TEXT);
+    );
+    const label = try std.fmt.allocPrint(testing.allocator, "com.malt.unregister-probe-{d}-{d}", .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) });
+    defer testing.allocator.free(label);
+    const dir = try serviceDir(testing.allocator, label);
+    defer testing.allocator.free(dir);
+    rmrf(dir);
+    defer rmrf(dir);
+    try std.Io.Dir.cwd().createDirPath(dbg_io, dir);
+    const plist = try std.fmt.allocPrint(testing.allocator, "{s}/service.plist", .{dir});
+    defer testing.allocator.free(plist);
+    try std.Io.Dir.cwd().writeFile(dbg_io, .{ .sub_path = plist, .data = "<plist/>" });
+    var ins = try db.prepare("INSERT INTO services (name, keg_name, plist_path) VALUES (?, 'unregister-probe', ?);");
+    defer ins.finalize();
+    try ins.bindText(1, label);
+    try ins.bindText(2, plist);
+    _ = try ins.step();
+
+    stopAndUnregister(.{ .allocator = testing.allocator, .io = dbg_io, .db = &db }, "unregister-probe");
+
+    try testing.expect(!hasService(&db, label));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(dbg_io, dir, .{}));
 }
