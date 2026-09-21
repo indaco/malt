@@ -441,6 +441,7 @@ test "defFromRuby refuses a dependency reference that is not a plain formula nam
     try testing.expect(defFromRuby(aa, .{ .run = &.{"Formula[\"a/b\"].opt_bin/\"x\""} }, "foo", "1.0") == null);
 }
 
+const atomic = @import("../../fs/atomic.zig");
 const schema = @import("../../db/schema.zig");
 const output = @import("../../ui/output.zig");
 
@@ -455,12 +456,12 @@ fn seedDroppedRow(db: *sqlite.Database) !void {
     );
 }
 
-var label_seq: std.atomic.Value(u32) = .init(0);
+var prefix_seq: std.atomic.Value(u32) = .init(0);
 
-/// Concurrent suite runs share the test prefix; a fixed label would let
-/// one run's deleteTree race another's assertion.
-fn uniqueLabel() ![]const u8 {
-    return std.fmt.allocPrint(testing.allocator, "com.malt.retire-{d}-{d}", .{ std.c.getpid(), label_seq.fetchAdd(1, .monotonic) });
+/// A private prefix per call: the suite may run without the harness prefix
+/// (the real `/opt/malt` is the fallback) or as several concurrent copies.
+fn scratchPrefix() ![:0]const u8 {
+    return std.fmt.allocPrintSentinel(testing.allocator, "/tmp/malt_retire_{d}_{d}", .{ std.c.getpid(), prefix_seq.fetchAdd(1, .monotonic) }, 0);
 }
 
 test "applyDropped retires the previous version's row when no job is loaded" {
@@ -476,12 +477,15 @@ test "applyDropped retires the previous version's row when no job is loaded" {
     output.beginStderrCapture(testing.allocator, &buf);
     defer output.endStderrCapture();
 
-    const label = try uniqueLabel();
-    defer testing.allocator.free(label);
+    const prefix = try scratchPrefix();
+    defer testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    const prev = try atomic.overridePrefixEnv(prefix);
+    defer atomic.restorePrefixEnv(prev);
+    const label = "com.malt.tree";
     const dir = try supervisor_mod.serviceDir(testing.allocator, label);
     defer testing.allocator.free(dir);
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, dir);
-    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
 
     applyDropped(std.Options.debug_io, testing.allocator, &db, "tree", "2.2.1", label, .not_loaded, sink_mod.terminal);
 

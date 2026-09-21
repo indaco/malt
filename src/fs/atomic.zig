@@ -17,6 +17,35 @@ fn getenvLocal(name: []const u8) ?[:0]const u8 {
     return std.process.Environ.getPosix(env, name);
 }
 
+const libc_env = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+};
+
+/// Test support: point `MALT_PREFIX` at `prefix` and hand back what it
+/// replaced for `restorePrefixEnv`. Tests must restore rather than unset:
+/// later tests rely on the harness value, and without it the real
+/// `/opt/malt` is the fallback.
+pub fn overridePrefixEnv(prefix: [:0]const u8) !?[:0]u8 {
+    const prev: ?[:0]u8 = if (getenvLocal("MALT_PREFIX")) |v| try std.heap.c_allocator.dupeZ(u8, v) else null;
+    _ = libc_env.setenv("MALT_PREFIX", prefix.ptr, 1);
+    return prev;
+}
+
+pub fn restorePrefixEnv(prev: ?[:0]u8) void {
+    if (prev) |v| {
+        _ = libc_env.setenv("MALT_PREFIX", v.ptr, 1);
+        std.heap.c_allocator.free(v);
+        return;
+    }
+    // libc compacts the env block in place and the test runner's failure
+    // printer walks it lazily; touching stderr first keeps a later failing
+    // assertion reported instead of crashing on a null entry.
+    _ = std.debug.lockStderr(&.{});
+    std.debug.unlockStderr();
+    _ = libc_env.unsetenv("MALT_PREFIX");
+}
+
 /// Validated form of `maltPrefixOrAbort`, returns an error on bad env so tests
 /// can inspect the failure without the process exiting.
 pub fn maltPrefixChecked() prefix_path.PrefixError![:0]const u8 {

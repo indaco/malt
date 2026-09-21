@@ -935,18 +935,19 @@ test "parseRuntime: finds the target row past earlier non-matching services" {
 test "stopAndUnregister removes the service directory its registration owned" {
     // Uninstall must not leave a plist behind that a later install of the
     // same name would silently inherit.
+    var s = try Scratch.init("unregister_dir");
+    defer s.deinit();
+    const prev = try atomic.overridePrefixEnv(s.base);
+    defer atomic.restorePrefixEnv(prev);
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try db.exec(
         \\CREATE TABLE services (name TEXT PRIMARY KEY, keg_name TEXT NOT NULL, plist_path TEXT NOT NULL,
         \\  auto_start INTEGER NOT NULL DEFAULT 0, last_started_at INTEGER, last_status TEXT, schedule TEXT);
     );
-    const label = try std.fmt.allocPrint(testing.allocator, "com.malt.unregister-probe-{d}-{d}", .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) });
-    defer testing.allocator.free(label);
+    const label = "com.malt.unregister-probe";
     const dir = try serviceDir(testing.allocator, label);
     defer testing.allocator.free(dir);
-    rmrf(dir);
-    defer rmrf(dir);
     try std.Io.Dir.cwd().createDirPath(dbg_io, dir);
     const plist = try std.fmt.allocPrint(testing.allocator, "{s}/service.plist", .{dir});
     defer testing.allocator.free(plist);
