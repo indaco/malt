@@ -47,8 +47,9 @@ pub fn specFromDef(
 }
 
 /// Register (or re-register) the launchd service a formula's `service:`
-/// block declares. No-op without one. Best-effort: failures warn but never
-/// fail the install or upgrade that called it.
+/// block declares; without one, retire whatever a previous version
+/// registered. Best-effort: failures warn but never fail the install or
+/// upgrade that called it.
 pub fn register(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -57,8 +58,49 @@ pub fn register(
     prefix: []const u8,
     sink: sink_mod.OutputSink,
 ) void {
-    const def = formula.service orelse return;
+    const def = formula.service orelse {
+        // A dropped block leaves the previous version's row behind, and
+        // nothing but uninstall would ever remove it.
+        if (!supervisor_mod.hasService(db, formula.name)) return;
+        const label = std.fmt.allocPrint(allocator, "com.malt.{s}", .{formula.name}) catch return;
+        defer allocator.free(label);
+        return applyDropped(io, allocator, db, formula, label, supervisor_mod.probeRuntime(io, allocator, label), sink);
+    };
     registerDef(io, allocator, db, def, formula.name, formula.pkg_version, prefix, sink);
+}
+
+/// Takes the probed state as a value so every arm is testable without
+/// launchctl. Loaded or unknown keeps the row so `mt services stop` can
+/// still bootout the job.
+fn applyDropped(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    formula: *const formula_mod.Formula,
+    label: []const u8,
+    state: ?supervisor_mod.RuntimeState,
+    sink: sink_mod.OutputSink,
+) void {
+    switch (state orelse {
+        sink.warn(
+            "{s} {s} declares no service; could not ask launchd about the previous version's job, kept its registration - upgrade again to retry",
+            .{ formula.name, formula.pkg_version },
+        );
+        return;
+    }) {
+        .not_loaded => {
+            var stmt = db.prepare("DELETE FROM services WHERE keg_name = ?;") catch return;
+            defer stmt.finalize();
+            stmt.bindText(1, formula.name) catch return;
+            _ = stmt.step() catch return;
+            supervisor_mod.removeServiceDir(.{ .allocator = allocator, .io = io, .db = db }, label);
+            sink.info("{s} {s} declares no service; retired the registration from the previous version", .{ formula.name, formula.pkg_version });
+        },
+        .loaded, .running, .errored => sink.warn(
+            "{s} {s} declares no service; the job from the previous version is still loaded - run 'mt services stop {s}' and upgrade again to retire it",
+            .{ formula.name, formula.pkg_version, formula.name },
+        ),
+    }
 }
 
 /// The Ruby-DSL twin of `register`: a tap or `--local` formula's textual
@@ -357,4 +399,104 @@ test "defFromRuby refuses a dependency reference that is not a plain formula nam
     const aa = arena.allocator();
     try testing.expect(defFromRuby(aa, .{ .run = &.{"Formula[\"../..\"].opt_bin/\"evil\""} }, "foo", "1.0") == null);
     try testing.expect(defFromRuby(aa, .{ .run = &.{"Formula[\"a/b\"].opt_bin/\"x\""} }, "foo", "1.0") == null);
+}
+
+const schema = @import("../../db/schema.zig");
+const output = @import("../../ui/output.zig");
+
+const dropped_json =
+    \\{"name":"tree","full_name":"tree","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"2.2.1"},"dependencies":[]}
+;
+
+fn seedDroppedRow(db: *sqlite.Database) !void {
+    try db.exec(
+        \\INSERT INTO services (name, keg_name, plist_path, auto_start, last_status)
+        \\VALUES ('com.malt.tree', 'tree', '/p/var/malt/services/com.malt.tree/service.plist', 0, 'registered');
+    );
+}
+
+test "applyDropped retires the previous version's row when no job is loaded" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try seedDroppedRow(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, dropped_json);
+    defer formula.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    const dir = try supervisor_mod.serviceDir(testing.allocator, "com.malt.tree");
+    defer testing.allocator.free(dir);
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, dir);
+
+    applyDropped(std.Options.debug_io, testing.allocator, &db, &formula, "com.malt.tree", .not_loaded, sink_mod.terminal);
+
+    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.Options.debug_io, dir, .{}));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "declares no service") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "retired") != null);
+}
+
+test "applyDropped keeps the row when launchd could not be asked" {
+    // A row deleted while its job is still loaded orphans a daemon nothing
+    // can bootout; not knowing is not evidence that nothing is loaded.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try seedDroppedRow(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, dropped_json);
+    defer formula.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    applyDropped(std.Options.debug_io, testing.allocator, &db, &formula, "com.malt.tree", null, sink_mod.terminal);
+
+    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not ask launchd") != null);
+}
+
+test "applyDropped keeps the row while the previous version's job is loaded" {
+    // `mt services stop` resolves the plist through the row; deleting it
+    // under a loaded job would orphan a daemon nothing can bootout.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try seedDroppedRow(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, dropped_json);
+    defer formula.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    applyDropped(std.Options.debug_io, testing.allocator, &db, &formula, "com.malt.tree", .running, sink_mod.terminal);
+
+    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "declares no service") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "mt services stop tree") != null);
+}
+
+test "register stays silent for a formula that never had a service" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, dropped_json);
+    defer formula.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    register(std.Options.debug_io, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
+
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
+    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
 }
