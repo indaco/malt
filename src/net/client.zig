@@ -803,12 +803,22 @@ pub const HttpClient = struct {
     }
 
     /// HEAD with manual redirect follow — stdlib skips redirects on HEAD.
-    ///
+    pub fn headResolved(self: *HttpClient, url: []const u8) HeadResolveError!HeadResolved {
+        return self.resolveWithRetry(.HEAD, url);
+    }
+
+    /// The HEAD walk's GET twin, for an origin that only redirects a GET.
+    /// Same rules, same retry policy; every hop is released without reading
+    /// its body, so the artifact a terminal hop serves never flows.
+    pub fn getResolved(self: *HttpClient, url: []const u8) HeadResolveError!HeadResolved {
+        return self.resolveWithRetry(.GET, url);
+    }
+
     /// Retried on the download's policy: this walk only classifies what the
     /// download then fetches, so a blip the fetch would have survived must not
     /// be fatal here. Each attempt re-walks from `url`; nothing pins a later
     /// attempt to the chain an earlier one saw.
-    pub fn headResolved(self: *HttpClient, url: []const u8) HeadResolveError!HeadResolved {
+    fn resolveWithRetry(self: *HttpClient, method: std.http.Method, url: []const u8) HeadResolveError!HeadResolved {
         if (self.offline) return error.OfflineRequired;
         // The final url and Content-Disposition this returns pick a cask's
         // artifact type, and the pkg type reaches `sudo installer -target /`.
@@ -817,7 +827,7 @@ pub const HttpClient = struct {
 
         var attempt: usize = 0;
         while (true) {
-            if (self.headResolvedOnce(url)) |resolved| {
+            if (self.resolveOnce(method, url)) |resolved| {
                 return resolved;
             } else |err| {
                 if (isRetriableWalkError(err) and attempt < self.retry_backoff_ms.len) {
@@ -830,7 +840,7 @@ pub const HttpClient = struct {
         }
     }
 
-    fn headResolvedOnce(self: *HttpClient, url: []const u8) HeadResolveError!HeadResolved {
+    fn resolveOnce(self: *HttpClient, method: std.http.Method, url: []const u8) HeadResolveError!HeadResolved {
         // Build the result eagerly so a single errdefer covers every dupe
         // inside the redirect loop; on success the caller takes ownership.
         var resolved: HeadResolved = .{
@@ -850,15 +860,19 @@ pub const HttpClient = struct {
 
             var fired = std.atomic.Value(bool).init(false);
             const hop_start_ns: u64 = nowNs(self.io);
-            var req = self.requestDeadlined(.HEAD, uri, .{
+            var req = self.requestDeadlined(method, uri, .{
                 .extra_headers = &.{},
-                // This walk follows Location itself; stdlib returns a HEAD
-                // before its redirect branch anyway, so pinning it keeps the
-                // watchdog's connection stable by contract, not by stdlib
-                // branch order.
+                // This walk follows Location itself. On a GET stdlib would
+                // otherwise follow it and swap the connection out from under
+                // the watchdog; on a HEAD it returns before its redirect
+                // branch anyway, so the pin holds by contract either way.
                 .redirect_behavior = .unhandled,
             }, self.head_timeout_ns, &fired) catch |e| return self.headWalkError(&fired, e);
-            defer req.deinit();
+            // Never drain: on a GET walk the terminal hop's body is the
+            // artifact itself. This also retires a HEAD hop's connection,
+            // which a plain deinit would have pooled; the walk's client is
+            // discarded right after it, so only a same-host chain re-dials.
+            defer finishBodiless(&req);
 
             var redirect_buf: [32 * 1024]u8 = undefined;
             const response = self.receiveHeadDeadlined(&req, &redirect_buf, self.remainingHopBudget(hop_start_ns), &fired, null) catch |e|
@@ -2256,6 +2270,7 @@ test "every buffered GET entry point exposes a closed error set" {
         assertErrorSetFitsIn(HttpClient.postJson, GetError, "postJson");
         assertErrorSetFitsIn(HttpClient.head, GetError, "head");
         assertErrorSetFitsIn(HttpClient.headResolved, HeadResolveError, "headResolved");
+        assertErrorSetFitsIn(HttpClient.getResolved, HeadResolveError, "getResolved");
     }
 }
 
@@ -2277,6 +2292,7 @@ test "every url entry point refuses a cleartext origin before dialling out" {
         "postJson",
         "head",
         "headResolved",
+        "getResolved",
     };
     comptime {
         for (@typeInfo(HttpClient).@"struct".decls) |decl| {
@@ -2306,6 +2322,7 @@ test "every url entry point refuses a cleartext origin before dialling out" {
     try std.testing.expectError(error.InsecureUrlScheme, http.postJson(url, "{}", 1024));
     try std.testing.expectError(error.InsecureUrlScheme, http.head(url));
     try std.testing.expectError(error.InsecureUrlScheme, http.headResolved(url));
+    try std.testing.expectError(error.InsecureUrlScheme, http.getResolved(url));
 }
 
 test "requireSecureOrigin: a digest never buys a non-http scheme" {
