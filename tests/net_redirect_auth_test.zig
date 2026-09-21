@@ -6,6 +6,8 @@
 
 const std = @import("std");
 const client = @import("malt").client;
+const install_cli = @import("malt").install;
+const app_ctx = @import("malt").app_ctx;
 const notifier = @import("malt").update_notifier;
 const net = std.Io.net;
 const test_io = @import("test_io");
@@ -479,6 +481,86 @@ test "getResolved follows a redirect the origin only emits on GET" {
     try std.testing.expectEqualStrings(loc, resolved.final_url);
     try std.testing.expectEqual(@as(usize, 1), hop2.requests);
     try std.testing.expectEqual(std.http.Method.GET, hop2.method.?);
+}
+
+// The classifier install and upgrade share, driven through the real `AppCtx`
+// path against an origin that answers HEAD with `head_status` and only
+// redirects a GET to `/Warp.dmg`.
+fn classifyAgainstGetOnlyOrigin(head_status: std.http.Status) !@import("malt").cask.ArtifactType {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l2 = try bindIp4(io);
+    defer l2.deinit(io);
+    const p2 = l2.socket.address.getPort();
+    var hop2 = Hop{ .io = io, .listener = &l2 };
+    const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/Warp.dmg", .{p2});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var hop1 = Hop{ .io = io, .listener = &l1, .head_status = head_status, .redirect_to = loc, .status = .found };
+    // HEAD, then GET.
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, @as(usize, 2) });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/download?package=dmg", .{p1});
+
+    const ctx: app_ctx.AppCtx = .{ .io = io, .environ = .empty };
+    const result = install_cli.resolveCaskArtifactViaWalk(&ctx, std.testing.allocator, url);
+
+    knock(io, p1);
+    knock(io, p2);
+    t1.join();
+    t2.join();
+
+    try std.testing.expectEqual(@as(usize, 2), hop1.requests);
+    try std.testing.expectEqual(@as(usize, 1), hop2.requests);
+    return result;
+}
+
+test "a suffix-less cask URL classifies from the redirect its origin only sends on GET" {
+    // HEAD terminates on the origin's page; the type must still come out of
+    // the GET walk's terminal url.
+    try std.testing.expectEqual(.dmg, try classifyAgainstGetOnlyOrigin(.ok));
+}
+
+test "a suffix-less cask URL classifies through GET when the origin refuses HEAD" {
+    // A refused HEAD is a terminal answer, not a walk failure: the fallback
+    // must still run rather than reporting the origin as unreachable.
+    try std.testing.expectEqual(.dmg, try classifyAgainstGetOnlyOrigin(.method_not_allowed));
+    try std.testing.expectEqual(.dmg, try classifyAgainstGetOnlyOrigin(.forbidden));
+}
+
+test "a HEAD walk that fails is reported as is, without a GET walk behind it" {
+    // The fallback is for a HEAD that answered and said nothing. A HEAD that
+    // failed - here a redirect with no Location - is the origin's own fault,
+    // and a second walk would only hide it behind a second verb.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var hop1 = Hop{ .io = io, .listener = &l1, .status = .found };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/download", .{p1});
+
+    const ctx: app_ctx.AppCtx = .{ .io = io, .environ = .empty };
+    const result = install_cli.resolveCaskArtifactViaWalk(&ctx, std.testing.allocator, url);
+    knock(io, p1);
+    t1.join();
+
+    try std.testing.expectError(error.HttpRedirectLocationMissing, result);
+    try std.testing.expectEqual(@as(usize, 1), hop1.requests);
+    try std.testing.expectEqual(std.http.Method.HEAD, hop1.method.?);
 }
 
 test "getResolved closes the terminal hop without reading its body" {

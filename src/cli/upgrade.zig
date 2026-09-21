@@ -1511,6 +1511,24 @@ fn upgradeAllFormulas(
 // Cask upgrade
 // ---------------------------------------------------------------------------
 
+/// The artifact type the installer is told to use, settled before the plan
+/// line, the sudo gate and the download: a suffix-less URL is walked here as
+/// on install, so none of them reads it as an unsupported format. `unknown`
+/// is a verdict, reported by the caller; only a failed walk aborts here.
+fn caskArtifactType(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, url: []const u8) error{Aborted}!cask_mod.ArtifactType {
+    const from_url = cask_mod.artifactTypeFromUrl(url);
+    if (from_url != .unknown) return from_url;
+
+    return install_mod.resolveCaskArtifactViaWalk(ctx, allocator, url) catch |e| {
+        if (e == error.Canceled) {
+            output.warn("Interrupted.", .{});
+            return error.Aborted;
+        }
+        output.err("Could not resolve the download URL for {s}: {s} (installed version left in place)", .{ token, @errorName(e) });
+        return error.Aborted;
+    };
+}
+
 fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, audit_mode: bool, bulk: bool, sink: ?*EntrySink) !Outcome {
     if (pinSkip(db, token, force, audit_mode)) {
         output.skip("{s} is pinned, skipped", .{token});
@@ -1580,17 +1598,25 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
 
     warnIfBackward(token, installed_version, parsed_cask.version);
 
+    const artifact_type = try caskArtifactType(ctx, allocator, token, parsed_cask.url);
+
     if (dry_run) {
         if (sink) |s| s.collectCask(token, installed_version, parsed_cask.version);
-        output.info("Dry run: would upgrade cask {s} {s} -> {s}", .{ token, installed_version, parsed_cask.version });
+        output.info("Dry run: would upgrade cask {s} {s} -> {s} ({s})", .{ token, installed_version, parsed_cask.version, @tagName(artifact_type) });
         output.emitNdjsonEvent(.would_install, token, null);
         return .would_upgrade;
+    }
+
+    if (artifact_type == .unknown) {
+        output.err("Unsupported cask format for '{s}' - URL: {s} (installed version left in place)", .{ token, parsed_cask.url });
+        output.err("malt supports .dmg, .zip, .pkg, .tar.gz, and .tar.xz casks. Use: brew install --cask {s}", .{token});
+        return error.Aborted;
     }
 
     // A PKG-cask upgrade re-runs `sudo installer -target /`. Gate it on a live
     // terminal + confirmation here, before the uninstall below, so a refusal
     // off a TTY leaves the installed version untouched.
-    if (cask_mod.artifactTypeFromUrl(parsed_cask.url) == .pkg) {
+    if (artifact_type == .pkg) {
         output.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{token});
         if (!install_mod.confirmPkgSudo(token)) return error.Aborted;
     }
@@ -1608,6 +1634,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // (potentially slow) install is harmless to other connections.
     artefact_cache.adoptLegacy(ctx.io, prefix, api.cache_dir);
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, api.cache_dir);
+    installer.artifact_type_override = artifact_type;
     installer.offline = ctx.offline;
     installer.retain_history = true;
     var flight = post_install_mod.Flight.init(allocator);
@@ -2318,6 +2345,22 @@ test "upgradeAllFormulas stops between packages once interrupted" {
 
     // Only the first keg was attempted; the interrupt stopped the loop.
     try std.testing.expectEqual(@as(usize, 1), tally.checked());
+}
+
+test "an upgrade takes a cask artifact type from the URL suffix without a walk" {
+    // A suffixed URL is settled locally: a walk here would dial an unbound
+    // host and abort.
+    const ctx = @import("../app_ctx.zig").debug_ctx;
+    try std.testing.expectEqual(cask_mod.ArtifactType.dmg, try caskArtifactType(&ctx, std.testing.allocator, "x", "https://example.invalid/x.dmg"));
+    try std.testing.expectEqual(cask_mod.ArtifactType.pkg, try caskArtifactType(&ctx, std.testing.allocator, "x", "https://example.invalid/x.pkg"));
+}
+
+test "an upgrade refuses a suffix-less cask URL it cannot resolve before downloading" {
+    // Offline stands in for a walk that fails: the upgrade must stop here,
+    // with the installed version in place, not inside the prefetch.
+    var ctx = @import("../app_ctx.zig").debug_ctx;
+    ctx.offline = true;
+    try std.testing.expectError(error.Aborted, caskArtifactType(&ctx, std.testing.allocator, "x", "https://example.invalid/download?package=dmg"));
 }
 
 test "upgradeAllFormulas processes nothing when interrupted before the loop" {

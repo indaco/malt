@@ -1459,8 +1459,10 @@ fn mapHeadResolveError(e: client_mod.HeadResolveError) ?InstallError {
 /// HEAD first; when that yields nothing malt can classify, once more with
 /// GET, because some download endpoints only redirect a GET to the file.
 /// Either walk's own error reaches the caller, which reports it before
-/// classifying.
-fn resolveCaskArtifactViaWalk(
+/// classifying: a HEAD the origin never answers is reported, not retried
+/// as a GET, so an origin that stalls both verbs costs at most two head
+/// budgets under the lock. Shared with upgrade so both verbs classify alike.
+pub fn resolveCaskArtifactViaWalk(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     url: []const u8,
