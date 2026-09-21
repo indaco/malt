@@ -59,15 +59,26 @@ pub fn register(
     sink: sink_mod.OutputSink,
 ) void {
     const def = formula.service orelse {
-        // A block malt cannot read is still a declared service; only an
-        // absent block retires the previous version's registration.
-        if (formula.service_declared) {
-            if (hasKegService(db, formula.name)) sink.warn("{s} {s} declares a service block malt cannot read; kept the registration from the previous version", .{ formula.name, formula.pkg_version });
-            return;
-        }
-        return retireDropped(io, allocator, db, formula.name, formula.pkg_version, sink);
+        // A refused block is still a declared service; only an absent
+        // block retires the previous version's registration.
+        const refusal = formula.service_refusal orelse return retireDropped(io, allocator, db, formula.name, formula.pkg_version, sink);
+        // Core carries a bare tag so the wording stays in cli; map it
+        // onto the Ruby parser's error set to share that wording.
+        const reason = rb_parse.serviceRefusalReason(switch (refusal) {
+            .ships_plist => error.ShipsOwnPlist,
+            .unsupported => error.Unsupported,
+        });
+        sink.warn("could not register service for {s}: {s}", .{ formula.name, reason });
+        warnKeptRow(db, formula.name, formula.pkg_version, sink);
+        return;
     };
     registerDef(io, allocator, db, def, formula.name, formula.pkg_version, prefix, sink);
+}
+
+/// Without this the user would read the refusal as "no service" while
+/// the old row lives on.
+fn warnKeptRow(db: *sqlite.Database, name: []const u8, pkg_version: []const u8, sink: sink_mod.OutputSink) void {
+    if (hasKegService(db, name)) sink.warn("{s} {s}: kept the service registration from the previous version", .{ name, pkg_version });
 }
 
 /// A dropped block leaves the previous version's row behind, and nothing
@@ -155,9 +166,8 @@ pub fn registerRuby(
 ) void {
     const b = block orelse {
         if (!declared) return retireDropped(io, allocator, db, name, pkg_version, sink);
-        // The parse site said why the block was refused; without this the
-        // user would read that as "no service" while the old row lives on.
-        if (hasKegService(db, name)) sink.warn("{s} {s}: kept the service registration from the previous version", .{ name, pkg_version });
+        // The parse site already said why the block was refused.
+        warnKeptRow(db, name, pkg_version, sink);
         return;
     };
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -561,7 +571,7 @@ test "register stays silent for a formula that never had a service" {
     try testing.expect(!supervisor_mod.hasService(&db, "tree"));
 }
 
-test "register keeps the row when the new version declares a service block malt cannot read" {
+test "register keeps the row and says why when the new version's service block is unsupported" {
     // An OS-keyed `run` parses to no def; deleting the row here would
     // retire a service the formula still declares, with nothing to bring
     // it back.
@@ -583,7 +593,57 @@ test "register keeps the row when the new version declares a service block malt 
     register(std.Options.debug_io, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
 
     try testing.expect(supervisor_mod.hasService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "cannot read") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: unsupported service block") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
+}
+
+test "register says a core formula ships its own plist and registers nothing" {
+    // The API renders a shipped plist as a `name`-only service object;
+    // the user must read why there is no malt service, as on the tap path.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    const ships_plist =
+        \\{"name":"tree","full_name":"tree","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"2.2.1"},"dependencies":[],"service":{"name":{"macos":"org.freedesktop.dbus-session"}}}
+    ;
+    var formula = try formula_mod.parseFormula(testing.allocator, ships_plist);
+    defer formula.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    register(std.Options.debug_io, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
+
+    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: formula ships its own plist, which malt does not adopt") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "kept the service registration") == null);
+}
+
+test "register keeps the row and says why when the new version ships its own plist" {
+    // The refusal reason and the kept-row line come from different facts;
+    // an upgrade over a registration must print both.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try seedDroppedRow(&db);
+    const ships_plist =
+        \\{"name":"tree","full_name":"tree","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"2.2.1"},"dependencies":[],"service":{"name":{"macos":"org.freedesktop.dbus-session"}}}
+    ;
+    var formula = try formula_mod.parseFormula(testing.allocator, ships_plist);
+    defer formula.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    register(std.Options.debug_io, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
+
+    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: formula ships its own plist, which malt does not adopt") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
 
 test "registerRuby retires the previous version's row when the block is gone" {
