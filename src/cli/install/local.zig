@@ -38,6 +38,7 @@ const record = @import("record.zig");
 const InstallError = record.InstallError;
 const sink_mod = @import("sink.zig");
 const post_install_mod = @import("post_install.zig");
+const service_mod = @import("service.zig");
 const OutputSink = sink_mod.OutputSink;
 
 /// Maximum size of a `.rb` formula file that `malt install --local`
@@ -89,6 +90,9 @@ pub const ResolvedRubyFormula = struct {
     /// The `:recommended` subset of `dependencies` - the ones the formula
     /// works without if malt cannot install them.
     recommended: []const []const u8 = &.{},
+    /// The `.rb`'s `service do` block, raw. Borrowed from the formula
+    /// source like `dependencies`. Null when the formula declares none.
+    service: ?rb_parse.RubyServiceBlock = null,
     /// When set, the tap is registered in the DB (mirrors the original
     /// tap install behaviour). Local installs leave this null so they
     /// never pollute the tap list.
@@ -434,6 +438,16 @@ fn installTapRb(
     var final_url_buf: [512]u8 = undefined;
     const final_url = args.interpolateUrl(&final_url_buf, rb.url, rb.version, rb.arch_token);
     var binary_buf: [512]u8 = undefined;
+    // Casks carry no service stanza, and a pass that never registers has
+    // nothing to warn about.
+    const app_name = parseCaskApp(resp.body);
+    const is_cask = tapCaskArtifactKind(final_url, app_name != null) != null;
+    var svc_buf: [rb_parse.max_service_args][]const u8 = undefined;
+    const service = if (is_cask) null else rb_parse.parseServiceBlock(&svc_buf, resp.body) catch blk: {
+        if (!dry_run and !download_only)
+            sink.warn("could not register service for {s}: unsupported service block", .{parts.formula});
+        break :blk null;
+    };
 
     const resolved = ResolvedRubyFormula{
         .name = parts.formula,
@@ -445,9 +459,10 @@ fn installTapRb(
         .sha256 = rb.sha256,
         .binary_name = resolvedCaskBinary(&binary_buf, resp.body, rb.version, rb.arch_token),
         .binary_target = rb_parse.parseCaskBinaryTarget(resp.body),
-        .app_name = parseCaskApp(resp.body),
+        .app_name = app_name,
         .dependencies = deps,
         .recommended = recommended,
+        .service = service,
         .tap_registration = .{
             .url = urls.repo_url,
             .commit_sha = commit_sha,
@@ -583,6 +598,11 @@ pub fn installLocalFormula(
         sink.err("{s} declares more than {d} dependencies", .{ name, dep_buf.len });
         return InstallError.DependencyFailed;
     };
+    var svc_buf: [rb_parse.max_service_args][]const u8 = undefined;
+    const service = rb_parse.parseServiceBlock(&svc_buf, body) catch blk: {
+        if (!dry_run) sink.warn("could not register service for {s}: unsupported service block", .{name});
+        break :blk null;
+    };
 
     const resolved = ResolvedRubyFormula{
         .name = name,
@@ -595,6 +615,7 @@ pub fn installLocalFormula(
         // Borrows from `body`, which outlives the materialise call below.
         .dependencies = deps,
         .recommended = recommended,
+        .service = service,
         // No tap_registration — never pollute `mt tap` with a local path.
     };
 
@@ -1204,6 +1225,10 @@ pub fn materializeRubyFormula(
     }
 
     db.commit() catch return InstallError.RecordFailed;
+
+    // After the commit, like the API path: a refused service warns and
+    // can never roll back the keg.
+    service_mod.registerRuby(ctx.io, allocator, db, resolved.service, resolved.name, pkg_version, prefix, sink);
 
     sink.success("{s} {s} installed", .{ resolved.name, resolved.version });
 }

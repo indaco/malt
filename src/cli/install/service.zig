@@ -4,10 +4,13 @@
 
 const std = @import("std");
 
+const cron = @import("../../core/services/cron.zig");
 const formula_mod = @import("../../core/formula.zig");
 const plist_mod = @import("../../core/services/plist.zig");
 const supervisor_mod = @import("../../core/services/supervisor.zig");
 const sqlite = @import("../../db/sqlite.zig");
+const path_component = @import("../../fs/path_component.zig");
+const rb_parse = @import("rb_parse.zig");
 const sink_mod = @import("sink.zig");
 
 const testing = std.testing;
@@ -55,21 +58,56 @@ pub fn register(
     sink: sink_mod.OutputSink,
 ) void {
     const def = formula.service orelse return;
+    registerDef(io, allocator, db, def, formula.name, formula.pkg_version, prefix, sink);
+}
 
+/// The Ruby-DSL twin of `register`: a tap or `--local` formula's textual
+/// `service do` block. A block malt cannot translate warns and is dropped;
+/// the keg is already committed, so the install still succeeds.
+pub fn registerRuby(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    block: ?rb_parse.RubyServiceBlock,
+    name: []const u8,
+    pkg_version: []const u8,
+    prefix: []const u8,
+    sink: sink_mod.OutputSink,
+) void {
+    const b = block orelse return;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const def = defFromRuby(arena.allocator(), b, name, pkg_version) orelse {
+        sink.warn("could not register service for {s}: unsupported service block", .{name});
+        return;
+    };
+    registerDef(io, allocator, db, def, name, pkg_version, prefix, sink);
+}
+
+fn registerDef(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    def: formula_mod.ServiceDef,
+    name: []const u8,
+    pkg_version: []const u8,
+    prefix: []const u8,
+    sink: sink_mod.OutputSink,
+) void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const aa = arena.allocator();
 
-    const spec = specFromDef(aa, def, formula.name, prefix) catch return;
+    const spec = specFromDef(aa, def, name, prefix) catch return;
 
     // launchd creates the log files on first run; a missing dir surfaces there.
     const log_dir = std.fmt.allocPrint(aa, "{s}/var/log", .{prefix}) catch return;
     std.Io.Dir.cwd().createDirPath(io, log_dir) catch {};
 
-    const cellar_path = std.fmt.allocPrint(aa, "{s}/Cellar/{s}/{s}", .{ prefix, formula.name, formula.pkg_version }) catch return;
+    const cellar_path = std.fmt.allocPrint(aa, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch return;
 
-    supervisor_mod.register(.{ .allocator = allocator, .io = io, .db = db }, spec, formula.name, false, cellar_path, prefix) catch |err| {
-        sink.warn("could not register service for {s}: {s}", .{ formula.name, @errorName(err) });
+    supervisor_mod.register(.{ .allocator = allocator, .io = io, .db = db }, spec, name, false, cellar_path, prefix) catch |err| {
+        sink.warn("could not register service for {s}: {s}", .{ name, @errorName(err) });
         return;
     };
 
@@ -77,9 +115,104 @@ pub fn register(
     // rewritten plist only takes effect on restart. Never restart here: an
     // upgrade must not kill a daemon the user did not ask to stop.
     switch (supervisor_mod.queryRuntime(io, allocator, spec.label)) {
-        .loaded, .running, .errored => sink.warn("{s} service re-registered; run 'mt services restart {s}' to apply it", .{ formula.name, formula.name }),
+        .loaded, .running, .errored => sink.warn("{s} service re-registered; run 'mt services restart {s}' to apply it", .{ name, name }),
         .not_loaded => {},
     }
+}
+
+/// Where a Ruby path token is rooted. Keg-relative roots are spelled out as
+/// the Cellar leaf because `expandPrefix` only knows `$HOMEBREW_PREFIX`.
+const RubyRoot = enum { opt_bin, opt_sbin, opt_libexec, opt_prefix, bin, sbin, libexec, prefix, @"var", etc, homebrew_prefix };
+
+const ruby_roots = std.StaticStringMap(RubyRoot).initComptime(.{
+    .{ "opt_bin", .opt_bin },
+    .{ "opt_sbin", .opt_sbin },
+    .{ "opt_libexec", .opt_libexec },
+    .{ "opt_prefix", .opt_prefix },
+    .{ "bin", .bin },
+    .{ "sbin", .sbin },
+    .{ "libexec", .libexec },
+    .{ "prefix", .prefix },
+    .{ "var", .@"var" },
+    .{ "etc", .etc },
+    .{ "HOMEBREW_PREFIX", .homebrew_prefix },
+});
+
+/// Translate a textual `service do` block into the `ServiceDef` the API
+/// path produces, so both share `specFromDef` and `validate`. Null when any
+/// token is a shape malt cannot render (`#{...}`, `Dir.home`, a method
+/// call) or the schedule is out of bounds - the API side fails those the
+/// same way, and a half-translated argv must never reach launchd.
+pub fn defFromRuby(
+    aa: std.mem.Allocator,
+    block: rb_parse.RubyServiceBlock,
+    name: []const u8,
+    pkg_version: []const u8,
+) ?formula_mod.ServiceDef {
+    const run = aa.alloc([]const u8, block.run.len) catch return null;
+    for (block.run, 0..) |tok, i| run[i] = rubyPath(aa, tok, name, pkg_version) orelse return null;
+
+    return .{
+        .run = run,
+        .working_dir = if (block.working_dir) |t| rubyPath(aa, t, name, pkg_version) orelse return null else null,
+        .log_path = if (block.log_path) |t| rubyPath(aa, t, name, pkg_version) orelse return null else null,
+        .error_log_path = if (block.error_log_path) |t| rubyPath(aa, t, name, pkg_version) orelse return null else null,
+        .keep_alive = block.keep_alive,
+        .schedule = switch (block.run_type) {
+            .immediate => .immediate,
+            .interval => blk: {
+                const secs = block.interval orelse return null;
+                if (secs < 1 or secs > plist_mod.max_interval_secs) return null;
+                break :blk .{ .interval = secs };
+            },
+            .cron => .{ .calendar = cron.parseCron(aa, block.cron orelse return null) catch return null },
+        },
+    };
+}
+
+/// One Ruby token -> a `$HOMEBREW_PREFIX`-rooted path or a bare literal.
+/// Accepted shapes: `"literal"`, `<root>`, `<root>/"leaf"`, and
+/// `Formula["dep"].<root>/"leaf"` with an opt root.
+fn rubyPath(aa: std.mem.Allocator, tok: []const u8, name: []const u8, pkg_version: []const u8) ?[]const u8 {
+    if (std.mem.indexOf(u8, tok, "#{") != null) return null;
+    if (tok.len >= 2 and tok[0] == '"' and tok[tok.len - 1] == '"') return tok[1 .. tok.len - 1];
+
+    var owner = name;
+    var rest = tok;
+    if (std.mem.startsWith(u8, rest, "Formula[\"")) {
+        const dep, const after = std.mem.cut(u8, rest["Formula[\"".len..], "\"].") orelse return null;
+        if (!path_component.isPathComponent(dep)) return null;
+        owner = dep;
+        rest = after;
+    }
+    const root_tok, const leaf = std.mem.cut(u8, rest, "/\"") orelse .{ rest, null };
+    const root = ruby_roots.get(root_tok) orelse return null;
+    // `Formula["dep"].bin` would point into another keg's Cellar leaf, whose
+    // version this formula cannot know.
+    if (owner.ptr != name.ptr) switch (root) {
+        .opt_bin, .opt_sbin, .opt_libexec, .opt_prefix => {},
+        else => return null,
+    };
+    const base: []const u8 = switch (root) {
+        .opt_bin => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/opt/{s}/bin", .{owner}),
+        .opt_sbin => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/opt/{s}/sbin", .{owner}),
+        .opt_libexec => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/opt/{s}/libexec", .{owner}),
+        .opt_prefix => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/opt/{s}", .{owner}),
+        .bin => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/Cellar/{s}/{s}/bin", .{ name, pkg_version }),
+        .sbin => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/Cellar/{s}/{s}/sbin", .{ name, pkg_version }),
+        .libexec => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/Cellar/{s}/{s}/libexec", .{ name, pkg_version }),
+        .prefix => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/Cellar/{s}/{s}", .{ name, pkg_version }),
+        .@"var" => aa.dupe(u8, "$HOMEBREW_PREFIX/var"),
+        .etc => aa.dupe(u8, "$HOMEBREW_PREFIX/etc"),
+        .homebrew_prefix => aa.dupe(u8, "$HOMEBREW_PREFIX"),
+    } catch return null;
+    const quoted = leaf orelse return base;
+    if (quoted.len == 0 or quoted[quoted.len - 1] != '"') return null;
+    const sub = quoted[0 .. quoted.len - 1];
+    // A second `"` means a chained `/"a"/"b"` leaf; pasting it verbatim would
+    // put quotes into the rendered path.
+    if (std.mem.indexOfScalar(u8, sub, '"') != null) return null;
+    return std.fmt.allocPrint(aa, "{s}/{s}", .{ base, sub }) catch null;
 }
 
 test "specFromDef expands the Homebrew prefix token in every path field" {
@@ -130,4 +263,98 @@ test "specFromDef copies keep_alive, schedule and stop_timeout through unchanged
     try testing.expect(plain_spec.keep_alive);
     try testing.expect(plain_spec.schedule == .immediate);
     try testing.expect(plain_spec.stop_timeout == null);
+}
+
+test "defFromRuby translates opt_bin, literal and var tokens into the prefix vocabulary" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const block: rb_parse.RubyServiceBlock = .{
+        .run = &.{ "opt_bin/\"svcd\"", "\"--foreground\"", "var/\"svcd/data\"" },
+        .working_dir = "var",
+        .log_path = "var/\"log/svcd.log\"",
+        .error_log_path = "var/\"log/svcd.err\"",
+        .keep_alive = false,
+    };
+    const def = defFromRuby(arena.allocator(), block, "svcd", "1.0") orelse return error.TestUnexpectedNull;
+    try testing.expectEqual(@as(usize, 3), def.run.len);
+    try testing.expectEqualStrings("$HOMEBREW_PREFIX/opt/svcd/bin/svcd", def.run[0]);
+    try testing.expectEqualStrings("--foreground", def.run[1]);
+    try testing.expectEqualStrings("$HOMEBREW_PREFIX/var/svcd/data", def.run[2]);
+    try testing.expectEqualStrings("$HOMEBREW_PREFIX/var", def.working_dir.?);
+    try testing.expectEqualStrings("$HOMEBREW_PREFIX/var/log/svcd.log", def.log_path.?);
+    try testing.expectEqualStrings("$HOMEBREW_PREFIX/var/log/svcd.err", def.error_log_path.?);
+    try testing.expect(!def.keep_alive);
+    try testing.expect(def.schedule == .immediate);
+}
+
+test "defFromRuby renders keg-relative tokens under the Cellar leaf and opt tokens under opt" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const cases = [_]struct { tok: []const u8, want: []const u8 }{
+        .{ .tok = "bin/\"x\"", .want = "$HOMEBREW_PREFIX/Cellar/foo/1.2_1/bin/x" },
+        .{ .tok = "sbin/\"x\"", .want = "$HOMEBREW_PREFIX/Cellar/foo/1.2_1/sbin/x" },
+        .{ .tok = "libexec/\"x\"", .want = "$HOMEBREW_PREFIX/Cellar/foo/1.2_1/libexec/x" },
+        .{ .tok = "prefix/\"x\"", .want = "$HOMEBREW_PREFIX/Cellar/foo/1.2_1/x" },
+        .{ .tok = "opt_sbin/\"x\"", .want = "$HOMEBREW_PREFIX/opt/foo/sbin/x" },
+        .{ .tok = "opt_libexec/\"x\"", .want = "$HOMEBREW_PREFIX/opt/foo/libexec/x" },
+        .{ .tok = "opt_prefix/\"x\"", .want = "$HOMEBREW_PREFIX/opt/foo/x" },
+        .{ .tok = "etc/\"foo.conf\"", .want = "$HOMEBREW_PREFIX/etc/foo.conf" },
+        .{ .tok = "HOMEBREW_PREFIX/\"x\"", .want = "$HOMEBREW_PREFIX/x" },
+        .{ .tok = "HOMEBREW_PREFIX", .want = "$HOMEBREW_PREFIX" },
+        .{ .tok = "Formula[\"node\"].opt_bin/\"node\"", .want = "$HOMEBREW_PREFIX/opt/node/bin/node" },
+    };
+    for (cases) |case| {
+        const def = defFromRuby(aa, .{ .run = &.{case.tok} }, "foo", "1.2_1") orelse return error.TestUnexpectedNull;
+        try testing.expectEqualStrings(case.want, def.run[0]);
+    }
+}
+
+test "defFromRuby drops the service on a token shape it cannot render" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    try testing.expect(defFromRuby(aa, .{ .run = &.{"\"#{opt_bin}/x\""} }, "foo", "1.0") == null);
+    try testing.expect(defFromRuby(aa, .{ .run = &.{ "opt_bin/\"x\"", "Dir.home" } }, "foo", "1.0") == null);
+    try testing.expect(defFromRuby(aa, .{ .run = &.{"opt_bin/\"x\""}, .log_path = "Dir.home" }, "foo", "1.0") == null);
+}
+
+test "defFromRuby maps run_type to a bounded schedule" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const run: []const []const u8 = &.{"opt_bin/\"x\""};
+
+    const iv = defFromRuby(aa, .{ .run = run, .run_type = .interval, .interval = 300 }, "foo", "1.0") orelse return error.TestUnexpectedNull;
+    try testing.expectEqual(@as(u32, 300), iv.schedule.interval);
+
+    try testing.expect(defFromRuby(aa, .{ .run = run, .run_type = .interval, .interval = 0 }, "foo", "1.0") == null);
+    try testing.expect(defFromRuby(aa, .{ .run = run, .run_type = .interval, .interval = plist_mod.max_interval_secs + 1 }, "foo", "1.0") == null);
+    try testing.expect(defFromRuby(aa, .{ .run = run, .run_type = .interval }, "foo", "1.0") == null);
+
+    const cr = defFromRuby(aa, .{ .run = run, .run_type = .cron, .cron = "0 4 * * *" }, "foo", "1.0") orelse return error.TestUnexpectedNull;
+    try testing.expect(cr.schedule == .calendar);
+    try testing.expectEqual(@as(?u8, 4), cr.schedule.calendar[0].hour);
+    try testing.expect(defFromRuby(aa, .{ .run = run, .run_type = .cron, .cron = "not a cron" }, "foo", "1.0") == null);
+    try testing.expect(defFromRuby(aa, .{ .run = run, .run_type = .cron }, "foo", "1.0") == null);
+}
+
+test "defFromRuby refuses a chained leaf whose quotes would land in the plist" {
+    // `var/"log"/"x.log"` is legal Ruby, but pasting past the first `/"` would
+    // write `var/log"/"x.log` into a path launchd then fails to open.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    try testing.expect(defFromRuby(aa, .{ .run = &.{"opt_bin/\"x\""}, .log_path = "var/\"log\"/\"x.log\"" }, "foo", "1.0") == null);
+    try testing.expect(defFromRuby(aa, .{ .run = &.{"opt_bin/\"a\"/\"b\""} }, "foo", "1.0") == null);
+}
+
+test "defFromRuby refuses a dependency reference that is not a plain formula name" {
+    // The name becomes an `opt/<dep>` component; traversal in the rendered
+    // path is `validate`'s job, but a slash here is simply not a formula.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    try testing.expect(defFromRuby(aa, .{ .run = &.{"Formula[\"../..\"].opt_bin/\"evil\""} }, "foo", "1.0") == null);
+    try testing.expect(defFromRuby(aa, .{ .run = &.{"Formula[\"a/b\"].opt_bin/\"x\""} }, "foo", "1.0") == null);
 }
