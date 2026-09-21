@@ -1108,7 +1108,21 @@ test "a tap-routed upgrade whose install fails puts the old version back" {
         malt.output.setQuiet(prior_quiet);
     }
     const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = rig.environ, .offline = false };
-    try testing.expectError(error.Aborted, malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "plain" }));
+    const outcome = blk: {
+        // ditto reports the missing bundle on the inherited stderr; park
+        // fd 2 on /dev/null only for the call so the runner's output stays
+        // clean and the assert below still speaks.
+        const saved = std.c.dup(std.posix.STDERR_FILENO);
+        if (saved < 0) return error.Unexpected;
+        defer _ = std.c.close(saved);
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+        if (devnull < 0) return error.Unexpected;
+        defer _ = std.c.close(devnull);
+        if (std.c.dup2(devnull, std.posix.STDERR_FILENO) < 0) return error.Unexpected;
+        defer _ = std.c.dup2(saved, std.posix.STDERR_FILENO);
+        break :blk malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "plain" });
+    };
+    try testing.expectError(error.Aborted, outcome);
     try testing.expect(std.mem.indexOf(u8, captured.items, "plain 1.0 is back in place") != null);
 
     const bin = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.p("Applications/Plain.app/Contents/MacOS/bin"), 64);
