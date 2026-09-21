@@ -163,6 +163,9 @@ jobs:
       - name: Regression guard - upgrade retires a service the new version no longer declares
         run: ./scripts/regressions/upgrade-retires-dropped-service-upgrade-to-a-version-without-a-service-block-keeps-the-old-registration.sh
 
+      - name: Regression guard - a service's working_dir is pre-created only under keg, var or etc
+        run: ./scripts/regressions/service-working-dir-not-precreated-outside-keg-var-etc-service-working-dir-precreated-anywhere-under-prefix.sh
+
       - name: Regression guard - a dead tap host is paid for once per audit
         run: ./scripts/regressions/tap-dead-host-breaker-tap-audits-pay-full-retry-budget-per-keg-behind-one-dead-forge.sh
 
