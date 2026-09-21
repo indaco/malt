@@ -482,6 +482,13 @@ fn parseRuntime(stdout: []const u8, label: []const u8) RuntimeState {
 /// on any failure (missing label, non-macOS, launchctl error) so callers can
 /// degrade to the DB-recorded status without aborting.
 pub fn queryRuntime(io: std.Io, allocator: std.mem.Allocator, label: []const u8) RuntimeState {
+    return probeRuntime(io, allocator, label) orelse .not_loaded;
+}
+
+/// `queryRuntime` that keeps "launchctl could not be asked" (null) apart
+/// from "nothing loaded", for callers whose action is irreversible. Without
+/// launchd there is nothing to load, so a non-macOS host is a real answer.
+pub fn probeRuntime(io: std.Io, allocator: std.mem.Allocator, label: []const u8) ?RuntimeState {
     if (builtin.os.tag != .macos) return .not_loaded;
 
     // `launchctl list` output is at most a few hundred lines (one per
@@ -494,11 +501,18 @@ pub fn queryRuntime(io: std.Io, allocator: std.mem.Allocator, label: []const u8)
         .argv = &.{ system_tools.launchctl, "list" },
         .stdout_limit = .limited(4 * 1024 * 1024),
         .stderr_limit = .limited(4 * 1024 * 1024),
-    }) catch return .not_loaded;
+    }) catch return null;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    return parseRuntime(result.stdout, label);
+    return runtimeFromList(result.term, result.stdout, label);
+}
+
+/// A `launchctl list` that did not exit cleanly prints nothing useful, and
+/// nothing must not read as "nothing loaded".
+fn runtimeFromList(term: std.process.Child.Term, stdout: []const u8, label: []const u8) ?RuntimeState {
+    if (term != .exited or term.exited != 0) return null;
+    return parseRuntime(stdout, label);
 }
 
 pub fn hasService(db: *sqlite.Database, name: []const u8) bool {
@@ -947,4 +961,13 @@ test "stopAndUnregister removes the service directory its registration owned" {
 
     try testing.expect(!hasService(&db, label));
     try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(dbg_io, dir, .{}));
+}
+
+test "runtimeFromList: a launchctl that did not exit cleanly is no answer" {
+    // Empty stdout from a failed `launchctl list` must not read as "nothing
+    // loaded" - a caller about to retire a registration would act on it.
+    try testing.expect(runtimeFromList(.{ .exited = 1 }, "", "com.x") == null);
+    try testing.expect(runtimeFromList(.{ .signal = .KILL }, launchctl_header ++ "1\t0\tcom.x\n", "com.x") == null);
+    try testing.expectEqual(RuntimeState.running, runtimeFromList(.{ .exited = 0 }, launchctl_header ++ "1\t0\tcom.x\n", "com.x").?);
+    try testing.expectEqual(RuntimeState.not_loaded, runtimeFromList(.{ .exited = 0 }, launchctl_header, "com.x").?);
 }
