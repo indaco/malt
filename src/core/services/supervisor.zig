@@ -420,6 +420,16 @@ pub fn stopAndUnregister(ctx: SupervisorCtx, name: []const u8) void {
     stmt.bindText(1, label) catch return;
     // Row may not exist; DELETE is idempotent either way.
     _ = stmt.step() catch {};
+    removeServiceDir(ctx, label);
+}
+
+/// Drop the plist directory `register` created for `label`. Best-effort:
+/// the row is already gone, and a leftover dir only costs a later
+/// `register` an overwrite.
+pub fn removeServiceDir(ctx: SupervisorCtx, label: []const u8) void {
+    const dir = serviceDir(ctx.allocator, label) catch return;
+    defer ctx.allocator.free(dir);
+    std.Io.Dir.cwd().deleteTree(ctx.io, dir) catch {};
 }
 
 fn setStatus(db: *sqlite.Database, name: []const u8, status: []const u8) SupervisorError!void {
@@ -472,6 +482,13 @@ fn parseRuntime(stdout: []const u8, label: []const u8) RuntimeState {
 /// on any failure (missing label, non-macOS, launchctl error) so callers can
 /// degrade to the DB-recorded status without aborting.
 pub fn queryRuntime(io: std.Io, allocator: std.mem.Allocator, label: []const u8) RuntimeState {
+    return probeRuntime(io, allocator, label) orelse .not_loaded;
+}
+
+/// `queryRuntime` that keeps "launchctl could not be asked" (null) apart
+/// from "nothing loaded", for callers whose action is irreversible. Without
+/// launchd there is nothing to load, so a non-macOS host is a real answer.
+pub fn probeRuntime(io: std.Io, allocator: std.mem.Allocator, label: []const u8) ?RuntimeState {
     if (builtin.os.tag != .macos) return .not_loaded;
 
     // `launchctl list` output is at most a few hundred lines (one per
@@ -484,11 +501,18 @@ pub fn queryRuntime(io: std.Io, allocator: std.mem.Allocator, label: []const u8)
         .argv = &.{ system_tools.launchctl, "list" },
         .stdout_limit = .limited(4 * 1024 * 1024),
         .stderr_limit = .limited(4 * 1024 * 1024),
-    }) catch return .not_loaded;
+    }) catch return null;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    return parseRuntime(result.stdout, label);
+    return runtimeFromList(result.term, result.stdout, label);
+}
+
+/// A `launchctl list` that did not exit cleanly prints nothing useful, and
+/// nothing must not read as "nothing loaded".
+fn runtimeFromList(term: std.process.Child.Term, stdout: []const u8, label: []const u8) ?RuntimeState {
+    if (term != .exited or term.exited != 0) return null;
+    return parseRuntime(stdout, label);
 }
 
 pub fn hasService(db: *sqlite.Database, name: []const u8) bool {
@@ -906,4 +930,45 @@ test "parseRuntime: finds the target row past earlier non-matching services" {
         "-\t0\tcom.other\n" ++
         "4321\t2\tcom.target\n";
     try testing.expectEqual(RuntimeState.errored, parseRuntime(out, "com.target"));
+}
+
+test "stopAndUnregister removes the service directory its registration owned" {
+    // Uninstall must not leave a plist behind that a later install of the
+    // same name would silently inherit.
+    var s = try Scratch.init("unregister_dir");
+    defer s.deinit();
+    const prev = try atomic.overridePrefixEnv(s.base);
+    defer atomic.restorePrefixEnv(prev);
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec(
+        \\CREATE TABLE services (name TEXT PRIMARY KEY, keg_name TEXT NOT NULL, plist_path TEXT NOT NULL,
+        \\  auto_start INTEGER NOT NULL DEFAULT 0, last_started_at INTEGER, last_status TEXT, schedule TEXT);
+    );
+    const label = "com.malt.unregister-probe";
+    const dir = try serviceDir(testing.allocator, label);
+    defer testing.allocator.free(dir);
+    try std.Io.Dir.cwd().createDirPath(dbg_io, dir);
+    const plist = try std.fmt.allocPrint(testing.allocator, "{s}/service.plist", .{dir});
+    defer testing.allocator.free(plist);
+    try std.Io.Dir.cwd().writeFile(dbg_io, .{ .sub_path = plist, .data = "<plist/>" });
+    var ins = try db.prepare("INSERT INTO services (name, keg_name, plist_path) VALUES (?, 'unregister-probe', ?);");
+    defer ins.finalize();
+    try ins.bindText(1, label);
+    try ins.bindText(2, plist);
+    _ = try ins.step();
+
+    stopAndUnregister(.{ .allocator = testing.allocator, .io = dbg_io, .db = &db }, "unregister-probe");
+
+    try testing.expect(!hasService(&db, label));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(dbg_io, dir, .{}));
+}
+
+test "runtimeFromList: a launchctl that did not exit cleanly is no answer" {
+    // Empty stdout from a failed `launchctl list` must not read as "nothing
+    // loaded" - a caller about to retire a registration would act on it.
+    try testing.expect(runtimeFromList(.{ .exited = 1 }, "", "com.x") == null);
+    try testing.expect(runtimeFromList(.{ .signal = .KILL }, launchctl_header ++ "1\t0\tcom.x\n", "com.x") == null);
+    try testing.expectEqual(RuntimeState.running, runtimeFromList(.{ .exited = 0 }, launchctl_header ++ "1\t0\tcom.x\n", "com.x").?);
+    try testing.expectEqual(RuntimeState.not_loaded, runtimeFromList(.{ .exited = 0 }, launchctl_header, "com.x").?);
 }

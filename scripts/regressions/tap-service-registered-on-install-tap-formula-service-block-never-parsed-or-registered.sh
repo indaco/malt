@@ -47,9 +47,9 @@ fail() {
 
 LOCAL_SRC="$ROOT/src/cli/install/local.zig"
 TAP_FN=$(awk '/^fn installTapRb\(/,/^}/' "$LOCAL_SRC")
-grep -q 'parseServiceBlock(&svc_buf, resp.body)' <<<"$TAP_FN" ||
+grep -q 'ParsedService.parse(&svc_buf, resp.body)' <<<"$TAP_FN" ||
   fail "the tap resolver no longer lifts the service block from the fetched .rb"
-grep -q '\.service = service,' <<<"$TAP_FN" ||
+grep -q '\.service = svc.block,' <<<"$TAP_FN" ||
   fail "the tap resolver no longer hands the service block to the install tail"
 pass "tap resolver still lifts and forwards the service block"
 

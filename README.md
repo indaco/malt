@@ -480,7 +480,7 @@ mt services logs postgresql@16 --stderr
 mt services logs postgresql@16 -f        # tail and follow until SIGINT
 ```
 
-Services are registered automatically when an installed formula carries a `service` block (e.g. `postgresql@16`, `redis`), including tap and `--local` formulas. Plist + log files live at `{prefix}/var/malt/services/<name>/`; runtime state in the SQLite `services` table. `mt upgrade` re-renders the plist from the new version (`mt rollback` does not); a running service keeps the old definition until `mt services restart <name>`. macOS-only - Linux/Windows return `OsNotSupported`.
+Services are registered automatically when an installed formula carries a `service` block (e.g. `postgresql@16`, `redis`), including tap and `--local` formulas. Plist + log files live at `{prefix}/var/malt/services/<name>/`; runtime state in the SQLite `services` table. `mt upgrade` re-renders the plist from the new version (`mt rollback` does not); a running service keeps the old definition until `mt services restart <name>`. A version that drops its `service` block retires the registration (`mt rollback` does not bring it back; `mt reinstall <name>` does); if the job is still loaded, stop it and `mt reinstall <name>`. macOS-only - Linux/Windows return `OsNotSupported`.
 
 ### Reproducible setups
 

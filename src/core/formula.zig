@@ -355,6 +355,10 @@ pub const Formula = struct {
     /// JSON contains a `service` object with at least a `run` array.
     /// All string fields inside borrow from `_parsed`.
     service: ?ServiceDef = null,
+    /// True when the JSON carries a `service` object at all, so a block
+    /// malt cannot read (OS-keyed `run`, no `run`) is not mistaken for a
+    /// formula that dropped its service.
+    service_declared: bool = false,
     /// Advisories still open at the tap's current version. Outer slice
     /// allocated through `_parsed.arena`; strings live in `_parsed`.
     vulns_open: []const Vuln = &.{},
@@ -546,8 +550,10 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
 
     // service block (optional — Homebrew formulas opt in)
     var service_def: ?ServiceDef = null;
+    var service_declared = false;
     if (root.get("service")) |sv| {
         if (sv == .object) {
+            service_declared = true;
             const so = sv.object;
             const run_val = so.get("run");
             if (run_val) |rv| {
@@ -659,6 +665,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         .bottle_root_url = bottle_root_url,
         .oldnames = oldnames,
         .service = service_def,
+        .service_declared = service_declared,
         .vulns_open = vulns_open,
         ._parsed = parsed,
     };
@@ -1684,4 +1691,23 @@ test "parseStopTimeout keeps only a value inside the cap" {
         defer parsed.deinit();
         try std.testing.expectEqual(case.want, parseStopTimeout(parsed.value.object));
     }
+}
+
+test "parseFormula records that a service block was declared even when it cannot read it" {
+    // A block whose `run` is OS-keyed is declared but unreadable; callers
+    // must not treat it like a formula that never had a service.
+    const declared =
+        \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[],"service":{"run":{"macos":["/bin/x"],"linux":["/bin/x"]}}}
+    ;
+    var f = try parseFormula(testing.allocator, declared);
+    defer f.deinit();
+    try testing.expect(f.service == null);
+    try testing.expect(f.service_declared);
+
+    const absent =
+        \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[]}
+    ;
+    var g = try parseFormula(testing.allocator, absent);
+    defer g.deinit();
+    try testing.expect(!g.service_declared);
 }
