@@ -1338,3 +1338,62 @@ test "installLocalFormula warns about an unsupported service block only when it 
     );
     try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service for nosvc: unsupported service block") != null);
 }
+
+test "installLocalFormula says a formula ships its own plist instead of calling the block unsupported" {
+    // The block is well-formed; malt just does not adopt shipped plists.
+    // The generic reason would send the user hunting for a parser gap.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/shipd.rb", .{prefix});
+    defer testing.allocator.free(rb_path);
+    try writeFile(rb_path,
+        \\class Shipd < Formula
+        \\  version "1.0"
+        \\  url "https://example.invalid/shipd-1.0.tar.gz"
+        \\  sha256 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        \\  service do
+        \\    name macos: "homebrew.mxcl.shipd"
+        \\  end
+        \\end
+        \\
+    );
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    var warns: std.ArrayList(u8) = .empty;
+    defer warns.deinit(testing.allocator);
+    const sink: malt.install_sink.OutputSink = .{
+        .ctx = &warns,
+        .writeInfo = swallowLine,
+        .writeWarn = captureWarn,
+        .writeSuccess = swallowLine,
+        .writeErr = swallowLine,
+        .show_progress = false,
+    };
+
+    try install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, true, false, sink);
+    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service") == null);
+
+    // The real pass warns at parse time and then fails on the (offline) fetch.
+    try testing.expectError(
+        install_record.InstallError.DownloadFailed,
+        install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, false, false, sink),
+    );
+    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service for shipd: formula ships its own plist, which malt does not adopt") != null);
+    try testing.expect(std.mem.indexOf(u8, warns.items, "unsupported service block") == null);
+}

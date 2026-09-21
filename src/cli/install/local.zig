@@ -60,9 +60,12 @@ pub const max_local_formula_bytes: usize = 1 * 1024 * 1024;
 const ParsedService = struct {
     block: ?rb_parse.RubyServiceBlock = null,
     declared: bool = false,
+    /// Why the block did not lift; only meaningful when `unreadable()`.
+    reason: []const u8 = "",
 
     fn parse(buf: *[rb_parse.max_service_args][]const u8, body: []const u8) ParsedService {
-        const block = rb_parse.parseServiceBlock(buf, body) catch return .{ .declared = true };
+        const block = rb_parse.parseServiceBlock(buf, body) catch |err|
+            return .{ .declared = true, .reason = rb_parse.serviceRefusalReason(err) };
         return .{ .block = block, .declared = block != null };
     }
 
@@ -465,7 +468,7 @@ fn installTapRb(
     var svc_buf: [rb_parse.max_service_args][]const u8 = undefined;
     const svc: ParsedService = if (is_cask) .{} else ParsedService.parse(&svc_buf, resp.body);
     if (svc.unreadable() and !dry_run and !download_only)
-        sink.warn("could not register service for {s}: unsupported service block", .{parts.formula});
+        sink.warn("could not register service for {s}: {s}", .{ parts.formula, svc.reason });
 
     const resolved = ResolvedRubyFormula{
         .name = parts.formula,
@@ -619,7 +622,7 @@ pub fn installLocalFormula(
     };
     var svc_buf: [rb_parse.max_service_args][]const u8 = undefined;
     const svc = ParsedService.parse(&svc_buf, body);
-    if (svc.unreadable() and !dry_run) sink.warn("could not register service for {s}: unsupported service block", .{name});
+    if (svc.unreadable() and !dry_run) sink.warn("could not register service for {s}: {s}", .{ name, svc.reason });
 
     const resolved = ResolvedRubyFormula{
         .name = name,
@@ -2144,15 +2147,27 @@ test "ParsedService keeps a block malt cannot read apart from no block at all" {
     try std.testing.expect(readable.block != null);
     try std.testing.expect(readable.declared);
 
-    const unreadable = ParsedService.parse(&buf,
+    const no_run = ParsedService.parse(&buf,
         \\  service do
         \\    keep_alive true
         \\  end
     );
-    try std.testing.expect(unreadable.block == null);
-    try std.testing.expect(unreadable.declared);
+    try std.testing.expect(no_run.block == null);
+    try std.testing.expect(no_run.declared);
 
     const none = ParsedService.parse(&buf, "class X < Formula\nend\n");
     try std.testing.expect(none.block == null);
     try std.testing.expect(!none.declared);
+
+    // A shipped plist is declared-but-unreadable too: it must not retire a
+    // previous registration like an absent block would, and it carries its
+    // own reason for both the tap and the local warning.
+    const shipped = ParsedService.parse(&buf,
+        \\  service do
+        \\    name macos: "x"
+        \\  end
+    );
+    try std.testing.expect(shipped.unreadable());
+    try std.testing.expectEqualStrings("formula ships its own plist, which malt does not adopt", shipped.reason);
+    try std.testing.expectEqualStrings("unsupported service block", no_run.reason);
 }
