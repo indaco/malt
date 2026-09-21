@@ -844,48 +844,49 @@ For installing malt from a local checkout (the end-user path), see [From source]
 ## Benchmarks
 
 <!-- BENCH:META:START -->
-
 - Install times on macOS 14 (Apple Silicon).
-- Benchmarked releases: malt `0.24.2`, nanobrew `v0.1.211`, zerobrew `v0.3.2`
-  <!-- BENCH:META:END -->
+- Benchmarked releases:
+  - malt `0.24.4`
+  - nanobrew `v0.1.212`
+  - zerobrew `v0.3.2`
+<!-- BENCH:META:END -->
 
 <!-- BENCH:COLD:START -->
-
 ### Cold Install (median ±σ)
 
-| Package              | malt         | nanobrew     | zerobrew      | Homebrew     |
-| -------------------- | ------------ | ------------ | ------------- | ------------ |
-| **tree** (0 deps)    | 0.484±0.043s | 0.621±0.036s | 0.918±0.045s  | 1.428±0.140s |
-| **wget** (6 deps)    | 4.039±0.395s | 8.186±0.547s | 6.780±1.109s  | 1.548±0.127s |
-| **ffmpeg** (11 deps) | 4.530±0.831s | 7.081±0.455s | 36.375±1.989s | 3.134±0.329s |
+| Package | malt | nanobrew | zerobrew | Homebrew |
+| ------- | ---- | -------- | -------- | -------- |
+| **tree** (0 deps) | 0.484±0.020s | 0.552±0.036s | 1.182±0.037s | 1.453±0.195s |
+| **wget** (6 deps) | 3.579±0.665s | 7.533±0.526s | ⚠️ n/a (install failed) | 1.639±0.296s |
+| **ffmpeg** (11 deps) | 3.426±0.352s | 6.420±0.549s | ⚠️ n/a (install failed) | 2.801±0.145s |
 
+> ⚠️ = cell omitted. That tool's cold install failed, or exceeded the
+> sanity ceiling (50 s), which reflects a regression in that tool rather
+> than a comparable install time, so the number is withheld instead of
+> published. malt is never omitted - a real malt slowdown stays visible.
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
-
 ### Warm Install
 
-| Package              | malt   | nanobrew | zerobrew |
-| -------------------- | ------ | -------- | -------- |
-| **tree** (0 deps)    | 0.012s | 0.080s   | 0.371s   |
-| **wget** (6 deps)    | 0.020s | 0.171s   | 1.087s   |
-| **ffmpeg** (11 deps) | 0.029s | 3.471s   | 30.489s  |
-
+| Package | malt | nanobrew | zerobrew |
+| ------- | ---- | -------- | -------- |
+| **tree** (0 deps) | 0.011s | 0.057s | 0.391s |
+| **wget** (6 deps) | 0.021s | 0.166s | ⚠️ n/a (install failed) |
+| **ffmpeg** (11 deps) | 0.024s | 3.434s | ⚠️ n/a (install failed) |
 <!-- BENCH:WARM:END -->
 
 <!-- BENCH:SIZE:START -->
-
 ### Binary Size
 
-| Tool     | Size   |
-| -------- | ------ |
+| Tool | Size |
+| ---- | ---- |
 | **malt** | 4.3 MB |
 | nanobrew | 3.4 MB |
 | zerobrew | 8.7 MB |
-
 <!-- BENCH:SIZE:END -->
 
-> Apple Silicon (GitHub Actions macos-14), 2026-09-14. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
+> Apple Silicon (GitHub Actions macos-14), 2026-09-21. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
 
 ### Inside the binary
 
