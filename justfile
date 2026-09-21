@@ -68,6 +68,8 @@ regressions-hermetic:
     @./scripts/regressions/head-read-deadline-response-head-reads-have-no-deadline.sh
     @./scripts/regressions/no-deadline-on-connect-tls-response-head.sh
     @./scripts/regressions/redirect-response-released-with-draining-deinit.sh
+    @./scripts/regressions/get-only-redirect-resolve-cask-head-only-resolve-misses-get-only-redirects.sh
+    @./scripts/regressions/cask-upgrade-resolves-extensionless-url-before-download.sh
     @./scripts/regressions/notifier-probe-unbounded-by-client-retry-backoff.sh
 
 # Guards that build a standalone `zig test` harness. Those duplicate build.zig's
