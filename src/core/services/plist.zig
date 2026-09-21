@@ -158,6 +158,9 @@ pub fn validate(
     const head = spec.program_args[0];
     if (head.len == 0 or head[0] != '/') return ValidationError.RelativeExecutable;
     if (forbidden_heads.has(head)) return ValidationError.InterpreterBait;
+    // The root checks below are textual, so a `..` segment would satisfy
+    // them and still resolve outside the root when launchd opens the path.
+    if (hasDotDotSegment(head)) return ValidationError.PathEscape;
 
     // Allowed roots: formula's own cellar, OR malt_prefix/opt. Both
     // checked with a component-boundary-aware prefix match so
@@ -180,6 +183,12 @@ pub fn validate(
         dsl_sandbox.validatePath(p, cellar_path, malt_prefix) catch
             return ValidationError.PathEscape;
     }
+}
+
+fn hasDotDotSegment(p: []const u8) bool {
+    var it = std.mem.splitScalar(u8, p, '/');
+    while (it.next()) |seg| if (std.mem.eql(u8, seg, "..")) return true;
+    return false;
 }
 
 /// True when every set field of a CalendarInterval sits in launchd's range.
@@ -392,4 +401,26 @@ test "validate rejects path separators in label" {
         spec.label = ok;
         try validate(spec, "/opt/malt/Cellar/foo/1.0", "/opt/malt");
     }
+}
+
+test "validate rejects a dot-dot segment in the executable head" {
+    // The root check is a textual prefix match, so `<opt>/foo/../../..` passed
+    // it and only launchd resolved where it really pointed. The log and
+    // working paths were already covered by the sandbox's validatePath.
+    const base = ServiceSpec{
+        .label = "com.malt.foo",
+        .program_args = &.{"/opt/malt/opt/foo/bin/foo"},
+        .stdout_path = "/opt/malt/var/log/foo.out",
+        .stderr_path = "/opt/malt/var/log/foo.err",
+    };
+    try validate(base, "/opt/malt/Cellar/foo/1.0", "/opt/malt");
+
+    var head = base;
+    head.program_args = &.{"/opt/malt/opt/foo/../../../../bin/evil"};
+    try testing.expectError(ValidationError.PathEscape, validate(head, "/opt/malt/Cellar/foo/1.0", "/opt/malt"));
+
+    // Dots inside a segment are not traversal, and later argv is free text.
+    var dotted = base;
+    dotted.program_args = &.{ "/opt/malt/opt/foo/bin/foo..bar", "--config=../relative.conf" };
+    try validate(dotted, "/opt/malt/Cellar/foo/1.0", "/opt/malt");
 }

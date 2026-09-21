@@ -480,7 +480,7 @@ mt services logs postgresql@16 --stderr
 mt services logs postgresql@16 -f        # tail and follow until SIGINT
 ```
 
-Services are registered automatically when an installed formula carries a `service` block (e.g. `postgresql@16`, `redis`). Plist + log files live at `{prefix}/var/malt/services/<name>/`; runtime state in the SQLite `services` table. `mt upgrade` re-renders the plist from the new version (`mt rollback` does not); a running service keeps the old definition until `mt services restart <name>`. macOS-only - Linux/Windows return `OsNotSupported`.
+Services are registered automatically when an installed formula carries a `service` block (e.g. `postgresql@16`, `redis`), including tap and `--local` formulas. Plist + log files live at `{prefix}/var/malt/services/<name>/`; runtime state in the SQLite `services` table. `mt upgrade` re-renders the plist from the new version (`mt rollback` does not); a running service keeps the old definition until `mt services restart <name>`. macOS-only - Linux/Windows return `OsNotSupported`.
 
 ### Reproducible setups
 
@@ -691,7 +691,7 @@ The supply-chain story:
 - **Flag conflicts refused.** Combining `--local` with `--cask`, `--formula`, or `--use-system-ruby` is refused up front.
 - **No upstream.** `mt upgrade` and `mt outdated` skip a local keg — there is nothing to fetch. Re-run `mt install --local <path>` to update it.
 
-For local installs, malt reads only the bottle-style `version` + `url` + `sha256` triple (optionally nested under `on_macos` / `on_arm` / `on_intel`). It does not evaluate `depends_on` or `post_install` - if you need either, publish the formula to a tap and install via `mt install user/tap/formula` instead.
+For local installs, malt reads the bottle-style `version` + `url` + `sha256` triple (optionally nested under `on_macos` / `on_arm` / `on_intel`), the runtime `depends_on` names, and a `service do` block whose `run` uses keg-relative paths (`opt_bin/"x"`, `var/"..."`, `Formula["dep"].opt_bin/"x"`) or plain strings - a block it cannot translate is skipped with a warning. Keg-relative roots (`bin/"x"`, `libexec/"x"`) pin the plist to the installed version's Cellar path, so prefer `opt_bin/"x"` if the service should survive `mt rollback`. A keg installed before its service was recognised gains it on the next `mt install --force` or `mt upgrade`. It does not evaluate `post_install` - if you need that, publish the formula to a tap and install via `mt install user/tap/formula` instead.
 
 Supported archive formats are `.tar.gz`, `.tgz`, `.tar.xz`, and `.zip`. The formula name comes from the file's basename: `hello.rb` installs `hello`. A minimal compatible `.rb`:
 

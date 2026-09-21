@@ -31,6 +31,7 @@ const system_tools = @import("../../system_tools.zig");
 const builtin = @import("builtin");
 const sqlite = @import("../../db/sqlite.zig");
 const plist_mod = @import("plist.zig");
+const dsl_sandbox = @import("../dsl/sandbox.zig");
 const service_types = @import("types.zig");
 const atomic = @import("../../fs/atomic.zig");
 
@@ -83,6 +84,21 @@ pub const ServiceInfo = struct {
     /// run-at-load. A convenience cache; the plist stays authoritative.
     schedule: []const u8,
 };
+
+/// Whether `register` may create `wd` on the formula's behalf. `validate`
+/// confines it to the prefix, but the prefix also holds every slot another
+/// formula will want (`opt/<x>`, `bin/<x>`, `Cellar/<x>`, malt's own state),
+/// and a formula-controlled mkdir there squats it before anything is started.
+/// Real services only ever need the keg, `var` or `etc`.
+fn precreatableWorkingDir(wd: []const u8, cellar_path: []const u8, malt_prefix: []const u8) bool {
+    if (dsl_sandbox.pathHasPrefix(wd, cellar_path)) return true;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    inline for (.{ "var/malt", "var", "etc" }) |sub| {
+        const root = std.fmt.bufPrint(&buf, "{s}/{s}", .{ malt_prefix, sub }) catch return false;
+        if (dsl_sandbox.pathHasPrefix(wd, root)) return !std.mem.eql(u8, sub, "var/malt");
+    }
+    return false;
+}
 
 /// Returns the services directory: `{prefix}/var/malt/services`.
 pub fn servicesDir(allocator: std.mem.Allocator) SupervisorError![]const u8 {
@@ -213,9 +229,9 @@ pub fn register(
     // pre-creates the log directory for the same reason; the working dir was
     // the half that got missed. `plist_mod.validate` above has already
     // confined it to the keg or the prefix, so creating it is in-bounds.
-    if (spec.working_dir) |wd| {
+    if (spec.working_dir) |wd| if (precreatableWorkingDir(wd, cellar_path, malt_prefix)) {
         std.Io.Dir.cwd().createDirPath(ctx.io, wd) catch {};
-    }
+    };
 
     const plist_path = std.fmt.allocPrint(allocator, "{s}/service.plist", .{dir}) catch
         return SupervisorError.OutOfMemory;

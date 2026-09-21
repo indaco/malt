@@ -472,6 +472,162 @@ pub fn tapCaskArtifactKind(url: []const u8, has_app: bool) ?cask_mod.ArtifactTyp
     };
 }
 
+/// Cap on `run` argv tokens a Ruby service block may carry. Sized well below
+/// `plist.max_program_args` so the caller-owned buffer stays small.
+pub const max_service_args = 16;
+
+/// A formula's `service do ... end` block, lifted textually. Every string is
+/// the raw Ruby spelling (`opt_bin/"svcd"`, `"--foreground"`, `var/"log"`);
+/// translating those into launchd paths is the caller's job.
+pub const RubyServiceBlock = struct {
+    run: []const []const u8,
+    working_dir: ?[]const u8 = null,
+    log_path: ?[]const u8 = null,
+    error_log_path: ?[]const u8 = null,
+    keep_alive: bool = true,
+    run_type: RunType = .immediate,
+    interval: ?u32 = null,
+    cron: ?[]const u8 = null,
+
+    pub const RunType = enum { immediate, interval, cron };
+};
+
+const ServiceDirective = enum { run, keep_alive, working_dir, log_path, error_log_path, run_type, interval, cron };
+
+const service_directives = std.StaticStringMap(ServiceDirective).initComptime(.{
+    .{ "run", .run },
+    .{ "keep_alive", .keep_alive },
+    .{ "working_dir", .working_dir },
+    .{ "log_path", .log_path },
+    .{ "error_log_path", .error_log_path },
+    .{ "run_type", .run_type },
+    .{ "interval", .interval },
+    .{ "cron", .cron },
+});
+
+/// Lift the `service do ... end` block. Null when the formula has none;
+/// `Unsupported` when it has one but `run` did not lift (absent, empty, over
+/// `max_service_args`, or a shape this scanner cannot follow), so the caller
+/// can warn instead of reading it as "declares no service". Directives are
+/// read only at the block's own body indentation, so a nested `on_macos do`
+/// / `if` is skipped without tracking depth; the block closes at the first
+/// `end` back at the opener's indentation. Anything not in
+/// `service_directives` (`sudo`, `environment_variables`, ...) is ignored.
+pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const u8) error{Unsupported}!?RubyServiceBlock {
+    var block: RubyServiceBlock = .{ .run = &.{} };
+    var block_indent: ?usize = null;
+    var body_indent: ?usize = null;
+    var pos: usize = 0;
+    while (pos < rb_content.len) {
+        const nl = std.mem.indexOfScalarPos(u8, rb_content, pos, '\n') orelse rb_content.len;
+        const raw = rb_content[pos..nl];
+        pos = nl + 1;
+        // A top-level `#` can only open a comment: `#{` lives inside strings.
+        const code = raw[0 .. indexOfTopLevel(raw, '#') orelse raw.len];
+        const line = std.mem.trim(u8, code, " \t\r");
+        if (line.len == 0) continue;
+        const indent = std.mem.indexOfNone(u8, raw, " \t") orelse raw.len;
+
+        const opener = block_indent orelse {
+            if (std.mem.eql(u8, line, "service do")) block_indent = indent;
+            continue;
+        };
+        if (indent == opener and std.mem.eql(u8, line, "end")) break;
+        const body = body_indent orelse blk: {
+            body_indent = indent;
+            break :blk indent;
+        };
+        if (indent != body) continue;
+
+        // The fallback stays a slice of `line` so `arg.ptr` is always inside
+        // `rb_content` for the offset arithmetic below.
+        const word, const rest = std.mem.cut(u8, line, " ") orelse .{ line, line[line.len..] };
+        const arg = std.mem.trim(u8, rest, " \t");
+        switch (service_directives.get(word) orelse continue) {
+            .run => {
+                // A bracketed argv may continue past this line; consume it
+                // from the body and resume after its closing `]`.
+                const start = @intFromPtr(arg.ptr) - @intFromPtr(rb_content.ptr);
+                const argv_src, const consumed = macosArgv(rb_content[start..]) orelse return error.Unsupported;
+                block.run = splitArgv(buf, argv_src) orelse return error.Unsupported;
+                pos = @max(pos, start + consumed);
+            },
+            .keep_alive => block.keep_alive = !std.mem.eql(u8, arg, "false"),
+            .working_dir => block.working_dir = arg,
+            .log_path => block.log_path = arg,
+            .error_log_path => block.error_log_path = arg,
+            .run_type => block.run_type = if (std.mem.eql(u8, arg, ":interval"))
+                .interval
+            else if (std.mem.eql(u8, arg, ":cron"))
+                .cron
+            else
+                .immediate,
+            .interval => block.interval = std.fmt.parseInt(u32, arg, 10) catch null,
+            .cron => block.cron = extractQuoted(line, "cron \""),
+        }
+    }
+    if (block_indent == null) return null;
+    if (block.run.len == 0) return error.Unsupported;
+    return block;
+}
+
+/// The macOS argv source of a `run` directive: the bracket body of `run [...]`
+/// or `run macos: [...]`, or the bare single token of `run opt_bin/"x"`. Also
+/// returns how many bytes of `src` the argv spans, so a multi-line array is
+/// consumed whole. Null when only a `linux:` argv is given.
+fn macosArgv(src: []const u8) ?struct { []const u8, usize } {
+    var s = src;
+    if (std.mem.startsWith(u8, s, "linux:")) return null;
+    if (std.mem.startsWith(u8, s, "macos:")) s = std.mem.trimStart(u8, s["macos:".len..], " \t");
+    const skipped = src.len - s.len;
+    if (s.len > 0 and s[0] == '[') {
+        const close = indexOfTopLevel(s[1..], ']') orelse return null;
+        return .{ s[1 .. 1 + close], skipped + close + 2 };
+    }
+    // Bare form: one token, ending at the line, a comment, or a `, linux:` sibling.
+    const eol = std.mem.indexOfScalar(u8, s, '\n') orelse s.len;
+    var end = indexOfTopLevel(s[0..eol], '#') orelse eol;
+    end = indexOfTopLevel(s[0..end], ',') orelse end;
+    return .{ s[0..end], skipped + end };
+}
+
+/// Split an argv body on top-level commas, keeping `"..."` contents intact.
+/// Null when it is empty or exceeds `buf`.
+fn splitArgv(buf: *[max_service_args][]const u8, body: []const u8) ?[]const []const u8 {
+    var n: usize = 0;
+    var rest = body;
+    while (true) {
+        const cut = indexOfTopLevel(rest, ',') orelse rest.len;
+        const tok = std.mem.trim(u8, rest[0..cut], " \t\r\n");
+        if (tok.len > 0) {
+            if (n == buf.len) return null;
+            buf[n] = tok;
+            n += 1;
+        }
+        if (cut == rest.len) break;
+        rest = rest[cut + 1 ..];
+    }
+    return if (n == 0) null else buf[0..n];
+}
+
+/// First `needle` outside a `"..."` string and outside nested `[...]`, so
+/// `Formula["x"]` inside an argv array neither closes it nor splits it.
+fn indexOfTopLevel(s: []const u8, needle: u8) ?usize {
+    var in_str = false;
+    var depth: usize = 0;
+    for (s, 0..) |c, i| {
+        if (c == '"') in_str = !in_str;
+        if (in_str) continue;
+        if (depth == 0 and c == needle) return i;
+        switch (c) {
+            '[' => depth += 1,
+            ']' => depth -|= 1,
+            else => {},
+        }
+    }
+    return null;
+}
+
 test "parseRubyFormula: extracts version/url/sha256 from a flat formula" {
     const src =
         \\class Foo < Formula
@@ -1332,4 +1488,238 @@ test "rb_parse entry points return null on empty input" {
     try std.testing.expect(parseRubyFormula("") == null);
     try std.testing.expect(parseCaskBinary("") == null);
     try std.testing.expect(parseCaskApp("") == null);
+}
+
+test "parseServiceBlock: lifts run argv and the path/keep_alive directives" {
+    const rb =
+        \\class Svcd < Formula
+        \\  url "https://example.com/svcd-1.0.tar.gz"
+        \\  version "1.0"
+        \\  sha256 "deadbeef"
+        \\  service do
+        \\    run [opt_bin/"svcd", "--foreground", var/"y"]
+        \\    keep_alive true
+        \\    working_dir var
+        \\    log_path var/"log/svcd.log"
+        \\    error_log_path var/"log/svcd.err"
+        \\  end
+        \\end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(usize, 3), got.run.len);
+    try std.testing.expectEqualStrings("opt_bin/\"svcd\"", got.run[0]);
+    try std.testing.expectEqualStrings("\"--foreground\"", got.run[1]);
+    try std.testing.expectEqualStrings("var/\"y\"", got.run[2]);
+    try std.testing.expect(got.keep_alive);
+    try std.testing.expectEqualStrings("var", got.working_dir.?);
+    try std.testing.expectEqualStrings("var/\"log/svcd.log\"", got.log_path.?);
+    try std.testing.expectEqualStrings("var/\"log/svcd.err\"", got.error_log_path.?);
+    try std.testing.expect(got.run_type == .immediate);
+}
+
+test "parseServiceBlock: a bare run token and keep_alive false" {
+    const rb =
+        \\  service do
+        \\    run opt_bin/"x"
+        \\    keep_alive false
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(usize, 1), got.run.len);
+    try std.testing.expectEqualStrings("opt_bin/\"x\"", got.run[0]);
+    try std.testing.expect(!got.keep_alive);
+}
+
+test "parseServiceBlock: keep_alive hash form reads as true" {
+    const rb =
+        \\  service do
+        \\    run [opt_bin/"x"]
+        \\    keep_alive { always: true }
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+    try std.testing.expect(got.keep_alive);
+}
+
+test "parseServiceBlock: run macos: takes the macOS argv and ignores linux:" {
+    const rb =
+        \\  service do
+        \\    run macos: [opt_bin/"x", "--mac"], linux: [opt_bin/"x", "--linux"]
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(usize, 2), got.run.len);
+    try std.testing.expectEqualStrings("\"--mac\"", got.run[1]);
+}
+
+test "parseServiceBlock: a quoted comma stays inside its token" {
+    const rb =
+        \\  service do
+        \\    run [opt_bin/"x", "--opt=a,b"]
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(usize, 2), got.run.len);
+    try std.testing.expectEqualStrings("\"--opt=a,b\"", got.run[1]);
+}
+
+test "parseServiceBlock: interval and cron schedules" {
+    const iv =
+        \\  service do
+        \\    run [opt_bin/"x"]
+        \\    run_type :interval
+        \\    interval 300
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, iv)) orelse return error.TestUnexpectedNull;
+    try std.testing.expect(got.run_type == .interval);
+    try std.testing.expectEqual(@as(?u32, 300), got.interval);
+
+    const cr =
+        \\  service do
+        \\    run [opt_bin/"x"]
+        \\    run_type :cron
+        \\    cron "0 * * * *"
+        \\  end
+    ;
+    const got_cr = (try parseServiceBlock(&buf, cr)) orelse return error.TestUnexpectedNull;
+    try std.testing.expect(got_cr.run_type == .cron);
+    try std.testing.expectEqualStrings("0 * * * *", got_cr.cron.?);
+}
+
+test "parseServiceBlock: no block yields null, a block without a usable run is Unsupported" {
+    var buf: [max_service_args][]const u8 = undefined;
+    const none =
+        \\class Foo < Formula
+        \\  url "https://example.com/foo-1.0.tar.gz"
+        \\end
+    ;
+    try std.testing.expect((try parseServiceBlock(&buf, none)) == null);
+
+    // Each of these opened a block the caller should warn about, not
+    // mistake for "declares no service".
+    const no_run =
+        \\  service do
+        \\    keep_alive true
+        \\  end
+    ;
+    try std.testing.expectError(error.Unsupported, parseServiceBlock(&buf, no_run));
+
+    const bare_run =
+        \\  service do
+        \\    run
+        \\    keep_alive false
+        \\  end
+    ;
+    try std.testing.expectError(error.Unsupported, parseServiceBlock(&buf, bare_run));
+
+    const empty_run =
+        \\  service do
+        \\    run []
+        \\  end
+    ;
+    try std.testing.expectError(error.Unsupported, parseServiceBlock(&buf, empty_run));
+
+    const too_many =
+        \\  service do
+        \\    run [opt_bin/"x", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"]
+        \\  end
+    ;
+    try std.testing.expectError(error.Unsupported, parseServiceBlock(&buf, too_many));
+}
+
+test "parseServiceBlock: a trailing Ruby comment does not reach the directive value" {
+    // homebrew-core spells `interval 86400 # 24 hours` and `run_type :interval # ...`.
+    const rb =
+        \\  service do
+        \\    run opt_bin/"asimov" # scan
+        \\    run_type :interval # every day
+        \\    interval 86400 # 24 hours = 60 * 60 * 24
+        \\    log_path var/"log/a.log" # "quoted # inside" stays
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("opt_bin/\"asimov\"", got.run[0]);
+    try std.testing.expect(got.run_type == .interval);
+    try std.testing.expectEqual(@as(?u32, 86400), got.interval);
+    try std.testing.expectEqualStrings("var/\"log/a.log\"", got.log_path.?);
+}
+
+test "parseServiceBlock: unknown directives are skipped, not a parse failure" {
+    const rb =
+        \\  service do
+        \\    run [opt_bin/"x"]
+        \\    sudo true
+        \\    environment_variables PATH: std_service_path_env
+        \\    process_type :background
+        \\    restart_delay 5
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(usize, 1), got.run.len);
+}
+
+test "parseServiceBlock: a desc string mentioning service do does not open a block" {
+    const rb =
+        \\class Foo < Formula
+        \\  desc "runs as a service do not confuse"
+        \\  url "https://example.com/foo-1.0.tar.gz"
+        \\end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    try std.testing.expect((try parseServiceBlock(&buf, rb)) == null);
+}
+
+test "parseServiceBlock: a deeper-indented end does not close the block" {
+    const rb =
+        \\  service do
+        \\    on_macos do
+        \\      run [opt_bin/"x", "--nested"]
+        \\    end
+        \\    run [opt_bin/"x", "--top"]
+        \\    keep_alive false
+        \\  end
+        \\  def post_install
+        \\    keep_alive true
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("\"--top\"", got.run[1]);
+    try std.testing.expect(!got.keep_alive);
+}
+
+test "parseServiceBlock: a bracketed dependency reference does not close the argv array" {
+    const rb =
+        \\  service do
+        \\    run [Formula["bash"].opt_bin/"bash", "--login"]
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(usize, 2), got.run.len);
+    try std.testing.expectEqualStrings("Formula[\"bash\"].opt_bin/\"bash\"", got.run[0]);
+    try std.testing.expectEqualStrings("\"--login\"", got.run[1]);
+}
+
+test "parseServiceBlock: comments on the opener and the closer still delimit the block" {
+    const rb =
+        \\  service do # launchd
+        \\    run [opt_bin/"svcd"]
+        \\  end # service
+        \\  def install
+        \\    run [opt_bin/"svcd", "--from-def-install"]
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(usize, 1), got.run.len);
 }

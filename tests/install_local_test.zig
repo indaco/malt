@@ -988,6 +988,10 @@ fn seedKegArchive(prefix: []const u8, name: []const u8, sha: []const u8) !void {
 }
 
 fn installFromWarmCache(prefix: [:0]const u8, resolved: install_local.ResolvedRubyFormula, force: bool) !void {
+    return installFromWarmCacheWith(prefix, resolved, force, malt.install_sink.silent);
+}
+
+fn installFromWarmCacheWith(prefix: [:0]const u8, resolved: install_local.ResolvedRubyFormula, force: bool, sink: malt.install_sink.OutputSink) !void {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
@@ -1025,7 +1029,7 @@ fn installFromWarmCache(prefix: [:0]const u8, resolved: install_local.ResolvedRu
         force,
         false, // download_only
         null, // prefetch_slot
-        malt.install_sink.silent,
+        sink,
     );
 }
 
@@ -1144,4 +1148,193 @@ test "force reinstall migrates a pre-fix bare keg onto the revisioned leaf" {
     try testing.expectEqualStrings(want, row.cellar_path);
     try test_io.accessAbsolute(std.Options.debug_io, want, .{});
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, old, .{}));
+}
+
+// ─── a .rb service block registers a launchd service ────────────────
+
+// Keeps only the warn lines, so a test can assert on the one message the
+// service path emits without the install narration around it.
+fn captureWarn(ctx: ?*anyopaque, msg: []const u8) void {
+    const list: *std.ArrayList(u8) = @ptrCast(@alignCast(ctx.?));
+    list.appendSlice(testing.allocator, msg) catch {};
+    list.append(testing.allocator, '\n') catch {};
+}
+fn swallowLine(_: ?*anyopaque, _: []const u8) void {}
+
+// `keg_name` of the single services row labelled `label`; null when there
+// is none, an error when the upgrade shape left a duplicate behind.
+fn serviceKegName(prefix: []const u8, label: []const u8, buf: []u8) !?[]const u8 {
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT keg_name FROM services WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, label);
+    if (!try stmt.step()) return null;
+    const raw = std.mem.sliceTo(stmt.columnText(0) orelse return error.NoText, 0);
+    @memcpy(buf[0..raw.len], raw);
+    if (try stmt.step()) return error.DuplicateServiceRow;
+    return buf[0..raw.len];
+}
+
+fn readPlist(prefix: []const u8, label: []const u8) ![]u8 {
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/var/malt/services/{s}/service.plist", .{ prefix, label });
+    defer testing.allocator.free(path);
+    return test_io.cwd().readFileAlloc(std.Options.debug_io, path, testing.allocator, .unlimited);
+}
+
+test "materializeRubyFormula registers the service a .rb service block declares" {
+    // `mt services list` reads the services table and `start` loads the
+    // plist; without both, a tap daemon is installed but unmanageable.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "1a" ** 32;
+    try seedKegArchive(prefix, "svcd", sha);
+
+    try installFromWarmCache(prefix, .{
+        .name = "svcd",
+        .full_name = "user/repo/svcd",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://example.invalid/svcd-1.0.tar.gz",
+        .sha256 = sha,
+        .service = .{
+            .run = &.{ "opt_bin/\"svcd\"", "\"--foreground\"" },
+            .log_path = "var/\"log/svcd.log\"",
+        },
+    }, false);
+
+    var keg_buf: [64]u8 = undefined;
+    const keg = (try serviceKegName(prefix, "com.malt.svcd", &keg_buf)) orelse return error.ServiceRowMissing;
+    try testing.expectEqualStrings("svcd", keg);
+
+    const plist = try readPlist(prefix, "com.malt.svcd");
+    defer testing.allocator.free(plist);
+    const head = try std.fmt.allocPrint(testing.allocator, "<string>{s}/opt/svcd/bin/svcd</string>", .{prefix});
+    defer testing.allocator.free(head);
+    try testing.expect(std.mem.indexOf(u8, plist, head) != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>--foreground</string>") != null);
+    const log = try std.fmt.allocPrint(testing.allocator, "<string>{s}/var/log/svcd.log</string>", .{prefix});
+    defer testing.allocator.free(log);
+    try testing.expect(std.mem.indexOf(u8, plist, log) != null);
+}
+
+test "materializeRubyFormula keeps the keg and warns when the service is refused" {
+    // A `run` head outside the keg or opt is what the validator exists to
+    // stop; that must cost the user the service, never the install.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "2b" ** 32;
+    try seedKegArchive(prefix, "badsvc", sha);
+
+    var warns: std.ArrayList(u8) = .empty;
+    defer warns.deinit(testing.allocator);
+    const sink: malt.install_sink.OutputSink = .{
+        .ctx = &warns,
+        .writeInfo = swallowLine,
+        .writeWarn = captureWarn,
+        .writeSuccess = swallowLine,
+        .writeErr = swallowLine,
+        .show_progress = false,
+    };
+
+    try installFromWarmCacheWith(prefix, .{
+        .name = "badsvc",
+        .full_name = "user/repo/badsvc",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://example.invalid/badsvc-1.0.tar.gz",
+        .sha256 = sha,
+        .service = .{ .run = &.{"\"/usr/bin/true\""} },
+    }, false, sink);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try kegRevisionAndPath(prefix, "badsvc", &path_buf);
+    var keg_buf: [64]u8 = undefined;
+    try testing.expect((try serviceKegName(prefix, "com.malt.badsvc", &keg_buf)) == null);
+    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service for badsvc") != null);
+}
+
+test "materializeRubyFormula re-registers a service once on the upgrade shape" {
+    // `upgradeTapFormula` re-runs this tail with force=true; the row is
+    // keyed by label so a second pass must update, not duplicate.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "3c" ** 32;
+    try seedKegArchive(prefix, "twice", sha);
+
+    const resolved: install_local.ResolvedRubyFormula = .{
+        .name = "twice",
+        .full_name = "user/repo/twice",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://example.invalid/twice-1.0.tar.gz",
+        .sha256 = sha,
+        .service = .{ .run = &.{"opt_bin/\"twice\""} },
+    };
+    try installFromWarmCache(prefix, resolved, false);
+    try installFromWarmCache(prefix, resolved, true);
+
+    var keg_buf: [64]u8 = undefined;
+    const keg = (try serviceKegName(prefix, "com.malt.twice", &keg_buf)) orelse return error.ServiceRowMissing;
+    try testing.expectEqualStrings("twice", keg);
+}
+
+test "installLocalFormula warns about an unsupported service block only when it would register" {
+    // A dry run never reaches registration, so a warning there would tell
+    // the user a service was dropped from an install that did not happen.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/nosvc.rb", .{prefix});
+    defer testing.allocator.free(rb_path);
+    try writeFile(rb_path,
+        \\class Nosvc < Formula
+        \\  version "1.0"
+        \\  url "https://example.invalid/nosvc-1.0.tar.gz"
+        \\  sha256 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        \\  service do
+        \\    keep_alive true
+        \\  end
+        \\end
+        \\
+    );
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    var warns: std.ArrayList(u8) = .empty;
+    defer warns.deinit(testing.allocator);
+    const sink: malt.install_sink.OutputSink = .{
+        .ctx = &warns,
+        .writeInfo = swallowLine,
+        .writeWarn = captureWarn,
+        .writeSuccess = swallowLine,
+        .writeErr = swallowLine,
+        .show_progress = false,
+    };
+
+    try install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, true, false, sink);
+    try testing.expect(std.mem.indexOf(u8, warns.items, "unsupported service block") == null);
+
+    // The real pass warns at parse time and then fails on the (offline) fetch.
+    try testing.expectError(
+        install_record.InstallError.DownloadFailed,
+        install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, false, false, sink),
+    );
+    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service for nosvc: unsupported service block") != null);
 }
