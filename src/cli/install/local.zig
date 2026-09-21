@@ -54,6 +54,23 @@ pub const max_local_formula_bytes: usize = 1 * 1024 * 1024;
 /// `tests/install_download_only_test.zig` can drive the materialise
 /// path with a fabricated payload (cache-hit fixtures, ndjson event
 /// shape).
+/// `parseServiceBlock` is tri-state: no block, a readable block, or a block
+/// malt cannot read. Only the first may retire a previous registration, so
+/// the catch sites must not fold the third into it.
+const ParsedService = struct {
+    block: ?rb_parse.RubyServiceBlock = null,
+    declared: bool = false,
+
+    fn parse(buf: *[rb_parse.max_service_args][]const u8, body: []const u8) ParsedService {
+        const block = rb_parse.parseServiceBlock(buf, body) catch return .{ .declared = true };
+        return .{ .block = block, .declared = block != null };
+    }
+
+    fn unreadable(self: ParsedService) bool {
+        return self.declared and self.block == null;
+    }
+};
+
 pub const ResolvedRubyFormula = struct {
     /// Short formula name — becomes the Cellar dir, bin basename, and
     /// `kegs.name` column.
@@ -93,6 +110,9 @@ pub const ResolvedRubyFormula = struct {
     /// The `.rb`'s `service do` block, raw. Borrowed from the formula
     /// source like `dependencies`. Null when the formula declares none.
     service: ?rb_parse.RubyServiceBlock = null,
+    /// True when the `.rb` carries a `service do` block at all, readable
+    /// or not, so an unreadable block is not mistaken for a dropped one.
+    service_declared: bool = false,
     /// When set, the tap is registered in the DB (mirrors the original
     /// tap install behaviour). Local installs leave this null so they
     /// never pollute the tap list.
@@ -443,11 +463,9 @@ fn installTapRb(
     const app_name = parseCaskApp(resp.body);
     const is_cask = tapCaskArtifactKind(final_url, app_name != null) != null;
     var svc_buf: [rb_parse.max_service_args][]const u8 = undefined;
-    const service = if (is_cask) null else rb_parse.parseServiceBlock(&svc_buf, resp.body) catch blk: {
-        if (!dry_run and !download_only)
-            sink.warn("could not register service for {s}: unsupported service block", .{parts.formula});
-        break :blk null;
-    };
+    const svc: ParsedService = if (is_cask) .{} else ParsedService.parse(&svc_buf, resp.body);
+    if (svc.unreadable() and !dry_run and !download_only)
+        sink.warn("could not register service for {s}: unsupported service block", .{parts.formula});
 
     const resolved = ResolvedRubyFormula{
         .name = parts.formula,
@@ -462,7 +480,8 @@ fn installTapRb(
         .app_name = app_name,
         .dependencies = deps,
         .recommended = recommended,
-        .service = service,
+        .service = svc.block,
+        .service_declared = svc.declared,
         .tap_registration = .{
             .url = urls.repo_url,
             .commit_sha = commit_sha,
@@ -599,10 +618,8 @@ pub fn installLocalFormula(
         return InstallError.DependencyFailed;
     };
     var svc_buf: [rb_parse.max_service_args][]const u8 = undefined;
-    const service = rb_parse.parseServiceBlock(&svc_buf, body) catch blk: {
-        if (!dry_run) sink.warn("could not register service for {s}: unsupported service block", .{name});
-        break :blk null;
-    };
+    const svc = ParsedService.parse(&svc_buf, body);
+    if (svc.unreadable() and !dry_run) sink.warn("could not register service for {s}: unsupported service block", .{name});
 
     const resolved = ResolvedRubyFormula{
         .name = name,
@@ -615,7 +632,8 @@ pub fn installLocalFormula(
         // Borrows from `body`, which outlives the materialise call below.
         .dependencies = deps,
         .recommended = recommended,
-        .service = service,
+        .service = svc.block,
+        .service_declared = svc.declared,
         // No tap_registration — never pollute `mt tap` with a local path.
     };
 
@@ -1228,7 +1246,7 @@ pub fn materializeRubyFormula(
 
     // After the commit, like the API path: a refused service warns and
     // can never roll back the keg.
-    service_mod.registerRuby(ctx.io, allocator, db, resolved.service, resolved.name, pkg_version, prefix, sink);
+    service_mod.registerRuby(ctx.io, allocator, db, resolved.service, resolved.service_declared, resolved.name, pkg_version, prefix, sink);
 
     sink.success("{s} {s} installed", .{ resolved.name, resolved.version });
 }
@@ -2112,4 +2130,29 @@ test "screenRubyIdentity accepts the shapes real formula versions take" {
     // charset-agnostic on purpose.
     try screenRubyIdentity(sink_mod.silent, "python@3.14", "3.14.0");
     try screenRubyIdentity(sink_mod.silent, "probe", "3.2.1+dfsg");
+}
+
+test "ParsedService keeps a block malt cannot read apart from no block at all" {
+    // Only "no block" may retire a previous registration; folding the
+    // unreadable case into it would delete a service the formula declares.
+    var buf: [rb_parse.max_service_args][]const u8 = undefined;
+    const readable = ParsedService.parse(&buf,
+        \\  service do
+        \\    run [opt_bin/"x"]
+        \\  end
+    );
+    try std.testing.expect(readable.block != null);
+    try std.testing.expect(readable.declared);
+
+    const unreadable = ParsedService.parse(&buf,
+        \\  service do
+        \\    keep_alive true
+        \\  end
+    );
+    try std.testing.expect(unreadable.block == null);
+    try std.testing.expect(unreadable.declared);
+
+    const none = ParsedService.parse(&buf, "class X < Formula\nend\n");
+    try std.testing.expect(none.block == null);
+    try std.testing.expect(!none.declared);
 }
