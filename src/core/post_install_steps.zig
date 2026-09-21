@@ -6117,9 +6117,23 @@ test "a cask run step is fenced off the credential trees under $HOME/Library" {
     const keychains = try std.fs.path.join(a, &.{ ch.home, "Library/Keychains" });
     try std.Io.Dir.cwd().createDirPath(c.io, keychains);
 
-    runSteps(c, try parseSteps(&ch.h, try std.fmt.allocPrint(a,
+    const steps = try parseSteps(&ch.h, try std.fmt.allocPrint(a,
         \\[{{"type":"run","command":{{"path":"/bin/mkdir"}},"args":["{s}/planted"]}}]
-    , .{keychains})));
+    , .{keychains}));
+    {
+        // The denied mkdir reports "Operation not permitted" through the
+        // child stderr pump; park fd 2 on /dev/null only for the spawn so
+        // the runner's output stays clean and the asserts below still speak.
+        const saved = std.c.dup(std.posix.STDERR_FILENO);
+        if (saved < 0) return error.Unexpected;
+        defer _ = std.c.close(saved);
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+        if (devnull < 0) return error.Unexpected;
+        defer _ = std.c.close(devnull);
+        if (std.c.dup2(devnull, std.posix.STDERR_FILENO) < 0) return error.Unexpected;
+        defer _ = std.c.dup2(saved, std.posix.STDERR_FILENO);
+        runSteps(c, steps);
+    }
     try testing.expect(ch.h.flog.hasFatal());
     try testing.expect(!dirExists(c.io, try std.fmt.allocPrint(a, "{s}/planted", .{keychains})));
 }

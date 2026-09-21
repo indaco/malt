@@ -35,6 +35,10 @@ pub const BottleFile = struct {
     sha256: []const u8,
 };
 
+/// Why a `service` object produced no `ServiceDef`. Data only: the
+/// user-facing wording lives with the install code.
+pub const ServiceRefusal = enum { ships_plist, unsupported };
+
 /// Optional service definition lifted from the upstream Homebrew formula's
 /// `service` block. Strings borrow from `Formula._parsed`.
 pub const ServiceDef = struct {
@@ -355,10 +359,10 @@ pub const Formula = struct {
     /// JSON contains a `service` object with at least a `run` array.
     /// All string fields inside borrow from `_parsed`.
     service: ?ServiceDef = null,
-    /// True when the JSON carries a `service` object at all, so a block
-    /// malt cannot read (OS-keyed `run`, no `run`) is not mistaken for a
-    /// formula that dropped its service.
-    service_declared: bool = false,
+    /// Why a `service` object yielded no `service`, so it is not mistaken
+    /// for a formula that dropped its service. Null when `service` is set
+    /// or the key is absent.
+    service_refusal: ?ServiceRefusal = null,
     /// Advisories still open at the tap's current version. Outer slice
     /// allocated through `_parsed.arena`; strings live in `_parsed`.
     vulns_open: []const Vuln = &.{},
@@ -550,10 +554,9 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
 
     // service block (optional — Homebrew formulas opt in)
     var service_def: ?ServiceDef = null;
-    var service_declared = false;
+    var service_refusal: ?ServiceRefusal = null;
     if (root.get("service")) |sv| {
         if (sv == .object) {
-            service_declared = true;
             const so = sv.object;
             const run_val = so.get("run");
             if (run_val) |rv| {
@@ -592,6 +595,9 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
                     };
                 };
             }
+            // A `name` and no `run` at all is how the API renders a formula
+            // that installs its own plist; a `run` malt cannot read is a gap.
+            if (service_def == null) service_refusal = if (run_val == null and so.get("name") != null) .ships_plist else .unsupported;
         }
     }
 
@@ -665,7 +671,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         .bottle_root_url = bottle_root_url,
         .oldnames = oldnames,
         .service = service_def,
-        .service_declared = service_declared,
+        .service_refusal = service_refusal,
         .vulns_open = vulns_open,
         ._parsed = parsed,
     };
@@ -1693,21 +1699,60 @@ test "parseStopTimeout keeps only a value inside the cap" {
     }
 }
 
-test "parseFormula records that a service block was declared even when it cannot read it" {
-    // A block whose `run` is OS-keyed is declared but unreadable; callers
-    // must not treat it like a formula that never had a service.
-    const declared =
+test "parseFormula tags why a service block yielded no definition" {
+    // An OS-keyed `run` is declared but unreadable; callers must not
+    // treat it like a formula that never had a service.
+    const unsupported =
         \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[],"service":{"run":{"macos":["/bin/x"],"linux":["/bin/x"]}}}
     ;
-    var f = try parseFormula(testing.allocator, declared);
+    var f = try parseFormula(testing.allocator, unsupported);
     defer f.deinit();
     try testing.expect(f.service == null);
-    try testing.expect(f.service_declared);
+    try testing.expectEqual(ServiceRefusal.unsupported, f.service_refusal);
+
+    // A `name`-only object is how the API renders a formula that installs
+    // its own plist; the label is a discriminator, never a definition.
+    const ships_plist =
+        \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[],"service":{"name":{"macos":"org.freedesktop.dbus-session"}}}
+    ;
+    var g = try parseFormula(testing.allocator, ships_plist);
+    defer g.deinit();
+    try testing.expect(g.service == null);
+    try testing.expectEqual(ServiceRefusal.ships_plist, g.service_refusal);
+
+    // A label beside a `run` malt cannot read is a parser gap, not a
+    // shipped plist - the Ruby twin draws the same line.
+    const name_with_os_run =
+        \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[],"service":{"name":{"macos":"custom.label"},"run":{"macos":["/bin/x"]}}}
+    ;
+    var h = try parseFormula(testing.allocator, name_with_os_run);
+    defer h.deinit();
+    try testing.expect(h.service == null);
+    try testing.expectEqual(ServiceRefusal.unsupported, h.service_refusal);
+
+    // A `run` keyed for other OSes only is refused the same way the Ruby
+    // twin refuses `run linux: [...]`, so both install paths say one thing.
+    const linux_only =
+        \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[],"service":{"run":{"linux":["/bin/x"]}}}
+    ;
+    var l = try parseFormula(testing.allocator, linux_only);
+    defer l.deinit();
+    try testing.expect(l.service == null);
+    try testing.expectEqual(ServiceRefusal.unsupported, l.service_refusal);
+
+    // A label beside a usable `run` overrides nothing malt reads.
+    const name_with_run =
+        \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[],"service":{"name":{"macos":"custom.label"},"run":["/bin/x"]}}
+    ;
+    var i = try parseFormula(testing.allocator, name_with_run);
+    defer i.deinit();
+    try testing.expect(i.service != null);
+    try testing.expectEqual(@as(?ServiceRefusal, null), i.service_refusal);
 
     const absent =
         \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[]}
     ;
-    var g = try parseFormula(testing.allocator, absent);
-    defer g.deinit();
-    try testing.expect(!g.service_declared);
+    var j = try parseFormula(testing.allocator, absent);
+    defer j.deinit();
+    try testing.expectEqual(@as(?ServiceRefusal, null), j.service_refusal);
 }
