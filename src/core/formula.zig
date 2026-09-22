@@ -57,6 +57,7 @@ pub const ServiceDef = struct {
     schedule: Schedule = .immediate,
     /// See `plist.ServiceSpec.stop_timeout`.
     stop_timeout: ?u32 = null,
+    env: []const service_types.EnvPair = &.{},
 };
 
 /// Format Homebrew's canonical on-disk version label into `buf`.
@@ -483,6 +484,22 @@ fn parseStopTimeout(so: std.json.ObjectMap) ?u32 {
     };
 }
 
+/// `environment_variables` as launchd pairs, in the API's key order so the
+/// plist stays deterministic. A non-string value drops only its pair, like a
+/// bad `stop_timeout`: the service still runs. A shipped plist is refused
+/// instead, because malt would install that file as written.
+fn parseEnvVars(arena: std.mem.Allocator, so: std.json.ObjectMap) ![]const service_types.EnvPair {
+    const v = so.get("environment_variables") orelse return &.{};
+    if (v != .object) return &.{};
+    var out: std.ArrayList(service_types.EnvPair) = .empty;
+    var it = v.object.iterator();
+    while (it.next()) |e| switch (e.value_ptr.*) {
+        .string => |s| try out.append(arena, .{ .key = e.key_ptr.*, .value = s }),
+        else => {},
+    };
+    return out.items;
+}
+
 fn getStringArray(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]const []const u8 {
     const v = obj.get(key) orelse return &.{};
     const arr = switch (v) {
@@ -610,6 +627,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
                             true,
                         .schedule = try parseSchedule(arena, so),
                         .stop_timeout = parseStopTimeout(so),
+                        .env = try parseEnvVars(arena, so),
                     };
                 };
             }
@@ -1719,6 +1737,30 @@ test "parseStopTimeout keeps only a value inside the cap" {
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, case.json, .{});
         defer parsed.deinit();
         try std.testing.expectEqual(case.want, parseStopTimeout(parsed.value.object));
+    }
+}
+
+test "parseEnvVars lifts string pairs in order and drops the rest" {
+    // Non-string values are formula bugs; launchd only takes strings.
+    for ([_]struct { json: []const u8, want: []const service_types.EnvPair }{
+        .{ .json = "{}", .want = &.{} },
+        .{ .json = "{\"environment_variables\": {}}", .want = &.{} },
+        .{ .json = "{\"environment_variables\": [\"LC_ALL\"]}", .want = &.{} },
+        .{ .json = "{\"environment_variables\": {\"LC_ALL\": \"en_US.UTF-8\"}}", .want = &.{.{ .key = "LC_ALL", .value = "en_US.UTF-8" }} },
+        .{
+            .json = "{\"environment_variables\": {\"B\": \"2\", \"N\": 3, \"A\": \"1\", \"X\": null}}",
+            .want = &.{ .{ .key = "B", .value = "2" }, .{ .key = "A", .value = "1" } },
+        },
+    }) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), case.json, .{});
+        const got = try parseEnvVars(arena.allocator(), parsed.object);
+        try std.testing.expectEqual(case.want.len, got.len);
+        for (case.want, got) |w, g| {
+            try std.testing.expectEqualStrings(w.key, g.key);
+            try std.testing.expectEqualStrings(w.value, g.value);
+        }
     }
 }
 

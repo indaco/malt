@@ -266,3 +266,44 @@ test "absent stop_timeout leaves ExitTimeOut to launchd's default" {
 
     try testing.expect(std.mem.indexOf(u8, aw.written(), "ExitTimeOut") == null);
 }
+
+test "an API service's environment_variables reach the rendered plist" {
+    // Live `postgresql@17` service block, end to end.
+    var f = try malt.formula.parseFormula(testing.allocator,
+        \\{"name":"postgresql@17","full_name":"postgresql@17","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":true,"post_install_defined":false,"versions":{"stable":"17.6"},"dependencies":[],"service":{"run":["$HOMEBREW_PREFIX/opt/postgresql@17/bin/postgres","-D","$HOMEBREW_PREFIX/var/postgresql@17"],"run_type":"immediate","keep_alive":{"always":true},"environment_variables":{"LC_ALL":"en_US.UTF-8"},"working_dir":"$HOMEBREW_PREFIX","log_path":"$HOMEBREW_PREFIX/var/log/postgresql@17.log","error_log_path":"$HOMEBREW_PREFIX/var/log/postgresql@17.log","stop_timeout":120}}
+    );
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const spec = try malt.install_service.specFromDef(arena.allocator(), f.service.?, f.name, "/opt/malt");
+    try plist.validate(spec, "/opt/malt/Cellar/postgresql@17/17.6", "/opt/malt");
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try plist.render(spec, &aw.writer);
+
+    const want =
+        \\    <key>WorkingDirectory</key>
+        \\    <string>/opt/malt</string>
+        \\    <key>EnvironmentVariables</key>
+        \\    <dict>
+        \\        <key>LC_ALL</key>
+        \\        <string>en_US.UTF-8</string>
+        \\    </dict>
+        \\    <key>StandardOutPath</key>
+        \\
+    ;
+    try testing.expect(std.mem.indexOf(u8, aw.written(), want) != null);
+}
+
+test "a NUL smuggled into an API environment value fails validation" {
+    // JSON can escape a NUL that would cut the plist string short.
+    var f = try malt.formula.parseFormula(testing.allocator,
+        \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[],"service":{"run":["$HOMEBREW_PREFIX/opt/x/bin/x"],"environment_variables":{"A":"ok\u0000tail"}}}
+    );
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const spec = try malt.install_service.specFromDef(arena.allocator(), f.service.?, f.name, "/opt/malt");
+    try testing.expectError(plist.ValidationError.EmbeddedNul, plist.validate(spec, "/opt/malt/Cellar/x/1.0", "/opt/malt"));
+}
