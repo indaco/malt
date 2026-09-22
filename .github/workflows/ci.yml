@@ -163,6 +163,9 @@ jobs:
       - name: Regression guard - a core formula that ships its own plist is refused for that reason
         run: ./scripts/regressions/api-shipped-plist-service-warns-why-api-formula-shipped-plist-installs-silently.sh
 
+      - name: Regression guard - a linux-only service block installs quietly and registers nothing
+        run: ./scripts/regressions/linux-only-service-block-installs-quietly-linux-only-service-block-reported-as-unsupported.sh
+
       - name: Regression guard - upgrade retires a service the new version no longer declares
         run: ./scripts/regressions/upgrade-retires-dropped-service-upgrade-to-a-version-without-a-service-block-keeps-the-old-registration.sh
 
