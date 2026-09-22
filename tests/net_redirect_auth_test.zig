@@ -6,6 +6,8 @@
 
 const std = @import("std");
 const client = @import("malt").client;
+const install_cli = @import("malt").install;
+const app_ctx = @import("malt").app_ctx;
 const notifier = @import("malt").update_notifier;
 const net = std.Io.net;
 const test_io = @import("test_io");
@@ -26,6 +28,13 @@ const Hop = struct {
     status: ?std.http.Status = null,
     redirect_to: ?[]const u8 = null,
     content_disposition: ?[]const u8 = null,
+    // Non-null: a HEAD gets this status bare - no Location, no
+    // Content-Disposition - while a GET gets the answer above. The
+    // method-discriminating download endpoint the GET fallback exists for.
+    head_status: ?std.http.Status = null,
+    // Method of the last request received, so a test can pin which verb a
+    // walk actually sent.
+    method: ?std.http.Method = null,
     // When set, the hop redirects this many times and answers 200 after, so a
     // single hop can stand in for a whole chain.
     redirects_left: ?usize = null,
@@ -130,6 +139,11 @@ fn answer(hop: *Hop, req: *std.http.Server.Request) void {
     while (it.next()) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "authorization")) hop.saw_auth = true;
     }
+    hop.method = req.head.method;
+    if (hop.head_status) |status| if (req.head.method == .HEAD) {
+        req.respond("", .{ .status = status }) catch return;
+        return;
+    };
     if (hop.redirects_left) |*left| {
         if (left.* == 0) hop.status = null else left.* -= 1;
     }
@@ -194,6 +208,9 @@ const UnframedRedirectPeer = struct {
     // Omit `Location` so the walk unwinds through its error path, which
     // releases the hop somewhere else entirely.
     omit_location: bool = false,
+    // Answer 200 instead of a redirect: the artifact itself, declared far
+    // larger than what follows. What a GET classification walk terminates on.
+    terminal: bool = false,
 };
 
 // Bounds a regression: the drain hits EOF here instead of hanging the suite,
@@ -217,7 +234,9 @@ fn serveUnframedRedirect(peer: *UnframedRedirectPeer) void {
     // single loopback segment.
     _ = reader.interface.peek(1) catch return;
 
-    if (peer.omit_location) {
+    if (peer.terminal) {
+        writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 4294967296\r\n\r\nartifact-bytes\n") catch return;
+    } else if (peer.omit_location) {
         // No Location and no framing: the walk errors out, and the hop is
         // released on the unwind path rather than the committed-hop one.
         writer.interface.writeAll("HTTP/1.1 302 Found\r\n\r\nredirecting\n") catch return;
@@ -418,6 +437,202 @@ test "headResolved follows a hop and harvests the artifact headers from it" {
     try std.testing.expectEqualStrings("/artifact", hopTarget(&hop2));
 }
 
+test "getResolved follows a redirect the origin only emits on GET" {
+    // A download endpoint that answers HEAD with its landing page and only
+    // redirects a GET to the file. The HEAD walk terminates on the page; this
+    // walk must reach the file, and it must be the only request the file's
+    // host sees.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l2 = try bindIp4(io);
+    defer l2.deinit(io);
+    const p2 = l2.socket.address.getPort();
+    var hop2 = Hop{ .io = io, .listener = &l2 };
+    const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/Warp.dmg", .{p2});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var hop1 = Hop{ .io = io, .listener = &l1, .head_status = .ok, .redirect_to = loc, .status = .found };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/download?package=dmg", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    const result = http.getResolved(url);
+
+    knock(io, p1);
+    knock(io, p2);
+    t1.join();
+    t2.join();
+
+    var resolved = try result;
+    defer resolved.deinit();
+
+    try std.testing.expectEqualStrings(loc, resolved.final_url);
+    try std.testing.expectEqual(@as(usize, 1), hop2.requests);
+    try std.testing.expectEqual(std.http.Method.GET, hop2.method.?);
+}
+
+// The classifier install and upgrade share, driven through the real `AppCtx`
+// path against an origin that answers HEAD with `head_status` and only
+// redirects a GET to `/Warp.dmg`.
+fn classifyAgainstGetOnlyOrigin(head_status: std.http.Status) !@import("malt").cask.ArtifactType {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l2 = try bindIp4(io);
+    defer l2.deinit(io);
+    const p2 = l2.socket.address.getPort();
+    var hop2 = Hop{ .io = io, .listener = &l2 };
+    const t2 = try std.Thread.spawn(.{}, serveOne, .{&hop2});
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/Warp.dmg", .{p2});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var hop1 = Hop{ .io = io, .listener = &l1, .head_status = head_status, .redirect_to = loc, .status = .found };
+    // HEAD, then GET.
+    const t1 = try std.Thread.spawn(.{}, serveCount, .{ &hop1, @as(usize, 2) });
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/download?package=dmg", .{p1});
+
+    const ctx: app_ctx.AppCtx = .{ .io = io, .environ = .empty };
+    const result = install_cli.resolveCaskArtifactViaWalk(&ctx, std.testing.allocator, url);
+
+    knock(io, p1);
+    knock(io, p2);
+    t1.join();
+    t2.join();
+
+    try std.testing.expectEqual(@as(usize, 2), hop1.requests);
+    try std.testing.expectEqual(@as(usize, 1), hop2.requests);
+    return result;
+}
+
+test "a suffix-less cask URL classifies from the redirect its origin only sends on GET" {
+    // HEAD terminates on the origin's page; the type must still come out of
+    // the GET walk's terminal url.
+    try std.testing.expectEqual(.dmg, try classifyAgainstGetOnlyOrigin(.ok));
+}
+
+test "a suffix-less cask URL classifies through GET when the origin refuses HEAD" {
+    // A refused HEAD is a terminal answer, not a walk failure: the fallback
+    // must still run rather than reporting the origin as unreachable.
+    try std.testing.expectEqual(.dmg, try classifyAgainstGetOnlyOrigin(.method_not_allowed));
+    try std.testing.expectEqual(.dmg, try classifyAgainstGetOnlyOrigin(.forbidden));
+}
+
+test "a HEAD walk that fails is reported as is, without a GET walk behind it" {
+    // The fallback is for a HEAD that answered and said nothing. A HEAD that
+    // failed - here a redirect with no Location - is the origin's own fault,
+    // and a second walk would only hide it behind a second verb.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var hop1 = Hop{ .io = io, .listener = &l1, .status = .found };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/download", .{p1});
+
+    const ctx: app_ctx.AppCtx = .{ .io = io, .environ = .empty };
+    const result = install_cli.resolveCaskArtifactViaWalk(&ctx, std.testing.allocator, url);
+    knock(io, p1);
+    t1.join();
+
+    try std.testing.expectError(error.HttpRedirectLocationMissing, result);
+    try std.testing.expectEqual(@as(usize, 1), hop1.requests);
+    try std.testing.expectEqual(std.http.Method.HEAD, hop1.method.?);
+}
+
+test "getResolved closes the terminal hop without reading its body" {
+    // The GET walk's terminal hop is the artifact itself. A release that
+    // drains the body downloads it just to hang up; the peer holds the socket
+    // open past the budget, so a drain shows up as wall clock.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var peer = UnframedRedirectPeer{ .io = io, .listener = &l1, .location = "", .terminal = true };
+    const t1 = try std.Thread.spawn(.{}, serveUnframedRedirect, .{&peer});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/Warp.dmg", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    http.retry_backoff_ms = &.{};
+    http.head_timeout_ns = stall_budget_ns;
+
+    const started_ms = test_io.elapsedMillis(io);
+    const result = http.getResolved(url);
+    const elapsed_ms = test_io.elapsedMillis(io) - started_ms;
+    http.deinit();
+    t1.join();
+
+    var resolved = try result;
+    defer resolved.deinit();
+    try std.testing.expectEqualStrings(url, resolved.final_url);
+    try std.testing.expect(elapsed_ms < drain_budget_ms);
+}
+
+test "headResolved is unchanged when the origin answers HEAD with a plain 200" {
+    // The fallback decision lives in the caller: the HEAD walk still hands
+    // back the origin untouched, and sends nothing but HEAD. A fixture that
+    // answered both verbs alike would follow the 302 to a dead port here.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var loc_buf: [64]u8 = undefined;
+    const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/Warp.dmg", .{try closedPort(io)});
+
+    var l1 = try bindIp4(io);
+    defer l1.deinit(io);
+    const p1 = l1.socket.address.getPort();
+    var hop1 = Hop{ .io = io, .listener = &l1, .head_status = .ok, .redirect_to = loc, .status = .found };
+    const t1 = try std.Thread.spawn(.{}, serveOne, .{&hop1});
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/download", .{p1});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    const result = http.headResolved(url);
+    knock(io, p1);
+    t1.join();
+
+    var resolved = try result;
+    defer resolved.deinit();
+
+    try std.testing.expectEqualStrings(url, resolved.final_url);
+    try std.testing.expectEqual(@as(usize, 1), hop1.requests);
+    try std.testing.expectEqual(std.http.Method.HEAD, hop1.method.?);
+}
+
 // Stands up one hop answering `status` with a Location pointing at a dead
 // port, and returns what `headResolved` made of it.
 fn resolveAgainstNonRedirect(status: std.http.Status) !void {
@@ -593,10 +808,20 @@ test "headResolved reports an exhausted redirect walk instead of an un-fetched u
     try std.testing.expectEqual(one_walk, hop1.requests);
 }
 
-test "headResolved resolves a chain as long as the download can follow" {
-    // Guards against over-correcting: a chain the download would follow to the
-    // end must still classify. Expressed in the download's budget so retuning
-    // it moves both loops together.
+// Both classification walks share one redirect budget with the download;
+// the tests below run each through the same fixture.
+fn resolveWith(http: *client.HttpClient, method: std.http.Method, url: []const u8) client.HeadResolveError!client.HttpClient.HeadResolved {
+    return switch (method) {
+        .HEAD => http.headResolved(url),
+        .GET => http.getResolved(url),
+        else => unreachable,
+    };
+}
+
+// Guards against over-correcting: a chain the download would follow to the
+// end must still classify. Expressed in the download's budget so retuning
+// it moves both loops together.
+fn resolvesFullChain(method: std.http.Method) !void {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -622,7 +847,7 @@ test "headResolved resolves a chain as long as the download can follow" {
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
 
-    const result = http.headResolved(url);
+    const result = resolveWith(&http, method, url);
     http.deinit();
     knock(io, p1);
     t1.join();
@@ -633,10 +858,18 @@ test "headResolved resolves a chain as long as the download can follow" {
     try std.testing.expectEqualStrings(loc, resolved.final_url);
 }
 
-test "headResolved refuses a chain one hop longer than the download can follow" {
-    // The window this closes: classifying a cask - possibly as `.pkg`, which
-    // raises the sudo installer prompt - from a chain the download then
-    // rejects. One hop past the download's budget must never resolve.
+test "headResolved resolves a chain as long as the download can follow" {
+    try resolvesFullChain(.HEAD);
+}
+
+test "getResolved resolves a chain as long as the download can follow" {
+    try resolvesFullChain(.GET);
+}
+
+// The window this closes: classifying a cask - possibly as `.pkg`, which
+// raises the sudo installer prompt - from a chain the download then rejects.
+// One hop past the download's budget must never resolve.
+fn refusesOverlongChain(method: std.http.Method) !void {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -665,7 +898,7 @@ test "headResolved refuses a chain one hop longer than the download can follow" 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
 
-    const result = http.headResolved(url);
+    const result = resolveWith(&http, method, url);
     http.deinit();
     knock(io, p1);
     t1.join();
@@ -677,6 +910,14 @@ test "headResolved refuses a chain one hop longer than the download can follow" 
         resolved.deinit();
     } else |_| {};
     try std.testing.expectError(error.TooManyHttpRedirects, result);
+}
+
+test "headResolved refuses a chain one hop longer than the download can follow" {
+    try refusesOverlongChain(.HEAD);
+}
+
+test "getResolved refuses a chain one hop longer than the download can follow" {
+    try refusesOverlongChain(.GET);
 }
 
 test "a download follows a chain the full length of the shared redirect budget" {

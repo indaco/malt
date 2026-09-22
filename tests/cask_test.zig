@@ -1498,6 +1498,12 @@ const plain_cask =
     \\ "artifacts":[{"app":["Plain.app"]}]}
 ;
 
+// A download endpoint with no suffix to classify from.
+const suffixless_cask =
+    \\{"token":"bare","version":"2.0","url":"https://example.invalid/download?package=dmg","sha256":"no_check",
+    \\ "artifacts":[{"app":["Bare.app"]}]}
+;
+
 test "install refuses a cask whose depends_on is unmet" {
     var fx = try Fixture.init("install_refuses_unmet");
     defer fx.deinit();
@@ -1570,6 +1576,287 @@ test "upgrade skips an incompatible cask and upgrades the rest" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "toonew requires macOS >= 99") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade cask plain 1.0 -> 2.0") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade cask toonew") == null);
+}
+
+test "upgrade --dry-run names the artifact type of a cask" {
+    var fx = try Fixture.init("upgrade_dry_run_type");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    try seedCaskCache(&fx, "plain", plain_cask);
+    {
+        try test_io.cwd().createDirPath(testIo(), fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        try insertInstalledCask(&db, "plain", "1.0");
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    try malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "--dry-run", "plain" });
+
+    // Same plan line as install: the type is what the sudo gate keys on.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade cask plain 1.0 -> 2.0 (dmg)") != null);
+}
+
+// A loopback download endpoint. HEAD gets a bare 200 page. With `artifact`
+// set, a GET on the endpoint redirects to that filename on the same host and
+// the artifact path itself answers 404: the classification walk never reads
+// a terminal status, so the type still resolves, while a download that gets
+// this far fails without a byte - which is what the tests below assert on.
+// Without `artifact`, every GET is the 200 page too. Keeps a connection
+// alive across requests, as the download's same-host hop expects; ends on a
+// bare connection, the knock.
+const Origin = struct {
+    io: std.Io,
+    listener: *std.Io.net.Server,
+    artifact: ?[]const u8 = null,
+    requests: usize = 0,
+
+    fn serve(self: *Origin) void {
+        while (true) {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            var rbuf: [16 * 1024]u8 = undefined;
+            var wbuf: [4 * 1024]u8 = undefined;
+            var reader = stream.reader(self.io, &rbuf);
+            var writer = stream.writer(self.io, &wbuf);
+            var srv = std.http.Server.init(&reader.interface, &writer.interface);
+            var served_here = false;
+            while (true) {
+                var req = srv.receiveHead() catch break;
+                served_here = true;
+                self.requests += 1;
+                self.answer(&req) catch break;
+            }
+            if (!served_here) return;
+        }
+    }
+
+    fn answer(self: *Origin, req: *std.http.Server.Request) !void {
+        const artifact = self.artifact orelse return req.respond("<html>download</html>", .{});
+        if (req.head.method == .HEAD) return req.respond("", .{ .status = .ok });
+        if (!std.mem.startsWith(u8, req.head.target, "/download")) return req.respond("", .{ .status = .not_found });
+        var loc_buf: [64]u8 = undefined;
+        const loc = try std.fmt.bufPrint(&loc_buf, "http://127.0.0.1:{d}/{s}", .{ self.listener.socket.address.getPort(), artifact });
+        try req.respond("", .{ .status = .found, .extra_headers = &.{.{ .name = "location", .value = loc }} });
+    }
+};
+
+// Seeds an installed 1.0 of `bare` whose 2.0 lives at a suffix-less URL on
+// the loopback origin.
+fn seedSuffixlessUpgrade(fx: *Fixture, io: std.Io, port: u16) !void {
+    const json = try std.fmt.allocPrint(fx.arena.allocator(),
+        \\{{"token":"bare","version":"2.0","url":"http://127.0.0.1:{d}/download?package=dmg","sha256":"no_check",
+        \\ "artifacts":[{{"app":["Bare.app"]}}]}}
+    , .{port});
+    try seedCaskCache(fx, "bare", json);
+    try test_io.cwd().createDirPath(io, fx.p("db"));
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertInstalledCask(&db, "bare", "1.0");
+}
+
+fn knockLoopback(io: std.Io, port: u16) void {
+    var addr = std.Io.net.IpAddress.parseIp4("127.0.0.1", port) catch return;
+    const s = addr.connect(io, .{ .mode = .stream }) catch return;
+    s.close(io);
+}
+
+// Runs `mt upgrade <args>` against a seeded suffix-less cask on a loopback
+// origin, returning what execute made of it; `captured` holds the output.
+fn upgradeSuffixless(
+    fx: *Fixture,
+    io: std.Io,
+    origin: *Origin,
+    args: []const []const u8,
+    captured: *std.ArrayList(u8),
+) !void {
+    const port = origin.listener.socket.address.getPort();
+    const thread = try std.Thread.spawn(.{}, Origin.serve, .{origin});
+    try seedSuffixlessUpgrade(fx, io, port);
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty };
+    const result = malt.upgrade.execute(&ctx, testing.allocator, args);
+    knockLoopback(io, port);
+    thread.join();
+    return result;
+}
+
+test "upgrade --dry-run refuses a suffix-less cask offline instead of guessing a plan" {
+    // Install parity: a dry-run verdict needs the walk, and `--offline` is
+    // fail-fast on a miss rather than a plan line for a type nobody resolved.
+    var fx = try Fixture.init("upgrade_dry_run_offline_suffixless");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    try seedCaskCache(&fx, "bare", suffixless_cask);
+    {
+        try test_io.cwd().createDirPath(testIo(), fx.p("db"));
+        var db = try sqlite.Database.open(fx.p("db/malt.db"));
+        defer db.close();
+        try schema.initSchema(&db);
+        try insertInstalledCask(&db, "bare", "1.0");
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    try testing.expectError(error.Aborted, malt.upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "--dry-run", "bare" }));
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve the download URL for bare: OfflineRequired") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade cask bare") == null);
+}
+
+test "upgrade --dry-run reports a suffix-less cask URL neither walk can classify" {
+    var fx = try Fixture.init("upgrade_dry_run_unknown");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var origin = Origin{ .io = io, .listener = &listener };
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+
+    try upgradeSuffixless(&fx, io, &origin, &.{ "--cask", "--dry-run", "bare" }, &captured);
+
+    // As on install: the plan names the type it found and refuses nothing.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade cask bare 1.0 -> 2.0 (unknown)") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unsupported") == null);
+}
+
+test "upgrade refuses a suffix-less cask neither walk can classify before touching the installed version" {
+    var fx = try Fixture.init("upgrade_refuses_unknown");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var origin = Origin{ .io = io, .listener = &listener };
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+
+    try testing.expectError(error.Aborted, upgradeSuffixless(&fx, io, &origin, &.{ "--cask", "bare" }, &captured));
+
+    // Install's refusal, word for word, plus where that leaves the user.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unsupported cask format for 'bare'") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "installed version left in place") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "brew install --cask bare") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Failed to download") == null);
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    try testing.expect(malt.cask.isInstalled(&db, "bare"));
+}
+
+test "upgrade hands a walk-resolved pkg to the sudo gate before touching the installed version" {
+    // The gate reads the resolved type, not the suffix-less URL: off a TTY it
+    // refuses, and the refusal lands before the uninstall. The origin sees the
+    // two walks and nothing more.
+    var fx = try Fixture.init("upgrade_walk_pkg_gate");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var origin = Origin{ .io = io, .listener = &listener, .artifact = "Bare.pkg" };
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+
+    // The gate asks the terminal; park stdin on /dev/null so a run from a
+    // shell refuses the same way CI does instead of waiting for a keypress.
+    const saved = std.c.dup(std.posix.STDIN_FILENO);
+    if (saved < 0) return error.Unexpected;
+    defer _ = std.c.close(saved);
+    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY });
+    if (devnull < 0) return error.Unexpected;
+    defer _ = std.c.close(devnull);
+    if (std.c.dup2(devnull, std.posix.STDIN_FILENO) < 0) return error.Unexpected;
+    defer _ = std.c.dup2(saved, std.posix.STDIN_FILENO);
+
+    try testing.expectError(error.Aborted, upgradeSuffixless(&fx, io, &origin, &.{ "--cask", "bare" }, &captured));
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "bare is a PKG cask and requires sudo") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unsupported cask format") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Failed to download") == null);
+    // HEAD, the GET that was redirected, the GET on the artifact: no download.
+    try testing.expectEqual(@as(usize, 3), origin.requests);
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    try testing.expect(malt.cask.isInstalled(&db, "bare"));
+}
+
+test "upgrade prefetches a walk-resolved dmg instead of refusing it as unsupported" {
+    // The prefetch reads the resolved type too: it reaches the artifact and
+    // fails on the origin's 404, where an installer left without the type
+    // refused before dialling.
+    var fx = try Fixture.init("upgrade_walk_dmg_prefetch");
+    defer fx.deinit();
+    _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
+    defer _ = test_io.c.unsetenv("MALT_PREFIX");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var origin = Origin{ .io = io, .listener = &listener, .artifact = "Bare.dmg" };
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+
+    try testing.expectError(error.Aborted, upgradeSuffixless(&fx, io, &origin, &.{ "--cask", "bare" }, &captured));
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Failed to download new version of bare: DownloadFailed") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "InstallFailed") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unsupported cask format") == null);
+    // The two walks, then the download's own hop to the artifact.
+    try testing.expectEqual(@as(usize, 5), origin.requests);
+    var db = try sqlite.Database.open(fx.p("db/malt.db"));
+    defer db.close();
+    try testing.expect(malt.cask.isInstalled(&db, "bare"));
 }
 
 test "install --dry-run names the resolved download for a cask" {

@@ -1455,10 +1455,14 @@ fn mapHeadResolveError(e: client_mod.HeadResolveError) ?InstallError {
     };
 }
 
-/// HEAD-based fallback for extensionless cask URLs.
-/// Follows redirects to discover the real file extension. The walk's own
-/// error reaches the caller, which reports it before classifying.
-fn resolveCaskArtifactViaHead(
+/// Redirect-walk fallback for extensionless cask URLs.
+/// HEAD first; when that yields nothing malt can classify, once more with
+/// GET, because some download endpoints only redirect a GET to the file.
+/// Either walk's own error reaches the caller, which reports it before
+/// classifying: a HEAD the origin never answers is reported, not retried
+/// as a GET, so an origin that stalls both verbs costs at most two head
+/// budgets under the lock. Shared with upgrade so both verbs classify alike.
+pub fn resolveCaskArtifactViaWalk(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     url: []const u8,
@@ -1467,10 +1471,14 @@ fn resolveCaskArtifactViaHead(
     defer http.deinit();
     http.offline = ctx.offline;
 
-    var resolved = try http.headResolved(url);
-    defer resolved.deinit();
+    var head = try http.headResolved(url);
+    defer head.deinit();
+    const via_head = cask_mod.resolveArtifactType(allocator, head.final_url, head.content_disposition);
+    if (via_head != .unknown) return via_head;
 
-    return cask_mod.resolveArtifactType(allocator, resolved.final_url, resolved.content_disposition);
+    var get = try http.getResolved(url);
+    defer get.deinit();
+    return cask_mod.resolveArtifactType(allocator, get.final_url, get.content_disposition);
 }
 
 /// Gate the system-wide `sudo installer -pkg … -target /` escalation a PKG
@@ -1553,9 +1561,10 @@ fn installCask(
     var artifact_type = cask_mod.artifactTypeFromUrl(cask.url);
 
     // Extensionless URLs (e.g. download APIs that 302 to the real file):
-    // resolve via HEAD to discover the final URL and Content-Disposition.
+    // walk the redirects - HEAD, then GET - to discover the final URL and
+    // Content-Disposition.
     if (artifact_type == .unknown) {
-        artifact_type = resolveCaskArtifactViaHead(ctx, allocator, cask.url) catch |e| {
+        artifact_type = resolveCaskArtifactViaWalk(ctx, allocator, cask.url) catch |e| {
             // Names the machine, not the network: the peer was never reached.
             if (e == error.WatchdogSpawnFailed) {
                 sink.err(
