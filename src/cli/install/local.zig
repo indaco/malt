@@ -60,17 +60,23 @@ pub const max_local_formula_bytes: usize = 1 * 1024 * 1024;
 const ParsedService = struct {
     block: ?rb_parse.RubyServiceBlock = null,
     declared: bool = false,
+    /// The plist a `name`-only block says the keg carries; lifted after
+    /// the keg is on disk.
+    shipped_label: ?[]const u8 = null,
     /// Why the block did not lift; only meaningful when `unreadable()`.
     reason: []const u8 = "",
 
     fn parse(buf: *[rb_parse.max_service_args][]const u8, body: []const u8) ParsedService {
-        const block = rb_parse.parseServiceBlock(buf, body) catch |err|
-            return .{ .declared = true, .reason = rb_parse.serviceRefusalReason(err) };
+        const block = rb_parse.parseServiceBlock(buf, body) catch |err| return .{
+            .declared = true,
+            .shipped_label = if (err == error.ShipsOwnPlist) rb_parse.shippedPlistLabel(body) else null,
+            .reason = rb_parse.serviceRefusalReason(err),
+        };
         return .{ .block = block, .declared = block != null };
     }
 
     fn unreadable(self: ParsedService) bool {
-        return self.declared and self.block == null;
+        return self.declared and self.block == null and self.shipped_label == null;
     }
 };
 
@@ -117,6 +123,9 @@ pub const ResolvedRubyFormula = struct {
     /// an unreadable block is not mistaken for a dropped one. A block whose
     /// `run` is keyed for Linux only declares none.
     service_declared: bool = false,
+    /// The label of the plist a `name`-only `service do` block says the
+    /// keg carries, for `registerRuby` to lift post-commit.
+    shipped_label: ?[]const u8 = null,
     /// When set, the tap is registered in the DB (mirrors the original
     /// tap install behaviour). Local installs leave this null so they
     /// never pollute the tap list.
@@ -486,6 +495,7 @@ fn installTapRb(
         .recommended = recommended,
         .service = svc.block,
         .service_declared = svc.declared,
+        .shipped_label = svc.shipped_label,
         .tap_registration = .{
             .url = urls.repo_url,
             .commit_sha = commit_sha,
@@ -638,6 +648,7 @@ pub fn installLocalFormula(
         .recommended = recommended,
         .service = svc.block,
         .service_declared = svc.declared,
+        .shipped_label = svc.shipped_label,
         // No tap_registration — never pollute `mt tap` with a local path.
     };
 
@@ -1250,7 +1261,7 @@ pub fn materializeRubyFormula(
 
     // After the commit, like the API path: a refused service warns and
     // can never roll back the keg.
-    service_mod.registerRuby(ctx.io, allocator, db, resolved.service, resolved.service_declared, resolved.name, pkg_version, prefix, sink);
+    service_mod.registerRuby(ctx.io, allocator, db, resolved.service, resolved.service_declared, resolved.shipped_label, resolved.name, pkg_version, prefix, sink);
 
     sink.success("{s} {s} installed", .{ resolved.name, resolved.version });
 }
@@ -2160,17 +2171,30 @@ test "ParsedService keeps a block malt cannot read apart from no block at all" {
     try std.testing.expect(none.block == null);
     try std.testing.expect(!none.declared);
 
-    // A shipped plist is declared-but-unreadable too: it must not retire a
-    // previous registration like an absent block would, and it carries its
-    // own reason for both the tap and the local warning.
+    // A shipped plist is declared with no block to read; the label names
+    // the keg file `registerRuby` lifts once the keg exists, so the parse
+    // site has nothing to warn about yet.
     const shipped = ParsedService.parse(&buf,
         \\  service do
         \\    name macos: "x"
         \\  end
     );
-    try std.testing.expect(shipped.unreadable());
-    try std.testing.expectEqualStrings("formula ships its own plist, which malt does not adopt", shipped.reason);
+    try std.testing.expect(shipped.declared);
+    try std.testing.expect(shipped.block == null);
+    try std.testing.expectEqualStrings("x", shipped.shipped_label.?);
+    try std.testing.expect(!shipped.unreadable());
     try std.testing.expectEqualStrings("unsupported service block", no_run.reason);
+
+    // A label the scanner cannot resolve names no file: declared and
+    // unreadable, with its own reason.
+    const unresolved = ParsedService.parse(&buf,
+        \\  service do
+        \\    name macos: "#{plist_name}"
+        \\  end
+    );
+    try std.testing.expect(unresolved.unreadable());
+    try std.testing.expect(unresolved.shipped_label == null);
+    try std.testing.expectEqualStrings("formula ships its own plist, but malt could not read its label", unresolved.reason);
 
     // A Linux-only `run` is no macOS service: not declared, so an upgrade
     // retires the previous registration instead of keeping it.

@@ -37,7 +37,12 @@ pub const BottleFile = struct {
 
 /// Why a `service` object produced no `ServiceDef`. Data only: the
 /// user-facing wording lives with the install code.
-pub const ServiceRefusal = enum { ships_plist, unsupported };
+pub const ServiceRefusal = union(enum) {
+    /// The formula installs `<keg>/<label>.plist` itself; the label
+    /// borrows from `_parsed`.
+    ships_plist: []const u8,
+    unsupported,
+};
 
 /// Optional service definition lifted from the upstream Homebrew formula's
 /// `service` block. Strings borrow from `Formula._parsed`.
@@ -459,6 +464,13 @@ fn parseSchedule(arena: std.mem.Allocator, so: std.json.ObjectMap) !Schedule {
     return .{ .interval = @intCast(secs) };
 }
 
+/// The macOS label of a `name` object (`{"macos": "<label>"}`).
+fn shippedPlistLabel(name_val: std.json.Value) ?[]const u8 {
+    if (name_val != .object) return null;
+    const macos = name_val.object.get("macos") orelse return null;
+    return if (macos == .string) macos.string else null;
+}
+
 /// A `stop_timeout` in `1..=max_stop_timeout_secs`; anything else is a
 /// formula bug and falls back to launchd's default rather than failing the
 /// install - unlike a bad schedule, a missing timeout still yields a working
@@ -603,7 +615,12 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
             }
             // A `name` and no `run` at all is how the API renders a formula
             // that installs its own plist; a `run` malt cannot read is a gap.
-            if (service_def == null and !linux_only) service_refusal = if (run_val == null and so.get("name") != null) .ships_plist else .unsupported;
+            if (service_def == null and !linux_only) service_refusal = blk: {
+                if (run_val != null) break :blk .unsupported;
+                const name_val = so.get("name") orelse break :blk .unsupported;
+                const label = shippedPlistLabel(name_val) orelse break :blk .unsupported;
+                break :blk .{ .ships_plist = label };
+            };
         }
     }
 
@@ -1724,7 +1741,22 @@ test "parseFormula tags why a service block yielded no definition" {
     var g = try parseFormula(testing.allocator, ships_plist);
     defer g.deinit();
     try testing.expect(g.service == null);
-    try testing.expectEqual(ServiceRefusal.ships_plist, g.service_refusal);
+    // The label names `<keg>/<label>.plist`, the file the lift reads.
+    try testing.expectEqualStrings("org.freedesktop.dbus-session", g.service_refusal.?.ships_plist);
+
+    // A `name` without a readable macOS label names no file to lift.
+    const name_no_macos =
+        \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[],"service":{"name":{"linux":"x"}}}
+    ;
+    var g2 = try parseFormula(testing.allocator, name_no_macos);
+    defer g2.deinit();
+    try testing.expectEqual(ServiceRefusal.unsupported, g2.service_refusal.?);
+    const name_not_string =
+        \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[],"service":{"name":{"macos":42}}}
+    ;
+    var g3 = try parseFormula(testing.allocator, name_not_string);
+    defer g3.deinit();
+    try testing.expectEqual(ServiceRefusal.unsupported, g3.service_refusal.?);
 
     // A label beside a `run` malt cannot read is a parser gap, not a
     // shipped plist - the Ruby twin draws the same line.
