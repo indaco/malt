@@ -360,8 +360,8 @@ pub const Formula = struct {
     /// All string fields inside borrow from `_parsed`.
     service: ?ServiceDef = null,
     /// Why a `service` object yielded no `service`, so it is not mistaken
-    /// for a formula that dropped its service. Null when `service` is set
-    /// or the key is absent.
+    /// for a formula that dropped its service. Null when `service` is set,
+    /// the key is absent, or `run` is keyed for Linux only (no macOS service).
     service_refusal: ?ServiceRefusal = null,
     /// Advisories still open at the tap's current version. Outer slice
     /// allocated through `_parsed.arena`; strings live in `_parsed`.
@@ -559,7 +559,11 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         if (sv == .object) {
             const so = sv.object;
             const run_val = so.get("run");
+            var linux_only = false;
             if (run_val) |rv| {
+                // A `run` keyed for Linux alone is no service on macOS at
+                // all, not a shape malt cannot read.
+                linux_only = rv == .object and rv.object.get("linux") != null and rv.object.get("macos") == null;
                 const items: ?[]std.json.Value = switch (rv) {
                     .array => |a| a.items,
                     .string => |s| blk: {
@@ -597,7 +601,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
             }
             // A `name` and no `run` at all is how the API renders a formula
             // that installs its own plist; a `run` malt cannot read is a gap.
-            if (service_def == null) service_refusal = if (run_val == null and so.get("name") != null) .ships_plist else .unsupported;
+            if (service_def == null and !linux_only) service_refusal = if (run_val == null and so.get("name") != null) .ships_plist else .unsupported;
         }
     }
 
@@ -1730,15 +1734,25 @@ test "parseFormula tags why a service block yielded no definition" {
     try testing.expect(h.service == null);
     try testing.expectEqual(ServiceRefusal.unsupported, h.service_refusal);
 
-    // A `run` keyed for other OSes only is refused the same way the Ruby
-    // twin refuses `run linux: [...]`, so both install paths say one thing.
+    // A `run` keyed for Linux only is no macOS service at all, same as an
+    // absent block; the Ruby twin returns null for `run linux: [...]`.
     const linux_only =
         \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[],"service":{"run":{"linux":["/bin/x"]}}}
     ;
     var l = try parseFormula(testing.allocator, linux_only);
     defer l.deinit();
     try testing.expect(l.service == null);
-    try testing.expectEqual(ServiceRefusal.unsupported, l.service_refusal);
+    try testing.expectEqual(@as(?ServiceRefusal, null), l.service_refusal);
+
+    // A `linux` key beside a `macos` one is still a macOS argv malt does
+    // not read yet; only the absence of `macos` makes the block silent.
+    const linux_with_macos =
+        \\{"name":"x","full_name":"x","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":[],"service":{"run":{"linux":["/bin/x"],"macos":["/bin/x"]}}}
+    ;
+    var m = try parseFormula(testing.allocator, linux_with_macos);
+    defer m.deinit();
+    try testing.expect(m.service == null);
+    try testing.expectEqual(ServiceRefusal.unsupported, m.service_refusal);
 
     // A label beside a usable `run` overrides nothing malt reads.
     const name_with_run =

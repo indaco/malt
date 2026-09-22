@@ -508,7 +508,8 @@ const service_directives = std.StaticStringMap(ServiceDirective).initComptime(.{
 
 pub const ServiceParseError = error{ Unsupported, ShipsOwnPlist };
 
-/// Lift the `service do ... end` block. Null when the formula has none;
+/// Lift the `service do ... end` block. Null when the formula has none, or
+/// when its `run` carries only a `linux:` argv (no service on macOS);
 /// `Unsupported` when it has one but `run` did not lift (absent, empty, over
 /// `max_service_args`, or a shape this scanner cannot follow), so the caller
 /// can warn instead of reading it as "declares no service". A run-less block
@@ -522,6 +523,7 @@ pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const
     var block: RubyServiceBlock = .{ .run = &.{} };
     var saw_name = false;
     var saw_run = false;
+    var linux_only = false;
     var block_indent: ?usize = null;
     var body_indent: ?usize = null;
     var pos: usize = 0;
@@ -559,9 +561,11 @@ pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const
                 // A bracketed argv may continue past this line; consume it
                 // from the body and resume after its closing `]`.
                 const start = @intFromPtr(arg.ptr) - @intFromPtr(rb_content.ptr);
-                const argv_src, const consumed = macosArgv(rb_content[start..]) orelse return error.Unsupported;
-                block.run = splitArgv(buf, argv_src) orelse return error.Unsupported;
-                pos = @max(pos, start + consumed);
+                const argv = try macosArgv(rb_content[start..]);
+                pos = @max(pos, start + argv.consumed);
+                // Homebrew leaves `@run` untouched on macOS for a Linux-only
+                // call, so a plain `run` elsewhere in the block still wins.
+                if (argv.src) |src| block.run = splitArgv(buf, src) orelse return error.Unsupported else linux_only = true;
             },
             // The label is irrelevant: malt keeps its own `com.malt.<name>`.
             .name => saw_name = true,
@@ -580,7 +584,11 @@ pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const
         }
     }
     if (block_indent == null) return null;
-    if (block.run.len == 0) return if (saw_name and !saw_run) error.ShipsOwnPlist else error.Unsupported;
+    if (block.run.len == 0) {
+        // No service on macOS at all; Homebrew prints nothing for it either.
+        if (linux_only) return null;
+        return if (saw_name and !saw_run) error.ShipsOwnPlist else error.Unsupported;
+    }
     return block;
 }
 
@@ -603,23 +611,56 @@ pub fn serviceRefusalReason(err: ServiceParseError) []const u8 {
 }
 
 /// The macOS argv source of a `run` directive: the bracket body of `run [...]`
-/// or `run macos: [...]`, or the bare single token of `run opt_bin/"x"`. Also
-/// returns how many bytes of `src` the argv spans, so a multi-line array is
-/// consumed whole. Null when only a `linux:` argv is given.
-fn macosArgv(src: []const u8) ?struct { []const u8, usize } {
+/// or `run macos: [...]`, or the bare single token of `run opt_bin/"x"`.
+/// `consumed` is how many bytes of `src` the directive spans, so a
+/// multi-line array is stepped over whole. `src` is null when only a
+/// `linux:` argv is given: no service on macOS, not a shape this scanner
+/// cannot read. Brackets are matched on the raw buffer, so a `]` inside a
+/// comment or a single-quoted string can end an array early.
+const MacosArgv = struct { src: ?[]const u8, consumed: usize };
+
+fn macosArgv(src: []const u8) error{Unsupported}!MacosArgv {
     var s = src;
-    if (std.mem.startsWith(u8, s, "linux:")) return null;
+    if (std.mem.startsWith(u8, s, "linux:")) {
+        // Step over the Linux argv: a `macos:` sibling may still follow it.
+        s = std.mem.trimStart(u8, s["linux:".len..], " \t");
+        const end = if (s.len > 0 and s[0] == '[')
+            (indexOfTopLevel(s[1..], ']') orelse return error.Unsupported) + 2
+        else
+            bareTokenEnd(s);
+        const linux: MacosArgv = .{ .src = null, .consumed = src.len - s.len + end };
+        s = std.mem.trimStart(u8, s[end..], " \t");
+        if (s.len == 0 or s[0] != ',') return linux;
+        // The raw buffer is read here, so comment lines are still in it.
+        s = skipBlankAndComments(s[1..]);
+        if (!std.mem.startsWith(u8, s, "macos:")) return linux;
+    }
     if (std.mem.startsWith(u8, s, "macos:")) s = std.mem.trimStart(u8, s["macos:".len..], " \t");
     const skipped = src.len - s.len;
     if (s.len > 0 and s[0] == '[') {
-        const close = indexOfTopLevel(s[1..], ']') orelse return null;
-        return .{ s[1 .. 1 + close], skipped + close + 2 };
+        const close = indexOfTopLevel(s[1..], ']') orelse return error.Unsupported;
+        return .{ .src = s[1 .. 1 + close], .consumed = skipped + close + 2 };
     }
-    // Bare form: one token, ending at the line, a comment, or a `, linux:` sibling.
+    const end = bareTokenEnd(s);
+    return .{ .src = s[0..end], .consumed = skipped + end };
+}
+
+/// Bare form: one token, ending at the line, a comment, or an OS-keyed sibling.
+fn bareTokenEnd(s: []const u8) usize {
     const eol = std.mem.indexOfScalar(u8, s, '\n') orelse s.len;
-    var end = indexOfTopLevel(s[0..eol], '#') orelse eol;
-    end = indexOfTopLevel(s[0..end], ',') orelse end;
-    return .{ s[0..end], skipped + end };
+    const end = indexOfTopLevel(s[0..eol], '#') orelse eol;
+    return indexOfTopLevel(s[0..end], ',') orelse end;
+}
+
+/// A `\\` is Ruby's line continuation; between a comma and `macos:` it
+/// is only ever whitespace.
+fn skipBlankAndComments(src: []const u8) []const u8 {
+    var s = src;
+    while (true) {
+        s = std.mem.trimStart(u8, s, " \t\r\n\\");
+        if (s.len == 0 or s[0] != '#') return s;
+        s = s[std.mem.indexOfScalar(u8, s, '\n') orelse s.len ..];
+    }
 }
 
 /// Split an argv body on top-level commas, keeping `"..."` contents intact.
@@ -1585,6 +1626,131 @@ test "parseServiceBlock: run macos: takes the macOS argv and ignores linux:" {
     const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqual(@as(usize, 2), got.run.len);
     try std.testing.expectEqualStrings("\"--mac\"", got.run[1]);
+}
+
+test "parseServiceBlock: run linux: alone is no service on macOS" {
+    // Homebrew refuses to start such a service on macOS and says nothing
+    // at install time; a refusal here would blame a parser gap instead.
+    var buf: [max_service_args][]const u8 = undefined;
+    const one_line =
+        \\  service do
+        \\    run linux: [opt_bin/"x"]
+        \\    working_dir HOMEBREW_PREFIX
+        \\  end
+    ;
+    try std.testing.expect((try parseServiceBlock(&buf, one_line)) == null);
+
+    const multi_line =
+        \\  service do
+        \\    run linux: [
+        \\      opt_bin/"x",
+        \\      "--linux",
+        \\    ]
+        \\  end
+    ;
+    try std.testing.expect((try parseServiceBlock(&buf, multi_line)) == null);
+}
+
+test "parseServiceBlock: run linux: before macos: still lifts the macOS argv" {
+    // The linux-only outcome is silent, so it must never swallow a
+    // macOS argv that merely comes second.
+    const rb =
+        \\  service do
+        \\    run linux: [opt_bin/"x", "--linux"], macos: [opt_bin/"x", "--mac"]
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(usize, 2), got.run.len);
+    try std.testing.expectEqualStrings("\"--mac\"", got.run[1]);
+}
+
+test "parseServiceBlock: a comment between the linux: array and macos: does not hide the argv" {
+    // The argv is read from the raw buffer, so comments sit between the
+    // comma and `macos:`; they must not turn into a silent drop.
+    var buf: [max_service_args][]const u8 = undefined;
+    for ([_][]const u8{
+        \\  service do
+        \\    run linux: [opt_bin/"x", "--linux"], # linux first
+        \\        macos: [opt_bin/"x", "--mac"]
+        \\  end
+        ,
+        \\  service do
+        \\    run linux: [opt_bin/"x", "--linux"],
+        \\        # linux first
+        \\        macos: [opt_bin/"x", "--mac"]
+        \\  end
+        ,
+    }) |rb| {
+        const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+        try std.testing.expectEqual(@as(usize, 2), got.run.len);
+        try std.testing.expectEqualStrings("\"--mac\"", got.run[1]);
+    }
+}
+
+test "parseServiceBlock: a bare linux: token reads like a bracketed one" {
+    // The JSON twin is silent on `{"run":{"linux":"/x"}}`; the Ruby side
+    // must not warn for the same formula.
+    var buf: [max_service_args][]const u8 = undefined;
+    const bare =
+        \\  service do
+        \\    run linux: opt_bin/"x" # linux only
+        \\  end
+    ;
+    try std.testing.expect((try parseServiceBlock(&buf, bare)) == null);
+
+    const bare_then_macos =
+        \\  service do
+        \\    run linux: opt_bin/"x", macos: opt_bin/"y"
+        \\  end
+    ;
+    const got = (try parseServiceBlock(&buf, bare_then_macos)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(usize, 1), got.run.len);
+    try std.testing.expectEqualStrings("opt_bin/\"y\"", got.run[0]);
+}
+
+test "parseServiceBlock: a plain run beside run linux: still wins" {
+    // Homebrew's `run linux:` leaves `@run` untouched on macOS, so the
+    // plain call is the service whichever line comes first.
+    var buf: [max_service_args][]const u8 = undefined;
+    for ([_][]const u8{
+        \\  service do
+        \\    run [opt_bin/"z"]
+        \\    run linux: [opt_bin/"x"]
+        \\  end
+        ,
+        \\  service do
+        \\    run linux: [opt_bin/"x"]
+        \\    run [opt_bin/"z"]
+        \\  end
+        ,
+    }) |rb| {
+        const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+        try std.testing.expectEqual(@as(usize, 1), got.run.len);
+        try std.testing.expectEqualStrings("opt_bin/\"z\"", got.run[0]);
+    }
+}
+
+test "parseServiceBlock: a backslash continuation before macos: does not hide the argv" {
+    const rb =
+        \\  service do
+        \\    run linux: [opt_bin/"x"], \\
+        \\        macos: [opt_bin/"x", "--mac"]
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, rb)) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("\"--mac\"", got.run[1]);
+}
+
+test "parseServiceBlock: an unclosed run linux: array is still Unsupported" {
+    const rb =
+        \\  service do
+        \\    run linux: [opt_bin/"x"
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    try std.testing.expectError(error.Unsupported, parseServiceBlock(&buf, rb));
 }
 
 test "parseServiceBlock: a quoted comma stays inside its token" {

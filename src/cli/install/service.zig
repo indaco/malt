@@ -597,6 +597,41 @@ test "register keeps the row and says why when the new version's service block i
     try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
 
+test "register retires the previous version's row when the new version's service is linux-only" {
+    // A `linux`-only `run` is positive evidence the new version has no
+    // macOS service, so the old row must go, not be kept behind a refusal.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try seedDroppedRow(&db);
+    const linux_only =
+        \\{"name":"tree","full_name":"tree","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"2.2.1"},"dependencies":[],"service":{"run":{"linux":["$HOMEBREW_PREFIX/opt/tree/bin/tree","system","service","--time","0"]},"run_type":"immediate","working_dir":"$HOMEBREW_PREFIX"}}
+    ;
+    var formula = try formula_mod.parseFormula(testing.allocator, linux_only);
+    defer formula.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    // The retire path deletes the label's service dir under the prefix.
+    const prefix = try scratchPrefix();
+    defer testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    const prev = try atomic.overridePrefixEnv(prefix);
+    defer atomic.restorePrefixEnv(prev);
+
+    // The probe spawns launchctl; the debug io cannot.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    register(threaded.io(), testing.allocator, &db, &formula, prefix, sink_mod.terminal);
+
+    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "declares no service; retired the registration from the previous version") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
+}
+
 test "register says a core formula ships its own plist and registers nothing" {
     // The API renders a shipped plist as a `name`-only service object;
     // the user must read why there is no malt service, as on the tap path.
