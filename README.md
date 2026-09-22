@@ -453,7 +453,7 @@ mt purge --wipe --backup ~/snapshot.txt --remove-binary --yes
 | `--stale-casks`   | Cask cache + Caskroom entries for uninstalled casks     | none                |
 | `--old-versions`  | Non-latest version directories in `{prefix}/Cellar`     | type `old-versions` |
 | `--housekeeping`  | = `--store-orphans --unused-deps --cache --stale-casks` | none                |
-| `--wipe`          | Every malt artefact on disk (mutually exclusive)        | type `purge`        |
+| `--wipe`          | Every malt artefact on disk except `{prefix}/var` (mutually exclusive) | type `purge`        |
 
 Shared flags: `--dry-run`/`-n` (preview), `--yes`/`-y` (skip typed-confirm), `--quiet`/`-q`, `--backup`/`-b <path>` (write a `mt restore`-compatible manifest before any deletion). `--wipe`-only flags: `--keep-cache` (preserve downloaded bottles), `--remove-binary` (also unlink `/usr/local/bin/{mt,malt}`).
 

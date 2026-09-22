@@ -224,7 +224,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 r.error_kind,
             );
             r = try switch (k) {
-                .unused_deps => scopes_mod.runUnusedDeps(ctx, allocator, prefix, dry_run),
+                .unused_deps => scopes_mod.runUnusedDeps(ctx, allocator, prefix, cache_dir, dry_run),
                 .store_orphans => scopes_mod.runStoreOrphans(ctx, allocator, prefix, dry_run),
                 .cache => scopes_mod.runCache(ctx, allocator, cache_dir, prefix, opts.cache_days, dry_run),
                 .downloads => scopes_mod.runDownloads(ctx, cache_dir, dry_run),
