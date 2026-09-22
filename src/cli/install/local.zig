@@ -113,8 +113,9 @@ pub const ResolvedRubyFormula = struct {
     /// The `.rb`'s `service do` block, raw. Borrowed from the formula
     /// source like `dependencies`. Null when the formula declares none.
     service: ?rb_parse.RubyServiceBlock = null,
-    /// True when the `.rb` carries a `service do` block at all, readable
-    /// or not, so an unreadable block is not mistaken for a dropped one.
+    /// True when the `.rb` declares a macOS service, readable or not, so
+    /// an unreadable block is not mistaken for a dropped one. A block whose
+    /// `run` is keyed for Linux only declares none.
     service_declared: bool = false,
     /// When set, the tap is registered in the DB (mirrors the original
     /// tap install behaviour). Local installs leave this null so they
@@ -2170,4 +2171,14 @@ test "ParsedService keeps a block malt cannot read apart from no block at all" {
     try std.testing.expect(shipped.unreadable());
     try std.testing.expectEqualStrings("formula ships its own plist, which malt does not adopt", shipped.reason);
     try std.testing.expectEqualStrings("unsupported service block", no_run.reason);
+
+    // A Linux-only `run` is no macOS service: not declared, so an upgrade
+    // retires the previous registration instead of keeping it.
+    const linux_only = ParsedService.parse(&buf,
+        \\  service do
+        \\    run linux: [opt_bin/"x"]
+        \\  end
+    );
+    try std.testing.expect(!linux_only.declared);
+    try std.testing.expect(!linux_only.unreadable());
 }
