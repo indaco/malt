@@ -572,15 +572,15 @@ test "register stays silent for a formula that never had a service" {
 }
 
 test "register keeps the row and says why when the new version's service block is unsupported" {
-    // An OS-keyed `run` parses to no def; deleting the row here would
-    // retire a service the formula still declares, with nothing to bring
-    // it back.
+    // A `run` malt cannot read parses to no def; deleting the row here
+    // would retire a service the formula still declares, with nothing to
+    // bring it back.
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
     try seedDroppedRow(&db);
     const unreadable =
-        \\{"name":"tree","full_name":"tree","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"2.2.1"},"dependencies":[],"service":{"run":{"macos":["/bin/x"]}}}
+        \\{"name":"tree","full_name":"tree","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"2.2.1"},"dependencies":[],"service":{"run":{"macos":42}}}
     ;
     var formula = try formula_mod.parseFormula(testing.allocator, unreadable);
     defer formula.deinit();
