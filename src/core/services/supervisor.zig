@@ -23,8 +23,8 @@
 //!   they only touch the DB and the local filesystem.
 //! - **Formula integration**: registering a service when a formula carries a
 //!   `service:` field happens in `cli/install/service.zig`, shared by install
-//!   and upgrade. `cli/uninstall.zig` calls `stopAndUnregister` before
-//!   deleting files.
+//!   and upgrade. `cli/uninstall.zig` calls `stopAndUnregister` and
+//!   `cli/purge/scopes.zig` calls `retireKegServices` before deleting files.
 
 const std = @import("std");
 const system_tools = @import("../../system_tools.zig");
@@ -421,6 +421,47 @@ pub fn stopAndUnregister(ctx: SupervisorCtx, name: []const u8) void {
     // Row may not exist; DELETE is idempotent either way.
     _ = stmt.step() catch {};
     removeServiceDir(ctx, label);
+}
+
+/// Retire every registration owned by `keg_name`, for a caller that is
+/// deleting the keg itself. Keyed on the keg alone: `resolveLabel` is shaped
+/// for user input and matches a *label* first, so a formula whose name spells
+/// another service's label would retire that service instead.
+///
+/// A job that is still loaded keeps its row: `mt services stop` resolves the
+/// plist through it, and deleting it would orphan a daemon nothing can boot
+/// out. Returns how many registrations were retired.
+pub fn retireKegServices(ctx: SupervisorCtx, keg_name: []const u8) usize {
+    var labels: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (labels.items) |l| ctx.allocator.free(l);
+        labels.deinit(ctx.allocator);
+    }
+    {
+        var stmt = ctx.db.prepare("SELECT name FROM services WHERE keg_name = ?;") catch return 0;
+        defer stmt.finalize();
+        stmt.bindText(1, keg_name) catch return 0;
+        // Collected before the first delete: the statement walks the table
+        // these writes mutate.
+        while (stmt.step() catch false) {
+            const p = stmt.columnText(0) orelse continue;
+            labels.append(ctx.allocator, ctx.allocator.dupe(u8, std.mem.sliceTo(p, 0)) catch return 0) catch return 0;
+        }
+    }
+
+    var retired: usize = 0;
+    for (labels.items) |label| {
+        stop(ctx, label) catch {};
+        // Unverifiable is not evidence the job is down, so keep the row.
+        if (probeRuntime(ctx.io, ctx.allocator, label) orelse .loaded != .not_loaded) continue;
+        var del = ctx.db.prepare("DELETE FROM services WHERE name = ?;") catch continue;
+        defer del.finalize();
+        del.bindText(1, label) catch continue;
+        _ = del.step() catch continue;
+        removeServiceDir(ctx, label);
+        retired += 1;
+    }
+    return retired;
 }
 
 /// Drop the plist directory `register` created for `label`. Best-effort:

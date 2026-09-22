@@ -17,6 +17,8 @@ const formula_mod = @import("../../core/formula.zig");
 const cask_mod = @import("../../core/cask.zig");
 const relocated_store = @import("../../core/relocated_store.zig");
 const tap_cache = @import("../../core/tap_cache.zig");
+const services_mod = @import("../services.zig");
+const supervisor_mod = @import("../../core/services/supervisor.zig");
 const symlink = @import("../../fs/symlink.zig");
 const store_path = @import("../../fs/store_path.zig");
 const util = @import("util.zig");
@@ -163,7 +165,10 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     rep.header(removable.items.len, "package", "packages");
 
     if (dry_run) {
-        for (removable.items) |name| rep.item(name);
+        for (removable.items) |name| {
+            rep.item(name);
+            if (kegHasService(&db, name)) rep.note("would retire the service registration for {s}", .{name});
+        }
         rep.done(removable.items.len);
         result.removed = @intCast(removable.items.len);
         return result;
@@ -197,6 +202,22 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
                 if (cellar_path.len > 0) result.bytes += util.pathSize(io, allocator, cellar_path);
             }
 
+            // Before the files go, same order as `uninstall`: a row left
+            // behind keeps advertising a service whose binary is gone.
+            // Booting out a loaded job can take seconds, so say so first.
+            // This and the kegs DELETE below are two writes without a
+            // transaction: a crash between them leaves the keg listed with
+            // no registration, which `mt reinstall` restores. The reverse
+            // order would leave a loaded job nothing can reach.
+            if (kegHasService(&db, name)) {
+                services_mod.announceStop(io, allocator, &db, name);
+                const retired = supervisor_mod.retireKegServices(.{ .allocator = allocator, .io = io, .db = &db }, name);
+                if (retired > 0)
+                    rep.note("retired the service registration for {s}", .{name})
+                else
+                    rep.note("{s}: its service is still loaded; run 'mt services stop {s}' then 'launchctl bootout' if it persists", .{ name, name });
+            }
+
             linker.unlink(keg_id) catch {};
             if (pkg_version.len > 0) {
                 cellar_mod.remove(io, prefix, name, pkg_version) catch {};
@@ -218,6 +239,15 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     }
     rep.done(removable.items.len);
     return result;
+}
+
+/// Keyed on the keg only, like `install/service.zig`'s twin: a label can
+/// spell a formula name, and only the keg column says who owns the row.
+fn kegHasService(db: *sqlite.Database, name: []const u8) bool {
+    var stmt = db.prepare("SELECT 1 FROM services WHERE keg_name = ?;") catch return false;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return false;
+    return stmt.step() catch false;
 }
 
 /// True iff some installed keg other than `name` carries a Mach-O hard
@@ -926,6 +956,7 @@ fn deleteCaskVersionRow(db: *sqlite.Database, token: []const u8, version: []cons
 // ── inline unit tests ──────────────────────────────────────────────────────
 
 const testing = std.testing;
+const atomic = @import("../../fs/atomic.zig");
 const fs_test_io = std.Options.debug_io;
 
 var scratch_seq: std.atomic.Value(u32) = .init(0);
@@ -1778,6 +1809,86 @@ test "runUnusedDeps keeps a dependency a still-installed keg's Mach-O links desp
     defer stmt.finalize();
     _ = try stmt.step();
     try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+}
+
+test "runUnusedDeps reaps a batch mixing orphans with and without a service" {
+    // Uninstall stops and unregisters a keg's service before tearing down
+    // its files; autoremove reaches the same kegs by another door, and a
+    // row left behind keeps `services list` and `backup` advertising a
+    // service whose binary is gone. A keg that never registered one must
+    // still be reaped in the same pass, and a still-installed keg's
+    // registration must survive even when its label spells the reaped
+    // keg's name.
+    const allocator = testing.allocator;
+
+    const prefix = try uniqueCellarPrefix(allocator, "unuseddeps_mixed");
+    defer allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+
+    const db_dir = try joinZ(allocator, prefix, "/db");
+    defer allocator.free(db_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, db_dir);
+    inline for (.{ "/Cellar/withsvc/1.0/bin", "/Cellar/plainlib/1.0/lib", "/Cellar/keeper/1.0/bin" }) |sub| {
+        const dir = try joinZ(allocator, prefix, sub);
+        defer allocator.free(dir);
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, dir);
+    }
+    const svc_dir = try joinZ(allocator, prefix, "/var/malt/services/com.malt.withsvc");
+    defer allocator.free(svc_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, svc_dir);
+    // The keeper's label is spelled exactly like the orphan's keg name, the
+    // one shape that makes a label-keyed lookup retire the wrong service.
+    const keep_dir = try joinZ(allocator, prefix, "/var/malt/services/withsvc");
+    defer allocator.free(keep_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, keep_dir);
+
+    const db_path = try joinZ(allocator, prefix, "/db/malt.db");
+    defer allocator.free(db_path);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        const insert = try std.fmt.allocPrintSentinel(
+            allocator,
+            "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason) " ++
+                "VALUES('withsvc','withsvc','1.0',0,'sha','{s}/Cellar/withsvc/1.0','dependency')," ++
+                "('plainlib','plainlib','1.0',0,'sha','{s}/Cellar/plainlib/1.0','dependency')," ++
+                "('keeper','keeper','1.0',0,'sha','{s}/Cellar/keeper/1.0','direct');" ++
+                "INSERT INTO services(name,keg_name,plist_path,auto_start,last_status) " ++
+                "VALUES('com.malt.withsvc','withsvc','{s}/var/malt/services/com.malt.withsvc/service.plist',1,'registered')," ++
+                "('withsvc','keeper','{s}/var/malt/services/withsvc/service.plist',1,'registered');",
+            .{ prefix, prefix, prefix, prefix, prefix },
+            0,
+        );
+        defer allocator.free(insert);
+        try db.exec(insert);
+    }
+
+    const prefix_z = try allocator.dupeZ(u8, prefix);
+    defer allocator.free(prefix_z);
+    const prev = try atomic.overridePrefixEnv(prefix_z);
+    defer atomic.restorePrefixEnv(prev);
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const ctx = AppCtx{ .io = threaded.io(), .environ = .empty };
+    const result = try runUnusedDeps(&ctx, allocator, prefix, false);
+
+    try testing.expectEqual(@as(u32, 2), result.removed);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    // Keg-scoped on both sides: `hasService` also matches the label, which
+    // here is the reaped keg's own name.
+    try testing.expect(!kegHasService(&db, "withsvc"));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, svc_dir, .{}));
+    // The still-installed keg keeps its registration and its plist.
+    try testing.expect(kegHasService(&db, "keeper"));
+    try std.Io.Dir.accessAbsolute(fs_test_io, keep_dir, .{});
+    inline for (.{ "/Cellar/withsvc/1.0", "/Cellar/plainlib/1.0" }) |sub| {
+        const dir = try joinZ(allocator, prefix, sub);
+        defer allocator.free(dir);
+        try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, dir, .{}));
+    }
 }
 
 test "runUnusedDeps removes a revisioned orphan's Cellar dir named with the _<revision> suffix" {
