@@ -101,6 +101,8 @@ Formula Ruby source fetched over the wire is checked against `src/core/pins_mani
 
 Formula `service:` blocks flow through `plist_mod.validate` before launchd ever sees them: `program_args[0]` must live under the formula's own cellar or `MALT_PREFIX/opt/<formula>`, interpreter shebangs (`/bin/sh` etc.) are refused as the leading executable, argv length / per-arg length are capped, and NUL bytes are rejected.
 
+A formula that ships its own launchd plist (`service` block with only a `name`) has that file read by `src/core/services/shipped_plist.zig` - a refuse-by-default reader with a launchd key allowlist, a 64 KiB / depth-4 cap and only the five entities the writer emits - into the same `ServiceSpec`, which then passes the same gate. The one launchd feature it carries beyond a `run` block is a `Sockets` entry of the `SecureSocketWithKey` shape, whose path launchd owns.
+
 ### Release signing
 
 Releases are signed keyless via cosign in the goreleaser workflow; `scripts/install.sh` re-verifies the signature before the SHA check. Fail-closed: no signature, no install (bypass requires explicit `MALT_ALLOW_UNVERIFIED=1`). The `scripts/test/install_sh_test.sh` suite locks the fail-closed paths against regression.

@@ -987,6 +987,31 @@ fn seedKegArchive(prefix: []const u8, name: []const u8, sha: []const u8) !void {
     try runTar(&.{ "tar", "czf", cache_path, "-C", work, "bin" });
 }
 
+// Like `seedKegArchive`, but the archive also carries `<label>.plist` at
+// its root with `body`, the way a formula that installs its own plist does.
+fn seedKegArchiveWithPlist(prefix: []const u8, name: []const u8, sha: []const u8, label: []const u8, body: []const u8) !void {
+    const work = try std.fmt.allocPrint(testing.allocator, "{s}/work_{s}", .{ prefix, name });
+    defer testing.allocator.free(work);
+    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{work});
+    defer testing.allocator.free(bin_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
+    const exe = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, name });
+    defer testing.allocator.free(exe);
+    try writeFile(exe, "#!/bin/sh\necho hi\n");
+    const plist = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.plist", .{ work, label });
+    defer testing.allocator.free(plist);
+    try writeFile(plist, body);
+
+    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
+    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
+    const plist_leaf = try std.fmt.allocPrint(testing.allocator, "{s}.plist", .{label});
+    defer testing.allocator.free(plist_leaf);
+    try runTar(&.{ "tar", "czf", cache_path, "-C", work, "bin", plist_leaf });
+}
+
 fn installFromWarmCache(prefix: [:0]const u8, resolved: install_local.ResolvedRubyFormula, force: bool) !void {
     return installFromWarmCacheWith(prefix, resolved, force, malt.install_sink.silent);
 }
@@ -1220,6 +1245,123 @@ test "materializeRubyFormula registers the service a .rb service block declares"
     try testing.expect(std.mem.indexOf(u8, plist, log) != null);
 }
 
+test "materializeRubyFormula lifts the plist a name-only service block says the keg ships" {
+    // Homebrew's second service shape: the keg carries `<label>.plist`
+    // itself. `services list` and `start` only see malt's own row and
+    // render, so the shipped file is read into them after the pour.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "3c" ** 32;
+    const body = try std.fmt.allocPrint(testing.allocator,
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        \\<plist version="1.0">
+        \\<dict>
+        \\    <key>Label</key>
+        \\    <string>homebrew.mxcl.shipd</string>
+        \\    <key>ProgramArguments</key>
+        \\    <array>
+        \\        <string>{s}/opt/shipd/bin/shipd</string>
+        \\        <string>--foreground</string>
+        \\    </array>
+        \\    <key>EnvironmentVariables</key>
+        \\    <dict>
+        \\        <key>SHIPD_HOME</key>
+        \\        <string>{s}/var/shipd</string>
+        \\    </dict>
+        \\    <key>RunAtLoad</key>
+        \\    <true/>
+        \\</dict>
+        \\</plist>
+        \\
+    , .{ prefix, prefix });
+    defer testing.allocator.free(body);
+    try seedKegArchiveWithPlist(prefix, "shipd", sha, "homebrew.mxcl.shipd", body);
+
+    var warns: std.ArrayList(u8) = .empty;
+    defer warns.deinit(testing.allocator);
+    const sink: malt.install_sink.OutputSink = .{
+        .ctx = &warns,
+        .writeInfo = swallowLine,
+        .writeWarn = captureWarn,
+        .writeSuccess = swallowLine,
+        .writeErr = swallowLine,
+        .show_progress = false,
+    };
+
+    try installFromWarmCacheWith(prefix, .{
+        .name = "shipd",
+        .full_name = "user/repo/shipd",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://example.invalid/shipd-1.0.tar.gz",
+        .sha256 = sha,
+        .service_declared = true,
+        .shipped_label = "homebrew.mxcl.shipd",
+    }, false, sink);
+
+    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service") == null);
+    var keg_buf: [64]u8 = undefined;
+    const keg = (try serviceKegName(prefix, "com.malt.shipd", &keg_buf)) orelse return error.ServiceRowMissing;
+    try testing.expectEqualStrings("shipd", keg);
+
+    const plist = try readPlist(prefix, "com.malt.shipd");
+    defer testing.allocator.free(plist);
+    const head = try std.fmt.allocPrint(testing.allocator, "<string>{s}/opt/shipd/bin/shipd</string>", .{prefix});
+    defer testing.allocator.free(head);
+    try testing.expect(std.mem.indexOf(u8, plist, head) != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<key>SHIPD_HOME</key>") != null);
+    // Malt's label and log paths, not the shipped ones.
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>com.malt.shipd</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "homebrew.mxcl.shipd") == null);
+    const log = try std.fmt.allocPrint(testing.allocator, "<string>{s}/var/log/shipd.out</string>", .{prefix});
+    defer testing.allocator.free(log);
+    try testing.expect(std.mem.indexOf(u8, plist, log) != null);
+
+    // The keg's own file is input only.
+    const keg_plist = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/shipd/1.0/homebrew.mxcl.shipd.plist", .{prefix});
+    defer testing.allocator.free(keg_plist);
+    const after = try test_io.cwd().readFileAlloc(std.Options.debug_io, keg_plist, testing.allocator, .unlimited);
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(body, after);
+}
+
+test "materializeRubyFormula keeps the keg and says so when the declared plist is not in it" {
+    // A name-only block over a keg that ships no plist.
+    // The keg installs; the user reads that the file is missing, not that
+    // the block was unsupported.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "4d" ** 32;
+    try seedKegArchive(prefix, "noplist", sha);
+
+    var warns: std.ArrayList(u8) = .empty;
+    defer warns.deinit(testing.allocator);
+    const sink: malt.install_sink.OutputSink = .{
+        .ctx = &warns,
+        .writeInfo = swallowLine,
+        .writeWarn = captureWarn,
+        .writeSuccess = swallowLine,
+        .writeErr = swallowLine,
+        .show_progress = false,
+    };
+
+    try installFromWarmCacheWith(prefix, .{
+        .name = "noplist",
+        .full_name = "user/repo/noplist",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://example.invalid/noplist-1.0.tar.gz",
+        .sha256 = sha,
+        .service_declared = true,
+        .shipped_label = "homebrew.mxcl.noplist",
+    }, false, sink);
+
+    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service for noplist: declares a shipped plist that is not in the keg") != null);
+    var keg_buf: [64]u8 = undefined;
+    try testing.expect((try serviceKegName(prefix, "com.malt.noplist", &keg_buf)) == null);
+}
+
 test "materializeRubyFormula keeps the keg and warns when the service is refused" {
     // A `run` head outside the keg or opt is what the validator exists to
     // stop; that must cost the user the service, never the install.
@@ -1395,9 +1537,9 @@ test "installLocalFormula stays quiet about a linux-only service block" {
     try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service") == null);
 }
 
-test "installLocalFormula says a formula ships its own plist instead of calling the block unsupported" {
-    // The block is well-formed; malt just does not adopt shipped plists.
-    // The generic reason would send the user hunting for a parser gap.
+test "installLocalFormula does not refuse a shipped plist before the keg exists" {
+    // The block names a plist the keg will carry; the lift runs after the
+    // pour, so neither the dry run nor a failed fetch may call it refused.
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
     const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/shipd.rb", .{prefix});
@@ -1445,11 +1587,10 @@ test "installLocalFormula says a formula ships its own plist instead of calling 
     try install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, true, false, sink);
     try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service") == null);
 
-    // The real pass warns at parse time and then fails on the (offline) fetch.
+    // The real pass fails on the (offline) fetch, before any lift could run.
     try testing.expectError(
         install_record.InstallError.DownloadFailed,
         install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, false, false, sink),
     );
-    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service for shipd: formula ships its own plist, which malt does not adopt") != null);
-    try testing.expect(std.mem.indexOf(u8, warns.items, "unsupported service block") == null);
+    try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service") == null);
 }

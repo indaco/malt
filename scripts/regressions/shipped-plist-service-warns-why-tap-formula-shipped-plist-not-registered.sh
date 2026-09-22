@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Regression: a `service do ... end` block that carries only
 # `name macos: "<label>"` and no `run` is Homebrew's second service shape -
-# the formula installs a pre-rendered `<keg>/<label>.plist` itself. malt
-# has no plist reader, so it deliberately registers nothing for it.
+# the formula installs a pre-rendered `<keg>/<label>.plist` itself, which
+# malt lifts into its own service once the keg is poured.
 #
 # The bug: the install refused the block with the generic "unsupported
 # service block" reason, which reads as a parser gap in malt when the
 # block is perfectly well-formed. The user is left with an installed keg,
 # a daemon `services start` cannot find, and the wrong explanation.
 #
-# Offline: a one-file tarball is planted at the sha-keyed tap-cache path
-# so the install skips the download. The fix must only change the reason
-# string; it must neither fail the keg nor start registering a service
-# it cannot render.
+# Offline: a one-file tarball that ships NO plist is planted at the
+# sha-keyed tap-cache path so the install skips the download. The reason
+# must name the missing file; it must neither fail the keg nor register
+# a service it has nothing to render from.
 
 set -euo pipefail
 
@@ -77,15 +77,15 @@ pass "warm tap cache seeded for a local formula that ships its own plist"
 }
 pass "shipd installed"
 
-grep -q 'could not register service for shipd: formula ships its own plist, which malt does not adopt' "$PREFIX/install.log" ||
-  fail "install did not say the formula ships its own plist"
+grep -q 'could not register service for shipd: declares a shipped plist that is not in the keg' "$PREFIX/install.log" ||
+  fail "install did not say the declared plist is missing from the keg"
 ! grep -q 'unsupported service block' "$PREFIX/install.log" ||
   fail "shipped-plist block still reported as an unsupported service block"
 pass "install names the real reason"
 
 ROW=$(sqlite3 "$DB" "SELECT 1 FROM services WHERE name='com.malt.shipd';")
 [[ -z "$ROW" ]] ||
-  fail "a services row was registered for a plist malt cannot render"
-pass "no service registered for a plist malt cannot render"
+  fail "a services row was registered with no plist to render it from"
+pass "no service registered without a plist to render it from"
 
 echo "PASS: shipped-plist service block warns with its real reason and registers nothing"

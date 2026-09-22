@@ -18,11 +18,20 @@ pub const EnvPair = struct {
     value: []const u8,
 };
 
+/// One `Sockets` entry of the `SecureSocketWithKey` shape: launchd creates
+/// the socket in a secure temp dir and exports its path to the job under
+/// `env_key`, so nothing here is a filesystem path malt has to confine.
+pub const Socket = struct {
+    name: []const u8,
+    env_key: []const u8,
+};
+
 pub const ServiceSpec = struct {
     label: []const u8,
     program_args: []const []const u8,
     working_dir: ?[]const u8 = null,
     env: []const EnvPair = &.{},
+    sockets: []const Socket = &.{},
     stdout_path: []const u8,
     stderr_path: []const u8,
     schedule: Schedule = .immediate,
@@ -154,6 +163,10 @@ pub fn validate(
         try checkString(p.key);
         try checkString(p.value);
     }
+    for (spec.sockets) |s| {
+        try checkString(s.name);
+        try checkString(s.env_key);
+    }
 
     const head = spec.program_args[0];
     if (head.len == 0 or head[0] != '/') return ValidationError.RelativeExecutable;
@@ -242,6 +255,18 @@ pub fn render(spec: ServiceSpec, writer: *std.Io.Writer) !void {
             try writer.writeAll("</key>\n        <string>");
             try writeEscaped(writer, pair.value);
             try writer.writeAll("</string>\n");
+        }
+        try writer.writeAll("    </dict>\n");
+    }
+
+    if (spec.sockets.len > 0) {
+        try writer.writeAll("    <key>Sockets</key>\n    <dict>\n");
+        for (spec.sockets) |s| {
+            try writer.writeAll("        <key>");
+            try writeEscaped(writer, s.name);
+            try writer.writeAll("</key>\n        <dict>\n            <key>SecureSocketWithKey</key>\n            <string>");
+            try writeEscaped(writer, s.env_key);
+            try writer.writeAll("</string>\n        </dict>\n");
         }
         try writer.writeAll("    </dict>\n");
     }
@@ -423,4 +448,62 @@ test "validate rejects a dot-dot segment in the executable head" {
     var dotted = base;
     dotted.program_args = &.{ "/opt/malt/opt/foo/bin/foo..bar", "--config=../relative.conf" };
     try validate(dotted, "/opt/malt/Cellar/foo/1.0", "/opt/malt");
+}
+
+test "render emits a SecureSocketWithKey socket under Sockets" {
+    // launchd owns the socket path and exports it to the job under the
+    // named environment key; the plist carries no filesystem path for it.
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try render(.{
+        .label = "com.malt.dbus",
+        .program_args = &.{"/opt/malt/opt/dbus/bin/dbus-daemon"},
+        .stdout_path = "/opt/malt/var/log/dbus.out",
+        .stderr_path = "/opt/malt/var/log/dbus.err",
+        .sockets = &.{.{ .name = "unix_domain_listener", .env_key = "DBUS_LAUNCHD_SESSION_BUS_SOCKET" }},
+    }, &aw.writer);
+    try testing.expect(std.mem.indexOf(u8, aw.written(),
+        \\    <key>Sockets</key>
+        \\    <dict>
+        \\        <key>unix_domain_listener</key>
+        \\        <dict>
+        \\            <key>SecureSocketWithKey</key>
+        \\            <string>DBUS_LAUNCHD_SESSION_BUS_SOCKET</string>
+        \\        </dict>
+        \\    </dict>
+        \\
+    ) != null);
+}
+
+test "render leaves Sockets out when the spec has none" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try render(.{
+        .label = "com.malt.x",
+        .program_args = &.{"/opt/malt/opt/x/bin/x"},
+        .stdout_path = "/opt/malt/var/log/x.out",
+        .stderr_path = "/opt/malt/var/log/x.err",
+    }, &aw.writer);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "Sockets") == null);
+}
+
+test "validate checks socket names and keys like every other string" {
+    // Both strings land verbatim in the rendered plist, so the same NUL
+    // and length gates apply as for argv.
+    const base = ServiceSpec{
+        .label = "com.malt.foo",
+        .program_args = &.{"/opt/malt/opt/foo/bin/foo"},
+        .stdout_path = "/opt/malt/var/log/foo.out",
+        .stderr_path = "/opt/malt/var/log/foo.err",
+        .sockets = &.{.{ .name = "listener", .env_key = "FOO_SOCKET" }},
+    };
+    try validate(base, "/opt/malt/Cellar/foo/1.0", "/opt/malt");
+
+    var nul = base;
+    nul.sockets = &.{.{ .name = "lis\x00tener", .env_key = "FOO_SOCKET" }};
+    try testing.expectError(ValidationError.EmbeddedNul, validate(nul, "/opt/malt/Cellar/foo/1.0", "/opt/malt"));
+
+    var long = base;
+    long.sockets = &.{.{ .name = "listener", .env_key = "K" ** (max_arg_len + 1) }};
+    try testing.expectError(ValidationError.ArgTooLong, validate(long, "/opt/malt/Cellar/foo/1.0", "/opt/malt"));
 }

@@ -157,11 +157,14 @@ jobs:
       - name: Regression guard - a tap or local formula's service block is registered on install
         run: ./scripts/regressions/tap-service-registered-on-install-tap-formula-service-block-never-parsed-or-registered.sh
 
-      - name: Regression guard - a formula that ships its own plist is refused for that reason
+      - name: Regression guard - a declared shipped plist missing from the keg is reported, not called unsupported
         run: ./scripts/regressions/shipped-plist-service-warns-why-tap-formula-shipped-plist-not-registered.sh
 
-      - name: Regression guard - a core formula that ships its own plist is refused for that reason
+      - name: Regression guard - a core formula's shipped plist is lifted into a malt service on install and upgrade
         run: ./scripts/regressions/api-shipped-plist-service-warns-why-api-formula-shipped-plist-installs-silently.sh
+
+      - name: Regression guard - a shipped launchd plist is lifted into a malt service and refusals name their cause
+        run: ./scripts/regressions/shipped-plist-lifted-to-service-adopt-shipped-launchd-plist-as-a-service.sh
 
       - name: Regression guard - a linux-only service block installs quietly and registers nothing
         run: ./scripts/regressions/linux-only-service-block-installs-quietly-linux-only-service-block-reported-as-unsupported.sh

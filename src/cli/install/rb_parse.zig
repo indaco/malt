@@ -514,7 +514,7 @@ pub const ServiceParseError = error{ Unsupported, ShipsOwnPlist };
 /// `max_service_args`, or a shape this scanner cannot follow), so the caller
 /// can warn instead of reading it as "declares no service". A run-less block
 /// that only `name`s a label is `ShipsOwnPlist`: the formula installs the
-/// plist itself, which malt deliberately does not adopt. Directives are
+/// plist itself, and `shippedPlistLabel` names the file to lift. Directives are
 /// read only at the block's own body indentation, so a nested `on_macos do`
 /// / `if` is skipped without tracking depth; the block closes at the first
 /// `end` back at the opener's indentation. Anything not in
@@ -592,6 +592,29 @@ pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const
     return block;
 }
 
+/// The quoted macOS label of the `service do` block's `name` directive
+/// (`name macos: "<label>"`, in any position), which names
+/// `<keg>/<label>.plist`. Null when it is interpolated, unquoted or empty:
+/// the scanner cannot resolve those to a file name.
+pub fn shippedPlistLabel(rb_content: []const u8) ?[]const u8 {
+    // Scoped to the block so a comment or caveats text cannot name the file.
+    var in_block = false;
+    var lines = std.mem.splitScalar(u8, rb_content, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (!in_block) {
+            in_block = std.mem.eql(u8, line, "service do");
+            continue;
+        }
+        if (std.mem.eql(u8, line, "end")) return null;
+        if (!std.mem.startsWith(u8, line, "name ")) continue;
+        const label = extractQuoted(line, "macos: \"") orelse return null;
+        if (label.len == 0 or std.mem.indexOf(u8, label, "#{") != null) return null;
+        return label;
+    }
+    return null;
+}
+
 fn isRunDirective(line: []const u8) bool {
     if (!std.mem.startsWith(u8, line, "run")) return false;
     // Not `run_type`.
@@ -602,11 +625,12 @@ fn isRunDirective(line: []const u8) bool {
 }
 
 /// The reason suffix of the install warning, kept here so both Ruby-DSL
-/// call sites print the same words for the same refusal.
+/// call sites print the same words for the same refusal. A shipped plist
+/// only warns here when `shippedPlistLabel` found nothing to lift.
 pub fn serviceRefusalReason(err: ServiceParseError) []const u8 {
     return switch (err) {
         error.Unsupported => "unsupported service block",
-        error.ShipsOwnPlist => "formula ships its own plist, which malt does not adopt",
+        error.ShipsOwnPlist => "formula ships its own plist, but malt could not read its label",
     };
 }
 
@@ -1833,8 +1857,8 @@ test "parseServiceBlock: no block yields null, a block without a usable run is U
 
 test "parseServiceBlock: a run-less block that names a shipped plist is refused for that reason" {
     // Homebrew's second service shape: the formula installs
-    // `<keg>/<label>.plist` itself and only names it. Malt does not adopt
-    // shipped plists, but that refusal must not read as a parser gap.
+    // `<keg>/<label>.plist` itself and only names it. The block yields no
+    // argv to lift, and that must not read as a parser gap.
     var buf: [max_service_args][]const u8 = undefined;
     const ships_plist =
         \\  service do
@@ -1886,9 +1910,34 @@ test "parseServiceBlock: a run-less block that names a shipped plist is refused 
     try std.testing.expectError(error.Unsupported, parseServiceBlock(&buf, name_with_paren_run));
 }
 
+test "shippedPlistLabel reads the quoted macOS label of a name-only service block" {
+    // The label is the one datum that names `<keg>/<label>.plist`.
+    try std.testing.expectEqualStrings("org.freedesktop.dbus-session", shippedPlistLabel(
+        \\  service do
+        \\    name macos: "org.freedesktop.dbus-session"
+        \\  end
+    ).?);
+    // An interpolated or unquoted label is a value the scanner cannot
+    // resolve, so there is no file name to look for.
+    try std.testing.expect(shippedPlistLabel("  service do\n    name macos: \"#{plist_name}\"\n  end\n") == null);
+    try std.testing.expect(shippedPlistLabel("  service do\n    name macos: plist_name\n  end\n") == null);
+    try std.testing.expect(shippedPlistLabel("  service do\n    name macos: \"\"\n  end\n") == null);
+    try std.testing.expect(shippedPlistLabel("  service do\n    run [opt_bin/\"x\"]\n  end\n") == null);
+    // Both OS labels on one line: only the macOS one names a file here.
+    try std.testing.expectEqualStrings("io.netatalk.daemon", shippedPlistLabel("  service do\n    name macos: \"io.netatalk.daemon\", linux: \"netatalk\"\n  end\n").?);
+    // A commented-out directive above the block must not win.
+    try std.testing.expectEqualStrings("real", shippedPlistLabel("  # name macos: \"stale\"\n  service do\n    name macos: \"real\"\n  end\n").?);
+    // Nor a `name macos:` line outside the block (a caveats heredoc).
+    try std.testing.expectEqualStrings("real", shippedPlistLabel("  def caveats\n    <<~EOS\n      name macos: \"stale\"\n    EOS\n  end\n  service do\n    name macos: \"real\"\n  end\n").?);
+    // `macos:` may follow `linux:`.
+    try std.testing.expectEqualStrings("y", shippedPlistLabel("  service do\n    name linux: \"x\", macos: \"y\"\n  end\n").?);
+    // A `name` without a macOS label names no file.
+    try std.testing.expect(shippedPlistLabel("  service do\n    name linux: \"x\"\n  end\n") == null);
+}
+
 test "serviceRefusalReason names each refusal for the install warning" {
     try std.testing.expectEqualStrings("unsupported service block", serviceRefusalReason(error.Unsupported));
-    try std.testing.expectEqualStrings("formula ships its own plist, which malt does not adopt", serviceRefusalReason(error.ShipsOwnPlist));
+    try std.testing.expectEqualStrings("formula ships its own plist, but malt could not read its label", serviceRefusalReason(error.ShipsOwnPlist));
 }
 
 test "parseServiceBlock: a trailing Ruby comment does not reach the directive value" {

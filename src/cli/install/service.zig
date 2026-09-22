@@ -4,11 +4,14 @@
 
 const std = @import("std");
 
+const confined_source = @import("../../fs/confined_source.zig");
 const cron = @import("../../core/services/cron.zig");
 const formula_mod = @import("../../core/formula.zig");
 const plist_mod = @import("../../core/services/plist.zig");
+const shipped_plist = @import("../../core/services/shipped_plist.zig");
 const supervisor_mod = @import("../../core/services/supervisor.zig");
 const sqlite = @import("../../db/sqlite.zig");
+const fs_read = @import("../../fs/read.zig");
 const path_component = @import("../../fs/path_component.zig");
 const rb_parse = @import("rb_parse.zig");
 const sink_mod = @import("sink.zig");
@@ -62,14 +65,14 @@ pub fn register(
         // A refused block is still a declared service; only an absent
         // block retires the previous version's registration.
         const refusal = formula.service_refusal orelse return retireDropped(io, allocator, db, formula.name, formula.pkg_version, sink);
-        // Core carries a bare tag so the wording stays in cli; map it
-        // onto the Ruby parser's error set to share that wording.
-        const reason = rb_parse.serviceRefusalReason(switch (refusal) {
-            .ships_plist => error.ShipsOwnPlist,
-            .unsupported => error.Unsupported,
-        });
-        sink.warn("could not register service for {s}: {s}", .{ formula.name, reason });
-        warnKeptRow(db, formula.name, formula.pkg_version, sink);
+        switch (refusal) {
+            .ships_plist => |label| registerShipped(io, allocator, db, label, formula.name, formula.pkg_version, prefix, sink),
+            .unsupported => {
+                // Core carries a bare tag so the wording stays in cli.
+                sink.warn("could not register service for {s}: {s}", .{ formula.name, rb_parse.serviceRefusalReason(error.Unsupported) });
+                warnKeptRow(db, formula.name, formula.pkg_version, sink);
+            },
+        }
         return;
     };
     registerDef(io, allocator, db, def, formula.name, formula.pkg_version, prefix, sink);
@@ -152,19 +155,22 @@ fn deleteKegService(db: *sqlite.Database, name: []const u8) !void {
 /// The Ruby-DSL twin of `register`: a tap or `--local` formula's textual
 /// `service do` block. A block malt cannot translate warns and is dropped;
 /// the keg is already committed, so the install still succeeds. `declared`
-/// tells a block the parser refused (already warned about) from no block.
+/// tells a block the parser refused (already warned about) from no block;
+/// `shipped_label` is the plist a `name`-only block says the keg carries.
 pub fn registerRuby(
     io: std.Io,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     block: ?rb_parse.RubyServiceBlock,
     declared: bool,
+    shipped_label: ?[]const u8,
     name: []const u8,
     pkg_version: []const u8,
     prefix: []const u8,
     sink: sink_mod.OutputSink,
 ) void {
     const b = block orelse {
+        if (shipped_label) |label| return registerShipped(io, allocator, db, label, name, pkg_version, prefix, sink);
         if (!declared) return retireDropped(io, allocator, db, name, pkg_version, sink);
         // The parse site already said why the block was refused.
         warnKeptRow(db, name, pkg_version, sink);
@@ -191,18 +197,103 @@ fn registerDef(
 ) void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const aa = arena.allocator();
+    const spec = specFromDef(arena.allocator(), def, name, prefix) catch return;
+    registerSpec(io, allocator, db, spec, name, pkg_version, prefix, sink);
+}
 
-    const spec = specFromDef(aa, def, name, prefix) catch return;
+/// Lift the plist a formula ships at `<keg>/<label>.plist` into malt's own
+/// rendered service. The keg file is only ever read; every refusal keeps
+/// the previous version's row the way an unreadable block does.
+fn registerShipped(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    label: []const u8,
+    name: []const u8,
+    pkg_version: []const u8,
+    prefix: []const u8,
+    sink: sink_mod.OutputSink,
+) void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var diag: shipped_plist.Diag = .{};
+    var reason_buf: [256]u8 = undefined;
+    const spec = liftShipped(io, arena.allocator(), label, name, pkg_version, prefix, &diag) catch |err| {
+        sink.warn("could not register service for {s}: {s}", .{ name, shippedRefusal(&reason_buf, err, diag) });
+        warnKeptRow(db, name, pkg_version, sink);
+        return;
+    };
+    registerSpec(io, allocator, db, spec, name, pkg_version, prefix, sink);
+}
 
+const LiftError = shipped_plist.Error || error{ BadLabel, NotInKeg, LinksOut, Unreadable };
+
+fn liftShipped(
+    io: std.Io,
+    aa: std.mem.Allocator,
+    label: []const u8,
+    name: []const u8,
+    pkg_version: []const u8,
+    prefix: []const u8,
+    diag: *shipped_plist.Diag,
+) LiftError!plist_mod.ServiceSpec {
+    // Both become path components under the Cellar.
+    if (!path_component.isPathComponent(label) or !path_component.isPathComponent(name)) return error.BadLabel;
+    const keg = try std.fmt.allocPrint(aa, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version });
+    const path = try std.fmt.allocPrint(aa, "{s}/{s}.plist", .{ keg, label });
+    // Formulas ship `<label>.plist` as a link to their real file, and the
+    // extractor lets a link climb one level above its root (the prefix,
+    // once the keg is in the Cellar); resolve it, but only into the keg.
+    var source = confined_source.openFile(io, aa, keg, path, .read_only) catch |err| return switch (err) {
+        error.FileNotFound => error.NotInKeg,
+        error.AccessDenied => error.LinksOut,
+        else => error.Unreadable,
+    };
+    defer source.deinit(io);
+    // One byte past the cap so an oversized file refuses instead of
+    // lifting truncated.
+    const bytes = fs_read.readFileAll(io, aa, source.file, shipped_plist.max_bytes + 1) catch return error.Unreadable;
+    return shipped_plist.lift(aa, bytes, name, label, prefix, diag);
+}
+
+fn shippedRefusal(buf: []u8, err: LiftError, diag: shipped_plist.Diag) []const u8 {
+    return switch (err) {
+        error.NotInKeg => "declares a shipped plist that is not in the keg",
+        error.BadLabel => "shipped plist label is not a plain file name",
+        error.LinksOut => "shipped plist links outside the keg",
+        error.Unreadable => "shipped plist could not be read",
+        error.Malformed => "shipped plist is not a launchd plist malt can read",
+        error.LabelMismatch => "shipped plist label does not match the declared service name",
+        error.NoProgramArguments => "shipped plist has no ProgramArguments",
+        // `max_key_len` keeps every key inside the caller's buffer.
+        error.UnknownKey => std.fmt.bufPrint(buf, "shipped plist uses {s}, which malt does not adopt", .{diag.key}) catch unreachable,
+        error.DuplicateKey => std.fmt.bufPrint(buf, "shipped plist repeats {s}", .{diag.key}) catch unreachable,
+        error.BadValue => std.fmt.bufPrint(buf, "shipped plist gives {s} a shape malt does not adopt", .{diag.key}) catch unreachable,
+        error.OutOfMemory => "out of memory",
+    };
+}
+
+fn registerSpec(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    spec: plist_mod.ServiceSpec,
+    name: []const u8,
+    pkg_version: []const u8,
+    prefix: []const u8,
+    sink: sink_mod.OutputSink,
+) void {
     // launchd creates the log files on first run; a missing dir surfaces there.
-    const log_dir = std.fmt.allocPrint(aa, "{s}/var/log", .{prefix}) catch return;
+    var log_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const log_dir = std.fmt.bufPrint(&log_buf, "{s}/var/log", .{prefix}) catch return;
     std.Io.Dir.cwd().createDirPath(io, log_dir) catch {};
 
-    const cellar_path = std.fmt.allocPrint(aa, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch return;
+    var cellar_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch return;
 
     supervisor_mod.register(.{ .allocator = allocator, .io = io, .db = db }, spec, name, false, cellar_path, prefix) catch |err| {
         sink.warn("could not register service for {s}: {s}", .{ name, @errorName(err) });
+        warnKeptRow(db, name, pkg_version, sink);
         return;
     };
 
@@ -632,9 +723,9 @@ test "register retires the previous version's row when the new version's service
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
 }
 
-test "register says a core formula ships its own plist and registers nothing" {
+test "register says a declared shipped plist is missing from the keg and registers nothing" {
     // The API renders a shipped plist as a `name`-only service object;
-    // the user must read why there is no malt service, as on the tap path.
+    // with no file to lift, the user must read why there is no service.
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
@@ -652,7 +743,7 @@ test "register says a core formula ships its own plist and registers nothing" {
     register(std.Options.debug_io, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
 
     try testing.expect(!supervisor_mod.hasService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: formula ships its own plist, which malt does not adopt") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: declares a shipped plist that is not in the keg") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "kept the service registration") == null);
 }
 
@@ -677,7 +768,7 @@ test "register keeps the row and says why when the new version ships its own pli
     register(std.Options.debug_io, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
 
     try testing.expect(supervisor_mod.hasService(&db, "tree"));
-    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: formula ships its own plist, which malt does not adopt") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: declares a shipped plist that is not in the keg") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
 
@@ -697,7 +788,7 @@ test "registerRuby retires the previous version's row when the block is gone" {
     // The probe spawns launchctl; the debug io cannot.
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
-    registerRuby(threaded.io(), testing.allocator, &db, null, false, "tree", "2.2.1", "/p", sink_mod.terminal);
+    registerRuby(threaded.io(), testing.allocator, &db, null, false, null, "tree", "2.2.1", "/p", sink_mod.terminal);
 
     try testing.expect(!supervisor_mod.hasService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "declares no service") != null);
@@ -739,7 +830,7 @@ test "registerRuby keeps the row when the block is declared but could not be rea
     output.beginStderrCapture(testing.allocator, &buf);
     defer output.endStderrCapture();
 
-    registerRuby(std.Options.debug_io, testing.allocator, &db, null, true, "tree", "2.2.1", "/p", sink_mod.terminal);
+    registerRuby(std.Options.debug_io, testing.allocator, &db, null, true, null, "tree", "2.2.1", "/p", sink_mod.terminal);
 
     try testing.expect(supervisor_mod.hasService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
@@ -757,8 +848,455 @@ test "registerRuby says nothing about a refused block on a fresh install" {
     output.beginStderrCapture(testing.allocator, &buf);
     defer output.endStderrCapture();
 
-    registerRuby(std.Options.debug_io, testing.allocator, &db, null, true, "tree", "2.2.1", "/p", sink_mod.terminal);
+    registerRuby(std.Options.debug_io, testing.allocator, &db, null, true, null, "tree", "2.2.1", "/p", sink_mod.terminal);
 
     try testing.expect(!supervisor_mod.hasService(&db, "tree"));
     try testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+const shipd_json =
+    \\{"name":"tree","full_name":"tree","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"2.2.1"},"dependencies":[],"service":{"name":{"macos":"org.example.shipd"}}}
+;
+
+/// A keg at `<prefix>/Cellar/tree/2.2.1` shipping `org.example.shipd.plist`
+/// with `body`; returns the file's path.
+fn seedShippedKeg(prefix: []const u8, body: []const u8) ![]u8 {
+    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/tree/2.2.1", .{prefix});
+    defer testing.allocator.free(keg);
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, keg);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/org.example.shipd.plist", .{keg});
+    errdefer testing.allocator.free(path);
+    const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, body);
+    return path;
+}
+
+fn shippedBody(aa: std.mem.Allocator, prefix: []const u8, extra: []const u8) ![]u8 {
+    return std.fmt.allocPrint(aa,
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        \\<plist version="1.0">
+        \\<dict>
+        \\    <key>Label</key>
+        \\    <string>org.example.shipd</string>
+        \\    <key>ProgramArguments</key>
+        \\    <array>
+        \\        <string>{s}/opt/tree/bin/tree</string>
+        \\        <string>--nofork</string>
+        \\    </array>
+        \\{s}
+        \\</dict>
+        \\</plist>
+        \\
+    , .{ prefix, extra });
+}
+
+fn renderedPlist(prefix: []const u8) ![]u8 {
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/var/malt/services/com.malt.tree/service.plist", .{prefix});
+    defer testing.allocator.free(path);
+    return std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, testing.allocator, .unlimited);
+}
+
+test "register lifts the plist a core formula ships into a malt-rendered service" {
+    // The row and the rendered plist are malt's own (`com.malt.<name>`,
+    // under var/malt/services); the keg's file is input and stays as is.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, shipd_json);
+    defer formula.deinit();
+
+    const prefix = try scratchPrefix();
+    defer testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    const prev = try atomic.overridePrefixEnv(prefix);
+    defer atomic.restorePrefixEnv(prev);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const body = try shippedBody(arena.allocator(), prefix,
+        \\    <key>Sockets</key>
+        \\    <dict>
+        \\        <key>unix_domain_listener</key>
+        \\        <dict>
+        \\            <key>SecureSocketWithKey</key>
+        \\            <string>TREE_SOCKET</string>
+        \\        </dict>
+        \\    </dict>
+    );
+    const keg_plist = try seedShippedKeg(prefix, body);
+    defer testing.allocator.free(keg_plist);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    // The post-register probe spawns launchctl; the debug io cannot.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    register(threaded.io(), testing.allocator, &db, &formula, prefix, sink_mod.terminal);
+
+    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
+    const rendered = try renderedPlist(prefix);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "<string>com.malt.tree</string>") != null);
+    const head = try std.fmt.allocPrint(testing.allocator, "<string>{s}/opt/tree/bin/tree</string>", .{prefix});
+    defer testing.allocator.free(head);
+    try testing.expect(std.mem.indexOf(u8, rendered, head) != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "<string>TREE_SOCKET</string>") != null);
+    const after = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, keg_plist, testing.allocator, .unlimited);
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(body, after);
+}
+
+test "register lifts a shipped plist that the keg carries as a symlink to its real file" {
+    // Formulas install `<label>.plist` as a link (`prefix.install_symlink`);
+    // the extractor already confines link targets to the keg, so the open
+    // must follow it rather than refuse it.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, shipd_json);
+    defer formula.deinit();
+
+    const prefix = try scratchPrefix();
+    defer testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    const prev = try atomic.overridePrefixEnv(prefix);
+    defer atomic.restorePrefixEnv(prev);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const body = try shippedBody(arena.allocator(), prefix, "");
+    const linked = try seedShippedKeg(prefix, body);
+    defer testing.allocator.free(linked);
+    const real = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/tree/2.2.1/macos_tree.plist", .{prefix});
+    defer testing.allocator.free(real);
+    try std.Io.Dir.renameAbsolute(linked, real, std.Options.debug_io);
+    // Relative target, as `install_symlink` writes it.
+    var keg = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, std.fs.path.dirname(real).?, .{});
+    defer keg.close(std.Options.debug_io);
+    try keg.symLink(std.Options.debug_io, "macos_tree.plist", "org.example.shipd.plist", .{});
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    register(threaded.io(), testing.allocator, &db, &formula, prefix, sink_mod.terminal);
+
+    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
+}
+
+test "register refreshes the previous version's row when the new keg's shipped plist lifts" {
+    // An upgrade over an existing registration must replace the plist and
+    // the row, not keep the old one behind a refusal.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try seedDroppedRow(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, shipd_json);
+    defer formula.deinit();
+
+    const prefix = try scratchPrefix();
+    defer testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    const prev = try atomic.overridePrefixEnv(prefix);
+    defer atomic.restorePrefixEnv(prev);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const keg_plist = try seedShippedKeg(prefix, try shippedBody(arena.allocator(), prefix, ""));
+    defer testing.allocator.free(keg_plist);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    register(threaded.io(), testing.allocator, &db, &formula, prefix, sink_mod.terminal);
+
+    try testing.expect(std.mem.indexOf(u8, buf.items, "kept the service registration") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
+    var stmt = try db.prepare("SELECT plist_path FROM services WHERE keg_name = 'tree';");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    const want = try std.fmt.allocPrint(testing.allocator, "{s}/var/malt/services/com.malt.tree/service.plist", .{prefix});
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, std.mem.sliceTo(stmt.columnText(0).?, 0));
+    const rendered = try renderedPlist(prefix);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "<string>--nofork</string>") != null);
+}
+
+test "register refuses a shipped label from the API that is not a plain file name" {
+    // The JSON path carries the label straight from the API into a keg
+    // path component; the gate must hold there, not only on the Ruby twin.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    const hostile =
+        \\{"name":"tree","full_name":"tree","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"2.2.1"},"dependencies":[],"service":{"name":{"macos":"../../etc/evil"}}}
+    ;
+    var formula = try formula_mod.parseFormula(testing.allocator, hostile);
+    defer formula.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    register(std.Options.debug_io, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
+
+    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist label is not a plain file name") != null);
+}
+
+test "register refuses a shipped plist whose symlink leaves the keg" {
+    // The extractor allows a link one level above its root, which lands
+    // under the prefix after the Cellar clone; the lift must not read
+    // another formula's file as this one's service.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, shipd_json);
+    defer formula.deinit();
+
+    const prefix = try scratchPrefix();
+    defer testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const body = try shippedBody(arena.allocator(), prefix, "");
+    const linked = try seedShippedKeg(prefix, body);
+    defer testing.allocator.free(linked);
+    const outside = try std.fmt.allocPrint(testing.allocator, "{s}/etc/evil.plist", .{prefix});
+    defer testing.allocator.free(outside);
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, std.fs.path.dirname(outside).?);
+    try std.Io.Dir.renameAbsolute(linked, outside, std.Options.debug_io);
+    var keg = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, std.fs.path.dirname(linked).?, .{});
+    defer keg.close(std.Options.debug_io);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    // Leaf link straight out of the keg.
+    try keg.symLink(std.Options.debug_io, "../../../etc/evil.plist", "org.example.shipd.plist", .{});
+    register(std.Options.debug_io, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
+    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist links outside the keg") != null);
+
+    // Leaf stays lexically in the keg; an intermediate directory link
+    // carries it out.
+    try keg.deleteFile(std.Options.debug_io, "org.example.shipd.plist");
+    try keg.symLink(std.Options.debug_io, "../../..", "dir", .{});
+    try keg.symLink(std.Options.debug_io, "dir/etc/evil.plist", "org.example.shipd.plist", .{});
+    buf.clearRetainingCapacity();
+    register(std.Options.debug_io, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
+    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist links outside the keg") != null);
+}
+
+test "register refuses a shipped plist over the size cap even when its head parses" {
+    // A complete document padded past the cap must refuse, not lift the
+    // first 64 KiB.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, shipd_json);
+    defer formula.deinit();
+
+    const prefix = try scratchPrefix();
+    defer testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const pad = try arena.allocator().alloc(u8, shipped_plist.max_bytes);
+    @memset(pad, ' ');
+    const body = try std.mem.concat(arena.allocator(), u8, &.{ try shippedBody(arena.allocator(), prefix, ""), pad });
+    const keg_plist = try seedShippedKeg(prefix, body);
+    defer testing.allocator.free(keg_plist);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    register(std.Options.debug_io, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
+
+    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist is not a launchd plist malt can read") != null);
+}
+
+test "register refuses a shipped plist that uses a key malt does not adopt and names it" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try seedDroppedRow(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, shipd_json);
+    defer formula.deinit();
+
+    const prefix = try scratchPrefix();
+    defer testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const body = try shippedBody(arena.allocator(), prefix, "    <key>MachServices</key>\n    <dict/>");
+    const keg_plist = try seedShippedKeg(prefix, body);
+    defer testing.allocator.free(keg_plist);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    register(std.Options.debug_io, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
+
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist uses MachServices, which malt does not adopt") != null);
+    // The seeded row is the previous version's; a refusal keeps it.
+    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
+}
+
+test "register refuses a shipped plist whose Label is not the declared one" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, shipd_json);
+    defer formula.deinit();
+
+    const prefix = try scratchPrefix();
+    defer testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const body = try shippedBody(arena.allocator(), prefix, "");
+    const other = try std.mem.replaceOwned(u8, arena.allocator(), body, "<string>org.example.shipd</string>", "<string>org.example.other</string>");
+    const keg_plist = try seedShippedKeg(prefix, other);
+    defer testing.allocator.free(keg_plist);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    register(std.Options.debug_io, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
+
+    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist label does not match the declared service name") != null);
+}
+
+test "register refuses a shipped plist whose executable escapes the keg and opt roots" {
+    // The lift is input to the same gate as a `run` block: a head outside
+    // the keg or `<prefix>/opt` must never reach launchd.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, shipd_json);
+    defer formula.deinit();
+
+    const prefix = try scratchPrefix();
+    defer testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const body = try shippedBody(arena.allocator(), "/usr/local", "");
+    const keg_plist = try seedShippedKeg(prefix, body);
+    defer testing.allocator.free(keg_plist);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    register(std.Options.debug_io, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
+
+    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: InvalidService") != null);
+}
+
+test "register says it kept the previous row when the new keg's shipped plist fails validation" {
+    // The validator refusal is the one arm that reads a lifted plist after
+    // the lift succeeded; on upgrade it must say the old row survived like
+    // every other refusal does.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try seedDroppedRow(&db);
+    var formula = try formula_mod.parseFormula(testing.allocator, shipd_json);
+    defer formula.deinit();
+
+    const prefix = try scratchPrefix();
+    defer testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const keg_plist = try seedShippedKeg(prefix, try shippedBody(arena.allocator(), "/usr/local", ""));
+    defer testing.allocator.free(keg_plist);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    register(std.Options.debug_io, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
+
+    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: InvalidService") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
+}
+
+test "registerRuby lifts the plist a tap formula ships" {
+    // The Ruby twin reaches the same lift through the label the block names.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const prefix = try scratchPrefix();
+    defer testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    const prev = try atomic.overridePrefixEnv(prefix);
+    defer atomic.restorePrefixEnv(prev);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const body = try shippedBody(arena.allocator(), prefix, "");
+    const keg_plist = try seedShippedKeg(prefix, body);
+    defer testing.allocator.free(keg_plist);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    registerRuby(threaded.io(), testing.allocator, &db, null, true, "org.example.shipd", "tree", "2.2.1", prefix, sink_mod.terminal);
+
+    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
+}
+
+test "registerRuby refuses a shipped label that is not a plain file name" {
+    // The label becomes a path component under the keg; `../x` would read
+    // a plist from outside it.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    registerRuby(std.Options.debug_io, testing.allocator, &db, null, true, "../../etc/evil", "tree", "2.2.1", "/p", sink_mod.terminal);
+
+    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist label is not a plain file name") != null);
 }
