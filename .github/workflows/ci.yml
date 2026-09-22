@@ -169,6 +169,9 @@ jobs:
       - name: Regression guard - autoremove retires the service registration of the orphan it removes
         run: ./scripts/regressions/cleanup-retires-orphaned-dep-service.sh
 
+      - name: Regression guard - autoremove reconciles the outdated snapshot with the keg it reaped
+        run: ./scripts/regressions/purge-reconciles-outdated-snapshot.sh
+
       - name: Regression guard - a linux-only service block installs quietly and registers nothing
         run: ./scripts/regressions/linux-only-service-block-installs-quietly-linux-only-service-block-reported-as-unsupported.sh
 

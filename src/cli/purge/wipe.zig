@@ -115,9 +115,12 @@ pub fn writeManifest(ctx: *const AppCtx, allocator: std.mem.Allocator, path: []c
             // Guarantees the tables exist, so a failing `prepare` below can
             // only mean a genuinely broken database, never a fresh one.
             schema.initSchema(&db) catch |e| return refuseUnusableDb(prefix, e);
-            // Versions always pinned and services always included: the
-            // wipe destroys the launchd plists, so this manifest is the
-            // only record of the auto-start set.
+            // Versions always pinned and services always included: the DB
+            // this reads is about to go, so the manifest is the only record
+            // of the auto-start set. The rendered plists under var/ are not
+            // in the wipe plan and any loaded job stays loaded; `mt restore`
+            // reinstalls the formulas, which re-register, then starts the
+            // services this manifest names.
             _ = backup_mod.writeRows(w, &db, true, true) catch |e| switch (e) {
                 error.DatabaseError => {
                     output.err("cannot read installed packages — refusing to wipe without a usable backup", .{});

@@ -17,6 +17,8 @@ const formula_mod = @import("../../core/formula.zig");
 const cask_mod = @import("../../core/cask.zig");
 const relocated_store = @import("../../core/relocated_store.zig");
 const tap_cache = @import("../../core/tap_cache.zig");
+const outdated_mod = @import("../outdated.zig");
+const snap_mod = @import("../outdated/snapshot.zig");
 const services_mod = @import("../services.zig");
 const supervisor_mod = @import("../../core/services/supervisor.zig");
 const symlink = @import("../../fs/symlink.zig");
@@ -96,7 +98,7 @@ pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix:
 
 // ── Tier: --unused-deps (was `autoremove`) ──────────────────────────────────
 
-pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
+pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, cache_dir: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
     var rep = report.Reporter.init("unused-deps", dry_run);
 
@@ -175,6 +177,7 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     }
 
     var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
+    var reaped = false;
 
     // Per-orphan removal is best-effort across all steps: a partially-linked
     // or partially-materialized keg must still be cleanable. Callers rely on
@@ -231,12 +234,23 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             var del = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch continue;
             defer del.finalize();
             del.bindInt(1, keg_id) catch continue;
-            _ = del.step() catch {};
-
+            // The row delete is what makes the removal real; reporting it
+            // before knowing the outcome once left `mt list` advertising a
+            // keg whose files were already gone.
+            _ = del.step() catch {
+                rep.note("could not remove {s} from the database; its files are gone - 'mt doctor' reports the mismatch", .{name});
+                continue;
+            };
+            reaped = true;
             rep.item(name);
             result.removed += 1;
         }
     }
+    // Once, against the DB rather than a list of names: two keg rows can
+    // share a name, and dropping the name would take the surviving
+    // version's audit with it.
+    if (reaped) outdated_mod.pruneSnapshot(io, allocator, &db, cache_dir);
+
     rep.done(removable.items.len);
     return result;
 }
@@ -958,6 +972,64 @@ fn deleteCaskVersionRow(db: *sqlite.Database, token: []const u8, version: []cons
 const testing = std.testing;
 const atomic = @import("../../fs/atomic.zig");
 const fs_test_io = std.Options.debug_io;
+
+/// A scratch cache dir. Kept out of the prefix so no fixture spells the
+/// prefix's cache layout (`no_prefix_cache_in_cli_test`).
+fn uniqueCacheDir(allocator: std.mem.Allocator) ![:0]u8 {
+    var rand_bytes: [8]u8 = undefined;
+    fs_test_io.random(&rand_bytes);
+    return std.fmt.allocPrintSentinel(allocator, "/tmp/malt_snapcache_{x}", .{std.mem.bytesToValue(u64, &rand_bytes)}, 0);
+}
+
+/// A scratch prefix holding `names` as orphan dependency kegs plus
+/// `keepers` as directly-installed ones, each with a Cellar dir. Only the
+/// orphans are reapable: `findOrphans` skips `install_reason = 'direct'`.
+/// Caller frees the path and deletes the tree.
+fn seedOrphanPrefix(
+    allocator: std.mem.Allocator,
+    comptime tag: []const u8,
+    names: []const []const u8,
+    keepers: []const []const u8,
+) ![]const u8 {
+    const prefix = try uniqueCellarPrefix(allocator, tag);
+    errdefer allocator.free(prefix);
+    const db_dir = try joinZ(allocator, prefix, "/db");
+    defer allocator.free(db_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, db_dir);
+
+    var sql: std.ArrayList(u8) = .empty;
+    defer sql.deinit(allocator);
+    try sql.appendSlice(allocator, "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason) VALUES");
+    var first = true;
+    for ([_][]const []const u8{ names, keepers }, [_][]const u8{ "dependency", "direct" }) |group, reason| {
+        for (group) |name| {
+            const keg = try std.fmt.allocPrint(allocator, "{s}/Cellar/{s}/1.0", .{ prefix, name });
+            defer allocator.free(keg);
+            const lib = try std.fmt.allocPrint(allocator, "{s}/lib", .{keg});
+            defer allocator.free(lib);
+            try std.Io.Dir.cwd().createDirPath(fs_test_io, lib);
+            const row = try std.fmt.allocPrint(
+                allocator,
+                "{s}('{s}','{s}','1.0',0,'sha','{s}','{s}')",
+                .{ if (first) "" else ",", name, name, keg, reason },
+            );
+            defer allocator.free(row);
+            try sql.appendSlice(allocator, row);
+            first = false;
+        }
+    }
+    try sql.append(allocator, ';');
+    const stmt = try allocator.dupeZ(u8, sql.items);
+    defer allocator.free(stmt);
+
+    const db_path = try joinZ(allocator, prefix, "/db/malt.db");
+    defer allocator.free(db_path);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(stmt);
+    return prefix;
+}
 
 var scratch_seq: std.atomic.Value(u32) = .init(0);
 
@@ -1746,7 +1818,11 @@ test "runUnusedDeps keeps an orphan whose Cellar entry is a symlink" {
     defer output.endStderrCapture();
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runUnusedDeps(&ctx, allocator, prefix, false);
+    // No snapshot in it; the prune is a no-op the scope still must survive.
+    const cache_dir = try uniqueCacheDir(allocator);
+    defer allocator.free(cache_dir);
+
+    const result = try runUnusedDeps(&ctx, allocator, prefix, cache_dir, false);
 
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     // Not counted as removed, row kept, and nothing crossed the link.
@@ -1797,7 +1873,11 @@ test "runUnusedDeps keeps a dependency a still-installed keg's Mach-O links desp
     defer output.endStderrCapture();
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runUnusedDeps(&ctx, allocator, prefix, false);
+    // No snapshot in it; the prune is a no-op the scope still must survive.
+    const cache_dir = try uniqueCacheDir(allocator);
+    defer allocator.free(cache_dir);
+
+    const result = try runUnusedDeps(&ctx, allocator, prefix, cache_dir, false);
 
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     // Nothing reaped: the only orphan is still linked by jq's binary.
@@ -1809,6 +1889,131 @@ test "runUnusedDeps keeps a dependency a still-installed keg's Mach-O links desp
     defer stmt.finalize();
     _ = try stmt.step();
     try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+}
+
+test "runUnusedDeps drops the reaped orphan from the outdated snapshot" {
+    // The TUI's Outdated tab parses the snapshot raw on first paint, so a
+    // keg reaped here still shows there (and in the tab's count badge)
+    // until the background audit lands. Uninstall reconciles for the same
+    // reason; `mt outdated` itself filters through the DB and never did.
+    const allocator = testing.allocator;
+
+    const prefix = try seedOrphanPrefix(allocator, "unuseddeps_snapshot", &.{"staleboy"}, &.{"keepme"});
+    defer allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+
+    // The snapshot lives under the cache dir, which the reconcile resolves
+    // from the environment.
+    const cache_dir = try uniqueCacheDir(allocator);
+    defer allocator.free(cache_dir);
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, cache_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, cache_dir);
+    const snap_path = try snap_mod.snapshotPath(allocator, cache_dir);
+    defer allocator.free(snap_path);
+    try atomic.atomicWriteFile(fs_test_io, snap_path,
+        \\{"version":2,"generated_at_ms":1700000000000,"formulas":[{"name":"staleboy","installed":"1.0","latest":"2.0"},{"name":"keepme","installed":"1.0","latest":"2.0"}],"casks":[]}
+    );
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runUnusedDeps(&ctx, allocator, prefix, cache_dir, false);
+    try testing.expectEqual(@as(u32, 1), result.removed);
+
+    const raw = try std.Io.Dir.cwd().readFileAlloc(fs_test_io, snap_path, allocator, .unlimited);
+    defer allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "staleboy") == null);
+    // Every other keg's audit survives; a deleted file would re-audit all.
+    try testing.expect(std.mem.indexOf(u8, raw, "keepme") != null);
+}
+
+test "runUnusedDeps keeps the audit of a surviving version when one name has two keg rows" {
+    // The schema allows one name at two versions. Reaping the orphaned row
+    // by name would take the still-installed version's audit entry with it,
+    // and `mt outdated`'s DB filter can only drop entries, never restore one.
+    const allocator = testing.allocator;
+
+    const prefix = try seedOrphanPrefix(allocator, "unuseddeps_two_rows", &.{"foo"}, &.{});
+    defer allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+
+    // A second, directly-installed row for the same name.
+    const db_path = try joinZ(allocator, prefix, "/db/malt.db");
+    defer allocator.free(db_path);
+    const keg2 = try joinZ(allocator, prefix, "/Cellar/foo/2.0/lib");
+    defer allocator.free(keg2);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, keg2);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        const insert = try std.fmt.allocPrintSentinel(
+            allocator,
+            "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason) " ++
+                "VALUES('foo','foo','2.0',0,'sha2','{s}/Cellar/foo/2.0','direct');",
+            .{prefix},
+            0,
+        );
+        defer allocator.free(insert);
+        try db.exec(insert);
+    }
+
+    const cache_dir = try uniqueCacheDir(allocator);
+    defer allocator.free(cache_dir);
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, cache_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, cache_dir);
+    const snap_path = try snap_mod.snapshotPath(allocator, cache_dir);
+    defer allocator.free(snap_path);
+    try atomic.atomicWriteFile(fs_test_io, snap_path,
+        \\{"version":2,"generated_at_ms":1700000000000,"formulas":[{"name":"foo","installed":"2.0","latest":"3.0"}],"casks":[]}
+    );
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    _ = try runUnusedDeps(&ctx, allocator, prefix, cache_dir, false);
+
+    const raw = try std.Io.Dir.cwd().readFileAlloc(fs_test_io, snap_path, allocator, .unlimited);
+    defer allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"foo\"") != null);
+    // The lease is not renewed: a reap must not extend a stale audit's TTL.
+    try testing.expect(std.mem.indexOf(u8, raw, "1700000000000") != null);
+}
+
+test "runUnusedDeps reconciles every orphan in the batch and tolerates no snapshot" {
+    // The reconcile is a read-modify-write inside the per-orphan loop, so
+    // the second orphan must not resurrect the first. A prefix that never
+    // ran an audit has no file to reconcile and must still reap.
+    const allocator = testing.allocator;
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const names: []const []const u8 = &.{ "one", "two" };
+
+    {
+        // No snapshot on disk at all: the reconcile has nothing to read.
+        const prefix = try seedOrphanPrefix(allocator, "unuseddeps_snap_absent", names, &.{});
+        defer allocator.free(prefix);
+        defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+        const cache_dir = try uniqueCacheDir(allocator);
+        defer allocator.free(cache_dir);
+        defer std.Io.Dir.cwd().deleteTree(fs_test_io, cache_dir) catch {};
+
+        try testing.expectEqual(@as(u32, 2), (try runUnusedDeps(&ctx, allocator, prefix, cache_dir, false)).removed);
+    }
+
+    const prefix = try seedOrphanPrefix(allocator, "unuseddeps_snap_batch", names, &.{"keepme"});
+    defer allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    const cache_dir = try uniqueCacheDir(allocator);
+    defer allocator.free(cache_dir);
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, cache_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, cache_dir);
+    const snap_path = try snap_mod.snapshotPath(allocator, cache_dir);
+    defer allocator.free(snap_path);
+    try atomic.atomicWriteFile(fs_test_io, snap_path,
+        \\{"version":2,"generated_at_ms":1700000000000,"formulas":[{"name":"one","installed":"1.0","latest":"2.0"},{"name":"two","installed":"1.0","latest":"2.0"},{"name":"keepme","installed":"1.0","latest":"2.0"}],"casks":[]}
+    );
+
+    try testing.expectEqual(@as(u32, 2), (try runUnusedDeps(&ctx, allocator, prefix, cache_dir, false)).removed);
+    const raw = try std.Io.Dir.cwd().readFileAlloc(fs_test_io, snap_path, allocator, .unlimited);
+    defer allocator.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"one\"") == null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"two\"") == null);
+    try testing.expect(std.mem.indexOf(u8, raw, "keepme") != null);
 }
 
 test "runUnusedDeps reaps a batch mixing orphans with and without a service" {
@@ -1872,7 +2077,11 @@ test "runUnusedDeps reaps a batch mixing orphans with and without a service" {
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
     const ctx = AppCtx{ .io = threaded.io(), .environ = .empty };
-    const result = try runUnusedDeps(&ctx, allocator, prefix, false);
+    // No snapshot in it; the prune is a no-op the scope still must survive.
+    const cache_dir = try uniqueCacheDir(allocator);
+    defer allocator.free(cache_dir);
+
+    const result = try runUnusedDeps(&ctx, allocator, prefix, cache_dir, false);
 
     try testing.expectEqual(@as(u32, 2), result.removed);
     var db = try sqlite.Database.open(db_path);
@@ -1926,7 +2135,11 @@ test "runUnusedDeps removes a revisioned orphan's Cellar dir named with the _<re
     }
 
     const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
-    const result = try runUnusedDeps(&ctx, allocator, prefix, false);
+    // No snapshot in it; the prune is a no-op the scope still must survive.
+    const cache_dir = try uniqueCacheDir(allocator);
+    defer allocator.free(cache_dir);
+
+    const result = try runUnusedDeps(&ctx, allocator, prefix, cache_dir, false);
 
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     try testing.expectEqual(@as(u32, 1), result.removed);
