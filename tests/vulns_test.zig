@@ -48,6 +48,23 @@ const nocheck_rb =
     \\end
 ;
 
+/// A tap shipping a formula and a cask under one name, each built from a
+/// different repo, so the OSV query shows which recipe was read.
+const dual_formula_rb =
+    \\class Dual < Formula
+    \\  version "1.0.0"
+    \\  url "https://github.com/formula-side/dual/releases/download/v1.0.0/dual.tar.gz"
+    \\  sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    \\end
+;
+const dual_cask_rb =
+    \\cask "dual" do
+    \\  version "1.0.0"
+    \\  url "https://github.com/cask-side/dual/releases/download/v1.0.0/dual.tar.gz"
+    \\  sha256 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    \\end
+;
+
 /// One OSV hit for the recipe above. The CVSS vector scores 9.8 while the
 /// database label says HIGH, so the row proves the vector wins.
 const osv_batch_json =
@@ -146,6 +163,10 @@ const FixtureServer = struct {
             std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Formula/cliamp2.rb"))
         {
             try req.respond(cliamp_rb, .{});
+        } else if (std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Formula/dual.rb")) {
+            try req.respond(dual_formula_rb, .{});
+        } else if (std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Casks/dual.rb")) {
+            try req.respond(dual_cask_rb, .{});
         } else if (std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Formula/nocheck.rb")) {
             try req.respond(nocheck_rb, .{});
         } else if (std.mem.eql(u8, target, "/commits/HEAD")) {
@@ -589,6 +610,24 @@ test "a tap keg whose recipe declares sha256 :no_check is unchecked with that re
     try testing.expectEqual(@as(?anyerror, error.ScanIncomplete), r.err);
     try testing.expect(std.mem.indexOf(u8, r.stdout, "\"unchecked\":[\"nocheck\"]") != null);
     try testing.expect(std.mem.indexOf(u8, errs.items, "sha256 :no_check") != null);
+}
+
+test "a tap keg installed from Casks/ is scanned from the cask, not a same-named formula" {
+    const h = try Harness.init(testing.allocator, "tap_dual");
+    defer h.deinit();
+    try h.seedTap("someone/tap", &.{"dual@1.0.0"});
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{h.prefix}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try db.exec("UPDATE kegs SET tap_rb_subtree = 'cask' WHERE name = 'dual';");
+    }
+
+    const r = try h.run(&.{}, true);
+    defer testing.allocator.free(r.stdout);
+    try testing.expect(std.mem.indexOf(u8, h.postBody(), "cask-side/dual") != null);
+    try testing.expect(std.mem.indexOf(u8, h.postBody(), "formula-side") == null);
 }
 
 test "a tap keg is scanned against OSV from its recipe url" {

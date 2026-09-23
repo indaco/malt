@@ -131,6 +131,9 @@ pub const ResolvedRubyFormula = struct {
     /// tap install behaviour). Local installs leave this null so they
     /// never pollute the tap list.
     tap_registration: ?TapRegistration = null,
+    /// Tap subtree that served the `.rb`, recorded so upgrade and outdated
+    /// re-read the same file. Null for local installs.
+    tap_rb_subtree: ?forge.RawKind = null,
 };
 
 /// The Ruby DSL is tap-controlled and both fields land raw in
@@ -423,6 +426,7 @@ fn installTapRb(
     var root_resp: ?client_mod.Response = null;
     defer if (root_resp) |*r| r.deinit();
 
+    var served: forge.RawKind = initial_kind;
     const resp: *const client_mod.Response = blk: {
         if (rb_resp.status == 200) break :blk &rb_resp;
         // `.cask_only` already probed Casks/ — there is no fallback to
@@ -444,12 +448,16 @@ fn installTapRb(
                 sink.err("Cannot fetch tap from GitHub", .{});
                 return InstallError.FormulaNotFound;
             };
-            if (cask_resp.?.status == 200) break :blk &cask_resp.?;
+            if (cask_resp.?.status == 200) {
+                served = .cask;
+                break :blk &cask_resp.?;
+            }
         }
 
         // Last resort: the older Homebrew layout keeps `<name>.rb` at the
         // repo root (koekeishiya/felixkratz taps). Only reached on the
         // double-miss path, so the common Formula/ install pays no extra GET.
+        // `--formula` still lands here: that layout holds formulas in practice.
         const root_url = forge.rawFileUrl(
             &url_buf,
             urls.forge,
@@ -463,6 +471,7 @@ fn installTapRb(
             sink.err("Cannot fetch tap from GitHub", .{});
             return InstallError.FormulaNotFound;
         };
+        served = .formula_root;
         break :blk &root_resp.?;
     };
 
@@ -526,6 +535,7 @@ fn installTapRb(
             .commit_sha = commit_sha,
             .head_etag = fresh_head_etag,
         },
+        .tap_rb_subtree = served,
     };
     const cache_dir = atomic.maltCacheDir(allocator) catch {
         sink.err("Failed to resolve cache directory", .{});
@@ -1256,6 +1266,7 @@ pub fn materializeRubyFormula(
             .install_reason = "direct",
             .bin_isolated = false,
             .tap_commit_sha = if (resolved.tap_registration) |t| t.commit_sha else null,
+            .tap_rb_subtree = resolved.tap_rb_subtree,
         }, .{ .in_transaction = true }) catch return InstallError.RecordFailed;
 
         // Without these rows `mt cleanup` sees the deps as orphans and

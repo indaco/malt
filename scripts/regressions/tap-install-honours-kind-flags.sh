@@ -6,9 +6,13 @@
 # The bug: every tap install went through the formula-then-cask lookup, so
 # both flags were ignored.
 #
+# The choice must also outlive the install: a keg installed with `--cask`
+# is upgraded from `Casks/` again, not swapped for the same-named formula.
+#
 # Uses two live taps. dahlia/dojang ships both files: its formula builds
 # from a source tag, its cask fetches a prebuilt release asset.
-# voltiusapp/voltius ships only a cask. Dry runs only.
+# voltiusapp/voltius ships only a cask. One real install of dojang's small
+# release binary into the throwaway prefix; everything else is a dry run.
 # Needs network; export MALT_GITHUB_TOKEN to stay clear of the anonymous cap.
 #
 # Usage: scripts/regressions/tap-install-honours-kind-flags.sh
@@ -26,6 +30,7 @@ BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
 # MALT_PREFIX must be <= 13 bytes (Mach-O in-place patching budget).
 PREFIX=$(mktemp -d /tmp/mt.XXX)
 export MALT_PREFIX="$PREFIX"
+export MALT_CACHE="$PREFIX/cache"
 export NO_COLOR=1
 export MALT_NO_EMOJI=1
 trap 'rm -rf "$PREFIX"' EXIT
@@ -49,6 +54,20 @@ if ! grep -q '/releases/download/' <<<"$CASK_OUT"; then
   printf '%s\n' "$CASK_OUT" >&2
   exit 1
 fi
+
+# The --cask choice is recorded, so a forced upgrade reinstalls the cask.
+# Pre-fix it resolved Formula/ and refused the source build.
+if ! INSTALL_OUT=$("$BIN" install --cask "$PKG" 2>&1); then
+  echo "FAIL: install --cask $PKG failed" >&2
+  printf '%s\n' "$INSTALL_OUT" >&2
+  exit 1
+fi
+if ! UPGRADE_OUT=$("$BIN" upgrade --force dojang 2>&1); then
+  echo "FAIL: upgrading a --cask keg left Casks/" >&2
+  printf '%s\n' "$UPGRADE_OUT" >&2
+  exit 1
+fi
+"$BIN" uninstall dojang >/dev/null 2>&1 || true
 
 # Without --cask the formula-first lookup still decides.
 DEFAULT_OUT=$("$BIN" install --dry-run "$PKG" 2>&1) || true

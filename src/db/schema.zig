@@ -36,6 +36,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
         \\    install_reason TEXT NOT NULL DEFAULT 'direct',
         \\    bin_isolated  INTEGER NOT NULL DEFAULT 0,
         \\    tap_commit_sha TEXT,
+        \\    tap_rb_subtree TEXT,
         \\    UNIQUE(name, version, revision)
         \\);
     );
@@ -128,7 +129,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 17;
+pub const known_schema_version: i64 = 18;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -155,6 +156,7 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 15) try migrateV14toV15(db);
     if (ver < 16) try migrateV15toV16(db);
     if (ver < 17) try migrateV16toV17(db);
+    if (ver < 18) try migrateV17toV18(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -812,6 +814,25 @@ fn migrateV16toV17(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
+/// v18 - which tap subtree (`formula`, `cask`, `formula_root`) served a tap
+/// keg's `.rb`. Upgrade, outdated and vulns re-read the same one, so a keg
+/// installed with `--cask` never flips to a same-named formula. Existing
+/// rows stay NULL: unknown keeps the formula-first lookup they had.
+fn migrateV17toV18(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    if (try columnsPresent(db, "PRAGMA table_info(kegs);", &.{"tap"})) {
+        if (!try columnsPresent(db, "PRAGMA table_info(kegs);", &.{"tap_rb_subtree"})) {
+            try db.exec("ALTER TABLE kegs ADD COLUMN tap_rb_subtree TEXT;");
+        }
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (18);");
+
+    try db.commit();
+}
+
 /// Stage the canonical form of every tap row in a temp table, then let
 /// SQL do the set work. Staging first keeps us from mutating `taps`
 /// while stepping a cursor over it.
@@ -1459,6 +1480,25 @@ test "v14→v15 backfills tap kegs from their tap's pin and leaves the rest NULL
         try testing.expect((try tapField(&db, "SELECT tap_commit_sha FROM kegs WHERE name = ?1;", name, &buf)) == null);
     }
     try testing.expectEqual(known_schema_version, try currentVersion(&db));
+}
+
+test "v17→v18 adds kegs.tap_rb_subtree and leaves existing rows unknown" {
+    // An unknown source keeps the formula-first lookup every keg had before.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+    try db.exec("ALTER TABLE kegs DROP COLUMN tap_rb_subtree;");
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap)
+        \\VALUES ('a', 'acme/tap/a', '1.0', 'sha-a', '/c/a/1.0', 'acme/tap');
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 18;");
+    try migrate(&db);
+    try migrate(&db);
+
+    var buf: [64]u8 = undefined;
+    try testing.expect((try tapField(&db, "SELECT tap_rb_subtree FROM kegs WHERE name = ?1;", "a", &buf)) == null);
+    try testing.expectEqual(@as(i64, 18), try currentVersion(&db));
 }
 
 test "v14→v15 is idempotent and never overwrites a keg that already knows its commit" {

@@ -1586,6 +1586,12 @@ pub const RawFetch = union(enum) {
 /// the audit must read the same file install did.
 pub const keg_rb_subtrees: []const forge.RawKind = &.{ .formula, .cask, .formula_root };
 
+/// A keg installed from `Casks/` (`mt install --cask`) is re-read only from
+/// there: the formula-first order would switch it to a same-named formula.
+pub fn kegRbSubtrees(from_casks: bool) []const forge.RawKind {
+    return if (from_casks) &.{.cask} else keg_rb_subtrees;
+}
+
 /// Per-run memory of raw hosts whose first keg already exhausted the retry
 /// budget, so every later keg behind the same host fails at once. Keyed on
 /// the host: two taps on one instance share its fate. Only the first keg per
@@ -2078,4 +2084,9 @@ test "TrippedHosts skips a host longer than its buffer rather than truncating it
     tripped.record(io, long, .{ .status = 503 });
     try std.testing.expectEqual(@as(usize, 0), tripped.len);
     try std.testing.expectEqual(@as(?TrippedHosts.Trip, null), tripped.find(io, long));
+}
+
+test "kegRbSubtrees keeps a Casks/ keg on Casks/ and everything else formula-first" {
+    try std.testing.expectEqualSlices(forge.RawKind, &.{.cask}, kegRbSubtrees(true));
+    try std.testing.expectEqualSlices(forge.RawKind, keg_rb_subtrees, kegRbSubtrees(false));
 }
