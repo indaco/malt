@@ -820,7 +820,7 @@ fn upgradeFormula(
     post_install_mod.provisionShippedCaBundle(ctx.io, prefix, name);
     // The new version may change argv, schedule or timeouts; re-render the
     // plist from it so the service does not stay frozen at install time.
-    service_mod.register(ctx.io, allocator, db, &formula, prefix, install_sink_mod.terminal);
+    service_mod.register(ctx.io, ctx.environ, allocator, db, &formula, prefix, install_sink_mod.terminal);
 
     output.success("{s} upgraded to {s}", .{ name, formula.pkg_version });
     return .upgraded;

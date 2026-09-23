@@ -10,6 +10,9 @@ const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const signals = @import("../core/signals.zig");
 const supervisor = @import("../core/services/supervisor.zig");
+const lock_mod = @import("../db/lock.zig");
+const install_service = @import("install/service.zig");
+const install_sink = @import("install/sink.zig");
 
 pub const ServicesError = error{
     InvalidArgs,
@@ -83,11 +86,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (std.mem.eql(u8, sub, "list") or std.mem.eql(u8, sub, "ls")) {
         return cmdList(ctx.io, allocator, &db);
     } else if (std.mem.eql(u8, sub, "start")) {
-        return cmdOne(ctx.io, allocator, &db, rest, .start);
+        return cmdOne(ctx.io, ctx.environ, allocator, &db, rest, .start);
     } else if (std.mem.eql(u8, sub, "stop")) {
-        return cmdOne(ctx.io, allocator, &db, rest, .stop);
+        return cmdOne(ctx.io, ctx.environ, allocator, &db, rest, .stop);
     } else if (std.mem.eql(u8, sub, "restart")) {
-        return cmdOne(ctx.io, allocator, &db, rest, .restart);
+        return cmdOne(ctx.io, ctx.environ, allocator, &db, rest, .restart);
     } else if (std.mem.eql(u8, sub, "status")) {
         return cmdStatus(ctx.io, allocator, &db, rest);
     } else if (std.mem.eql(u8, sub, "logs")) {
@@ -100,7 +103,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
 const Lifecycle = enum { start, stop, restart };
 
-fn cmdOne(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const []const u8, op: Lifecycle) !void {
+fn cmdOne(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const []const u8, op: Lifecycle) !void {
     if (rest.len != 1) {
         output.err("services {s}: expected a single service name", .{@tagName(op)});
         return ServicesError.InvalidArgs;
@@ -108,12 +111,27 @@ fn cmdOne(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, rest: 
     const name = rest[0];
     const ctx: supervisor.SupervisorCtx = .{ .allocator = allocator, .io = io, .db = db };
     if (op != .start) announceStop(io, allocator, db, name);
+    // Bootstrap reads the plist, so an edited override file lands here.
+    if (op != .stop) refreshLocked(io, environ, allocator, db, name);
     switch (op) {
         .start => try supervisor.start(ctx, name),
         .stop => try supervisor.stop(ctx, name),
         .restart => try supervisor.restart(ctx, name),
     }
     output.success("services {s}: {s}", .{ @tagName(op), name });
+}
+
+/// Rewriting the plist races an upgrade re-registering the same service;
+/// when the lock is busy the job starts on the plist it already has.
+fn refreshLocked(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) void {
+    var lock_path_buf: [512]u8 = undefined;
+    const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{atomic.maltPrefixOrAbort()}) catch return;
+    var lk = lock_mod.LockFile.acquire(io, lock_path, 5000) catch {
+        output.warn("{s}: another malt command is running; service .env not re-read", .{name});
+        return;
+    };
+    defer lk.release(io);
+    install_service.refreshOverrides(io, environ, allocator, db, name, install_sink.terminal);
 }
 
 /// bootout blocks silently for the loaded job's whole exit-timeout grace;
@@ -301,4 +319,32 @@ test "writeServicesJson: emits the schedule label as a trailing field per row" {
 /// `showIfRequested`. Both read the same text from `help.zig`.
 fn printHelp(ctx: *const AppCtx) void {
     ctx.stderr.writeStreamingAll(ctx.io, help_mod.helpFor("services")) catch {};
+}
+
+var lock_test_seq: std.atomic.Value(u32) = .init(0);
+
+test "start backs off the plist refresh while another malt command holds the lock" {
+    // An upgrade mid-register would otherwise have its new plist overwritten.
+    const io = std.Options.debug_io;
+    const prefix = try std.fmt.allocPrintSentinel(std.testing.allocator, "/tmp/malt_svc_lock_{d}_{d}", .{ std.c.getpid(), lock_test_seq.fetchAdd(1, .monotonic) }, 0);
+    defer std.testing.allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    const prev = try atomic.overridePrefixEnv(prefix);
+    defer atomic.restorePrefixEnv(prev);
+    const db_dir = try std.fmt.allocPrint(std.testing.allocator, "{s}/db", .{prefix});
+    defer std.testing.allocator.free(db_dir);
+    try std.Io.Dir.cwd().createDirPath(io, db_dir);
+    const lock_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/malt.lock", .{db_dir});
+    defer std.testing.allocator.free(lock_path);
+    var held = try lock_mod.LockFile.acquire(io, lock_path, 0);
+    defer held.release(io);
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+    refreshLocked(io, .empty, std.testing.allocator, &db, "tree");
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "another malt command is running") != null);
 }

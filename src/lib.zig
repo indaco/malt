@@ -76,6 +76,7 @@ pub const relocated_store = @import("core/relocated_store.zig");
 pub const ruby_subprocess = @import("core/ruby_subprocess.zig");
 pub const sandbox_macos = @import("core/sandbox/macos.zig");
 pub const services_cron = @import("core/services/cron.zig");
+pub const services_env_override = @import("core/services/env_override.zig");
 pub const services_plist = @import("core/services/plist.zig");
 pub const services_shipped_plist = @import("core/services/shipped_plist.zig");
 pub const services_supervisor = @import("core/services/supervisor.zig");

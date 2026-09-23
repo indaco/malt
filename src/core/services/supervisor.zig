@@ -34,6 +34,7 @@ const plist_mod = @import("plist.zig");
 const dsl_sandbox = @import("../dsl/sandbox.zig");
 const service_types = @import("types.zig");
 const atomic = @import("../../fs/atomic.zig");
+const fs_read = @import("../../fs/read.zig");
 
 pub const SupervisorError = error{
     OsNotSupported,
@@ -237,12 +238,7 @@ pub fn register(
         return SupervisorError.OutOfMemory;
     defer allocator.free(plist_path);
 
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    plist_mod.render(spec, &aw.writer) catch return SupervisorError.IoFailed;
-    // Re-registering overwrites a plist launchd may still load; a failed
-    // write must leave the previous one intact, not a truncated file.
-    atomic.atomicReplaceFile(ctx.io, plist_path, aw.written()) catch return SupervisorError.IoFailed;
+    try writePlist(ctx, spec, plist_path);
 
     // Cache the schedule as a human label so `services list` shows why a
     // service exists without re-parsing the plist.
@@ -268,6 +264,71 @@ pub fn register(
     stmt.bindInt(4, if (auto_start) 1 else 0) catch return SupervisorError.DatabaseError;
     stmt.bindText(5, schedule_label) catch return SupervisorError.DatabaseError;
     _ = stmt.step() catch return SupervisorError.DatabaseError;
+}
+
+/// The formula's spec before user overrides, kept beside the plist so
+/// `start` can re-merge an edited override file without the formula.
+pub const FormulaSpec = struct {
+    format: u32 = formula_spec_format,
+    keg_name: []const u8,
+    cellar_path: []const u8,
+    spec: plist_mod.ServiceSpec,
+};
+
+const formula_spec_file = "formula.json";
+
+/// Bump when `ServiceSpec` changes shape: older copies then load as
+/// absent and the user is told to reinstall, never half-read.
+const formula_spec_format: u32 = 1;
+
+/// Bounds the read; a real spec is a few KiB.
+const max_formula_spec_bytes: usize = 1024 * 1024;
+
+pub fn saveFormulaSpec(ctx: SupervisorCtx, saved: FormulaSpec) SupervisorError!void {
+    const path = try serviceFile(ctx.allocator, saved.spec.label, formula_spec_file);
+    defer ctx.allocator.free(path);
+    const json = std.json.Stringify.valueAlloc(ctx.allocator, saved, .{}) catch return SupervisorError.OutOfMemory;
+    defer ctx.allocator.free(json);
+    atomic.atomicReplaceFile(ctx.io, path, json) catch return SupervisorError.IoFailed;
+}
+
+pub fn dropFormulaSpec(ctx: SupervisorCtx, label: []const u8) void {
+    const path = serviceFile(ctx.allocator, label, formula_spec_file) catch return;
+    defer ctx.allocator.free(path);
+    std.Io.Dir.deleteFileAbsolute(ctx.io, path) catch {};
+}
+
+/// Null when absent, unreadable or from another format; the caller then
+/// keeps the plist as is.
+pub fn loadFormulaSpec(aa: std.mem.Allocator, io: std.Io, label: []const u8) ?FormulaSpec {
+    const path = serviceFile(aa, label, formula_spec_file) catch return null;
+    const bytes = fs_read.readFileAllAbsolute(io, aa, path, max_formula_spec_bytes) catch return null;
+    const saved = std.json.parseFromSliceLeaky(FormulaSpec, aa, bytes, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return null;
+    return if (saved.format == formula_spec_format) saved else null;
+}
+
+/// Replaces a registered service's plist; the running job keeps the old
+/// one until it is bootstrapped again.
+pub fn rewritePlist(ctx: SupervisorCtx, spec: plist_mod.ServiceSpec, cellar_path: []const u8) SupervisorError!void {
+    plist_mod.validate(spec, cellar_path, atomic.maltPrefixOrAbort()) catch return SupervisorError.InvalidService;
+    const path = try serviceFile(ctx.allocator, spec.label, "service.plist");
+    defer ctx.allocator.free(path);
+    try writePlist(ctx, spec, path);
+}
+
+fn serviceFile(allocator: std.mem.Allocator, label: []const u8, file: []const u8) SupervisorError![]const u8 {
+    const dir = try serviceDir(allocator, label);
+    defer allocator.free(dir);
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, file }) catch SupervisorError.OutOfMemory;
+}
+
+fn writePlist(ctx: SupervisorCtx, spec: plist_mod.ServiceSpec, path: []const u8) SupervisorError!void {
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer aw.deinit();
+    plist_mod.render(spec, &aw.writer) catch return SupervisorError.IoFailed;
+    // launchd may still load the old file; a failed write must leave it
+    // intact, not truncated.
+    atomic.atomicReplaceFile(ctx.io, path, aw.written()) catch return SupervisorError.IoFailed;
 }
 
 fn runLaunchctl(io: std.Io, argv: []const []const u8) SupervisorError!void {
@@ -1012,4 +1073,127 @@ test "runtimeFromList: a launchctl that did not exit cleanly is no answer" {
     try testing.expect(runtimeFromList(.{ .signal = .KILL }, launchctl_header ++ "1\t0\tcom.x\n", "com.x") == null);
     try testing.expectEqual(RuntimeState.running, runtimeFromList(.{ .exited = 0 }, launchctl_header ++ "1\t0\tcom.x\n", "com.x").?);
     try testing.expectEqual(RuntimeState.not_loaded, runtimeFromList(.{ .exited = 0 }, launchctl_header, "com.x").?);
+}
+
+/// `register` creates the service dir before anything is written into it.
+fn seedServiceDir(label: []const u8) !void {
+    const dir = try serviceDir(testing.allocator, label);
+    defer testing.allocator.free(dir);
+    try std.Io.Dir.cwd().createDirPath(dbg_io, dir);
+}
+
+test "a saved formula spec loads back field for field" {
+    var s = try Scratch.init("formula_spec");
+    defer s.deinit();
+    const prev = try atomic.overridePrefixEnv(s.base);
+    defer atomic.restorePrefixEnv(prev);
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const ctx: SupervisorCtx = .{ .allocator = testing.allocator, .io = dbg_io, .db = &db };
+    const saved: FormulaSpec = .{
+        .keg_name = "tree",
+        .cellar_path = "/opt/malt/Cellar/tree/2.2.1",
+        .spec = .{
+            .label = "com.malt.tree",
+            .program_args = &.{ "/opt/malt/bin/tree", "-a" },
+            .working_dir = "/opt/malt/var",
+            .env = &.{.{ .key = "LC_ALL", .value = "C \"quoted\"\nline" }},
+            .sockets = &.{.{ .name = "listener", .env_key = "TREE_SOCKET" }},
+            .stdout_path = "/o",
+            .stderr_path = "/e",
+            .schedule = .{ .calendar = &.{.{ .minute = 5, .weekday = 1 }} },
+            .keep_alive = false,
+            .stop_timeout = 30,
+        },
+    };
+    try seedServiceDir("com.malt.tree");
+    try seedServiceDir("com.malt.x");
+    try saveFormulaSpec(ctx, saved);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const got = loadFormulaSpec(arena.allocator(), dbg_io, "com.malt.tree") orelse return error.TestExpectedEqual;
+    try testing.expectEqualStrings(saved.keg_name, got.keg_name);
+    try testing.expectEqualStrings(saved.cellar_path, got.cellar_path);
+    // Rendering both is the comparison that matters: it is what launchd reads.
+    var want_w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer want_w.deinit();
+    try plist_mod.render(saved.spec, &want_w.writer);
+    var got_w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer got_w.deinit();
+    try plist_mod.render(got.spec, &got_w.writer);
+    try testing.expectEqualStrings(want_w.written(), got_w.written());
+
+    const immediate: FormulaSpec = .{ .keg_name = "x", .cellar_path = "/c", .spec = .{ .label = "com.malt.x", .program_args = &.{"/b"}, .stdout_path = "/o", .stderr_path = "/e" } };
+    try saveFormulaSpec(ctx, immediate);
+    const got2 = loadFormulaSpec(arena.allocator(), dbg_io, "com.malt.x") orelse return error.TestExpectedEqual;
+    try testing.expect(got2.spec.schedule == .immediate);
+    try testing.expect(got2.spec.stop_timeout == null);
+}
+
+test "a missing or corrupt formula spec loads as absent, never as a half spec" {
+    var s = try Scratch.init("formula_spec_bad");
+    defer s.deinit();
+    const prev = try atomic.overridePrefixEnv(s.base);
+    defer atomic.restorePrefixEnv(prev);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expect(loadFormulaSpec(arena.allocator(), dbg_io, "com.malt.none") == null);
+
+    const dir = try serviceDir(testing.allocator, "com.malt.bad");
+    defer testing.allocator.free(dir);
+    try std.Io.Dir.cwd().createDirPath(dbg_io, dir);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/formula.json", .{dir});
+    defer testing.allocator.free(path);
+    try std.Io.Dir.cwd().writeFile(dbg_io, .{ .sub_path = path, .data = "{\"keg_name\":\"bad\"" });
+    try testing.expect(loadFormulaSpec(arena.allocator(), dbg_io, "com.malt.bad") == null);
+}
+
+test "rewritePlist replaces the plist but refuses a spec that fails validation" {
+    var s = try Scratch.init("rewrite_plist");
+    defer s.deinit();
+    const prev = try atomic.overridePrefixEnv(s.base);
+    defer atomic.restorePrefixEnv(prev);
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const ctx: SupervisorCtx = .{ .allocator = testing.allocator, .io = dbg_io, .db = &db };
+    const cellar = s.p("/Cellar/tree/2.2.1");
+    const bin = s.p("/Cellar/tree/2.2.1/bin/tree");
+    const spec: plist_mod.ServiceSpec = .{ .label = "com.malt.tree", .program_args = &.{bin}, .stdout_path = s.p("/var/log/o"), .stderr_path = s.p("/var/log/e"), .env = &.{.{ .key = "A", .value = "1" }} };
+    try seedServiceDir("com.malt.tree");
+    try rewritePlist(ctx, spec, cellar);
+
+    const dir = try serviceDir(testing.allocator, "com.malt.tree");
+    defer testing.allocator.free(dir);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/service.plist", .{dir});
+    defer testing.allocator.free(path);
+    const first = try std.Io.Dir.cwd().readFileAlloc(dbg_io, path, testing.allocator, .unlimited);
+    defer testing.allocator.free(first);
+    try testing.expect(std.mem.indexOf(u8, first, "<key>A</key>") != null);
+
+    var bad = spec;
+    bad.env = &.{.{ .key = "A", .value = "x\x00y" }};
+    try testing.expectError(SupervisorError.InvalidService, rewritePlist(ctx, bad, cellar));
+    const after = try std.Io.Dir.cwd().readFileAlloc(dbg_io, path, testing.allocator, .unlimited);
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(first, after);
+}
+
+test "a formula spec from another format version loads as absent; unknown fields are tolerated" {
+    var s = try Scratch.init("formula_spec_format");
+    defer s.deinit();
+    const prev = try atomic.overridePrefixEnv(s.base);
+    defer atomic.restorePrefixEnv(prev);
+    try seedServiceDir("com.malt.tree");
+    const path = try serviceFile(testing.allocator, "com.malt.tree", formula_spec_file);
+    defer testing.allocator.free(path);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const body =
+        \\{{"format":{d},"keg_name":"tree","cellar_path":"/c","extra":1,"spec":{{"label":"com.malt.tree","program_args":["/b"],"stdout_path":"/o","stderr_path":"/e"}}}}
+    ;
+    try std.Io.Dir.cwd().writeFile(dbg_io, .{ .sub_path = path, .data = try std.fmt.allocPrint(arena.allocator(), body, .{formula_spec_format}) });
+    try testing.expect(loadFormulaSpec(arena.allocator(), dbg_io, "com.malt.tree") != null);
+    try std.Io.Dir.cwd().writeFile(dbg_io, .{ .sub_path = path, .data = try std.fmt.allocPrint(arena.allocator(), body, .{formula_spec_format + 1}) });
+    try testing.expect(loadFormulaSpec(arena.allocator(), dbg_io, "com.malt.tree") == null);
 }

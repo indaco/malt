@@ -743,6 +743,13 @@ const services_help =
     \\<name> accepts the formula name (mosquitto) or the launchd label
     \\(com.malt.mosquitto). Both are shown by `list`.
     \\
+    \\Environment overrides:
+    \\  ~/.config/malt/services/<formula>.env ($XDG_CONFIG_HOME/malt/... when
+    \\  set) holds KEY=VALUE lines merged over the formula's environment on
+    \\  install, upgrade, reinstall, start and restart. PATH, HOME and DYLD_*
+    \\  are refused, and so is a file others can write; a refused file
+    \\  leaves a started service's plist as it was.
+    \\
 ;
 
 const tui_help =
