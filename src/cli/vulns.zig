@@ -368,7 +368,10 @@ fn resolveTapKeg(x: TapExtra, http: *client_mod.HttpClient, f: *TapFetch) void {
         .not_found => return f.fail("recipe not found in the tap"),
         .found => |*resp| {
             defer resp.deinit();
-            const rb = rb_parse.parseRubyFormula(resp.body) orelse return f.fail("unreadable recipe");
+            const rb = rb_parse.parseRubyFormula(resp.body) orelse return f.fail(if (rb_parse.optsOutOfChecksum(resp.body))
+                "recipe " ++ rb_parse.checksum_opt_out_reason
+            else
+                "unreadable recipe");
             var buf: [512]u8 = undefined;
             const target = identify.identify(&buf, rb.url, rb.version) orelse {
                 f.outcome = .unidentified;

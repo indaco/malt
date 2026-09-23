@@ -101,6 +101,7 @@ test "localErrorIsAnnounced covers errors with specific user-facing messages" {
     try testing.expect(install_record.localErrorIsAnnounced(install_record.InstallError.InsecureArchiveUrl));
     try testing.expect(install_record.localErrorIsAnnounced(install_record.InstallError.DownloadFailed));
     try testing.expect(install_record.localErrorIsAnnounced(install_record.InstallError.CellarFailed));
+    try testing.expect(install_record.localErrorIsAnnounced(install_record.InstallError.UnpinnedChecksum));
 }
 
 test "localErrorIsAnnounced returns false for unexpected errors" {
@@ -1593,4 +1594,88 @@ test "installLocalFormula does not refuse a shipped plist before the keg exists"
         install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, false, false, sink),
     );
     try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service") == null);
+}
+
+// ─── the checksum gate on tap/local .rb installs ────────────────────
+
+// Runs a dry-run local install of `body` and returns its error with the
+// err lines it printed, so a refusal is judged by what the user reads.
+fn dryRunLocalErrors(body: []const u8, errs: *std.ArrayList(u8)) !void {
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/pkg.rb", .{prefix});
+    defer testing.allocator.free(rb_path);
+    try writeFile(rb_path, body);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const sink: malt.install_sink.OutputSink = .{
+        .ctx = errs,
+        .writeInfo = swallowLine,
+        .writeWarn = swallowLine,
+        .writeSuccess = swallowLine,
+        .writeErr = captureWarn,
+        .show_progress = false,
+    };
+    return install_local.installLocalFormula(&ctx, allocator, rb_path, &db, &linker, prefix, true, false, sink);
+}
+
+test "installLocalFormula names sha256 :no_check as the refusal reason" {
+    var errs: std.ArrayList(u8) = .empty;
+    defer errs.deinit(testing.allocator);
+    try testing.expectError(install_record.InstallError.FormulaNotFound, dryRunLocalErrors(
+        \\class Pkg < Formula
+        \\  version "1.0"
+        \\  url "https://example.invalid/pkg-1.0.tar.gz"
+        \\  sha256 :no_check
+        \\end
+    , &errs));
+    try testing.expect(std.mem.indexOf(u8, errs.items, "sha256 :no_check") != null);
+}
+
+test "installLocalFormula refuses a sha256 that is not a pinned digest, even on a dry run" {
+    // A quoted "no_check" would otherwise reach the cask verifier's opt-out;
+    // an empty or path-shaped value would become the cache file name.
+    const bodies = [_][]const u8{
+        \\class Pkg < Formula
+        \\  version "1.0"
+        \\  url "https://example.invalid/pkg-1.0.pkg"
+        \\  sha256 "no_check"
+        \\end
+        ,
+        \\cask "pkg" do
+        \\  version "1.0"
+        \\  sha256 arm: "no_check", intel: "no_check"
+        \\  url "https://example.invalid/pkg-1.0.dmg"
+        \\  app "Pkg.app"
+        \\end
+        ,
+        \\class Pkg < Formula
+        \\  version "1.0"
+        \\  url "https://example.invalid/pkg-1.0.tar.gz"
+        \\  sha256 "../../escape"
+        \\end
+        ,
+    };
+    for (bodies) |body| {
+        var errs: std.ArrayList(u8) = .empty;
+        defer errs.deinit(testing.allocator);
+        try testing.expectError(install_record.InstallError.UnpinnedChecksum, dryRunLocalErrors(body, &errs));
+        try testing.expect(std.mem.indexOf(u8, errs.items, "not a pinned sha256") != null);
+    }
 }

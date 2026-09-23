@@ -61,6 +61,9 @@ pub const InstallError = error{
     /// `ftp://`, or plaintext `http://` URL cannot be turned into an
     /// exploit just by `malt install --local`-ing the file.
     InsecureArchiveUrl,
+    /// A tap/local `.rb` resolved a sha256 that is not a 64-hex digest.
+    /// The digest is the only pin on these artefacts, so no fetch happens.
+    UnpinnedChecksum,
     /// GitHub-API rate limit hit while resolving a tap's HEAD commit.
     /// Distinct from `FormulaNotFound` so the user-facing summary
     /// names the real cause instead of "formula does not exist."
@@ -93,6 +96,7 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
     return switch (e) {
         InstallError.LocalFormulaNotReadable,
         InstallError.InsecureArchiveUrl,
+        InstallError.UnpinnedChecksum,
         InstallError.FormulaNotFound,
         InstallError.DownloadFailed,
         InstallError.CellarFailed,

@@ -983,6 +983,10 @@ fn tapVersionFromSubtrees(
         .found => |*rb_resp| {
             defer rb_resp.deinit();
             const rb_info = install_rb_parse_mod.parseRubyFormula(rb_resp.body) orelse {
+                if (install_rb_parse_mod.optsOutOfChecksum(rb_resp.body)) {
+                    warnTapCaskFetchFailed(tap_label, name, "the recipe " ++ install_rb_parse_mod.checksum_opt_out_reason);
+                    return null;
+                }
                 var dsl_buf: [96]u8 = undefined;
                 const reason = std.fmt.bufPrint(&dsl_buf, "unsupported Ruby DSL shape — use `brew upgrade` for this {s}", .{noun}) catch "unsupported Ruby DSL shape";
                 warnTapCaskFetchFailed(tap_label, name, reason);
@@ -1770,6 +1774,85 @@ test "tapVersionFromSubtrees resolves a keg whose .rb lives under Casks/" {
     // Bare version: the implicit revision 0 qualifies to nothing, so it stays
     // byte-equal to what install recorded.
     try std.testing.expectEqualStrings("1.13.1", v.?);
+}
+
+test "tapVersionFromSubtrees resolves a multi-arch cask whose arch/sha256 kwargs sit at top level" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    // The canonical `brew create --cask` shape: no `on_macos` wrapper.
+    const cask_rb =
+        \\cask "pkg" do
+        \\  arch arm: "aarch64", intel: "x64"
+        \\  version "0.40.0"
+        \\  sha256 arm:   "aaaaaaaa",
+        \\         intel: "iiiiiiii"
+        \\  url "https://x/releases/download/v#{version}/Pkg_#{version}_#{arch}.dmg"
+        \\  app "Pkg.app"
+        \\end
+    ;
+    var srv = RbLayoutServer{ .io = io, .listener = &listener, .cask_rb = cask_rb };
+    const thread = try std.Thread.spawn(.{}, RbLayoutServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.keg_rb_subtrees, "formula", "user/repo", null);
+    listener.deinit(io);
+    thread.join();
+
+    defer if (v) |vv| std.testing.allocator.free(vv);
+    try std.testing.expect(v != null);
+    try std.testing.expectEqualStrings("0.40.0", v.?);
+}
+
+test "tapVersionFromSubtrees names sha256 :no_check instead of an unsupported DSL shape" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    const cask_rb =
+        \\cask "pkg" do
+        \\  version "2.0"
+        \\  sha256 :no_check
+        \\  url "https://x/pkg.dmg"
+        \\end
+    ;
+    var srv = RbLayoutServer{ .io = io, .listener = &listener, .cask_rb = cask_rb };
+    const thread = try std.Thread.spawn(.{}, RbLayoutServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{.cask}, "cask", "user/repo", null);
+    output.endStderrCapture();
+    listener.deinit(io);
+    thread.join();
+
+    defer if (v) |vv| std.testing.allocator.free(vv);
+    try std.testing.expect(v == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "sha256 :no_check") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "unsupported Ruby DSL shape") == null);
 }
 
 test "tapVersionFromSubtrees reads Formula/ before Casks/ when a tap ships both" {

@@ -94,6 +94,10 @@ jobs:
       - name: Regression guard - Cellar symlink refusal claims no store bytes
         run: ./scripts/regressions/cellar-symlink-followups-3-follow-up.sh
 
+      # Rebuilds lib_tests, which only the warm cache here keeps under budget.
+      - name: Regression guard - top-level multi-arch tap casks
+        run: ./scripts/regressions/tap-cask-top-level-arch-kwargs-gh1096.sh
+
       - name: Regression guard - versionless keg
         run: ./scripts/regressions/versionless-keg-empty-stable-version-installs-a-versionless-keg.sh
 

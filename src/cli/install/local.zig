@@ -21,6 +21,7 @@ const sqlite = @import("../../db/sqlite.zig");
 const atomic = @import("../../fs/atomic.zig");
 const symlink = @import("../../fs/symlink.zig");
 const path_component = @import("../../fs/path_component.zig");
+const store_path = @import("../../fs/store_path.zig");
 const macho_parser = @import("../../macho/parser.zig");
 const client_mod = @import("../../net/client.zig");
 const output = @import("../../ui/output.zig");
@@ -451,7 +452,10 @@ fn installTapRb(
 
     // Parse the Ruby formula to extract name, version, URL, SHA256 for current arch
     const rb = parseRubyFormula(resp.body) orelse {
-        sink.err("Cannot parse tap formula (unsupported Ruby DSL shape). Use: brew install {s}", .{pkg_name});
+        if (rb_parse.optsOutOfChecksum(resp.body))
+            sink.err("Cannot parse tap formula: it " ++ rb_parse.checksum_opt_out_reason ++ ". Use: brew install {s}", .{pkg_name})
+        else
+            sink.err("Cannot parse tap formula (unsupported Ruby DSL shape). Use: brew install {s}", .{pkg_name});
         return InstallError.FormulaNotFound;
     };
 
@@ -605,7 +609,10 @@ pub fn installLocalFormula(
 
     // Parse the Ruby formula to extract name, version, URL, SHA256 for current arch
     const rb = parseRubyFormula(body) orelse {
-        sink.err("Cannot parse local formula (missing version/url/sha256 or unsupported DSL shape): {s}", .{realpath});
+        if (rb_parse.optsOutOfChecksum(body))
+            sink.err("Cannot parse local formula: it " ++ rb_parse.checksum_opt_out_reason ++ ": {s}", .{realpath})
+        else
+            sink.err("Cannot parse local formula (missing version/url/sha256 or unsupported DSL shape): {s}", .{realpath});
         return InstallError.FormulaNotFound;
     };
 
@@ -884,6 +891,13 @@ pub fn materializeRubyFormula(
     if (!args.isAllowedArchiveUrl(resolved.url)) {
         sink.err("Refusing to fetch non-HTTPS archive URL for {s}: {s}", .{ resolved.name, resolved.url });
         return InstallError.InsecureArchiveUrl;
+    }
+
+    // A quoted "no_check" would reach the cask verifier's opt-out, and a
+    // non-hex value would become the cache file name.
+    if (!store_path.isValidSha256(resolved.sha256)) {
+        sink.err("Refusing {s}: " ++ rb_parse.unpinned_checksum_reason, .{resolved.name});
+        return InstallError.UnpinnedChecksum;
     }
 
     // .dmg/.pkg/.zip-with-app casks route through the cask installer —
