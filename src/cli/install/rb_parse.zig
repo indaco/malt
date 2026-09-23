@@ -84,12 +84,12 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     // The state machine recognises two layouts:
     //   * Classic: each platform has its own `Hardware::CPU.*` /
     //     `on_arm` / `on_intel` block carrying url + sha256 lines.
-    //   * Cask DSL multi-arch: a single `on_macos` block holds
-    //     keyword-arg directives — `arch arm: "...", intel: "..."`,
+    //   * Cask DSL multi-arch: keyword-arg directives at top level or
+    //     in `on_macos` — `arch arm: "...", intel: "..."`,
     //     `sha256 arm: "...", intel: "..."`, and a url that
     //     interpolates `#{arch}`.
     var in_correct_section = false;
-    var in_macos = false;
+    var scope: ForeignScope = .{};
     var prev_in_kwarg_sha256 = false;
     // Formula is arch-segmented — disarms the arch-blind global fallback so it
     // can't resolve the other arch's self-consistent (checksum-passing) pair.
@@ -104,9 +104,10 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
         // Uniform skip; the sha256 kwarg continuation below thus tolerates a blank
         // line between its arm:/intel: halves rather than treating it as a reset.
         if (line.len == 0) continue;
+        scope.step(raw, line);
 
         // Extract version (global)
-        if (version == null) {
+        if (version == null and !scope.inside()) {
             if (extractQuoted(line, "version \"")) |v| {
                 version = v;
             }
@@ -121,13 +122,7 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
             revision = std.fmt.parseInt(i64, rest, 10) catch 0;
         }
 
-        // Track on_macos block. The cask DSL uses this as the only
-        // platform gate, so being inside it is enough to consume
-        // url + arch + multi-arch sha256 directives.
-        if (std.mem.indexOf(u8, line, "on_macos") != null) {
-            in_macos = true;
-            in_correct_section = true;
-        }
+        if (isBlockOpener(line, "on_macos")) in_correct_section = true;
 
         // CPU section (Hardware::CPU / on_arm / on_intel). Not gated on
         // `on_macos`: these markers also appear at top level, and missing
@@ -162,8 +157,8 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
             arch_if_open = false;
         }
 
-        // arch directive — only meaningful inside on_macos.
-        if (in_macos and arch_token.len == 0 and std.mem.startsWith(u8, line, "arch ")) {
+        // arch directive — top level or on_macos only.
+        if (!scope.inside() and arch_token.len == 0 and std.mem.startsWith(u8, line, "arch ")) {
             arch_token = pickKwArg(line["arch ".len..], is_arm) orelse arch_token;
         }
 
@@ -171,12 +166,13 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
         // (`sha256 arm: "...", \n  intel: "..."`). Track whether the
         // previous trimmed line opened a `sha256` directive so the
         // continuation line can still pick the platform value.
-        if (in_macos and sha256 == null) {
+        if (!scope.inside() and sha256 == null) {
             if (std.mem.startsWith(u8, line, "sha256 ")) {
                 const body = line["sha256 ".len..];
                 if (lineStartsWithKwArg(body)) {
                     if (pickKwArg(body, is_arm)) |s| sha256 = s;
-                    prev_in_kwarg_sha256 = sha256 == null;
+                    // Only a trailing comma continues the directive.
+                    prev_in_kwarg_sha256 = sha256 == null and std.mem.endsWith(u8, body, ",");
                 }
             } else if (prev_in_kwarg_sha256) {
                 if (pickKwArg(line, is_arm)) |s| sha256 = s;
@@ -188,7 +184,7 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
         } else prev_in_kwarg_sha256 = false;
 
         // Extract URL and SHA256 within the correct section
-        if (in_correct_section) {
+        if (in_correct_section and !scope.inside()) {
             if (url == null) {
                 if (extractQuoted(line, "url \"")) |u| {
                     url = u;
@@ -210,9 +206,12 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     // A partial block (our url + a shared global sha256) still completes.
     if ((url == null or sha256 == null) and !(saw_arch_marker and url == null and sha256 == null)) {
         var fallback_it = std.mem.splitScalar(u8, rb_content, '\n');
+        var fallback_scope: ForeignScope = .{};
         while (fallback_it.next()) |raw| {
             const ln = std.mem.trim(u8, raw, " \t\r");
             if (ln.len == 0) continue;
+            fallback_scope.step(raw, ln);
+            if (fallback_scope.inside()) continue;
 
             if (url == null) {
                 if (extractQuoted(ln, "url \"")) |u| url = u;
@@ -224,6 +223,7 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     }
 
     if (url != null and sha256 != null) {
+        if (!hasOnlyExpandableInterpolations(url.?)) return null;
         // Homebrew treats `version` as optional when the tag is encoded
         // in the URL. Mirror that: derive it from the release-asset or
         // archive-tag path so common tap shapes (top-level url+sha256,
@@ -366,6 +366,70 @@ fn validateVersionToken(s: []const u8) ?[]const u8 {
     }
     if (!std.ascii.isDigit(s[0])) return null;
     return s;
+}
+
+/// Whether a line sits in a block that does not describe this macOS host:
+/// `on_linux`, a macOS-release block (`on_ventura :or_newer do`) or an
+/// `if MacOS.version` branch. Directives there are skipped, never guessed.
+/// The scope ends at the opener's own `end` (same indent) or at `on_macos`.
+const ForeignScope = struct {
+    end_indent: ?usize = null,
+
+    fn inside(s: ForeignScope) bool {
+        return s.end_indent != null;
+    }
+
+    /// Feed every non-blank line in order; `line` is `raw` trimmed.
+    fn step(s: *ForeignScope, raw: []const u8, line: []const u8) void {
+        const indent = raw.len - std.mem.trimStart(u8, raw, " \t").len;
+        if (s.end_indent) |open_indent| {
+            // Nested openers stay inside the outer scope.
+            if ((indent == open_indent and std.mem.eql(u8, line, "end")) or isBlockOpener(line, "on_macos"))
+                s.end_indent = null;
+            return;
+        }
+        if (isForeignOpener(line)) s.end_indent = indent;
+    }
+};
+
+/// `name` as a whole identifier at the line start, so `on_macos_compat` or a
+/// `desc` string naming a block never counts as the block.
+fn isBlockOpener(line: []const u8, name: []const u8) bool {
+    if (!std.mem.startsWith(u8, line, name)) return false;
+    const rest = line[name.len..];
+    return rest.len == 0 or rest[0] == ' ' or rest[0] == '(';
+}
+
+fn isForeignOpener(line: []const u8) bool {
+    if (isBlockOpener(line, "on_linux")) return true;
+    if (std.mem.startsWith(u8, line, "on_")) {
+        // Any other `on_<name> ... do` is a macOS-release block.
+        return std.mem.endsWith(u8, line, " do") and
+            !isBlockOpener(line, "on_macos") and
+            !isBlockOpener(line, "on_arm") and
+            !isBlockOpener(line, "on_intel");
+    }
+    const conditional = std.mem.startsWith(u8, line, "if ") or
+        std.mem.startsWith(u8, line, "elsif ") or
+        std.mem.startsWith(u8, line, "unless ");
+    return conditional and std.mem.indexOf(u8, line, "MacOS.version") != null;
+}
+
+/// `interpolateUrl` expands only these two; any other `#{...}` would reach
+/// the fetch as a literal `#` that truncates the url.
+fn hasOnlyExpandableInterpolations(url: []const u8) bool {
+    const version_needle = "#" ++ "{version}";
+    const arch_needle = "#" ++ "{arch}";
+    var rest = url;
+    while (std.mem.indexOf(u8, rest, "#{")) |i| {
+        rest = rest[i..];
+        if (std.mem.startsWith(u8, rest, version_needle)) {
+            rest = rest[version_needle.len..];
+        } else if (std.mem.startsWith(u8, rest, arch_needle)) {
+            rest = rest[arch_needle.len..];
+        } else return false;
+    }
+    return true;
 }
 
 /// True when the trimmed line body starts with a keyword argument the
@@ -1505,7 +1569,7 @@ test "parseRubyFormula: url/sha256 fallback tolerates a trailing newline" {
 }
 
 test "parseRubyFormula: arch-segmented body with a trailing newline resolves the arch" {
-    // The state machine (in_macos / in_correct_section) is the part most at risk
+    // The state machine (in_linux / in_correct_section) is the part most at risk
     // if an empty segment were ever non-inert, so cover it explicitly.
     const is_arm = @import("../../macho/codesign.zig").isArm64();
     const arm =
