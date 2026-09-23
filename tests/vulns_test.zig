@@ -39,6 +39,15 @@ const cliamp_rb =
     \\end
 ;
 
+/// A tap recipe that opts out of checksum verification; malt cannot read it.
+const nocheck_rb =
+    \\class Nocheck < Formula
+    \\  version "1.0"
+    \\  url "https://github.com/someone/nocheck/releases/download/v1.0/nocheck.tar.gz"
+    \\  sha256 :no_check
+    \\end
+;
+
 /// One OSV hit for the recipe above. The CVSS vector scores 9.8 while the
 /// database label says HIGH, so the row proves the vector wins.
 const osv_batch_json =
@@ -137,6 +146,8 @@ const FixtureServer = struct {
             std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Formula/cliamp2.rb"))
         {
             try req.respond(cliamp_rb, .{});
+        } else if (std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Formula/nocheck.rb")) {
+            try req.respond(nocheck_rb, .{});
         } else if (std.mem.eql(u8, target, "/commits/HEAD")) {
             // What a forge answers for the tap's HEAD; kegs recorded before
             // the installed commit was tracked resolve through here.
@@ -560,6 +571,24 @@ test "a tap keg whose recipe cannot be fetched is unchecked, never quietly uncov
     const named = try h.run(&.{"curl"}, true);
     defer testing.allocator.free(named.stdout);
     try testing.expect(std.mem.indexOf(u8, named.stdout, "\"not_covered\":0") != null);
+}
+
+test "a tap keg whose recipe declares sha256 :no_check is unchecked with that reason" {
+    const h = try Harness.init(testing.allocator, "tap_nocheck");
+    defer h.deinit();
+    try h.seed(&.{"curl@8.16.0"});
+    try h.seedTap("someone/tap", &.{"nocheck@1.0"});
+
+    var errs: std.ArrayList(u8) = .empty;
+    defer errs.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &errs);
+    const r = try h.run(&.{}, true);
+    output.endStderrCapture();
+    defer testing.allocator.free(r.stdout);
+
+    try testing.expectEqual(@as(?anyerror, error.ScanIncomplete), r.err);
+    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"unchecked\":[\"nocheck\"]") != null);
+    try testing.expect(std.mem.indexOf(u8, errs.items, "sha256 :no_check") != null);
 }
 
 test "a tap keg is scanned against OSV from its recipe url" {

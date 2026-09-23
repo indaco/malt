@@ -468,6 +468,10 @@ fn pickKwArg(body: []const u8, is_arm: bool) ?[]const u8 {
     return null;
 }
 
+/// Shared wording so install, upgrade, outdated and vulns name the refusal alike.
+pub const checksum_opt_out_reason = "declares sha256 :no_check and malt requires a pinned sha256";
+pub const unpinned_checksum_reason = "its checksum is not a pinned sha256 (64 lowercase hex characters)";
+
 /// True when the body declares `sha256 :no_check`, whole or per arch. Tap installs require a
 /// pinned digest, so callers use this to name the real refusal reason.
 pub fn optsOutOfChecksum(rb_content: []const u8) bool {

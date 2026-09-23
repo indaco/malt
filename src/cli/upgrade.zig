@@ -30,6 +30,7 @@ const install_args_mod = @import("install/args.zig");
 const install_download_mod = @import("install/download.zig");
 const install_local_mod = @import("install/local.zig");
 const install_rb_parse_mod = @import("install/rb_parse.zig");
+const store_path = @import("../fs/store_path.zig");
 const install_record_mod = @import("install/record.zig");
 const InstallError = install_record_mod.InstallError;
 const install_sink_mod = @import("install/sink.zig");
@@ -1091,6 +1092,22 @@ fn upgradeTapFormula(
 /// the latter (a 404 against a recorded `casks.tap` is user-facing).
 const TapRouteError = error{ NotInTap, Aborted, AppRunning };
 
+/// A `:no_check` recipe is named here: as `NotInTap` the caller would call
+/// the cask gone from a tap that still ships it. An unpinned digest is
+/// refused here too, since the install behind it prints progress only.
+fn parseRoutedCaskRb(body: []const u8, token: []const u8, tap_label: []const u8) TapRouteError!install_rb_parse_mod.RubyFormulaInfo {
+    const rb_info = install_rb_parse_mod.parseRubyFormula(body) orelse {
+        if (!install_rb_parse_mod.optsOutOfChecksum(body)) return error.NotInTap;
+        output.err("Cask {s} in tap {s} " ++ install_rb_parse_mod.checksum_opt_out_reason, .{ token, tap_label });
+        return error.Aborted;
+    };
+    if (!store_path.isValidSha256(rb_info.sha256)) {
+        output.err("Refusing {s}: " ++ install_rb_parse_mod.unpinned_checksum_reason, .{token});
+        return error.Aborted;
+    }
+    return rb_info;
+}
+
 /// The installer refuses to remove a live app, but only once its turn
 /// comes; the stored phases run before that and must not start at all.
 fn caskAppRunning(ctx: *const AppCtx, app_path: ?[]const u8) bool {
@@ -1156,7 +1173,7 @@ fn upgradeRoutedTapCask(
     defer rb_resp.deinit();
     if (rb_resp.status != 200) return error.NotInTap;
 
-    const rb_info = install_rb_parse_mod.parseRubyFormula(rb_resp.body) orelse return error.NotInTap;
+    const rb_info = try parseRoutedCaskRb(rb_resp.body, token, tap_label);
 
     if (!force and std.mem.eql(u8, installed_version, rb_info.version)) {
         if (!bulk) output.skip("{s} is already at latest version {s}", .{ token, rb_info.version });
@@ -3144,4 +3161,53 @@ test "a local keg beside a core keg neither fails the bulk run nor taints the wa
     try std.testing.expect(!sink.tainted);
     try std.testing.expectEqual(@as(usize, 1), sink.formulas.items.len);
     try std.testing.expectEqualStrings("wget", sink.formulas.items[0].name);
+}
+
+test "a routed tap cask declaring sha256 :no_check is named, not reported gone from the tap" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    const rb =
+        \\cask "pkg" do
+        \\  version "2.0"
+        \\  sha256 :no_check
+        \\  url "https://example.com/pkg.dmg"
+        \\end
+    ;
+    try std.testing.expectError(error.Aborted, parseRoutedCaskRb(rb, "pkg", "user/tap"));
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "sha256 :no_check") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "user/tap") != null);
+}
+
+test "a routed tap cask .rb that does not parse still reads as not in the tap" {
+    try std.testing.expectError(error.NotInTap, parseRoutedCaskRb("cask \"pkg\" do\nend\n", "pkg", "user/tap"));
+    const got = try parseRoutedCaskRb(
+        \\cask "pkg" do
+        \\  version "2.0"
+        \\  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+        \\  url "https://example.com/pkg.dmg"
+        \\end
+    , "pkg", "user/tap");
+    try std.testing.expectEqualStrings("2.0", got.version);
+}
+
+test "a routed tap cask with an unpinned sha256 is refused before its progress-only install" {
+    // The install below runs behind a progress-only sink, so the reason must
+    // be printed here or the user sees only the error name.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    const rb =
+        \\cask "pkg" do
+        \\  version "2.0"
+        \\  sha256 "no_check"
+        \\  url "https://example.com/pkg.pkg"
+        \\end
+    ;
+    try std.testing.expectError(error.Aborted, parseRoutedCaskRb(rb, "pkg", "user/tap"));
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "not a pinned sha256") != null);
 }

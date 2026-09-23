@@ -453,7 +453,7 @@ fn installTapRb(
     // Parse the Ruby formula to extract name, version, URL, SHA256 for current arch
     const rb = parseRubyFormula(resp.body) orelse {
         if (rb_parse.optsOutOfChecksum(resp.body))
-            sink.err("Cannot parse tap formula: it declares sha256 :no_check and malt requires a pinned sha256. Use: brew install {s}", .{pkg_name})
+            sink.err("Cannot parse tap formula: it " ++ rb_parse.checksum_opt_out_reason ++ ". Use: brew install {s}", .{pkg_name})
         else
             sink.err("Cannot parse tap formula (unsupported Ruby DSL shape). Use: brew install {s}", .{pkg_name});
         return InstallError.FormulaNotFound;
@@ -610,7 +610,7 @@ pub fn installLocalFormula(
     // Parse the Ruby formula to extract name, version, URL, SHA256 for current arch
     const rb = parseRubyFormula(body) orelse {
         if (rb_parse.optsOutOfChecksum(body))
-            sink.err("Cannot parse local formula: it declares sha256 :no_check and malt requires a pinned sha256: {s}", .{realpath})
+            sink.err("Cannot parse local formula: it " ++ rb_parse.checksum_opt_out_reason ++ ": {s}", .{realpath})
         else
             sink.err("Cannot parse local formula (missing version/url/sha256 or unsupported DSL shape): {s}", .{realpath});
         return InstallError.FormulaNotFound;
@@ -896,7 +896,7 @@ pub fn materializeRubyFormula(
     // A quoted "no_check" would reach the cask verifier's opt-out, and a
     // non-hex value would become the cache file name.
     if (!store_path.isValidSha256(resolved.sha256)) {
-        sink.err("Refusing {s}: its checksum is not a pinned sha256 (64 lowercase hex characters)", .{resolved.name});
+        sink.err("Refusing {s}: " ++ rb_parse.unpinned_checksum_reason, .{resolved.name});
         return InstallError.UnpinnedChecksum;
     }
 
