@@ -488,11 +488,13 @@ pub const RubyServiceBlock = struct {
     run_type: RunType = .immediate,
     interval: ?u32 = null,
     cron: ?[]const u8 = null,
+    /// Present but not lifted: the caller warns rather than drop it silently.
+    declares_env: bool = false,
 
     pub const RunType = enum { immediate, interval, cron };
 };
 
-const ServiceDirective = enum { run, name, keep_alive, working_dir, log_path, error_log_path, run_type, interval, cron };
+const ServiceDirective = enum { run, name, keep_alive, working_dir, log_path, error_log_path, run_type, interval, cron, environment_variables };
 
 const service_directives = std.StaticStringMap(ServiceDirective).initComptime(.{
     .{ "run", .run },
@@ -502,6 +504,7 @@ const service_directives = std.StaticStringMap(ServiceDirective).initComptime(.{
     .{ "log_path", .log_path },
     .{ "error_log_path", .error_log_path },
     .{ "run_type", .run_type },
+    .{ "environment_variables", .environment_variables },
     .{ "interval", .interval },
     .{ "cron", .cron },
 });
@@ -518,7 +521,7 @@ pub const ServiceParseError = error{ Unsupported, ShipsOwnPlist };
 /// read only at the block's own body indentation, so a nested `on_macos do`
 /// / `if` is skipped without tracking depth; the block closes at the first
 /// `end` back at the opener's indentation. Anything not in
-/// `service_directives` (`sudo`, `environment_variables`, ...) is ignored.
+/// `service_directives` (`sudo`, ...) is ignored.
 pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const u8) ServiceParseError!?RubyServiceBlock {
     var block: RubyServiceBlock = .{ .run = &.{} };
     var saw_name = false;
@@ -581,6 +584,7 @@ pub fn parseServiceBlock(buf: *[max_service_args][]const u8, rb_content: []const
                 .immediate,
             .interval => block.interval = std.fmt.parseInt(u32, arg, 10) catch null,
             .cron => block.cron = extractQuoted(line, "cron \""),
+            .environment_variables => block.declares_env = true,
         }
     }
     if (block_indent == null) return null;
@@ -1626,6 +1630,22 @@ test "parseServiceBlock: a bare run token and keep_alive false" {
     try std.testing.expectEqual(@as(usize, 1), got.run.len);
     try std.testing.expectEqualStrings("opt_bin/\"x\"", got.run[0]);
     try std.testing.expect(!got.keep_alive);
+}
+
+test "parseServiceBlock: flags environment_variables it cannot carry" {
+    // Unlifted, so the caller must say the service runs without them.
+    const with_env =
+        \\  service do
+        \\    run [opt_bin/"x"]
+        \\    environment_variables PATH: std_service_path_env
+        \\  end
+    ;
+    var buf: [max_service_args][]const u8 = undefined;
+    const got = (try parseServiceBlock(&buf, with_env)) orelse return error.TestUnexpectedNull;
+    try std.testing.expect(got.declares_env);
+
+    const plain = (try parseServiceBlock(&buf, "  service do\n    run [opt_bin/\"x\"]\n  end\n")) orelse return error.TestUnexpectedNull;
+    try std.testing.expect(!plain.declares_env);
 }
 
 test "parseServiceBlock: keep_alive hash form reads as true" {

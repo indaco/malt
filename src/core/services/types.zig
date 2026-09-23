@@ -16,6 +16,12 @@ pub const CalendarInterval = struct {
     month: ?u8 = null,
 };
 
+/// One launchd `EnvironmentVariables` entry.
+pub const EnvPair = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
 /// How a service is scheduled under launchd.
 pub const Schedule = union(enum) {
     /// `RunAtLoad true`, no interval — run once when loaded (today's default).

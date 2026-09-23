@@ -31,6 +31,10 @@ pub fn specFromDef(
     const run = try aa.alloc([]const u8, def.run.len);
     for (def.run, 0..) |arg, i| run[i] = try plist_mod.expandPrefix(aa, arg, prefix);
 
+    // Values carry the token too (`PATH`, `HOME`); keys never do.
+    const env = try aa.alloc(plist_mod.EnvPair, def.env.len);
+    for (def.env, env) |src, *dst| dst.* = .{ .key = try aa.dupe(u8, src.key), .value = try plist_mod.expandPrefix(aa, src.value, prefix) };
+
     return .{
         .label = try std.fmt.allocPrint(aa, "com.malt.{s}", .{name}),
         .program_args = run,
@@ -46,6 +50,7 @@ pub fn specFromDef(
         .schedule = def.schedule,
         .keep_alive = def.keep_alive,
         .stop_timeout = def.stop_timeout,
+        .env = env,
     };
 }
 
@@ -182,6 +187,7 @@ pub fn registerRuby(
         sink.warn("could not register service for {s}: unsupported service block", .{name});
         return;
     };
+    if (b.declares_env) sink.warn("{s}: service environment_variables not applied (not read from tap or local formulas)", .{name});
     registerDef(io, allocator, db, def, name, pkg_version, prefix, sink);
 }
 
@@ -325,7 +331,8 @@ const ruby_roots = std.StaticStringMap(RubyRoot).initComptime(.{
 });
 
 /// Translate a textual `service do` block into the `ServiceDef` the API
-/// path produces, so both share `specFromDef` and `validate`. Null when any
+/// path produces, minus `environment_variables`, so both share
+/// `specFromDef` and `validate`. Null when any
 /// token is a shape malt cannot render (`#{...}`, `Dir.home`, a method
 /// call) or the schedule is out of bounds - the API side fails those the
 /// same way, and a half-translated argv must never reach launchd.
@@ -449,6 +456,24 @@ test "specFromDef copies keep_alive, schedule and stop_timeout through unchanged
     try testing.expect(plain_spec.keep_alive);
     try testing.expect(plain_spec.schedule == .immediate);
     try testing.expect(plain_spec.stop_timeout == null);
+}
+
+test "specFromDef expands the Homebrew prefix token in every env value, keys untouched" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const def: formula_mod.ServiceDef = .{
+        .run = &.{"/bin/true"},
+        .env = &.{
+            .{ .key = "PATH", .value = "$HOMEBREW_PREFIX/bin:$HOMEBREW_PREFIX/sbin:/usr/bin" },
+            .{ .key = "LC_ALL", .value = "en_US.UTF-8" },
+        },
+    };
+    const spec = try specFromDef(arena.allocator(), def, "x", "/opt/malt");
+    try testing.expectEqual(@as(usize, 2), spec.env.len);
+    try testing.expectEqualStrings("PATH", spec.env[0].key);
+    try testing.expectEqualStrings("/opt/malt/bin:/opt/malt/sbin:/usr/bin", spec.env[0].value);
+    try testing.expectEqualStrings("LC_ALL", spec.env[1].key);
+    try testing.expectEqualStrings("en_US.UTF-8", spec.env[1].value);
 }
 
 test "defFromRuby translates opt_bin, literal and var tokens into the prefix vocabulary" {

@@ -13,10 +13,7 @@ const types = @import("types.zig");
 pub const Schedule = types.Schedule;
 pub const CalendarInterval = types.CalendarInterval;
 
-pub const EnvPair = struct {
-    key: []const u8,
-    value: []const u8,
-};
+pub const EnvPair = types.EnvPair;
 
 /// One `Sockets` entry of the `SecureSocketWithKey` shape: launchd creates
 /// the socket in a secure temp dir and exports its path to the job under
