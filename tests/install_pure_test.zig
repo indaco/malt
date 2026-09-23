@@ -520,17 +520,14 @@ test "parseRubyFormula returns null when current platform's kwarg is missing" {
     }
 }
 
-// The arch directive is per-on_macos: a directive emitted before the
-// `on_macos` block opens (rare but seen in stage-loaded casks) should
-// be ignored so a Linux-side block can't bleed an arch token into the
-// macOS install.
-test "parseRubyFormula ignores arch directive outside on_macos" {
-    const is_arm = @import("builtin").cpu.arch == .aarch64;
-    _ = is_arm;
+// A Linux-side block must not bleed its arch token into the macOS install.
+test "parseRubyFormula ignores arch directive inside on_linux" {
     const src =
         \\cask "scoped" do
         \\  version "0.6"
-        \\  arch arm: "-do-not-use", intel: "-also-no"
+        \\  on_linux do
+        \\    arch arm: "-do-not-use", intel: "-also-no"
+        \\  end
         \\  on_macos do
         \\    sha256 "9999999999999999999999999999999999999999999999999999999999999999"
         \\    url "https://example.com/scoped-#{version}.dmg"

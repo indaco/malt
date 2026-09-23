@@ -1584,6 +1584,297 @@ test "parseRubyFormula: a blank line inside a split sha256 kwarg is skipped, not
     try std.testing.expectEqualStrings(if (is_arm) "aaaaaaaa" else "iiiiiiii", got.sha256);
 }
 
+test "parseRubyFormula: top-level cask arch/sha256 kwargs resolve for the host arch" {
+    // The canonical cask shape: no `on_macos` wrapper, split sha256 kwarg, and
+    // a livecheck `url :url` that must not be taken for the download url.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const body =
+        \\cask "voltius" do
+        \\  arch arm: "aarch64", intel: "x64"
+        \\  version "0.40.0"
+        \\  sha256 arm:   "aaaaaaaa",
+        \\         intel: "iiiiiiii"
+        \\  url "https://github.com/o/r/releases/download/v#{version}/V_#{version}_#{arch}.dmg"
+        \\  livecheck do
+        \\    url :url
+        \\    strategy :github_latest
+        \\  end
+        \\  depends_on :macos
+        \\  app "Voltius.app"
+        \\end
+    ;
+    const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings(if (is_arm) "aaaaaaaa" else "iiiiiiii", got.sha256);
+    try std.testing.expectEqualStrings(if (is_arm) "aarch64" else "x64", got.arch_token);
+    try std.testing.expectEqualStrings("0.40.0", got.version);
+}
+
+test "parseRubyFormula: top-level bottle sha256 kwargs are not taken for the source sha256" {
+    // With kwargs read at top level, only the `arm:`/`intel:` key match keeps
+    // a bottle's `arm64_*:` digest from standing in for the source archive's.
+    const body =
+        \\class Foo < Formula
+        \\  bottle do
+        \\    sha256 cellar: :any, arm64_sonoma: "bbbbbbbb"
+        \\    sha256 arm64_ventura: "cccccccc"
+        \\    sha256 sonoma: "dddddddd"
+        \\  end
+        \\  url "https://example.com/foo-1.0.0.tar.gz"
+        \\  sha256 "aaaaaaaa"
+        \\end
+    ;
+    const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("aaaaaaaa", got.sha256);
+    try std.testing.expectEqualStrings("", got.arch_token);
+}
+
+test "parseRubyFormula: top-level cask arch/sha256 kwargs on a single line" {
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const body =
+        \\cask "foo" do
+        \\  arch arm: "arm64", intel: "amd64"
+        \\  version "1.0.0"
+        \\  sha256 arm: "aaaaaaaa", intel: "iiiiiiii"
+        \\  url "https://example.com/foo-#{version}-#{arch}.zip"
+        \\end
+    ;
+    const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings(if (is_arm) "aaaaaaaa" else "iiiiiiii", got.sha256);
+    try std.testing.expectEqualStrings(if (is_arm) "arm64" else "amd64", got.arch_token);
+}
+
+test "parseRubyFormula: kwargs scoped to macOS release blocks are refused" {
+    // Picking the first block would pair an older release's digest with its
+    // url: checksum-consistent, but built for a different macOS.
+    const body =
+        \\cask "osver" do
+        \\  arch arm: "arm64", intel: "x64"
+        \\  on_monterey :or_older do
+        \\    version "1.0.0"
+        \\    sha256 arm: "aaaaaaaa", intel: "iiiiiiii"
+        \\    url "https://example.com/legacy-#{version}-#{arch}.tar.gz"
+        \\  end
+        \\  on_ventura :or_newer do
+        \\    version "2.0.0"
+        \\    sha256 arm: "bbbbbbbb", intel: "jjjjjjjj"
+        \\    url "https://example.com/osver-#{version}-#{arch}.tar.gz"
+        \\  end
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(body) == null);
+}
+
+test "parseRubyFormula: a quoted url/sha256 pair inside on_linux is never taken" {
+    const body =
+        \\cask "foo" do
+        \\  version "1.0.0"
+        \\  on_linux do
+        \\    url "https://example.com/foo-linux.tgz"
+        \\    sha256 "llllllll"
+        \\  end
+        \\  arch arm: "arm64", intel: "x64"
+        \\  sha256 arm: "aaaaaaaa", intel: "iiiiiiii"
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(body) == null);
+}
+
+test "parseRubyFormula: an on_macos mention inside on_linux does not end the block" {
+    const body =
+        \\cask "foo" do
+        \\  version "1.0.0"
+        \\  on_linux do
+        \\    # same layout as on_macos
+        \\    arch arm: "linux-arm", intel: "linux-x86"
+        \\    sha256 arm: "llllaaaa", intel: "lllliiii"
+        \\    url "https://example.com/foo-#{arch}.tgz"
+        \\  end
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(body) == null);
+}
+
+test "parseRubyFormula: an unquoted sha256 kwarg does not borrow the next line's value" {
+    // Without a trailing comma there is no continuation, so the `arch` line's
+    // `arm:` token must not be read as the digest.
+    const body =
+        \\cask "foo" do
+        \\  version "1.0.0"
+        \\  sha256 arm: :no_check, intel: :no_check
+        \\  arch arm: "aarch64", intel: "x64"
+        \\  url "https://example.com/foo-#{arch}.dmg"
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(body) == null);
+}
+
+test "parseRubyFormula: quoted url/sha256 in macOS release blocks are refused" {
+    const body =
+        \\cask "osver" do
+        \\  on_monterey :or_older do
+        \\    version "1.0.0"
+        \\    sha256 "1111111111111111111111111111111111111111111111111111111111111111"
+        \\    url "https://example.com/legacy-#{version}.dmg"
+        \\  end
+        \\  on_ventura :or_newer do
+        \\    version "2.0.0"
+        \\    sha256 "2222222222222222222222222222222222222222222222222222222222222222"
+        \\    url "https://example.com/osver-#{version}.dmg"
+        \\  end
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(body) == null);
+}
+
+test "parseRubyFormula: macOS release blocks nested in on_macos are refused, quoted or kwarg" {
+    const bodies = [_][]const u8{
+        \\cask "osver" do
+        \\  on_macos do
+        \\    on_monterey :or_older do
+        \\      version "1.0.0"
+        \\      sha256 "1111111111111111111111111111111111111111111111111111111111111111"
+        \\      url "https://example.com/legacy-#{version}.dmg"
+        \\    end
+        \\  end
+        \\end
+        ,
+        \\cask "osver" do
+        \\  arch arm: "arm64", intel: "x64"
+        \\  on_macos do
+        \\    on_monterey :or_older do
+        \\      version "1.0.0"
+        \\      sha256 arm: "aaaaaaaa", intel: "iiiiiiii"
+        \\      url "https://example.com/legacy-#{version}-#{arch}.dmg"
+        \\    end
+        \\  end
+        \\end
+        ,
+    };
+    for (bodies) |body| try std.testing.expect(parseRubyFormula(body) == null);
+}
+
+test "parseRubyFormula: an if MacOS.version branch is refused like a release block" {
+    const body =
+        \\cask "osver" do
+        \\  arch arm: "arm64", intel: "x64"
+        \\  if MacOS.version <= :big_sur
+        \\    version "1.0.0"
+        \\    sha256 arm: "aaaaaaaa", intel: "iiiiiiii"
+        \\  else
+        \\    version "2.0.0"
+        \\    sha256 arm: "bbbbbbbb", intel: "jjjjjjjj"
+        \\  end
+        \\  url "https://example.com/osver-#{version}-#{arch}.dmg"
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(body) == null);
+}
+
+test "parseRubyFormula: a version inside on_linux is not taken for the macOS one" {
+    const body =
+        \\class Foo < Formula
+        \\  on_linux do
+        \\    version "0.9.0"
+        \\    url "https://example.com/foo-linux.tgz"
+        \\    sha256 "llllllll"
+        \\  end
+        \\  on_macos do
+        \\    version "1.0.0"
+        \\    url "https://example.com/foo-mac.tgz"
+        \\    sha256 "mmmmmmmm"
+        \\  end
+        \\end
+    ;
+    const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("1.0.0", got.version);
+    try std.testing.expectEqualStrings("https://example.com/foo-mac.tgz", got.url);
+}
+
+test "parseRubyFormula: an on_linux block ahead of top-level url/sha256 no longer blocks them" {
+    const body =
+        \\class Foo < Formula
+        \\  on_linux do
+        \\    depends_on "zlib"
+        \\  end
+        \\  version "1.0.0"
+        \\  url "https://example.com/foo-1.0.0.tar.gz"
+        \\  sha256 "aaaaaaaa"
+        \\end
+    ;
+    const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("aaaaaaaa", got.sha256);
+    try std.testing.expectEqualStrings("1.0.0", got.version);
+}
+
+test "parseRubyFormula: only a real on_macos opener ends an on_linux block" {
+    // `on_macos_compat` is a different identifier, not the platform block.
+    const body =
+        \\cask "foo" do
+        \\  version "1.0.0"
+        \\  on_linux do
+        \\    on_macos_compat true
+        \\    sha256 arm: "llllaaaa", intel: "lllliiii"
+        \\  end
+        \\  url "https://example.com/foo.dmg"
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(body) == null);
+}
+
+test "parseRubyFormula: a url with an interpolation malt cannot expand is refused" {
+    // Expanding only #{version}/#{arch} would truncate at the `#` and fetch
+    // the wrong url; refusing keeps the `brew install` hint.
+    const body =
+        \\cask "foo" do
+        \\  arch arm: "arm64", intel: "x64"
+        \\  version "1.2.3,abc"
+        \\  sha256 arm: "aaaaaaaa", intel: "iiiiiiii"
+        \\  url "https://example.com/foo-#{version.csv.first}-#{arch}.dmg"
+        \\end
+    ;
+    try std.testing.expect(parseRubyFormula(body) == null);
+}
+
+test "parseRubyFormula: on_linux kwargs do not leak ahead of on_macos" {
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const body =
+        \\cask "foo" do
+        \\  version "1.0.0"
+        \\  on_linux do
+        \\    arch arm: "linux-arm", intel: "linux-x86"
+        \\    sha256 arm: "llllaaaa", intel: "lllliiii"
+        \\  end
+        \\  on_macos do
+        \\    arch arm: "mac-arm", intel: "mac-x86"
+        \\    sha256 arm: "mmmmaaaa", intel: "mmmmiiii"
+        \\  end
+        \\  url "https://example.com/foo-#{version}-#{arch}.zip"
+        \\end
+    ;
+    const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings(if (is_arm) "mmmmaaaa" else "mmmmiiii", got.sha256);
+    try std.testing.expectEqualStrings(if (is_arm) "mac-arm" else "mac-x86", got.arch_token);
+}
+
+test "parseRubyFormula: on_linux kwargs stay in their block; top-level kwargs after it resolve" {
+    // The block ends at its own `end`, so the macOS directives that follow
+    // count while the Linux arch token does not.
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const body =
+        \\cask "foo" do
+        \\  version "1.0.0"
+        \\  on_linux do
+        \\    arch arm: "linux-arm", intel: "linux-x86"
+        \\  end
+        \\  sha256 arm: "aaaaaaaa", intel: "iiiiiiii"
+        \\  url "https://example.com/foo-#{version}.zip"
+        \\end
+    ;
+    const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings(if (is_arm) "aaaaaaaa" else "iiiiiiii", got.sha256);
+    try std.testing.expectEqualStrings("", got.arch_token);
+}
+
 test "rb_parse entry points return null on empty input" {
     try std.testing.expect(parseRubyFormula("") == null);
     try std.testing.expect(parseCaskBinary("") == null);
