@@ -468,6 +468,17 @@ fn pickKwArg(body: []const u8, is_arm: bool) ?[]const u8 {
     return null;
 }
 
+/// True when the body declares `sha256 :no_check`, whole or per arch. Tap installs require a
+/// pinned digest, so callers use this to name the real refusal reason.
+pub fn optsOutOfChecksum(rb_content: []const u8) bool {
+    var it = std.mem.splitScalar(u8, rb_content, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (std.mem.startsWith(u8, line, "sha256 ") and std.mem.indexOf(u8, line, ":no_check") != null) return true;
+    }
+    return false;
+}
+
 pub fn extractQuoted(line: []const u8, prefix: []const u8) ?[]const u8 {
     _, const after = std.mem.cut(u8, line, prefix) orelse return null;
     const body, _ = std.mem.cut(u8, after, "\"") orelse return null;
@@ -1937,6 +1948,43 @@ test "parseRubyFormula: on_linux kwargs stay in their block; top-level kwargs af
     const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings(if (is_arm) "aaaaaaaa" else "iiiiiiii", got.sha256);
     try std.testing.expectEqualStrings("", got.arch_token);
+}
+
+test "optsOutOfChecksum: spots a sha256 :no_check directive at any indent" {
+    try std.testing.expect(optsOutOfChecksum(
+        \\cask "foo" do
+        \\  arch arm: "arm64", intel: "x64"
+        \\  sha256 :no_check
+        \\  url "https://example.com/foo-#{arch}.dmg"
+        \\end
+    ));
+    try std.testing.expect(optsOutOfChecksum(
+        \\cask "foo" do
+        \\  on_macos do
+        \\    sha256 :no_check
+        \\  end
+        \\end
+    ));
+    try std.testing.expect(optsOutOfChecksum(
+        \\cask "foo" do
+        \\  sha256 arm: "aaaaaaaa", intel: :no_check
+        \\end
+    ));
+}
+
+test "optsOutOfChecksum: a pinned sha256 or a no_check mention elsewhere is not an opt-out" {
+    try std.testing.expect(!optsOutOfChecksum(
+        \\cask "foo" do
+        \\  desc "Never uses sha256 :no_check"
+        \\  sha256 "aaaaaaaa"
+        \\end
+    ));
+    try std.testing.expect(!optsOutOfChecksum(
+        \\cask "foo" do
+        \\  sha256 arm: "aaaaaaaa", intel: "iiiiiiii"
+        \\end
+    ));
+    try std.testing.expect(!optsOutOfChecksum(""));
 }
 
 test "rb_parse entry points return null on empty input" {

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Smoke test for `malt install --local`.
 #
-# Builds two fixture .rb formulae under scripts/fixtures/local_formulae/
-# (one bottle-style, one GoReleaser-style) and exercises the dispatch,
-# dry-run, autodetection, and negative paths. Hermetic — every run
+# Drives the fixture .rb formulae under scripts/fixtures/local_formulae/
+# through the dispatch, dry-run, autodetection, and negative paths. Hermetic — every run
 # uses a throwaway MALT_PREFIX and no download ever executes.
 #
 # Usage: scripts/smokes/smoke_install_local.sh
@@ -62,6 +61,12 @@ printf '▸ malt install --local <malformed.rb>\n'
 out=$("$BIN" install --local --dry-run "$FIX_DIR/broken.rb" 2>&1 || true)
 echo "$out" | grep -q "Cannot parse local formula" || fail "parse error not surfaced"
 pass "malformed file is rejected"
+
+# ── 4b. sha256 :no_check is refused with its real reason ────────────
+printf '▸ malt install --local <no_check.rb>\n'
+out=$("$BIN" install --local --dry-run "$FIX_DIR/no_check.rb" 2>&1 || true)
+echo "$out" | grep -q "declares sha256 :no_check" || fail "no_check refusal reason not surfaced"
+pass "no_check file is rejected with its reason"
 
 # ── 5. bare --local without a path is an error ───────────────────────
 printf '▸ malt install --local (no operand)\n'
