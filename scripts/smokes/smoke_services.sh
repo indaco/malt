@@ -18,6 +18,9 @@
 
 set -euo pipefail
 
+# Keeps the developer's own service .env files out of the registered plists.
+export XDG_CONFIG_HOME=/nonexistent/malt-smoke-xdg
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "smoke test requires macOS" >&2
   exit 2

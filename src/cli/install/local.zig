@@ -1261,7 +1261,7 @@ pub fn materializeRubyFormula(
 
     // After the commit, like the API path: a refused service warns and
     // can never roll back the keg.
-    service_mod.registerRuby(ctx.io, allocator, db, resolved.service, resolved.service_declared, resolved.shipped_label, resolved.name, pkg_version, prefix, sink);
+    service_mod.registerRuby(ctx.io, ctx.environ, allocator, db, resolved.service, resolved.service_declared, resolved.shipped_label, resolved.name, pkg_version, prefix, sink);
 
     sink.success("{s} {s} installed", .{ resolved.name, resolved.version });
 }

@@ -1215,7 +1215,7 @@ fn runInstall(
             unlinkStaleKegLinks(&db, &linker, job.name, mats[i].kegPath());
         }
 
-        linkAndRecord(ctx.io, allocator, job, mats[i].kegPath(), &db, &linker, prefix, &formula_cache, flags, sink) catch {
+        linkAndRecord(ctx.io, ctx.environ, allocator, job, mats[i].kegPath(), &db, &linker, prefix, &formula_cache, flags, sink) catch {
             // The underlying error was already logged with a tag by
             // linkAndRecord — just record that this job failed so its
             // dependents in the rest of the loop get skipped above.
@@ -1327,6 +1327,7 @@ test "conflictHint names the one action that actually clears the slot" {
 /// "isolate transitive deps, never the named package."
 fn linkAndRecord(
     io: std.Io,
+    environ: std.process.Environ,
     allocator: std.mem.Allocator,
     job: *DownloadJob,
     keg_path: []const u8,
@@ -1405,7 +1406,7 @@ fn linkAndRecord(
         };
         recordDeps(db, keg_id, formula);
     }
-    service_mod.register(io, allocator, db, formula, prefix, sink);
+    service_mod.register(io, environ, allocator, db, formula, prefix, sink);
     // Annotate keg-only packages inline so the single line reads as success,
     // not as a "not linking" warning paired with a separate ✓.
     const keg_only_suffix: []const u8 = if (job.keg_only) " (keg-only — dependency only)" else "";

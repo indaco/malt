@@ -24,6 +24,8 @@ command -v sqlite3 >/dev/null 2>&1 || {
 
 PREFIX=$(mktemp -d /tmp/mt.XXX)
 export MALT_PREFIX="$PREFIX"
+# Keeps the developer's own service .env files out of the plist asserts.
+export XDG_CONFIG_HOME="$PREFIX/xdg"
 export NO_COLOR=1
 export MALT_NO_EMOJI=1
 trap 'rm -rf "$PREFIX"' EXIT
