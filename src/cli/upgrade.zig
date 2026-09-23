@@ -508,6 +508,8 @@ const OldKeg = struct {
     is_dep: bool,
     /// Tap commit this keg was installed from; null when unknown.
     tap_commit_sha: ?[]const u8,
+    /// Installed from the tap's `Casks/`; the upgrade re-reads only that.
+    rb_from_casks: bool,
 
     fn deinit(self: *OldKeg, allocator: std.mem.Allocator) void {
         allocator.free(self.full_name);
@@ -526,7 +528,7 @@ const OldKeg = struct {
 /// snapshot to a writer (SQLITE_BUSY). Returns null when no row matches.
 fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !?OldKeg {
     var stmt = try db.prepare(
-        "SELECT id, version, revision, cellar_path, tap, bin_isolated, install_reason, tap_commit_sha, full_name FROM kegs WHERE name = ?1 LIMIT 1;",
+        "SELECT id, version, revision, cellar_path, tap, bin_isolated, install_reason, tap_commit_sha, full_name, tap_rb_subtree = 'cask' FROM kegs WHERE name = ?1 LIMIT 1;",
     );
     defer stmt.finalize();
     try stmt.bindText(1, name);
@@ -553,6 +555,7 @@ fn readOldKeg(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const 
         // NULL reads as direct, matching the DB-side `prior_reason` default.
         .is_dep = if (stmt.columnText(6)) |r| std.mem.eql(u8, std.mem.sliceTo(r, 0), "dependency") else false,
         .tap_commit_sha = tap_commit_sha,
+        .rb_from_casks = stmt.columnInt(9) != 0,
     };
 }
 
@@ -619,7 +622,7 @@ fn upgradeFormula(
     // before touching `formulae.brew.sh`. `old.tap` is owned and lives
     // until this function returns, so it is safe to pass across the call.
     if (!install_args_mod.isCoreTap(old.tap)) {
-        return upgradeTapFormula(ctx, allocator, name, old.tap, old.version, old.revision, old.tap_commit_sha, db, prefix, dry_run, force, audit_mode, bulk, sink);
+        return upgradeTapFormula(ctx, allocator, name, old.tap, old.version, old.revision, old.tap_commit_sha, old.rb_from_casks, db, prefix, dry_run, force, audit_mode, bulk, sink);
     }
 
     // Reconstruct the revision-aware path label for the old keg so
@@ -866,7 +869,7 @@ test "tapFormulaUpstreamVersion honours a tripped host so a bulk dry-run pays a 
     defer sink.deinit();
     sink.tripped.record(io, raw_base, .{ .err = error.RequestFailed });
 
-    const v = tapFormulaUpstreamVersion(&ctx, std.testing.allocator, .github, raw_base, "deadbeef", "pkg", &sink.tripped);
+    const v = tapFormulaUpstreamVersion(&ctx, std.testing.allocator, .github, raw_base, "deadbeef", "pkg", false, &sink.tripped);
     srv.stop();
     thread.join();
     listener.deinit(io);
@@ -908,11 +911,12 @@ fn tapFormulaUpstreamVersion(
     raw_base: []const u8,
     sha: []const u8,
     name: []const u8,
+    from_casks: bool,
     tripped: ?*tap_mod.TrippedHosts,
 ) ?[]u8 {
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
-    var fetch = tap_mod.fetchRawFile(&http, ctx.environ, forge_kind, raw_base, sha, name, tap_mod.keg_rb_subtrees, tripped) catch return null;
+    var fetch = tap_mod.fetchRawFile(&http, ctx.environ, forge_kind, raw_base, sha, name, tap_mod.kegRbSubtrees(from_casks), tripped) catch return null;
     switch (fetch) {
         .not_found => return null,
         .found => |*resp| {
@@ -940,6 +944,7 @@ fn upgradeTapFormula(
     installed_version: []const u8,
     installed_revision: i64,
     installed_commit: ?[]const u8,
+    from_casks: bool,
     db: *sqlite.Database,
     prefix: [:0]const u8,
     dry_run: bool,
@@ -1010,7 +1015,7 @@ fn upgradeTapFormula(
             // version can only be a row recorded without its revision.
             var qbuf: [256]u8 = undefined;
             const installed = formula_mod.pkgVersion(&qbuf, installed_version, installed_revision) catch installed_version;
-            if (tapFormulaUpstreamVersion(ctx, allocator, urls.forge, urls.raw_base, fresh_sha, name, null)) |upstream| {
+            if (tapFormulaUpstreamVersion(ctx, allocator, urls.forge, urls.raw_base, fresh_sha, name, from_casks, null)) |upstream| {
                 defer allocator.free(upstream);
                 if (tapWarmDecision(upstream, installed) == .collect) {
                     var hint_buf: [512]u8 = undefined;
@@ -1030,7 +1035,7 @@ fn upgradeTapFormula(
         if (sink) |s| {
             var qbuf: [256]u8 = undefined;
             const installed = formula_mod.pkgVersion(&qbuf, installed_version, installed_revision) catch installed_version;
-            const upstream = tapFormulaUpstreamVersion(ctx, allocator, urls.forge, urls.raw_base, fresh_sha, name, &s.tripped);
+            const upstream = tapFormulaUpstreamVersion(ctx, allocator, urls.forge, urls.raw_base, fresh_sha, name, from_casks, &s.tripped);
             defer if (upstream) |u| allocator.free(u);
             switch (tapWarmDecision(upstream, installed)) {
                 .taint => s.tainted = true, // fetch/parse failure → full recompute
@@ -1069,7 +1074,12 @@ fn upgradeTapFormula(
     defer allocator.free(full_name);
 
     var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
-    install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, install_sink_mod.terminal) catch {
+    // A keg from `Casks/` stays there: the formula-first lookup would swap
+    // it for a same-named formula.
+    (if (from_casks)
+        install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, null, install_sink_mod.terminal)
+    else
+        install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, install_sink_mod.terminal)) catch {
         // The pin above now names a commit whose formula never landed; left
         // in place, the sha-truth gate would call the next retry "already at
         // latest" forever. Rewind both columns: a restored sha with the fresh
@@ -2302,6 +2312,25 @@ test "readOldKeg reads a NULL tap_commit_sha as unknown and a populated one verb
     var known = (try readOldKeg(std.testing.allocator, &db, "known")).?;
     defer known.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("abc123", known.tap_commit_sha.?);
+}
+
+test "readOldKeg flags a keg installed from its tap's Casks/" {
+    // The upgrade re-reads that subtree; a formula-first reinstall would
+    // swap the keg for a same-named formula.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, tap_rb_subtree)
+        \\VALUES ('fromcask', 'acme/tap/fromcask', '1.0', 'sha', '/c/fromcask/1.0', 'acme/tap', 'cask'),
+        \\       ('legacy',   'acme/tap/legacy',   '1.0', 'sha', '/c/legacy/1.0',   'acme/tap', NULL);
+    );
+    var from_cask = (try readOldKeg(std.testing.allocator, &db, "fromcask")).?;
+    defer from_cask.deinit(std.testing.allocator);
+    try std.testing.expect(from_cask.rb_from_casks);
+    var legacy = (try readOldKeg(std.testing.allocator, &db, "legacy")).?;
+    defer legacy.deinit(std.testing.allocator);
+    try std.testing.expect(!legacy.rb_from_casks);
 }
 
 test "readOldKeg carries the install reason so the new receipt can mirror it" {

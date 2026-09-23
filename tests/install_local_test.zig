@@ -1114,6 +1114,34 @@ test "materializeRubyFormula names the keg row and Cellar leaf by the .rb revisi
     try testing.expectEqualStrings(want, try test_io.readLinkAbsolute(std.Options.debug_io, opt, &link_buf));
 }
 
+test "materializeRubyFormula records the tap subtree its .rb came from" {
+    // A keg installed from Casks/ must be re-read from Casks/ on upgrade;
+    // the row is the only place that choice survives.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "ef" ** 32;
+    try seedKegArchive(prefix, "dual", sha);
+
+    try installFromWarmCache(prefix, .{
+        .name = "dual",
+        .full_name = "user/repo/dual",
+        .tap_label = "user/repo",
+        .version = "1.0.0",
+        .url = "https://example.invalid/dual-1.0.0.tar.gz",
+        .sha256 = sha,
+        .tap_rb_subtree = .cask,
+    }, false);
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT tap_rb_subtree FROM kegs WHERE name = 'dual';");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqualStrings("cask", std.mem.sliceTo(stmt.columnText(0) orelse return error.NoText, 0));
+}
+
 test "materializeRubyFormula keeps a revision-less .rb on the bare Cellar leaf" {
     // The `Casks/`-served goreleaser shape: no `revision`, so the audit
     // compares the bare version and the leaf must stay bare.

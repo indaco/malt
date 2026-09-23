@@ -347,7 +347,7 @@ test "v17 adds the flight_steps column to casks once, fresh or upgraded" {
     try t.db.exec("DELETE FROM schema_version WHERE version >= 17;");
     try schema.migrate(&t.db);
     try testing.expect(try casksHasColumn(&t.db, "flight_steps"));
-    try testing.expectEqual(@as(i64, 17), try schema.currentVersion(&t.db));
+    try testing.expectEqual(schema.known_schema_version, try schema.currentVersion(&t.db));
 }
 
 test "v17 tolerates a DB that never had a casks table" {
@@ -360,7 +360,7 @@ test "v17 tolerates a DB that never had a casks table" {
     );
     try t.db.exec("INSERT INTO schema_version (version) VALUES (16);");
     try schema.migrate(&t.db);
-    try testing.expectEqual(@as(i64, 17), try schema.currentVersion(&t.db));
+    try testing.expectEqual(schema.known_schema_version, try schema.currentVersion(&t.db));
 }
 
 test "v17 leaves a legacy cask row with no flight steps" {

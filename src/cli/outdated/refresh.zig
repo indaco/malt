@@ -588,7 +588,7 @@ fn upstreamLatest(
             // drop the row from the audit.
             if (row.tap) |tap_label| {
                 if (!install_args_mod.isCoreTap(tap_label)) {
-                    break :blk tapFormulaLatestVersion(alloc, head_cache, db, io, environ, tap_label, row.name, api.http);
+                    break :blk tapFormulaLatestVersion(alloc, head_cache, db, io, environ, tap_label, row.name, api.http, row.rb_from_casks);
                 }
             }
             const json = api.fetchFormula(row.name) catch break :blk null;
@@ -1026,6 +1026,7 @@ fn tapCaskLatestVersion(
 
 /// Tap formula: `Formula/<name>.rb`, then `Casks/<name>.rb` (a tarball cask
 /// installed as a keg), then a root-layout `<name>.rb` — the install order.
+/// A keg installed from `Casks/` reads only that.
 fn tapFormulaLatestVersion(
     alloc: std.mem.Allocator,
     head_cache: *TapHeadResolve,
@@ -1035,8 +1036,9 @@ fn tapFormulaLatestVersion(
     tap_label: []const u8,
     name: []const u8,
     http: *client_mod.HttpClient,
+    from_casks: bool,
 ) ?[]u8 {
-    return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, name, http, tap_mod.keg_rb_subtrees, "formula");
+    return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, name, http, tap_mod.kegRbSubtrees(from_casks), "formula");
 }
 
 /// Serial-path single-row check. `latest` is caller-owned.
@@ -1855,6 +1857,43 @@ test "tapVersionFromSubtrees names sha256 :no_check instead of an unsupported DS
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "unsupported Ruby DSL shape") == null);
 }
 
+test "tapVersionFromSubtrees keeps a keg installed from Casks/ on Casks/ when a tap ships both" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    const formula_rb =
+        \\class Pkg < Formula
+        \\  url "https://x/pkg-2.0.0.tar.gz"
+        \\  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+        \\  version "2.0.0"
+        \\end
+    ;
+    // `mt install --cask` recorded Casks/, so the same-named formula must
+    // not become this keg's upstream.
+    var srv = RbLayoutServer{ .io = io, .listener = &listener, .formula_rb = formula_rb, .cask_rb = tarball_cask_rb };
+    const thread = try std.Thread.spawn(.{}, RbLayoutServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", tap_mod.kegRbSubtrees(true), "formula", "user/repo", null);
+    listener.deinit(io);
+    thread.join();
+
+    defer if (v) |vv| std.testing.allocator.free(vv);
+    try std.testing.expect(v != null);
+    try std.testing.expectEqualStrings("1.13.1", v.?);
+}
+
 test "tapVersionFromSubtrees reads Formula/ before Casks/ when a tap ships both" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -1956,7 +1995,7 @@ test "tap rows reuse the caller-supplied client (the tap path constructs no Http
     defer http.deinit();
     http.offline = true;
 
-    const f = tapFormulaLatestVersion(std.testing.allocator, &head_cache, &db, io, std.process.Environ.empty, "user/repo", "pkg", &http);
+    const f = tapFormulaLatestVersion(std.testing.allocator, &head_cache, &db, io, std.process.Environ.empty, "user/repo", "pkg", &http, false);
     const c = tapCaskLatestVersion(std.testing.allocator, &head_cache, &db, io, std.process.Environ.empty, "user/repo", "tok", &http);
     if (f) |v| std.testing.allocator.free(v);
     if (c) |v| std.testing.allocator.free(v);
