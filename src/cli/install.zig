@@ -55,6 +55,8 @@ const ghcr_url_mod = @import("install/ghcr_url.zig");
 const parseGhcrUrl = ghcr_url_mod.parseGhcrUrl;
 const local_mod = @import("install/local.zig");
 const installTapFormula = local_mod.installTapFormula;
+const installTapCask = local_mod.installTapCask;
+const installTapFormulaOnly = local_mod.installTapFormulaOnly;
 const installLocalFormula = local_mod.installLocalFormula;
 const post_install_mod = @import("install/post_install.zig");
 const drive = post_install_mod.drive;
@@ -791,7 +793,14 @@ fn runInstall(
 
         // Handle tap formulas separately (they don't use GHCR)
         if (isTapFormula(pkg_name)) {
-            installTapFormula(ctx, allocator, pkg_name, &db, &linker, prefix, flags.dry_run, flags.force, flags.download_only, sink) catch |e| {
+            // A tap may ship a formula and a cask under one name; the flags
+            // pick a side instead of the formula-then-cask lookup.
+            (if (flags.force_cask)
+                installTapCask(ctx, allocator, pkg_name, &db, &linker, prefix, flags.dry_run, flags.force, flags.download_only, null, sink)
+            else if (flags.force_formula)
+                installTapFormulaOnly(ctx, allocator, pkg_name, &db, &linker, prefix, flags.dry_run, flags.force, flags.download_only, sink)
+            else
+                installTapFormula(ctx, allocator, pkg_name, &db, &linker, prefix, flags.dry_run, flags.force, flags.download_only, sink)) catch |e| {
                 // A source-build refusal already printed an actionable line
                 // plus the `brew install` hint, so don't bury it under a
                 // generic summary that just repeats the error enum name.

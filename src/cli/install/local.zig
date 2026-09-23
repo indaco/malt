@@ -214,7 +214,8 @@ const tap_archive_suffixes = [_]struct {
 /// Selects which subdirectory of the tap the installer probes for the
 /// `.rb` file. `.formula_or_cask` (the default for `mt install`) tries
 /// `Formula/` first and falls back to `Casks/`; `.cask_only` skips the
-/// Formula/ probe entirely.
+/// Formula/ probe entirely and `.formula_only` never reaches `Casks/`, so
+/// `--cask`/`--formula` pick one side of a tap that ships both.
 ///
 /// `.cask_only` exists because the formula branch of
 /// `materializeRubyFormula` opens its own DB transaction. Callers
@@ -226,6 +227,7 @@ const tap_archive_suffixes = [_]struct {
 /// unreachable.
 const TapResolveKind = enum {
     formula_or_cask,
+    formula_only,
     cask_only,
 };
 
@@ -245,6 +247,23 @@ pub fn installTapFormula(
     sink: OutputSink,
 ) !void {
     return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, download_only, .formula_or_cask, null, sink);
+}
+
+/// `mt install --formula` on a tap name: `Formula/` then the root layout,
+/// never `Casks/`.
+pub fn installTapFormulaOnly(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    pkg_name: []const u8,
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    prefix: []const u8,
+    dry_run: bool,
+    force: bool,
+    download_only: bool,
+    sink: OutputSink,
+) !void {
+    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, download_only, .formula_only, null, sink);
 }
 
 /// Install a tap cask whose owning tap is already known. Skips the
@@ -376,7 +395,7 @@ fn installTapRb(
     // First probe: Formula/ for the default mode, Casks/ when the
     // caller has pinned the resolve to cask-only.
     const initial_kind: forge.RawKind = switch (kind) {
-        .formula_or_cask => .formula,
+        .formula_or_cask, .formula_only => .formula,
         .cask_only => .cask,
     };
     var url_buf: [512]u8 = undefined;
@@ -411,20 +430,22 @@ fn installTapRb(
         // the not-found error.
         if (kind == .cask_only) break :blk &rb_resp;
 
-        const cask_url = forge.rawFileUrl(
-            &url_buf,
-            urls.forge,
-            urls.raw_base,
-            commit_sha,
-            .cask,
-            parts.formula,
-        ) catch return InstallError.FormulaNotFound;
+        if (kind == .formula_or_cask) {
+            const cask_url = forge.rawFileUrl(
+                &url_buf,
+                urls.forge,
+                urls.raw_base,
+                commit_sha,
+                .cask,
+                parts.formula,
+            ) catch return InstallError.FormulaNotFound;
 
-        cask_resp = tap_mod.getRawFile(&http, ctx.environ, urls.forge, cask_url) catch {
-            sink.err("Cannot fetch tap from GitHub", .{});
-            return InstallError.FormulaNotFound;
-        };
-        if (cask_resp.?.status == 200) break :blk &cask_resp.?;
+            cask_resp = tap_mod.getRawFile(&http, ctx.environ, urls.forge, cask_url) catch {
+                sink.err("Cannot fetch tap from GitHub", .{});
+                return InstallError.FormulaNotFound;
+            };
+            if (cask_resp.?.status == 200) break :blk &cask_resp.?;
+        }
 
         // Last resort: the older Homebrew layout keeps `<name>.rb` at the
         // repo root (koekeishiya/felixkratz taps). Only reached on the
