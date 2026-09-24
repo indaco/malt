@@ -437,6 +437,8 @@ pub fn parseLine(line: []const u8) ?Entry {
         return null;
     }
     if (s.len == 0) return null;
+    // Restore hands names to install's argv, where this would read as a flag.
+    if (s[0] == '-') return null;
 
     // Services keep `@` as part of their label (e.g. `postgresql@16`);
     // only formulas/casks split a trailing `@<version>` off the name.
@@ -560,6 +562,15 @@ test "writeEntry never appends a version suffix to a service entry" {
     defer aw.deinit();
     try writeEntry(&aw.writer, .service, "redis", "8.0", true);
     try std.testing.expectEqualStrings("service redis\n", aw.written());
+}
+
+test "parseLine refuses a name restore would hand to install as a flag" {
+    // A backup file is data; `formula --allow-unpinned` must not switch a
+    // trust opt-in on for the whole restore batch.
+    try std.testing.expect(parseLine("formula --allow-unpinned") == null);
+    try std.testing.expect(parseLine("cask --force") == null);
+    try std.testing.expect(parseLine("service -x") == null);
+    try std.testing.expect(parseLine("formula wget-2") != null);
 }
 
 test "parseLine parses a service line and keeps `@` inside the name" {
