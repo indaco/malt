@@ -477,7 +477,7 @@ Flags:
                        and ETag because the new repo has its own HEAD.
   --yes, -y            Confirm the apply step of --refresh --all.
   --json               Emit the --refresh --all diff as
-                       `{"taps":[{"tap","old_sha","new_sha","status"}]}`.
+                       `{"taps":[{"tap","old_sha","new_sha","status","error"}]}`.
 
 Taps are auto-resolved during install, so explicit `tap` is
 usually unnecessary — the auto-tap also pins the SHA on first use.

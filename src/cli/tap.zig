@@ -204,6 +204,8 @@ const RefreshRow = struct {
     old_sha: ?[]const u8,
     new_sha: ?[]const u8,
     status: RefreshStatus,
+    /// Why a `.failed` row could not be resolved.
+    reason: ?[]const u8 = null,
 };
 
 const RefreshStatus = enum { unchanged, moved, failed };
@@ -236,7 +238,7 @@ fn writeRefreshRowText(w: *std.Io.Writer, row: RefreshRow) !void {
     switch (row.status) {
         .unchanged => try w.print("  {s}: {s} (unchanged)\n", .{ row.name, shortSha(row.old_sha) }),
         .moved => try w.print("  {s}: {s} -> {s}\n", .{ row.name, shortSha(row.old_sha), shortSha(row.new_sha) }),
-        .failed => try w.print("  {s}: {s} -> ??? (failed)\n", .{ row.name, shortSha(row.old_sha) }),
+        .failed => try w.print("  {s}: {s} -> ??? (failed: {s})\n", .{ row.name, shortSha(row.old_sha), row.reason orelse "unknown" }),
     }
 }
 
@@ -273,6 +275,8 @@ fn writeRefreshRowsJson(w: *std.Io.Writer, rows: []const RefreshRow) !void {
         if (row.new_sha) |s| try output.jsonStr(w, s) else try w.writeAll("null");
         try w.writeAll(",\"status\":");
         try output.jsonStr(w, @tagName(row.status));
+        try w.writeAll(",\"error\":");
+        if (row.reason) |r| try output.jsonStr(w, r) else try w.writeAll("null");
         try w.writeAll("}");
     }
     try w.writeAll("]}\n");
@@ -424,7 +428,7 @@ test "writeRefreshRowText: unchanged row marks the row as unchanged" {
     try std.testing.expectEqualStrings("  user/repo: 0123456 (unchanged)\n", aw.written());
 }
 
-test "writeRefreshRowText: failed row keeps the old SHA visible" {
+test "writeRefreshRowText: failed row keeps the old SHA visible and says why" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     try writeRefreshRowText(&aw.writer, .{
@@ -432,8 +436,9 @@ test "writeRefreshRowText: failed row keeps the old SHA visible" {
         .old_sha = sha_old,
         .new_sha = null,
         .status = .failed,
+        .reason = "rate limited",
     });
-    try std.testing.expectEqualStrings("  user/repo: 0123456 -> ??? (failed)\n", aw.written());
+    try std.testing.expectEqualStrings("  user/repo: 0123456 -> ??? (failed: rate limited)\n", aw.written());
 }
 
 test "writeRefreshRowText: unpinned old SHA is surfaced explicitly" {
@@ -448,20 +453,20 @@ test "writeRefreshRowText: unpinned old SHA is surfaced explicitly" {
     try std.testing.expectEqualStrings("  user/repo: <unpinned> -> abcdef0\n", aw.written());
 }
 
-test "writeRefreshRowsJson: emits `{taps:[{tap,old_sha,new_sha,status},...]}`" {
+test "writeRefreshRowsJson: emits `{taps:[{tap,old_sha,new_sha,status,error},...]}`" {
     const rows = [_]RefreshRow{
         .{ .name = "a/b", .old_sha = sha_old, .new_sha = sha_new, .status = .moved },
         .{ .name = "c/d", .old_sha = sha_old, .new_sha = sha_old, .status = .unchanged },
-        .{ .name = "e/f", .old_sha = null, .new_sha = null, .status = .failed },
+        .{ .name = "e/f", .old_sha = null, .new_sha = null, .status = .failed, .reason = "rate \"limited\"" },
     };
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     try writeRefreshRowsJson(&aw.writer, &rows);
     try std.testing.expectEqualStrings(
         "{\"taps\":[" ++
-            "{\"tap\":\"a/b\",\"old_sha\":\"" ++ sha_old ++ "\",\"new_sha\":\"" ++ sha_new ++ "\",\"status\":\"moved\"}," ++
-            "{\"tap\":\"c/d\",\"old_sha\":\"" ++ sha_old ++ "\",\"new_sha\":\"" ++ sha_old ++ "\",\"status\":\"unchanged\"}," ++
-            "{\"tap\":\"e/f\",\"old_sha\":null,\"new_sha\":null,\"status\":\"failed\"}" ++
+            "{\"tap\":\"a/b\",\"old_sha\":\"" ++ sha_old ++ "\",\"new_sha\":\"" ++ sha_new ++ "\",\"status\":\"moved\",\"error\":null}," ++
+            "{\"tap\":\"c/d\",\"old_sha\":\"" ++ sha_old ++ "\",\"new_sha\":\"" ++ sha_old ++ "\",\"status\":\"unchanged\",\"error\":null}," ++
+            "{\"tap\":\"e/f\",\"old_sha\":null,\"new_sha\":null,\"status\":\"failed\",\"error\":\"rate \\\"limited\\\"\"}" ++
             "]}\n",
         aw.written(),
     );
@@ -502,6 +507,22 @@ test "writeTapListJson: emits `name`, `url`, `commit_sha`, `host` per tap; null 
             "]\n",
         aw.written(),
     );
+}
+
+test "resolveOneHead reports why a tap could not be refreshed" {
+    // Offline is the one failure reachable without a network fixture; the
+    // reason must reach the row instead of a bare `(failed)`.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try tap_mod.add(&db, "user/repo", "user", "homebrew-repo", sha_old);
+
+    const out = try resolveOneHead(&ctx, std.testing.allocator, &db, "user/repo");
+    defer out.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, out.failed, "offline mode") != null);
 }
 
 test "writeRefreshRowsJson: empty input emits `{\"taps\":[]}`" {
@@ -1090,32 +1111,33 @@ fn refreshAll(
     // full plan before any write happens — including the case where the
     // user immediately passes `--yes`. Etag travels alongside the sha so
     // the post-confirm apply step writes both atomically via updateHead.
-    var new_shas: std.ArrayList(?[]const u8) = .empty;
-    var new_etags: std.ArrayList(?[]const u8) = .empty;
+    var outcomes: std.ArrayList(RefreshOutcome) = .empty;
     defer {
-        for (new_shas.items) |maybe_sha| if (maybe_sha) |sha| allocator.free(sha);
-        new_shas.deinit(allocator);
-        for (new_etags.items) |maybe_et| if (maybe_et) |et| allocator.free(et);
-        new_etags.deinit(allocator);
+        for (outcomes.items) |o| o.deinit(allocator);
+        outcomes.deinit(allocator);
     }
-    try new_shas.ensureTotalCapacityPrecise(allocator, taps.len);
-    try new_etags.ensureTotalCapacityPrecise(allocator, taps.len);
+    try outcomes.ensureTotalCapacityPrecise(allocator, taps.len);
 
     var rows: std.ArrayList(RefreshRow) = .empty;
     defer rows.deinit(allocator);
     try rows.ensureTotalCapacityPrecise(allocator, taps.len);
 
     for (taps) |t| {
-        const pair = resolveOneHead(ctx, allocator, db, t.name) catch null;
-        const new_sha: ?[]const u8 = if (pair) |p| p.sha else null;
-        const new_et: ?[]const u8 = if (pair) |p| p.etag else null;
-        new_shas.appendAssumeCapacity(new_sha);
-        new_etags.appendAssumeCapacity(new_et);
+        const outcome = try resolveOneHead(ctx, allocator, db, t.name);
+        outcomes.appendAssumeCapacity(outcome);
+        const new_sha: ?[]const u8 = switch (outcome) {
+            .ok => |h| h.sha,
+            .failed => null,
+        };
         rows.appendAssumeCapacity(.{
             .name = t.name,
             .old_sha = t.commit_sha,
             .new_sha = new_sha,
             .status = classifyRefresh(t.commit_sha, new_sha),
+            .reason = switch (outcome) {
+                .ok => null,
+                .failed => |r| r,
+            },
         });
     }
 
@@ -1129,39 +1151,62 @@ fn refreshAll(
     // Apply only the rows that actually moved; unchanged is a no-op and
     // failed has no SHA to write. updateHead atomically pairs the new
     // sha with its etag — the next non-refresh resolve short-circuits.
-    for (rows.items, new_etags.items) |row, maybe_et| {
+    for (rows.items, outcomes.items) |row, outcome| {
         if (row.status != .moved) continue;
-        const new_sha = row.new_sha orelse continue;
-        tap_mod.updateHead(db, row.name, new_sha, maybe_et) catch {
+        const head = switch (outcome) {
+            .ok => |h| h,
+            .failed => continue,
+        };
+        tap_mod.updateHead(db, row.name, head.sha, head.etag) catch {
             output.err("Failed to update commit pin for {s}", .{row.name});
             return error.Aborted;
         };
     }
 }
 
-/// Resolve a tap's HEAD on the `--refresh` path. Caller takes ownership
-/// of both `sha` and `etag`; deinit by freeing each individually.
-const RefreshedHead = struct { sha: []const u8, etag: ?[]const u8 };
+/// A tap's HEAD on the `--refresh` path, or why it could not be resolved.
+/// Every slice is owned; `deinit` frees them.
+const RefreshOutcome = union(enum) {
+    ok: struct { sha: []const u8, etag: ?[]const u8 },
+    failed: []const u8,
+
+    fn deinit(self: RefreshOutcome, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .ok => |h| {
+                allocator.free(h.sha);
+                if (h.etag) |e| allocator.free(e);
+            },
+            .failed => |r| allocator.free(r),
+        }
+    }
+};
 
 fn resolveOneHead(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     slug: []const u8,
-) !RefreshedHead {
-    const urls = try tap_mod.resolveTapBaseUrls(allocator, db, slug);
+) error{OutOfMemory}!RefreshOutcome {
+    const urls = tap_mod.resolveTapBaseUrls(allocator, db, slug) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return .{ .failed = try allocator.dupe(u8, "could not read the tap's registration") },
+    };
     defer urls.deinit(allocator);
     // `tap --refresh` is the explicit "force fresh" verb — never send
     // If-None-Match so a stale-but-unmoved upstream still surfaces a
     // fresh body and the operator can confirm the tap really hasn't
     // budged. Per task implementation notes.
-    var res = try tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, ctx.offline, urls.forge, urls.api_head_url, null);
+    var rerr_buf: [512]u8 = undefined;
+    var res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, ctx.offline, urls.forge, urls.api_head_url, null) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return .{ .failed = try allocator.dupe(u8, tap_mod.describeResolveError(&rerr_buf, e, urls.forge, urls.host)) },
+    };
     defer res.deinit();
-    const sha = res.sha orelse return error.MalformedJson;
+    const sha = res.sha orelse return .{ .failed = try allocator.dupe(u8, "empty response") };
     const sha_owned = try allocator.dupe(u8, sha);
     errdefer allocator.free(sha_owned);
     const et_owned: ?[]const u8 = if (res.etag) |e| try allocator.dupe(u8, e) else null;
-    return .{ .sha = sha_owned, .etag = et_owned };
+    return .{ .ok = .{ .sha = sha_owned, .etag = et_owned } };
 }
 
 fn emitRefreshAll(ctx: *const AppCtx, rows: []const RefreshRow) !void {
