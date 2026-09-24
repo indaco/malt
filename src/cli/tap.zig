@@ -678,6 +678,12 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     }
     if (refresh_target) |rt| {
         if (rt.len == 0) refresh_target = positional;
+        // Otherwise it falls through to the listing and exits 0 having
+        // refreshed nothing.
+        if (refresh_target == null and !refresh_all) {
+            output.err("--refresh needs a tap (mt tap --refresh <user>/<repo>) or --all", .{});
+            return error.Aborted;
+        }
     }
 
     // --repo / --force only make sense on the add path with a positional

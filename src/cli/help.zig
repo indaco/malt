@@ -360,7 +360,8 @@ const tap_help =
     \\against the pin, not whatever HEAD happens to point to later.
     \\
     \\Flags:
-    \\  --refresh [<slug>]   Advance the pin to the current HEAD. With a
+    \\  --refresh <slug>|--all
+    \\                       Advance the pin to the current HEAD. With a
     \\                       slug, refreshes that one tap; with --all,
     \\                       walks every registered tap.
     \\  --all                Pairs with --refresh: batch every tap, print
