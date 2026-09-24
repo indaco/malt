@@ -391,7 +391,7 @@ fn installTapRb(
             break :blk cached;
         }
         var rerr_buf: [512]u8 = undefined;
-        var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, null) catch |e| {
+        var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, ctx.offline, urls.forge, urls.api_head_url, null) catch |e| {
             sink.err("Could not resolve {s}'s HEAD commit: {s}", .{ tap_slug, tap_mod.describeResolveError(&rerr_buf, e, urls.forge, urls.host) });
             return mapTapResolveError(e);
         };
@@ -1656,6 +1656,7 @@ fn mapTapResolveError(e: tap_mod.TapError) InstallError {
         error.NetworkError,
         // A too-long token can't reach the network either; same exit path.
         error.AuthTokenTooLong,
+        error.OfflineRequired,
         => InstallError.NetworkError,
         error.NotFound,
         error.MalformedJson,
@@ -1793,6 +1794,8 @@ test "mapTapResolveError surfaces rate limit and network failure as their own ta
     try std.testing.expectEqual(InstallError.NetworkError, mapTapResolveError(error.NetworkError));
     // A too-long token shares the network exit path, not FormulaNotFound.
     try std.testing.expectEqual(InstallError.NetworkError, mapTapResolveError(error.AuthTokenTooLong));
+    // Offline is a "can't reach the forge" outcome, not a missing formula.
+    try std.testing.expectEqual(InstallError.NetworkError, mapTapResolveError(error.OfflineRequired));
 }
 
 test "mapTapResolveError keeps non-classified causes on FormulaNotFound" {

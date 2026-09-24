@@ -98,7 +98,7 @@ test "gitea resolve: a recorded commits array body yields the sha and its raw .r
     var url_buf: [96]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/grp/tap/commits?limit=1&stat=false", .{port});
 
-    var res = try tap.resolveHeadCommit(io, .empty, testing.allocator, .gitea, url, null);
+    var res = try tap.resolveHeadCommit(io, .empty, testing.allocator, false, .gitea, url, null);
     defer res.deinit();
     try testing.expect(!res.not_modified);
     try testing.expectEqualStrings(fixture_sha, res.sha.?);
@@ -139,7 +139,7 @@ test "gitea resolve: the API request carries Authorization token when MALT_GITEA
     var url_buf: [96]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/grp/tap/commits?limit=1&stat=false", .{port});
 
-    var res = try tap.resolveHeadCommit(io, envWithGiteaToken(), testing.allocator, .gitea, url, null);
+    var res = try tap.resolveHeadCommit(io, envWithGiteaToken(), testing.allocator, false, .gitea, url, null);
     defer res.deinit();
     try testing.expectEqualStrings("token cb-itest", fx.authorization[0..fx.authorization_len]);
 }

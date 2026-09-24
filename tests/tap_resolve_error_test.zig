@@ -56,7 +56,7 @@ test "gitlab refresh over a 403 reports a forge-correct rate-limit message" {
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v4/projects/grp%2Ftap/repository/commits/HEAD", .{port});
 
     // The wire 403 must classify to RateLimited on the gitlab path...
-    try testing.expectError(error.RateLimited, tap.resolveHeadCommit(io, .empty, testing.allocator, .gitlab, url, null));
+    try testing.expectError(error.RateLimited, tap.resolveHeadCommit(io, .empty, testing.allocator, false, .gitlab, url, null));
 
     // ...and the message the CLI prints names the gitlab instance + token.
     var msg_buf: [512]u8 = undefined;
@@ -86,7 +86,7 @@ test "gitea refresh over a 404 names the instance host and drops the github-only
     var url_buf: [96]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/grp/tap/commits?limit=1&stat=false", .{port});
 
-    try testing.expectError(error.NotFound, tap.resolveHeadCommit(io, .empty, testing.allocator, .gitea, url, null));
+    try testing.expectError(error.NotFound, tap.resolveHeadCommit(io, .empty, testing.allocator, false, .gitea, url, null));
 
     var msg_buf: [512]u8 = undefined;
     const msg = tap.describeResolveError(&msg_buf, error.NotFound, .gitea, "git.example.org");

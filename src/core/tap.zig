@@ -38,6 +38,8 @@ pub const TapError = error{
     /// error, kept distinct from NetworkError so the user is told to check
     /// the token, not their connection.
     AuthTokenTooLong,
+    /// Offline mode refused the lookup before any dial.
+    OfflineRequired,
     OutOfMemory,
 };
 
@@ -80,9 +82,12 @@ fn githubResolveError(err: TapError) []const u8 {
         error.MalformedJson => "Unexpected response shape from GitHub — rerun with --debug and attach the log when filing an issue.",
         error.InvalidSha => "GitHub returned a commit SHA that failed validation (not 40-char lowercase hex).",
         error.ResolveFailed => "GitHub returned an unexpected status while resolving HEAD — retry, or set MALT_GITHUB_TOKEN if this persists.",
+        error.OfflineRequired => offline_resolve_hint,
         error.OutOfMemory => "Out of memory while resolving HEAD commit.",
     };
 }
+
+pub const offline_resolve_hint = "offline mode is on and the tap's commit lookup needs the network - rerun without --offline / MALT_OFFLINE.";
 
 /// Resolve hints for a non-github forge, naming its instance `host` and
 /// per-forge `token_var`. `bufPrint` writes into the caller's `buf`
@@ -106,6 +111,7 @@ fn forgeResolveError(
         error.MalformedJson => std.fmt.bufPrint(buf, "Unexpected response shape from {s} ({s}) — rerun with --debug and attach the log when filing an issue.", .{ name, host }) catch unreachable,
         error.InvalidSha => std.fmt.bufPrint(buf, "{s} ({s}) returned a commit SHA that failed validation (not 40-char lowercase hex).", .{ name, host }) catch unreachable,
         error.ResolveFailed => std.fmt.bufPrint(buf, "{s} ({s}) returned an unexpected status while resolving HEAD — retry, or set {s} if this persists.", .{ name, host, token_var }) catch unreachable,
+        error.OfflineRequired => offline_resolve_hint,
         error.OutOfMemory => "Out of memory while resolving HEAD commit.",
     };
 }
@@ -1521,12 +1527,14 @@ pub fn resolveHeadCommit(
     io: std.Io,
     environ: std.process.Environ,
     allocator: std.mem.Allocator,
+    offline: bool,
     forge_kind: forge.Forge,
     api_head_url: []const u8,
     cached_etag: ?[]const u8,
 ) TapError!HeadResolution {
     var http = client_mod.HttpClient.init(io, environ, allocator);
     defer http.deinit();
+    http.offline = offline;
 
     // The forge's own token (e.g. MALT_GITHUB_TOKEN) is attached per
     // request; falling through to `extra=&.{}` lets net/client's
@@ -1538,11 +1546,15 @@ pub fn resolveHeadCommit(
     var auth_buf: [8 * 1024]u8 = undefined;
     var resp = if (forge.authHeader(forge_kind, environ, &auth_buf) catch return TapError.AuthTokenTooLong) |header| blk: {
         const headers = [_]std.http.Header{header};
-        break :blk http.getConditional(api_head_url, cached_etag, &headers) catch return TapError.NetworkError;
-    } else http.getConditional(api_head_url, cached_etag, &.{}) catch return TapError.NetworkError;
+        break :blk http.getConditional(api_head_url, cached_etag, &headers) catch |e| return headFetchError(e);
+    } else http.getConditional(api_head_url, cached_etag, &.{}) catch |e| return headFetchError(e);
     defer resp.deinit();
 
     return resolveFromConditional(allocator, forge_kind, resp);
+}
+
+fn headFetchError(e: anyerror) TapError {
+    return if (e == error.OfflineRequired) TapError.OfflineRequired else TapError.NetworkError;
 }
 
 /// Fetch a tap's raw `.rb`, attaching the forge's raw-auth header when it
@@ -2089,4 +2101,22 @@ test "TrippedHosts skips a host longer than its buffer rather than truncating it
 test "kegRbSubtrees keeps a Casks/ keg on Casks/ and everything else formula-first" {
     try std.testing.expectEqualSlices(forge.RawKind, &.{.cask}, kegRbSubtrees(true));
     try std.testing.expectEqualSlices(forge.RawKind, keg_rb_subtrees, kegRbSubtrees(false));
+}
+
+test "resolveHeadCommit refuses in offline mode before dialling the forge" {
+    // Port 1 would fail as NetworkError; OfflineRequired proves no dial happened.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        TapError.OfflineRequired,
+        resolveHeadCommit(threaded.io(), std.process.Environ.empty, std.testing.allocator, true, .github, "http://127.0.0.1:1/commits/HEAD", null),
+    );
+}
+
+test "describeResolveError names offline mode, not the network, for every forge" {
+    var buf: [512]u8 = undefined;
+    inline for (.{ forge.Forge.github, .gitlab, .gitea, .gogs }) |f| {
+        const msg = describeResolveError(&buf, TapError.OfflineRequired, f, "git.example.com");
+        try std.testing.expect(std.mem.indexOf(u8, msg, "offline mode") != null);
+    }
 }

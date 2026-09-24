@@ -876,6 +876,7 @@ const HeadResolverCtx = struct {
     io: std.Io,
     environ: std.process.Environ,
     db: *sqlite.Database,
+    offline: bool,
 
     fn resolve(userdata: *anyopaque, a: std.mem.Allocator, tap_label: []const u8) ?[]const u8 {
         // Unpack the userdata pointer the cache hands back per call.
@@ -888,7 +889,7 @@ const HeadResolverCtx = struct {
         const cached_sha = tap_mod.getCommitSha(a, self.db, tap_label) catch null;
         const cached_etag = tap_mod.getHeadEtag(a, self.db, tap_label) catch null;
 
-        var res = tap_mod.resolveHeadCommit(self.io, self.environ, a, urls.forge, urls.api_head_url, cached_etag) catch |err| {
+        var res = tap_mod.resolveHeadCommit(self.io, self.environ, a, self.offline, urls.forge, urls.api_head_url, cached_etag) catch |err| {
             warnTapHeadResolveFailed(tap_label, err, urls.forge, urls.host);
             return null;
         };
@@ -936,7 +937,7 @@ fn tapRawLatestVersion(
 
     // Dedup'd HEAD resolve: N workers for the same tap pay 1 API call,
     // not N (and the rare moved-tap race costs 1 token, not N).
-    var rctx = HeadResolverCtx{ .io = io, .environ = environ, .db = db };
+    var rctx = HeadResolverCtx{ .io = io, .environ = environ, .db = db, .offline = http.offline };
     const fresh_sha = head_cache.getOrResolve(tap_label, .{
         .userdata = &rctx,
         .resolve = HeadResolverCtx.resolve,

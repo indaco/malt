@@ -87,7 +87,7 @@ fn resolveServed(
 
     var url_buf: [96]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/commits/{s}", .{ port, fixture_sha });
-    return tap.resolveHeadCommit(io, .empty, testing.allocator, forge_kind, url, null);
+    return tap.resolveHeadCommit(io, .empty, testing.allocator, false, forge_kind, url, null);
 }
 
 test "gitlab pin: a recorded commits/<sha> body resolves to the pinned sha" {

@@ -360,7 +360,7 @@ fn resolveTapKeg(x: TapExtra, http: *client_mod.HttpClient, f: *TapFetch) void {
         else
             urls.api_head_url;
         // The tap resolve hint every other command shows (rate limit, token).
-        head = tap_mod.resolveHeadCommit(x.ctx.io, x.ctx.environ, std.heap.smp_allocator, urls.forge, head_url, null) catch |e|
+        head = tap_mod.resolveHeadCommit(x.ctx.io, x.ctx.environ, std.heap.smp_allocator, x.ctx.offline, urls.forge, head_url, null) catch |e|
             return f.fail(tap_mod.describeResolveError(&f.buf, e, urls.forge, urls.host));
         break :blk head.?.sha orelse return f.fail("could not resolve the tap HEAD");
     };

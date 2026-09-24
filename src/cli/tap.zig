@@ -920,6 +920,21 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
                 return;
             }
 
+            // The HEAD lookup below cannot succeed offline. A pinned tap
+            // needs none to stay as it is (a Brewfile `tap` line re-adds it);
+            // anything else is refused before a rebind can strip the pin.
+            if (ctx.offline) {
+                if (!rebinding) {
+                    if (tap_mod.getCommitSha(allocator, &db, name) catch null) |pinned| {
+                        defer allocator.free(pinned);
+                        output.info("Tapped {s} @ {s}", .{ name, pinned[0..@min(pinned.len, 7)] });
+                        return;
+                    }
+                }
+                output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.offline_resolve_hint });
+                return error.Aborted;
+            }
+
             // Apply the rebind before any HTTP work. Clearing the pin
             // upfront means a network failure leaves the row in the
             // "needs refresh" state rather than half-rebound with stale
@@ -943,7 +958,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             defer if (cached_etag_opt) |e| allocator.free(e);
 
             var rerr_buf: [512]u8 = undefined;
-            var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, cached_etag_opt) catch |e| {
+            var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, ctx.offline, urls.forge, urls.api_head_url, cached_etag_opt) catch |e| {
                 output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(&rerr_buf, e, urls.forge, urls.host) });
                 // Rebind already moved (owner, repo) and cleared the pin —
                 // the row is unfetchable until `mt tap --refresh {slug}` lands a fresh SHA.
@@ -1014,7 +1029,7 @@ fn pinTap(
     const commit_url = try tap_mod.resolveCommitUrl(allocator, db, slug, sha);
     defer allocator.free(commit_url);
     var perr_buf: [512]u8 = undefined;
-    var echoed_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, pair.forge, commit_url, null) catch |e| {
+    var echoed_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, ctx.offline, pair.forge, commit_url, null) catch |e| {
         if (e == error.NotFound) {
             output.err("Cannot pin {s} @ {s}: {s} has no such commit on this tap.", .{ slug, sha[0..@min(sha.len, 7)], pair.host });
         } else {
@@ -1134,7 +1149,7 @@ fn resolveOneHead(
     // If-None-Match so a stale-but-unmoved upstream still surfaces a
     // fresh body and the operator can confirm the tap really hasn't
     // budged. Per task implementation notes.
-    var res = try tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, null);
+    var res = try tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, ctx.offline, urls.forge, urls.api_head_url, null);
     defer res.deinit();
     const sha = res.sha orelse return error.MalformedJson;
     const sha_owned = try allocator.dupe(u8, sha);
@@ -1168,7 +1183,7 @@ fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Data
     // current body. The new etag is still persisted afterwards so the
     // *next* non-refresh resolve can short-circuit.
     var rerr_buf: [512]u8 = undefined;
-    var res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, null) catch |e| {
+    var res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, ctx.offline, urls.forge, urls.api_head_url, null) catch |e| {
         output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(&rerr_buf, e, urls.forge, urls.host) });
         return error.Aborted;
     };
