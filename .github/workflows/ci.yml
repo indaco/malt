@@ -83,6 +83,9 @@ jobs:
       - name: Regression guard - Ruby-DSL Cellar confinement
         run: ./scripts/regressions/ruby-dsl-name-version-escape-cellar.sh
 
+      - name: Regression guard - tap raw binary stays in its keg
+        run: ./scripts/regressions/raw-binary-name-escapes-keg-tap-raw-binary-target-not-a-path-component.sh
+
       - name: Regression guard - Cellar delete confinement
         run: ./scripts/regressions/formula-name-version-reach-deletetree-unguarded.sh
 
