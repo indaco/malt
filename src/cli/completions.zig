@@ -151,7 +151,7 @@ pub const bash_script =
     \\    local cmd_flags=""
     \\    case "$cmd" in
     \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-deps --only-dependencies --isolate-deps --isolate-dependencies --use-system-ruby= --allow-unpinned --quiet -q --json" ;;
-    \\        reinstall)        cmd_flags="--cask --dry-run --isolate-deps --isolate-dependencies --quiet -q --json" ;;
+    \\        reinstall)        cmd_flags="--cask --formula --dry-run --isolate-deps --isolate-dependencies --quiet -q --json" ;;
     \\        backup)           cmd_flags="--output -o --versions --services --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --broken-symlinks --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
@@ -287,7 +287,8 @@ pub const zsh_script =
     \\                    ;;
     \\                reinstall)
     \\                    _arguments \
-    \\                        '--cask[Force cask path (auto-detected from the DB)]' \
+    \\                        '--cask[Pick the cask when a formula shares its name]' \
+    \\                        '--formula[Pick the formula when a cask shares its name]' \
     \\                        '--dry-run[Show what would be reinstalled]' \
     \\                        '--isolate-deps[Apply isolation to any newly fetched dep]' \
     \\                        '--isolate-dependencies[Alias of --isolate-deps]' \
@@ -630,7 +631,8 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l json    -d 'JSON output'
     \\
     \\    # reinstall
-    \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l cask    -d 'Force cask path (auto-detected from the DB)'
+    \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l cask    -d 'Pick the cask when a formula shares its name'
+    \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l formula -d 'Pick the formula when a cask shares its name'
     \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l isolate-deps         -d 'Apply isolation to deps newly fetched by this reinstall'
     \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l isolate-dependencies -d 'Alias of --isolate-deps'

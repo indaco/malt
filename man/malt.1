@@ -130,8 +130,14 @@ install protocol without retyping the --force flag.
 Reinstall is package-scoped — transitive dependencies are NOT
 reinstalled. To rebuild a dep, name it explicitly.
 
+A tap package reinstalls from its owning tap and side, named as
+`<name>` or `<user>/<repo>/<name>`; reinstall it on its own. A
+`--local` keg is reinstalled with `mt install --local --force <path>`.
+
 Flags pass through to `install`; the common ones:
-  --cask               Force cask path (auto-detected from the DB row)
+  --cask               Pick the cask when a formula shares its name
+                       (otherwise auto-detected from the DB row)
+  --formula            Pick the formula when a cask shares its name
   --dry-run            Show what would be reinstalled
   --quiet, -q          Suppress non-error output
   --json               JSON output (mirrors `mt install --json`)
@@ -143,6 +149,7 @@ Flags pass through to `install`; the common ones:
 Examples:
   malt reinstall wget
   malt reinstall --cask firefox
+  malt reinstall user/repo/tool
 .fi
 .SS uninstall
 .nf

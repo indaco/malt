@@ -308,7 +308,7 @@ mt install --dry-run jq                  # preview without installing
 
 Other flags: `--force` (overwrite existing), `--use-system-ruby[=<name>,…]` (delegate `post_install` to system Ruby, sandboxed, per-formula), `--allow-unpinned` (let a tap or local recipe that declares `sha256 :no_check` install unverified - it covers every package the run installs, dependencies included, and each one warns), `--quiet`/`-q`, `--json`. `mt restore` and `mt bundle` never pass `--allow-unpinned` on: a backup file or Brewfile cannot opt in for you.
 
-`mt reinstall <pkg>` is the discoverable peer of `mt install --force`: refuses if the package isn't installed, wipes and re-materialises the existing keg or cask. Transitive dependencies are not reinstalled. Global flags (`--json`, `--quiet`, `--dry-run`) pass through.
+`mt reinstall <pkg>` is the discoverable peer of `mt install --force`: refuses if the package isn't installed, wipes and re-materialises the existing keg or cask. A tap package reinstalls from its owning tap, named bare or as `<user>/<repo>/<name>`, on its own. Transitive dependencies are not reinstalled. Global flags (`--json`, `--quiet`, `--dry-run`) pass through.
 
 `mt run <pkg> -- <args...>` runs a binary without a permanent install. Useful for one-off invocations:
 
