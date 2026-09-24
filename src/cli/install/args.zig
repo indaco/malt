@@ -222,6 +222,8 @@ pub const InstallFlags = struct {
     only_deps: bool = false,
     download_only: bool = false,
     isolate_deps: bool = false,
+    /// `--allow-unpinned`: admit a tap/local recipe declaring `sha256 :no_check`.
+    allow_unpinned: bool = false,
     /// Resolved `--use-system-ruby` scope. Empty means system ruby off.
     system_ruby: []const []const u8 = &.{},
 
@@ -323,6 +325,7 @@ const InstallFlag = enum {
     only_deps,
     download_only,
     isolate_deps,
+    allow_unpinned,
 };
 
 const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
@@ -345,6 +348,7 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     // Long-form alias — mirrors the `--only-deps` / `--only-dependencies`
     // pair so the flag surface stays predictable.
     .{ "--isolate-dependencies", .isolate_deps },
+    .{ "--allow-unpinned", .allow_unpinned },
 });
 
 /// Scan + validate the install argv in one place. Returns validated data or
@@ -384,6 +388,7 @@ pub fn parse(arena: std.mem.Allocator, args: []const []const u8) error{OutOfMemo
             .only_deps => flags.only_deps = true,
             .download_only => flags.download_only = true,
             .isolate_deps => flags.isolate_deps = true,
+            .allow_unpinned => flags.allow_unpinned = true,
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try packages.append(arena, arg);
         }
@@ -497,6 +502,15 @@ test "parse: a bare package name yields ok with default flags" {
             try std.testing.expectEqual(InstallFlags{}, p.flags);
         },
     }
+}
+
+test "parse: --allow-unpinned is the only way to set the checksum opt-in" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const on = try parse(arena.allocator(), &.{ "--local", "--allow-unpinned", "/tmp/foo.rb" });
+    try std.testing.expect(on.ok.flags.allow_unpinned);
+    const off = try parse(arena.allocator(), &.{ "--local", "/tmp/foo.rb" });
+    try std.testing.expect(!off.ok.flags.allow_unpinned);
 }
 
 test "parse: --local without a path is refused (a .rb path is required)" {

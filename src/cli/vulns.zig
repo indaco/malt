@@ -374,6 +374,12 @@ fn resolveTapKeg(x: TapExtra, http: *client_mod.HttpClient, f: *TapFetch) void {
                 "recipe " ++ rb_parse.checksum_opt_out_reason
             else
                 "unreadable recipe");
+            // OSV knows no release called "latest": asking would read as clean,
+            // and failing would leave the scan incomplete on every run.
+            if (rb.version_latest) {
+                f.outcome = .unidentified;
+                return;
+            }
             var buf: [512]u8 = undefined;
             const target = identify.identify(&buf, rb.url, rb.version) orelse {
                 f.outcome = .unidentified;

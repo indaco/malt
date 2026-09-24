@@ -1826,11 +1826,12 @@ test "tapVersionFromSubtrees names sha256 :no_check instead of an unsupported DS
     var listener = try addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
+    // A parseable opt-out compares like any recipe; this url cannot be expanded.
     const cask_rb =
         \\cask "pkg" do
         \\  version "2.0"
         \\  sha256 :no_check
-        \\  url "https://x/pkg.dmg"
+        \\  url "https://x/pkg-#{language}.dmg"
         \\end
     ;
     var srv = RbLayoutServer{ .io = io, .listener = &listener, .cask_rb = cask_rb };

@@ -306,7 +306,7 @@ mt install --local ./hello.rb            # local Ruby formula (see "Local formul
 mt install --dry-run jq                  # preview without installing
 ```
 
-Other flags: `--force` (overwrite existing), `--use-system-ruby[=<name>,…]` (delegate `post_install` to system Ruby, sandboxed, per-formula), `--quiet`/`-q`, `--json`.
+Other flags: `--force` (overwrite existing), `--use-system-ruby[=<name>,…]` (delegate `post_install` to system Ruby, sandboxed, per-formula), `--allow-unpinned` (let a tap or local recipe that declares `sha256 :no_check` install unverified - it covers every package the run installs, dependencies included, and each one warns), `--quiet`/`-q`, `--json`. `mt restore` and `mt bundle` never pass `--allow-unpinned` on: a backup file or Brewfile cannot opt in for you.
 
 `mt reinstall <pkg>` is the discoverable peer of `mt install --force`: refuses if the package isn't installed, wipes and re-materialises the existing keg or cask. Transitive dependencies are not reinstalled. Global flags (`--json`, `--quiet`, `--dry-run`) pass through.
 
@@ -345,7 +345,10 @@ mt upgrade --formula                     # all outdated formulas
 mt upgrade --cask                        # all outdated casks
 mt upgrade --pinned --dry-run            # audit pinned drift without mutating
 mt upgrade --force <name>                # bypass a pin for one upgrade
+mt upgrade --allow-unpinned <name>       # upgrade a sha256 :no_check tap package
 ```
+
+Without `--allow-unpinned`, a tap package whose recipe declares `sha256 :no_check` is skipped by a bulk `mt upgrade` and fails when named.
 
 `mt outdated` reads a cached snapshot (5 min TTL; `MALT_OUTDATED_MAX_AGE=<minutes>` overrides, `0` always recomputes) that refreshes live once it ages out, so it stays in step with `mt upgrade`. Entries are filtered through the live DB, so a removed or hand-upgraded keg never appears. Add `--json` for machine output.
 
@@ -680,7 +683,7 @@ The supply-chain story:
 - **Signed releases.** Every release is cosign-signed keyless via GitHub OIDC; `install.sh` verifies the signature before trusting the SHA256 checksum. A leaked GitHub token is not enough to ship a malicious malt binary.
 - **Pinned third-party source.** `homebrew-core` and third-party taps are pinned to a specific commit SHA. Formula Ruby source is SHA256-verified against an embedded manifest at that commit. A rewritten upstream branch cannot substitute a formula's bottle URL mid-install. Advance a tap pin explicitly with `mt tap --refresh user/repo`.
 - **Sandboxed `post_install`.** The opt-in `--use-system-ruby` path runs inside a `sandbox-exec` profile scoped to the formula's cellar. Hostile formulas can affect their own install prefix and nothing else.
-- **Boundary validation.** `MALT_PREFIX`, `MALT_CACHE`, launchd service declarations, install-script checksums, and HTTP redirects fail-closed on malformed or suspicious input - no silent HTTPS→HTTP downgrades, no `/bin/sh` in service argv, no `..` in prefix paths. A cask that declares no `sha256` is refused rather than treated as opted out; only an API cask's explicit `sha256 :no_check` skips verification. Tap and local `.rb` packages must pin a 64 lowercase-hex `sha256` and are refused otherwise. A manifest URL must be `https://` unless a digest already pins the bytes it returns - so the handful of upstream packages still served over plaintext keep installing, while one that hash-verifies nothing is refused outright.
+- **Boundary validation.** `MALT_PREFIX`, `MALT_CACHE`, launchd service declarations, install-script checksums, and HTTP redirects fail-closed on malformed or suspicious input - no silent HTTPS→HTTP downgrades, no `/bin/sh` in service argv, no `..` in prefix paths. A cask that declares no `sha256` is refused rather than treated as opted out; only an API cask's explicit `sha256 :no_check` skips verification. Tap and local `.rb` packages must pin a 64 lowercase-hex `sha256`; one that declares `sha256 :no_check` installs only with `--allow-unpinned`, with a warning, and never as a `.pkg`. A manifest URL must be `https://` unless a digest already pins the bytes it returns - so the handful of upstream packages still served over plaintext keep installing, while one that hash-verifies nothing is refused outright.
 - **Trusted verifier.** `mt version update` refuses a `cosign` that resolves inside `/opt/malt`, which packages can write to. A shim dropped there cannot rubber-stamp a malicious update.
 - **Posture visibility.** `mt doctor` flags world- or group-writable paths and unexpected ownership under `/opt/malt`, so multi-user machines see their attack surface at a glance.
 

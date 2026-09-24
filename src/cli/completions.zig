@@ -150,13 +150,13 @@ pub const bash_script =
     \\
     \\    local cmd_flags=""
     \\    case "$cmd" in
-    \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-deps --only-dependencies --isolate-deps --isolate-dependencies --use-system-ruby= --quiet -q --json" ;;
+    \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-deps --only-dependencies --isolate-deps --isolate-dependencies --use-system-ruby= --allow-unpinned --quiet -q --json" ;;
     \\        reinstall)        cmd_flags="--cask --dry-run --isolate-deps --isolate-dependencies --quiet -q --json" ;;
     \\        backup)           cmd_flags="--output -o --versions --services --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --broken-symlinks --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
     \\        uninstall|remove) cmd_flags="--cask --force --dry-run" ;;
-    \\        upgrade)          cmd_flags="--cask --formula --dry-run --pinned --force -f --isolate-deps --isolate-dependencies --use-system-ruby=" ;;
+    \\        upgrade)          cmd_flags="--cask --formula --dry-run --pinned --force -f --isolate-deps --isolate-dependencies --use-system-ruby= --allow-unpinned" ;;
     \\        outdated)         cmd_flags="--json --formula --formulae --cask --casks --pinned-only --tap --refresh --quiet -q" ;;
     \\        update)           cmd_flags="--check --quiet -q" ;;
     \\        version)          cmd_flags="--check --yes -y --no-verify --cleanup" ;;
@@ -280,6 +280,7 @@ pub const zsh_script =
     \\                        '--isolate-deps[Keep transitive deps out of <prefix>/bin and <prefix>/sbin]' \
     \\                        '--isolate-dependencies[Alias of --isolate-deps]' \
     \\                        '--use-system-ruby=[Run post_install via system Ruby for the named kegs]:names:' \
+    \\                        '--allow-unpinned[Install a sha256 :no_check tap or local recipe unverified]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
     \\                        '--json[Output result as JSON]' \
     \\                        '*::package:'
@@ -311,6 +312,7 @@ pub const zsh_script =
     \\                        '--isolate-deps[Apply isolation to deps newly pulled in by this upgrade]' \
     \\                        '--isolate-dependencies[Alias of --isolate-deps]' \
     \\                        '--use-system-ruby=[Run post_install via system Ruby for the named kegs]:names:' \
+    \\                        '--allow-unpinned[Upgrade a sha256 :no_check tap package unverified]' \
     \\                        '*::package:'
     \\                    ;;
     \\                pin|unpin)
@@ -624,6 +626,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l isolate-deps         -d 'Keep transitive deps out of <prefix>/bin and <prefix>/sbin'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l isolate-dependencies -d 'Alias of --isolate-deps'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l use-system-ruby -d 'Run post_install via system Ruby for the named kegs'
+    \\    complete -c $__malt_bin -n '__malt_using_command install' -l allow-unpinned -d 'Install a sha256 :no_check tap or local recipe unverified'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l json    -d 'JSON output'
     \\
     \\    # reinstall
@@ -650,6 +653,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l isolate-deps         -d 'Apply isolation to deps newly pulled in by this upgrade'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l isolate-dependencies -d 'Alias of --isolate-deps'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l use-system-ruby -d 'Run post_install via system Ruby for the named kegs'
+    \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l allow-unpinned -d 'Upgrade a sha256 :no_check tap package unverified'
     \\
     \\    # outdated
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l json        -d 'JSON output'

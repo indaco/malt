@@ -30,6 +30,9 @@ pub const AppCtx = struct {
     /// on a miss rather than waiting for a connect timeout. Resolved
     /// once at boot so per-call sites read a single bool.
     offline: bool = false,
+    /// `--allow-unpinned` on install/upgrade. Lives here, like `offline`,
+    /// because the tap/local materialise sits many calls below the parser.
+    allow_unpinned: bool = false,
 };
 
 /// Parent `environ` as `std.process.Environ`. Production `main` builds an

@@ -39,11 +39,21 @@ const cliamp_rb =
     \\end
 ;
 
-/// A tap recipe that opts out of checksum verification; malt cannot read it.
+/// A tap recipe that opts out of checksum verification. Scanning needs only
+/// its url and version, so the missing digest does not matter here.
 const nocheck_rb =
     \\class Nocheck < Formula
     \\  version "1.0"
     \\  url "https://github.com/someone/nocheck/releases/download/v1.0/nocheck.tar.gz"
+    \\  sha256 :no_check
+    \\end
+;
+
+/// The usual companion of `:no_check`; no release to ask OSV about.
+const nocheck_latest_rb =
+    \\class Nolatest < Formula
+    \\  version :latest
+    \\  url "https://github.com/someone/nolatest/releases/latest/download/nolatest.tar.gz"
     \\  sha256 :no_check
     \\end
 ;
@@ -169,6 +179,8 @@ const FixtureServer = struct {
             try req.respond(dual_cask_rb, .{});
         } else if (std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Formula/nocheck.rb")) {
             try req.respond(nocheck_rb, .{});
+        } else if (std.mem.eql(u8, target, "/" ++ tap_sha ++ "/Formula/nolatest.rb")) {
+            try req.respond(nocheck_latest_rb, .{});
         } else if (std.mem.eql(u8, target, "/commits/HEAD")) {
             // What a forge answers for the tap's HEAD; kegs recorded before
             // the installed commit was tracked resolve through here.
@@ -594,22 +606,29 @@ test "a tap keg whose recipe cannot be fetched is unchecked, never quietly uncov
     try testing.expect(std.mem.indexOf(u8, named.stdout, "\"not_covered\":0") != null);
 }
 
-test "a tap keg whose recipe declares sha256 :no_check is unchecked with that reason" {
+test "a tap keg whose recipe declares sha256 :no_check is still scanned from its url" {
     const h = try Harness.init(testing.allocator, "tap_nocheck");
     defer h.deinit();
-    try h.seed(&.{"curl@8.16.0"});
     try h.seedTap("someone/tap", &.{"nocheck@1.0"});
 
-    var errs: std.ArrayList(u8) = .empty;
-    defer errs.deinit(testing.allocator);
-    output.beginStderrCapture(testing.allocator, &errs);
     const r = try h.run(&.{}, true);
-    output.endStderrCapture();
     defer testing.allocator.free(r.stdout);
+    try testing.expect(std.mem.indexOf(u8, h.postBody(), "https://github.com/someone/nocheck") != null);
+    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"unchecked\":[]") != null);
+}
 
-    try testing.expectEqual(@as(?anyerror, error.ScanIncomplete), r.err);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"unchecked\":[\"nocheck\"]") != null);
-    try testing.expect(std.mem.indexOf(u8, errs.items, "sha256 :no_check") != null);
+test "a :latest tap keg is not covered, never reported clean nor a failed scan" {
+    const h = try Harness.init(testing.allocator, "tap_nolatest");
+    defer h.deinit();
+    try h.seedTap("someone/tap", &.{"nolatest@1.0"});
+
+    const r = try h.run(&.{}, true);
+    defer testing.allocator.free(r.stdout);
+    // An exit that never clears would keep a CI gate red for good.
+    try testing.expect(r.err == null);
+    try testing.expectEqualStrings("{\"schema_version\":1,\"not_covered\":1,\"unchecked\":[],\"formulae\":[]}\n", r.stdout);
+    // A forge url, so the skipped query is the :latest rule, not an unknown host.
+    try testing.expectEqualStrings("", h.postBody());
 }
 
 test "a tap keg installed from Casks/ is scanned from the cask, not a same-named formula" {

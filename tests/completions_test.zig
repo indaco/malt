@@ -382,10 +382,17 @@ test "no shell advertises the removed phantom flags" {
         try testing.expect(std.mem.indexOf(u8, script, "-l system") == null);
     }
     // `--all` is scoped: search, tap and link keep their real ones.
-    try expectNotContains(try bashFlagsFor("upgrade)"), "--all");
+    // Whole-token match: `--allow-unpinned` is a real, different flag.
+    try testing.expect(!hasFlagToken(try bashFlagsFor("upgrade)"), "--all"));
     try expectNotContains(try zshCaseFor("                upgrade)"), "'--all[");
-    try testing.expect(std.mem.indexOf(u8, completions.fish_script, "__malt_using_command upgrade' -l all") == null);
+    try testing.expect(std.mem.indexOf(u8, completions.fish_script, "__malt_using_command upgrade' -l all ") == null);
     try expectContains(try bashFlagsFor("search)"), "--all");
+}
+
+fn hasFlagToken(haystack: []const u8, flag: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, haystack, " \t\n\"");
+    while (it.next()) |tok| if (std.mem.eql(u8, tok, flag)) return true;
+    return false;
 }
 
 fn expectNotContains(haystack: []const u8, needle: []const u8) !void {
