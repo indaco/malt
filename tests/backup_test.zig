@@ -263,10 +263,12 @@ test "writeBackupJson: empty inputs emit `{formulas:[],casks:[]}\\n`" {
     try testing.expectEqualStrings("{\"formulas\":[],\"casks\":[]}\n", aw.written());
 }
 
-test "writeBackupJson: emits `name`/`version` for formulas and `name`/`version`/`tap` for casks" {
+test "writeBackupJson: emits `name`/`version`/`tap` for formulas and casks" {
+    // Formulas carry `tap` like casks so a consumer can restore a tap keg
+    // from its owning tap instead of homebrew/core.
     const formulas = [_]backup.JsonFormula{
-        .{ .name = "wget", .version = "1.21" },
-        .{ .name = "jq", .version = "1.7" },
+        .{ .name = "wget", .version = "1.21", .tap = "" },
+        .{ .name = "jq", .version = "1.7", .tap = "acme/tools" },
     };
     const casks = [_]backup.JsonCask{
         .{ .name = "firefox", .version = "120.0", .tap = "" },
@@ -277,8 +279,8 @@ test "writeBackupJson: emits `name`/`version` for formulas and `name`/`version`/
     try backup.writeBackupJson(&aw.writer, &formulas, &casks, null);
     try testing.expectEqualStrings(
         "{\"formulas\":[" ++
-            "{\"name\":\"wget\",\"version\":\"1.21\"}," ++
-            "{\"name\":\"jq\",\"version\":\"1.7\"}" ++
+            "{\"name\":\"wget\",\"version\":\"1.21\",\"tap\":\"\"}," ++
+            "{\"name\":\"jq\",\"version\":\"1.7\",\"tap\":\"acme/tools\"}" ++
             "],\"casks\":[" ++
             "{\"name\":\"firefox\",\"version\":\"120.0\",\"tap\":\"\"}," ++
             "{\"name\":\"flux-markdown\",\"version\":\"0.1.0\",\"tap\":\"xykong/tap\"}" ++

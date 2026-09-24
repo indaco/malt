@@ -521,7 +521,7 @@ mt restore my-setup.txt --dry-run
 mt restore my-setup.txt --force
 ```
 
-Only directly-installed packages are recorded; transitive dependencies are resolved on restore. The file format is one entry per line (`formula <name>` / `cask <token>`) with `#` comments. Restore batches into two `mt install` invocations, so dependency resolution, parallel downloads, and atomic install all apply. Lines with a `@<version>` suffix install at that version.
+Only directly-installed packages are recorded; transitive dependencies are resolved on restore. The file format is one entry per line (`formula <name>` / `cask <token>`, with tap packages as `<user>/<repo>/<name>`) with `#` comments. Restore batches into two `mt install` invocations, so dependency resolution, parallel downloads, and atomic install all apply. Lines with a `@<version>` suffix install at that version.
 
 ### Custom sources
 

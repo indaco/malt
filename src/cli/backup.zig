@@ -9,7 +9,8 @@
 //!   formula git
 //!   formula wget
 //!   cask firefox
-//!   cask slack
+//!   formula user/repo/tool   (a third-party tap package: its owning tap)
+//!   cask user/repo/app       (also a tap keg built from the tap's Casks/)
 //!
 //! An optional `@<version>` suffix is written when `--versions` is passed and
 //! honoured by `malt restore`.
@@ -23,6 +24,7 @@ const atomic = @import("../fs/atomic.zig");
 const path_write = @import("../fs/path_write.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
+const install_args = @import("install/args.zig");
 
 pub const Kind = enum { formula, cask, service };
 
@@ -130,9 +132,11 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
     var count: usize = 0;
 
     // Directly-installed formulae only — dependencies are pulled transitively
-    // by `malt install` during restore.
+    // by `malt install` during restore. A tap keg is written by its slug so
+    // restore reaches the owning tap, and as `cask` when it came from the
+    // tap's Casks/ subtree, the only side that can rebuild it.
     const formulae_sql =
-        "SELECT name, version FROM kegs " ++
+        "SELECT name, version, tap, tap_rb_subtree = 'cask' FROM kegs " ++
         "WHERE install_reason = 'direct' " ++
         "ORDER BY name;";
     {
@@ -141,9 +145,14 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
         while (try stepOrFail(&fstmt)) {
             const name_ptr = fstmt.columnText(0) orelse continue;
             const ver_ptr = fstmt.columnText(1);
+            const tap_ptr = fstmt.columnText(2);
             const name = std.mem.sliceTo(name_ptr, 0);
             const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
-            try writeEntry(w, .formula, name, version, include_versions);
+            const tap = if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "";
+            var qual_buf: [256]u8 = undefined;
+            const entry = try qualify(&qual_buf, tap, name);
+            const kind: Kind = if (fstmt.columnBool(3)) .cask else .formula;
+            try writeEntry(w, kind, entry, version, include_versions);
             count += 1;
         }
     }
@@ -164,21 +173,9 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
             const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
             const tap = if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "";
 
-            // Qualify only for third-party taps. `homebrew/cask` is the
-            // core API path and stays bare so legacy backups parse the
-            // same way.
-            if (tap.len > 0 and !std.mem.eql(u8, tap, "homebrew/cask")) {
-                var qual_buf: [256]u8 = undefined;
-                const qualified = std.fmt.bufPrint(&qual_buf, "{s}/{s}", .{ tap, token }) catch {
-                    // No legitimate slug overflows this; a bare token here
-                    // would be a line restore cannot use.
-                    output.err("Tap label too long for cask {s} ({s})", .{ token, tap });
-                    return RowsError.DatabaseError;
-                };
-                try writeEntry(w, .cask, qualified, version, include_versions);
-            } else {
-                try writeEntry(w, .cask, token, version, include_versions);
-            }
+            var qual_buf: [256]u8 = undefined;
+            const entry = try qualify(&qual_buf, tap, token);
+            try writeEntry(w, .cask, entry, version, include_versions);
             count += 1;
         }
     }
@@ -200,6 +197,25 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
     }
 
     return count;
+}
+
+/// The tap a package can be re-fetched from, or `""` for core and for a
+/// `--local` keg, whose `local` label is not a tap.
+fn thirdPartyTap(tap: []const u8) []const u8 {
+    return if (install_args.isCoreTap(tap) or install_args.isLocalTap(tap)) "" else tap;
+}
+
+/// `<tap>/<name>` for a third-party tap; bare otherwise, so legacy backups
+/// parse the same way.
+fn qualify(buf: []u8, tap: []const u8, name: []const u8) RowsError![]const u8 {
+    const owner = thirdPartyTap(tap);
+    if (owner.len == 0) return name;
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ owner, name }) catch {
+        // No legitimate slug overflows this; a bare name here would be a
+        // line restore cannot use.
+        output.err("Tap label too long for {s} ({s})", .{ name, tap });
+        return RowsError.DatabaseError;
+    };
 }
 
 /// A backup that silently drops rows is worse than no backup — restore would
@@ -240,17 +256,20 @@ fn executeJson(
     var services: std.ArrayList(JsonService) = .empty;
 
     {
-        var s = try prepareOrFail(db, "SELECT name, version FROM kegs " ++
+        var s = try prepareOrFail(db, "SELECT name, version, tap FROM kegs " ++
             "WHERE install_reason = 'direct' " ++
             "ORDER BY name;");
         defer s.finalize();
         while (try stepOrFail(&s)) {
             const name_ptr = s.columnText(0) orelse continue;
             const ver_ptr = s.columnText(1);
+            const tap_ptr = s.columnText(2);
             const name = a.dupe(u8, std.mem.sliceTo(name_ptr, 0)) catch return Error.WriteFailed;
             const version = a.dupe(u8, if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "") catch
                 return Error.WriteFailed;
-            formulas.append(a, .{ .name = name, .version = version }) catch
+            const tap = a.dupe(u8, thirdPartyTap(if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "")) catch
+                return Error.WriteFailed;
+            formulas.append(a, .{ .name = name, .version = version, .tap = tap }) catch
                 return Error.WriteFailed;
         }
     }
@@ -265,7 +284,7 @@ fn executeJson(
             const name = a.dupe(u8, std.mem.sliceTo(name_ptr, 0)) catch return Error.WriteFailed;
             const version = a.dupe(u8, if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "") catch
                 return Error.WriteFailed;
-            const tap = a.dupe(u8, if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "") catch
+            const tap = a.dupe(u8, thirdPartyTap(if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "")) catch
                 return Error.WriteFailed;
             casks.append(a, .{ .name = name, .version = version, .tap = tap }) catch
                 return Error.WriteFailed;
@@ -318,10 +337,12 @@ fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8) Error!vo
     };
 }
 
-/// Plain-data view of one formula row for the `--json` writer.
+/// Plain-data view of one formula row for the `--json` writer. `tap` is
+/// the owning tap, `""` for core and `--local` kegs, like `JsonCask.tap`.
 pub const JsonFormula = struct {
     name: []const u8,
     version: []const u8,
+    tap: []const u8,
 };
 
 /// Plain-data view of one cask row for the `--json` writer. `tap` is the
@@ -359,6 +380,8 @@ pub fn writeBackupJson(
         try output.jsonStr(w, f.name);
         try w.writeAll(",\"version\":");
         try output.jsonStr(w, f.version);
+        try w.writeAll(",\"tap\":");
+        try output.jsonStr(w, f.tap);
         try w.writeAll("}");
     }
     try w.writeAll("],\"casks\":[");
@@ -392,7 +415,7 @@ pub fn writeBackupJson(
 pub fn writeHeader(w: *std.Io.Writer) !void {
     try w.writeAll("# malt backup\n");
     try w.writeAll("# Generated by `malt backup`. Restore with `malt restore <file>`.\n");
-    try w.writeAll("# Format: one entry per line — `formula <name>` or `cask <token>`.\n");
+    try w.writeAll("# Format: one entry per line — `formula <name>` or `cask <token>`; tap packages as `<user>/<repo>/<name>`.\n");
     try w.writeAll("# Lines starting with `#` are comments and are ignored on restore.\n");
     try w.writeAll("\n");
 }
@@ -659,9 +682,13 @@ fn seedRowsDb() !sqlite.Database {
     errdefer db.close();
     try schema.initSchema(&db);
     try db.exec(
-        \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, install_reason) VALUES
-        \\  ('git', 'git', '2.0', 'a', '/c/git', 'direct'),
-        \\  ('pcre', 'pcre', '10.0', 'b', '/c/pcre', 'dependency');
+        \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, install_reason, tap, tap_rb_subtree) VALUES
+        \\  ('git', 'git', '2.0', 'a', '/c/git', 'direct', NULL, NULL),
+        \\  ('pcre', 'pcre', '10.0', 'b', '/c/pcre', 'dependency', NULL, NULL),
+        \\  ('ack', 'acme/tools/ack', '1.0', 'c', '/c/ack', 'direct', 'acme/tools', 'formula'),
+        \\  ('bat', 'acme/tools/bat', '1.5', 'd', '/c/bat', 'direct', 'acme/tools', 'cask'),
+        \\  ('cmake', 'cmake', '3.0', 'e', '/c/cmake', 'direct', 'homebrew/core', NULL),
+        \\  ('lx', '/src/lx.rb', '1.0', 'f', '/c/lx', 'direct', 'local', NULL);
         \\INSERT INTO casks(token, name, version, url, tap) VALUES
         \\  ('foo', 'Foo', '1.0', 'https://x/foo.dmg', 'acme/tools'),
         \\  ('bar', 'Bar', '2.0', 'https://x/bar.dmg', 'homebrew/cask'),
@@ -674,7 +701,7 @@ fn seedRowsDb() !sqlite.Database {
     return db;
 }
 
-test "writeRows qualifies third-party casks and leaves core, NULL and empty taps bare" {
+test "writeRows qualifies third-party taps and leaves core, NULL and empty taps bare" {
     // Row order follows the raw token, not the emitted slug: `mt restore`
     // consumers pin these bytes, so the ordering is part of the contract.
     var db = try seedRowsDb();
@@ -684,15 +711,21 @@ test "writeRows qualifies third-party casks and leaves core, NULL and empty taps
 
     const count = try writeRows(&aw.writer, &db, true, false);
 
+    // A keg sourced from a tap's Casks/ subtree is written as `cask` so
+    // restore routes it through `--cask`, the only side that reaches it.
     try std.testing.expectEqualStrings(
-        "formula git@2.0\n" ++
+        "formula acme/tools/ack@1.0\n" ++
+            "cask acme/tools/bat@1.5\n" ++
+            "formula cmake@3.0\n" ++
+            "formula git@2.0\n" ++
+            "formula lx@1.0\n" ++
             "cask bar@2.0\n" ++
             "cask baz@3.0\n" ++
             "cask acme/tools/foo@1.0\n" ++
             "cask qux@4.0\n",
         aw.written(),
     );
-    try std.testing.expectEqual(@as(usize, 5), count);
+    try std.testing.expectEqual(@as(usize, 9), count);
 }
 
 test "writeRows emits auto-start services only when asked" {
@@ -704,7 +737,11 @@ test "writeRows emits auto-start services only when asked" {
     const count = try writeRows(&aw.writer, &db, false, true);
 
     try std.testing.expectEqualStrings(
-        "formula git\n" ++
+        "formula acme/tools/ack\n" ++
+            "cask acme/tools/bat\n" ++
+            "formula cmake\n" ++
+            "formula git\n" ++
+            "formula lx\n" ++
             "cask bar\n" ++
             "cask baz\n" ++
             "cask acme/tools/foo\n" ++
@@ -712,7 +749,16 @@ test "writeRows emits auto-start services only when asked" {
             "service svc\n",
         aw.written(),
     );
-    try std.testing.expectEqual(@as(usize, 6), count);
+    try std.testing.expectEqual(@as(usize, 10), count);
+}
+
+test "thirdPartyTap keeps only a tap a package can be re-fetched from" {
+    // `local` is a label for a `.rb` on disk, not a tap: `local/<name>`
+    // resolves nowhere.
+    for ([_][]const u8{ "", "homebrew/core", "homebrew/cask", "local" }) |tap| {
+        try std.testing.expectEqualStrings("", thirdPartyTap(tap));
+    }
+    try std.testing.expectEqualStrings("acme/tools", thirdPartyTap("acme/tools"));
 }
 
 test "writeRows aborts on an unreadable table instead of truncating" {
@@ -734,6 +780,18 @@ test "writeRows refuses a tap label the qualified slug cannot hold" {
     try schema.initSchema(&db);
     const long_tap = "x" ** 300;
     try db.exec("INSERT INTO casks(token, name, version, url, tap) VALUES ('foo', 'Foo', '1.0', 'https://x/foo.dmg', '" ++ long_tap ++ "');");
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    try std.testing.expectError(error.DatabaseError, writeRows(&aw.writer, &db, true, false));
+}
+
+test "writeRows refuses a formula tap label the qualified slug cannot hold" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    const long_tap = "x" ** 300;
+    try db.exec("INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, tap) VALUES ('foo', 'foo', '1.0', 'a', '/c/foo', '" ++ long_tap ++ "');");
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
