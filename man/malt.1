@@ -102,8 +102,9 @@ Flags:
                      (experimental, sandboxed). A bare flag requires a single
                      package; use =<name>,... to scope when installing multiple.
   --allow-unpinned   Let a tap or local .rb that declares `sha256 :no_check`
-                     install with TLS as its only integrity check. Warns on
-                     every such install; an unpinned .pkg is still refused.
+                     install with TLS as its only integrity check. Covers every
+                     package the run installs, dependencies included, and warns
+                     on each; an unpinned .pkg is still refused.
   --isolate-deps     Keep every transitive dep out of <prefix>/bin and
                      <prefix>/sbin. The package(s) you named still link
                      normally; deps land in the Cellar with their `opt/`
@@ -647,6 +648,9 @@ Flags:
   --force       Pass --force to the underlying install
   --quiet, -q   Suppress non-error output
 
+A tap or local recipe that declares `sha256 :no_check` is never installed:
+a backup file cannot opt in to `--allow-unpinned`.
+
 Example:
   malt restore malt-backup-2026-04-10T14-32-05.txt
 .fi
@@ -802,6 +806,9 @@ Subcommands:
 
 Lookup order for install/export without an explicit path:
   ./Brewfile, ./Maltfile.json, ~/.config/malt/Brewfile, ~/.config/malt/Maltfile.json
+
+A tap recipe that declares `sha256 :no_check` is never installed: a bundle
+file cannot opt in to `--allow-unpinned`.
 .fi
 .SS version
 .nf
