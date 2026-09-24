@@ -99,6 +99,9 @@ pub const ResolvedRubyFormula = struct {
     /// Archive URL post `#{version}` interpolation.
     url: []const u8,
     sha256: []const u8,
+    /// The recipe declared `sha256 :no_check` and `--allow-unpinned` admitted
+    /// it; `sha256` is then empty and the fetch is transport-only.
+    checksum_opted_out: bool = false,
     /// Cask DSL `binary "<x>"` override. Set when the archive's
     /// top-level executable does not match `name` (e.g. the
     /// `longbridge-terminal` cask ships a `longbridge` binary). Null
@@ -493,6 +496,7 @@ fn installTapRb(
     }
 
     // Parse the Ruby formula to extract name, version, URL, SHA256 for current arch
+    // An opt-out that still fails to parse keeps its real reason.
     const rb = parseRubyFormula(resp.body) orelse {
         if (rb_parse.optsOutOfChecksum(resp.body))
             sink.err("Cannot parse tap formula: it " ++ rb_parse.checksum_opt_out_reason ++ ". Use: brew install {s}", .{pkg_name})
@@ -500,6 +504,9 @@ fn installTapRb(
             sink.err("Cannot parse tap formula (unsupported Ruby DSL shape). Use: brew install {s}", .{pkg_name});
         return InstallError.FormulaNotFound;
     };
+    try admitChecksum(ctx, sink, rb, pkg_name);
+    // An upgrade's prefetch pass installs nothing; its install pass warns.
+    if (rb.checksum_opted_out and !(download_only and prefetch_slot != null)) warnUnverified(pkg_name);
 
     // Borrows from `resp.body`, which outlives the materialise call below.
     var dep_buf: [64][]const u8 = undefined;
@@ -534,6 +541,7 @@ fn installTapRb(
         .revision = rb.revision,
         .url = final_url,
         .sha256 = rb.sha256,
+        .checksum_opted_out = rb.checksum_opted_out,
         .binary_name = resolvedCaskBinary(&binary_buf, resp.body, rb.version, rb.arch_token),
         .binary_target = rb_parse.parseCaskBinaryTarget(resp.body),
         .app_name = app_name,
@@ -658,6 +666,8 @@ pub fn installLocalFormula(
             sink.err("Cannot parse local formula (missing version/url/sha256 or unsupported DSL shape): {s}", .{realpath});
         return InstallError.FormulaNotFound;
     };
+    try admitChecksum(ctx, sink, rb, realpath);
+    if (rb.checksum_opted_out) warnUnverified(realpath);
 
     // Formula name comes from the basename minus `.rb` — mirrors
     // Homebrew's convention where `wget.rb` installs `wget`. This is
@@ -693,6 +703,7 @@ pub fn installLocalFormula(
         .revision = rb.revision,
         .url = final_url,
         .sha256 = rb.sha256,
+        .checksum_opted_out = rb.checksum_opted_out,
         // Borrows from `body`, which outlives the materialise call below.
         .dependencies = deps,
         .recommended = recommended,
@@ -714,6 +725,17 @@ pub fn installLocalFormula(
     };
     defer allocator.free(cache_dir);
     try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, cache_dir, dry_run, force, false, null, sink);
+}
+
+/// A `sha256 :no_check` recipe installs only under `--allow-unpinned`, and
+/// then always says so: nothing but TLS ties the artefact to the recipe.
+fn admitChecksum(ctx: *const AppCtx, sink: OutputSink, rb: RubyFormulaInfo, label: []const u8) InstallError!void {
+    if (!rb.checksum_opted_out) return;
+    if (!ctx.allow_unpinned) {
+        sink.err("Refusing {s}: it " ++ rb_parse.checksum_opt_out_reason ++ "; pass --allow-unpinned to install it unverified", .{label});
+        return InstallError.FormulaNotFound;
+    }
+    sink.warn("{s} is not checksum-verified: its recipe declares sha256 :no_check, so only TLS protects the download.", .{label});
 }
 
 /// Whether any linker-visible dir under `keg_path` holds an entry - the same
@@ -938,7 +960,13 @@ pub fn materializeRubyFormula(
 
     // A quoted "no_check" would reach the cask verifier's opt-out, and a
     // non-hex value would become the cache file name.
-    if (!store_path.isValidSha256(resolved.sha256)) {
+    // The opt-out travels only as the tag, and only with the run's opt-in.
+    if (resolved.checksum_opted_out) {
+        if (!ctx.allow_unpinned) {
+            sink.err("Refusing {s}: " ++ rb_parse.checksum_opt_out_reason, .{resolved.name});
+            return InstallError.UnpinnedChecksum;
+        }
+    } else if (!store_path.isValidSha256(resolved.sha256)) {
         sink.err("Refusing {s}: " ++ rb_parse.unpinned_checksum_reason, .{resolved.name});
         return InstallError.UnpinnedChecksum;
     }
@@ -947,11 +975,23 @@ pub fn materializeRubyFormula(
     // mounting, ditto, and `installer` live there. Tar.gz/tar.xz/zip
     // formula archives keep the simple-extract path below.
     if (tapCaskArtifactKind(resolved.url, resolved.app_name != null)) |kind| {
+        // A .pkg runs `sudo installer -target /`: root code gated only by TLS.
+        if (kind == .pkg and resolved.checksum_opted_out) {
+            sink.err("Refusing {s}: an unpinned .pkg would run as root with nothing but TLS vouching for it", .{resolved.name});
+            return InstallError.UnpinnedChecksum;
+        }
         return materializeTapCask(ctx, allocator, resolved, db, kind, cache_dir, dry_run, force, download_only, prefetch_slot, sink);
     }
 
     // Before deps, download and the --force prune, so a refusal changes nothing.
     try screenRawBinaryName(sink, resolved);
+
+    // Nothing would ever read the warmed entry: an opted-out install never
+    // trusts the cache.
+    if (download_only and resolved.checksum_opted_out) {
+        sink.err("Refusing --download-only for {s}: its recipe declares sha256 :no_check, so a later install fetches it again", .{resolved.name});
+        return InstallError.UnpinnedChecksum;
+    }
 
     if (dry_run) {
         sink.info("Dry run: would install {s} {s} from {s}", .{ resolved.name, resolved.version, resolved.url });
@@ -994,8 +1034,11 @@ pub fn materializeRubyFormula(
     // publishes via atomic rename. Either branch yields `cache_path`
     // as the on-disk source the extractor reads from below.
     var cache_path_buf: [512]u8 = undefined;
+    // The only digest an opted-out recipe has; it never takes the warm branch.
+    var fetched_hex: [64]u8 = undefined;
     const cache_path = blk: {
-        if (tap_cache.exists(ctx.io, cache_dir, resolved.sha256, archive_ext)) {
+        // Without a pinned digest no warm entry can be trusted.
+        if (!resolved.checksum_opted_out and tap_cache.exists(ctx.io, cache_dir, resolved.sha256, archive_ext)) {
             // Warm cache: skip the fetch. SHA-keyed filename is its
             // own verification — a follow-up install of the same
             // formula consumes the warmed bytes instead of refetching.
@@ -1017,10 +1060,10 @@ pub fn materializeRubyFormula(
             .{ .context = @ptrCast(s.bind()), .func = &download.progressBridge }
         else
             null;
-        // `resolved.sha256` is mandatory on this path and checked against the
-        // body a few lines down, so the digest — not the transport — is what
-        // detects a substituted archive.
-        var download_resp = http.getWithHeaders(resolved.url, &.{}, bar_cb, .digest_pinned) catch {
+        // A pinned digest, not the transport, catches a substituted archive;
+        // only an opted-out recipe leans on TLS.
+        const integrity: client_mod.Integrity = if (resolved.checksum_opted_out) .transport_only else .digest_pinned;
+        var download_resp = http.getWithHeaders(resolved.url, &.{}, bar_cb, integrity) catch {
             if (sp) |*s| s.bar.finish();
             sink.err("Failed to download {s}", .{resolved.name});
             return InstallError.DownloadFailed;
@@ -1039,10 +1082,11 @@ pub fn materializeRubyFormula(
 
         // Tap manifest SHAs are public: constant-time here is for uniformity
         // across malt's SHA paths, not to close a live oracle.
-        if (!hash.eqlHex256(hex_buf, resolved.sha256)) {
+        if (!resolved.checksum_opted_out and !hash.eqlHex256(hex_buf, resolved.sha256)) {
             sink.err("SHA256 mismatch for {s}", .{resolved.name});
             return InstallError.DownloadFailed;
         }
+        fetched_hex = hex_buf;
 
         var tmp_buf: [512]u8 = undefined;
         const tmp_archive = formatTapDownloadName(&tmp_buf, prefix, archive_ext, std.c.getpid()) catch
@@ -1059,10 +1103,11 @@ pub fn materializeRubyFormula(
         // exists at its source path. On failure we still wipe it so
         // the next run's pid collision space stays clean.
         errdefer std.Io.Dir.cwd().deleteFile(ctx.io, tmp_archive) catch {};
+        // Keyed by the computed digest, so the name still vouches for the bytes.
         break :blk tap_cache.promoteStagingToCache(
             ctx.io,
             cache_dir,
-            resolved.sha256,
+            &fetched_hex,
             archive_ext,
             tmp_archive,
             &cache_path_buf,
@@ -1276,7 +1321,7 @@ pub fn materializeRubyFormula(
             .version = resolved.version,
             .revision = resolved.revision,
             .tap = resolved.tap_label,
-            .store_sha256 = resolved.sha256,
+            .store_sha256 = if (resolved.checksum_opted_out) &fetched_hex else resolved.sha256,
             .cellar_path = cellar_path,
             .install_reason = "direct",
             .bin_isolated = false,
@@ -1524,7 +1569,8 @@ fn buildSyntheticCaskJson(
     try out.appendSlice(allocator, ",\"url\":");
     try writeJsonString(allocator, out, resolved.url);
     try out.appendSlice(allocator, ",\"sha256\":");
-    try writeJsonString(allocator, out, resolved.sha256);
+    // The API's own opt-out literal; only the tag can produce it here.
+    try writeJsonString(allocator, out, if (resolved.checksum_opted_out) "no_check" else resolved.sha256);
     try out.appendSlice(allocator, ",\"desc\":\"\",\"homepage\":\"\",\"auto_updates\":false,\"artifacts\":[");
     if (resolved.app_name) |app| {
         try out.appendSlice(allocator, "{\"app\":[");
@@ -1912,6 +1958,26 @@ test "buildSyntheticCaskJson emits both the app and the binary a tap cask declar
     try std.testing.expectEqual(@as(usize, 1), entries.len);
     try std.testing.expectEqualStrings("$APPDIR/Zed.app/Contents/MacOS/cli", entries[0].source);
     try std.testing.expectEqualStrings("zed", entries[0].target.?);
+}
+
+test "buildSyntheticCaskJson hands the cask verifier its opt-out only from the tag" {
+    const base: ResolvedRubyFormula = .{ .name = "foo", .full_name = "u/t/foo", .tap_label = "u/t", .version = "1.0", .url = "https://example.com/Foo.dmg", .sha256 = "", .app_name = "Foo.app" };
+    var opted = base;
+    opted.checksum_opted_out = true;
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(std.testing.allocator);
+    try buildSyntheticCaskJson(std.testing.allocator, &json_buf, opted);
+    var cask = try cask_mod.parseCask(std.testing.allocator, json_buf.items);
+    defer cask.deinit();
+    try std.testing.expectEqual(client_mod.Integrity.transport_only, cask_mod.artifactIntegrity(cask.sha256));
+
+    // Without the tag the empty digest stays a digest, never the opt-out.
+    json_buf.clearRetainingCapacity();
+    try buildSyntheticCaskJson(std.testing.allocator, &json_buf, base);
+    var plain = try cask_mod.parseCask(std.testing.allocator, json_buf.items);
+    defer plain.deinit();
+    try std.testing.expectEqualStrings("", plain.sha256.?);
 }
 
 test "a tap binary source carries the same interpolations as the url" {

@@ -1734,7 +1734,8 @@ fn dryRunLocalErrors(body: []const u8, errs: *std.ArrayList(u8)) !void {
 test "installLocalFormula names sha256 :no_check as the refusal reason" {
     var errs: std.ArrayList(u8) = .empty;
     defer errs.deinit(testing.allocator);
-    try testing.expectError(install_record.InstallError.FormulaNotFound, dryRunLocalErrors(
+    // Its own error, so install does not add a contradictory "not found" line.
+    try testing.expectError(install_record.InstallError.UnpinnedChecksum, dryRunLocalErrors(
         \\class Pkg < Formula
         \\  version "1.0"
         \\  url "https://example.invalid/pkg-1.0.tar.gz"
@@ -1742,6 +1743,7 @@ test "installLocalFormula names sha256 :no_check as the refusal reason" {
         \\end
     , &errs));
     try testing.expect(std.mem.indexOf(u8, errs.items, "sha256 :no_check") != null);
+    try testing.expect(std.mem.indexOf(u8, errs.items, "--allow-unpinned") != null);
 }
 
 test "installLocalFormula refuses a sha256 that is not a pinned digest, even on a dry run" {

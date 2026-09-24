@@ -17,7 +17,12 @@ pub const RubyFormulaInfo = struct {
     /// revision-only bump on a tap formula, matching the core path.
     revision: i64 = 0,
     url: []const u8,
+    /// Pinned digest as written; empty when `checksum_opted_out`, so a caller
+    /// unaware of the opt-out still fails the pinned-hex guard.
     sha256: []const u8,
+    /// `sha256 :no_check` for this arch. A tag, never the string: a quoted
+    /// `"no_check"` stays an (invalid) pinned value.
+    checksum_opted_out: bool = false,
     /// Empty by default. Populated only when the cask DSL set `arch`
     /// keyword-argument values for the current platform (typically a
     /// short suffix like `-aarch64` for arm and `""` for intel).
@@ -79,6 +84,7 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     var revision: i64 = 0;
     var url: ?[]const u8 = null;
     var sha256: ?[]const u8 = null;
+    var opted_out = false;
     var arch_token: []const u8 = "";
 
     // The state machine recognises two layouts:
@@ -166,16 +172,16 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
         // (`sha256 arm: "...", \n  intel: "..."`). Track whether the
         // previous trimmed line opened a `sha256` directive so the
         // continuation line can still pick the platform value.
-        if (!scope.inside() and sha256 == null) {
+        if (!scope.inside() and sha256 == null and !opted_out) {
             if (std.mem.startsWith(u8, line, "sha256 ")) {
                 const body = line["sha256 ".len..];
                 if (lineStartsWithKwArg(body)) {
-                    if (pickKwArg(body, is_arm)) |s| sha256 = s;
+                    pickKwChecksum(body, is_arm, &sha256, &opted_out);
                     // Only a trailing comma continues the directive.
-                    prev_in_kwarg_sha256 = sha256 == null and std.mem.endsWith(u8, body, ",");
+                    prev_in_kwarg_sha256 = sha256 == null and !opted_out and std.mem.endsWith(u8, body, ",");
                 }
             } else if (prev_in_kwarg_sha256) {
-                if (pickKwArg(line, is_arm)) |s| sha256 = s;
+                pickKwChecksum(line, is_arm, &sha256, &opted_out);
                 // Continuation lines never re-open the directive — a
                 // missed match means the second arg is the one we
                 // didn't want, so stop hunting for more.
@@ -190,21 +196,22 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
                     url = u;
                 }
             }
-            if (sha256 == null) {
+            if (sha256 == null and !opted_out) {
                 if (extractQuoted(line, "sha256 \"")) |s| {
                     sha256 = s;
-                }
+                } else opted_out = isNoCheck(line);
             }
         }
 
         // If we have both, stop
-        if (url != null and sha256 != null) break;
+        if (url != null and (sha256 != null or opted_out)) break;
     }
 
     // Global url/sha256 fallback. Skip when an arch-segmented formula yielded
     // NEITHER field for our arch — else it grabs the whole other-arch pair.
     // A partial block (our url + a shared global sha256) still completes.
-    if ((url == null or sha256 == null) and !(saw_arch_marker and url == null and sha256 == null)) {
+    const have_sum = sha256 != null or opted_out;
+    if ((url == null or !have_sum) and !(saw_arch_marker and url == null and !have_sum)) {
         var fallback_it = std.mem.splitScalar(u8, rb_content, '\n');
         var fallback_scope: ForeignScope = .{};
         while (fallback_it.next()) |raw| {
@@ -216,13 +223,15 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
             if (url == null) {
                 if (extractQuoted(ln, "url \"")) |u| url = u;
             }
-            if (sha256 == null) {
-                if (extractQuoted(ln, "sha256 \"")) |s| sha256 = s;
+            if (sha256 == null and !opted_out) {
+                if (extractQuoted(ln, "sha256 \"")) |s| {
+                    sha256 = s;
+                } else opted_out = isNoCheck(ln);
             }
         }
     }
 
-    if (url != null and sha256 != null) {
+    if (url != null and (sha256 != null or opted_out)) {
         if (!hasOnlyExpandableInterpolations(url.?)) return null;
         // Homebrew treats `version` as optional when the tag is encoded
         // in the URL. Mirror that: derive it from the release-asset or
@@ -233,7 +242,8 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
             .version = final_version,
             .revision = revision,
             .url = url.?,
-            .sha256 = sha256.?,
+            .sha256 = sha256 orelse "",
+            .checksum_opted_out = sha256 == null,
             .arch_token = arch_token,
         };
     }
@@ -447,6 +457,36 @@ fn lineStartsWithKwArg(body: []const u8) bool {
 /// and tolerates the variable run of whitespace casks use to align the
 /// values vertically. Returns null when the platform's key is absent.
 fn pickKwArg(body: []const u8, is_arm: bool) ?[]const u8 {
+    const after = kwArgValue(body, is_arm) orelse return null;
+    if (after.len == 0 or after[0] != '"') return null;
+    const value, _ = std.mem.cut(u8, after[1..], "\"") orelse return null;
+    return value;
+}
+
+/// The `sha256` kwarg for this arch: a quoted digest, or the `:no_check` symbol.
+fn pickKwChecksum(body: []const u8, is_arm: bool, sha256: *?[]const u8, opted_out: *bool) void {
+    if (pickKwArg(body, is_arm)) |s| {
+        sha256.* = s;
+    } else if (kwArgValue(body, is_arm)) |after| {
+        opted_out.* = isNoCheckValue(after);
+    }
+}
+
+/// Whole-line `sha256 :no_check` (a trailing comment allowed).
+fn isNoCheck(line: []const u8) bool {
+    return std.mem.startsWith(u8, line, "sha256 ") and isNoCheckValue(std.mem.trimStart(u8, line["sha256 ".len..], " \t"));
+}
+
+/// `value` starts with the `:no_check` symbol and nothing identifier-like follows it.
+fn isNoCheckValue(value: []const u8) bool {
+    const sym = ":no_check";
+    if (!std.mem.startsWith(u8, value, sym)) return false;
+    const rest = value[sym.len..];
+    return rest.len == 0 or rest[0] == ' ' or rest[0] == '\t' or rest[0] == ',' or rest[0] == '#';
+}
+
+/// The text after this arch's `arm:`/`intel:` key, leading blanks skipped.
+fn kwArgValue(body: []const u8, is_arm: bool) ?[]const u8 {
     const key = if (is_arm) "arm:" else "intel:";
     var rest = body;
     while (std.mem.indexOf(u8, rest, key)) |pos| {
@@ -461,9 +501,7 @@ fn pickKwArg(body: []const u8, is_arm: bool) ?[]const u8 {
         // Skip the spaces casks insert between key and value for
         // vertical alignment.
         while (after.len > 0 and (after[0] == ' ' or after[0] == '\t')) after = after[1..];
-        if (after.len == 0 or after[0] != '"') return null;
-        const value, _ = std.mem.cut(u8, after[1..], "\"") orelse return null;
-        return value;
+        return after;
     }
     return null;
 }
@@ -1784,7 +1822,9 @@ test "parseRubyFormula: an unquoted sha256 kwarg does not borrow the next line's
         \\  url "https://example.com/foo-#{arch}.dmg"
         \\end
     ;
-    try std.testing.expect(parseRubyFormula(body) == null);
+    const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expect(got.checksum_opted_out);
+    try std.testing.expectEqualStrings("", got.sha256);
 }
 
 test "parseRubyFormula: quoted url/sha256 in macOS release blocks are refused" {
@@ -1989,6 +2029,128 @@ test "optsOutOfChecksum: a pinned sha256 or a no_check mention elsewhere is not 
         \\end
     ));
     try std.testing.expect(!optsOutOfChecksum(""));
+}
+
+test "parseRubyFormula: each sha256 :no_check shape parses as an explicit opt-out" {
+    const shapes = [_][]const u8{
+        \\class Foo < Formula
+        \\  version "1.0"
+        \\  url "https://example.com/foo-1.0.tar.gz"
+        \\  sha256 :no_check
+        \\end
+        ,
+        \\cask "foo" do
+        \\  version "1.0"
+        \\  sha256 arm: :no_check, intel: :no_check
+        \\  url "https://example.com/foo.dmg"
+        \\end
+        ,
+        \\cask "foo" do
+        \\  version "1.0"
+        \\  sha256 arm: :no_check,
+        \\         intel: :no_check
+        \\  url "https://example.com/foo.dmg"
+        \\end
+        ,
+        \\cask "foo" do
+        \\  version "1.0"
+        \\  on_macos do
+        \\    url "https://example.com/foo.dmg"
+        \\    sha256 :no_check
+        \\  end
+        \\end
+    };
+    for (shapes) |body| {
+        const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+        try std.testing.expect(got.checksum_opted_out);
+        // Empty, so a caller unaware of the tag still fails the pinned-hex guard.
+        try std.testing.expectEqualStrings("", got.sha256);
+    }
+}
+
+test "parseRubyFormula: a quoted \"no_check\" is a (bogus) pinned value, never the opt-out" {
+    const got = parseRubyFormula(
+        \\class Foo < Formula
+        \\  version "1.0"
+        \\  url "https://example.com/foo-1.0.tar.gz"
+        \\  sha256 "no_check"
+        \\end
+    ) orelse return error.TestUnexpectedNull;
+    try std.testing.expect(!got.checksum_opted_out);
+    try std.testing.expectEqualStrings("no_check", got.sha256);
+}
+
+test "parseRubyFormula: :no_check edge spellings" {
+    const with_comment = parseRubyFormula(
+        \\class Foo < Formula
+        \\  version "1.0"
+        \\  url "https://example.com/foo-1.0.tar.gz"
+        \\  sha256 :no_check # vendor rebuilds in place
+        \\end
+    ) orelse return error.TestUnexpectedNull;
+    try std.testing.expect(with_comment.checksum_opted_out);
+
+    // A longer symbol is not the opt-out.
+    try std.testing.expect(parseRubyFormula(
+        \\class Foo < Formula
+        \\  version "1.0"
+        \\  url "https://example.com/foo-1.0.tar.gz"
+        \\  sha256 :no_checksum
+        \\end
+    ) == null);
+}
+
+test "parseRubyFormula: the other arch's block never lends its opt-out" {
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const body =
+        \\class Foo < Formula
+        \\  version "1.0"
+        \\  on_arm do
+        \\    url "https://example.com/foo-arm.tar.gz"
+        \\    sha256 :no_check
+        \\  end
+        \\  on_intel do
+        \\    url "https://example.com/foo-intel.tar.gz"
+        \\    sha256 "iiiiiiii"
+        \\  end
+        \\end
+    ;
+    const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(is_arm, got.checksum_opted_out);
+    try std.testing.expectEqualStrings(if (is_arm) "" else "iiiiiiii", got.sha256);
+}
+
+test "parseRubyFormula: an absent sha256 stays unparseable" {
+    try std.testing.expect(parseRubyFormula(
+        \\class Foo < Formula
+        \\  version "1.0"
+        \\  url "https://example.com/foo-1.0.tar.gz"
+        \\end
+    ) == null);
+}
+
+test "parseRubyFormula: a pinned digest for this arch wins over the other arch's opt-out" {
+    const got = parseRubyFormula(
+        \\cask "foo" do
+        \\  version "1.0"
+        \\  sha256 arm: "aaaaaaaa", intel: "iiiiiiii"
+        \\  url "https://example.com/foo.dmg"
+        \\end
+    ) orelse return error.TestUnexpectedNull;
+    try std.testing.expect(!got.checksum_opted_out);
+}
+
+test "parseRubyFormula: only the running arch's kwarg decides the opt-out" {
+    const is_arm = @import("../../macho/codesign.zig").isArm64();
+    const got = parseRubyFormula(
+        \\cask "foo" do
+        \\  version "1.0"
+        \\  sha256 arm: "aaaaaaaa", intel: :no_check
+        \\  url "https://example.com/foo.dmg"
+        \\end
+    ) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(!is_arm, got.checksum_opted_out);
+    try std.testing.expectEqualStrings(if (is_arm) "aaaaaaaa" else "", got.sha256);
 }
 
 test "rb_parse entry points return null on empty input" {

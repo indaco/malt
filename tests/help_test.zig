@@ -287,5 +287,7 @@ test "upgrade help no longer advertises the no-op --all" {
     // ever mean "the default". It is not a Homebrew flag either - `brew upgrade
     // --all` errors with "invalid option" - so there was no compatibility to
     // preserve, just a line implying the default is narrower than it is.
-    try testing.expect(std.mem.indexOf(u8, help.helpFor("upgrade"), "--all") == null);
+    // Whole-token match: `--allow-unpinned` is a real, different flag.
+    var it = std.mem.tokenizeAny(u8, help.helpFor("upgrade"), " \t\n,[]`");
+    while (it.next()) |tok| try testing.expect(!std.mem.eql(u8, tok, "--all"));
 }

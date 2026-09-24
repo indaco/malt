@@ -100,6 +100,9 @@ const install_help =
     \\  --use-system-ruby[=<name>,...]  Run post_install via the system Ruby interpreter
     \\                     (experimental, sandboxed). A bare flag requires a single
     \\                     package; use =<name>,... to scope when installing multiple.
+    \\  --allow-unpinned   Let a tap or local .rb that declares `sha256 :no_check`
+    \\                     install with TLS as its only integrity check. Warns on
+    \\                     every such install; an unpinned .pkg is still refused.
     \\  --isolate-deps     Keep every transitive dep out of <prefix>/bin and
     \\                     <prefix>/sbin. The package(s) you named still link
     \\                     normally; deps land in the Cellar with their `opt/`
@@ -184,6 +187,8 @@ const upgrade_help =
     \\                 interpreter (experimental, sandboxed) for the named
     \\                 kegs only. A bare `--use-system-ruby` is refused —
     \\                 it would widen the trust boundary to every outdated keg.
+    \\  --allow-unpinned Upgrade a tap package whose recipe declares
+    \\                 `sha256 :no_check` (TLS is its only integrity check).
     \\
 ;
 

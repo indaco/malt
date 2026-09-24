@@ -1682,3 +1682,96 @@ test "--download-only on a tap app cask refuses a bin entry the cask cannot take
     const n = try std.Io.Dir.readLinkAbsolute(std.Options.debug_io, link, &buf);
     try testing.expectEqualStrings(formula_bin, buf[0..n]);
 }
+
+/// Drives `materializeRubyFormula` for an opted-out recipe with a throwaway
+/// prefix and an offline client, so any fetch fails fast instead of leaving.
+fn materializeOptedOut(suffix: []const u8, url: []const u8, allow_unpinned: bool, seed_empty_key: bool, download_only: bool) !struct { err: ?anyerror, stderr: []u8 } {
+    const prefix = try setupPrefix(suffix);
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var cache_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_dir);
+    if (seed_empty_key) {
+        // The slot a digest-less recipe would name if it ever consulted the
+        // SHA-keyed cache: trusting it would install unrelated bytes.
+        var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const p = try malt.tap_cache.cachePath(&p_buf, cache_dir, "", ".tar.gz");
+        const f = try test_io.cwd().createFile(std.Options.debug_io, p, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "stale-bytes\n");
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true, .allow_unpinned = allow_unpinned };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+    http.offline = true;
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    errdefer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "nocheck",
+        .full_name = "user/repo/nocheck",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = url,
+        .sha256 = "",
+        .checksum_opted_out = true,
+    };
+    var err: ?anyerror = null;
+    malt.install_local.materializeRubyFormula(&ctx, allocator, resolved, &http, &db, &linker, prefix, cache_dir, false, false, download_only, null, malt.install_sink.terminal) catch |e| {
+        err = e;
+    };
+    malt.output.endStderrCapture();
+    return .{ .err = err, .stderr = try captured.toOwnedSlice(testing.allocator) };
+}
+
+test "an opted-out tap recipe never installs from a warm cache entry" {
+    const r = try materializeOptedOut("nocheck_cache", "https://malt-tap-test.invalid/nocheck-1.0.tar.gz", true, true, false);
+    defer testing.allocator.free(r.stderr);
+    // Offline, so the only way to succeed would be the seeded slot.
+    try testing.expectEqual(@as(?anyerror, install_record.InstallError.DownloadFailed), r.err);
+    // It went to the network rather than trusting the seeded slot.
+    try testing.expect(std.mem.indexOf(u8, r.stderr, "Failed to download nocheck") != null);
+}
+
+test "an opted-out tap recipe is refused without the run's --allow-unpinned" {
+    const r = try materializeOptedOut("nocheck_noflag", "https://malt-tap-test.invalid/nocheck-1.0.tar.gz", false, false, false);
+    defer testing.allocator.free(r.stderr);
+    try testing.expectEqual(@as(?anyerror, install_record.InstallError.UnpinnedChecksum), r.err);
+    try testing.expect(std.mem.indexOf(u8, r.stderr, "sha256 :no_check") != null);
+}
+
+test "an opted-out tap .pkg is refused even under --allow-unpinned" {
+    const r = try materializeOptedOut("nocheck_pkg", "https://malt-tap-test.invalid/nocheck-1.0.pkg", true, false, false);
+    defer testing.allocator.free(r.stderr);
+    try testing.expectEqual(@as(?anyerror, install_record.InstallError.UnpinnedChecksum), r.err);
+    try testing.expect(std.mem.indexOf(u8, r.stderr, "unpinned .pkg") != null);
+}
+
+test "--download-only refuses an opted-out tap formula whose cache no install would read" {
+    const r = try materializeOptedOut("nocheck_dlonly", "https://malt-tap-test.invalid/nocheck-1.0.tar.gz", true, false, true);
+    defer testing.allocator.free(r.stderr);
+    try testing.expectEqual(@as(?anyerror, install_record.InstallError.UnpinnedChecksum), r.err);
+    try testing.expect(std.mem.indexOf(u8, r.stderr, "--download-only") != null);
+}

@@ -1826,9 +1826,10 @@ test "tapVersionFromSubtrees names sha256 :no_check instead of an unsupported DS
     var listener = try addr.listen(io, .{ .reuse_address = true });
     const port = listener.socket.address.getPort();
 
+    // A versioned opt-out parses and compares; `:latest` still cannot.
     const cask_rb =
         \\cask "pkg" do
-        \\  version "2.0"
+        \\  version :latest
         \\  sha256 :no_check
         \\  url "https://x/pkg.dmg"
         \\end

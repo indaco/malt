@@ -43,7 +43,7 @@ const pin_mod = @import("pin.zig");
 
 const OutdatedEntry = outdated_mod.OutdatedEntry;
 
-const UpgradeFlag = enum { quiet, cask, formula, dry_run, force, pinned, isolate_deps, use_system_ruby };
+const UpgradeFlag = enum { quiet, cask, formula, dry_run, force, pinned, isolate_deps, use_system_ruby, allow_unpinned };
 
 const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     .{ "-q", .quiet },
@@ -61,6 +61,7 @@ const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     // Recognised only to refuse it with a pointed message: a bare flag
     // would widen the Ruby trust boundary to every outdated keg.
     .{ "--use-system-ruby", .use_system_ruby },
+    .{ "--allow-unpinned", .allow_unpinned },
 });
 
 /// True when this name should be skipped due to a user pin. Pure gate so
@@ -275,7 +276,10 @@ fn warmsSnapshot(g: WarmGate) bool {
     return g.dry_run and g.full_keg and !g.walk_failed and !g.tainted;
 }
 
-pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    // `--allow-unpinned` rides the ctx down to the tap materialise, like `offline`.
+    var run_ctx = parent_ctx.*;
+    const ctx: *const AppCtx = &run_ctx;
     if (help.showIfRequested(ctx, args, "upgrade")) return;
 
     var cask_only = false;
@@ -313,6 +317,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             .pinned => pinned_only = true,
             .isolate_deps => isolate_deps = true,
             .use_system_ruby => use_system_ruby_bare = true,
+            .allow_unpinned => run_ctx.allow_unpinned = true,
         } else if (arg.len > 0 and arg[0] != '-') {
             names.append(allocator, arg) catch return error.OutOfMemory;
         }
@@ -1105,12 +1110,18 @@ const TapRouteError = error{ NotInTap, Aborted, AppRunning };
 /// A `:no_check` recipe is named here: as `NotInTap` the caller would call
 /// the cask gone from a tap that still ships it. An unpinned digest is
 /// refused here too, since the install behind it prints progress only.
-fn parseRoutedCaskRb(body: []const u8, token: []const u8, tap_label: []const u8) TapRouteError!install_rb_parse_mod.RubyFormulaInfo {
+/// `allow_unpinned` admits only the explicit opt-out, never a bogus digest.
+fn parseRoutedCaskRb(body: []const u8, token: []const u8, tap_label: []const u8, allow_unpinned: bool) TapRouteError!install_rb_parse_mod.RubyFormulaInfo {
     const rb_info = install_rb_parse_mod.parseRubyFormula(body) orelse {
         if (!install_rb_parse_mod.optsOutOfChecksum(body)) return error.NotInTap;
         output.err("Cask {s} in tap {s} " ++ install_rb_parse_mod.checksum_opt_out_reason, .{ token, tap_label });
         return error.Aborted;
     };
+    if (rb_info.checksum_opted_out) {
+        if (allow_unpinned) return rb_info;
+        output.err("Cask {s} in tap {s} " ++ install_rb_parse_mod.checksum_opt_out_reason ++ "; pass --allow-unpinned to upgrade it unverified", .{ token, tap_label });
+        return error.Aborted;
+    }
     if (!store_path.isValidSha256(rb_info.sha256)) {
         output.err("Refusing {s}: " ++ install_rb_parse_mod.unpinned_checksum_reason, .{token});
         return error.Aborted;
@@ -1183,7 +1194,7 @@ fn upgradeRoutedTapCask(
     defer rb_resp.deinit();
     if (rb_resp.status != 200) return error.NotInTap;
 
-    const rb_info = try parseRoutedCaskRb(rb_resp.body, token, tap_label);
+    const rb_info = try parseRoutedCaskRb(rb_resp.body, token, tap_label, ctx.allow_unpinned);
 
     if (!force and std.mem.eql(u8, installed_version, rb_info.version)) {
         if (!bulk) output.skip("{s} is already at latest version {s}", .{ token, rb_info.version });
@@ -3205,21 +3216,45 @@ test "a routed tap cask declaring sha256 :no_check is named, not reported gone f
         \\  url "https://example.com/pkg.dmg"
         \\end
     ;
-    try std.testing.expectError(error.Aborted, parseRoutedCaskRb(rb, "pkg", "user/tap"));
+    try std.testing.expectError(error.Aborted, parseRoutedCaskRb(rb, "pkg", "user/tap", false));
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "sha256 :no_check") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "user/tap") != null);
 }
 
 test "a routed tap cask .rb that does not parse still reads as not in the tap" {
-    try std.testing.expectError(error.NotInTap, parseRoutedCaskRb("cask \"pkg\" do\nend\n", "pkg", "user/tap"));
+    try std.testing.expectError(error.NotInTap, parseRoutedCaskRb("cask \"pkg\" do\nend\n", "pkg", "user/tap", false));
     const got = try parseRoutedCaskRb(
         \\cask "pkg" do
         \\  version "2.0"
         \\  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
         \\  url "https://example.com/pkg.dmg"
         \\end
-    , "pkg", "user/tap");
+    , "pkg", "user/tap", false);
     try std.testing.expectEqualStrings("2.0", got.version);
+}
+
+test "a routed tap cask declaring sha256 :no_check upgrades only under --allow-unpinned" {
+    const rb =
+        \\cask "pkg" do
+        \\  version "2.0"
+        \\  sha256 :no_check
+        \\  url "https://example.com/pkg.dmg"
+        \\end
+    ;
+    const got = try parseRoutedCaskRb(rb, "pkg", "user/tap", true);
+    try std.testing.expect(got.checksum_opted_out);
+    // The opt-in never rescues a bogus pinned value.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+    try std.testing.expectError(error.Aborted, parseRoutedCaskRb(
+        \\cask "pkg" do
+        \\  version "2.0"
+        \\  sha256 "no_check"
+        \\  url "https://example.com/pkg.dmg"
+        \\end
+    , "pkg", "user/tap", true));
 }
 
 test "a routed tap cask with an unpinned sha256 is refused before its progress-only install" {
@@ -3237,6 +3272,6 @@ test "a routed tap cask with an unpinned sha256 is refused before its progress-o
         \\  url "https://example.com/pkg.pkg"
         \\end
     ;
-    try std.testing.expectError(error.Aborted, parseRoutedCaskRb(rb, "pkg", "user/tap"));
+    try std.testing.expectError(error.Aborted, parseRoutedCaskRb(rb, "pkg", "user/tap", false));
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "not a pinned sha256") != null);
 }

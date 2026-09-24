@@ -588,7 +588,9 @@ fn executeWithOpts(
     if (parsed.quiet) output.setQuiet(true);
     if (parsed.json) output.setMode(.json);
 
-    return runInstall(ctx, allocator, parsed.packages, parsed.flags, exec_opts);
+    var run_ctx = ctx.*;
+    run_ctx.allow_unpinned = parsed.flags.allow_unpinned;
+    return runInstall(&run_ctx, allocator, parsed.packages, parsed.flags, exec_opts);
 }
 
 /// Struct-first install core shared by the argv path (`executeWithOpts`)
@@ -809,7 +811,8 @@ fn runInstall(
                 if (skippableRecommended(exec_opts.recommended, pkg_name, e)) {
                     sink.warn("{s} is recommended, not required — continuing without it.", .{pkg_name});
                 } else {
-                    if (e != InstallError.BuildFromSourceUnsupported) {
+                    // Both refusals already printed their own line.
+                    if (e != InstallError.BuildFromSourceUnsupported and e != InstallError.UnpinnedChecksum) {
                         sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                     }
                     failed_count += 1;
