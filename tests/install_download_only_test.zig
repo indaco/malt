@@ -1775,3 +1775,104 @@ test "--download-only refuses an opted-out tap formula whose cache no install wo
     try testing.expectEqual(@as(?anyerror, install_record.InstallError.UnpinnedChecksum), r.err);
     try testing.expect(std.mem.indexOf(u8, r.stderr, "--download-only") != null);
 }
+
+/// `--force` over an installed `latest` keg with a warm archive whose
+/// payload is `payload_file`. Returns the materialise result; the prefix is
+/// left for the caller to inspect and delete.
+fn reinstallLatestOver(prefix: []const u8, payload_file: []const u8) !void {
+    const sha = "ab" ** 32;
+    const work = try std.fmt.allocPrint(testing.allocator, "{s}/work", .{prefix});
+    defer testing.allocator.free(work);
+    {
+        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/payload", .{work});
+        defer testing.allocator.free(dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+        const file = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, payload_file });
+        defer testing.allocator.free(file);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, file, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "new\n");
+    }
+    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache", .{prefix});
+    try malt.tap_cache.ensureCacheDir(std.Options.debug_io, cache_parent);
+    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, cache_parent, sha, ".tar.gz");
+    try runTar(&.{ "tar", "czf", cache_path, "-C", work, "payload" });
+
+    // The working keg a `version :latest` upgrade reinstalls over in place.
+    {
+        const old_bin = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/nightly/latest/bin", .{prefix});
+        defer testing.allocator.free(old_bin);
+        try test_io.cwd().createDirPath(std.Options.debug_io, old_bin);
+        const old = try std.fmt.allocPrint(testing.allocator, "{s}/nightly", .{old_bin});
+        defer testing.allocator.free(old);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, old, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "old\n");
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "nightly",
+        .full_name = "user/repo/nightly",
+        .tap_label = "user/repo",
+        .version = "latest",
+        .url = "https://malt-reinstall-test.invalid/nightly.tar.gz",
+        .sha256 = sha,
+    };
+    return malt.install_local.materializeRubyFormula(&ctx, allocator, resolved, &http, &db, &linker, prefix, cache_parent, false, true, false, null, malt.install_sink.terminal);
+}
+
+fn readKegBin(prefix: []const u8, buf: []u8) ![]const u8 {
+    const p = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/nightly/latest/bin/nightly", .{prefix});
+    defer testing.allocator.free(p);
+    return std.Io.Dir.cwd().readFile(std.Options.debug_io, p, buf);
+}
+
+test "a failed same-version --force reinstall keeps the working keg" {
+    const prefix = try setupPrefix("reinstall_keep");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // A source tree: the backstop refuses it after the old keg would be gone.
+    try testing.expectError(install_record.InstallError.BuildFromSourceUnsupported, reinstallLatestOver(prefix, "readme.txt"));
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("old\n", try readKegBin(prefix, &buf));
+}
+
+test "a successful same-version --force reinstall replaces the keg and leaves nothing aside" {
+    const prefix = try setupPrefix("reinstall_swap");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    try reinstallLatestOver(prefix, "nightly");
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("new\n", try readKegBin(prefix, &buf));
+    // The parked copy is dropped once the new keg commits.
+    const tmp = try std.fmt.allocPrint(testing.allocator, "{s}/tmp", .{prefix});
+    defer testing.allocator.free(tmp);
+    var dir = std.Io.Dir.openDirAbsolute(std.Options.debug_io, tmp, .{ .iterate = true }) catch |e| switch (e) {
+        error.FileNotFound => return,
+        else => return e,
+    };
+    defer dir.close(std.Options.debug_io);
+    var it = dir.iterate();
+    while (try it.next(std.Options.debug_io)) |e| try testing.expect(!std.mem.startsWith(u8, e.name, "keg-aside"));
+}

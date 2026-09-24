@@ -727,15 +727,16 @@ pub fn installLocalFormula(
     try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, cache_dir, dry_run, force, false, null, sink);
 }
 
-/// A `sha256 :no_check` recipe installs only under `--allow-unpinned`, and
-/// then always says so: nothing but TLS ties the artefact to the recipe.
+/// A `sha256 :no_check` recipe installs only under `--allow-unpinned`.
 fn admitChecksum(ctx: *const AppCtx, sink: OutputSink, rb: RubyFormulaInfo, label: []const u8) InstallError!void {
-    if (!rb.checksum_opted_out) return;
-    if (!ctx.allow_unpinned) {
-        sink.err("Refusing {s}: it " ++ rb_parse.checksum_opt_out_reason ++ "; pass --allow-unpinned to install it unverified", .{label});
-        return InstallError.FormulaNotFound;
-    }
-    sink.warn("{s} is not checksum-verified: its recipe declares sha256 :no_check, so only TLS protects the download.", .{label});
+    if (!rb.checksum_opted_out or ctx.allow_unpinned) return;
+    sink.err("Refusing {s}: it " ++ rb_parse.checksum_opt_out_reason ++ "; pass --allow-unpinned to install it unverified", .{label});
+    return InstallError.UnpinnedChecksum;
+}
+
+/// Shown even under `--quiet`: nothing but TLS ties the artefact to the recipe.
+fn warnUnverified(label: []const u8) void {
+    output.warnAlways("{s} is not checksum-verified: its recipe declares sha256 :no_check, so only TLS protects the download.", .{label});
 }
 
 /// Whether any linker-visible dir under `keg_path` holds an entry - the same
@@ -1157,21 +1158,13 @@ pub fn materializeRubyFormula(
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
     };
-    // `--force` pre-materialize: wipe the resolved-version dir so the
-    // archive extracts into a clean target. Without this, extract
-    // mixes new and prior files at the same paths, and the post-link
-    // sweep would only address symlinks + DB rows. Matches the JSON
-    // pipeline's pre-materialize call.
-    //
-    // Known limitation: pruning here, before extraction, means a --force
-    // reinstall of a formula whose *same-version* artifact flipped from a
-    // prebuilt binary to a source build hits the no-artifact backstop below
-    // with the old keg already gone (doctor reclaims the dangling links).
-    // Not staged behind the backstop because an artifact swap without a
-    // version bump does not happen in practice.
-    if (force) {
-        install_mod.pruneCellarForReinstall(ctx, prefix, resolved.name, pkg_version);
-    }
+    // `--force` extracts into a clean target, but a same-version reinstall
+    // (every `version :latest` upgrade) replaces the working keg in place:
+    // park it, and put it back if anything fails before the commit.
+    var aside_buf: [512]u8 = undefined;
+    const aside: ?[]const u8 = if (force) parkKeg(ctx.io, &aside_buf, prefix, resolved.name, cellar_path) else null;
+    errdefer if (aside) |a| unparkKeg(ctx.io, a, cellar_path);
+    if (force and aside == null) install_mod.pruneCellarForReinstall(ctx, prefix, resolved.name, pkg_version);
     std.Io.Dir.createDirAbsolute(ctx.io, cellar_path, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
@@ -1364,12 +1357,34 @@ pub fn materializeRubyFormula(
     }
 
     db.commit() catch return InstallError.RecordFailed;
+    if (aside) |a| std.Io.Dir.cwd().deleteTree(ctx.io, a) catch {};
 
     // After the commit, like the API path: a refused service warns and
     // can never roll back the keg.
     service_mod.registerRuby(ctx.io, ctx.environ, allocator, db, resolved.service, resolved.service_declared, resolved.shipped_label, resolved.name, pkg_version, prefix, sink);
 
     sink.success("{s} {s} installed", .{ resolved.name, resolved.version });
+}
+
+/// Move an installed keg out of the Cellar - pruning there would take it -
+/// into `{prefix}/tmp`. Null when there is nothing to park or it will not move.
+fn parkKeg(io: std.Io, buf: []u8, prefix: []const u8, name: []const u8, cellar_path: []const u8) ?[]const u8 {
+    std.Io.Dir.accessAbsolute(io, cellar_path, .{}) catch return null;
+    var tmp_buf: [512]u8 = undefined;
+    const tmp = std.fmt.bufPrint(&tmp_buf, "{s}/tmp", .{prefix}) catch return null;
+    std.Io.Dir.createDirAbsolute(io, tmp, .default_dir) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => return null,
+    };
+    const aside = std.fmt.bufPrint(buf, "{s}/keg-aside.{d}.{s}", .{ tmp, std.c.getpid(), name }) catch return null;
+    std.Io.Dir.cwd().deleteTree(io, aside) catch {};
+    std.Io.Dir.renameAbsolute(cellar_path, aside, io) catch return null;
+    return aside;
+}
+
+fn unparkKeg(io: std.Io, aside: []const u8, cellar_path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(io, cellar_path) catch {};
+    std.Io.Dir.renameAbsolute(aside, cellar_path, io) catch {};
 }
 
 /// Whether a PKG cask's sudo confirmation is owed on this pass.
