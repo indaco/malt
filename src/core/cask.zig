@@ -858,6 +858,9 @@ pub const CaskInstaller = struct {
     /// which is what lets an upgrade survive a failed download even for a
     /// cask that pins no digest and so can never be validated from cache.
     prefetched_artifact: ?[]const u8 = null,
+    /// What an unpinned zip may inflate to; injectable so a test need not
+    /// build a 16 GiB archive.
+    unverified_zip_budget: u64 = archive_mod.max_decompressed_bytes,
     /// An upgrade's uninstall is not the end of the cask: its history rows
     /// and cached artefacts stay, so a failed install can put the old
     /// version back and `mt rollback` can still reach it afterwards.
@@ -1582,6 +1585,11 @@ pub const CaskInstaller = struct {
             .follow_symlinks = false,
         }) catch return error.InstallFailed;
         defer extract_handle.close(self.io);
+
+        // Nothing vouches for unpinned bytes, so bound what they inflate to.
+        // Pinned casks skip the extra pass: ditto, not unzip, is their decoder.
+        if (artifactIntegrity(cask.sha256) == .transport_only)
+            archive_mod.checkZipExpansion(self.io, zip_path, self.unverified_zip_budget) catch return error.InstallFailed;
 
         // Extract with ditto -xk (handles macOS-specific ZIP features).
         const ditto_argv = [_][]const u8{ system_tools.ditto, "-xk", zip_path, "." };
@@ -3025,6 +3033,62 @@ test "installZip does not extract through a pre-existing predictable symlink" {
         error.FileNotFound,
         std.Io.Dir.accessAbsolute(io, escaped_payload, .{}),
     );
+}
+
+test "installZip bounds what an unpinned zip inflates to, and only an unpinned one" {
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try std.fmt.allocPrintSentinel(a, "/tmp/malt_cask_zip_budget_{d}", .{std.c.getpid()}, 0);
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const prefix = try std.fmt.allocPrintSentinel(a, "{s}/prefix", .{base}, 0);
+    const source = try std.fmt.allocPrint(a, "{s}/source/Big.app/Contents", .{base});
+    const source_root = try std.fmt.allocPrint(a, "{s}/source/Big.app", .{base});
+    const zip_path = try std.fmt.allocPrint(a, "{s}/big.zip", .{base});
+    const app_dir = try std.fmt.allocPrint(a, "{s}/Applications", .{base});
+    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.allocPrint(a, "{s}/tmp", .{prefix}));
+    try std.Io.Dir.cwd().createDirPath(io, source);
+    try std.Io.Dir.cwd().createDirPath(io, app_dir);
+    {
+        const zeros = try a.alloc(u8, 64 * 1024);
+        @memset(zeros, 0);
+        const f = try std.Io.Dir.createFileAbsolute(io, try std.fmt.allocPrint(a, "{s}/payload", .{source}), .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, zeros);
+    }
+    try child_mod.runOrFail(io, a, &.{ system_tools.ditto, "-c", "-k", "--keepParent", source_root, zip_path });
+
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = prefix,
+        .cache_dir = unused_cache_dir,
+        .db = undefined,
+        .progress = null,
+        .unverified_zip_budget = 4096,
+    };
+    const placed = try std.fmt.allocPrint(a, "{s}/Big.app", .{app_dir});
+
+    var unpinned = try parseCask(a,
+        \\{"token":"big","name":["Big"],"version":"1.0","url":"https://example.invalid/big.zip","sha256":"no_check","artifacts":[{"app":["Big.app"]}]}
+    );
+    defer unpinned.deinit();
+    try std.testing.expectError(error.InstallFailed, installer.installZip(zip_path, app_dir, &unpinned));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, placed, .{}));
+
+    // A pinned digest already vouches for the bytes, so the budget is not consulted.
+    var pinned = try parseCask(a,
+        \\{"token":"big","name":["Big"],"version":"1.0","url":"https://example.invalid/big.zip","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","artifacts":[{"app":["Big.app"]}]}
+    );
+    defer pinned.deinit();
+    a.free(try installer.installZip(zip_path, app_dir, &pinned));
+    try std.Io.Dir.accessAbsolute(io, placed, .{});
 }
 
 test "parseCask does not length-cap a clean version" {

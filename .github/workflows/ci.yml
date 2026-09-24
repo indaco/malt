@@ -161,6 +161,9 @@ jobs:
       - name: Regression guard - subprocess extractors refuse escaping link targets
         run: ./scripts/regressions/xz-zip-extractors-lack-pax-linkpath-prescan.sh
 
+      - name: Regression guard - xz and zip extraction stay within the byte budget
+        run: ./scripts/regressions/archive-xz-zip-expansion-unbounded.sh
+
       - name: Regression guard - vulns scans tap kegs via OSV
         run: ./scripts/regressions/vulns-scans-tap-kegs-via-osv-vulns-skips-tap-and-local-kegs.sh
 

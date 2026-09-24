@@ -76,7 +76,7 @@ fn sniffMagic(io: std.Io, absolute_path: []const u8, out: []u8) !usize {
 /// on a tap formula the attacker supplies the archive and its digest alike.
 /// Cap what the archive declares instead - 16 GiB clears the largest real keg
 /// and cask payloads by a wide margin.
-const max_decompressed_bytes: u64 = 16 * 1024 * 1024 * 1024;
+pub const max_decompressed_bytes: u64 = 16 * 1024 * 1024 * 1024;
 const max_entries: usize = 1_000_000;
 
 /// Injectable: a fixture that merely *declared* 16 GiB would fail on
@@ -588,6 +588,11 @@ fn validChksum(header: *const [512]u8) bool {
 /// page saved as .zip gives a clean error instead of propagating up
 /// from unzip's own output.
 pub fn extractZip(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !void {
+    return extractZipLimited(io, archive_path, dest_dir, .default);
+}
+
+/// `extractZip` with an explicit expansion budget.
+fn extractZipLimited(io: std.Io, archive_path: []const u8, dest_dir: []const u8, limits: Limits) !void {
     var magic: [4]u8 = undefined;
     const n = try sniffMagic(io, archive_path, &magic);
     if (n < 4 or magic[0] != 'P' or magic[1] != 'K' or magic[2] != 0x03 or magic[3] != 0x04) {
@@ -595,6 +600,7 @@ pub fn extractZip(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !v
     }
 
     try validateZip(io, archive_path);
+    try checkZipExpansion(io, archive_path, limits.bytes);
 
     // -q: quiet, -o: overwrite without prompting, -d: destination dir.
     const argv = [_][]const u8{ system_tools.unzip, "-q", "-o", archive_path, "-d", dest_dir };
@@ -629,7 +635,13 @@ fn validateZip(io: std.Io, archive_path: []const u8) !void {
 /// uid/mode bits on extract — downloaded archives should not shape the
 /// on-disk identity of what they produce.
 pub fn extractTarXzFile(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !void {
+    return extractTarXzFileLimited(io, archive_path, dest_dir, .default);
+}
+
+/// `extractTarXzFile` with an explicit expansion budget.
+fn extractTarXzFileLimited(io: std.Io, archive_path: []const u8, dest_dir: []const u8, limits: Limits) !void {
     try validateTarListing(io, archive_path);
+    try checkExpansion(io, &.{ system_tools.tar, "-xOf", archive_path }, limits.bytes);
 
     const argv = [_][]const u8{ system_tools.tar, "xf", archive_path, "-C", dest_dir, "--no-same-permissions", "--no-same-owner" };
     var child = std.process.spawn(io, .{
@@ -653,6 +665,45 @@ pub fn extractTarXzFile(io: std.Io, archive_path: []const u8, dest_dir: []const 
 fn validateTarListing(io: std.Io, archive_path: []const u8) !void {
     const argv = [_][]const u8{ system_tools.tar, "tf", archive_path };
     try validateSubprocessListing(io, &argv);
+}
+
+/// The zip budget for extractors other than `extractZip` (cask `ditto`).
+pub fn checkZipExpansion(io: std.Io, archive_path: []const u8, limit: u64) !void {
+    // A dummy password: an encrypted entry fails fast instead of prompting on
+    // the tty with stderr ignored.
+    return checkExpansion(io, &.{ system_tools.unzip, "-P", "x", "-p", archive_path }, limit);
+}
+
+/// Refuse an archive whose files decode past `limit` before any reach disk.
+/// Counts the extracting tool's own output: a zip's declared sizes are not
+/// what unzip writes.
+fn checkExpansion(io: std.Io, argv: []const []const u8, limit: u64) !void {
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    }) catch return error.ExtractionFailed;
+    const stdout = child.stdout orelse {
+        _ = child.wait(io) catch {};
+        return error.ExtractionFailed;
+    };
+    var buf: [64 * 1024]u8 = undefined;
+    var r = stdout.readerStreaming(io, &buf);
+    const cap = std.math.cast(usize, limit +| 1) orelse std.math.maxInt(usize);
+    const n = r.interface.discardShort(cap) catch {
+        child.kill(io);
+        return error.ExtractionFailed;
+    };
+    if (n > limit) {
+        // Stop the decoder now; draining the rest would spend what the cap saves.
+        child.kill(io);
+        return error.ExtractionFailed;
+    }
+    const term = child.wait(io) catch return error.ExtractionFailed;
+    switch (term) {
+        .exited => |code| if (code != 0) return error.ExtractionFailed,
+        else => return error.ExtractionFailed,
+    }
 }
 
 /// Spawn `argv` expecting one entry name per stdout line, and reject the
@@ -951,6 +1002,121 @@ fn testExtractXz(io: std.Io, s: *Scratch, raw: []const u8) !void {
     if (std.c.dup2(devnull, std.posix.STDERR_FILENO) < 0) return error.Unexpected;
     defer _ = std.c.dup2(saved, std.posix.STDERR_FILENO);
     return extractTarXzFile(io, s.p("/a.tar"), s.p("/dest"));
+}
+
+/// `testExtractXz` with an injected budget.
+fn testExtractXzLimited(io: std.Io, s: *Scratch, raw: []const u8, limits: Limits) !void {
+    try s.dir.writeFile(io, .{ .sub_path = "a.tar", .data = raw });
+    return extractTarXzFileLimited(io, s.p("/a.tar"), s.p("/dest"), limits);
+}
+
+/// Zip `size` zero bytes as `<s>/big.zip`, optionally rewriting both size
+/// fields to `declare` - unzip ignores them, which is why the budget cannot.
+fn testZeroZip(io: std.Io, s: *Scratch, size: usize, declare: ?u32) ![]const u8 {
+    const zeros = try s.arena.allocator().alloc(u8, size);
+    @memset(zeros, 0);
+    try s.dir.writeFile(io, .{ .sub_path = "big", .data = zeros });
+    const archive_path = s.p("/big.zip");
+    var zip = try std.process.spawn(io, .{
+        .argv = &.{ "/usr/bin/zip", "-j", "-q", archive_path, s.p("/big") },
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    const term = try zip.wait(io);
+    try std.testing.expect(term == .exited and term.exited == 0);
+    if (declare) |n| {
+        const bytes = try s.dir.readFileAlloc(io, "big.zip", s.arena.allocator(), .limited(1 << 20));
+        std.mem.writeInt(u32, bytes[22..26], n, .little);
+        const central = std.mem.indexOf(u8, bytes, "PK\x01\x02") orelse return error.TestUnexpectedResult;
+        std.mem.writeInt(u32, bytes[central + 24 ..][0..4], n, .little);
+        try s.dir.writeFile(io, .{ .sub_path = "big.zip", .data = bytes });
+    }
+    return archive_path;
+}
+
+test "extractTarXzFile refuses an archive whose payload exceeds the byte budget" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var s = try Scratch.init("xz_byte_budget_over");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    var raw: [8192]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.file("a", "x" ** 1024);
+    t.file("b", "y" ** 1024);
+    try std.testing.expectError(error.ExtractionFailed, testExtractXzLimited(io, &s, t.bytes(), .{ .bytes = 1500 }));
+    // Refused before extraction, so nothing reached the destination.
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, s.p("/dest/a"), .{}));
+
+    try testExtractXzLimited(io, &s, t.bytes(), .{ .bytes = 2048 });
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/b"), .{});
+}
+
+test "extractZip counts what unzip writes, not what the archive declares" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var s = try Scratch.init("zip_byte_budget_lie");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    // Declares 16 bytes; unzip would still inflate all 64 KiB.
+    const archive_path = try testZeroZip(io, &s, 64 * 1024, 16);
+    try std.testing.expectError(error.ExtractionFailed, extractZipLimited(io, archive_path, s.p("/dest"), .{ .bytes = 4096 }));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, s.p("/dest/big"), .{}));
+}
+
+test "extractZip admits an archive of empty files under a zero budget" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var s = try Scratch.init("zip_byte_budget_zero");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    // The boundary: zero decoded bytes never exceed a zero budget.
+    const archive_path = try testZeroZip(io, &s, 0, null);
+    try extractZipLimited(io, archive_path, s.p("/dest"), .{ .bytes = 0 });
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/big"), .{});
+}
+
+test "extractZip refuses an encrypted archive instead of waiting on a password" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var s = try Scratch.init("zip_encrypted");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+    try s.dir.writeFile(io, .{ .sub_path = "secret", .data = "payload" });
+    const archive_path = s.p("/secret.zip");
+    var zip = try std.process.spawn(io, .{
+        .argv = &.{ "/usr/bin/zip", "-j", "-q", "-P", "hunter2", archive_path, s.p("/secret") },
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    const term = try zip.wait(io);
+    try std.testing.expect(term == .exited and term.exited == 0);
+
+    try std.testing.expectError(error.ExtractionFailed, extractZip(io, archive_path, s.p("/dest")));
+}
+
+test "extractZip extracts an archive that fits the byte budget" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var s = try Scratch.init("zip_byte_budget_fits");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "dest");
+
+    const archive_path = try testZeroZip(io, &s, 64 * 1024, null);
+    try extractZipLimited(io, archive_path, s.p("/dest"), .{ .bytes = 64 * 1024 });
+    try std.Io.Dir.accessAbsolute(io, s.p("/dest/big"), .{});
 }
 
 test "extractZip ignores a PATH-resident unzip shim" {
