@@ -954,6 +954,74 @@ test "materializeRubyFormula refuses a symlinked package dir" {
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, leaked, .{}));
 }
 
+test "materializeRubyFormula refuses an escaping raw binary name before touching the Cellar" {
+    // Refusing any later would first install deps, download, or - under
+    // --force - prune the installed keg the refusal then leaves missing.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    try seedLocalKeg(db_path, prefix, "tool", "1.0", "u/t/tool");
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(true);
+    defer malt.output.setQuiet(prior_quiet);
+
+    const resolved: install_local.ResolvedRubyFormula = .{
+        .name = "tool",
+        .full_name = "u/t/tool",
+        .tap_label = "u/t",
+        .version = "1.0",
+        .url = "https://example.invalid/tool-darwin-arm64",
+        .sha256 = "dd" ** 32,
+        .binary_name = "../../../../victim",
+        .dependencies = &.{"no-such-dep"},
+    };
+    const cache_dir = try std.fmt.allocPrint(allocator, "{s}/cache", .{prefix});
+
+    // force, then dry run: both must stop at the screen.
+    for ([_][2]bool{ .{ false, true }, .{ true, false } }) |mode| {
+        try testing.expectError(install_record.InstallError.FormulaNotFound, install_local.materializeRubyFormula(
+            &ctx,
+            allocator,
+            resolved,
+            &http,
+            &db,
+            &linker,
+            prefix,
+            cache_dir,
+            mode[0], // dry_run
+            mode[1], // force
+            false,
+            null, // prefetch_slot
+            malt.install_sink.silent,
+        ));
+    }
+
+    const keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/tool/1.0", .{prefix});
+    defer testing.allocator.free(keg);
+    try test_io.accessAbsolute(std.Options.debug_io, keg, .{});
+    var stmt = try db.prepare("SELECT 1 FROM kegs WHERE name = 'tool';");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+}
+
 // ─── .rb revision reaches the keg row and the Cellar leaf ───────────
 
 // Real `Threaded` io to spawn `tar` — `std.Options.debug_io`'s failing

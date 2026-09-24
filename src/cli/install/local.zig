@@ -151,6 +151,18 @@ fn screenRubyIdentity(sink: OutputSink, name: []const u8, version: []const u8) I
     }
 }
 
+/// A bare-asset URL is copied straight to `<keg>/bin/<binary_name>`, so the
+/// name must be one component; archives may nest it. Refused, not dropped:
+/// falling back to `name` would install a binary the cask never named.
+fn screenRawBinaryName(sink: OutputSink, resolved: ResolvedRubyFormula) InstallError!void {
+    if (TapArchiveKind.fromUrl(resolved.url) != null) return;
+    const bin = resolved.binary_name orelse return;
+    if (!path_component.isPathComponent(bin)) {
+        sink.err("Formula declares an unsafe binary name: {s}", .{bin});
+        return InstallError.FormulaNotFound;
+    }
+}
+
 const TapRegistration = struct {
     url: []const u8,
     commit_sha: []const u8,
@@ -937,6 +949,9 @@ pub fn materializeRubyFormula(
     if (tapCaskArtifactKind(resolved.url, resolved.app_name != null)) |kind| {
         return materializeTapCask(ctx, allocator, resolved, db, kind, cache_dir, dry_run, force, download_only, prefetch_slot, sink);
     }
+
+    // Before deps, download and the --force prune, so a refusal changes nothing.
+    try screenRawBinaryName(sink, resolved);
 
     if (dry_run) {
         sink.info("Dry run: would install {s} {s} from {s}", .{ resolved.name, resolved.version, resolved.url });
@@ -2191,6 +2206,37 @@ test "screenRubyIdentity accepts the shapes real formula versions take" {
     // charset-agnostic on purpose.
     try screenRubyIdentity(sink_mod.silent, "python@3.14", "3.14.0");
     try screenRubyIdentity(sink_mod.silent, "probe", "3.2.1+dfsg");
+}
+
+test "screenRawBinaryName refuses an unsafe binary name on a bare-asset url" {
+    // The name is the sink path under `<keg>/bin/`; any hop or separator
+    // writes the downloaded asset outside the keg.
+    for ([_][]const u8{ "../../x", "a/b", "..", ".", "", "a\x00b" }) |bad| {
+        const resolved: ResolvedRubyFormula = .{ .name = "tool", .full_name = "u/t/tool", .tap_label = "u/t", .version = "1.0", .url = "https://example.invalid/tool-darwin-arm64", .sha256 = "", .binary_name = bad };
+        try std.testing.expectError(InstallError.FormulaNotFound, screenRawBinaryName(sink_mod.silent, resolved));
+    }
+}
+
+test "screenRawBinaryName screens every url the install routes to the raw sink" {
+    // A query string hides the archive suffix, so the install copies the
+    // asset verbatim; the screen has to agree on what counts as raw.
+    const resolved: ResolvedRubyFormula = .{ .name = "tool", .full_name = "u/t/tool", .tap_label = "u/t", .version = "1.0", .url = "https://example.invalid/tool.tar.gz?download=1", .sha256 = "", .binary_name = "../../x" };
+    try std.testing.expectEqual(@as(?TapArchiveKind, null), TapArchiveKind.fromUrl(resolved.url));
+    try std.testing.expectError(InstallError.FormulaNotFound, screenRawBinaryName(sink_mod.silent, resolved));
+}
+
+test "screenRawBinaryName leaves safe and archive binary names alone" {
+    const base: ResolvedRubyFormula = .{ .name = "tool", .full_name = "u/t/tool", .tap_label = "u/t", .version = "1.0", .url = "https://example.invalid/tool-darwin-arm64", .sha256 = "" };
+    var plain = base;
+    plain.binary_name = "tool";
+    try screenRawBinaryName(sink_mod.silent, plain);
+    // No directive falls back to the already-screened `name`.
+    try screenRawBinaryName(sink_mod.silent, base);
+    // Archives legitimately nest the binary.
+    var archive = base;
+    archive.url = "https://example.invalid/foo.tar.gz";
+    archive.binary_name = "foo-1.2.3-arm64/foo";
+    try screenRawBinaryName(sink_mod.silent, archive);
 }
 
 test "ParsedService keeps a block malt cannot read apart from no block at all" {
