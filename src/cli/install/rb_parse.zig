@@ -86,8 +86,7 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     var version_latest = false;
     var revision: i64 = 0;
     var url: ?[]const u8 = null;
-    var sha256: ?[]const u8 = null;
-    var opted_out = false;
+    var sum: ?Checksum = null;
     var arch_token: []const u8 = "";
 
     // The state machine recognises two layouts:
@@ -179,16 +178,16 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
         // (`sha256 arm: "...", \n  intel: "..."`). Track whether the
         // previous trimmed line opened a `sha256` directive so the
         // continuation line can still pick the platform value.
-        if (!scope.inside() and sha256 == null and !opted_out) {
+        if (!scope.inside() and sum == null) {
             if (std.mem.startsWith(u8, line, "sha256 ")) {
                 const body = line["sha256 ".len..];
                 if (lineStartsWithKwArg(body)) {
-                    pickKwChecksum(body, is_arm, &sha256, &opted_out);
+                    sum = pickKwChecksum(body, is_arm);
                     // Only a trailing comma continues the directive.
-                    prev_in_kwarg_sha256 = sha256 == null and !opted_out and std.mem.endsWith(u8, body, ",");
+                    prev_in_kwarg_sha256 = sum == null and std.mem.endsWith(u8, body, ",");
                 }
             } else if (prev_in_kwarg_sha256) {
-                pickKwChecksum(line, is_arm, &sha256, &opted_out);
+                sum = pickKwChecksum(line, is_arm);
                 // Continuation lines never re-open the directive — a
                 // missed match means the second arg is the one we
                 // didn't want, so stop hunting for more.
@@ -203,22 +202,17 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
                     url = u;
                 }
             }
-            if (sha256 == null and !opted_out) {
-                if (extractQuoted(line, "sha256 \"")) |s| {
-                    sha256 = s;
-                } else opted_out = isNoCheck(line);
-            }
+            if (sum == null) sum = flatChecksum(line);
         }
 
         // If we have both, stop
-        if (url != null and (sha256 != null or opted_out)) break;
+        if (url != null and sum != null) break;
     }
 
     // Global url/sha256 fallback. Skip when an arch-segmented formula yielded
     // NEITHER field for our arch — else it grabs the whole other-arch pair.
     // A partial block (our url + a shared global sha256) still completes.
-    const have_sum = sha256 != null or opted_out;
-    if ((url == null or !have_sum) and !(saw_arch_marker and url == null and !have_sum)) {
+    if ((url == null or sum == null) and !(saw_arch_marker and url == null and sum == null)) {
         var fallback_it = std.mem.splitScalar(u8, rb_content, '\n');
         var fallback_scope: ForeignScope = .{};
         while (fallback_it.next()) |raw| {
@@ -230,15 +224,11 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
             if (url == null) {
                 if (extractQuoted(ln, "url \"")) |u| url = u;
             }
-            if (sha256 == null and !opted_out) {
-                if (extractQuoted(ln, "sha256 \"")) |s| {
-                    sha256 = s;
-                } else opted_out = isNoCheck(ln);
-            }
+            if (sum == null) sum = flatChecksum(ln);
         }
     }
 
-    if (url != null and (sha256 != null or opted_out)) {
+    if (url != null and sum != null) {
         if (!hasOnlyExpandableInterpolations(url.?)) return null;
         // Homebrew treats `version` as optional when the tag is encoded
         // in the URL. Mirror that: derive it from the release-asset or
@@ -249,8 +239,11 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
             .version = final_version,
             .revision = revision,
             .url = url.?,
-            .sha256 = sha256 orelse "",
-            .checksum_opted_out = sha256 == null,
+            .sha256 = switch (sum.?) {
+                .pinned => |s| s,
+                .opted_out => "",
+            },
+            .checksum_opted_out = sum.? == .opted_out,
             .version_latest = version_latest,
             .arch_token = arch_token,
         };
@@ -471,17 +464,21 @@ fn pickKwArg(body: []const u8, is_arm: bool) ?[]const u8 {
     return value;
 }
 
+/// What one `sha256` directive declares, before it is flattened into
+/// `RubyFormulaInfo`.
+const Checksum = union(enum) { pinned: []const u8, opted_out };
+
 /// The `sha256` kwarg for this arch: a quoted digest, or the `:no_check` symbol.
-fn pickKwChecksum(body: []const u8, is_arm: bool, sha256: *?[]const u8, opted_out: *bool) void {
-    if (pickKwArg(body, is_arm)) |s| {
-        sha256.* = s;
-    } else if (kwArgValue(body, is_arm)) |after| {
-        opted_out.* = isSymbol(after, ":no_check");
-    }
+fn pickKwChecksum(body: []const u8, is_arm: bool) ?Checksum {
+    if (pickKwArg(body, is_arm)) |s| return .{ .pinned = s };
+    const after = kwArgValue(body, is_arm) orelse return null;
+    return if (isSymbol(after, ":no_check")) .opted_out else null;
 }
 
-fn isNoCheck(line: []const u8) bool {
-    return isDirectiveSymbol(line, "sha256 ", ":no_check");
+/// A whole-line `sha256 "<hex>"` or `sha256 :no_check`.
+fn flatChecksum(line: []const u8) ?Checksum {
+    if (extractQuoted(line, "sha256 \"")) |s| return .{ .pinned = s };
+    return if (isDirectiveSymbol(line, "sha256 ", ":no_check")) .opted_out else null;
 }
 
 /// Whole-line `<directive> <sym>` (a trailing comment allowed).
