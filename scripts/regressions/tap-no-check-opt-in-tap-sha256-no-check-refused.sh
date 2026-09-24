@@ -53,7 +53,14 @@ for f in nocheck kwarg; do
   grep -q 'not checksum-verified' <<<"$out" || fail "$f: no unverified warning: $out"
 done
 
-# 3. The opt-in never rescues a quoted or absent checksum.
+# 3. The usual vendor shape, `version :latest`, installs as the `latest` keg.
+printf 'class Foo < Formula\n  version :latest\n  url "https://example.com/foo.tar.gz"\n  sha256 :no_check\nend\n' >"$T/nightly.rb"
+out=$("$BIN" install --local --dry-run --allow-unpinned "$T/nightly.rb" 2>&1) ||
+  fail "version :latest refused under --allow-unpinned: $out"
+grep -q 'would install nightly latest from' <<<"$out" ||
+  fail "version :latest did not resolve to the latest keg: $out"
+
+# 4. The opt-in never rescues a quoted or absent checksum.
 for f in quoted absent; do
   if "$BIN" install --local --dry-run --allow-unpinned "$T/$f.rb" >/dev/null 2>&1; then
     fail "$f checksum accepted under --allow-unpinned"

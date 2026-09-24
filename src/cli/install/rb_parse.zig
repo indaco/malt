@@ -23,6 +23,8 @@ pub const RubyFormulaInfo = struct {
     /// `sha256 :no_check` for this arch. A tag, never the string: a quoted
     /// `"no_check"` stays an (invalid) pinned value.
     checksum_opted_out: bool = false,
+    /// `version :latest`: `version` reads "latest" and no release is pinned.
+    version_latest: bool = false,
     /// Empty by default. Populated only when the cask DSL set `arch`
     /// keyword-argument values for the current platform (typically a
     /// short suffix like `-aarch64` for arm and `""` for intel).
@@ -81,6 +83,7 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     const is_arm = @import("../../macho/codesign.zig").isArm64();
 
     var version: ?[]const u8 = null;
+    var version_latest = false;
     var revision: i64 = 0;
     var url: ?[]const u8 = null;
     var sha256: ?[]const u8 = null;
@@ -116,6 +119,10 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
         if (version == null and !scope.inside()) {
             if (extractQuoted(line, "version \"")) |v| {
                 version = v;
+            } else if (isDirectiveSymbol(line, "version ", ":latest")) {
+                // The cask API spells it the same way, so both paths agree on the keg.
+                version = "latest";
+                version_latest = true;
             }
         }
 
@@ -244,6 +251,7 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
             .url = url.?,
             .sha256 = sha256 orelse "",
             .checksum_opted_out = sha256 == null,
+            .version_latest = version_latest,
             .arch_token = arch_token,
         };
     }
@@ -468,18 +476,21 @@ fn pickKwChecksum(body: []const u8, is_arm: bool, sha256: *?[]const u8, opted_ou
     if (pickKwArg(body, is_arm)) |s| {
         sha256.* = s;
     } else if (kwArgValue(body, is_arm)) |after| {
-        opted_out.* = isNoCheckValue(after);
+        opted_out.* = isSymbol(after, ":no_check");
     }
 }
 
-/// Whole-line `sha256 :no_check` (a trailing comment allowed).
 fn isNoCheck(line: []const u8) bool {
-    return std.mem.startsWith(u8, line, "sha256 ") and isNoCheckValue(std.mem.trimStart(u8, line["sha256 ".len..], " \t"));
+    return isDirectiveSymbol(line, "sha256 ", ":no_check");
 }
 
-/// `value` starts with the `:no_check` symbol and nothing identifier-like follows it.
-fn isNoCheckValue(value: []const u8) bool {
-    const sym = ":no_check";
+/// Whole-line `<directive> <sym>` (a trailing comment allowed).
+fn isDirectiveSymbol(line: []const u8, directive: []const u8, sym: []const u8) bool {
+    return std.mem.startsWith(u8, line, directive) and isSymbol(std.mem.trimStart(u8, line[directive.len..], " \t"), sym);
+}
+
+/// `value` starts with `sym` and nothing identifier-like follows it.
+fn isSymbol(value: []const u8, sym: []const u8) bool {
     if (!std.mem.startsWith(u8, value, sym)) return false;
     const rest = value[sym.len..];
     return rest.len == 0 or rest[0] == ' ' or rest[0] == '\t' or rest[0] == ',' or rest[0] == '#';
@@ -2118,6 +2129,51 @@ test "parseRubyFormula: the other arch's block never lends its opt-out" {
     const got = parseRubyFormula(body) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqual(is_arm, got.checksum_opted_out);
     try std.testing.expectEqualStrings(if (is_arm) "" else "iiiiiiii", got.sha256);
+}
+
+test "parseRubyFormula: version :latest names the keg `latest`, as the cask API does" {
+    const got = parseRubyFormula(
+        \\cask "foo" do
+        \\  version :latest
+        \\  sha256 :no_check
+        \\  url "https://example.com/foo.dmg"
+        \\end
+    ) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("latest", got.version);
+    try std.testing.expect(got.version_latest);
+    try std.testing.expect(got.checksum_opted_out);
+}
+
+test "parseRubyFormula: version :latest wins over a version derivable from the url" {
+    const got = parseRubyFormula(
+        \\class Foo < Formula
+        \\  version :latest # vendor rebuilds nightly
+        \\  url "https://github.com/o/foo/releases/download/v1.2.3/foo.tar.gz"
+        \\  sha256 "aaaaaaaa"
+        \\end
+    ) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("latest", got.version);
+    try std.testing.expect(got.version_latest);
+}
+
+test "parseRubyFormula: only the :latest symbol is special" {
+    const quoted = parseRubyFormula(
+        \\class Foo < Formula
+        \\  version "latest"
+        \\  url "https://example.com/foo.tar.gz"
+        \\  sha256 "aaaaaaaa"
+        \\end
+    ) orelse return error.TestUnexpectedNull;
+    try std.testing.expect(!quoted.version_latest);
+
+    // Any other symbol has no version malt can name a keg after.
+    try std.testing.expect(parseRubyFormula(
+        \\class Foo < Formula
+        \\  version :latest_nightly
+        \\  url "https://example.com/foo.tar.gz"
+        \\  sha256 "aaaaaaaa"
+        \\end
+    ) == null);
 }
 
 test "parseRubyFormula: an absent sha256 stays unparseable" {

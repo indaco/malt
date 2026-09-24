@@ -49,11 +49,11 @@ const nocheck_rb =
     \\end
 ;
 
-/// The usual companion of `:no_check`; malt has no version to scan it at.
+/// The usual companion of `:no_check`; no release to ask OSV about.
 const nocheck_latest_rb =
     \\class Nolatest < Formula
     \\  version :latest
-    \\  url "https://example.com/nolatest.tar.gz"
+    \\  url "https://github.com/someone/nolatest/releases/latest/download/nolatest.tar.gz"
     \\  sha256 :no_check
     \\end
 ;
@@ -617,22 +617,18 @@ test "a tap keg whose recipe declares sha256 :no_check is still scanned from its
     try testing.expect(std.mem.indexOf(u8, r.stdout, "\"unchecked\":[]") != null);
 }
 
-test "a :latest tap keg that opts out of checksums is unchecked with that reason" {
+test "a :latest tap keg is not covered, never reported clean nor a failed scan" {
     const h = try Harness.init(testing.allocator, "tap_nolatest");
     defer h.deinit();
-    try h.seed(&.{"curl@8.16.0"});
     try h.seedTap("someone/tap", &.{"nolatest@1.0"});
 
-    var errs: std.ArrayList(u8) = .empty;
-    defer errs.deinit(testing.allocator);
-    output.beginStderrCapture(testing.allocator, &errs);
     const r = try h.run(&.{}, true);
-    output.endStderrCapture();
     defer testing.allocator.free(r.stdout);
-
-    try testing.expectEqual(@as(?anyerror, error.ScanIncomplete), r.err);
-    try testing.expect(std.mem.indexOf(u8, r.stdout, "\"unchecked\":[\"nolatest\"]") != null);
-    try testing.expect(std.mem.indexOf(u8, errs.items, "sha256 :no_check") != null);
+    // An exit that never clears would keep a CI gate red for good.
+    try testing.expect(r.err == null);
+    try testing.expectEqualStrings("{\"schema_version\":1,\"not_covered\":1,\"unchecked\":[],\"formulae\":[]}\n", r.stdout);
+    // A forge url, so the skipped query is the :latest rule, not an unknown host.
+    try testing.expectEqualStrings("", h.postBody());
 }
 
 test "a tap keg installed from Casks/ is scanned from the cask, not a same-named formula" {
