@@ -189,6 +189,7 @@ const upgrade_help =
     \\                 it would widen the trust boundary to every outdated keg.
     \\  --allow-unpinned Upgrade a tap package whose recipe declares
     \\                 `sha256 :no_check` (TLS is its only integrity check).
+    \\                 Without it such packages are skipped.
     \\
 ;
 
