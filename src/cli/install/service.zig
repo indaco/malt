@@ -188,6 +188,7 @@ pub fn registerRuby(
     defer arena.deinit();
     const def = defFromRuby(arena.allocator(), b, name, pkg_version) orelse {
         sink.warn("could not register service for {s}: unsupported service block", .{name});
+        warnKeptRow(db, name, pkg_version, sink);
         return;
     };
     if (b.declares_env) sink.warn("{s}: service environment_variables not applied (not read from tap or local formulas)", .{name});
@@ -488,10 +489,10 @@ const ruby_roots = std.StaticStringMap(RubyRoot).initComptime(.{
 
 /// Translate a textual `service do` block into the `ServiceDef` the API
 /// path produces, minus `environment_variables`, so both share
-/// `specFromDef` and `validate`. Null when any
-/// token is a shape malt cannot render (`#{...}`, `Dir.home`, a method
-/// call) or the schedule is out of bounds - the API side fails those the
-/// same way, and a half-translated argv must never reach launchd.
+/// `specFromDef` and `validate`. Null when any token is a shape malt
+/// cannot render (`Dir.home`, a method call, an interpolation other than a
+/// prefix root) or the schedule is out of bounds - the API side fails those
+/// the same way, and a half-translated argv must never reach launchd.
 pub fn defFromRuby(
     aa: std.mem.Allocator,
     block: rb_parse.RubyServiceBlock,
@@ -520,11 +521,11 @@ pub fn defFromRuby(
 }
 
 /// One Ruby token -> a `$HOMEBREW_PREFIX`-rooted path or a bare literal.
-/// Accepted shapes: `"literal"`, `<root>`, `<root>/"leaf"`, and
-/// `Formula["dep"].<root>/"leaf"` with an opt root.
+/// Accepted shapes: `"literal"`, `"...#{<root>}..."`, `<root>`,
+/// `<root>/"leaf"`, and `Formula["dep"].<root>/"leaf"` with an opt root.
 fn rubyPath(aa: std.mem.Allocator, tok: []const u8, name: []const u8, pkg_version: []const u8) ?[]const u8 {
+    if (tok.len >= 2 and tok[0] == '"' and tok[tok.len - 1] == '"') return rubyLiteral(aa, tok[1 .. tok.len - 1], name, pkg_version);
     if (std.mem.indexOf(u8, tok, "#{") != null) return null;
-    if (tok.len >= 2 and tok[0] == '"' and tok[tok.len - 1] == '"') return tok[1 .. tok.len - 1];
 
     var owner = name;
     var rest = tok;
@@ -542,7 +543,48 @@ fn rubyPath(aa: std.mem.Allocator, tok: []const u8, name: []const u8, pkg_versio
         .opt_bin, .opt_sbin, .opt_libexec, .opt_prefix => {},
         else => return null,
     };
-    const base: []const u8 = switch (root) {
+    const base = rootBase(aa, root, owner, name, pkg_version) orelse return null;
+    const quoted = leaf orelse return base;
+    if (quoted.len == 0 or quoted[quoted.len - 1] != '"') return null;
+    const sub = quoted[0 .. quoted.len - 1];
+    // Also catches a chained `/"a"/"b"` leaf, whose quotes would land in the path.
+    if (!isVerbatim(sub)) return null;
+    return std.fmt.allocPrint(aa, "{s}/{s}", .{ base, sub }) catch null;
+}
+
+/// Whether a quoted literal's body means the same in Ruby as its bytes,
+/// `#{...}` aside. An inner `"` makes it several literals, escapes need a
+/// Ruby lexer, and `#@ivar`/`#$global` interpolate state malt never has.
+fn isVerbatim(body: []const u8) bool {
+    return std.mem.indexOfAny(u8, body, "\"\\") == null and
+        std.mem.indexOf(u8, body, "#@") == null and
+        std.mem.indexOf(u8, body, "#$") == null;
+}
+
+/// Body of a quoted literal, with each `#{<root>}` rendered as its bare
+/// token would be.
+fn rubyLiteral(aa: std.mem.Allocator, body: []const u8, name: []const u8, pkg_version: []const u8) ?[]const u8 {
+    if (!isVerbatim(body)) return null;
+    if (std.mem.indexOf(u8, body, "#{") == null) return body;
+
+    var out: std.ArrayList(u8) = .empty;
+    var rest = body;
+    while (std.mem.cut(u8, rest, "#{")) |cut| {
+        const before, const after = cut;
+        const ident, rest = std.mem.cut(u8, after, "}") orelse return null;
+        const root = ruby_roots.get(ident) orelse return null;
+        const base = rootBase(aa, root, name, name, pkg_version) orelse return null;
+        out.appendSlice(aa, before) catch return null;
+        out.appendSlice(aa, base) catch return null;
+    }
+    out.appendSlice(aa, rest) catch return null;
+    return out.items;
+}
+
+/// `owner` names the opt link; keg-relative roots always use this keg's
+/// Cellar leaf.
+fn rootBase(aa: std.mem.Allocator, root: RubyRoot, owner: []const u8, name: []const u8, pkg_version: []const u8) ?[]const u8 {
+    return switch (root) {
         .opt_bin => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/opt/{s}/bin", .{owner}),
         .opt_sbin => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/opt/{s}/sbin", .{owner}),
         .opt_libexec => std.fmt.allocPrint(aa, "$HOMEBREW_PREFIX/opt/{s}/libexec", .{owner}),
@@ -554,14 +596,7 @@ fn rubyPath(aa: std.mem.Allocator, tok: []const u8, name: []const u8, pkg_versio
         .@"var" => aa.dupe(u8, "$HOMEBREW_PREFIX/var"),
         .etc => aa.dupe(u8, "$HOMEBREW_PREFIX/etc"),
         .homebrew_prefix => aa.dupe(u8, "$HOMEBREW_PREFIX"),
-    } catch return null;
-    const quoted = leaf orelse return base;
-    if (quoted.len == 0 or quoted[quoted.len - 1] != '"') return null;
-    const sub = quoted[0 .. quoted.len - 1];
-    // A second `"` means a chained `/"a"/"b"` leaf; pasting it verbatim would
-    // put quotes into the rendered path.
-    if (std.mem.indexOfScalar(u8, sub, '"') != null) return null;
-    return std.fmt.allocPrint(aa, "{s}/{s}", .{ base, sub }) catch null;
+    } catch null;
 }
 
 test "specFromDef expands the Homebrew prefix token in every path field" {
@@ -681,9 +716,63 @@ test "defFromRuby drops the service on a token shape it cannot render" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const aa = arena.allocator();
-    try testing.expect(defFromRuby(aa, .{ .run = &.{"\"#{opt_bin}/x\""} }, "foo", "1.0") == null);
     try testing.expect(defFromRuby(aa, .{ .run = &.{ "opt_bin/\"x\"", "Dir.home" } }, "foo", "1.0") == null);
     try testing.expect(defFromRuby(aa, .{ .run = &.{"opt_bin/\"x\""}, .log_path = "Dir.home" }, "foo", "1.0") == null);
+}
+
+test "defFromRuby renders a prefix root interpolated into a quoted literal" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const cases = [_]struct { tok: []const u8, want: []const u8 }{
+        .{ .tok = "\"#{opt_bin}/x\"", .want = "$HOMEBREW_PREFIX/opt/foo/bin/x" },
+        .{ .tok = "\"--config=#{etc}/x.conf\"", .want = "--config=$HOMEBREW_PREFIX/etc/x.conf" },
+        .{ .tok = "\"#{var}/a:#{HOMEBREW_PREFIX}/b\"", .want = "$HOMEBREW_PREFIX/var/a:$HOMEBREW_PREFIX/b" },
+        // Same Cellar leaf as bare `bin`, since `expandPrefix` has no Cellar token.
+        .{ .tok = "\"#{bin}/x\"", .want = "$HOMEBREW_PREFIX/Cellar/foo/1.2_1/bin/x" },
+    };
+    for (cases) |case| {
+        const def = defFromRuby(aa, .{ .run = &.{case.tok} }, "foo", "1.2_1") orelse return error.TestUnexpectedNull;
+        try testing.expectEqualStrings(case.want, def.run[0]);
+    }
+
+    const def = defFromRuby(aa, .{
+        .run = &.{"opt_bin/\"x\""},
+        .log_path = "\"#{var}/log/x.log\"",
+    }, "foo", "1.0") orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("$HOMEBREW_PREFIX/var/log/x.log", def.log_path.?);
+}
+
+test "defFromRuby drops the service on an interpolation it cannot render" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const refused = [_][]const u8{
+        "\"#{Dir.home}/x\"", // needs the install-time HOME
+        "\"#{foo}\"", // not a known root
+        "\"#{name}.conf\"", // no rendering in malt
+        "\"#{opt_bin\"", // unterminated
+        "\"a\\#{var}\"", // escapes need a real string lexer
+        "\"a\\n\"",
+        // Ruby's sigil shorthand interpolates too; verbatim would be wrong.
+        "\"#@dir/x\"",
+        "\"--pid=#$$\"",
+        "\"#{Formula[\"d\"].opt_bin}/x\"",
+        "#{var}", // unquoted
+        "var/\"log/#{name}.log\"", // a leaf is not rendered
+        "opt_bin/\"#{etc}\"",
+        "var/\"log/#$$.log\"",
+        "opt_bin/\"a\\\\b\"",
+        "\"#{var}\" + \"/x\"", // an expression, not one literal
+        "\"",
+    };
+    for (refused) |tok| {
+        if (defFromRuby(aa, .{ .run = &.{tok} }, "foo", "1.0") != null) {
+            std.debug.print("accepted: {s}\n", .{tok});
+            return error.TestExpectedNull;
+        }
+    }
+    try testing.expect(defFromRuby(aa, .{ .run = &.{"opt_bin/\"x\""}, .log_path = "\"#{Dir.home}/x.log\"" }, "foo", "1.0") == null);
 }
 
 test "defFromRuby maps run_type to a bounded schedule" {
@@ -1014,6 +1103,25 @@ test "registerRuby keeps the row when the block is declared but could not be rea
     registerRuby(std.Options.debug_io, .empty, testing.allocator, &db, null, true, null, "tree", "2.2.1", "/p", sink_mod.terminal);
 
     try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
+}
+
+test "registerRuby keeps the row when the block has a token it cannot render" {
+    // An upgrade whose block malt refuses leaves the old plist live; say so.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try seedDroppedRow(&db);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    registerRuby(std.Options.debug_io, .empty, testing.allocator, &db, .{ .run = &.{"\"a\\\\t\""} }, true, null, "tree", "2.2.1", "/p", sink_mod.terminal);
+
+    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: unsupported service block") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
 
