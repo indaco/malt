@@ -560,7 +560,13 @@ fn seedTapsAndServices(prefix: []const u8) !void {
     try db.exec(
         \\INSERT INTO services (name, keg_name, plist_path, auto_start, last_status)
         \\VALUES ('postgresql@16', 'postgresql@16', '/tmp/p.plist', 1, 'running'),
-        \\       ('redis',         'redis',         '/tmp/r.plist', 0, 'stopped');
+        \\       ('redis',         'redis',         '/tmp/r.plist', 0, 'stopped'),
+        \\       ('lxd',           'lx',            '/tmp/l.plist', 1, 'running');
+    );
+    // A local keg's service must not travel without its package.
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, install_reason)
+        \\VALUES ('lx', '/src/lx.rb', '1.0', 'd', '/c/lx', 'local', 'direct');
     );
 }
 
@@ -737,7 +743,8 @@ fn seedTapPackages(prefix: []const u8) !void {
 
 test "bundle create names tap packages by their tap, and cleanup keeps them" {
     // A bare name makes `bundle install` resolve against core, and a keg
-    // built from a tap's Casks/ only rebuilds through `cask`.
+    // built from a tap's Casks/ only rebuilds through `cask`. A `--local`
+    // recipe has no installable name, so it is left out with a rebuild hint.
     var s = try Scratch.init(testing.allocator, "create_tap_packages");
     defer s.deinit(testing.allocator);
     try seedTapPackages(s.path);
@@ -745,9 +752,17 @@ test "bundle create names tap packages by their tap, and cleanup keeps them" {
     const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
     defer testing.allocator.free(out_path);
 
-    quiet();
-    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", out_path });
-    unquiet();
+    {
+        var warned: std.ArrayList(u8) = .empty;
+        defer warned.deinit(testing.allocator);
+        output.beginStderrCapture(testing.allocator, &warned);
+        defer output.endStderrCapture();
+        // The file keeps no trace of the skip, so `-q` must not hide it.
+        quiet();
+        defer unquiet();
+        try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", out_path });
+        try testing.expect(std.mem.indexOf(u8, warned.items, "mt install --local '/src/lx.rb'") != null);
+    }
 
     const f = try test_io.openFileAbsolute(std.Options.debug_io, out_path, .{});
     const stat = try f.stat(std.Options.debug_io);
@@ -759,7 +774,6 @@ test "bundle create names tap packages by their tap, and cleanup keeps them" {
     for ([_][]const u8{
         "brew \"acme/tools/foo\"\n",
         "brew \"wget\"\n",
-        "brew \"lx\"\n",
         "cask \"acme/tools/bar\"\n",
         "cask \"acme/tools/baz\"\n",
         "cask \"firefox\"\n",
@@ -770,12 +784,92 @@ test "bundle create names tap packages by their tap, and cleanup keeps them" {
         }
     }
     try testing.expect(std.mem.indexOf(u8, body, "brew \"bar\"") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"lx\"") == null);
 
-    // Qualifying the writer alone would make cleanup uninstall every one.
+    // Qualifying the writer alone would make cleanup uninstall every one,
+    // and dropping the local line alone would uninstall the local keg.
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     output.beginStderrCapture(testing.allocator, &captured);
     defer output.endStderrCapture();
     try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "cleanup", "--dry-run", out_path });
     try testing.expect(std.mem.indexOf(u8, captured.items, "nothing to clean up") != null);
+}
+
+test "bundle cleanup never plans a local keg, even from an empty Brewfile" {
+    // No Brewfile can declare a `--local` recipe, so no Brewfile owns one.
+    var s = try Scratch.init(testing.allocator, "cleanup_skips_local");
+    defer s.deinit(testing.allocator);
+    try seedTapPackages(s.path);
+
+    const empty = try std.fmt.allocPrint(testing.allocator, "{s}/Empty", .{s.path});
+    defer testing.allocator.free(empty);
+    try writeFile(empty, "");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "cleanup", "--dry-run", empty });
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "- wget") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "- lx") == null);
+}
+
+test "bundle cleanup spares a core keg the local keg still depends on" {
+    // Uninstall refuses a keg something kept still needs, which used to fail
+    // the whole run once the local keg stopped leaving with it.
+    var s = try Scratch.init(testing.allocator, "cleanup_spares_local_dep");
+    defer s.deinit(testing.allocator);
+    try seedTapPackages(s.path);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try db.exec(
+            \\INSERT INTO dependencies (keg_id, dep_name, dep_type)
+            \\  SELECT id, 'wget', 'runtime' FROM kegs WHERE name = 'lx';
+        );
+    }
+
+    const empty = try std.fmt.allocPrint(testing.allocator, "{s}/Empty", .{s.path});
+    defer testing.allocator.free(empty);
+    try writeFile(empty, "");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "cleanup", "--dry-run", empty });
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "- wget") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "- foo") != null);
+    // Say why it stays, or "nothing to clean up" hides an unlisted package.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "keeping wget") != null);
+}
+
+test "remove --purge never takes a local keg for a same-named core line" {
+    // `brew "lx"` names core's lx; purging the bundle must not reach a
+    // `--local` keg that merely shares the name.
+    var s = try Scratch.init(testing.allocator, "purge_skips_local");
+    defer s.deinit(testing.allocator);
+    try seedTapPackages(s.path);
+
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "brew \"lx\"\nbrew \"wget\"\n");
+
+    quiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path });
+    unquiet();
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "--purge", "--dry-run", path });
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "- wget") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "- lx") == null);
 }

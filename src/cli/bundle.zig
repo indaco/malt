@@ -277,6 +277,10 @@ fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
             installed.casks,
         ) catch return BundleError.RunnerFailed;
         errdefer p.deinit();
+        const spared = cleanup_mod.dropKeptDependencies(allocator, &db, &p) catch
+            return BundleError.DatabaseError;
+        defer cleanup_mod.freeNames(p.allocator, spared);
+        for (spared) |n| output.info("keeping {s}: an installed package depends on it", .{n});
         cleanup_mod.orderForRemoval(allocator, &db, &p) catch
             return BundleError.DatabaseError;
         break :blk p;
@@ -738,11 +742,18 @@ fn populateFromInstalled(
     }
 
     // A keg built from a tap's Casks/ only rebuilds through `cask`.
-    var f = db.prepare("SELECT name, tap, tap_rb_subtree = 'cask' FROM kegs WHERE install_reason='direct' ORDER BY name;") catch
+    var f = db.prepare("SELECT name, tap, tap_rb_subtree = 'cask', full_name FROM kegs WHERE install_reason='direct' ORDER BY name;") catch
         return BundleError.DatabaseError;
     defer f.finalize();
     while (f.step() catch false) {
         const n = f.columnText(0) orelse continue;
+        // A bare name would install core's package of that name elsewhere;
+        // a `--local` recipe only rebuilds from its file on this machine.
+        if (install_args.isLocalTap(if (f.columnText(1)) |p| std.mem.sliceTo(p, 0) else "")) {
+            const path = if (f.columnText(3)) |p| std.mem.sliceTo(p, 0) else "";
+            output.warnAlways("{s} is a local formula; bundle skips it - rebuild with `mt install --local {f}`", .{ std.mem.sliceTo(n, 0), output.shellQuoted(path) });
+            continue;
+        }
         const name = qualifiedName(a, f.columnText(1), n) catch return BundleError.DatabaseError;
         if (f.columnBool(2))
             casks.append(a, .{ .name = name }) catch return BundleError.DatabaseError
@@ -760,7 +771,9 @@ fn populateFromInstalled(
     }
 
     if (opts.include_services) {
-        var s = db.prepare("SELECT name FROM services WHERE auto_start = 1 ORDER BY name;") catch
+        // A local keg's service stays behind with its package.
+        var s = db.prepare("SELECT name FROM services WHERE auto_start = 1 AND keg_name NOT IN " ++
+            "(SELECT name FROM kegs WHERE tap = '" ++ install_args.local_tap_label ++ "') ORDER BY name;") catch
             return BundleError.DatabaseError;
         defer s.finalize();
         while (s.step() catch false) {

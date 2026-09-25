@@ -507,7 +507,7 @@ mt bundle remove devtools                # unregister; --purge also uninstalls
 mt bundle import path/to/Brewfile        # register without installing
 ```
 
-Lookup order (no path given): `./Brewfile` → `./Maltfile.json` → `~/.config/malt/Brewfile` → `~/.config/malt/Maltfile.json`. Brewfile parsing covers `tap`, `brew`, `cask`, `mas`, `vscode`, plus hash options (`version:`, `restart_service:`, `link:`) and Ruby symbols (`restart_service: :changed`). Conditionals (`if OS.mac?`) and `do … end` blocks are rejected with a clear error pointing to `Maltfile.json`.
+Lookup order (no path given): `./Brewfile` → `./Maltfile.json` → `~/.config/malt/Brewfile` → `~/.config/malt/Maltfile.json`. Brewfile parsing covers `tap`, `brew`, `cask`, `mas`, `vscode`, plus hash options (`version:`, `restart_service:`, `link:`) and Ruby symbols (`restart_service: :changed`). Conditionals (`if OS.mac?`) and `do … end` blocks are rejected with a clear error pointing to `Maltfile.json`. A `--local` recipe has no Brewfile line: `create`/`export` skip it with a rebuild hint, and `cleanup`/`remove --purge` leave it installed; `cleanup` also keeps any package that a remaining one depends on.
 
 `mt backup` and `mt restore` cover the simpler case - a plain-text manifest of directly-installed packages, easy to hand-edit or check into dotfiles:
 

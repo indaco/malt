@@ -753,6 +753,10 @@ const bundle_help =
     \\A tap recipe that declares `sha256 :no_check` is never installed: a bundle
     \\file cannot opt in to `--allow-unpinned`.
     \\
+    \\A `--local` recipe has no bundle-file line: create and export skip it with a
+    \\rebuild hint, and cleanup and --purge leave it installed. cleanup also keeps
+    \\any package that a remaining one depends on.
+    \\
 ;
 
 const services_help =

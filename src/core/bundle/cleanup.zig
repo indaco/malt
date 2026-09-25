@@ -122,6 +122,8 @@ fn freeInstalled(allocator: std.mem.Allocator, rows: []const Installed) void {
 
 /// Pull the cleanup-relevant rows from the database. Only direct installs
 /// are candidates — indirect deps stay managed by `purge --unused-deps`.
+/// `--local` kegs are skipped: a Brewfile cannot declare a local recipe, so
+/// it never owns one.
 pub fn collectInstalled(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
@@ -130,7 +132,7 @@ pub fn collectInstalled(
         allocator,
         db,
         "SELECT name, ifnull(tap, ''), ifnull(tap_rb_subtree, '') = 'cask' FROM kegs " ++
-            "WHERE install_reason='direct' ORDER BY name;",
+            "WHERE install_reason='direct' AND ifnull(tap, '') <> 'local' ORDER BY name;",
     );
     errdefer freeInstalled(allocator, owned_formulas);
     const owned_casks = try collectRows(allocator, db, "SELECT token, ifnull(tap, ''), 0 FROM casks ORDER BY token;");
@@ -315,6 +317,71 @@ pub fn orderForRemoval(
 
     allocator.free(plan.formulas);
     plan.formulas = ordered;
+}
+
+/// Drop from `plan.formulas` every keg something staying installed depends
+/// on, directly or through another spared keg: uninstall would refuse it and
+/// fail the whole run. Returns the spared names, owned by `plan.allocator`,
+/// so the caller can say why they stay (free with `freeNames`).
+pub fn dropKeptDependencies(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    plan: *Plan,
+) CleanupError![]const []const u8 {
+    if (plan.formulas.len == 0) return &.{};
+    const kept = allocator.alloc(bool, plan.formulas.len) catch return CleanupError.OutOfMemory;
+    defer allocator.free(kept);
+    @memset(kept, false);
+
+    var stmt = db.prepare(
+        \\SELECT k.name, d.dep_name FROM kegs k
+        \\JOIN dependencies d ON d.keg_id = k.id;
+    ) catch return CleanupError.DatabaseError;
+    defer stmt.finalize();
+
+    // ponytail: rescans the edge list until stable, O(plan * edges); fine at
+    // install-sized graphs, build an adjacency list if that ever grows.
+    var changed = true;
+    while (changed) {
+        changed = false;
+        stmt.reset() catch return CleanupError.DatabaseError;
+        while (stmt.step() catch return CleanupError.DatabaseError) {
+            const k_ptr = stmt.columnText(0) orelse continue;
+            const d_ptr = stmt.columnText(1) orelse continue;
+            const d_idx = indexOf(plan.formulas, std.mem.sliceTo(d_ptr, 0)) orelse continue;
+            if (kept[d_idx]) continue;
+            const k_idx = indexOf(plan.formulas, std.mem.sliceTo(k_ptr, 0));
+            if (k_idx != null and !kept[k_idx.?]) continue;
+            kept[d_idx] = true;
+            changed = true;
+        }
+    }
+
+    // Allocate both halves before moving anything so an OOM leaves the plan intact.
+    const remaining = std.mem.count(bool, kept, &.{false});
+    const out = plan.allocator.alloc([]const u8, remaining) catch return CleanupError.OutOfMemory;
+    errdefer plan.allocator.free(out);
+    const spared = plan.allocator.alloc([]const u8, plan.formulas.len - remaining) catch
+        return CleanupError.OutOfMemory;
+    var out_idx: usize = 0;
+    var spared_idx: usize = 0;
+    for (plan.formulas, kept) |name, keep| {
+        if (keep) {
+            spared[spared_idx] = name;
+            spared_idx += 1;
+        } else {
+            out[out_idx] = name;
+            out_idx += 1;
+        }
+    }
+    plan.allocator.free(plan.formulas);
+    plan.formulas = out;
+    return spared;
+}
+
+pub fn freeNames(allocator: std.mem.Allocator, names: []const []const u8) void {
+    for (names) |n| allocator.free(n);
+    allocator.free(names);
 }
 
 fn indexOf(haystack: []const []const u8, needle: []const u8) ?u32 {
@@ -1118,6 +1185,7 @@ test "collectInstalled records each row's tap and whether it was built from Cask
         \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, install_reason, tap, tap_rb_subtree) VALUES
         \\  ('bar', 'acme/tools/bar', '1.0', '', '', 'direct', 'acme/tools', 'cask'),
         \\  ('foo', 'acme/tools/foo', '1.0', '', '', 'direct', 'acme/tools', 'formula'),
+        \\  ('lx', '/src/lx.rb', '1.0', '', '', 'direct', 'local', NULL),
         \\  ('wget', 'wget', '1.0', '', '', 'direct', NULL, NULL);
         \\INSERT INTO casks(token, name, version, url, tap) VALUES ('baz', 'Baz', '1.0', '', 'acme/tools');
     );
@@ -1125,10 +1193,75 @@ test "collectInstalled records each row's tap and whether it was built from Cask
     var lists = try collectInstalled(testing.allocator, &db);
     defer lists.deinit();
 
+    // No Brewfile line can declare a local recipe, so cleanup never owns one;
+    // the NULL-tap core row must survive the same filter.
+    try testing.expectEqual(@as(usize, 3), lists.formulas.len);
     try testing.expectEqualStrings("acme/tools", lists.formulas[0].tap);
     try testing.expect(lists.formulas[0].from_casks);
     try testing.expect(!lists.formulas[1].from_casks);
     try testing.expectEqualStrings("", lists.formulas[2].tap);
     try testing.expect(!lists.formulas[2].from_casks);
     try testing.expectEqualStrings("acme/tools", lists.casks[0].tap);
+}
+
+test "dropKeptDependencies spares what a kept keg needs, transitively" {
+    // lx stays installed (a local keg no Brewfile owns), so uninstalling
+    // openssl@3 or its own dep ca would be refused and fail the run. wget
+    // leaves with jq, so jq is still fair game.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, install_reason) VALUES
+        \\  ('lx', '/src/lx.rb', '1.0', '', '', 'direct'),
+        \\  ('openssl@3', 'openssl@3', '1.0', '', '', 'direct'),
+        \\  ('ca', 'ca', '1.0', '', '', 'direct'),
+        \\  ('jq', 'jq', '1.0', '', '', 'direct'),
+        \\  ('wget', 'wget', '1.0', '', '', 'direct');
+        \\INSERT INTO dependencies(keg_id, dep_name, dep_type)
+        \\  SELECT id, 'openssl@3', 'runtime' FROM kegs WHERE name = 'lx';
+        \\INSERT INTO dependencies(keg_id, dep_name, dep_type)
+        \\  SELECT id, 'ca', 'runtime' FROM kegs WHERE name = 'openssl@3';
+        \\INSERT INTO dependencies(keg_id, dep_name, dep_type)
+        \\  SELECT id, 'jq', 'runtime' FROM kegs WHERE name = 'wget';
+    );
+
+    var m = try testManifest(testing.allocator, &.{}, &.{});
+    defer m.deinit();
+    var plan = try diff(testing.allocator, m, &coreRows(&.{ "ca", "jq", "openssl@3", "wget" }), &.{});
+    defer plan.deinit();
+
+    const spared = try dropKeptDependencies(testing.allocator, &db, &plan);
+    defer freeNames(testing.allocator, spared);
+
+    try testing.expectEqual(@as(usize, 2), spared.len);
+    try testing.expectEqualStrings("ca", spared[0]);
+    try testing.expectEqualStrings("openssl@3", spared[1]);
+    try testing.expectEqual(@as(usize, 2), plan.formulas.len);
+    try testing.expectEqualStrings("jq", plan.formulas[0]);
+    try testing.expectEqualStrings("wget", plan.formulas[1]);
+}
+
+test "dropKeptDependencies neither leaks nor double-frees on allocation failure" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, install_reason) VALUES
+        \\  ('lx', '/src/lx.rb', '1.0', '', '', 'direct'),
+        \\  ('ca', 'ca', '1.0', '', '', 'direct');
+        \\INSERT INTO dependencies(keg_id, dep_name, dep_type)
+        \\  SELECT id, 'ca', 'runtime' FROM kegs WHERE name = 'lx';
+    );
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(a: std.mem.Allocator, d: *sqlite.Database) !void {
+            var m = try testManifest(a, &.{}, &.{});
+            defer m.deinit();
+            var plan = try diff(a, m, &coreRows(&.{ "ca", "jq" }), &.{});
+            defer plan.deinit();
+            const spared = try dropKeptDependencies(a, d, &plan);
+            defer freeNames(a, spared);
+            try testing.expectEqual(@as(usize, 1), plan.formulas.len);
+        }
+    }.run, .{&db});
 }
