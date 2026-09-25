@@ -191,12 +191,16 @@ pub fn touch(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     const path = try args[0].asString(ctx.allocator);
 
     // Create (no truncate) through an O_NOFOLLOW handle: a symlinked leaf must
-    // not let touch create/clobber a file outside the keg.
-    const file = sandbox.openTargetNoFollow(ctx.io, path, ctx.cellar_path, ctx.malt_prefix, .{ .create = true }) catch |e| switch (e) {
+    // not let touch create/clobber a file outside the keg. Read only, so a
+    // read-only bottle file can still have its times bumped.
+    const file = sandbox.openTargetNoFollow(ctx.io, path, ctx.cellar_path, ctx.malt_prefix, .{ .write = false, .create = true }) catch |e| switch (e) {
         error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
         else => return Value{ .nil = {} },
     };
-    file.close(ctx.io);
+    defer file.close(ctx.io);
+    // Marking a compiled cache newer than its source is what touch is for. A
+    // failure yields nil like the open's: the builtin's policy, not an oversight.
+    file.setTimestampsNow(ctx.io) catch {};
     return Value{ .nil = {} };
 }
 
@@ -1172,6 +1176,31 @@ test "touch creates a regular file in the keg" {
     const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
     _ = try touch(ctx, null, &.{Value{ .string = target }});
     try std.Io.Dir.cwd().access(io, target, .{}); // exists now
+}
+
+test "touch bumps the times of an existing read-only keg file" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var s = try Scratch.init("fileutils_touch_bump");
+    defer s.deinit();
+    const keg = s.base;
+
+    // A compiled cache marked newer than its source, read-only as bottled.
+    const target = try std.fmt.allocPrintSentinel(alloc, "{s}/mod.go", .{keg}, 0);
+    defer alloc.free(target);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, target, .{});
+        defer f.close(io);
+        const old: std.Io.Timestamp = .fromNanoseconds(1_000 * std.time.ns_per_s);
+        try f.setTimestamps(io, .{ .access_timestamp = .{ .new = old }, .modify_timestamp = .{ .new = old } });
+    }
+    try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(target, 0o444));
+
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    _ = try touch(ctx, null, &.{Value{ .string = target }});
+    const f = try std.Io.Dir.openFileAbsolute(io, target, .{});
+    defer f.close(io);
+    try std.testing.expect((try f.stat(io)).mtime.toNanoseconds() > 1_000 * std.time.ns_per_s);
 }
 
 test "chmod changes the mode of a regular keg file" {

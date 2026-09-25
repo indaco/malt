@@ -29,6 +29,8 @@ fi
 for t in \
   "write surfaces" \
   "touch surfaces" \
+  "touch surfaces a locked" \
+  "touch bumps" \
   "mkdir_p surfaces" \
   "symlink surfaces" \
   "symlink source_glob surfaces" \

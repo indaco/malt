@@ -849,9 +849,9 @@ fn stepTouch(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const path = resolvePathSpec(ctx, obj, "path") orelse return false;
     if (!confined(ctx, path)) return false;
     if (!mkParent(ctx, "touch", path)) return false;
-    // Create (no truncate) through an O_NOFOLLOW handle, same as the DSL
-    // touch builtin: a symlinked leaf must not reach outside the keg. Read
-    // only, so an existing read-only file is no failure.
+    // Create (no truncate) through an O_NOFOLLOW handle: a symlinked leaf
+    // must not reach outside the keg. Read only, so an existing file needs
+    // only to be owned or writable and not locked, as upstream's utimes.
     const file = openTargetNoFollow(ctx, path, .{ .write = false, .create = true }) catch |e| switch (e) {
         error.PathSandboxViolation => {
             logViolation(ctx, path);
@@ -859,7 +859,10 @@ fn stepTouch(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         },
         else => return ioFail(ctx, "touch", path, e),
     };
-    file.close(ctx.io);
+    defer file.close(ctx.io);
+    // Upstream's touch also bumps the times: formulae touch a compiled cache
+    // to mark it newer than its source, or it gets rebuilt.
+    file.setTimestampsNow(ctx.io) catch |e| return ioFail(ctx, "touch", path, e);
     return true;
 }
 
@@ -4023,13 +4026,29 @@ test "touch surfaces an IO failure instead of reporting success" {
     );
 }
 
-test "touch accepts an existing read-only file" {
+/// Backdate `path` so a touch that works is observable.
+fn backdate(io: std.Io, path: []const u8) !void {
+    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    const old: std.Io.Timestamp = .fromNanoseconds(1_000 * std.time.ns_per_s);
+    try f.setTimestamps(io, .{ .access_timestamp = .{ .new = old }, .modify_timestamp = .{ .new = old } });
+}
+
+fn mtimeSeconds(io: std.Io, path: []const u8) !i96 {
+    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    return @divFloor((try f.stat(io)).mtime.toNanoseconds(), std.time.ns_per_s);
+}
+
+test "touch bumps the modification time of an existing file" {
     var h = try TestHarness.init();
     defer h.deinit();
-    // Bottles ship read-only files; touching one needs no write access.
+    // A compiled cache a formula marks as newer than its source, read-only
+    // the way a bottle ships it.
     const cache = try std.fmt.allocPrintSentinel(h.arena.allocator(), "{s}/lib/site-ccache/mod.go", .{h.keg}, 0);
     try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(cache).?);
     try atomic.atomicWriteFile(h.io, cache, "compiled");
+    try backdate(h.io, cache);
     try testing.expectEqual(@as(c_int, 0), std.c.chmod(cache, 0o444));
 
     try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
@@ -4037,6 +4056,28 @@ test "touch accepts an existing read-only file" {
     )));
     try testing.expect(!h.flog.hasErrors());
     try testing.expectEqual(@as(usize, 1), h.flog.handled_top_level);
+    try testing.expect(try mtimeSeconds(h.io, cache) > 1_000);
+}
+
+/// BSD file flags; std has no binding for them.
+const bsd = struct {
+    extern "c" fn chflags(path: [*:0]const u8, flags: c_uint) c_int;
+    const UF_IMMUTABLE: c_uint = 0x2;
+};
+
+test "touch surfaces a locked file whose times it cannot set" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    // The open succeeds read-only; only setting the times is refused.
+    const locked = try std.fmt.allocPrintSentinel(h.arena.allocator(), "{s}/etc/locked", .{h.prefix}, 0);
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(locked).?);
+    try atomic.atomicWriteFile(h.io, locked, "x");
+    try testing.expectEqual(@as(c_int, 0), bsd.chflags(locked, bsd.UF_IMMUTABLE));
+    defer _ = bsd.chflags(locked, 0);
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"touch","path":{"base":"etc","path":"locked"}}
+    );
 }
 
 test "touch refuses a symlinked leaf" {
@@ -4046,6 +4087,7 @@ test "touch refuses a symlinked leaf" {
     const outside = try std.fmt.allocPrint(a, "{s}-OUTSIDE", .{h.prefix});
     try atomic.atomicWriteFile(h.io, outside, "outside\n");
     defer std.Io.Dir.cwd().deleteFile(h.io, outside) catch {};
+    try backdate(h.io, outside);
     const link = try std.fmt.allocPrint(a, "{s}/etc/t", .{h.prefix});
     try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(link).?);
     try std.Io.Dir.symLinkAbsolute(h.io, outside, link, .{});
@@ -4054,6 +4096,8 @@ test "touch refuses a symlinked leaf" {
         \\[{"type":"touch","path":{"base":"etc","path":"t"}}]
     )));
     try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, h.flog.entries()[0].reason);
+    // Not even its times move.
+    try testing.expectEqual(@as(i96, 1_000), try mtimeSeconds(h.io, outside));
 }
 
 test "mkdir_p surfaces an IO failure instead of reporting success" {
