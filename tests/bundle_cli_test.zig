@@ -715,3 +715,67 @@ test "bundle create round-trip: emitted JSON re-parses with taps preserved" {
     try testing.expectEqualStrings("postgresql@16", m.services[0].name);
     try testing.expect(m.services[0].auto_start);
 }
+
+fn seedTapPackages(prefix: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO taps (name, url) VALUES ('acme/tools', 'https://github.com/acme/homebrew-tools');
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, tap_rb_subtree, install_reason) VALUES
+        \\  ('foo', 'acme/tools/foo', '1.0', 'a', '/c/foo', 'acme/tools', 'formula', 'direct'),
+        \\  ('bar', 'acme/tools/bar', '2.0', 'b', '/c/bar', 'acme/tools', 'cask', 'direct'),
+        \\  ('wget', 'wget', '1.24', 'c', '/c/wget', 'homebrew/core', NULL, 'direct'),
+        \\  ('lx', '/src/lx.rb', '1.0', 'd', '/c/lx', 'local', NULL, 'direct');
+        \\INSERT INTO casks (token, name, version, url, tap) VALUES
+        \\  ('firefox', 'firefox', '120.0', 'https://x.invalid/f.dmg', NULL),
+        \\  ('baz', 'Baz', '3.0', 'https://x.invalid/b.dmg', 'acme/tools');
+    );
+}
+
+test "bundle create names tap packages by their tap, and cleanup keeps them" {
+    // A bare name makes `bundle install` resolve against core, and a keg
+    // built from a tap's Casks/ only rebuilds through `cask`.
+    var s = try Scratch.init(testing.allocator, "create_tap_packages");
+    defer s.deinit(testing.allocator);
+    try seedTapPackages(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", out_path });
+    unquiet();
+
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, out_path, .{});
+    const stat = try f.stat(std.Options.debug_io);
+    const body = try testing.allocator.alloc(u8, stat.size);
+    defer testing.allocator.free(body);
+    _ = try f.readPositionalAll(std.Options.debug_io, body, 0);
+    f.close(std.Options.debug_io);
+
+    for ([_][]const u8{
+        "brew \"acme/tools/foo\"\n",
+        "brew \"wget\"\n",
+        "brew \"lx\"\n",
+        "cask \"acme/tools/bar\"\n",
+        "cask \"acme/tools/baz\"\n",
+        "cask \"firefox\"\n",
+    }) |line| {
+        if (std.mem.indexOf(u8, body, line) == null) {
+            std.debug.print("missing {s} in:\n{s}\n", .{ line, body });
+            return error.TestUnexpectedResult;
+        }
+    }
+    try testing.expect(std.mem.indexOf(u8, body, "brew \"bar\"") == null);
+
+    // Qualifying the writer alone would make cleanup uninstall every one.
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "cleanup", "--dry-run", out_path });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "nothing to clean up") != null);
+}

@@ -84,6 +84,21 @@ pub fn isCoreTap(tap_label: []const u8) bool {
     return false;
 }
 
+/// The tap a package can be re-fetched from, or `""` for core and for a
+/// `--local` keg, whose `local` label is not a tap.
+pub fn thirdPartyTap(tap_label: []const u8) []const u8 {
+    return if (isCoreTap(tap_label) or isLocalTap(tap_label)) "" else tap_label;
+}
+
+test "thirdPartyTap keeps only a tap a package can be re-fetched from" {
+    // `local` is a label for a `.rb` on disk, not a tap: `local/<name>`
+    // resolves nowhere.
+    for ([_][]const u8{ "", "homebrew/core", "homebrew/cask", "local" }) |tap| {
+        try std.testing.expectEqualStrings("", thirdPartyTap(tap));
+    }
+    try std.testing.expectEqualStrings("acme/tools", thirdPartyTap("acme/tools"));
+}
+
 /// Shape-based detection for a local `.rb` path argument (e.g.
 /// `./wget.rb`, `/tmp/wget.rb`, `~/f/wget.rb`, `a/b/c/d.rb`). Pure:
 /// no filesystem access, no allocation.

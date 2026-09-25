@@ -16,6 +16,7 @@ const atomic = @import("../fs/atomic.zig");
 const path_write = @import("../fs/path_write.zig");
 const output = @import("../ui/output.zig");
 const signals = @import("../core/signals.zig");
+const install_args = @import("install/args.zig");
 const install_sink_mod = @import("install/sink.zig");
 const install_cmd = @import("install.zig");
 const services_cmd = @import("services.zig");
@@ -736,21 +737,25 @@ fn populateFromInstalled(
         taps.append(a, name) catch return BundleError.DatabaseError;
     }
 
-    var f = db.prepare("SELECT name FROM kegs WHERE install_reason='direct' ORDER BY name;") catch
+    // A keg built from a tap's Casks/ only rebuilds through `cask`.
+    var f = db.prepare("SELECT name, tap, tap_rb_subtree = 'cask' FROM kegs WHERE install_reason='direct' ORDER BY name;") catch
         return BundleError.DatabaseError;
     defer f.finalize();
     while (f.step() catch false) {
         const n = f.columnText(0) orelse continue;
-        const name = a.dupe(u8, std.mem.sliceTo(n, 0)) catch return BundleError.DatabaseError;
-        formulas.append(a, .{ .name = name }) catch return BundleError.DatabaseError;
+        const name = qualifiedName(a, f.columnText(1), n) catch return BundleError.DatabaseError;
+        if (f.columnBool(2))
+            casks.append(a, .{ .name = name }) catch return BundleError.DatabaseError
+        else
+            formulas.append(a, .{ .name = name }) catch return BundleError.DatabaseError;
     }
 
-    var c = db.prepare("SELECT token FROM casks ORDER BY token;") catch
+    var c = db.prepare("SELECT token, tap FROM casks ORDER BY token;") catch
         return BundleError.DatabaseError;
     defer c.finalize();
     while (c.step() catch false) {
         const n = c.columnText(0) orelse continue;
-        const name = a.dupe(u8, std.mem.sliceTo(n, 0)) catch return BundleError.DatabaseError;
+        const name = qualifiedName(a, c.columnText(1), n) catch return BundleError.DatabaseError;
         casks.append(a, .{ .name = name }) catch return BundleError.DatabaseError;
     }
 
@@ -771,6 +776,15 @@ fn populateFromInstalled(
     manifest.casks = casks.toOwnedSlice(a) catch return BundleError.DatabaseError;
     manifest.services = services.toOwnedSlice(a) catch return BundleError.DatabaseError;
     manifest.version = manifest_mod.schema_version;
+}
+
+/// `<tap>/<name>` for a third-party tap, so `bundle install` reaches the tap
+/// the package came from instead of core.
+fn qualifiedName(a: std.mem.Allocator, tap_col: ?[*:0]const u8, name_col: [*:0]const u8) ![]const u8 {
+    const name = std.mem.sliceTo(name_col, 0);
+    const tap = install_args.thirdPartyTap(if (tap_col) |p| std.mem.sliceTo(p, 0) else "");
+    if (tap.len == 0) return a.dupe(u8, name);
+    return std.fmt.allocPrint(a, "{s}/{s}", .{ tap, name });
 }
 
 fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, name: []const u8) !void {

@@ -216,16 +216,10 @@ pub fn warnLocal(name: []const u8, path: []const u8) void {
     output.warn("{s} is a local formula; restore skips it - rebuild with `mt install --local {f}`", .{ name, output.shellQuoted(path) });
 }
 
-/// The tap a package can be re-fetched from, or `""` for core and for a
-/// `--local` keg, whose `local` label is not a tap.
-fn thirdPartyTap(tap: []const u8) []const u8 {
-    return if (install_args.isCoreTap(tap) or install_args.isLocalTap(tap)) "" else tap;
-}
-
 /// `<tap>/<name>` for a third-party tap; bare otherwise, so legacy backups
 /// parse the same way.
 fn qualify(buf: []u8, tap: []const u8, name: []const u8) RowsError![]const u8 {
-    const owner = thirdPartyTap(tap);
+    const owner = install_args.thirdPartyTap(tap);
     if (owner.len == 0) return name;
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ owner, name }) catch {
         // No legitimate slug overflows this; a bare name here would be a
@@ -284,7 +278,7 @@ fn executeJson(
             const name = a.dupe(u8, std.mem.sliceTo(name_ptr, 0)) catch return Error.WriteFailed;
             const version = a.dupe(u8, if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "") catch
                 return Error.WriteFailed;
-            const tap = a.dupe(u8, thirdPartyTap(if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "")) catch
+            const tap = a.dupe(u8, install_args.thirdPartyTap(if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "")) catch
                 return Error.WriteFailed;
             formulas.append(a, .{ .name = name, .version = version, .tap = tap }) catch
                 return Error.WriteFailed;
@@ -301,7 +295,7 @@ fn executeJson(
             const name = a.dupe(u8, std.mem.sliceTo(name_ptr, 0)) catch return Error.WriteFailed;
             const version = a.dupe(u8, if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "") catch
                 return Error.WriteFailed;
-            const tap = a.dupe(u8, thirdPartyTap(if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "")) catch
+            const tap = a.dupe(u8, install_args.thirdPartyTap(if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "")) catch
                 return Error.WriteFailed;
             casks.append(a, .{ .name = name, .version = version, .tap = tap }) catch
                 return Error.WriteFailed;
@@ -780,15 +774,6 @@ test "writeRows emits auto-start services only when asked" {
         aw.written(),
     );
     try std.testing.expectEqual(@as(usize, 9), count);
-}
-
-test "thirdPartyTap keeps only a tap a package can be re-fetched from" {
-    // `local` is a label for a `.rb` on disk, not a tap: `local/<name>`
-    // resolves nowhere.
-    for ([_][]const u8{ "", "homebrew/core", "homebrew/cask", "local" }) |tap| {
-        try std.testing.expectEqualStrings("", thirdPartyTap(tap));
-    }
-    try std.testing.expectEqualStrings("acme/tools", thirdPartyTap("acme/tools"));
 }
 
 test "writeRows aborts on an unreadable table instead of truncating" {
