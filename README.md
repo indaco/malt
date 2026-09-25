@@ -514,14 +514,14 @@ Lookup order (no path given): `./Brewfile` → `./Maltfile.json` → `~/.config/
 ```bash
 mt backup                                # writes malt-backup-<timestamp>.txt to cwd
 mt backup -o my-setup.txt                # custom path; "-o -" writes to stdout
-mt backup --versions                     # pin each entry to its installed version
+mt backup --versions                     # record each entry's installed version
 
 mt restore my-setup.txt
 mt restore my-setup.txt --dry-run
 mt restore my-setup.txt --force
 ```
 
-Only directly-installed packages are recorded; transitive dependencies are resolved on restore. The file format is one entry per line (`formula <name>` / `cask <token>`, with tap packages as `<user>/<repo>/<name>`) with `#` comments. Restore batches into two `mt install` invocations, so dependency resolution, parallel downloads, and atomic install all apply. Lines with a `@<version>` suffix install at that version.
+Only directly-installed packages are recorded; transitive dependencies are resolved on restore. The file format is one entry per line (`formula <name>` / `cask <token>`, with tap packages as `<user>/<repo>/<name>`) with `#` comments. Restore batches into two `mt install` invocations, so dependency resolution, parallel downloads, and atomic install all apply. A recorded version is informational: restore installs the current release. A `--local` keg is kept as a `# local <name> <path>` comment, and restore prints the command to rebuild it.
 
 ### Custom sources
 

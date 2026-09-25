@@ -70,41 +70,36 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
     defer allocator.free(entries);
 
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const note = backup_mod.parseLocalNote(line) orelse continue;
+        backup_mod.warnLocal(note.name, note.path);
+    }
+
+    if (std.mem.indexOf(u8, text, backup_mod.versioned_format_marker) == null) warnLegacyPins(entries);
+
     if (entries.len == 0) {
         output.warn("No entries found in {s}", .{path});
         return;
     }
 
     // ── Split into formula / cask / service arg lists ────────────────────
+    // Names only, borrowed from `text`: install has no version pin, so a
+    // recorded version never reaches its argv.
     var formulae: std.ArrayList([]const u8) = .empty;
-    defer {
-        // Each item is an owned `<name>` or `<name>@<version>` slice.
-        // Free the items first, then the list backing store.
-        for (formulae.items) |item| allocator.free(item);
-        formulae.deinit(allocator);
-    }
+    defer formulae.deinit(allocator);
     var casks: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (casks.items) |item| allocator.free(item);
-        casks.deinit(allocator);
-    }
+    defer casks.deinit(allocator);
     var services: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (services.items) |item| allocator.free(item);
-        services.deinit(allocator);
-    }
+    defer services.deinit(allocator);
 
+    var any_version = false;
     for (entries) |e| {
-        // Reconstruct the install-style argument: `<name>` or `<name>@<version>`
-        const arg = if (e.version.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}@{s}", .{ e.name, e.version })
-        else
-            try allocator.dupe(u8, e.name);
-
+        any_version = any_version or e.version.len > 0;
         switch (e.kind) {
-            .formula => try formulae.append(allocator, arg),
-            .cask => try casks.append(allocator, arg),
-            .service => try services.append(allocator, arg),
+            .formula => try formulae.append(allocator, e.name),
+            .cask => try casks.append(allocator, e.name),
+            .service => try services.append(allocator, e.name),
         }
     }
 
@@ -115,10 +110,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         path,
     });
 
+    if (any_version) output.info("recorded versions are informational; restore installs the current release", .{});
+
     if (dry_run) {
-        for (formulae.items) |name| output.info("  formula {s}", .{name});
-        for (casks.items) |name| output.info("  cask    {s}", .{name});
-        for (services.items) |name| output.info("  service {s}", .{name});
+        for ([_]backup_mod.Kind{ .formula, .cask, .service }) |kind| {
+            for (entries) |e| if (e.kind == kind) dryRunLine(e);
+        }
         output.info("Dry run — no packages installed.", .{});
         return;
     }
@@ -174,6 +171,27 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (any_failed) {
         return error.RestoreFailed;
     }
+}
+
+/// Older backups wrote a pinned version as `name@version`, which now reads as
+/// one package name. Splitting it would break `postgresql@16`, so say it once.
+fn warnLegacyPins(entries: []const backup_mod.Entry) void {
+    var count: usize = 0;
+    var first: []const u8 = "";
+    for (entries) |e| {
+        if (e.kind == .service or e.version.len > 0 or std.mem.findScalar(u8, e.name, '@') == null) continue;
+        if (count == 0) first = e.name;
+        count += 1;
+    }
+    if (count == 0) return;
+    output.warn("{d} line{s} name a package with `@` (e.g. {s}); an older backup wrote pinned versions that way - rewrite those as `<name> <version>`", .{ count, if (count == 1) "" else "s", first });
+}
+
+fn dryRunLine(e: backup_mod.Entry) void {
+    if (e.version.len > 0)
+        output.info("  {s:<7} {s} ({s})", .{ @tagName(e.kind), e.name, e.version })
+    else
+        output.info("  {s:<7} {s}", .{ @tagName(e.kind), e.name });
 }
 
 fn readFile(ctx: *const AppCtx, allocator: std.mem.Allocator, path: []const u8) ![]u8 {

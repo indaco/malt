@@ -157,19 +157,6 @@ fn mixesRewrittenNames(allocator: std.mem.Allocator, db: *sqlite.Database, args:
     return false;
 }
 
-/// Single-quotes `s` so a path with spaces stays one argument when the
-/// suggested command is pasted.
-fn shellQuote(allocator: std.mem.Allocator, s: []const u8) error{OutOfMemory}![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.append(allocator, '\'');
-    for (s) |c| {
-        if (c == '\'') try out.appendSlice(allocator, "'\\''") else try out.append(allocator, c);
-    }
-    try out.append(allocator, '\'');
-    return out.toOwnedSlice(allocator);
-}
-
 fn onlyFromArgs(args: []const []const u8) Only {
     for (args) |a| if (std.mem.eql(u8, a, "--cask")) return .cask;
     for (args) |a| if (std.mem.eql(u8, a, "--formula")) return .keg;
@@ -246,9 +233,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         },
         // Forwarding would silently re-run a `.rb` the user didn't name here.
         .local => {
-            const path = try shellQuote(allocator, target.name.?);
-            defer allocator.free(path);
-            output.err("{s} was installed from a local formula; reinstall it with `mt install --local --force {s}`", .{ name, path });
+            output.err("{s} was installed from a local formula; reinstall it with `mt install --local --force {f}`", .{ name, output.shellQuoted(target.name.?) });
             return error.Aborted;
         },
         .keg, .cask => {},
@@ -377,12 +362,6 @@ test "classify keeps each core qualifier to its own table" {
     defer db.close();
     try expectMissing(&db, "homebrew/cask/wget");
     try expectMissing(&db, "homebrew/core/firefox");
-}
-
-test "shellQuote keeps a path with spaces and quotes one argument" {
-    const q = try shellQuote(testing.allocator, "/src/my dir/l'x.rb");
-    defer testing.allocator.free(q);
-    try testing.expectEqualStrings("'/src/my dir/l'\\''x.rb'", q);
 }
 
 test "classify reports a local keg with its recorded path, never as a tap slug" {

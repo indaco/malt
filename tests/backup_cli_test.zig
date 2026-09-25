@@ -225,7 +225,7 @@ test "execute --output=<path> joined-form is accepted" {
     try testing.expect(std.mem.indexOf(u8, body, "cask firefox") != null);
 }
 
-test "execute --versions appends @<version> to every entry" {
+test "execute --versions records each version as a separate field" {
     var s = try Scratch.init(testing.allocator, "versions");
     defer s.deinit(testing.allocator);
     try seedRows(s.path);
@@ -240,9 +240,10 @@ test "execute --versions appends @<version> to every entry" {
 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "formula wget@1.21") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "formula jq@1.7") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "cask firefox@120.0") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "formula wget 1.21\n") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "formula jq 1.7\n") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "cask firefox 120.0\n") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "@") == null);
 }
 
 test "execute --output - emits to stdout instead of a file" {
@@ -660,10 +661,8 @@ test "execute --services on an empty services table is a clean no-op (plain text
     try testing.expect(std.mem.indexOf(u8, body, "service ") == null);
 }
 
-test "execute --services --versions never appends @version to a service line" {
-    // `--versions` is a formula/cask concern; bleeding into a service
-    // line would re-introduce the `name@channel` ambiguity parseLine
-    // explicitly avoids.
+test "execute --services --versions never adds a version to a service line" {
+    // `--versions` is a formula/cask concern; services carry no version.
     var s = try Scratch.init(testing.allocator, "text_services_versions");
     defer s.deinit(testing.allocator);
     try seedServices(s.path);
@@ -682,11 +681,8 @@ test "execute --services --versions never appends @version to a service line" {
 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
-    // Formulas still pinned; the service line stays unsuffixed.
-    try testing.expect(std.mem.indexOf(u8, body, "formula wget@1.21") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "formula wget 1.21\n") != null);
     try testing.expect(std.mem.indexOf(u8, body, "service postgresql@16\n") != null);
-    // No `postgresql@16@<...>` artefact from the version writer.
-    try testing.expect(std.mem.indexOf(u8, body, "postgresql@16@") == null);
 }
 
 test "execute --json with --output <path> writes JSON to the file" {
