@@ -809,6 +809,11 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             output.err("--refresh is only valid with `mt tap`", .{});
             return error.Aborted;
         }
+        // Every row would fail offline, and failed rows alone exit 0.
+        if (ctx.offline) {
+            output.err("Cannot refresh taps: {s}", .{tap_mod.offline_resolve_hint});
+            return error.Aborted;
+        }
         try refreshAll(ctx, allocator, &db, yes);
         return;
     }
