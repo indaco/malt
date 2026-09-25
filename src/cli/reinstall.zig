@@ -4,7 +4,8 @@
 //! `install.execute`. Mirrors the `cleanup → purge` shape so global
 //! flags (`--json`, `--quiet`, `--dry-run`) reach the downstream parser
 //! untouched. Package-scoped — transitive deps are not reinstalled.
-//! A tap package is reinstalled from its owning tap, on its own.
+//! A tap package is reinstalled from its owning tap, on its own; a core
+//! cask is pointed at uninstall + install instead.
 
 const std = @import("std");
 
@@ -259,6 +260,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.err("Reinstall formulas and casks separately", .{});
             return error.Aborted;
         },
+    }
+    // A forced core-cask install would delete the live app before placing
+    // the new copy, with no way back if that fails.
+    if (target.presence == .cask and !target.pinned) {
+        const token = target.name.?;
+        output.err("{s} is a cask; reinstall it with `mt uninstall --cask {s}` then `mt install --cask {s}`", .{ token, token, token });
+        return error.Aborted;
     }
     const argv = try forwardArgv(allocator, target, args);
     defer allocator.free(argv);

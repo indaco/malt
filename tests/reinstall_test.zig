@@ -202,3 +202,45 @@ test "execute refuses a formula and a cask in one run before installing anything
     defer testing.allocator.free(lock_file);
     try testing.expect(!pathExists(lock_file));
 }
+
+test "execute points a core cask at uninstall then install instead of forcing it" {
+    // A forced install would delete the live app before placing the new
+    // copy, with no way back if that fails; exiting 0 unchanged hid that.
+    const prefix = try setupPrefix("core_cask");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+        _ = c.unsetenv("MALT_PREFIX");
+    }
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    try test_io.cwd().createDirPath(std.Options.debug_io, std.fs.path.dirname(db_path).?);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO casks (token, name, version, url)
+            \\  VALUES ('firefox', 'firefox', '120.0', 'https://x.invalid/f.dmg');
+        );
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    for ([_][]const u8{ "firefox", "homebrew/cask/firefox" }) |typed| {
+        try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), &.{typed}));
+    }
+
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, captured.items, "`mt uninstall --cask firefox` then `mt install --cask firefox`"));
+    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    defer testing.allocator.free(lock_file);
+    try testing.expect(!pathExists(lock_file));
+}

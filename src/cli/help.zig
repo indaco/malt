@@ -133,7 +133,8 @@ const reinstall_help =
     \\A tap package reinstalls from its owning tap and side, named as
     \\`<name>` or `<user>/<repo>/<name>`; reinstall it on its own. A
     \\`--local` keg is reinstalled with `mt install --local --force <path>`.
-    \\Formulae and casks are reinstalled in separate runs.
+    \\Formulae and casks are reinstalled in separate runs. A core cask is
+    \\reinstalled with `mt uninstall --cask <cask>` then `mt install --cask <cask>`.
     \\
     \\Flags pass through to `install`; the common ones:
     \\  --cask               Pick the cask when a formula shares its name
