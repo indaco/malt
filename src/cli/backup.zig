@@ -268,7 +268,7 @@ fn executeJson(
 
     {
         var s = try prepareOrFail(db, "SELECT name, version, tap FROM kegs " ++
-            "WHERE install_reason = 'direct' " ++
+            "WHERE install_reason = 'direct' AND ifnull(tap_rb_subtree, '') <> 'cask' " ++
             "ORDER BY name;");
         defer s.finalize();
         while (try stepOrFail(&s)) {
@@ -286,7 +286,12 @@ fn executeJson(
     }
 
     {
-        var s = try prepareOrFail(db, "SELECT token, version, tap FROM casks ORDER BY token;");
+        // A keg built from a tap's Casks/ is listed as a cask, as the text
+        // writer does: nothing else in the JSON marks its side.
+        var s = try prepareOrFail(db, "SELECT token, version, tap FROM casks " ++
+            "UNION ALL SELECT name, version, tap FROM kegs " ++
+            "WHERE install_reason = 'direct' AND tap_rb_subtree = 'cask' " ++
+            "ORDER BY 1;");
         defer s.finalize();
         while (try stepOrFail(&s)) {
             const name_ptr = s.columnText(0) orelse continue;
