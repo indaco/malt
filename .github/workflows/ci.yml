@@ -179,6 +179,9 @@ jobs:
       - name: Regression guard - a tap or local formula's service block is registered on install
         run: ./scripts/regressions/tap-service-registered-on-install-tap-formula-service-block-never-parsed-or-registered.sh
 
+      - name: Regression guard - a tap or local service block interpolating a prefix root is rendered, not dropped
+        run: ./scripts/regressions/tap-service-interpolated-paths-render-interpolated-service-path-dropped-as-unsupported.sh
+
       - name: Regression guard - a declared shipped plist missing from the keg is reported, not called unsupported
         run: ./scripts/regressions/shipped-plist-service-warns-why-tap-formula-shipped-plist-not-registered.sh
 
