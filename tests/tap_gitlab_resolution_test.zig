@@ -97,7 +97,7 @@ test "gitlab resolve: a recorded commits/HEAD body yields the sha and its raw .r
     var url_buf: [96]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v4/projects/grp%2Ftap/repository/commits/HEAD", .{port});
 
-    var res = try tap.resolveHeadCommit(io, .empty, testing.allocator, .gitlab, url, null);
+    var res = try tap.resolveHeadCommit(io, .empty, testing.allocator, false, .gitlab, url, null);
     defer res.deinit();
     try testing.expect(!res.not_modified);
     try testing.expectEqualStrings(fixture_sha, res.sha.?);
@@ -138,7 +138,7 @@ test "gitlab resolve: the API request carries PRIVATE-TOKEN when MALT_GITLAB_TOK
     var url_buf: [96]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v4/projects/grp%2Ftap/repository/commits/HEAD", .{port});
 
-    var res = try tap.resolveHeadCommit(io, envWithGitlabToken(), testing.allocator, .gitlab, url, null);
+    var res = try tap.resolveHeadCommit(io, envWithGitlabToken(), testing.allocator, false, .gitlab, url, null);
     defer res.deinit();
     try testing.expectEqualStrings("glpat-itest", fx.private_token[0..fx.private_token_len]);
 }

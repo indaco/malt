@@ -654,6 +654,41 @@ test "execute --refresh --all on an empty DB is a clean no-op" {
     try tap_cli.execute(&ctx, testing.allocator, &.{ "--refresh", "--all", "--yes" });
 }
 
+test "execute rejects a bare --refresh instead of listing taps" {
+    // With no slug and no --all, --refresh used to fall through to the
+    // listing and exit 0 having refreshed nothing.
+    const prefix = try setupPrefix("bare_refresh");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    for ([_][]const u8{ "--refresh", "--refresh=" }) |flag| {
+        try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{flag}));
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--all") != null);
+}
+
+test "execute --refresh --all refuses offline instead of exiting clean with every row failed" {
+    // Offline no row can resolve, so a zero exit would read as a refresh.
+    const prefix = try setupPrefix("refresh_all_offline");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "--refresh", "--all" }));
+}
+
 test "execute --refresh --all under `mt untap` is rejected" {
     const prefix = try setupPrefix("refresh_all_under_untap");
     defer testing.allocator.free(prefix);

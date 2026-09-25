@@ -1079,7 +1079,7 @@ fn upgradeTapFormula(
     defer if (cached_etag_opt) |e| allocator.free(e);
 
     var rerr_buf: [512]u8 = undefined;
-    var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, cached_etag_opt) catch |e| {
+    var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, ctx.offline, urls.forge, urls.api_head_url, cached_etag_opt) catch |e| {
         output.err("Could not resolve {s} HEAD: {s}", .{ tap_label, tap_mod.describeResolveError(&rerr_buf, e, urls.forge, urls.host) });
         return error.Aborted;
     };
@@ -1267,7 +1267,7 @@ fn upgradeRoutedTapCask(
     defer if (cached_etag_opt) |e| allocator.free(e);
 
     var rerr_buf: [512]u8 = undefined;
-    var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, cached_etag_opt) catch |e| {
+    var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, ctx.offline, urls.forge, urls.api_head_url, cached_etag_opt) catch |e| {
         output.err("Could not resolve {s} HEAD: {s}", .{ tap_label, tap_mod.describeResolveError(&rerr_buf, e, urls.forge, urls.host) });
         return error.Aborted;
     };

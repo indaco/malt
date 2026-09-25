@@ -360,7 +360,8 @@ const tap_help =
     \\against the pin, not whatever HEAD happens to point to later.
     \\
     \\Flags:
-    \\  --refresh [<slug>]   Advance the pin to the current HEAD. With a
+    \\  --refresh <slug>|--all
+    \\                       Advance the pin to the current HEAD. With a
     \\                       slug, refreshes that one tap; with --all,
     \\                       walks every registered tap.
     \\  --all                Pairs with --refresh: batch every tap, print
@@ -395,7 +396,7 @@ const tap_help =
     \\                       and ETag because the new repo has its own HEAD.
     \\  --yes, -y            Confirm the apply step of --refresh --all.
     \\  --json               Emit the --refresh --all diff as
-    \\                       `{"taps":[{"tap","old_sha","new_sha","status"}]}`.
+    \\                       `{"taps":[{"tap","old_sha","new_sha","status","error"}]}`.
     \\
     \\Taps are auto-resolved during install, so explicit `tap` is
     \\usually unnecessary — the auto-tap also pins the SHA on first use.
