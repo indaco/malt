@@ -692,6 +692,66 @@ test "a phase whose context cannot be built is reported as a failure, not an emp
     try testing.expect(flog.hasFatal());
 }
 
+test "a preflight step that cannot write aborts the install before the app is placed" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root ignores the mode
+    var fx = try Fixture.init("pre_eacces");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCaskWithMajor(testing.allocator, box_json, null);
+    defer c.deinit();
+    try putFile(io, fx.p("extract/Box.app/Contents/MacOS/box"), "bin");
+    try test_io.cwd().createDirPath(io, fx.p("Applications"));
+
+    // A read-only $HOME/Library: the ROM dir the preflight makes cannot land.
+    const lib = try std.fmt.allocPrintSentinel(fx.arena.allocator(), "{s}/Library", .{fx.home}, 0);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(lib, 0o555));
+    defer _ = std.c.chmod(lib, 0o755);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var flog = cask.FlightLog.init(testing.allocator);
+    defer flog.deinit();
+    var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.flight = .{ .log = &flog, .allocator = arena.allocator() };
+
+    try testing.expectError(error.PreflightFailed, installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c));
+    try testing.expect(flog.hasFatal());
+    try testing.expect(!exists(io, fx.p("Applications/Box.app")));
+}
+
+test "a postflight step that cannot write fails the phase instead of passing its gate" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var fx = try Fixture.init("post_eacces");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var c = try cask.parseCaskWithMajor(testing.allocator, box_json, null);
+    defer c.deinit();
+
+    const lib = try std.fmt.allocPrintSentinel(fx.arena.allocator(), "{s}/Library", .{fx.home}, 0);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(lib, 0o555));
+    defer _ = std.c.chmod(lib, 0o755);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var flog = cask.FlightLog.init(testing.allocator);
+    defer flog.deinit();
+    var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.flight = .{ .log = &flog, .allocator = arena.allocator() };
+
+    try testing.expect(!installer.runFlight("box", "6.0", c.flight_steps.get(.postflight).?, null));
+    try testing.expect(flog.hasFatal());
+    try testing.expect(!exists(io, fx.h("Library/box.conf")));
+}
+
 test "a cask without flight steps stores NULL and installs as before" {
     var fx = try Fixture.init("plain");
     defer fx.deinit();

@@ -803,16 +803,18 @@ fn confined(ctx: StepsCtx, path: []const u8) bool {
     return true;
 }
 
-fn mkParent(ctx: StepsCtx, path: []const u8) void {
-    if (std.fs.path.dirname(path)) |parent| {
-        std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch {};
-    }
+/// Reported here, a parent that cannot be made names the directory; left to
+/// the step, it would read as its leaf "not found".
+fn mkParent(ctx: StepsCtx, step: []const u8, path: []const u8) bool {
+    const parent = std.fs.path.dirname(path) orelse return true;
+    std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch |e| return ioFail(ctx, step, parent, e);
+    return true;
 }
 
 fn stepMkdirP(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const path = resolvePathSpec(ctx, obj, "path") orelse return false;
     if (!confined(ctx, path)) return false;
-    std.Io.Dir.cwd().createDirPath(ctx.io, path) catch {};
+    std.Io.Dir.cwd().createDirPath(ctx.io, path) catch |e| return ioFail(ctx, "mkdir_p", path, e);
     return true;
 }
 
@@ -834,12 +836,16 @@ fn stepMkdir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
 fn stepTouch(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const path = resolvePathSpec(ctx, obj, "path") orelse return false;
     if (!confined(ctx, path)) return false;
-    mkParent(ctx, path);
+    if (!mkParent(ctx, "touch", path)) return false;
     // Create (no truncate) through an O_NOFOLLOW handle, same as the DSL
-    // touch builtin: a symlinked leaf must not reach outside the keg.
-    const file = openTargetNoFollow(ctx, path, .{ .create = true }) catch |e| {
-        if (e == error.PathSandboxViolation) logViolation(ctx, path);
-        return e != error.PathSandboxViolation;
+    // touch builtin: a symlinked leaf must not reach outside the keg. Read
+    // only, so an existing read-only file is no failure.
+    const file = openTargetNoFollow(ctx, path, .{ .write = false, .create = true }) catch |e| switch (e) {
+        error.PathSandboxViolation => {
+            logViolation(ctx, path);
+            return false;
+        },
+        else => return ioFail(ctx, "touch", path, e),
     };
     file.close(ctx.io);
     return true;
@@ -855,17 +861,20 @@ fn stepWrite(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     // Existing files are the user's unless the step opts into overwrite.
     if (!getFlag(obj, "overwrite") and fileExists(ctx.io, path)) return true;
     const content = expandTemplates(ctx, raw_content) catch return false;
-    mkParent(ctx, path);
-    const file = openTargetNoFollow(ctx, path, .{
-        .write = true,
-        .create = true,
-        .truncate = true,
-    }) catch |e| {
-        if (e == error.PathSandboxViolation) logViolation(ctx, path);
-        return e != error.PathSandboxViolation;
-    };
-    defer file.close(ctx.io);
-    file.writeStreamingAll(ctx.io, content) catch {};
+    if (!mkParent(ctx, "write", path)) return false;
+    // The rename below would replace a planted leaf symlink, not refuse it.
+    if (openTargetNoFollow(ctx, path, .{ .write = false })) |f| f.close(ctx.io) else |e| switch (e) {
+        error.PathSandboxViolation => {
+            logViolation(ctx, path);
+            return false;
+        },
+        error.FileNotFound => {},
+        else => return ioFail(ctx, "write", path, e),
+    }
+    // Replaced whole or not at all, like upstream's `atomic_write`: a failed
+    // write must not leave the user's file truncated. Like upstream's, it
+    // needs a writable directory.
+    atomic.atomicReplaceFile(ctx.io, path, content) catch |e| return ioFail(ctx, "write", path, e);
     return true;
 }
 
@@ -891,9 +900,7 @@ fn stepCopy(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         dest = std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ target, std.fs.path.basename(source) }) catch
             return false;
         if (!confined(ctx, dest)) return false;
-    } else {
-        mkParent(ctx, target);
-    }
+    } else if (!mkParent(ctx, "copy", target)) return false;
 
     // Staged beside the destination rather than into it: the replace is only
     // committed once the replacement exists.
@@ -984,11 +991,36 @@ fn stepSymlink(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         }
         return symlinkGlob(ctx, obj, source, target);
     }
-    mkParent(ctx, target);
-    if (getFlag(obj, "force")) std.Io.Dir.cwd().deleteFile(ctx.io, target) catch {};
-    // Not `symLinkAbsolute`: that asserts absolute link content.
-    std.Io.Dir.cwd().symLink(ctx.io, source, target, .{}) catch {};
+    if (!mkParent(ctx, "symlink", target)) return false;
+    if (getFlag(obj, "force") and !clearForLink(ctx, "symlink", target)) return false;
+    return placeLink(ctx, "symlink", source, target);
+}
+
+/// Already absent is what clearing wants, not a failure.
+fn clearForLink(ctx: StepsCtx, step: []const u8, path: []const u8) bool {
+    std.Io.Dir.cwd().deleteFile(ctx.io, path) catch |e| switch (e) {
+        error.FileNotFound => {},
+        else => return ioFail(ctx, step, path, e),
+    };
     return true;
+}
+
+/// Without `force`, upstream fails on any occupant. The exact link this step
+/// would place is let through, so a reinstall replays cleanly; a link to
+/// another version still fails, as upstream's does.
+fn placeLink(ctx: StepsCtx, step: []const u8, source: []const u8, link: []const u8) bool {
+    // Not `symLinkAbsolute`: that asserts absolute link content.
+    std.Io.Dir.cwd().symLink(ctx.io, source, link, .{}) catch |e| {
+        if (e == error.PathAlreadyExists and linksTo(ctx, link, source)) return true;
+        return ioFail(ctx, step, link, e);
+    };
+    return true;
+}
+
+fn linksTo(ctx: StepsCtx, link: []const u8, source: []const u8) bool {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.Io.Dir.readLinkAbsolute(ctx.io, link, &buf) catch return false;
+    return std.mem.eql(u8, buf[0..n], source);
 }
 
 fn relativeSource(obj: std.json.ObjectMap) bool {
@@ -1003,21 +1035,25 @@ fn symlinkGlob(ctx: StepsCtx, obj: std.json.ObjectMap, source: []const u8, targe
     const dir_path = std.fs.path.dirname(source) orelse return false;
     const pattern = std.fs.path.basename(source);
 
-    std.Io.Dir.cwd().createDirPath(ctx.io, target) catch {};
-    var dir = std.Io.Dir.openDirAbsolute(ctx.io, dir_path, .{ .iterate = true }) catch return true;
+    std.Io.Dir.cwd().createDirPath(ctx.io, target) catch |e| return ioFail(ctx, "symlink", target, e);
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, dir_path, .{ .iterate = true }) catch |e| switch (e) {
+        error.FileNotFound => return true,
+        else => return ioFail(ctx, "symlink", dir_path, e),
+    };
     defer dir.close(ctx.io);
 
     const force = getFlag(obj, "force");
     var iter = dir.iterate();
-    while (iter.next(ctx.io) catch null) |entry| {
+    // A read error must not read as "no more matches".
+    while (iter.next(ctx.io) catch |e| return ioFail(ctx, "symlink", dir_path, e)) |entry| {
         if (!glob_match.match(pattern, entry.name)) continue;
         const child = std.fs.path.join(ctx.allocator, &.{ dir_path, entry.name }) catch continue;
         const link_path = std.fs.path.join(ctx.allocator, &.{ target, entry.name }) catch continue;
         // Each match is its own write: a planted symlink must not redirect
         // one of them out of the prefix.
         if (!confined(ctx, link_path)) return false;
-        if (force) std.Io.Dir.cwd().deleteFile(ctx.io, link_path) catch {};
-        std.Io.Dir.symLinkAbsolute(ctx.io, child, link_path, .{}) catch {};
+        if (force and !clearForLink(ctx, "symlink", link_path)) return false;
+        if (!placeLink(ctx, "symlink", child, link_path)) return false;
     }
     return true;
 }
@@ -1134,20 +1170,27 @@ fn stepInreplace(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         return false;
     }
 
-    const file = openSourceNoFollow(ctx, path) catch |e| {
-        switch (e) {
-            error.PathSandboxViolation => logViolation(ctx, path),
-            // Silent here would report the phase as completed with the
-            // declared edit never made.
-            error.FileNotFound => logUnsupported(ctx, "inreplace of a file the artefact did not ship"),
-            else => {},
-        }
-        return false;
+    // Silent on any path out would report the phase as completed with the
+    // declared edit never made.
+    const file = openSourceNoFollow(ctx, path) catch |e| switch (e) {
+        error.PathSandboxViolation => {
+            logViolation(ctx, path);
+            return false;
+        },
+        error.FileNotFound => {
+            logUnsupported(ctx, "inreplace of a file the artefact did not ship");
+            return false;
+        },
+        else => return ioFail(ctx, "inreplace", path, e),
     };
     defer file.close(ctx.io);
-    const stat = file.stat(ctx.io) catch return false;
-    if (stat.size > 4 * 1024 * 1024) return false;
-    const content = fs_read.readFileAll(ctx.io, ctx.allocator, file, 4 * 1024 * 1024) catch return false;
+    const stat = file.stat(ctx.io) catch |e| return ioFail(ctx, "inreplace", path, e);
+    if (stat.size > 4 * 1024 * 1024) {
+        logUnsupported(ctx, "inreplace of a file over 4 MiB");
+        return false;
+    }
+    const content = fs_read.readFileAll(ctx.io, ctx.allocator, file, 4 * 1024 * 1024) catch |e|
+        return ioFail(ctx, "inreplace", path, e);
 
     const updated = if (getFlag(obj, "regexp")) blk: {
         const literal = anchoredLineLiteral(before) orelse {
@@ -1157,7 +1200,7 @@ fn stepInreplace(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         break :blk replaceAnchoredLines(ctx, content, literal, after) orelse return false;
     } else text_replace.replaceAll(ctx.allocator, content, before, after) catch return false;
 
-    atomic.atomicReplaceFile(ctx.io, path, updated) catch return false;
+    atomic.atomicReplaceFile(ctx.io, path, updated) catch |e| return ioFail(ctx, "inreplace", path, e);
     return true;
 }
 
@@ -1259,7 +1302,7 @@ fn stepLinkChildren(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const source = resolvePathSpec(ctx, obj, "source") orelse return false;
     const target = resolvePathSpec(ctx, obj, "target") orelse return false;
     if (!confined(ctx, target)) return false;
-    std.Io.Dir.cwd().createDirPath(ctx.io, target) catch {};
+    std.Io.Dir.cwd().createDirPath(ctx.io, target) catch |e| return ioFail(ctx, "link_children", target, e);
     // Same per-level guards as the DSL cp_r walk: neither side may resolve
     // out of the keg/prefix through a planted directory symlink.
     validateDirTarget(ctx, target) catch {
@@ -1273,15 +1316,18 @@ fn stepLinkChildren(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const link_prefix = expandTemplates(ctx, getString(obj, "prefix") orelse "") catch return false;
     const link_suffix = expandTemplates(ctx, getString(obj, "suffix") orelse "") catch return false;
 
-    var dir = std.Io.Dir.openDirAbsolute(ctx.io, source, .{ .iterate = true }) catch return true;
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, source, .{ .iterate = true }) catch |e| switch (e) {
+        error.FileNotFound => return true,
+        else => return ioFail(ctx, "link_children", source, e),
+    };
     defer dir.close(ctx.io);
     var iter = dir.iterate();
-    while (iter.next(ctx.io) catch null) |entry| {
+    while (iter.next(ctx.io) catch |e| return ioFail(ctx, "link_children", source, e)) |entry| {
         const child = std.fs.path.join(ctx.allocator, &.{ source, entry.name }) catch continue;
         const link_name = std.fmt.allocPrint(ctx.allocator, "{s}{s}{s}", .{ link_prefix, entry.name, link_suffix }) catch continue;
         const link_path = std.fs.path.join(ctx.allocator, &.{ target, link_name }) catch continue;
-        std.Io.Dir.cwd().deleteFile(ctx.io, link_path) catch {};
-        std.Io.Dir.symLinkAbsolute(ctx.io, child, link_path, .{}) catch {};
+        if (!clearForLink(ctx, "link_children", link_path)) return false;
+        if (!placeLink(ctx, "link_children", child, link_path)) return false;
     }
     return true;
 }
@@ -1290,38 +1336,41 @@ fn stepLinkDir(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     const source = resolvePathSpec(ctx, obj, "source") orelse return false;
     const target = resolvePathSpec(ctx, obj, "target") orelse return false;
     if (!confined(ctx, target)) return false;
-    linkDirRecursive(ctx, source, target);
-    return true;
+    return linkDirRecursive(ctx, source, target);
 }
 
 /// Mirror of brew's link_dir walk: directories materialise as real dirs,
 /// files and symlinks become symlinks, `.DS_Store` is skipped. Guarded per
 /// level like the DSL cp_r walk.
-fn linkDirRecursive(ctx: StepsCtx, src: []const u8, dst: []const u8) void {
-    std.Io.Dir.cwd().createDirPath(ctx.io, dst) catch {};
+fn linkDirRecursive(ctx: StepsCtx, src: []const u8, dst: []const u8) bool {
+    std.Io.Dir.cwd().createDirPath(ctx.io, dst) catch |e| return ioFail(ctx, "link_dir", dst, e);
     validateDirTarget(ctx, dst) catch {
         logViolation(ctx, dst);
-        return;
+        return false;
     };
     validateDirTarget(ctx, src) catch {
         logViolation(ctx, src);
-        return;
+        return false;
     };
 
-    var dir = std.Io.Dir.openDirAbsolute(ctx.io, src, .{ .iterate = true }) catch return;
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, src, .{ .iterate = true }) catch |e| switch (e) {
+        error.FileNotFound => return true,
+        else => return ioFail(ctx, "link_dir", src, e),
+    };
     defer dir.close(ctx.io);
     var iter = dir.iterate();
-    while (iter.next(ctx.io) catch null) |entry| {
+    while (iter.next(ctx.io) catch |e| return ioFail(ctx, "link_dir", src, e)) |entry| {
         if (std.mem.eql(u8, entry.name, ".DS_Store")) continue;
         const src_child = std.fs.path.join(ctx.allocator, &.{ src, entry.name }) catch continue;
         const dst_child = std.fs.path.join(ctx.allocator, &.{ dst, entry.name }) catch continue;
         if (entry.kind == .directory) {
-            linkDirRecursive(ctx, src_child, dst_child);
+            if (!linkDirRecursive(ctx, src_child, dst_child)) return false;
         } else {
-            std.Io.Dir.cwd().deleteFile(ctx.io, dst_child) catch {};
-            std.Io.Dir.symLinkAbsolute(ctx.io, src_child, dst_child, .{}) catch {};
+            if (!clearForLink(ctx, "link_dir", dst_child)) return false;
+            if (!placeLink(ctx, "link_dir", src_child, dst_child)) return false;
         }
     }
+    return true;
 }
 
 /// `move`: relocate a tree the formula shipped — nginx lifts its default
@@ -1365,7 +1414,6 @@ fn stepMove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
             logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "could not clear {s}", .{target}) catch target);
             return false;
         };
-        mkParent(ctx, target);
         if (atomic.atomicRename(ctx.io, ctx.allocator, source, target)) |_| {
             std.Io.Dir.cwd().deleteTree(ctx.io, aside) catch {};
             return true;
@@ -1375,7 +1423,7 @@ fn stepMove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
             return false;
         }
     }
-    mkParent(ctx, target);
+    if (!mkParent(ctx, "move", target)) return false;
     // An aside can outlive a crash between the two renames below; drop it here
     // too, or it lingers in the prefix with nothing to reclaim it.
     std.Io.Dir.cwd().deleteTree(ctx.io, asidePath(ctx, target) orelse "") catch {};
@@ -1580,7 +1628,12 @@ fn pathDetail(ctx: StepsCtx, what: []const u8, path: []const u8) []const u8 {
 /// root and every file and directory below it.
 fn applyTree(ctx: StepsCtx, path: []const u8, leaf: anytype) bool {
     if (!leaf.apply(ctx, path)) return false;
-    var dir = std.Io.Dir.openDirAbsolute(ctx.io, path, .{ .iterate = true }) catch return true;
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, path, .{ .iterate = true }) catch |e| switch (e) {
+        // A file root has nothing below it; a vanished one is the race
+        // `chmodConfined` already tolerates.
+        error.NotDir, error.FileNotFound => return true,
+        else => return ioFail(ctx, @TypeOf(leaf).step, path, e),
+    };
     defer dir.close(ctx.io);
     // Per-level guard, like the link_dir walk: a directory symlink must not
     // redirect the descent outside the prefix.
@@ -1589,7 +1642,7 @@ fn applyTree(ctx: StepsCtx, path: []const u8, leaf: anytype) bool {
         return false;
     };
     var iter = dir.iterate();
-    while (iter.next(ctx.io) catch null) |entry| {
+    while (iter.next(ctx.io) catch |e| return ioFail(ctx, @TypeOf(leaf).step, path, e)) |entry| {
         // `-R` walks past anything that is not a file or a directory;
         // refusing a symlink here would fail the step over a keg's own links.
         if (entry.kind != .directory and entry.kind != .file) continue;
@@ -1602,6 +1655,7 @@ fn applyTree(ctx: StepsCtx, path: []const u8, leaf: anytype) bool {
 
 const ChmodLeaf = struct {
     mode: Mode,
+    const step = "set_permissions";
     fn apply(self: ChmodLeaf, ctx: StepsCtx, path: []const u8) bool {
         return chmodConfined(ctx, path, self.mode);
     }
@@ -1688,6 +1742,7 @@ fn chownConfined(ctx: StepsCtx, named: []const u8, uid: std.posix.uid_t, gid: st
 const ChownLeaf = struct {
     uid: std.posix.uid_t,
     gid: std.posix.gid_t,
+    const step = "set_ownership";
     fn apply(self: ChownLeaf, ctx: StepsCtx, path: []const u8) bool {
         return chownConfined(ctx, path, self.uid, self.gid);
     }
@@ -2683,6 +2738,13 @@ fn logViolation(ctx: StepsCtx, path: []const u8) void {
 
 fn logCmdFail(ctx: StepsCtx, detail: []const u8) void {
     ctx.flog.log(.{ .formula = ctx.name, .reason = .system_command_failed, .detail = detail, .loc = null });
+}
+
+/// A failed filesystem write is as fatal as a failed command: counted as
+/// handled, it would report a step that left nothing on disk as done.
+fn ioFail(ctx: StepsCtx, step: []const u8, path: []const u8, e: anyerror) bool {
+    logCmdFail(ctx, std.fmt.allocPrint(ctx.allocator, "{s} {s}: {s}", .{ step, path, @errorName(e) }) catch step);
+    return false;
 }
 
 // --- tests -----------------------------------------------------------------
@@ -3809,6 +3871,420 @@ test "write respects existing files unless overwrite is set" {
         try testing.expectEqualStrings("fresh\n", buf[0..n]);
     }
     try testing.expect(!h.flog.hasErrors());
+}
+
+/// A `0o555` directory under the prefix stands in for a read-only volume:
+/// writes into it fail for a non-root user.
+const LockedDir = struct {
+    path: [:0]const u8,
+
+    fn init(h: *TestHarness, rel: []const u8) !LockedDir {
+        const path = try std.fmt.allocPrintSentinel(h.arena.allocator(), "{s}/{s}", .{ h.prefix, rel }, 0);
+        try std.Io.Dir.cwd().createDirPath(h.io, path);
+        try testing.expectEqual(@as(c_int, 0), std.c.chmod(path, 0o555));
+        return .{ .path = path };
+    }
+
+    /// Restored so the harness can delete the tree.
+    fn deinit(self: LockedDir) void {
+        _ = std.c.chmod(self.path, 0o755);
+    }
+};
+
+/// `step` fails on IO: it must end the run as fatal and uncounted, so the
+/// sentinel step after it never runs.
+fn expectIoFailureAborts(h: *TestHarness, step: []const u8) !void {
+    const a = h.arena.allocator();
+    const steps = try std.fmt.allocPrint(a,
+        \\[{s},{{"type":"mkdir_p","path":{{"base":"etc","path":"after"}}}}]
+    , .{step});
+    try testing.expect(execute(h.ctx(), try testFormulaJson(h, steps)));
+    try testing.expect(h.flog.hasFatal());
+    try testing.expectEqual(fallback_log.FallbackReason.system_command_failed, h.flog.entries()[0].reason);
+    try testing.expectEqual(@as(usize, 0), h.flog.handled_top_level);
+    try testing.expect(!dirExists(h.io, try std.fmt.allocPrint(a, "{s}/etc/after", .{h.prefix})));
+}
+
+/// A keg directory with one file, for the link-walk steps to link from.
+fn seedKegShare(h: *TestHarness) !void {
+    const share = try std.fmt.allocPrint(h.arena.allocator(), "{s}/share/glow", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, share);
+    try atomic.atomicWriteFile(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/tool", .{share}), "x\n");
+}
+
+test "write surfaces an IO failure instead of reporting success" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root ignores the mode
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const ro = try LockedDir.init(&h, "etc/ro");
+    defer ro.deinit();
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"write","path":{"base":"etc","path":"ro/app.conf"},"content":"x\n","overwrite":true}
+    );
+    try testing.expect(!pathExists(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/app.conf", .{ro.path})));
+}
+
+test "write keeps the original file when an overwrite cannot land" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const conf = try std.fmt.allocPrint(a, "{s}/etc/ro/app.conf", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(conf).?);
+    try atomic.atomicWriteFile(h.io, conf, "user edited\n");
+    // The file stays writable; only its directory refuses the replacement.
+    const ro = try LockedDir.init(&h, "etc/ro");
+    defer ro.deinit();
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"write","path":{"base":"etc","path":"ro/app.conf"},"content":"fresh\n","overwrite":true}
+    );
+    var buf: [64]u8 = undefined;
+    const f = try std.Io.Dir.openFileAbsolute(h.io, conf, .{});
+    defer f.close(h.io);
+    const n = try f.readPositionalAll(h.io, &buf, 0);
+    try testing.expectEqualStrings("user edited\n", buf[0..n]);
+}
+
+test "write keeps an existing file's mode when it overwrites it" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const conf = try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/secret.conf", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(conf).?);
+    try atomic.atomicWriteFile(h.io, conf, "token=old\n");
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(try h.arena.allocator().dupeZ(u8, conf), 0o600));
+
+    // The replacement is a new file; a private config must not come back
+    // world-readable.
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"write","path":{"base":"etc","path":"secret.conf"},"content":"token=new\n","overwrite":true}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqual(@as(std.posix.mode_t, 0o600), try fileMode(h.io, conf));
+}
+
+test "write refuses a symlinked leaf instead of replacing it" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const outside = try std.fmt.allocPrint(a, "{s}-OUTSIDE", .{h.prefix});
+    try atomic.atomicWriteFile(h.io, outside, "outside\n");
+    defer std.Io.Dir.cwd().deleteFile(h.io, outside) catch {};
+    const link = try std.fmt.allocPrint(a, "{s}/etc/app.conf", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(link).?);
+    try std.Io.Dir.symLinkAbsolute(h.io, outside, link, .{});
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"write","path":{"base":"etc","path":"app.conf"},"content":"x\n","overwrite":true}]
+    )));
+    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, h.flog.entries()[0].reason);
+    // Neither the link nor what it points at was touched.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings(outside, buf[0..try std.Io.Dir.readLinkAbsolute(h.io, link, &buf)]);
+    const f = try std.Io.Dir.openFileAbsolute(h.io, outside, .{});
+    defer f.close(h.io);
+    const n = try f.readPositionalAll(h.io, &buf, 0);
+    try testing.expectEqualStrings("outside\n", buf[0..n]);
+}
+
+test "touch surfaces an IO failure instead of reporting success" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const ro = try LockedDir.init(&h, "etc/ro");
+    defer ro.deinit();
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"touch","path":{"base":"etc","path":"ro/t"}}
+    );
+}
+
+test "touch accepts an existing read-only file" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    // Bottles ship read-only files; touching one needs no write access.
+    const cache = try std.fmt.allocPrintSentinel(h.arena.allocator(), "{s}/lib/site-ccache/mod.go", .{h.keg}, 0);
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(cache).?);
+    try atomic.atomicWriteFile(h.io, cache, "compiled");
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(cache, 0o444));
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"touch","path":{"base":"prefix","path":"lib/site-ccache/mod.go"}}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 1), h.flog.handled_top_level);
+}
+
+test "touch refuses a symlinked leaf" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const outside = try std.fmt.allocPrint(a, "{s}-OUTSIDE", .{h.prefix});
+    try atomic.atomicWriteFile(h.io, outside, "outside\n");
+    defer std.Io.Dir.cwd().deleteFile(h.io, outside) catch {};
+    const link = try std.fmt.allocPrint(a, "{s}/etc/t", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(link).?);
+    try std.Io.Dir.symLinkAbsolute(h.io, outside, link, .{});
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"touch","path":{"base":"etc","path":"t"}}]
+    )));
+    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, h.flog.entries()[0].reason);
+}
+
+test "mkdir_p surfaces an IO failure instead of reporting success" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const ro = try LockedDir.init(&h, "etc/ro");
+    defer ro.deinit();
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"mkdir_p","path":{"base":"etc","path":"ro/d/e"}}
+    );
+}
+
+test "symlink surfaces an IO failure instead of reporting success" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const ro = try LockedDir.init(&h, "etc/ro");
+    defer ro.deinit();
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"symlink","source":{"base":"absolute","path":"/usr/bin/true"},"target":{"base":"etc","path":"ro/l"}}
+    );
+}
+
+test "symlink surfaces an occupied target that is not its link" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const occupant = try std.fmt.allocPrint(a, "{s}/etc/l", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(occupant).?);
+    try atomic.atomicWriteFile(h.io, occupant, "mine\n");
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"symlink","source":{"base":"absolute","path":"/usr/bin/true"},"target":{"base":"etc","path":"l"}}
+    );
+}
+
+test "symlink force surfaces a target it cannot clear" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    // A directory is not unlinked by force, so the link can never be placed.
+    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/l/sub", .{h.prefix}));
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"symlink","force":true,"source":{"base":"absolute","path":"/usr/bin/true"},"target":{"base":"etc","path":"l"}}
+    );
+    // The report names why the clear failed, not the collision it caused.
+    try testing.expect(std.mem.indexOf(u8, h.flog.entries()[0].detail, "PathAlreadyExists") == null);
+}
+
+test "link_children surfaces a source that is not a directory" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    try seedKegShare(&h);
+
+    // Only a missing source is a no-op; one that exists but cannot be listed
+    // must not read as "no children".
+    try expectIoFailureAborts(&h,
+        \\{"type":"link_children","source":{"base":"prefix","path":"share/glow/tool"},"target":{"base":"etc","path":"lc"}}
+    );
+}
+
+test "re-running the link steps over their own links is handled, not a failure" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    try seedKegShare(&h);
+    // Every unforced link shape live formulae and casks declare.
+    const steps = try testFormulaJson(&h,
+        \\[{"type":"symlink","source":{"base":"absolute","path":"/usr/bin/true"},"target":{"base":"etc","path":"l"}},
+        \\ {"type":"symlink","source":{"base":"relative","path":"libx.{{version}}.dylib"},"target":{"base":"etc","path":"rel"}},
+        \\ {"type":"symlink","source_glob":true,"source":{"base":"prefix","path":"share/glow/*"},"target":{"base":"etc","path":"g"}},
+        \\ {"type":"link_children","source":{"base":"prefix","path":"share/glow"},"target":{"base":"etc","path":"lc"}},
+        \\ {"type":"link_dir","source":{"base":"prefix","path":"share"},"target":{"base":"etc","path":"ld"}}]
+    );
+    // A reinstall or upgrade replays the same steps over the links it placed.
+    try testing.expect(execute(h.ctx(), steps));
+    try testing.expect(execute(h.ctx(), steps));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 10), h.flog.handled_top_level);
+}
+
+test "symlink source_glob surfaces a failed link instead of reporting success" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    try seedKegShare(&h);
+    const ro = try LockedDir.init(&h, "etc/ro");
+    defer ro.deinit();
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"symlink","source_glob":true,"source":{"base":"prefix","path":"share/glow/*"},"target":{"base":"etc","path":"ro"}}
+    );
+}
+
+test "symlink source_glob treats a missing source directory as a no-op" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"symlink","source_glob":true,"source":{"base":"prefix","path":"share/ghost/*"},"target":{"base":"etc","path":"g"}}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 1), h.flog.handled_top_level);
+}
+
+test "link_children surfaces a failed link instead of reporting success" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    try seedKegShare(&h);
+    const ro = try LockedDir.init(&h, "etc/ro");
+    defer ro.deinit();
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"link_children","source":{"base":"prefix","path":"share/glow"},"target":{"base":"etc","path":"ro"}}
+    );
+}
+
+test "link_dir surfaces a failed link instead of reporting success" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    try seedKegShare(&h);
+    const ro = try LockedDir.init(&h, "etc/ro");
+    defer ro.deinit();
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"link_dir","source":{"base":"prefix","path":"share/glow"},"target":{"base":"etc","path":"ro"}}
+    );
+}
+
+test "the link walks report a target directory they cannot create" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    const walks = [_][]const u8{
+        \\{"type":"symlink","source_glob":true,"source":{"base":"prefix","path":"share/glow/*"},"target":{"base":"etc","path":"ro/sub"}}
+        ,
+        \\{"type":"link_children","source":{"base":"prefix","path":"share/glow"},"target":{"base":"etc","path":"ro/sub"}}
+        ,
+        \\{"type":"link_dir","source":{"base":"prefix","path":"share/glow"},"target":{"base":"etc","path":"ro/sub"}}
+        ,
+    };
+    for (walks) |step| {
+        var h = try TestHarness.init();
+        defer h.deinit();
+        try seedKegShare(&h);
+        const ro = try LockedDir.init(&h, "etc/ro");
+        defer ro.deinit();
+
+        try expectIoFailureAborts(&h, step);
+        // The directory is the cause; a link "not found" inside it would
+        // send the reader looking in the wrong place.
+        const detail = h.flog.entries()[0].detail;
+        try testing.expect(std.mem.indexOf(u8, detail, "ro/sub:") != null);
+        try testing.expect(std.mem.indexOf(u8, detail, "FileNotFound") == null);
+    }
+}
+
+test "inreplace surfaces an edit it cannot write" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const conf = try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/ro/app.conf", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(conf).?);
+    try atomic.atomicWriteFile(h.io, conf, "port=1\n");
+    const ro = try LockedDir.init(&h, "etc/ro");
+    defer ro.deinit();
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"inreplace","path":{"base":"etc","path":"ro/app.conf"},"before":"port=1","after":"port=2"}
+    );
+}
+
+test "inreplace surfaces a file it cannot read" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const conf = try std.fmt.allocPrintSentinel(h.arena.allocator(), "{s}/etc/app.conf", .{h.prefix}, 0);
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(conf).?);
+    try atomic.atomicWriteFile(h.io, conf, "port=1\n");
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(conf, 0o000));
+    defer _ = std.c.chmod(conf, 0o644);
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"inreplace","path":{"base":"etc","path":"app.conf"},"before":"port=1","after":"port=2"}
+    );
+}
+
+test "inreplace reports a file over its size cap instead of skipping it quietly" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const conf = try std.fmt.allocPrint(a, "{s}/etc/big.conf", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(conf).?);
+    const big = try a.alloc(u8, 4 * 1024 * 1024 + 1);
+    @memset(big, 'x');
+    try atomic.atomicWriteFile(h.io, conf, big);
+
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"inreplace","path":{"base":"etc","path":"big.conf"},"before":"x","after":"y"}]
+    )));
+    try testing.expect(h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 0), h.flog.handled_top_level);
+}
+
+test "set_permissions -R surfaces a directory it cannot descend" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const tree = try std.fmt.allocPrintSentinel(a, "{s}/var/tree", .{h.prefix}, 0);
+    try std.Io.Dir.cwd().createDirPath(h.io, try std.fmt.allocPrint(a, "{s}/sub", .{tree}));
+    try atomic.atomicWriteFile(h.io, try std.fmt.allocPrint(a, "{s}/sub/f", .{tree}), "x");
+    // Restored so the harness can delete the tree.
+    defer _ = std.c.chmod(tree, 0o755);
+
+    // A mode without search permission locks the walk out of the directory it
+    // just changed, as `chmod -R 0644` does; the rest must not read as done.
+    try expectIoFailureAborts(&h,
+        \\{"type":"set_permissions","paths":[{"base":"var","path":"tree"}],"permissions":"0644"}
+    );
+}
+
+test "file steps report the parent directory they cannot create" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    const steps = [_][]const u8{
+        \\{"type":"write","path":{"base":"etc","path":"ro/sub/app.conf"},"content":"x\n"}
+        ,
+        \\{"type":"touch","path":{"base":"etc","path":"ro/sub/t"}}
+        ,
+        \\{"type":"symlink","source":{"base":"absolute","path":"/usr/bin/true"},"target":{"base":"etc","path":"ro/sub/l"}}
+        ,
+    };
+    for (steps) |step| {
+        var h = try TestHarness.init();
+        defer h.deinit();
+        const ro = try LockedDir.init(&h, "etc/ro");
+        defer ro.deinit();
+
+        try expectIoFailureAborts(&h, step);
+        const detail = h.flog.entries()[0].detail;
+        try testing.expect(std.mem.indexOf(u8, detail, "ro/sub:") != null);
+        try testing.expect(std.mem.indexOf(u8, detail, "FileNotFound") == null);
+    }
+}
+
+test "link_dir treats a missing source directory as a no-op" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"link_dir","source":{"base":"prefix","path":"share/ghost"},"target":{"base":"etc","path":"g"}}]
+    )));
+    try testing.expect(!h.flog.hasErrors());
+    try testing.expectEqual(@as(usize, 1), h.flog.handled_top_level);
 }
 
 test "a planted directory symlink cannot redirect a later step outside the prefix" {
