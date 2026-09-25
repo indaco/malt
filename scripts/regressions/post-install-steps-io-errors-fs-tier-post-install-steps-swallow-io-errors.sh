@@ -36,6 +36,7 @@ for t in \
   "link_dir surfaces" \
   "the link walks report" \
   "file steps report the parent" \
+  "link_children refuses" \
   "inreplace surfaces" \
   "set_permissions -R surfaces" \
   "write keeps the original" \

@@ -1330,6 +1330,14 @@ fn stepLinkChildren(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     };
     const link_prefix = expandTemplates(ctx, getString(obj, "prefix") orelse "") catch return false;
     const link_suffix = expandTemplates(ctx, getString(obj, "suffix") orelse "") catch return false;
+    // The name must land in `target`; a separator walks it out of the
+    // directory just confined. A readdir name never holds one.
+    for ([_][]const u8{ link_prefix, link_suffix }) |part| {
+        if (std.mem.indexOfScalar(u8, part, '/') != null) {
+            logViolation(ctx, part);
+            return false;
+        }
+    }
 
     var dir = std.Io.Dir.openDirAbsolute(ctx.io, source, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return true,
@@ -4816,6 +4824,41 @@ test "link_children honours the link-name prefix and treats a missing source as 
         \\[{"type":"link_children","source":{"base":"prefix","path":"share/ghost"},"target":{"base":"homebrew_prefix","path":"bin"}}]
     )));
     try testing.expect(!h.flog.hasErrors());
+}
+
+test "link_children refuses a link-name prefix that walks out of the target" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    try seedKegShare(&h);
+    // What the escape would unlink and replace with a link into the keg.
+    const outside = try std.fmt.allocPrint(a, "{s}-OUTSIDE", .{h.prefix});
+    const victim = try std.fmt.allocPrint(a, "{s}/tool", .{outside});
+    try std.Io.Dir.cwd().createDirPath(h.io, outside);
+    defer std.Io.Dir.cwd().deleteTree(h.io, outside) catch {};
+    try atomic.atomicWriteFile(h.io, victim, "user file\n");
+
+    // <prefix>/etc/lc/../../../<prefix>-OUTSIDE/tool
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h, try std.fmt.allocPrint(a,
+        \\[{{"type":"link_children","source":{{"base":"prefix","path":"share/glow"}},"target":{{"base":"etc","path":"lc"}},"prefix":"../../../{s}/"}}]
+    , .{std.fs.path.basename(outside)}))));
+    try testing.expect(h.flog.hasFatal());
+    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, h.flog.entries()[0].reason);
+    var buf: [64]u8 = undefined;
+    const f = try std.Io.Dir.openFileAbsolute(h.io, victim, .{});
+    defer f.close(h.io);
+    try testing.expectEqualStrings("user file\n", buf[0..try f.readPositionalAll(h.io, &buf, 0)]);
+}
+
+test "link_children refuses a link-name suffix with a path separator" {
+    var h = try TestHarness.init();
+    defer h.deinit();
+    try seedKegShare(&h);
+    try testing.expect(execute(h.ctx(), try testFormulaJson(&h,
+        \\[{"type":"link_children","source":{"base":"prefix","path":"share/glow"},"target":{"base":"etc","path":"lc"},"suffix":"/x"}]
+    )));
+    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, h.flog.entries()[0].reason);
+    try testing.expect(!pathExists(h.io, try std.fmt.allocPrint(h.arena.allocator(), "{s}/etc/lc/tool", .{h.prefix})));
 }
 
 test "supportedStepType matches the executable tier and rejects the rest" {
