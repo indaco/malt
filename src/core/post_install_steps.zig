@@ -279,14 +279,24 @@ pub fn runSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
 /// declared with `uninstall`, which drops its link if it still points at
 /// the declared source. Everything else is a silent no-op.
 pub fn runUninstallSteps(ctx: StepsCtx, steps: []const std.json.Value) void {
+    const start = ctx.flog.entries().len;
     for (steps) |step_val| {
         const obj = if (step_val == .object) step_val.object else continue;
         if (step_map.get(getString(obj, "type") orelse continue) != .symlink) continue;
         if (!getFlag(obj, "uninstall")) continue;
         ctx.flog.total_top_level += 1;
         if (unlinkDeclaredSymlink(ctx, obj)) ctx.flog.handled_top_level += 1;
-        if (ctx.flog.hasFatal()) break;
+        // Cleanup is best-effort: a link that will not go is reported and the
+        // rest still run. Only a step reaching outside the prefix stops it.
+        if (refusedSince(ctx.flog, start)) break;
     }
+}
+
+fn refusedSince(flog: *const FallbackLog, start: usize) bool {
+    for (flog.entries()[start..]) |entry| {
+        if (entry.reason == .sandbox_violation) return true;
+    }
+    return false;
 }
 
 /// A link that no longer points at the declared source belongs to something
@@ -298,10 +308,12 @@ fn unlinkDeclaredSymlink(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
     if (!confined(ctx, target)) return false;
     const source = resolvePathSpec(ctx, obj, "source") orelse return false;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const len = std.Io.Dir.readLinkAbsolute(ctx.io, target, &buf) catch return true;
+    const len = std.Io.Dir.readLinkAbsolute(ctx.io, target, &buf) catch |e| switch (e) {
+        error.FileNotFound, error.NotLink, error.NotDir => return true,
+        else => return ioFail(ctx, "symlink", target, e),
+    };
     if (!std.mem.eql(u8, buf[0..len], source)) return true;
-    std.Io.Dir.cwd().deleteFile(ctx.io, target) catch {};
-    return true;
+    return clearForLink(ctx, "symlink", target);
 }
 
 /// Dry-run classifier: log every step this executor would refuse, run none.
@@ -1232,9 +1244,12 @@ fn stepRemove(ctx: StepsCtx, obj: std.json.ObjectMap) bool {
         if (!confined(ctx, path)) continue;
 
         var target_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const len = std.Io.Dir.readLinkAbsolute(ctx.io, path, &target_buf) catch continue;
+        const len = std.Io.Dir.readLinkAbsolute(ctx.io, path, &target_buf) catch |e| switch (e) {
+            error.FileNotFound, error.NotLink, error.NotDir => continue,
+            else => return ioFail(ctx, "remove", path, e),
+        };
         if (std.mem.indexOf(u8, target_buf[0..len], needle) == null) continue;
-        std.Io.Dir.cwd().deleteFile(ctx.io, path) catch {};
+        if (!clearForLink(ctx, "remove", path)) return false;
     }
     return true;
 }
@@ -1255,7 +1270,7 @@ fn removeTrees(ctx: StepsCtx, items: []const std.json.Value) bool {
                 logUnsupported(ctx, "recursive remove of a shared directory");
                 return false;
             }
-            std.Io.Dir.cwd().deleteTree(ctx.io, path) catch {};
+            std.Io.Dir.cwd().deleteTree(ctx.io, path) catch |e| return ioFail(ctx, "remove", path, e);
         }
     }
     return true;
@@ -4285,6 +4300,157 @@ test "link_dir treats a missing source directory as a no-op" {
     )));
     try testing.expect(!h.flog.hasErrors());
     try testing.expectEqual(@as(usize, 1), h.flog.handled_top_level);
+}
+
+/// `<prefix>/bin/glow-init` -> the keg's `bin/glow`: the stale link the
+/// `remove` step retires.
+fn plantStaleLink(h: *TestHarness) ![]const u8 {
+    const a = h.arena.allocator();
+    const dest = try std.fmt.allocPrint(a, "{s}/bin/glow", .{h.keg});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(dest).?);
+    try atomic.atomicWriteFile(h.io, dest, "bin");
+    const stale = try std.fmt.allocPrint(a, "{s}/bin/glow-init", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(stale).?);
+    try std.Io.Dir.symLinkAbsolute(h.io, dest, stale, .{});
+    return stale;
+}
+
+test "remove surfaces a matching link it cannot delete" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const stale = try plantStaleLink(&h);
+    const ro = try LockedDir.init(&h, "bin");
+    defer ro.deinit();
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"remove","symlink_target_contains":"Cellar/glow/","paths":[{"path":"{{HOMEBREW_PREFIX}}/bin/glow-init"}]}
+    );
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(h.io, stale, &buf);
+}
+
+test "remove surfaces a link it cannot read instead of skipping it" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    _ = try plantStaleLink(&h);
+    // No search permission: the link cannot even be inspected.
+    const bin = try std.fmt.allocPrintSentinel(h.arena.allocator(), "{s}/bin", .{h.prefix}, 0);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(bin, 0o000));
+    defer _ = std.c.chmod(bin, 0o755);
+
+    try expectIoFailureAborts(&h,
+        \\{"type":"remove","symlink_target_contains":"Cellar/glow/","paths":[{"path":"{{HOMEBREW_PREFIX}}/bin/glow-init"}]}
+    );
+}
+
+test "remove surfaces a tree it cannot delete" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var h = try TestHarness.init();
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const kept = try std.fmt.allocPrint(a, "{s}/lib/node_modules/npm/locked/index.js", .{h.prefix});
+    try std.Io.Dir.cwd().createDirPath(h.io, std.fs.path.dirname(kept).?);
+    try atomic.atomicWriteFile(h.io, kept, "x");
+    const ro = try LockedDir.init(&h, "lib/node_modules/npm/locked");
+    defer ro.deinit();
+
+    // A stale tree left behind would be read as retired.
+    try expectIoFailureAborts(&h,
+        \\{"type":"remove","recursive":true,"paths":[{"path":"{{HOMEBREW_PREFIX}}/lib/node_modules/npm"}]}
+    );
+    try testing.expect(fileExists(h.io, kept));
+}
+
+test "uninstall mode surfaces a placed link it cannot remove" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const declared = try parseSteps(&ch.h,
+        \\[{"type":"symlink","source":{"base":"staged_path","path":"libx.1.2.3.dylib"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libx.1.dylib"},"uninstall":true}]
+    );
+    runSteps(c, declared);
+    try testing.expect(!ch.h.flog.hasErrors());
+    const ro = try LockedDir.init(&ch.h, "lib");
+    defer ro.deinit();
+
+    // The link now points at a Caskroom that is going away; saying nothing
+    // leaves it dangling unnoticed.
+    runUninstallSteps(c, declared);
+    try testing.expect(ch.h.flog.hasFatal());
+    try testing.expectEqual(fallback_log.FallbackReason.system_command_failed, ch.h.flog.entries()[0].reason);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(c.io, try std.fmt.allocPrint(ch.h.arena.allocator(), "{s}/lib/libx.1.dylib", .{ch.h.prefix}), &buf);
+}
+
+test "uninstall mode surfaces a placed link it cannot read" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const declared = try parseSteps(&ch.h,
+        \\[{"type":"symlink","source":{"base":"staged_path","path":"libx.1.2.3.dylib"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libx.1.dylib"},"uninstall":true}]
+    );
+    runSteps(c, declared);
+    const lib = try std.fmt.allocPrintSentinel(ch.h.arena.allocator(), "{s}/lib", .{ch.h.prefix}, 0);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(lib, 0o000));
+    defer _ = std.c.chmod(lib, 0o755);
+
+    runUninstallSteps(c, declared);
+    try testing.expect(ch.h.flog.hasFatal());
+    try testing.expectEqual(fallback_log.FallbackReason.system_command_failed, ch.h.flog.entries()[0].reason);
+}
+
+test "uninstall mode keeps removing the other links after one will not go" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const declared = try parseSteps(&ch.h,
+        \\[{"type":"symlink","source":{"base":"staged_path","path":"liba.dylib"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/ro/liba.dylib"},"uninstall":true},
+        \\ {"type":"symlink","source":{"base":"staged_path","path":"libb.dylib"},
+        \\  "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libb.dylib"},"uninstall":true}]
+    );
+    runSteps(c, declared);
+    try testing.expect(!ch.h.flog.hasErrors());
+    const ro = try LockedDir.init(&ch.h, "lib/ro");
+    defer ro.deinit();
+
+    // Cleanup is best-effort: one stuck link must not strand the rest.
+    runUninstallSteps(c, declared);
+    try testing.expect(ch.h.flog.hasFatal());
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(c.io, try std.fmt.allocPrint(a, "{s}/liba.dylib", .{ro.path}), &buf);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(c.io, try std.fmt.allocPrint(a, "{s}/lib/libb.dylib", .{ch.h.prefix}), &buf));
+}
+
+test "uninstall mode still stops at a confinement refusal" {
+    var ch = try CaskHarness.init();
+    defer ch.deinit();
+    const c = ch.ctx();
+    const a = ch.h.arena.allocator();
+    const outside = try std.fmt.allocPrint(a, "{s}-OUTSIDE", .{ch.h.prefix});
+    const staged = c.subject.cask.staged_path;
+    const kept = try std.fmt.allocPrint(a, "{s}/lib/libb.dylib", .{ch.h.prefix});
+    try std.Io.Dir.cwd().createDirPath(c.io, std.fs.path.dirname(kept).?);
+    try std.Io.Dir.symLinkAbsolute(c.io, try std.fmt.allocPrint(a, "{s}/libb.dylib", .{staged}), kept, .{});
+
+    runUninstallSteps(c, try parseSteps(&ch.h, try std.fmt.allocPrint(a,
+        \\[{{"type":"symlink","source":{{"base":"staged_path","path":"liba.dylib"}},
+        \\  "target":{{"base":"absolute","path":"{s}/liba.dylib"}},"uninstall":true}},
+        \\ {{"type":"symlink","source":{{"base":"staged_path","path":"libb.dylib"}},
+        \\  "target":{{"path":"{{{{HOMEBREW_PREFIX}}}}/lib/libb.dylib"}},"uninstall":true}}]
+    , .{outside})));
+    try testing.expectEqual(fallback_log.FallbackReason.sandbox_violation, ch.h.flog.entries()[0].reason);
+    // A step that tried to leave the prefix ends the walk, as at install.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try std.Io.Dir.readLinkAbsolute(c.io, kept, &buf);
 }
 
 test "a planted directory symlink cannot redirect a later step outside the prefix" {

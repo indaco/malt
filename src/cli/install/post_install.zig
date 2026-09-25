@@ -223,9 +223,15 @@ pub fn routeFlightOutcome(allocator: std.mem.Allocator, flog: *const dsl.Fallbac
     renderNotes(flog);
     const status: PostInstallStatus = blk: {
         if (flog.hasFatal()) {
-            // An error, not a warning: `--quiet` keeps it, and when the
-            // phase aborts the command this line is the reason it exits 1.
-            sink.err("{s} steps failed for {s}", .{ phase.label(), token });
+            // Uninstall cleanup runs once the cask and its record are gone, so
+            // the command still succeeds: what it left behind is a warning.
+            if (phase == .install_phase_cleanup) {
+                sink.warn("{s}: {s} left paths behind", .{ token, phase.label() });
+            } else {
+                // An error, not a warning: `--quiet` keeps it, and when the
+                // phase aborts the command this line is the reason it exits 1.
+                sink.err("{s} steps failed for {s}", .{ phase.label(), token });
+            }
             renderFatal(flog, token);
             if (output.isDebug()) renderUnknown(flog, token);
             break :blk .fatal;
@@ -288,7 +294,9 @@ pub const Flight = struct {
         self.log = dsl.FallbackLog.init(self.allocator);
         for ([_]cask_mod.FlightPhase{ .preflight, .postflight }) |phase| {
             const s = stored.get(phase) orelse continue;
-            if (!installer.runFlightUninstall(token, version, s)) break;
+            // Confined step by step, so a phase that could not finish must not
+            // strand the other phase's links.
+            installer.runFlightUninstall(token, version, s);
         }
         if (self.log.total_top_level > 0 or self.log.hasErrors()) _ = self.route(token, .install_phase_cleanup, out);
     }
