@@ -44,9 +44,9 @@ MALT_PREFIX="$P" "$BIN" backup --versions --services -o "$tmp/b.txt" >/dev/null 
 MALT_PREFIX="$P" "$BIN" purge --wipe --backup="$tmp/m.txt" --yes >/dev/null 2>&1 ||
   fail "wipe failed on the seeded prefix"
 
-grep -q '^cask acme/tools/foo@1.0$' "$tmp/m.txt" ||
+grep -q '^cask acme/tools/foo 1.0$' "$tmp/m.txt" ||
   fail "wipe manifest lost tap qualification for a third-party cask"
-grep -q '^cask bar@2.0$' "$tmp/m.txt" || fail "core cask must stay bare"
+grep -q '^cask bar 2.0$' "$tmp/m.txt" || fail "core cask must stay bare"
 grep -q '^service svc$' "$tmp/m.txt" || fail "wipe manifest dropped an auto-start service"
 diff <(grep -E '^(cask|service|formula) ' "$tmp/b.txt") \
   <(grep -E '^(cask|service|formula) ' "$tmp/m.txt") ||

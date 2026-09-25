@@ -178,6 +178,127 @@ test "execute --dry-run routes tap-slug lines to the batch their kind names" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "formula wget") != null);
 }
 
+fn dryRunCapture(path: []const u8, captured: *std.ArrayList(u8)) !void {
+    output.beginStderrCapture(testing.allocator, captured);
+    defer output.endStderrCapture();
+    output.setDryRun(true);
+    defer output.setDryRun(false);
+    try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
+}
+
+test "execute --dry-run shows a recorded version beside the name it installs" {
+    // Install has no version pin: forwarding `wget@1.24` looked up a package
+    // of that literal name, so every pinned line failed to restore.
+    var s = try Scratch.init(testing.allocator, "dry_versions");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\formula wget 1.24
+        \\formula postgresql@16 16.4
+        \\cask acme/tools/baz 3.0
+        \\
+    );
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCapture(path, &captured);
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "formula wget (1.24)") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "formula postgresql@16 (16.4)") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "cask    acme/tools/baz (3.0)") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "wget@") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "installs the current release") != null);
+}
+
+test "execute asks install for the bare name of a pinned line" {
+    // Offline, install names what it failed to fetch: that is the exact
+    // name restore forwarded.
+    var s = try Scratch.init(testing.allocator, "real_versions");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "formula zzrestore 1.24\n");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    var ctx = malt.app_ctx.debug_ctx;
+    ctx.offline = true;
+    try testing.expectError(error.RestoreFailed, restore.execute(&ctx, testing.allocator, &.{path}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "'zzrestore'") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "zzrestore@") == null);
+}
+
+test "execute warns once that an older backup's name@version lines need rewriting" {
+    // Such a line reads as one package name; guessing the split would break
+    // versioned formulas like `postgresql@16`.
+    var s = try Scratch.init(testing.allocator, "legacy_pins");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "formula wget@1.24.5\ncask firefox@120.0\nformula jq\n");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCapture(path, &captured);
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "rewrite"));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "2 lines") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "wget@1.24.5") != null);
+}
+
+test "execute trusts `@` names in a backup written with separate version fields" {
+    var s = try Scratch.init(testing.allocator, "current_format");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try malt.backup.writeHeader(&aw.writer);
+    try aw.writer.writeAll("formula postgresql@16 16.4\n");
+    try writeFile(path, aw.written());
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCapture(path, &captured);
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "rewrite") == null);
+}
+
+test "execute --dry-run says nothing about versions for an unpinned backup" {
+    var s = try Scratch.init(testing.allocator, "dry_unpinned");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "formula wget\n");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCapture(path, &captured);
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "installs the current release") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "formula wget\n") != null);
+}
+
+test "execute points each local note at its rebuild command, even with no entries" {
+    // A local keg's recipe lives outside any tap; only the user can rebuild it.
+    var s = try Scratch.init(testing.allocator, "local_note");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "# local lx /src/my dir/l'x.rb\n");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCapture(path, &captured);
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "mt install --local '/src/my dir/l'\\''x.rb'") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No entries found") != null);
+}
+
 test "execute treats unknown kinds as comments and reports zero entries" {
     // backup.parseBackup is line-tolerant: anything that isn't a
     // recognised `formula <name>` / `cask <name>` is silently dropped,

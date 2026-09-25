@@ -115,7 +115,7 @@ pub fn writeManifest(ctx: *const AppCtx, allocator: std.mem.Allocator, path: []c
             // Guarantees the tables exist, so a failing `prepare` below can
             // only mean a genuinely broken database, never a fresh one.
             schema.initSchema(&db) catch |e| return refuseUnusableDb(prefix, e);
-            // Versions always pinned and services always included: the DB
+            // Versions always recorded and services always included: the DB
             // this reads is about to go, so the manifest is the only record
             // of the auto-start set. The rendered plists under var/ are not
             // in the wipe plan and any loaded job stays loaded; `mt restore`
@@ -490,7 +490,7 @@ test "writeManifest writes the same tap-qualified cask and service rows as mt ba
 
     const got = try std.Io.Dir.cwd().readFileAlloc(io, dest, std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(got);
-    try std.testing.expect(std.mem.indexOf(u8, got, "cask bar@2.0\ncask acme/tools/foo@1.0\nservice svc\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "cask bar 2.0\ncask acme/tools/foo 1.0\nservice svc\n") != null);
 }
 
 test "writeManifest refuses a database whose tables cannot be read and leaves no manifest" {

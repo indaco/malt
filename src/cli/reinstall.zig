@@ -4,7 +4,8 @@
 //! `install.execute`. Mirrors the `cleanup → purge` shape so global
 //! flags (`--json`, `--quiet`, `--dry-run`) reach the downstream parser
 //! untouched. Package-scoped — transitive deps are not reinstalled.
-//! A tap package is reinstalled from its owning tap, on its own.
+//! A tap package is reinstalled from its owning tap, on its own; a core
+//! cask is pointed at uninstall + install instead.
 
 const std = @import("std");
 
@@ -140,34 +141,32 @@ fn columnSlice(stmt: *sqlite.Statement, col: u32) []const u8 {
     return std.mem.sliceTo(stmt.columnText(col) orelse return "", 0);
 }
 
+/// Why a multi-name run can't share one install run.
+const Mix = enum { none, rewritten, kinds };
+
 /// One install run pins a single tap and side, so a package that needs
-/// rewriting can't share it with other names without mis-routing them.
-fn mixesRewrittenNames(allocator: std.mem.Allocator, db: *sqlite.Database, args: []const []const u8, only: Only) error{OutOfMemory}!bool {
+/// rewriting, or formulas beside casks, would mis-route some of the names.
+fn mixOf(allocator: std.mem.Allocator, db: *sqlite.Database, args: []const []const u8, only: Only) error{OutOfMemory}!Mix {
     var positionals: usize = 0;
     for (args) |a| {
         if (isPositional(a)) positionals += 1;
     }
-    if (positionals < 2) return false;
+    if (positionals < 2) return .none;
+    var first_kind: ?Presence = null;
     for (args) |a| {
         if (!isPositional(a)) continue;
         const t = try classify(allocator, db, a, only);
         defer t.deinit(allocator);
-        if (t.rewrites(a)) return true;
+        if (t.rewrites(a)) return .rewritten;
+        switch (t.presence) {
+            .keg, .cask => {
+                first_kind = first_kind orelse t.presence;
+                if (first_kind.? != t.presence) return .kinds;
+            },
+            .local, .missing => {},
+        }
     }
-    return false;
-}
-
-/// Single-quotes `s` so a path with spaces stays one argument when the
-/// suggested command is pasted.
-fn shellQuote(allocator: std.mem.Allocator, s: []const u8) error{OutOfMemory}![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.append(allocator, '\'');
-    for (s) |c| {
-        if (c == '\'') try out.appendSlice(allocator, "'\\''") else try out.append(allocator, c);
-    }
-    try out.append(allocator, '\'');
-    return out.toOwnedSlice(allocator);
+    return .none;
 }
 
 fn onlyFromArgs(args: []const []const u8) Only {
@@ -235,7 +234,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
         const t = try classify(allocator, &db, name, only);
         errdefer t.deinit(allocator);
-        break :blk .{ t, try mixesRewrittenNames(allocator, &db, args, only) };
+        break :blk .{ t, try mixOf(allocator, &db, args, only) };
     };
     defer target.deinit(allocator);
 
@@ -246,15 +245,27 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         },
         // Forwarding would silently re-run a `.rb` the user didn't name here.
         .local => {
-            const path = try shellQuote(allocator, target.name.?);
-            defer allocator.free(path);
-            output.err("{s} was installed from a local formula; reinstall it with `mt install --local --force {s}`", .{ name, path });
+            output.err("{s} was installed from a local formula; reinstall it with `mt install --local --force {f}`", .{ name, output.shellQuoted(target.name.?) });
             return error.Aborted;
         },
         .keg, .cask => {},
     }
-    if (mixed) {
-        output.err("Reinstall tap packages one at a time so each resolves from its own tap", .{});
+    switch (mixed) {
+        .none => {},
+        .rewritten => {
+            output.err("Reinstall tap packages one at a time so each resolves from its own tap", .{});
+            return error.Aborted;
+        },
+        .kinds => {
+            output.err("Reinstall formulas and casks separately", .{});
+            return error.Aborted;
+        },
+    }
+    // A forced core-cask install would delete the live app before placing
+    // the new copy, with no way back if that fails.
+    if (target.presence == .cask and !target.pinned) {
+        const token = target.name.?;
+        output.err("{s} is a cask; reinstall it with `mt uninstall --cask {s}` then `mt install --cask {s}`", .{ token, token, token });
         return error.Aborted;
     }
     const argv = try forwardArgv(allocator, target, args);
@@ -289,6 +300,7 @@ fn seedDb() !sqlite.Database {
         \\  ('dual', 'acme/tools/dual', '1.0', 'g', '/c/dual', 'acme/tools', 'formula');
         \\INSERT INTO casks (token, name, version, url, tap) VALUES
         \\  ('firefox', 'firefox', '120.0', 'https://x.invalid/f.dmg', NULL),
+        \\  ('iterm2', 'iTerm2', '3.5', 'https://x.invalid/i.zip', NULL),
         \\  ('baz', 'Baz', '1.0', 'https://x.invalid/b.dmg', 'acme/tools'),
         \\  ('dual', 'Dual', '1.0', 'https://x.invalid/d.dmg', NULL);
     );
@@ -379,12 +391,6 @@ test "classify keeps each core qualifier to its own table" {
     try expectMissing(&db, "homebrew/core/firefox");
 }
 
-test "shellQuote keeps a path with spaces and quotes one argument" {
-    const q = try shellQuote(testing.allocator, "/src/my dir/l'x.rb");
-    defer testing.allocator.free(q);
-    try testing.expectEqualStrings("'/src/my dir/l'\\''x.rb'", q);
-}
-
 test "classify reports a local keg with its recorded path, never as a tap slug" {
     // `local` is a label, not a tap: `local/lx` resolves nowhere.
     var db = try seedDb();
@@ -408,23 +414,39 @@ test "onlyFromArgs maps the user's kind flag onto the table it restricts" {
     try testing.expectEqual(Only.any, onlyFromArgs(&.{"x"}));
 }
 
-test "mixesRewrittenNames refuses a tap package alongside other names" {
+fn expectMix(db: *sqlite.Database, args: []const []const u8, only: Only, want: Mix) !void {
+    try testing.expectEqual(want, try mixOf(testing.allocator, db, args, only));
+}
+
+test "mixOf refuses a tap package alongside other names" {
     // One install run pins one tap and one side: `foo firefox` would send
     // firefox to the formula side, `old wget` would send old to core.
     var db = try seedDb();
     defer db.close();
-    try testing.expect(try mixesRewrittenNames(testing.allocator, &db, &.{ "foo", "firefox" }, .any));
-    try testing.expect(try mixesRewrittenNames(testing.allocator, &db, &.{ "bar", "wget" }, .any));
-    try testing.expect(try mixesRewrittenNames(testing.allocator, &db, &.{ "wget", "old" }, .any));
-    try testing.expect(try mixesRewrittenNames(testing.allocator, &db, &.{ "wget", "homebrew/core/jq" }, .any));
+    try expectMix(&db, &.{ "foo", "firefox" }, .any, .rewritten);
+    try expectMix(&db, &.{ "bar", "wget" }, .any, .rewritten);
+    try expectMix(&db, &.{ "wget", "old" }, .any, .rewritten);
+    try expectMix(&db, &.{ "wget", "homebrew/core/jq" }, .any, .rewritten);
 }
 
-test "mixesRewrittenNames keeps core-only and single-name runs as before" {
+test "mixOf refuses core formulas and casks in one run, in either order" {
+    // Neither rewrites, yet the first name's `--cask` reached both.
     var db = try seedDb();
     defer db.close();
-    try testing.expect(!try mixesRewrittenNames(testing.allocator, &db, &.{ "wget", "jq" }, .any));
-    try testing.expect(!try mixesRewrittenNames(testing.allocator, &db, &.{ "--quiet", "foo" }, .any));
-    try testing.expect(!try mixesRewrittenNames(testing.allocator, &db, &.{ "wget", "not-installed" }, .any));
+    try expectMix(&db, &.{ "firefox", "wget" }, .any, .kinds);
+    try expectMix(&db, &.{ "wget", "jq", "firefox" }, .any, .kinds);
+}
+
+test "mixOf keeps single-kind and single-name runs as before" {
+    var db = try seedDb();
+    defer db.close();
+    try expectMix(&db, &.{ "wget", "jq" }, .any, .none);
+    try expectMix(&db, &.{ "firefox", "iterm2" }, .any, .none);
+    try expectMix(&db, &.{ "--quiet", "foo" }, .any, .none);
+    try expectMix(&db, &.{ "wget", "not-installed" }, .any, .none);
+    try expectMix(&db, &.{ "firefox", "not-installed" }, .any, .none);
+    // `--cask` hides the formula row, so no side is split.
+    try expectMix(&db, &.{ "--cask", "firefox", "wget" }, .cask, .none);
 }
 
 fn expectArgv(expected: []const []const u8, target: Target, args: []const []const u8) !void {

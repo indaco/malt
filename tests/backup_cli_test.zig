@@ -225,7 +225,7 @@ test "execute --output=<path> joined-form is accepted" {
     try testing.expect(std.mem.indexOf(u8, body, "cask firefox") != null);
 }
 
-test "execute --versions appends @<version> to every entry" {
+test "execute --versions records each version as a separate field" {
     var s = try Scratch.init(testing.allocator, "versions");
     defer s.deinit(testing.allocator);
     try seedRows(s.path);
@@ -240,9 +240,10 @@ test "execute --versions appends @<version> to every entry" {
 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "formula wget@1.21") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "formula jq@1.7") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "cask firefox@120.0") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "formula wget 1.21\n") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "formula jq 1.7\n") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "cask firefox 120.0\n") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "@") == null);
 }
 
 test "execute --output - emits to stdout instead of a file" {
@@ -660,10 +661,8 @@ test "execute --services on an empty services table is a clean no-op (plain text
     try testing.expect(std.mem.indexOf(u8, body, "service ") == null);
 }
 
-test "execute --services --versions never appends @version to a service line" {
-    // `--versions` is a formula/cask concern; bleeding into a service
-    // line would re-introduce the `name@channel` ambiguity parseLine
-    // explicitly avoids.
+test "execute --services --versions never adds a version to a service line" {
+    // `--versions` is a formula/cask concern; services carry no version.
     var s = try Scratch.init(testing.allocator, "text_services_versions");
     defer s.deinit(testing.allocator);
     try seedServices(s.path);
@@ -682,11 +681,8 @@ test "execute --services --versions never appends @version to a service line" {
 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
-    // Formulas still pinned; the service line stays unsuffixed.
-    try testing.expect(std.mem.indexOf(u8, body, "formula wget@1.21") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "formula wget 1.21\n") != null);
     try testing.expect(std.mem.indexOf(u8, body, "service postgresql@16\n") != null);
-    // No `postgresql@16@<...>` artefact from the version writer.
-    try testing.expect(std.mem.indexOf(u8, body, "postgresql@16@") == null);
 }
 
 test "execute --json with --output <path> writes JSON to the file" {
@@ -755,6 +751,53 @@ test "execute writes tap casks as <user>/<repo>/<token> so restore re-routes cor
     // form, otherwise restore would attempt both and the bare-token
     // attempt would 404 against the core API.
     try testing.expect(std.mem.indexOf(u8, body, "cask flux-markdown\n") == null);
+}
+
+test "execute --json lists a keg built from a tap's Casks/ under casks" {
+    // Nothing else in the JSON marks the side, so a consumer reading it from
+    // `formulas` would rebuild it as a formula, which the tap cannot do. A
+    // legacy row with no recorded subtree stays a formula.
+    var s = try Scratch.init(testing.allocator, "json_tap_cask_keg");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, tap_rb_subtree, install_reason) VALUES
+            \\  ('wget', 'wget', '1.24', 'a', '/c/wget', NULL, NULL, 'direct'),
+            \\  ('bar', 'acme/tools/bar', '2.0', 'b', '/c/bar', 'acme/tools', 'cask', 'direct'),
+            \\  ('old', 'acme/tools/old', '0.9', 'c', '/c/old', 'acme/tools', NULL, 'direct'),
+            \\  ('dep', 'acme/tools/dep', '0.1', 'd', '/c/dep', 'acme/tools', 'cask', 'dependency');
+            \\INSERT INTO casks (token, name, version, url, tap) VALUES
+            \\  ('firefox', 'Firefox', '120.0', 'https://x.invalid/f.dmg', NULL),
+            \\  ('baz', 'Baz', '3.0', 'https://x.invalid/b.dmg', 'acme/tools');
+        );
+    }
+
+    const prior = withJson();
+    defer restoreJson(prior);
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
+
+    try testing.expectEqualStrings(
+        "{\"formulas\":[" ++
+            "{\"name\":\"old\",\"version\":\"0.9\",\"tap\":\"acme/tools\"}," ++
+            "{\"name\":\"wget\",\"version\":\"1.24\",\"tap\":\"\"}" ++
+            "],\"casks\":[" ++
+            "{\"name\":\"bar\",\"version\":\"2.0\",\"tap\":\"acme/tools\"}," ++
+            "{\"name\":\"baz\",\"version\":\"3.0\",\"tap\":\"acme/tools\"}," ++
+            "{\"name\":\"firefox\",\"version\":\"120.0\",\"tap\":\"\"}" ++
+            "]}\n",
+        stdout_buf.items,
+    );
 }
 
 test "execute fails when the kegs table cannot be read" {

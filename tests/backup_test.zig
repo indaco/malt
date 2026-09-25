@@ -25,14 +25,17 @@ test "writeEntry writes a bare cask line without a version" {
     try testing.expectEqualStrings("cask firefox\n", aw.written());
 }
 
-test "writeEntry includes @version when include_versions is true" {
+test "writeEntry writes the version as a separate field when include_versions is true" {
+    // A `@` suffix is ambiguous with versioned names like `postgresql@16`
+    // and reached install as a literal package name.
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     try backup.writeEntry(&aw.writer, .formula, "wget", "1.24.5", true);
-    try testing.expectEqualStrings("formula wget@1.24.5\n", aw.written());
+    try backup.writeEntry(&aw.writer, .formula, "postgresql@16", "16.4", true);
+    try testing.expectEqualStrings("formula wget 1.24.5\nformula postgresql@16 16.4\n", aw.written());
 }
 
-test "writeEntry omits @version even with include_versions when version is empty" {
+test "writeEntry omits the version even with include_versions when version is empty" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     try backup.writeEntry(&aw.writer, .cask, "slack", "", true);
@@ -77,16 +80,61 @@ test "parseLine parses a bare cask line" {
     try testing.expectEqualStrings("", e.version);
 }
 
-test "parseLine parses the @version suffix" {
-    const f = backup.parseLine("formula wget@1.24.5").?;
+test "parseLine reads the version from the second field" {
+    const f = backup.parseLine("formula wget 1.24.5").?;
     try testing.expectEqual(backup.Kind.formula, f.kind);
     try testing.expectEqualStrings("wget", f.name);
     try testing.expectEqualStrings("1.24.5", f.version);
 
-    const c = backup.parseLine("cask slack@4.36.140").?;
+    const c = backup.parseLine("cask slack \t 4.36.140\r").?;
     try testing.expectEqual(backup.Kind.cask, c.kind);
     try testing.expectEqualStrings("slack", c.name);
     try testing.expectEqualStrings("4.36.140", c.version);
+}
+
+test "parseLine keeps `@` inside the name, versioned or not" {
+    // `postgresql@16` is a package name; splitting it would install `postgresql`.
+    const bare = backup.parseLine("formula postgresql@16").?;
+    try testing.expectEqualStrings("postgresql@16", bare.name);
+    try testing.expectEqualStrings("", bare.version);
+
+    const pinned = backup.parseLine("formula postgresql@16 16.4").?;
+    try testing.expectEqualStrings("postgresql@16", pinned.name);
+    try testing.expectEqualStrings("16.4", pinned.version);
+
+    // A legacy `name@version` line stays one token: no heuristic can tell it
+    // from a versioned name.
+    const legacy = backup.parseLine("formula wget@1.24.5").?;
+    try testing.expectEqualStrings("wget@1.24.5", legacy.name);
+    try testing.expectEqualStrings("", legacy.version);
+}
+
+test "parseLine takes the rest of the line as the version" {
+    // A tap may declare `version "1.0 beta"`; splitting it would drop the line.
+    const e = backup.parseLine("formula acme/tools/foo 1.0 beta\r").?;
+    try testing.expectEqualStrings("acme/tools/foo", e.name);
+    try testing.expectEqualStrings("1.0 beta", e.version);
+    // Services carry no version, so anything after the name is malformed.
+    try testing.expect(backup.parseLine("service redis extra") == null);
+}
+
+// ── parseLocalNote ───────────────────────────────────────────────────────
+
+test "parseLocalNote reads the keg name and the rest of the line as its recipe path" {
+    const n = backup.parseLocalNote("# local lx /src/my dir/lx.rb\r").?;
+    try testing.expectEqualStrings("lx", n.name);
+    try testing.expectEqualStrings("/src/my dir/lx.rb", n.path);
+}
+
+test "parseLocalNote ignores every other comment and malformed note" {
+    try testing.expect(backup.parseLocalNote("# malt backup") == null);
+    try testing.expect(backup.parseLocalNote("#local lx /src/lx.rb") == null);
+    try testing.expect(backup.parseLocalNote("# local") == null);
+    try testing.expect(backup.parseLocalNote("# local lx") == null);
+    try testing.expect(backup.parseLocalNote("# local lx   ") == null);
+    try testing.expect(backup.parseLocalNote("formula lx") == null);
+    // Older readers see a comment, so the note never becomes an install.
+    try testing.expect(backup.parseLine("# local lx /src/lx.rb") == null);
 }
 
 test "parseLine tolerates trailing carriage returns and surrounding whitespace" {
@@ -116,10 +164,10 @@ test "parseBackup ignores comments and parses every data line in order" {
         "# some header comment\n" ++
         "\n" ++
         "formula git\n" ++
-        "formula wget@1.24.5\n" ++
+        "formula wget 1.24.5\n" ++
         "# mid-file comment\n" ++
         "cask firefox\n" ++
-        "cask slack@4.36.140\n";
+        "cask slack 4.36.140\n";
 
     const entries = try backup.parseBackup(testing.allocator, text);
     defer testing.allocator.free(entries);
@@ -193,6 +241,8 @@ test "writeEntry + parseBackup round-trip preserves every entry" {
     }{
         .{ .kind = .formula, .name = "git", .version = "2.44.0", .expected_version = "2.44.0" },
         .{ .kind = .formula, .name = "wget", .version = "1.24.5", .expected_version = "1.24.5" },
+        .{ .kind = .formula, .name = "postgresql@16", .version = "16.4", .expected_version = "16.4" },
+        .{ .kind = .formula, .name = "acme/tools/foo", .version = "1.0 beta", .expected_version = "1.0 beta" },
         .{ .kind = .cask, .name = "firefox", .version = "124.0", .expected_version = "124.0" },
         .{ .kind = .cask, .name = "slack", .version = "4.36.140", .expected_version = "4.36.140" },
         // Services round-trip with the full `name@channel` intact and no

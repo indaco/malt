@@ -9,6 +9,7 @@ const manifest_mod = @import("manifest.zig");
 const signals = @import("../signals.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const runner_mod = @import("runner.zig");
+const tap_slug = @import("../../tap_slug.zig");
 
 pub const CleanupError = error{
     OutOfMemory,
@@ -87,21 +88,37 @@ pub const Plan = struct {
     }
 };
 
+/// One installed package and where it came from, so a `<tap>/<name>`
+/// entry never claims a namesake from core or another tap.
+pub const Installed = struct {
+    name: []const u8,
+    /// The recorded tap label; empty when none was recorded.
+    tap: []const u8 = "",
+    /// A keg built from its tap's Casks/, which a manifest lists as a cask.
+    from_casks: bool = false,
+};
+
 /// Direct formulas plus every cask currently installed, queried from the
 /// malt database. Strings are owned; `deinit` frees them.
 pub const InstalledLists = struct {
     allocator: std.mem.Allocator,
-    formulas: [][]const u8,
-    casks: [][]const u8,
+    formulas: []Installed,
+    casks: []Installed,
 
     pub fn deinit(self: *InstalledLists) void {
-        for (self.formulas) |n| self.allocator.free(n);
-        for (self.casks) |n| self.allocator.free(n);
-        self.allocator.free(self.formulas);
-        self.allocator.free(self.casks);
+        freeInstalled(self.allocator, self.formulas);
+        freeInstalled(self.allocator, self.casks);
         self.* = undefined;
     }
 };
+
+fn freeInstalled(allocator: std.mem.Allocator, rows: []const Installed) void {
+    for (rows) |r| {
+        allocator.free(r.name);
+        allocator.free(r.tap);
+    }
+    allocator.free(rows);
+}
 
 /// Pull the cleanup-relevant rows from the database. Only direct installs
 /// are candidates — indirect deps stay managed by `purge --unused-deps`.
@@ -109,45 +126,14 @@ pub fn collectInstalled(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
 ) CleanupError!InstalledLists {
-    var formulas: std.ArrayList([]const u8) = .empty;
-    errdefer freeOwnedNames(allocator, &formulas);
-    var casks: std.ArrayList([]const u8) = .empty;
-    errdefer freeOwnedNames(allocator, &casks);
-
-    {
-        var stmt = db.prepare(
-            "SELECT name FROM kegs WHERE install_reason='direct' ORDER BY name;",
-        ) catch return CleanupError.DatabaseError;
-        defer stmt.finalize();
-        while (stmt.step() catch return CleanupError.DatabaseError) {
-            const n = stmt.columnText(0) orelse continue;
-            const owned = allocator.dupe(u8, std.mem.sliceTo(n, 0)) catch
-                return CleanupError.OutOfMemory;
-            formulas.append(allocator, owned) catch {
-                allocator.free(owned);
-                return CleanupError.OutOfMemory;
-            };
-        }
-    }
-
-    {
-        var stmt = db.prepare("SELECT token FROM casks ORDER BY token;") catch
-            return CleanupError.DatabaseError;
-        defer stmt.finalize();
-        while (stmt.step() catch return CleanupError.DatabaseError) {
-            const n = stmt.columnText(0) orelse continue;
-            const owned = allocator.dupe(u8, std.mem.sliceTo(n, 0)) catch
-                return CleanupError.OutOfMemory;
-            casks.append(allocator, owned) catch {
-                allocator.free(owned);
-                return CleanupError.OutOfMemory;
-            };
-        }
-    }
-
-    const owned_formulas = formulas.toOwnedSlice(allocator) catch return CleanupError.OutOfMemory;
-    errdefer allocator.free(owned_formulas);
-    const owned_casks = casks.toOwnedSlice(allocator) catch return CleanupError.OutOfMemory;
+    const owned_formulas = try collectRows(
+        allocator,
+        db,
+        "SELECT name, ifnull(tap, ''), ifnull(tap_rb_subtree, '') = 'cask' FROM kegs " ++
+            "WHERE install_reason='direct' ORDER BY name;",
+    );
+    errdefer freeInstalled(allocator, owned_formulas);
+    const owned_casks = try collectRows(allocator, db, "SELECT token, ifnull(tap, ''), 0 FROM casks ORDER BY token;");
 
     return .{
         .allocator = allocator,
@@ -156,14 +142,40 @@ pub fn collectInstalled(
     };
 }
 
+/// Rows of `(name, tap, from_casks)`; each string is owned by the caller.
+fn collectRows(allocator: std.mem.Allocator, db: *sqlite.Database, sql: []const u8) CleanupError![]Installed {
+    var rows: std.ArrayList(Installed) = .empty;
+    errdefer {
+        for (rows.items) |r| {
+            allocator.free(r.name);
+            allocator.free(r.tap);
+        }
+        rows.deinit(allocator);
+    }
+    var stmt = db.prepare(sql) catch return CleanupError.DatabaseError;
+    defer stmt.finalize();
+    while (stmt.step() catch return CleanupError.DatabaseError) {
+        const n = stmt.columnText(0) orelse continue;
+        const name = allocator.dupe(u8, std.mem.sliceTo(n, 0)) catch return CleanupError.OutOfMemory;
+        errdefer allocator.free(name);
+        const tap = allocator.dupe(u8, if (stmt.columnText(1)) |t| std.mem.sliceTo(t, 0) else "") catch
+            return CleanupError.OutOfMemory;
+        rows.append(allocator, .{ .name = name, .tap = tap, .from_casks = stmt.columnBool(2) }) catch {
+            allocator.free(tap);
+            return CleanupError.OutOfMemory;
+        };
+    }
+    return rows.toOwnedSlice(allocator) catch CleanupError.OutOfMemory;
+}
+
 /// Compute the cleanup plan: every installed name not present in the
 /// manifest, returned sorted by name. Only direct installs are candidates —
 /// indirect deps are managed by `purge --unused-deps`.
 pub fn diff(
     allocator: std.mem.Allocator,
     manifest: manifest_mod.Manifest,
-    installed_formulas: []const []const u8,
-    installed_casks: []const []const u8,
+    installed_formulas: []const Installed,
+    installed_casks: []const Installed,
 ) CleanupError!Plan {
     return planByMembership(allocator, manifest, installed_formulas, installed_casks, false);
 }
@@ -175,8 +187,8 @@ pub fn diff(
 pub fn selectMembers(
     allocator: std.mem.Allocator,
     manifest: manifest_mod.Manifest,
-    installed_formulas: []const []const u8,
-    installed_casks: []const []const u8,
+    installed_formulas: []const Installed,
+    installed_casks: []const Installed,
 ) CleanupError!Plan {
     return planByMembership(allocator, manifest, installed_formulas, installed_casks, true);
 }
@@ -187,8 +199,8 @@ pub fn selectMembers(
 fn planByMembership(
     allocator: std.mem.Allocator,
     manifest: manifest_mod.Manifest,
-    installed_formulas: []const []const u8,
-    installed_casks: []const []const u8,
+    installed_formulas: []const Installed,
+    installed_casks: []const Installed,
     keep_members: bool,
 ) CleanupError!Plan {
     var formulas: std.ArrayList([]const u8) = .empty;
@@ -196,17 +208,17 @@ fn planByMembership(
     var casks: std.ArrayList([]const u8) = .empty;
     errdefer freeOwnedNames(allocator, &casks);
 
-    for (installed_formulas) |name| {
-        if (manifestHasFormula(manifest, name) != keep_members) continue;
-        const owned = allocator.dupe(u8, name) catch return CleanupError.OutOfMemory;
+    for (installed_formulas) |row| {
+        if (manifestHasFormula(manifest, row) != keep_members) continue;
+        const owned = allocator.dupe(u8, row.name) catch return CleanupError.OutOfMemory;
         formulas.append(allocator, owned) catch {
             allocator.free(owned);
             return CleanupError.OutOfMemory;
         };
     }
-    for (installed_casks) |name| {
-        if (manifestHasCask(manifest, name) != keep_members) continue;
-        const owned = allocator.dupe(u8, name) catch return CleanupError.OutOfMemory;
+    for (installed_casks) |row| {
+        if (manifestHasCask(manifest, row) != keep_members) continue;
+        const owned = allocator.dupe(u8, row.name) catch return CleanupError.OutOfMemory;
         casks.append(allocator, owned) catch {
             allocator.free(owned);
             return CleanupError.OutOfMemory;
@@ -359,14 +371,34 @@ pub fn run(
     };
 }
 
-fn manifestHasFormula(manifest: manifest_mod.Manifest, name: []const u8) bool {
-    for (manifest.formulas) |f| if (std.mem.eql(u8, f.name, name)) return true;
+/// A keg built from its tap's Casks/ is listed as a cask, so it is a
+/// member through a cask entry too.
+fn manifestHasFormula(manifest: manifest_mod.Manifest, row: Installed) bool {
+    for (manifest.formulas) |f| if (entryNames(f.name, row)) return true;
+    if (row.from_casks) for (manifest.casks) |c| if (entryNames(c.name, row)) return true;
     return false;
 }
 
-fn manifestHasCask(manifest: manifest_mod.Manifest, name: []const u8) bool {
-    for (manifest.casks) |c| if (std.mem.eql(u8, c.name, name)) return true;
+fn manifestHasCask(manifest: manifest_mod.Manifest, row: Installed) bool {
+    for (manifest.casks) |c| if (entryNames(c.name, row)) return true;
     return false;
+}
+
+/// A bare entry matches by name, as it always has. A `<tap>/<name>` entry
+/// matches only a row from that tap, so purge never reaches a namesake.
+fn entryNames(entry: []const u8, row: Installed) bool {
+    const slash = std.mem.findScalarLast(u8, entry, '/') orelse return std.mem.eql(u8, entry, row.name);
+    if (!std.mem.eql(u8, entry[slash + 1 ..], row.name)) return false;
+    var buf: [tap_slug.max_slug_len]u8 = undefined;
+    const want = tap_slug.canonicalTapSlug(&buf, entry[0..slash]) orelse return false;
+    if (isCoreTap(want)) return isCoreTap(row.tap);
+    return std.mem.eql(u8, want, row.tap);
+}
+
+/// Mirrors the install layer's rule, which core cannot import: rows from
+/// before tap tracking carry no label and are core.
+fn isCoreTap(tap: []const u8) bool {
+    return tap.len == 0 or std.mem.eql(u8, tap, "homebrew/core") or std.mem.eql(u8, tap, "homebrew/cask");
 }
 
 fn sortNames(items: [][]const u8) void {
@@ -430,6 +462,13 @@ const Scratch = struct {
     }
 };
 
+/// Installed rows with no recorded tap, the shape of core packages.
+fn coreRows(comptime names: []const []const u8) [names.len]Installed {
+    var out: [names.len]Installed = undefined;
+    for (names, 0..) |n, i| out[i] = .{ .name = n };
+    return out;
+}
+
 fn testManifest(
     parent: std.mem.Allocator,
     formulas: []const []const u8,
@@ -459,8 +498,8 @@ test "diff returns formulas installed but missing from manifest" {
     var plan = try diff(
         testing.allocator,
         m,
-        &[_][]const u8{ "wget", "ripgrep", "jq", "fzf" },
-        &[_][]const u8{},
+        &coreRows(&.{ "wget", "ripgrep", "jq", "fzf" }),
+        &.{},
     );
     defer plan.deinit();
 
@@ -477,8 +516,8 @@ test "diff returns casks installed but missing from manifest" {
     var plan = try diff(
         testing.allocator,
         m,
-        &[_][]const u8{},
-        &[_][]const u8{ "ghostty", "visual-studio-code", "iterm2" },
+        &.{},
+        &coreRows(&.{ "ghostty", "visual-studio-code", "iterm2" }),
     );
     defer plan.deinit();
 
@@ -495,8 +534,8 @@ test "diff is empty when manifest covers every installed entry" {
     var plan = try diff(
         testing.allocator,
         m,
-        &[_][]const u8{ "wget", "jq" },
-        &[_][]const u8{"ghostty"},
+        &coreRows(&.{ "wget", "jq" }),
+        &coreRows(&.{"ghostty"}),
     );
     defer plan.deinit();
 
@@ -510,8 +549,8 @@ test "diff entries are sorted alphabetically" {
     var plan = try diff(
         testing.allocator,
         m,
-        &[_][]const u8{ "zsh", "abc", "midline" },
-        &[_][]const u8{},
+        &coreRows(&.{ "zsh", "abc", "midline" }),
+        &.{},
     );
     defer plan.deinit();
 
@@ -532,8 +571,8 @@ test "selectMembers returns installed formulas that the manifest lists" {
     var plan = try selectMembers(
         testing.allocator,
         m,
-        &[_][]const u8{ "wget", "ripgrep", "jq", "fzf" },
-        &[_][]const u8{},
+        &coreRows(&.{ "wget", "ripgrep", "jq", "fzf" }),
+        &.{},
     );
     defer plan.deinit();
 
@@ -550,8 +589,8 @@ test "selectMembers returns installed casks that the manifest lists" {
     var plan = try selectMembers(
         testing.allocator,
         m,
-        &[_][]const u8{},
-        &[_][]const u8{ "ghostty", "chrome" },
+        &.{},
+        &coreRows(&.{ "ghostty", "chrome" }),
     );
     defer plan.deinit();
 
@@ -569,8 +608,8 @@ test "selectMembers skips manifest members that are not installed" {
     var plan = try selectMembers(
         testing.allocator,
         m,
-        &[_][]const u8{"wget"},
-        &[_][]const u8{},
+        &coreRows(&.{"wget"}),
+        &.{},
     );
     defer plan.deinit();
 
@@ -586,8 +625,8 @@ test "selectMembers is empty when the manifest shares nothing with installed sta
     var plan = try selectMembers(
         testing.allocator,
         m,
-        &[_][]const u8{ "ripgrep", "fzf" },
-        &[_][]const u8{},
+        &coreRows(&.{ "ripgrep", "fzf" }),
+        &.{},
     );
     defer plan.deinit();
 
@@ -599,7 +638,7 @@ test "selectMembers is empty when the manifest shares nothing with installed sta
 test "selectMembers and diff partition the installed set" {
     var m = try testManifest(testing.allocator, &.{ "wget", "jq" }, &.{});
     defer m.deinit();
-    const installed = [_][]const u8{ "wget", "ripgrep", "jq", "fzf" };
+    const installed = coreRows(&.{ "wget", "ripgrep", "jq", "fzf" });
 
     var kept = try selectMembers(testing.allocator, m, &installed, &.{});
     defer kept.deinit();
@@ -612,6 +651,85 @@ test "selectMembers and diff partition the installed set" {
     }
 }
 
+test "diff keeps tap packages a manifest lists by their qualified name" {
+    // Installed rows carry the bare name; a `bundle create` manifest names
+    // tap packages `<tap>/<name>`, and a keg built from a tap's Casks/ is
+    // listed as a cask. Missing any of these would uninstall it.
+    var m = try testManifest(testing.allocator, &.{ "acme/homebrew-tools/foo", "homebrew/core/wget" }, &.{ "acme/tools/bar", "Acme/Tools/baz", "firefox" });
+    defer m.deinit();
+
+    var plan = try diff(testing.allocator, m, &tap_formulas, &tap_casks);
+    defer plan.deinit();
+
+    try testing.expect(plan.isEmpty());
+}
+
+const tap_formulas = [_]Installed{
+    .{ .name = "bar", .tap = "acme/tools", .from_casks = true },
+    .{ .name = "foo", .tap = "acme/tools" },
+    .{ .name = "wget" },
+};
+const tap_casks = [_]Installed{
+    .{ .name = "baz", .tap = "acme/tools" },
+    .{ .name = "firefox", .tap = "homebrew/cask" },
+};
+
+test "selectMembers never purges a namesake from core or another tap" {
+    // `bundle remove --purge` uninstalls what it matches; a qualified entry
+    // naming a different tap's package must leave this one alone.
+    var m = try testManifest(testing.allocator, &.{ "acme/tools/wget", "other/tap/foo" }, &.{ "acme/tools/firefox", "acme/tools/wget", "acme/tools/foo" });
+    defer m.deinit();
+
+    var plan = try selectMembers(testing.allocator, m, &tap_formulas, &tap_casks);
+    defer plan.deinit();
+
+    // Only a Casks/-built keg is a member through a cask entry.
+    try testing.expect(plan.isEmpty());
+}
+
+test "diff matches a qualified name by its whole leaf only" {
+    var m = try testManifest(testing.allocator, &.{"acme/tools/foo"}, &.{"acme/tools/app"});
+    defer m.deinit();
+
+    var plan = try diff(
+        testing.allocator,
+        m,
+        &coreRows(&.{ "oo", "foobar", "tools/foo" }),
+        &coreRows(&.{"pp"}),
+    );
+    defer plan.deinit();
+
+    try testing.expectEqual(@as(usize, 3), plan.formulas.len);
+    try testing.expectEqual(@as(usize, 1), plan.casks.len);
+}
+
+test "diff never lets a core cask entry stand in for a formula keg" {
+    // Only a tap's Casks/ builds a keg; a bare `cask "wget"` is a different
+    // package from an installed formula `wget`.
+    var m = try testManifest(testing.allocator, &.{}, &.{"wget"});
+    defer m.deinit();
+
+    var plan = try diff(testing.allocator, m, &coreRows(&.{"wget"}), &.{});
+    defer plan.deinit();
+
+    try testing.expectEqual(@as(usize, 1), plan.formulas.len);
+    try testing.expectEqualStrings("wget", plan.formulas[0]);
+}
+
+test "selectMembers purges tap packages a manifest lists by their qualified name" {
+    var m = try testManifest(testing.allocator, &.{"acme/tools/foo"}, &.{ "acme/tools/bar", "acme/tools/baz" });
+    defer m.deinit();
+
+    var plan = try selectMembers(testing.allocator, m, &tap_formulas, &tap_casks);
+    defer plan.deinit();
+
+    try testing.expectEqual(@as(usize, 2), plan.formulas.len);
+    try testing.expectEqualStrings("bar", plan.formulas[0]);
+    try testing.expectEqualStrings("foo", plan.formulas[1]);
+    try testing.expectEqual(@as(usize, 1), plan.casks.len);
+    try testing.expectEqualStrings("baz", plan.casks[0]);
+}
+
 test "selectMembers entries are sorted alphabetically" {
     var m = try testManifest(testing.allocator, &.{ "zsh", "abc", "midline" }, &.{});
     defer m.deinit();
@@ -619,8 +737,8 @@ test "selectMembers entries are sorted alphabetically" {
     var plan = try selectMembers(
         testing.allocator,
         m,
-        &[_][]const u8{ "zsh", "abc", "midline" },
-        &[_][]const u8{},
+        &coreRows(&.{ "zsh", "abc", "midline" }),
+        &.{},
     );
     defer plan.deinit();
 
@@ -667,8 +785,8 @@ test "run with dry_run does not invoke the dispatcher" {
     var plan = try diff(
         testing.allocator,
         m,
-        &[_][]const u8{ "wget", "jq" },
-        &[_][]const u8{"ghostty"},
+        &coreRows(&.{ "wget", "jq" }),
+        &coreRows(&.{"ghostty"}),
     );
     defer plan.deinit();
 
@@ -696,8 +814,8 @@ test "run executes uninstall via dispatcher in formula-then-cask order" {
     var plan = try diff(
         testing.allocator,
         m,
-        &[_][]const u8{ "jq", "wget" },
-        &[_][]const u8{"ghostty"},
+        &coreRows(&.{ "jq", "wget" }),
+        &coreRows(&.{"ghostty"}),
     );
     defer plan.deinit();
 
@@ -729,8 +847,8 @@ test "run stops uninstalling at the next member boundary when interrupted" {
     var plan = try diff(
         testing.allocator,
         m,
-        &[_][]const u8{ "jq", "wget" },
-        &[_][]const u8{"ghostty"},
+        &coreRows(&.{ "jq", "wget" }),
+        &coreRows(&.{"ghostty"}),
     );
     defer plan.deinit();
 
@@ -760,8 +878,8 @@ test "run records per-member failures and keeps going" {
     var plan = try diff(
         testing.allocator,
         m,
-        &[_][]const u8{ "jq", "wget" },
-        &[_][]const u8{"ghostty"},
+        &coreRows(&.{ "jq", "wget" }),
+        &coreRows(&.{"ghostty"}),
     );
     defer plan.deinit();
 
@@ -832,8 +950,8 @@ test "orderForRemoval reorders formulas so dependents land before their deps" {
     var plan = try diff(
         testing.allocator,
         m,
-        &[_][]const u8{ "A", "Z" },
-        &[_][]const u8{},
+        &coreRows(&.{ "A", "Z" }),
+        &.{},
     );
     defer plan.deinit();
 
@@ -895,8 +1013,8 @@ test "orderForRemoval falls back to alphabetical when the dep graph cycles" {
     var plan = try diff(
         testing.allocator,
         m,
-        &[_][]const u8{ "A", "B" },
-        &[_][]const u8{},
+        &coreRows(&.{ "A", "B" }),
+        &.{},
     );
     defer plan.deinit();
 
@@ -923,8 +1041,8 @@ test "orderForRemoval is a no-op when no in-plan deps exist" {
     var plan = try diff(
         testing.allocator,
         m,
-        &[_][]const u8{ "abc", "midline", "zsh" },
-        &[_][]const u8{},
+        &coreRows(&.{ "abc", "midline", "zsh" }),
+        &.{},
     );
     defer plan.deinit();
 
@@ -955,12 +1073,12 @@ test "collectInstalled returns direct formulas and every cask, sorted" {
             \\VALUES (?, ?, '1.0', '', '', ?);
         );
         defer stmt.finalize();
-        const rows = [_]struct { name: []const u8, reason: []const u8 }{
+        const seed = [_]struct { name: []const u8, reason: []const u8 }{
             .{ .name = "ripgrep", .reason = "direct" },
             .{ .name = "openssl@3", .reason = "dependency" },
             .{ .name = "wget", .reason = "direct" },
         };
-        for (rows) |r| {
+        for (seed) |r| {
             try stmt.reset();
             try stmt.bindText(1, r.name);
             try stmt.bindText(2, r.name);
@@ -985,9 +1103,32 @@ test "collectInstalled returns direct formulas and every cask, sorted" {
     defer lists.deinit();
 
     try testing.expectEqual(@as(usize, 2), lists.formulas.len);
-    try testing.expectEqualStrings("ripgrep", lists.formulas[0]);
-    try testing.expectEqualStrings("wget", lists.formulas[1]);
+    try testing.expectEqualStrings("ripgrep", lists.formulas[0].name);
+    try testing.expectEqualStrings("wget", lists.formulas[1].name);
     try testing.expectEqual(@as(usize, 2), lists.casks.len);
-    try testing.expectEqualStrings("ghostty", lists.casks[0]);
-    try testing.expectEqualStrings("iterm2", lists.casks[1]);
+    try testing.expectEqualStrings("ghostty", lists.casks[0].name);
+    try testing.expectEqualStrings("iterm2", lists.casks[1].name);
+}
+
+test "collectInstalled records each row's tap and whether it was built from Casks/" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, install_reason, tap, tap_rb_subtree) VALUES
+        \\  ('bar', 'acme/tools/bar', '1.0', '', '', 'direct', 'acme/tools', 'cask'),
+        \\  ('foo', 'acme/tools/foo', '1.0', '', '', 'direct', 'acme/tools', 'formula'),
+        \\  ('wget', 'wget', '1.0', '', '', 'direct', NULL, NULL);
+        \\INSERT INTO casks(token, name, version, url, tap) VALUES ('baz', 'Baz', '1.0', '', 'acme/tools');
+    );
+
+    var lists = try collectInstalled(testing.allocator, &db);
+    defer lists.deinit();
+
+    try testing.expectEqualStrings("acme/tools", lists.formulas[0].tap);
+    try testing.expect(lists.formulas[0].from_casks);
+    try testing.expect(!lists.formulas[1].from_casks);
+    try testing.expectEqualStrings("", lists.formulas[2].tap);
+    try testing.expect(!lists.formulas[2].from_casks);
+    try testing.expectEqualStrings("acme/tools", lists.casks[0].tap);
 }

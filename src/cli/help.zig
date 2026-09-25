@@ -74,7 +74,7 @@ const install_help =
     \\Install formulas, casks, or tap formulas.
     \\
     \\  malt install <name>                    auto-detect formula or cask
-    \\  malt install <name>@<version>          specific version
+    \\  malt install python@3.12              versioned formula (no version pins)
     \\  malt install --cask <app>              explicit cask
     \\  malt install --formula <name>          explicit formula
     \\  malt install <user>/<tap>/<formula>    inline tap
@@ -133,6 +133,8 @@ const reinstall_help =
     \\A tap package reinstalls from its owning tap and side, named as
     \\`<name>` or `<user>/<repo>/<name>`; reinstall it on its own. A
     \\`--local` keg is reinstalled with `mt install --local --force <path>`.
+    \\Formulae and casks are reinstalled in separate runs. A core cask is
+    \\reinstalled with `mt uninstall --cask <cask>` then `mt install --cask <cask>`.
     \\
     \\Flags pass through to `install`; the common ones:
     \\  --cask               Pick the cask when a formula shares its name
@@ -552,7 +554,8 @@ const backup_help =
     \\
     \\Flags:
     \\  --output, -o <path>  Write to a specific file (use `-` for stdout)
-    \\  --versions           Pin each entry to its current version (@ver)
+    \\  --versions           Record each entry's installed version (informational;
+    \\                       restore installs the current release)
     \\  --services           Include auto-start services so `malt restore`
     \\                       re-bootstraps launchd state on the destination
     \\  --quiet, -q          Suppress non-error output
@@ -643,6 +646,10 @@ const restore_help =
     \\Read a backup file produced by `malt backup` and install every entry
     \\it lists. Formulae and casks are installed in a single batched run each
     \\so dependency resolution and parallel downloads apply normally.
+    \\
+    \\A recorded version is informational: restore installs the current
+    \\release. A `--local` keg is not installed; restore prints the command
+    \\that rebuilds it from its recipe.
     \\
     \\Flags:
     \\  --dry-run     Print the list of packages that would be installed

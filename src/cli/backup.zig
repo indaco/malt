@@ -11,9 +11,10 @@
 //!   cask firefox
 //!   formula user/repo/tool   (a third-party tap package: its owning tap)
 //!   cask user/repo/app       (also a tap keg built from the tap's Casks/)
+//!   # local lx /src/lx.rb    (a `--local` keg: restore can only point at it)
 //!
-//! An optional `@<version>` suffix is written when `--versions` is passed and
-//! honoured by `malt restore`.
+//! `--versions` adds the installed version as a second field. It is a record,
+//! not a pin: restore installs the current release.
 
 const std = @import("std");
 
@@ -136,7 +137,7 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
     // restore reaches the owning tap, and as `cask` when it came from the
     // tap's Casks/ subtree, the only side that can rebuild it.
     const formulae_sql =
-        "SELECT name, version, tap, tap_rb_subtree = 'cask' FROM kegs " ++
+        "SELECT name, version, tap, tap_rb_subtree = 'cask', full_name FROM kegs " ++
         "WHERE install_reason = 'direct' " ++
         "ORDER BY name;";
     {
@@ -149,6 +150,15 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
             const name = std.mem.sliceTo(name_ptr, 0);
             const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
             const tap = if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "";
+            // A `--local` keg's recipe is a file only this machine has, so
+            // its line is a comment every reader skips and restore surfaces
+            // as a rebuild hint.
+            if (install_args.isLocalTap(tap)) {
+                const path = if (fstmt.columnText(4)) |p| std.mem.sliceTo(p, 0) else "";
+                w.print(local_note_prefix ++ "{s} {s}\n", .{ name, path }) catch return RowsError.WriteFailed;
+                warnLocal(name, path);
+                continue;
+            }
             var qual_buf: [256]u8 = undefined;
             const entry = try qualify(&qual_buf, tap, name);
             const kind: Kind = if (fstmt.columnBool(3)) .cask else .formula;
@@ -199,16 +209,17 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
     return count;
 }
 
-/// The tap a package can be re-fetched from, or `""` for core and for a
-/// `--local` keg, whose `local` label is not a tap.
-fn thirdPartyTap(tap: []const u8) []const u8 {
-    return if (install_args.isCoreTap(tap) or install_args.isLocalTap(tap)) "" else tap;
+const local_note_prefix = "# local ";
+
+/// Shared by backup and restore so both point at the same rebuild command.
+pub fn warnLocal(name: []const u8, path: []const u8) void {
+    output.warn("{s} is a local formula; restore skips it - rebuild with `mt install --local {f}`", .{ name, output.shellQuoted(path) });
 }
 
 /// `<tap>/<name>` for a third-party tap; bare otherwise, so legacy backups
 /// parse the same way.
 fn qualify(buf: []u8, tap: []const u8, name: []const u8) RowsError![]const u8 {
-    const owner = thirdPartyTap(tap);
+    const owner = install_args.thirdPartyTap(tap);
     if (owner.len == 0) return name;
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ owner, name }) catch {
         // No legitimate slug overflows this; a bare name here would be a
@@ -257,7 +268,7 @@ fn executeJson(
 
     {
         var s = try prepareOrFail(db, "SELECT name, version, tap FROM kegs " ++
-            "WHERE install_reason = 'direct' " ++
+            "WHERE install_reason = 'direct' AND ifnull(tap_rb_subtree, '') <> 'cask' " ++
             "ORDER BY name;");
         defer s.finalize();
         while (try stepOrFail(&s)) {
@@ -267,7 +278,7 @@ fn executeJson(
             const name = a.dupe(u8, std.mem.sliceTo(name_ptr, 0)) catch return Error.WriteFailed;
             const version = a.dupe(u8, if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "") catch
                 return Error.WriteFailed;
-            const tap = a.dupe(u8, thirdPartyTap(if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "")) catch
+            const tap = a.dupe(u8, install_args.thirdPartyTap(if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "")) catch
                 return Error.WriteFailed;
             formulas.append(a, .{ .name = name, .version = version, .tap = tap }) catch
                 return Error.WriteFailed;
@@ -275,7 +286,12 @@ fn executeJson(
     }
 
     {
-        var s = try prepareOrFail(db, "SELECT token, version, tap FROM casks ORDER BY token;");
+        // A keg built from a tap's Casks/ is listed as a cask, as the text
+        // writer does: nothing else in the JSON marks its side.
+        var s = try prepareOrFail(db, "SELECT token, version, tap FROM casks " ++
+            "UNION ALL SELECT name, version, tap FROM kegs " ++
+            "WHERE install_reason = 'direct' AND tap_rb_subtree = 'cask' " ++
+            "ORDER BY 1;");
         defer s.finalize();
         while (try stepOrFail(&s)) {
             const name_ptr = s.columnText(0) orelse continue;
@@ -284,7 +300,7 @@ fn executeJson(
             const name = a.dupe(u8, std.mem.sliceTo(name_ptr, 0)) catch return Error.WriteFailed;
             const version = a.dupe(u8, if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "") catch
                 return Error.WriteFailed;
-            const tap = a.dupe(u8, thirdPartyTap(if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "")) catch
+            const tap = a.dupe(u8, install_args.thirdPartyTap(if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "")) catch
                 return Error.WriteFailed;
             casks.append(a, .{ .name = name, .version = version, .tap = tap }) catch
                 return Error.WriteFailed;
@@ -411,12 +427,16 @@ pub fn writeBackupJson(
     try w.writeAll("}\n");
 }
 
+/// Only headers of backups with a separate version field carry this, so
+/// restore can tell an older file's `name@version` lines apart.
+pub const versioned_format_marker = "`formula <name> [<version>]`";
+
 /// Write the canonical header block at the top of a backup file.
 pub fn writeHeader(w: *std.Io.Writer) !void {
     try w.writeAll("# malt backup\n");
     try w.writeAll("# Generated by `malt backup`. Restore with `malt restore <file>`.\n");
-    try w.writeAll("# Format: one entry per line — `formula <name>` or `cask <token>`; tap packages as `<user>/<repo>/<name>`.\n");
-    try w.writeAll("# Lines starting with `#` are comments and are ignored on restore.\n");
+    try w.writeAll("# Format: one entry per line — " ++ versioned_format_marker ++ " or `cask <token> [<version>]`; tap packages as `<user>/<repo>/<name>`.\n");
+    try w.writeAll("# Lines starting with `#` are comments; restore reads `# local` notes only to print their rebuild command.\n");
     try w.writeAll("\n");
 }
 
@@ -429,17 +449,17 @@ pub fn writeEntry(w: *std.Io.Writer, kind: Kind, name: []const u8, version: []co
     };
     try w.writeAll(prefix);
     try w.writeAll(name);
-    // Services don't carry a version; the suffix would collide with
-    // their `name@channel` shape (e.g. `postgresql@16`) on parse.
+    // A separate field, never an `@` suffix: `postgresql@16` is a name.
+    // Services carry no version.
     if (kind != .service and include_versions and version.len > 0) {
-        try w.writeAll("@");
+        try w.writeAll(" ");
         try w.writeAll(version);
     }
     try w.writeAll("\n");
 }
 
 /// Parse a single line. Returns null for blank lines, comments, and any line
-/// that does not match the canonical `<kind> <name>[@<version>]` shape.
+/// that does not match the canonical `<kind> <name> [<version>]` shape.
 /// The returned `name` and `version` slices point into `line`.
 pub fn parseLine(line: []const u8) ?Entry {
     var s = std.mem.trim(u8, line, " \t\r\n");
@@ -459,22 +479,30 @@ pub fn parseLine(line: []const u8) ?Entry {
     } else {
         return null;
     }
-    if (s.len == 0) return null;
+    var fields = std.mem.tokenizeAny(u8, s, " \t");
+    const name = fields.next() orelse return null;
     // Restore hands names to install's argv, where this would read as a flag.
-    if (s[0] == '-') return null;
-
-    // Services keep `@` as part of their label (e.g. `postgresql@16`);
-    // only formulas/casks split a trailing `@<version>` off the name.
-    if (kind == .service) return .{ .kind = kind, .name = s, .version = "" };
-
-    var name = s;
-    var version: []const u8 = "";
-    if (std.mem.findScalar(u8, s, '@')) |idx| {
-        name = s[0..idx];
-        version = s[idx + 1 ..];
-    }
-    if (name.len == 0) return null;
+    if (name[0] == '-') return null;
+    // No `@` split: a legacy `wget@1.2` line stays one name, because no rule
+    // can tell it from a versioned formula like `postgresql@16`. The version
+    // is the rest of the line, since a tap may declare one with spaces.
+    const version = std.mem.trim(u8, fields.rest(), " \t");
+    if (kind == .service and version.len > 0) return null;
     return .{ .kind = kind, .name = name, .version = version };
+}
+
+pub const LocalNote = struct { name: []const u8, path: []const u8 };
+
+/// Recognise the `# local <name> <path>` note `writeRows` leaves for a
+/// `--local` keg. The path is the rest of the line, spaces included.
+pub fn parseLocalNote(line: []const u8) ?LocalNote {
+    const s = std.mem.trim(u8, line, " \t\r\n");
+    if (!std.mem.startsWith(u8, s, local_note_prefix)) return null;
+    const rest = s[local_note_prefix.len..];
+    const sep = std.mem.findScalar(u8, rest, ' ') orelse return null;
+    const path = std.mem.trim(u8, rest[sep + 1 ..], " \t");
+    if (sep == 0 or path.len == 0) return null;
+    return .{ .name = rest[0..sep], .path = path };
 }
 
 /// Parse an entire backup file into a freshly-allocated slice of entries.
@@ -713,19 +741,20 @@ test "writeRows qualifies third-party taps and leaves core, NULL and empty taps 
 
     // A keg sourced from a tap's Casks/ subtree is written as `cask` so
     // restore routes it through `--cask`, the only side that reaches it.
+    // A local keg is a note, not an entry: restore cannot rebuild it.
     try std.testing.expectEqualStrings(
-        "formula acme/tools/ack@1.0\n" ++
-            "cask acme/tools/bat@1.5\n" ++
-            "formula cmake@3.0\n" ++
-            "formula git@2.0\n" ++
-            "formula lx@1.0\n" ++
-            "cask bar@2.0\n" ++
-            "cask baz@3.0\n" ++
-            "cask acme/tools/foo@1.0\n" ++
-            "cask qux@4.0\n",
+        "formula acme/tools/ack 1.0\n" ++
+            "cask acme/tools/bat 1.5\n" ++
+            "formula cmake 3.0\n" ++
+            "formula git 2.0\n" ++
+            "# local lx /src/lx.rb\n" ++
+            "cask bar 2.0\n" ++
+            "cask baz 3.0\n" ++
+            "cask acme/tools/foo 1.0\n" ++
+            "cask qux 4.0\n",
         aw.written(),
     );
-    try std.testing.expectEqual(@as(usize, 9), count);
+    try std.testing.expectEqual(@as(usize, 8), count);
 }
 
 test "writeRows emits auto-start services only when asked" {
@@ -741,7 +770,7 @@ test "writeRows emits auto-start services only when asked" {
             "cask acme/tools/bat\n" ++
             "formula cmake\n" ++
             "formula git\n" ++
-            "formula lx\n" ++
+            "# local lx /src/lx.rb\n" ++
             "cask bar\n" ++
             "cask baz\n" ++
             "cask acme/tools/foo\n" ++
@@ -749,16 +778,7 @@ test "writeRows emits auto-start services only when asked" {
             "service svc\n",
         aw.written(),
     );
-    try std.testing.expectEqual(@as(usize, 10), count);
-}
-
-test "thirdPartyTap keeps only a tap a package can be re-fetched from" {
-    // `local` is a label for a `.rb` on disk, not a tap: `local/<name>`
-    // resolves nowhere.
-    for ([_][]const u8{ "", "homebrew/core", "homebrew/cask", "local" }) |tap| {
-        try std.testing.expectEqualStrings("", thirdPartyTap(tap));
-    }
-    try std.testing.expectEqualStrings("acme/tools", thirdPartyTap("acme/tools"));
+    try std.testing.expectEqual(@as(usize, 9), count);
 }
 
 test "writeRows aborts on an unreadable table instead of truncating" {

@@ -519,6 +519,20 @@ pub fn writeField(
 pub const jsonStr = json_escape.jsonStr;
 pub const jsonStringArray = json_escape.jsonStringArray;
 
+/// `{f}` renders `s` single-quoted, so a suggested command with spaces in a
+/// path still pastes as one argument.
+pub fn shellQuoted(s: []const u8) std.fmt.Alt([]const u8, writeShellQuoted) {
+    return .{ .data = s };
+}
+
+fn writeShellQuoted(s: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try w.writeByte('\'');
+    for (s) |c| {
+        if (c == '\'') try w.writeAll("'\\''") else try w.writeByte(c);
+    }
+    try w.writeByte('\'');
+}
+
 /// Version stamped on every read command's `--json` root (`list`, `info`,
 /// `outdated`, `services`, `doctor`). Bump when a documented field shape
 /// changes so consumers can refuse a shape they don't understand —
@@ -617,6 +631,12 @@ pub fn emitNdjsonEvent(
 // Sister tests for the other prefix-line helpers live alongside the public
 // API surface in tests/output_test.zig; these are kept inline because the
 // helper is a thin wrapper over the shared `emitPrefixLine`.
+test "shellQuoted keeps a path with spaces and quotes one argument" {
+    var buf: [64]u8 = undefined;
+    const got = try std.fmt.bufPrint(&buf, "{f}", .{shellQuoted("/src/my dir/l'x.rb")});
+    try std.testing.expectEqualStrings("'/src/my dir/l'\\''x.rb'", got);
+}
+
 test "notice wraps the magenta prefix and uses the circled-i glyph (dark + basic)" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);

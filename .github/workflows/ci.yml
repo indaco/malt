@@ -125,6 +125,9 @@ jobs:
       - name: Regression guard - wipe manifest matches mt backup
         run: ./scripts/regressions/wipe-manifest-tap-qualification-wipe-manifest-drops-tap-qualification-for-casks.sh
 
+      - name: Regression guard - backups round-trip through restore, bundle and reinstall
+        run: ./scripts/regressions/backup-restore-bundle-reinstall-round-trip.sh
+
       - name: Regression guard - tap kegs back up and reinstall from their tap
         run: ./scripts/regressions/tap-kegs-restore-reinstall-by-full-name-tap-kegs-not-restorable-or-reinstallable-by-full-name.sh
 
