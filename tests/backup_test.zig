@@ -309,7 +309,7 @@ test "writeRows output parses back into restore entries with the tap kept on the
 test "writeBackupJson: empty inputs emit `{formulas:[],casks:[]}\\n`" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try backup.writeBackupJson(&aw.writer, &.{}, &.{}, null);
+    try backup.writeBackupJson(&aw.writer, &.{}, &.{}, &.{}, null);
     try testing.expectEqualStrings("{\"formulas\":[],\"casks\":[]}\n", aw.written());
 }
 
@@ -326,7 +326,7 @@ test "writeBackupJson: emits `name`/`version`/`tap` for formulas and casks" {
     };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try backup.writeBackupJson(&aw.writer, &formulas, &casks, null);
+    try backup.writeBackupJson(&aw.writer, &formulas, &casks, &.{}, null);
     try testing.expectEqualStrings(
         "{\"formulas\":[" ++
             "{\"name\":\"wget\",\"version\":\"1.21\",\"tap\":\"\"}," ++
@@ -345,7 +345,7 @@ test "writeBackupJson: appends services array only when caller opts in" {
     };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try backup.writeBackupJson(&aw.writer, &.{}, &.{}, &services);
+    try backup.writeBackupJson(&aw.writer, &.{}, &.{}, &.{}, &services);
     try testing.expectEqualStrings(
         "{\"formulas\":[],\"casks\":[]," ++
             "\"services\":[{\"name\":\"postgresql@16\",\"auto_start\":true}]}\n",

@@ -128,6 +128,9 @@ jobs:
       - name: Regression guard - backups round-trip through restore, bundle and reinstall
         run: ./scripts/regressions/backup-restore-bundle-reinstall-round-trip.sh
 
+      - name: Regression guard - local kegs stay out of bundle and backup exports
+        run: ./scripts/regressions/local-kegs-stay-out-of-exports-local-kegs-exported-as-core-packages.sh
+
       - name: Regression guard - tap kegs back up and reinstall from their tap
         run: ./scripts/regressions/tap-kegs-restore-reinstall-by-full-name-tap-kegs-not-restorable-or-reinstallable-by-full-name.sh
 

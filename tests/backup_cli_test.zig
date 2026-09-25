@@ -800,6 +800,51 @@ test "execute --json lists a keg built from a tap's Casks/ under casks" {
     );
 }
 
+test "execute --json lists a --local keg apart from core formulas, with its recipe path" {
+    // An empty `tap` in `formulas` means core, so a local keg there would be
+    // installed as a different package; the recipe path is the only way back.
+    var s = try Scratch.init(testing.allocator, "json_local_keg");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, install_reason) VALUES
+            \\  ('wget', 'wget', '1.24', 'a', '/c/wget', 'homebrew/core', 'direct'),
+            \\  ('lx', '/src/lx.rb', '1.0', 'b', '/c/lx', 'local', 'direct'),
+            \\  ('ldep', '/src/ldep.rb', '0.1', 'c', '/c/ldep', 'local', 'dependency');
+            \\INSERT INTO services (name, keg_name, plist_path, auto_start) VALUES
+            \\  ('lxd', 'lx', '/l.plist', 1),
+            \\  ('wget', 'wget', '/w.plist', 1);
+        );
+    }
+
+    const prior = withJson();
+    defer restoreJson(prior);
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--services"});
+
+    try testing.expectEqualStrings(
+        "{\"formulas\":[{\"name\":\"wget\",\"version\":\"1.24\",\"tap\":\"\"}]," ++
+            "\"casks\":[]," ++
+            "\"local\":[{\"name\":\"lx\",\"version\":\"1.0\",\"path\":\"/src/lx.rb\"}]," ++
+            "\"services\":[{\"name\":\"wget\",\"auto_start\":true}]}\n",
+        stdout_buf.items,
+    );
+    // Same rebuild hint as the text backup.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "mt install --local '/src/lx.rb'") != null);
+}
+
 test "execute fails when the kegs table cannot be read" {
     // A DB that opens but whose tables are unusable must not be reported as
     // an empty install — the backup would silently lose every package.
