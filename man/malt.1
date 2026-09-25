@@ -133,6 +133,7 @@ reinstalled. To rebuild a dep, name it explicitly.
 A tap package reinstalls from its owning tap and side, named as
 `<name>` or `<user>/<repo>/<name>`; reinstall it on its own. A
 `--local` keg is reinstalled with `mt install --local --force <path>`.
+Formulae and casks are reinstalled in separate runs.
 
 Flags pass through to `install`; the common ones:
   --cask               Pick the cask when a formula shares its name

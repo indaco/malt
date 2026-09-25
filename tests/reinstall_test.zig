@@ -158,3 +158,47 @@ test "execute reaches the install pipeline when the keg row exists" {
     defer testing.allocator.free(lock_file);
     try testing.expect(pathExists(lock_file));
 }
+
+test "execute refuses a formula and a cask in one run before installing anything" {
+    // One install run takes one side: `--cask` from the first name would
+    // send the formula to the cask resolver.
+    const prefix = try setupPrefix("mixed_kinds");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+        _ = c.unsetenv("MALT_PREFIX");
+    }
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    try test_io.cwd().createDirPath(std.Options.debug_io, std.fs.path.dirname(db_path).?);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+            \\  VALUES ('wget', 'wget', '1.24', 'a', '/c/wget');
+            \\INSERT INTO casks (token, name, version, url)
+            \\  VALUES ('firefox', 'firefox', '120.0', 'https://x.invalid/f.dmg');
+        );
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    for ([_][2][]const u8{ .{ "firefox", "wget" }, .{ "wget", "firefox" } }) |names| {
+        try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), &names));
+    }
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Reinstall formulas and casks separately") != null);
+    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    defer testing.allocator.free(lock_file);
+    try testing.expect(!pathExists(lock_file));
+}
