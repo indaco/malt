@@ -150,6 +150,34 @@ test "execute --dry-run reports formula + cask entries without delegating" {
     try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
 }
 
+test "execute --dry-run routes tap-slug lines to the batch their kind names" {
+    // Formula lines install with `--formula` and cask lines with `--cask`, so
+    // a tap keg built from Casks/ must reach the cask batch to be rebuilt.
+    var s = try Scratch.init(testing.allocator, "dry_tap");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\formula acme/tools/foo
+        \\cask acme/tools/bar
+        \\formula wget
+        \\
+    );
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    output.setDryRun(true);
+    defer output.setDryRun(false);
+    try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "formula acme/tools/foo") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "cask    acme/tools/bar") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "formula wget") != null);
+}
+
 test "execute treats unknown kinds as comments and reports zero entries" {
     // backup.parseBackup is line-tolerant: anything that isn't a
     // recognised `formula <name>` / `cask <name>` is silently dropped,
