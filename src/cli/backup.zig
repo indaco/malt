@@ -195,7 +195,7 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
     // auto_start, no extra token needed.
     if (include_services) {
         {
-            var st = try prepareOrFail(db, "SELECT name FROM services WHERE auto_start = 1 ORDER BY name;");
+            var st = try prepareOrFail(db, auto_start_services_sql);
             defer st.finalize();
             while (try stepOrFail(&st)) {
                 const name_ptr = st.columnText(0) orelse continue;
@@ -210,6 +210,11 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
 }
 
 const local_note_prefix = "# local ";
+
+/// A local keg's service is left out with its package: on another machine the
+/// name would start an unrelated namesake's service.
+const auto_start_services_sql = "SELECT name FROM services WHERE auto_start = 1 AND keg_name NOT IN " ++
+    "(SELECT name FROM kegs WHERE tap = '" ++ install_args.local_tap_label ++ "') ORDER BY name;";
 
 /// Shared by backup and restore so both point at the same rebuild command.
 pub fn warnLocal(name: []const u8, path: []const u8) void {
@@ -264,10 +269,11 @@ fn executeJson(
 
     var formulas: std.ArrayList(JsonFormula) = .empty;
     var casks: std.ArrayList(JsonCask) = .empty;
+    var locals: std.ArrayList(JsonLocal) = .empty;
     var services: std.ArrayList(JsonService) = .empty;
 
     {
-        var s = try prepareOrFail(db, "SELECT name, version, tap FROM kegs " ++
+        var s = try prepareOrFail(db, "SELECT name, version, tap, full_name FROM kegs " ++
             "WHERE install_reason = 'direct' AND ifnull(tap_rb_subtree, '') <> 'cask' " ++
             "ORDER BY name;");
         defer s.finalize();
@@ -278,7 +284,16 @@ fn executeJson(
             const name = a.dupe(u8, std.mem.sliceTo(name_ptr, 0)) catch return Error.WriteFailed;
             const version = a.dupe(u8, if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "") catch
                 return Error.WriteFailed;
-            const tap = a.dupe(u8, install_args.thirdPartyTap(if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "")) catch
+            const tap_label = if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "";
+            if (install_args.isLocalTap(tap_label)) {
+                const path = a.dupe(u8, if (s.columnText(3)) |p| std.mem.sliceTo(p, 0) else "") catch
+                    return Error.WriteFailed;
+                locals.append(a, .{ .name = name, .version = version, .path = path }) catch
+                    return Error.WriteFailed;
+                warnLocal(name, path);
+                continue;
+            }
+            const tap = a.dupe(u8, install_args.thirdPartyTap(tap_label)) catch
                 return Error.WriteFailed;
             formulas.append(a, .{ .name = name, .version = version, .tap = tap }) catch
                 return Error.WriteFailed;
@@ -309,7 +324,7 @@ fn executeJson(
 
     if (include_services) {
         {
-            var st = try prepareOrFail(db, "SELECT name FROM services WHERE auto_start = 1 ORDER BY name;");
+            var st = try prepareOrFail(db, auto_start_services_sql);
             defer st.finalize();
             while (try stepOrFail(&st)) {
                 const name_ptr = st.columnText(0) orelse continue;
@@ -323,7 +338,7 @@ fn executeJson(
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     const services_opt: ?[]const JsonService = if (include_services) services.items else null;
-    writeBackupJson(&aw.writer, formulas.items, casks.items, services_opt) catch
+    writeBackupJson(&aw.writer, formulas.items, casks.items, locals.items, services_opt) catch
         return Error.WriteFailed;
     const bytes = aw.written();
 
@@ -354,11 +369,19 @@ fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8) Error!vo
 }
 
 /// Plain-data view of one formula row for the `--json` writer. `tap` is
-/// the owning tap, `""` for core and `--local` kegs, like `JsonCask.tap`.
+/// the owning tap, `""` for core, like `JsonCask.tap`.
 pub const JsonFormula = struct {
     name: []const u8,
     version: []const u8,
     tap: []const u8,
+};
+
+/// A `--local` keg for the `--json` writer: kept out of `formulas`, where an
+/// empty `tap` would read as core, and carrying the recipe path to rebuild it.
+pub const JsonLocal = struct {
+    name: []const u8,
+    version: []const u8,
+    path: []const u8,
 };
 
 /// Plain-data view of one cask row for the `--json` writer. `tap` is the
@@ -381,12 +404,13 @@ pub const JsonService = struct {
 
 /// Emit `{ "formulas":[...], "casks":[...] }\n` for `mt backup --json`.
 /// `formulas` and `casks` are always present so consumers don't branch
-/// on absence; `services` is added only when the caller opts in, which
-/// keeps default payloads byte-identical to pre-`--services` malt.
+/// on absence; `local` only when non-empty and `services` only when the
+/// caller opts in, which keeps existing payloads byte-identical.
 pub fn writeBackupJson(
     w: *std.Io.Writer,
     formulas: []const JsonFormula,
     casks: []const JsonCask,
+    locals: []const JsonLocal,
     services: ?[]const JsonService,
 ) !void {
     try w.writeAll("{\"formulas\":[");
@@ -412,6 +436,20 @@ pub fn writeBackupJson(
         try w.writeAll("}");
     }
     try w.writeAll("]");
+    if (locals.len > 0) {
+        try w.writeAll(",\"local\":[");
+        for (locals, 0..) |l, i| {
+            if (i != 0) try w.writeAll(",");
+            try w.writeAll("{\"name\":");
+            try output.jsonStr(w, l.name);
+            try w.writeAll(",\"version\":");
+            try output.jsonStr(w, l.version);
+            try w.writeAll(",\"path\":");
+            try output.jsonStr(w, l.path);
+            try w.writeAll("}");
+        }
+        try w.writeAll("]");
+    }
     if (services) |list| {
         try w.writeAll(",\"services\":[");
         for (list, 0..) |sv, i| {
@@ -760,6 +798,8 @@ test "writeRows qualifies third-party taps and leaves core, NULL and empty taps 
 test "writeRows emits auto-start services only when asked" {
     var db = try seedRowsDb();
     defer db.close();
+    // A local keg's service stays behind with its package.
+    try db.exec("INSERT INTO services(name, keg_name, plist_path, auto_start) VALUES ('lxd', 'lx', '/lxd.plist', 1);");
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
@@ -816,4 +856,19 @@ test "writeRows refuses a formula tap label the qualified slug cannot hold" {
     defer aw.deinit();
 
     try std.testing.expectError(error.DatabaseError, writeRows(&aw.writer, &db, true, false));
+}
+
+test "writeBackupJson escapes a local recipe path and keeps `local` ahead of `services`" {
+    // The path is user-controlled, so a quote in it must not end the string.
+    const locals = [_]JsonLocal{.{ .name = "lx", .version = "1.0", .path = "/my src/l\"x.rb" }};
+    const services = [_]JsonService{.{ .name = "svc", .auto_start = true }};
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeBackupJson(&aw.writer, &.{}, &.{}, &locals, &services);
+    try std.testing.expectEqualStrings(
+        "{\"formulas\":[],\"casks\":[]," ++
+            "\"local\":[{\"name\":\"lx\",\"version\":\"1.0\",\"path\":\"/my src/l\\\"x.rb\"}]," ++
+            "\"services\":[{\"name\":\"svc\",\"auto_start\":true}]}\n",
+        aw.written(),
+    );
 }
