@@ -902,10 +902,9 @@ pub const CaskInstaller = struct {
     /// artefact goes, so a `staged_path` source still resolves to the
     /// Caskroom version dir. That is where a tarball unpacked; a zip or dmg
     /// preflight saw a temporary stage instead, so its links never match.
-    pub fn runFlightUninstall(self: *CaskInstaller, token: []const u8, version: []const u8, steps: []const std.json.Value) bool {
-        const ctx = self.flightCtx(token, version, null) orelse return false;
+    pub fn runFlightUninstall(self: *CaskInstaller, token: []const u8, version: []const u8, steps: []const std.json.Value) void {
+        const ctx = self.flightCtx(token, version, null) orelse return;
         steps_mod.runUninstallSteps(ctx, steps);
-        return !ctx.flog.hasFatal();
     }
 
     fn flightCtx(self: *CaskInstaller, token: []const u8, version: []const u8, staged_path: ?[]const u8) ?steps_mod.StepsCtx {

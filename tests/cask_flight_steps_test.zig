@@ -63,6 +63,25 @@ fn exists(io: std.Io, path: []const u8) bool {
     return if (std.Io.Dir.accessAbsolute(io, path, .{})) |_| true else |_| false;
 }
 
+/// Counts the human lines a phase reports, by level.
+const Capture = struct {
+    warns: usize = 0,
+    errs: usize = 0,
+
+    fn sink(self: *Capture) malt.install_sink.OutputSink {
+        return .{ .ctx = self, .writeInfo = swallow, .writeWarn = warn, .writeSuccess = swallow, .writeErr = err, .show_progress = false };
+    }
+    fn warn(ctx: ?*anyopaque, _: []const u8) void {
+        const self: *Capture = @ptrCast(@alignCast(ctx.?));
+        self.warns += 1;
+    }
+    fn err(ctx: ?*anyopaque, _: []const u8) void {
+        const self: *Capture = @ptrCast(@alignCast(ctx.?));
+        self.errs += 1;
+    }
+    fn swallow(_: ?*anyopaque, _: []const u8) void {}
+};
+
 /// The link itself, not what it points at: `exists` follows it.
 fn linkExists(io: std.Io, path: []const u8) bool {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -690,6 +709,146 @@ test "a phase whose context cannot be built is reported as a failure, not an emp
 
     try testing.expect(!installer.runFlight("box", "6.0", c.flight_steps.get(.preflight).?, null));
     try testing.expect(flog.hasFatal());
+}
+
+test "a preflight step that cannot write aborts the install before the app is placed" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root ignores the mode
+    var fx = try Fixture.init("pre_eacces");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCaskWithMajor(testing.allocator, box_json, null);
+    defer c.deinit();
+    try putFile(io, fx.p("extract/Box.app/Contents/MacOS/box"), "bin");
+    try test_io.cwd().createDirPath(io, fx.p("Applications"));
+
+    // A read-only $HOME/Library: the ROM dir the preflight makes cannot land.
+    const lib = try std.fmt.allocPrintSentinel(fx.arena.allocator(), "{s}/Library", .{fx.home}, 0);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(lib, 0o555));
+    defer _ = std.c.chmod(lib, 0o755);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var flog = cask.FlightLog.init(testing.allocator);
+    defer flog.deinit();
+    var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.flight = .{ .log = &flog, .allocator = arena.allocator() };
+
+    try testing.expectError(error.PreflightFailed, installer.placeExtracted(fx.p("extract"), fx.p("Applications"), &c));
+    try testing.expect(flog.hasFatal());
+    try testing.expect(!exists(io, fx.p("Applications/Box.app")));
+}
+
+test "a postflight step that cannot write fails the phase instead of passing its gate" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var fx = try Fixture.init("post_eacces");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var c = try cask.parseCaskWithMajor(testing.allocator, box_json, null);
+    defer c.deinit();
+
+    const lib = try std.fmt.allocPrintSentinel(fx.arena.allocator(), "{s}/Library", .{fx.home}, 0);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(lib, 0o555));
+    defer _ = std.c.chmod(lib, 0o755);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var flog = cask.FlightLog.init(testing.allocator);
+    defer flog.deinit();
+    var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.flight = .{ .log = &flog, .allocator = arena.allocator() };
+
+    try testing.expect(!installer.runFlight("box", "6.0", c.flight_steps.get(.postflight).?, null));
+    try testing.expect(flog.hasFatal());
+    try testing.expect(!exists(io, fx.h("Library/box.conf")));
+}
+
+test "an uninstall link that cannot be removed fails the uninstall phase" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var fx = try Fixture.init("uninst_eacces");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var c = try cask.parseCaskWithMajor(testing.allocator,
+        \\{"token":"box","name":["Box"],"version":"6.0","url":"https://example.invalid/box.zip","sha256":"no_check",
+        \\ "artifacts":[{"postflight_steps":[{"steps":[{"type":"symlink","source":{"base":"staged_path","path":"libbox.dylib"},
+        \\   "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libbox.dylib"},"uninstall":true}]}]}]}
+    , null);
+    defer c.deinit();
+
+    // The link the postflight placed, in a directory that no longer lets it go.
+    try test_io.cwd().createDirPath(io, fx.p("lib"));
+    try std.Io.Dir.symLinkAbsolute(io, fx.p("Caskroom/box/6.0/libbox.dylib"), fx.p("lib/libbox.dylib"), .{});
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(fx.p("lib"), 0o555));
+    defer _ = std.c.chmod(fx.p("lib"), 0o755);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var flog = cask.FlightLog.init(testing.allocator);
+    defer flog.deinit();
+    var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.flight = .{ .log = &flog, .allocator = arena.allocator() };
+
+    installer.runFlightUninstall("box", "6.0", c.flight_steps.get(.postflight).?);
+    try testing.expect(flog.hasFatal());
+    try testing.expect(linkExists(io, fx.p("lib/libbox.dylib")));
+}
+
+test "cask uninstall still clears postflight links after a preflight link will not go" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    var fx = try Fixture.init("uninst_phases");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = fx.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var c = try cask.parseCaskWithMajor(testing.allocator,
+        \\{"token":"box","name":["Box"],"version":"6.0","url":"https://example.invalid/box.zip","sha256":"no_check",
+        \\ "artifacts":[{"app":["Box.app"]},
+        \\  {"preflight_steps":[{"steps":[{"type":"symlink","source":{"base":"staged_path","path":"liba.dylib"},
+        \\   "target":{"path":"{{HOMEBREW_PREFIX}}/lib/ro/liba.dylib"},"uninstall":true}]}]},
+        \\  {"postflight_steps":[{"steps":[{"type":"symlink","source":{"base":"staged_path","path":"libb.dylib"},
+        \\   "target":{"path":"{{HOMEBREW_PREFIX}}/lib/libb.dylib"},"uninstall":true}]}]}]}
+    , null);
+    defer c.deinit();
+    try cask.recordInstall(&db, &c, fx.p("Applications/Box.app"), null);
+    var stored = (try cask.readFlightSteps(&db, testing.allocator, "box")) orelse return error.TestUnexpectedResult;
+    defer stored.deinit();
+
+    // Both links as the install left them; the preflight one can no longer go.
+    try test_io.cwd().createDirPath(io, fx.p("lib/ro"));
+    try std.Io.Dir.symLinkAbsolute(io, fx.p("Caskroom/box/6.0/liba.dylib"), fx.p("lib/ro/liba.dylib"), .{});
+    try std.Io.Dir.symLinkAbsolute(io, fx.p("Caskroom/box/6.0/libb.dylib"), fx.p("lib/libb.dylib"), .{});
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(fx.p("lib/ro"), 0o555));
+    defer _ = std.c.chmod(fx.p("lib/ro"), 0o755);
+
+    var flight = malt.install_post_install.Flight.init(testing.allocator);
+    defer flight.deinit();
+    var installer = cask.CaskInstaller.init(io, fx.environ, testing.allocator, &db, fx.base, fx.p("cache"));
+    installer.flight = flight.sink();
+
+    var lines: Capture = .{};
+    flight.runUninstallMode(&installer, "box", "6.0", &stored, lines.sink());
+    try testing.expect(flight.log.hasFatal());
+    try testing.expect(linkExists(io, fx.p("lib/ro/liba.dylib")));
+    try testing.expect(!linkExists(io, fx.p("lib/libb.dylib")));
+    // The cask is gone and the command succeeds: the leftover is a warning,
+    // not an error line on an exit-0 run.
+    try testing.expectEqual(@as(usize, 0), lines.errs);
+    try testing.expect(lines.warns > 0);
 }
 
 test "a cask without flight steps stores NULL and installs as before" {
