@@ -157,9 +157,11 @@ fn collectParserFlags(set: *FlagSet, src: []const u8) !void {
     }
 }
 
-fn readSourceFlags(allocator: std.mem.Allocator, cmd: Command) !FlagSet {
-    var set = FlagSet.init(allocator);
-    errdefer set.deinit();
+/// Every source file a command owns, newline-joined so line scans treat
+/// them as one. Caller frees.
+fn readSources(allocator: std.mem.Allocator, cmd: Command) ![]u8 {
+    var all: std.ArrayList(u8) = .empty;
+    errdefer all.deinit(allocator);
 
     for (cmd.sources) |entry| {
         var path_buf: [256]u8 = undefined;
@@ -170,7 +172,8 @@ fn readSourceFlags(allocator: std.mem.Allocator, cmd: Command) !FlagSet {
             defer f.close(std.Options.debug_io);
             const src = try test_io.readFileToEndAlloc(f, allocator, 4 * 1024 * 1024);
             defer allocator.free(src);
-            try collectParserFlags(&set, src);
+            try all.appendSlice(allocator, src);
+            try all.append(allocator, '\n');
             continue;
         }
 
@@ -186,10 +189,40 @@ fn readSourceFlags(allocator: std.mem.Allocator, cmd: Command) !FlagSet {
             defer f.close(std.Options.debug_io);
             const src = try test_io.readFileToEndAlloc(f, allocator, 4 * 1024 * 1024);
             defer allocator.free(src);
-            try collectParserFlags(&set, src);
+            try all.appendSlice(allocator, src);
+            try all.append(allocator, '\n');
         }
     }
+    return all.toOwnedSlice(allocator);
+}
+
+fn readSourceFlags(allocator: std.mem.Allocator, cmd: Command) !FlagSet {
+    var set = FlagSet.init(allocator);
+    errdefer set.deinit();
+    const src = try readSources(allocator, cmd);
+    defer allocator.free(src);
+    try collectParserFlags(&set, src);
     return set;
+}
+
+/// True when shipped code, not a comment or an inline test, asks `output`
+/// for the global dry-run flag. Relies on zig fmt: a top-level `test` block
+/// opens at column 0 and closes on a lone `}`.
+fn readsDryRun(src: []const u8) bool {
+    var in_test = false;
+    var it = std.mem.splitScalar(u8, src, '\n');
+    while (it.next()) |line| {
+        if (in_test) {
+            in_test = !std.mem.eql(u8, line, "}");
+            continue;
+        }
+        if (std.mem.startsWith(u8, line, "test \"")) {
+            in_test = true;
+            continue;
+        }
+        if (std.mem.indexOf(u8, stripLineComment(line), "isDryRun()") != null) return true;
+    }
+    return false;
 }
 
 /// The bash per-command flag list. Scoped to the `cmd_flags` table so the
@@ -384,4 +417,49 @@ test "every exception is still needed" {
             }
         }
     }
+}
+
+/// Aliases with no completions of their own, so outside `commands`; still
+/// checked for honouring the --dry-run their help advertises.
+const dry_run_only = [_]Command{
+    .{ .name = "cleanup", .sources = &.{ "purge.zig", "purge" } },
+};
+
+test "every command whose help advertises --dry-run reads the global flag" {
+    // `main` strips the global from argv, so a command that never asks
+    // `output` for it runs for real; the parser scrape above cannot tell.
+    // Only per-command help is covered: a command that never mentions the
+    // flag still ignores the global silently.
+    const alloc = testing.allocator;
+    var report: std.ArrayList(u8) = .empty;
+    defer report.deinit(alloc);
+
+    var checked: usize = 0;
+    for (commands ++ dry_run_only) |cmd| {
+        if (cmd.delegates) continue;
+        if (std.mem.indexOf(u8, malt.cli_help.helpFor(cmd.name), "--dry-run") == null) continue;
+        checked += 1;
+        const src = try readSources(alloc, cmd);
+        defer alloc.free(src);
+        if (readsDryRun(src)) continue;
+        try report.appendSlice(alloc, "  ");
+        try report.appendSlice(alloc, cmd.name);
+        try report.appendSlice(alloc, " advertises --dry-run but never reads output.isDryRun()\n");
+    }
+    // Guards the help lookup itself: zero matches would pass vacuously.
+    try testing.expect(checked > 0);
+
+    if (report.items.len > 0) {
+        std.debug.print("Commands ignoring the global --dry-run:\n{s}", .{report.items});
+        return error.DryRunIgnored;
+    }
+}
+
+test "readsDryRun ignores a mention inside a comment or an inline test" {
+    try testing.expect(readsDryRun("    const d = output.isDryRun();\n"));
+    try testing.expect(!readsDryRun("    // output.isDryRun() is read by main\n"));
+    try testing.expect(!readsDryRun(""));
+    try testing.expect(!readsDryRun("test \"x\" {\n    output.setDryRun(output.isDryRun());\n}\n"));
+    // Code after the test block counts again.
+    try testing.expect(readsDryRun("test \"x\" {\n}\nconst d = output.isDryRun();\n"));
 }
