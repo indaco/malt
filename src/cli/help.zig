@@ -161,7 +161,7 @@ const uninstall_help =
     \\Remove installed packages.
     \\
     \\Flags:
-    \\  --force        Remove even if other packages depend on it
+    \\  --force        Remove even if other packages depend on it, or that can't be checked
     \\  --dry-run      Show what would be removed
     \\
 ;

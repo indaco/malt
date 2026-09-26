@@ -221,6 +221,9 @@ jobs:
       - name: Regression guard - a failed post_install file step is reported, not counted as done
         run: ./scripts/regressions/post-install-steps-io-errors-fs-tier-post-install-steps-swallow-io-errors.sh
 
+      - name: Regression guard - uninstall fails loud on a database error and keeps the package
+        run: ./scripts/regressions/uninstall-aborts-on-db-failure-uninstall-swallows-db-failures-and-exits-zero.sh
+
       # Needs root to mint the setuid copy; the runner's passwordless sudo
       # keeps SUDO_USER set so the probe runs as the unprivileged caller.
       - name: Regression guard - setuid wrapper is refused
