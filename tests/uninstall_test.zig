@@ -490,31 +490,35 @@ test "execute drops the uninstalled keg from the outdated snapshot and nothing e
     try testing.expectEqualStrings("foo", snap.casks[0].name);
 }
 
+// Records an installed `firefox` cask and creates its app bundle, so the
+// running-app probe and the teardown have something real. Caller frees the
+// returned app path.
+fn seedFirefoxCask(prefix: []const u8) ![]u8 {
+    const app_path = try std.fmt.allocPrint(testing.allocator, "{s}/Firefox.app", .{prefix});
+    errdefer testing.allocator.free(app_path);
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+    const cask_json =
+        \\{"token":"firefox","name":["Firefox"],"version":"123.0","desc":"","homepage":"",
+        \\ "url":"https://example.com/firefox.dmg",
+        \\ "sha256":"00000000000000000000000000000000000000000000000000000000deadbeef",
+        \\ "auto_updates":false,"artifacts":[{"app":["Firefox.app"]}]}
+    ;
+    var parsed = try cask.parseCask(testing.allocator, cask_json);
+    defer parsed.deinit();
+    try cask.recordInstall(&db, &parsed, app_path, null);
+    try test_io.cwd().createDirPath(std.Options.debug_io, app_path);
+    return app_path;
+}
+
 test "execute on a cask drops it from the snapshot's casks only" {
     var prefix = try ScratchPrefix.init(testing.allocator, "snapshot_cask");
     defer prefix.deinit(testing.allocator);
     const token = "firefox";
-    {
-        var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
-        var db = try sqlite.Database.open(db_path);
-        defer db.close();
-        try schema.initSchema(&db);
-        const cask_json =
-            \\{"token":"firefox","name":["Firefox"],"version":"123.0","desc":"","homepage":"",
-            \\ "url":"https://example.com/firefox.dmg",
-            \\ "sha256":"00000000000000000000000000000000000000000000000000000000deadbeef",
-            \\ "auto_updates":false,"artifacts":[{"app":["Firefox.app"]}]}
-        ;
-        var parsed = try cask.parseCask(testing.allocator, cask_json);
-        defer parsed.deinit();
-        const app_path = try std.fmt.allocPrint(testing.allocator, "{s}/Firefox.app", .{prefix.path});
-        defer testing.allocator.free(app_path);
-        try cask.recordInstall(&db, &parsed, app_path, null);
-    }
-    const app_path_z = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/Firefox.app", .{prefix.path}, 0);
-    defer testing.allocator.free(app_path_z);
-    try test_io.makeDirAbsolute(std.Options.debug_io, app_path_z);
+    testing.allocator.free(try seedFirefoxCask(prefix.path));
     try seedSnapshot(prefix.path);
 
     quiet();
@@ -794,4 +798,129 @@ test "execute under a near-limit prefix fails loud instead of exiting 0" {
     const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{long});
     defer testing.allocator.free(lock_path);
     try testing.expect(pathExists(lock_path));
+}
+
+// ─── --dry-run ───────────────────────────────────────────────────────
+// A preview must leave the package exactly as it was, yet still run the
+// read-only gates so it answers what the real run would do.
+
+// Runs `uninstall <argv>` under the global dry-run flag, capturing stderr.
+// The flag is process-global, so it is reset or it would turn every later
+// test in this binary into a no-op.
+fn dryRunCaptured(captured: *std.ArrayList(u8), argv: []const []const u8) !void {
+    output.setDryRun(true);
+    defer output.setDryRun(false);
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(false);
+    defer output.setQuiet(prior_quiet);
+    output.beginStderrCapture(testing.allocator, captured);
+    defer output.endStderrCapture();
+    try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, argv);
+}
+
+test "execute --dry-run previews a formula and keeps its row, Cellar entry and snapshot" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "dry_formula");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedSnapshot(prefix.path);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCaptured(&captured, &.{"foo"});
+
+    try expectKegIntact(prefix.path, "foo", "1.0");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall foo 1.0") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "uninstalled") == null);
+    const after = try readSnapshotRaw(prefix.path);
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(snapshot_seed, after);
+}
+
+test "execute --dry-run still refuses a formula other kegs depend on" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "dry_dependents");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try sabotage(prefix.path,
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES ('bar', 'bar', '2.0', 0, '', 'Cellar/bar/2.0');
+        \\INSERT INTO dependencies (keg_id, dep_name) SELECT id, 'foo' FROM kegs WHERE name = 'bar';
+    );
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try testing.expectError(error.Aborted, dryRunCaptured(&captured, &.{"foo"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "is required by bar") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall") == null);
+
+    // --force lifts the gate but not the preview: still nothing removed.
+    captured.clearRetainingCapacity();
+    try dryRunCaptured(&captured, &.{ "--force", "foo" });
+    try expectKegIntact(prefix.path, "foo", "1.0");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall foo 1.0") != null);
+}
+
+test "execute --dry-run on a missing formula or cask still reports it not installed" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "dry_missing");
+    defer prefix.deinit(testing.allocator);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try testing.expectError(error.Aborted, dryRunCaptured(&captured, &.{"ghost"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "ghost is not installed") != null);
+
+    captured.clearRetainingCapacity();
+    try testing.expectError(error.Aborted, dryRunCaptured(&captured, &.{ "--cask", "ghost" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "ghost is not installed as a cask") != null);
+}
+
+test "execute --dry-run previews a cask and keeps its row, files and snapshot" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "dry_cask");
+    defer prefix.deinit(testing.allocator);
+    const token = "firefox";
+    const app_path = try seedFirefoxCask(prefix.path);
+    defer testing.allocator.free(app_path);
+    const caskroom = try std.fmt.allocPrint(testing.allocator, "{s}/Caskroom/firefox/123.0", .{prefix.path});
+    defer testing.allocator.free(caskroom);
+    try test_io.cwd().createDirPath(std.Options.debug_io, caskroom);
+    try seedSnapshot(prefix.path);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCaptured(&captured, &.{token});
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall cask firefox 123.0") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "uninstalled") == null);
+    try testing.expect(pathExists(app_path));
+    try testing.expect(pathExists(caskroom));
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try testing.expect(cask.isInstalled(&db, token));
+    }
+    const after = try readSnapshotRaw(prefix.path);
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(snapshot_seed, after);
+}
+
+test "execute refuses an unknown flag and keeps the package" {
+    // Skipping it would let a mistyped preview (`-n`, `--dryrun`, or a
+    // `--dry-run` after `--`, which `main` leaves in argv) remove for real.
+    var prefix = try ScratchPrefix.init(testing.allocator, "unknown_flag");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+
+    const cases = [_][]const []const u8{
+        &.{ "-n", "foo" },
+        &.{ "--dryrun", "foo" },
+        &.{ "foo", "--", "--dry-run" },
+    };
+    for (cases) |argv| {
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        try expectAbortCaptured(&captured, argv);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag") != null);
+        try expectKegIntact(prefix.path, "foo", "1.0");
+    }
 }

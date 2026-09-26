@@ -27,6 +27,8 @@ const sink_mod = @import("install/sink.zig");
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "uninstall")) return;
 
+    // Global flag: `main` strips `--dry-run` from argv before we see it.
+    const dry_run = output.isDryRun();
     var force = false;
     var force_cask = false;
     var pkg_name: ?[]const u8 = null;
@@ -38,7 +40,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             force_cask = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             output.setQuiet(true);
-        } else if (arg.len > 0 and arg[0] != '-') {
+        } else if (arg.len > 0 and arg[0] == '-') {
+            // Refused, not skipped: a mistyped preview would remove for real.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
+        } else if (arg.len > 0) {
             if (pkg_name == null) pkg_name = arg;
         }
     }
@@ -86,7 +92,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Check if it's a cask first (or if --cask was passed)
     if (force_cask or cask_mod.isInstalled(&db, name)) {
-        try uninstallCask(ctx, allocator, name, &db, prefix, force);
+        try uninstallCask(ctx, allocator, name, &db, prefix, force, dry_run);
         return;
     }
 
@@ -129,6 +135,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.err("{s} is required by {s}. Use --force to remove anyway.", .{ name, dep_name });
             return error.Aborted;
         }
+    }
+
+    if (dry_run) {
+        output.info("Dry run: would uninstall {s} {s}", .{ name, version });
+        return;
     }
 
     output.info("Uninstalling {s} {s}...", .{ name, version });
@@ -334,7 +345,7 @@ test "finalizeDbRemoval reports a failed BEGIN and leaves a transaction it does 
 }
 
 /// Uninstall a cask by token.
-fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, force: bool) !void {
+fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, force: bool, dry_run: bool) !void {
     const info = cask_mod.lookupInstalled(db, token) orelse {
         output.err("{s} is not installed as a cask", .{token});
         return error.Aborted;
@@ -350,13 +361,21 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
         }
     }
 
-    output.info("Uninstalling cask {s}...", .{token});
-
+    // Resolved before the preview: a malformed MALT_CACHE fails both runs alike.
     const cache_dir = atomic.maltCacheDir(allocator) catch {
         output.err("Failed to resolve cache directory", .{});
         return error.Aborted;
     };
     defer allocator.free(cache_dir);
+
+    // Stored flight steps are recorded side effects, not checks, so the
+    // preview stops before them.
+    if (dry_run) {
+        output.info("Dry run: would uninstall cask {s} {s}", .{ token, info.version() });
+        return;
+    }
+
+    output.info("Uninstalling cask {s}...", .{token});
     artefact_cache.adoptLegacy(ctx.io, prefix, cache_dir);
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix, cache_dir);
 

@@ -1026,7 +1026,7 @@ test "upgrade refuses a running app before any stored step can act" {
     try testing.expectEqualStrings("1.0", cask.lookupInstalled(&db, "live").?.version());
 }
 
-test "uninstall drops the symlink a postflight placed and declared for removal" {
+test "uninstall --dry-run runs no stored step; the real run drops the declared symlink" {
     var fx = try Fixture.init("uninstall_symlink");
     defer fx.deinit();
     _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
@@ -1040,7 +1040,8 @@ test "uninstall drops the symlink a postflight placed and declared for removal" 
         \\ "artifacts":[{"app":["Box.app"]},
         \\  {"postflight_steps":[{"steps":[
         \\    {"type":"symlink","source":{"base":"staged_path","path":"libbox.6.0.dylib"},"target":{"path":"{{HOMEBREW_PREFIX}}/lib/libbox.6.dylib"},"uninstall":true},
-        \\    {"type":"symlink","source":{"base":"staged_path","path":"box"},"target":{"path":"{{HOMEBREW_PREFIX}}/bin/box"}}]}]}]}
+        \\    {"type":"symlink","source":{"base":"staged_path","path":"box"},"target":{"path":"{{HOMEBREW_PREFIX}}/bin/box"}}]}]},
+        \\  {"uninstall_preflight_steps":[{"steps":[{"type":"write","path":{"base":"home","path":"Library/box.pre"},"content":"ran"}]}]}]}
     ;
     const app_path = fx.p("Applications/Box.app");
     try putFile(io, fx.p("Applications/Box.app/Contents/MacOS/box"), "bin");
@@ -1065,8 +1066,21 @@ test "uninstall drops the symlink a postflight placed and declared for removal" 
     try testing.expect(linkExists(io, fx.p("lib/libbox.6.dylib")));
 
     const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = fx.environ, .offline = true };
+    // Stored steps are recorded side effects, not checks: a preview that ran
+    // them would change the system it only claims to describe.
+    {
+        malt.output.setDryRun(true);
+        defer malt.output.setDryRun(false);
+        try malt.cli_uninstall.execute(&ctx, testing.allocator, &.{ "--cask", "box" });
+        try testing.expect(!exists(io, fx.h("Library/box.pre")));
+        try testing.expect(linkExists(io, fx.p("lib/libbox.6.dylib")));
+        try testing.expect(exists(io, app_path));
+    }
+
     try malt.cli_uninstall.execute(&ctx, testing.allocator, &.{ "--cask", "box" });
 
+    // The preflight the preview skipped is live, so the check above is not vacuous.
+    try testing.expect(exists(io, fx.h("Library/box.pre")));
     try testing.expect(!exists(io, app_path));
     try testing.expect(!linkExists(io, fx.p("lib/libbox.6.dylib")));
     // Declared without `uninstall`: upstream leaves it, so does malt.
@@ -1294,7 +1308,7 @@ test "a tap-routed upgrade whose install fails puts the old version back" {
     try testing.expectEqualStrings("grp/tap", row.tap().?);
 }
 
-test "uninstall --force still refuses a running app before any stored step acts" {
+test "uninstall --force or --dry-run still refuses a running app before any stored step acts" {
     var fx = try Fixture.init("uninstall_force_running");
     defer fx.deinit();
     _ = test_io.c.setenv("MALT_PREFIX", fx.base.ptr, 1);
@@ -1334,6 +1348,10 @@ test "uninstall --force still refuses a running app before any stored step acts"
     // `--force` overrides dependents; it never removed a live app, and now
     // it does not run the stored phases on one either.
     try testing.expectError(error.Aborted, malt.cli_uninstall.execute(&ctx, testing.allocator, &.{ "--cask", "--force", "live" }));
+    // A preview must give the answer the real run would, not "would uninstall".
+    malt.output.setDryRun(true);
+    defer malt.output.setDryRun(false);
+    try testing.expectError(error.Aborted, malt.cli_uninstall.execute(&ctx, testing.allocator, &.{ "--cask", "live" }));
 
     try testing.expect(linkExists(io, fx.p("lib/liblive.1.dylib")));
     try testing.expect(!exists(io, fx.h("Library/live.pre")));
