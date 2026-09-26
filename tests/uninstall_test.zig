@@ -543,3 +543,255 @@ test "an aborted uninstall leaves the outdated snapshot byte-identical" {
     defer testing.allocator.free(after);
     try testing.expectEqualStrings(snapshot_seed, after);
 }
+
+// ─── DB failures fail loud ───────────────────────────────────────────
+// A DB error must abort before anything is torn down: exit 0 with nothing
+// removed lies to scripts and the TUI, and a keg removed after a failed
+// query or delete leaves the DB and the Cellar disagreeing.
+
+fn sabotage(prefix: []const u8, sql: [:0]const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try db.exec(sql);
+}
+
+fn expectKegIntact(prefix: []const u8, name: []const u8, version: []const u8) !void {
+    try testing.expect(try kegRowExists(prefix, name));
+    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    defer testing.allocator.free(cellar_dir);
+    try testing.expect(pathExists(cellar_dir));
+}
+
+// Links `{prefix}/bin/<name>` into its Cellar dir and records the row, as
+// `mt link` would. Caller frees the returned path.
+fn seedLink(prefix: []const u8, name: []const u8, version: []const u8) ![]u8 {
+    const io = std.Options.debug_io;
+    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{prefix});
+    defer testing.allocator.free(bin_dir);
+    try test_io.cwd().createDirPath(io, bin_dir);
+    const target = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    defer testing.allocator.free(target);
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, name });
+    errdefer testing.allocator.free(link);
+    try test_io.symLinkAbsolute(io, target, link, .{});
+
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("INSERT INTO links (keg_id, link_path, target) SELECT id, ?2, ?3 FROM kegs WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    try stmt.bindText(2, link);
+    try stmt.bindText(3, target);
+    _ = try stmt.step();
+    return link;
+}
+
+fn isSymlink(path: []const u8) bool {
+    const st = test_io.cwd().statFile(std.Options.debug_io, path, .{ .follow_symlinks = false }) catch return false;
+    return st.kind == .sym_link;
+}
+
+// Runs `uninstall <argv>`, expects Aborted, and captures stderr into `captured`.
+fn expectAbortCaptured(captured: *std.ArrayList(u8), argv: []const []const u8) !void {
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(false);
+    defer output.setQuiet(prior_quiet);
+    output.beginStderrCapture(testing.allocator, captured);
+    defer output.endStderrCapture();
+    try testing.expectError(error.Aborted, uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, argv));
+}
+
+// Seeds `bar` depending on `foo`, behind a view that errors at step time
+// only once a matching row is read, so prepare and bind still succeed.
+fn seedErroringDependents(prefix: []const u8) !void {
+    try sabotage(prefix,
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES ('bar', 'bar', '2.0', 0, '', 'Cellar/bar/2.0');
+        \\INSERT INTO dependencies (keg_id, dep_name) SELECT id, 'foo' FROM kegs WHERE name = 'bar';
+        \\PRAGMA foreign_keys=OFF;
+        \\ALTER TABLE dependencies RENAME TO deps_real;
+        \\CREATE VIEW dependencies AS SELECT keg_id, dep_name, dep_type FROM deps_real
+        \\  WHERE abs(-9223372036854775807 - 1) > 0;
+    );
+}
+
+test "execute aborts and keeps the keg when the lookup query cannot be prepared" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "db_prepare");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try sabotage(prefix.path, "ALTER TABLE kegs RENAME COLUMN revision TO rev;");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{"foo"});
+
+    try expectKegIntact(prefix.path, "foo", "1.0");
+    // The cause, not a misleading "not installed".
+    try testing.expect(std.mem.indexOf(u8, captured.items, "revision") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+}
+
+test "execute reports an unreadable lookup instead of calling the package not installed" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "db_lookup_step");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+
+    // Corrupt every index on `kegs`: prepare and initSchema still pass, and
+    // the lookup's step fails whichever index the planner picks, the way a
+    // real disk or lock error would.
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+    var offsets: [8]u64 = undefined;
+    var n: usize = 0;
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        var stmt = try db.prepare(
+            \\SELECT (rootpage - 1) * (SELECT page_size FROM pragma_page_size)
+            \\FROM sqlite_master WHERE type = 'index' AND tbl_name = 'kegs';
+        );
+        defer stmt.finalize();
+        while (try stmt.step()) : (n += 1) offsets[n] = @intCast(stmt.columnInt(0));
+    }
+    try testing.expect(n > 0);
+    {
+        const io = std.Options.debug_io;
+        const f = try test_io.openFileAbsolute(io, db_path, .{ .mode = .read_write });
+        defer f.close(io);
+        for (offsets[0..n]) |off| try f.writePositionalAll(io, "\x0d\xff\xff\xff\xff\xff\xff\xff", off);
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{"foo"});
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "malformed") != null);
+    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix.path});
+    defer testing.allocator.free(cellar_dir);
+    try testing.expect(pathExists(cellar_dir));
+}
+
+test "execute refuses when the dependents query cannot be prepared" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "db_depgate_prepare");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try sabotage(prefix.path, "ALTER TABLE dependencies RENAME COLUMN dep_name TO dn;");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{"foo"});
+
+    try expectKegIntact(prefix.path, "foo", "1.0");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--force") != null);
+}
+
+test "execute refuses to remove a package whose dependents cannot be checked" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "db_depgate");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedErroringDependents(prefix.path);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{"foo"});
+
+    try expectKegIntact(prefix.path, "foo", "1.0");
+    // The only way past an unreadable gate is the explicit override.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--force") != null);
+}
+
+test "execute --force still removes a package whose dependents cannot be checked" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "db_depgate_force");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedErroringDependents(prefix.path);
+
+    quiet();
+    defer unquiet();
+    try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--force", "foo" });
+
+    try testing.expect(!try kegRowExists(prefix.path, "foo"));
+    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix.path});
+    defer testing.allocator.free(cellar_dir);
+    try testing.expect(!pathExists(cellar_dir));
+}
+
+test "execute keeps the Cellar entry when the keg row cannot be deleted" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "db_finalize");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    const link = try seedLink(prefix.path, "foo", "1.0");
+    defer testing.allocator.free(link);
+    try sabotage(prefix.path,
+        \\CREATE TRIGGER block_keg_delete BEFORE DELETE ON kegs
+        \\BEGIN SELECT RAISE(ABORT, 'keg-row-pinned-by-test-trigger'); END;
+    );
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    // Under -q too: the recovery hint is part of the error, not chatter.
+    try expectAbortCaptured(&captured, &.{ "-q", "foo" });
+
+    try expectKegIntact(prefix.path, "foo", "1.0");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "keg-row-pinned-by-test-trigger") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "uninstalled") == null);
+    // Links go before the row delete, so the message must say how to get
+    // them back rather than claim nothing was touched.
+    try testing.expect(!isSymlink(link));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "mt link foo") != null);
+}
+
+test "execute aborts and keeps the links when their rows cannot be read" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "db_unlink");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    const link = try seedLink(prefix.path, "foo", "1.0");
+    defer testing.allocator.free(link);
+    try sabotage(prefix.path, "ALTER TABLE links RENAME COLUMN link_path TO lp;");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{"foo"});
+
+    // Going on would CASCADE the rows away and strand an untracked symlink.
+    try expectKegIntact(prefix.path, "foo", "1.0");
+    try testing.expect(isSymlink(link));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "link_path") != null);
+}
+
+test "execute under a near-limit prefix fails loud instead of exiting 0" {
+    // 505 is a legal prefix whose `/db/malt.lock` path once overflowed a
+    // 512-byte buffer. One component caps at 255, hence nested segments.
+    const io = std.Options.debug_io;
+    const base = try test_io.uniqueTempPath(testing.allocator, "uninstall", "long_prefix");
+    defer testing.allocator.free(base);
+    test_io.deleteTreeAbsolute(io, base) catch {};
+    defer test_io.deleteTreeAbsolute(io, base) catch {};
+
+    var buf: [505]u8 = undefined;
+    @memcpy(buf[0..base.len], base);
+    var i = base.len;
+    while (i < buf.len) : (i += 1) buf[i] = if ((i - base.len) % 100 == 0) '/' else 'a';
+    const long = try testing.allocator.dupeZ(u8, &buf);
+    defer testing.allocator.free(long);
+
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{long});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(io, db_dir);
+    _ = c.setenv("MALT_PREFIX", long.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{"foo"});
+    try testing.expect(captured.items.len > 0);
+    // Proves the prefix was accepted and the lock taken, not rejected early.
+    const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{long});
+    defer testing.allocator.free(lock_path);
+    try testing.expect(pathExists(lock_path));
+}

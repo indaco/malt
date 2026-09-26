@@ -7,6 +7,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const schema_report = @import("schema_report.zig");
 const atomic = @import("../fs/atomic.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const symlink = @import("../fs/symlink.zig");
 const output = @import("../ui/output.zig");
 const services_mod = @import("services.zig");
@@ -50,8 +51,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const prefix = atomic.maltPrefixOrAbort();
 
     // Acquire lock
-    var lock_path_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
+    var lock_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const lock_path = prefix_path.join(&lock_path_buf, prefix, "/db/malt.lock") catch {
+        output.err("lock path too long", .{});
+        return error.Aborted;
+    };
     var lock = lock_mod.LockFile.acquire(ctx.io, lock_path, 5000) catch |e| switch (e) {
         // Fresh prefix with no `db/` dir → nothing is installed, so the
         // requested package certainly isn't. Say so plainly instead of
@@ -68,8 +72,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer lock.release(ctx.io);
 
     // Open DB
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const db_path = prefix_path.joinZ(&db_path_buf, prefix, "/db/malt.db") catch {
+        output.err("database path too long", .{});
+        return error.Aborted;
+    };
     var db = sqlite.Database.open(db_path) catch {
         output.err("Failed to open database", .{});
         return error.Aborted;
@@ -86,11 +93,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Find the keg
     var find_stmt = db.prepare(
         "SELECT id, version, revision FROM kegs WHERE name = ?1 LIMIT 1;",
-    ) catch return;
+    ) catch return readFailed(&db);
     defer find_stmt.finalize();
-    find_stmt.bindText(1, name) catch return;
+    find_stmt.bindText(1, name) catch return readFailed(&db);
 
-    const found = find_stmt.step() catch false;
+    const found = find_stmt.step() catch return readFailed(&db);
     if (!found) {
         output.err("{s} is not installed", .{name});
         return error.Aborted;
@@ -105,17 +112,18 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var pkgver_buf: [128]u8 = undefined;
     const pkg_version = formula_mod.pkgVersion(&pkgver_buf, version, revision) catch version;
 
-    // Check for dependents (unless --force)
+    // Check for dependents (unless --force). A check that cannot run
+    // refuses, since removing a keg others need is the harm it guards.
     if (!force) {
         var dep_stmt = db.prepare(
             \\SELECT k.name FROM dependencies d
             \\JOIN kegs k ON k.id = d.keg_id
             \\WHERE d.dep_name = ?1;
-        ) catch return;
+        ) catch return dependentsUnreadable(&db, name);
         defer dep_stmt.finalize();
-        dep_stmt.bindText(1, name) catch return;
+        dep_stmt.bindText(1, name) catch return dependentsUnreadable(&db, name);
 
-        if (dep_stmt.step() catch false) {
+        if (dep_stmt.step() catch return dependentsUnreadable(&db, name)) {
             const dependent = dep_stmt.columnText(0);
             const dep_name = if (dependent) |d| std.mem.sliceTo(d, 0) else "unknown";
             output.err("{s} is required by {s}. Use --force to remove anyway.", .{ name, dep_name });
@@ -132,18 +140,21 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Unlink symlinks
     var lnk = linker.Linker.init(ctx.io, allocator, &db, prefix);
+    // Only a DB error surfaces here (filesystem misses are skipped inside).
+    // Carrying on would CASCADE away the rows that track the surviving links.
     lnk.unlink(keg_id) catch {
-        output.warn("Could not remove all symlinks for {s}", .{name});
+        output.err("Could not remove the links for {s}: {s}", .{ name, db.errMsg() });
+        return error.Aborted;
     };
 
     // Land the DB writes before any Cellar teardown so a SIGKILL
     // between filesystem and database steps can't leave a keg row
     // pointing at a Cellar dir that is gone. CASCADE drops deps/links rows.
-    if (finalizeDbRemoval(&db, keg_id)) {
-        reconcileOutdated(ctx.io, allocator, .formulas, name);
-    } else |_| {
-        output.warn("Could not finalize uninstall for {s}", .{name});
-    }
+    finalizeDbRemoval(&db, keg_id, name) catch {
+        output.warnAlways("{s} is still installed, but its links and any service were removed. Run `mt link {s}` to restore the links, or `mt uninstall {s}` to retry.", .{ name, name, name });
+        return error.Aborted;
+    };
+    reconcileOutdated(ctx.io, allocator, .formulas, name);
 
     // Remove Cellar directory (dir name carries the _<revision> suffix
     // when the keg was installed with revision > 0).
@@ -176,6 +187,16 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     output.success("{s} uninstalled", .{name});
 }
 
+fn readFailed(db: *sqlite.Database) error{Aborted} {
+    output.err("Could not read the package database: {s}", .{db.errMsg()});
+    return error.Aborted;
+}
+
+fn dependentsUnreadable(db: *sqlite.Database, name: []const u8) error{Aborted} {
+    output.err("Could not check what depends on {s}: {s}. Use --force to remove anyway.", .{ name, db.errMsg() });
+    return error.Aborted;
+}
+
 /// Drop the removed package from `{cache}/outdated.json` so the TUI's raw
 /// read stops painting it. Only after the row is gone: the file must never
 /// run ahead of the DB. A MALT_CACHE the readers refuse is skipped, not
@@ -200,9 +221,15 @@ fn nameStillRecorded(db: *sqlite.Database, name: []const u8) bool {
 // releases the store bytes: the `store_refs` row stays so the orphan
 // sweep can find them. One transaction so CASCADE and the delete land
 // together.
-fn finalizeDbRemoval(db: *sqlite.Database, keg_id: i64) sqlite.SqliteError!void {
+fn finalizeDbRemoval(db: *sqlite.Database, keg_id: i64, name: []const u8) sqlite.SqliteError!void {
+    var began = false;
+    errdefer {
+        // Report first: ROLLBACK resets the connection's error message.
+        output.err("Could not remove {s} from the database: {s}", .{ name, db.errMsg() });
+        if (began) db.rollback();
+    }
     try db.beginTransaction();
-    errdefer db.rollback();
+    began = true;
 
     var del = try db.prepare("DELETE FROM kegs WHERE id = ?1;");
     defer del.finalize();
@@ -253,7 +280,7 @@ test "finalizeDbRemoval drops the kegs row and leaves the store claim for the or
     const sha = "abc123";
     try db.exec("INSERT INTO store_refs (store_sha256) VALUES ('abc123');");
     const keg_id = try testSeedKeg(&db, "foo", sha);
-    try finalizeDbRemoval(&db, keg_id);
+    try finalizeDbRemoval(&db, keg_id, "foo");
 
     try testing.expect(!try testKegPresent(&db, keg_id));
     // The row is what makes the bytes visible to `purge --store-orphans`;
@@ -275,10 +302,35 @@ test "finalizeDbRemoval leaves the kegs row when the delete is blocked" {
         \\BEGIN SELECT RAISE(ABORT, 'blocked'); END;
     );
 
-    try testing.expectError(sqlite.SqliteError.ConstraintViolation, finalizeDbRemoval(&db, keg_id));
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try testing.expectError(sqlite.SqliteError.ConstraintViolation, finalizeDbRemoval(&db, keg_id, "foo"));
+    // The rollback resets errMsg, so the cause must be printed before it.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "blocked") != null);
 
     try testing.expect(try testKegPresent(&db, keg_id));
     try testing.expect(try testRefRowPresent(&db, sha));
+}
+
+test "finalizeDbRemoval reports a failed BEGIN and leaves a transaction it does not own" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    const keg_id = try testSeedKeg(&db, "foo", "abc123");
+    try db.exec("BEGIN;");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try testing.expectError(sqlite.SqliteError.ExecFailed, finalizeDbRemoval(&db, keg_id, "foo"));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "within a transaction") != null);
+    try testing.expect(db.inTransaction());
+    try testing.expect(try testKegPresent(&db, keg_id));
 }
 
 /// Uninstall a cask by token.
