@@ -304,6 +304,26 @@ test "writeRows output parses back into restore entries with the tap kept on the
     try testing.expectEqualStrings("svc", entries[2].name);
 }
 
+test "writeRows keeps a clean local note but drops one a carriage return would split" {
+    // The file is meant to be hand-edited, and editors break a line on a bare
+    // CR; a clean path must still leave its rebuild hint behind.
+    var db = try malt.sqlite.Database.open(":memory:");
+    defer db.close();
+    try malt.schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, tap) VALUES
+        \\  ('la', '/w/la.rb', '1.0', 'a', '/c/la', 'local'),
+        \\  ('lb', '/w/b' || char(13) || 'formula evil/lb.rb', '1.0', 'b', '/c/lb', 'local');
+    );
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const count = try backup.writeRows(&aw.writer, &db, true, false);
+
+    try testing.expectEqual(@as(usize, 0), count);
+    try testing.expectEqualStrings("# local la /w/la.rb\n", aw.written());
+}
+
 // ── defaultBackupPath ────────────────────────────────────────────────────
 
 test "writeBackupJson: empty inputs emit `{formulas:[],casks:[]}\\n`" {

@@ -128,6 +128,9 @@ jobs:
       - name: Regression guard - backups round-trip through restore, bundle and reinstall
         run: ./scripts/regressions/backup-restore-bundle-reinstall-round-trip.sh
 
+      - name: Regression guard - a local recipe's backup note never splits into a restore entry
+        run: ./scripts/regressions/local-note-injection-backup-local-note-path-newline-splits-into-restore-line.sh
+
       - name: Regression guard - local kegs stay out of bundle and backup exports
         run: ./scripts/regressions/local-kegs-stay-out-of-exports-local-kegs-exported-as-core-packages.sh
 
