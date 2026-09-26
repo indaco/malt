@@ -924,3 +924,308 @@ test "execute refuses an unknown flag and keeps the package" {
         try expectKegIntact(prefix.path, "foo", "1.0");
     }
 }
+
+// ─── several names ───────────────────────────────────────────────────
+// Every name is checked before any is removed, and a batch that stops
+// early says so: exiting 0 after removing only part of it misleads scripts
+// about what is still installed.
+
+// Records a cask row with no app bundle, enough for the teardown to run.
+fn seedCask(prefix: []const u8, token: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+    var stmt = try db.prepare("INSERT INTO casks (token, name, version, url) VALUES (?1, ?1, '1.0', 'https://example.invalid/c.zip');");
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    _ = try stmt.step();
+}
+
+fn caskInstalled(prefix: []const u8, token: []const u8) !bool {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    return cask.isInstalled(&db, token);
+}
+
+fn expectKegGone(prefix: []const u8, name: []const u8) !void {
+    try testing.expect(!try kegRowExists(prefix, name));
+    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}", .{ prefix, name });
+    defer testing.allocator.free(cellar_dir);
+    try testing.expect(!pathExists(cellar_dir));
+}
+
+fn seedDependent(prefix: []const u8, dependent: []const u8, dep: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("INSERT INTO dependencies (keg_id, dep_name) SELECT id, ?2 FROM kegs WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, dependent);
+    try stmt.bindText(2, dep);
+    _ = try stmt.step();
+}
+
+fn runQuiet(argv: []const []const u8) !void {
+    quiet();
+    defer unquiet();
+    try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, argv);
+}
+
+test "execute with no package names the repeatable argument in its usage line" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "usage");
+    defer prefix.deinit(testing.allocator);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{"-q"});
+    try testing.expect(std.mem.indexOf(u8, captured.items, "<package>...") != null);
+}
+
+test "execute removes every named package" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "batch");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedKeg(testing.allocator, prefix.path, "bar", "2.0");
+
+    try runQuiet(&.{ "foo", "bar" });
+
+    try expectKegGone(prefix.path, "foo");
+    try expectKegGone(prefix.path, "bar");
+}
+
+test "execute removes nothing and names every package that is not installed" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "batch_missing");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{ "foo", "ghost1", "ghost2" });
+
+    // The installed name comes first, so any removal before the check shows.
+    try expectKegIntact(prefix.path, "foo", "1.0");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "ghost1 is not installed") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "ghost2 is not installed") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Uninstalling") == null);
+}
+
+test "execute lets a batch remove a package whose dependents are all in it" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "batch_dependents");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedKeg(testing.allocator, prefix.path, "bar", "2.0");
+    try seedKeg(testing.allocator, prefix.path, "baz", "3.0");
+    try seedDependent(prefix.path, "bar", "foo");
+    try seedDependent(prefix.path, "baz", "foo");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    // baz stays behind, so foo is still needed: the gate refuses before
+    // bar, which nothing needs, is removed either.
+    try expectAbortCaptured(&captured, &.{ "bar", "foo" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "foo is required by baz") != null);
+    try expectKegIntact(prefix.path, "bar", "2.0");
+    try expectKegIntact(prefix.path, "foo", "1.0");
+
+    try runQuiet(&.{ "foo", "baz", "bar" });
+    try expectKegGone(prefix.path, "foo");
+    try expectKegGone(prefix.path, "bar");
+    try expectKegGone(prefix.path, "baz");
+}
+
+test "execute removes a dependent before its dependency, so a failed removal keeps the dependency" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "batch_dependent_first");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedKeg(testing.allocator, prefix.path, "bar", "2.0");
+    try seedDependent(prefix.path, "bar", "foo");
+    try sabotage(prefix.path,
+        \\CREATE TRIGGER block_bar_delete BEFORE DELETE ON kegs WHEN OLD.name = 'bar'
+        \\BEGIN SELECT RAISE(ABORT, 'blocked'); END;
+    );
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    // Typed dependency-first: removing in argv order would take foo and then
+    // fail on bar, leaving bar installed without what it needs.
+    try expectAbortCaptured(&captured, &.{ "foo", "bar" });
+    try expectKegIntact(prefix.path, "foo", "1.0");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "foo was not uninstalled") != null);
+}
+
+test "execute stops a batch at Ctrl-C and names what it skipped" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "batch_interrupt");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedKeg(testing.allocator, prefix.path, "bar", "2.0");
+
+    const prior = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior);
+    malt.signals.setInterruptedForTest(false);
+    // Fires on the second poll: foo is removed, bar must not be.
+    malt.signals.armInterruptAfterForTest(2);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    {
+        const prior_quiet = output.isQuiet();
+        output.setQuiet(false);
+        defer output.setQuiet(prior_quiet);
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try testing.expectError(error.UserInterrupted, uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "foo", "bar" }));
+    }
+    try expectKegGone(prefix.path, "foo");
+    try expectKegIntact(prefix.path, "bar", "2.0");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "bar was not uninstalled") != null);
+}
+
+test "execute refuses a batch with a running cask app before removing anything" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "batch_running_app");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    const app_path = try seedFirefoxCask(prefix.path);
+    defer testing.allocator.free(app_path);
+
+    // Stand in for the live app: `pgrep -f` matches the bundle path in argv,
+    // and `read x` blocks on the open pipe until the kill.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = malt.app_ctx.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/bin/sh", "-c", "read x", app_path },
+        .stdin = .pipe,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    defer child.kill(io);
+    var tries: usize = 0;
+    // Spawn to exec is async: poll every 10ms, for up to 3s.
+    while (tries < 300 and !cask.CaskInstaller.isAppRunningPub(io, app_path)) : (tries += 1)
+        std.Io.sleep(io, .fromNanoseconds(10 * std.time.ns_per_ms), .awake) catch {};
+    try testing.expect(cask.CaskInstaller.isAppRunningPub(io, app_path));
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    {
+        // debug_io cannot spawn, so the probe would always answer "not running".
+        const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = malt.app_ctx.processEnviron() };
+        const prior_quiet = output.isQuiet();
+        output.setQuiet(false);
+        defer output.setQuiet(prior_quiet);
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        // The formula comes first, so a check made only at removal time shows.
+        try testing.expectError(error.Aborted, uninstall.execute(&ctx, testing.allocator, &.{ "foo", "firefox" }));
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "firefox appears to be running") != null);
+    try expectKegIntact(prefix.path, "foo", "1.0");
+    try testing.expect(try caskInstalled(prefix.path, "firefox"));
+}
+
+test "execute refuses a batch that removes only one of a dependent's installed versions" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "batch_dependent_versions");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedKeg(testing.allocator, prefix.path, "bar", "1.0");
+    try seedKeg(testing.allocator, prefix.path, "bar", "2.0");
+    // Both bar rows depend on foo; naming bar removes just one of them.
+    try seedDependent(prefix.path, "bar", "foo");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{ "foo", "bar" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "foo is required by bar") != null);
+    try expectKegIntact(prefix.path, "foo", "1.0");
+}
+
+test "execute removes a package named twice once, without a not-installed error" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "batch_dupe");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "foo", "foo" });
+
+    try expectKegGone(prefix.path, "foo");
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "foo uninstalled"));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+}
+
+test "execute removes a formula and a cask named together" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "batch_mixed");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedCask(prefix.path, "c1");
+
+    try runQuiet(&.{ "c1", "foo" });
+
+    try expectKegGone(prefix.path, "foo");
+    try testing.expect(!try caskInstalled(prefix.path, "c1"));
+}
+
+test "execute --cask applies to every name and refuses a batch with a missing cask" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "batch_casks");
+    defer prefix.deinit(testing.allocator);
+    try seedCask(prefix.path, "c1");
+    try seedCask(prefix.path, "c2");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{ "--cask", "c1", "ghost" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "ghost is not installed as a cask") != null);
+    try testing.expect(try caskInstalled(prefix.path, "c1"));
+
+    try runQuiet(&.{ "--cask", "c1", "c2" });
+    try testing.expect(!try caskInstalled(prefix.path, "c1"));
+    try testing.expect(!try caskInstalled(prefix.path, "c2"));
+}
+
+test "execute stops the batch at a failed removal and names what it skipped" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "batch_stop");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedKeg(testing.allocator, prefix.path, "bar", "2.0");
+    try seedKeg(testing.allocator, prefix.path, "baz", "3.0");
+    try sabotage(prefix.path,
+        \\CREATE TRIGGER block_bar BEFORE DELETE ON kegs WHEN OLD.name = 'bar'
+        \\BEGIN SELECT RAISE(ABORT, 'blocked'); END;
+    );
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{ "foo", "bar", "baz" });
+
+    try expectKegGone(prefix.path, "foo");
+    try expectKegIntact(prefix.path, "bar", "2.0");
+    try expectKegIntact(prefix.path, "baz", "3.0");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "baz was not uninstalled") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "baz 3.0...") == null);
+}
+
+test "execute --dry-run previews every named package and removes none" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "batch_dry");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "foo", "1.0");
+    try seedKeg(testing.allocator, prefix.path, "bar", "2.0");
+    try seedCask(prefix.path, "c1");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCaptured(&captured, &.{ "foo", "bar", "c1" });
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall foo 1.0") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall bar 2.0") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall cask c1 1.0") != null);
+    try expectKegIntact(prefix.path, "foo", "1.0");
+    try expectKegIntact(prefix.path, "bar", "2.0");
+    try testing.expect(try caskInstalled(prefix.path, "c1"));
+}
