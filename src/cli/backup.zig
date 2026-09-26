@@ -11,7 +11,8 @@
 //!   cask firefox
 //!   formula user/repo/tool   (a third-party tap package: its owning tap)
 //!   cask user/repo/app       (also a tap keg built from the tap's Casks/)
-//!   # local lx /src/lx.rb    (a `--local` keg: restore can only point at it)
+//!   # local lx /src/lx.rb    (a `--local` keg: restore can only point at it;
+//!                             left out when its name or path holds a line break)
 //!
 //! `--versions` adds the installed version as a second field. It is a record,
 //! not a pin: restore installs the current release.
@@ -155,8 +156,15 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
             // as a rebuild hint.
             if (install_args.isLocalTap(tap)) {
                 const path = if (fstmt.columnText(4)) |p| std.mem.sliceTo(p, 0) else "";
-                w.print(local_note_prefix ++ "{s} {s}\n", .{ name, path }) catch return RowsError.WriteFailed;
-                warnLocal(name, path);
+                // A line break would turn the rest of the note into an
+                // entry restore installs. With no note left, nothing else
+                // records the keg, so say so even under --quiet.
+                if (fitsOneLine(name) and fitsOneLine(path)) {
+                    w.print(local_note_prefix ++ "{s} {s}\n", .{ name, path }) catch return RowsError.WriteFailed;
+                    warnLocal(name, path);
+                } else {
+                    output.warnAlways("{s} is a local formula whose name or recipe path holds a line break; it is left out of the backup", .{name});
+                }
                 continue;
             }
             var qual_buf: [256]u8 = undefined;
@@ -210,6 +218,11 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
 }
 
 const local_note_prefix = "# local ";
+
+/// Screens CR too: editors break a hand-edited line on a bare CR.
+fn fitsOneLine(s: []const u8) bool {
+    return std.mem.indexOfAny(u8, s, "\r\n") == null;
+}
 
 /// A local keg's service is left out with its package: on another machine the
 /// name would start an unrelated namesake's service.
@@ -486,6 +499,8 @@ pub fn writeEntry(w: *std.Io.Writer, kind: Kind, name: []const u8, version: []co
         .service => "service ",
     };
     try w.writeAll(prefix);
+    // Unscreened: these names come from the API or a validated tap slug,
+    // a source that could ship a malicious package anyway.
     try w.writeAll(name);
     // A separate field, never an `@` suffix: `postgresql@16` is a name.
     // Services carry no version.
@@ -819,6 +834,56 @@ test "writeRows emits auto-start services only when asked" {
         aw.written(),
     );
     try std.testing.expectEqual(@as(usize, 9), count);
+}
+
+test "writeRows drops a local note whose name or path would split into a restorable line" {
+    // The text after a newline in the note is parsed as its own line, so a
+    // recipe path or name carrying one would reach restore as an entry.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, tap) VALUES
+        \\  ('lx', '/w/x' || char(10) || 'formula evil/lx.rb', '1.0', 'a', '/c/lx', 'local'),
+        \\  ('ly' || char(10) || 'formula evil', '/w/ly.rb', '1.0', 'b', '/c/ly', 'local'),
+        \\  ('lz', '/w/z' || char(13) || 'formula evil/lz.rb', '1.0', 'c', '/c/lz', 'local');
+    );
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const count = try writeRows(&aw.writer, &db, true, true);
+
+    try std.testing.expectEqual(@as(usize, 0), count);
+    try std.testing.expectEqualStrings("", aw.written());
+    const entries = try parseBackup(std.testing.allocator, aw.written());
+    defer std.testing.allocator.free(entries);
+    try std.testing.expectEqual(@as(usize, 0), entries.len);
+}
+
+test "writeRows still names a dropped local keg under --quiet" {
+    // `backup -q` and `purge --wipe -q` would otherwise lose the keg without
+    // a trace: the note is gone, and wipe then deletes the row.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec("INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, tap) VALUES ('lx', '/w/x' || char(13) || 'y/lx.rb', '1.0', 'a', '/c/lx', 'local');");
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(true);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer {
+        output.endStderrCapture();
+        output.setQuiet(prior_quiet);
+    }
+
+    _ = try writeRows(&aw.writer, &db, true, false);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "lx is a local formula whose name or recipe path holds a line break") != null);
+    // A hint built from the scrubbed path would name a file that does not exist.
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "mt install --local") == null);
 }
 
 test "writeRows aborts on an unreadable table instead of truncating" {

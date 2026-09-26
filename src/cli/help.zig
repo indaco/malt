@@ -653,7 +653,8 @@ const restore_help =
     \\
     \\A recorded version is informational: restore installs the current
     \\release. A `--local` keg is not installed; restore prints the command
-    \\that rebuilds it from its recipe.
+    \\that rebuilds it from its recipe. A local keg whose name or recipe
+    \\path holds a line break is left out of the backup, with a warning.
     \\
     \\Flags:
     \\  --dry-run     Print the list of packages that would be installed
