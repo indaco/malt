@@ -156,12 +156,13 @@ const reinstall_help =
 ;
 
 const uninstall_help =
-    \\Usage: malt uninstall <package> [flags]
+    \\Usage: malt uninstall <package>... [flags]
     \\
-    \\Remove installed packages.
+    \\Remove installed packages. Every name is checked first: if one is not
+    \\installed, or is still needed by a package left behind, nothing is removed.
     \\
     \\Flags:
-    \\  --cask         Treat <package> as a cask
+    \\  --cask         Treat every <package> as a cask
     \\  --force, -f    Remove even if other packages depend on it, or that can't be checked
     \\  --dry-run      Show what would be removed
     \\  --quiet, -q    Suppress non-error output

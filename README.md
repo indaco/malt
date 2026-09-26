@@ -319,7 +319,7 @@ mt run --keep ripgrep -- --help          # cache the bottle for next run
 
 `--keep` extracts under `{cache}/run/<sha256>/` so subsequent calls skip the download. The cache is wiped by `mt purge --cache`.
 
-`mt uninstall` removes a package, refusing if dependents exist or cannot be checked, or, for casks, if the application is running. `--force` (`-f`) bypasses both checks. `--cask` forces cask uninstall. `--dry-run` runs the same checks and only prints what would be removed. Store entries are preserved for `mt purge --store-orphans`.
+`mt uninstall` removes one or more packages, refusing if dependents outside the named set exist or cannot be checked, or, for casks, if the application is running. Every name is checked before anything is removed, so one that is not installed aborts the whole run. `--force` (`-f`) bypasses the dependents check, never a running app. `--cask` forces cask uninstall. `--dry-run` runs the same checks and only prints what would be removed. Store entries are preserved for `mt purge --store-orphans`.
 
 `mt migrate` imports an existing Homebrew installation: it scans the Cellar and reinstalls each package through malt, without touching the Homebrew install itself.
 

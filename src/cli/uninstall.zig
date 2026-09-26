@@ -2,7 +2,8 @@
 //! Remove installed packages.
 
 const std = @import("std");
-const AppCtx = @import("../app_ctx.zig").AppCtx;
+const app_ctx = @import("../app_ctx.zig");
+const AppCtx = app_ctx.AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const schema_report = @import("schema_report.zig");
@@ -23,6 +24,20 @@ const lock_report = @import("lock_report.zig");
 const snap_mod = @import("outdated/snapshot.zig");
 const post_install = @import("install/post_install.zig");
 const sink_mod = @import("install/sink.zig");
+const signals = @import("../core/signals.zig");
+
+/// One resolved name; `keg` is null for a cask.
+const Target = struct {
+    name: []const u8,
+    keg: ?Keg,
+};
+
+const Keg = struct {
+    id: i64,
+    /// Owned: the row's text dies with its statement.
+    version: []const u8,
+    revision: i64,
+};
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "uninstall")) return;
@@ -31,7 +46,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const dry_run = output.isDryRun();
     var force = false;
     var force_cask = false;
-    var pkg_name: ?[]const u8 = null;
+    // Tokens borrow from `args`, which outlives this call, so no dup is needed.
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(allocator);
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
@@ -45,14 +62,15 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.err("Unknown flag: {s}", .{arg});
             return error.Aborted;
         } else if (arg.len > 0) {
-            if (pkg_name == null) pkg_name = arg;
+            // A repeat would fail its second lookup as "not installed".
+            if (!containsName(names.items, arg)) try names.append(allocator, arg);
         }
     }
 
-    const name = pkg_name orelse {
-        output.err("Usage: mt uninstall <package>", .{});
+    if (names.items.len == 0) {
+        output.err("Usage: mt uninstall <package>...", .{});
         return error.Aborted;
-    };
+    }
 
     const prefix = atomic.maltPrefixOrAbort();
 
@@ -64,10 +82,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
     var lock = lock_mod.LockFile.acquire(ctx.io, lock_path, 5000) catch |e| switch (e) {
         // Fresh prefix with no `db/` dir → nothing is installed, so the
-        // requested package certainly isn't. Say so plainly instead of
+        // requested packages certainly aren't. Say so plainly instead of
         // reporting phantom lock contention.
         error.DirMissing => {
-            output.err("{s} is not installed", .{name});
+            for (names.items) |name| output.err("{s} is not installed", .{name});
             return error.Aborted;
         },
         else => {
@@ -90,70 +108,201 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer db.close();
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
 
-    // Check if it's a cask first (or if --cask was passed)
-    if (force_cask or cask_mod.isInstalled(&db, name)) {
-        try uninstallCask(ctx, allocator, name, &db, prefix, force, dry_run);
-        return;
+    // Resolve every name before removing any, so an unknown one or a running
+    // app aborts the batch with nothing touched. A cask wins over a formula
+    // of the same name.
+    var targets: std.ArrayList(Target) = .empty;
+    defer {
+        for (targets.items) |t| if (t.keg) |k| allocator.free(k.version);
+        targets.deinit(allocator);
     }
+    try targets.ensureTotalCapacityPrecise(allocator, names.items.len);
+    var refused = false;
+    for (names.items) |name| {
+        if (cask_mod.lookupInstalled(&db, name)) |info| {
+            refuseIfRunning(ctx.io, name, &info) catch {
+                refused = true;
+                continue;
+            };
+            targets.appendAssumeCapacity(.{ .name = name, .keg = null });
+        } else if (force_cask) {
+            output.err("{s} is not installed as a cask", .{name});
+            refused = true;
+        } else if (try lookupKeg(&db, allocator, name)) |keg| {
+            targets.appendAssumeCapacity(.{ .name = name, .keg = keg });
+        } else {
+            output.err("{s} is not installed", .{name});
+            refused = true;
+        }
+    }
+    if (refused) return error.Aborted;
 
-    // Find the keg
-    var find_stmt = db.prepare(
+    var edges: std.ArrayList(Edge) = .empty;
+    defer edges.deinit(allocator);
+    for (targets.items, 0..) |t, i| {
+        if (t.keg != null) try gateDependents(&db, allocator, targets.items, i, force, &edges);
+    }
+    const order = try removalOrder(allocator, targets.items.len, edges.items);
+    defer allocator.free(order);
+
+    // Resolved before any removal: a malformed MALT_CACHE exits the process,
+    // and the preview must fail it the same way.
+    const cache_dir: ?[]const u8 = for (targets.items) |t| {
+        if (t.keg == null) break atomic.maltCacheDir(allocator) catch {
+            output.err("Failed to resolve cache directory", .{});
+            return error.Aborted;
+        };
+    } else null;
+    defer if (cache_dir) |d| allocator.free(d);
+
+    for (order, 0..) |ti, pos| {
+        if (signals.isInterrupted()) {
+            reportSkipped(targets.items, order[pos..]);
+            return error.UserInterrupted;
+        }
+        const t = targets.items[ti];
+        const removed = if (t.keg) |keg|
+            removeFormula(ctx, allocator, &db, prefix, t.name, keg, dry_run)
+        else
+            uninstallCask(ctx, allocator, t.name, &db, prefix, cache_dir.?, force, dry_run);
+        removed catch |e| {
+            // The next removal would most likely hit the same failure.
+            reportSkipped(targets.items, order[pos + 1 ..]);
+            return e;
+        };
+    }
+}
+
+fn reportSkipped(batch: []const Target, rest: []const usize) void {
+    for (rest) |ti| output.err("{s} was not uninstalled", .{batch[ti].name});
+}
+
+fn containsName(names: []const []const u8, name: []const u8) bool {
+    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
+    return false;
+}
+
+fn lookupKeg(db: *sqlite.Database, allocator: std.mem.Allocator, name: []const u8) error{ Aborted, OutOfMemory }!?Keg {
+    var stmt = db.prepare(
         "SELECT id, version, revision FROM kegs WHERE name = ?1 LIMIT 1;",
-    ) catch return readFailed(&db);
-    defer find_stmt.finalize();
-    find_stmt.bindText(1, name) catch return readFailed(&db);
+    ) catch return readFailed(db);
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return readFailed(db);
+    if (!(stmt.step() catch return readFailed(db))) return null;
 
-    const found = find_stmt.step() catch return readFailed(&db);
-    if (!found) {
-        output.err("{s} is not installed", .{name});
-        return error.Aborted;
-    }
+    const version = if (stmt.columnText(1)) |v| std.mem.sliceTo(v, 0) else "unknown";
+    return .{
+        .id = stmt.columnInt(0),
+        .version = try allocator.dupe(u8, version),
+        .revision = stmt.columnInt(2),
+    };
+}
 
-    const keg_id = find_stmt.columnInt(0);
-    const ver_ptr = find_stmt.columnText(1);
-    const revision = find_stmt.columnInt(2);
-    const version = if (ver_ptr) |v| std.mem.sliceTo(v, 0) else "unknown";
+/// Target `dependent` depends on target `dep`, so it has to go first.
+const Edge = struct { dep: usize, dependent: usize };
 
-    // Revision-aware dir name for the on-disk cellar entry.
-    var pkgver_buf: [128]u8 = undefined;
-    const pkg_version = formula_mod.pkgVersion(&pkgver_buf, version, revision) catch version;
+/// Records which batch targets depend on `batch[i]`, and refuses while a keg
+/// outside the batch does. A check that cannot run refuses too, since
+/// removing a keg others need is the harm it guards; `force` skips both
+/// refusals and only loses the removal order.
+fn gateDependents(
+    db: *sqlite.Database,
+    allocator: std.mem.Allocator,
+    batch: []const Target,
+    i: usize,
+    force: bool,
+    edges: *std.ArrayList(Edge),
+) error{ Aborted, OutOfMemory }!void {
+    const name = batch[i].name;
+    var stmt = db.prepare(
+        \\SELECT k.id, k.name FROM dependencies d
+        \\JOIN kegs k ON k.id = d.keg_id
+        \\WHERE d.dep_name = ?1;
+    ) catch return unreadableUnlessForced(db, name, force);
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return unreadableUnlessForced(db, name, force);
 
-    // Check for dependents (unless --force). A check that cannot run
-    // refuses, since removing a keg others need is the harm it guards.
-    if (!force) {
-        var dep_stmt = db.prepare(
-            \\SELECT k.name FROM dependencies d
-            \\JOIN kegs k ON k.id = d.keg_id
-            \\WHERE d.dep_name = ?1;
-        ) catch return dependentsUnreadable(&db, name);
-        defer dep_stmt.finalize();
-        dep_stmt.bindText(1, name) catch return dependentsUnreadable(&db, name);
-
-        if (dep_stmt.step() catch return dependentsUnreadable(&db, name)) {
-            const dependent = dep_stmt.columnText(0);
-            const dep_name = if (dependent) |d| std.mem.sliceTo(d, 0) else "unknown";
-            output.err("{s} is required by {s}. Use --force to remove anyway.", .{ name, dep_name });
+    while (stmt.step() catch return unreadableUnlessForced(db, name, force)) {
+        if (batchIndex(batch, stmt.columnInt(0))) |j| {
+            try edges.append(allocator, .{ .dep = i, .dependent = j });
+        } else if (!force) {
+            const dependent = if (stmt.columnText(1)) |d| std.mem.sliceTo(d, 0) else "unknown";
+            output.err("{s} is required by {s}. Use --force to remove anyway.", .{ name, dependent });
             return error.Aborted;
         }
     }
+}
 
+fn unreadableUnlessForced(db: *sqlite.Database, name: []const u8, force: bool) error{Aborted}!void {
+    if (!force) return dependentsUnreadable(db, name);
+}
+
+// By row, not name: a name can own several installed versions, and the
+// batch removes only the one it looked up.
+fn batchIndex(batch: []const Target, keg_id: i64) ?usize {
+    for (batch, 0..) |t, i| if (t.keg) |k| if (k.id == keg_id) return i;
+    return null;
+}
+
+/// Batch indices with every dependent ahead of what it depends on, so a
+/// failure partway never strands a dependent without its dependency. Ties
+/// and cycles keep argv order.
+fn removalOrder(allocator: std.mem.Allocator, n: usize, edges: []const Edge) error{OutOfMemory}![]usize {
+    const order = try allocator.alloc(usize, n);
+    errdefer allocator.free(order);
+    const placed = try allocator.alloc(bool, n);
+    defer allocator.free(placed);
+    @memset(placed, false);
+
+    for (order) |*slot| {
+        var first: ?usize = null;
+        const pick = for (0..n) |i| {
+            if (placed[i]) continue;
+            if (first == null) first = i;
+            if (dependentsPlaced(edges, placed, i)) break i;
+        } else first.?; // Only a cycle leaves nothing ready.
+        placed[pick] = true;
+        slot.* = pick;
+    }
+    return order;
+}
+
+fn dependentsPlaced(edges: []const Edge, placed: []const bool, i: usize) bool {
+    for (edges) |e| if (e.dep == i and e.dependent != i and !placed[e.dependent]) return false;
+    return true;
+}
+
+fn removeFormula(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    prefix: [:0]const u8,
+    name: []const u8,
+    keg: Keg,
+    dry_run: bool,
+) error{Aborted}!void {
+    const version = keg.version;
     if (dry_run) {
         output.info("Dry run: would uninstall {s} {s}", .{ name, version });
         return;
     }
 
+    // Revision-aware dir name for the on-disk cellar entry.
+    var pkgver_buf: [128]u8 = undefined;
+    const pkg_version = formula_mod.pkgVersion(&pkgver_buf, version, keg.revision) catch version;
+
     output.info("Uninstalling {s} {s}...", .{ name, version });
 
     // Stop and unregister any associated launchd service before tearing down
     // files. The service name we register matches the formula name.
-    services_mod.announceStop(ctx.io, allocator, &db, name);
-    supervisor_mod.stopAndUnregister(.{ .allocator = allocator, .io = ctx.io, .db = &db }, name);
+    services_mod.announceStop(ctx.io, allocator, db, name);
+    supervisor_mod.stopAndUnregister(.{ .allocator = allocator, .io = ctx.io, .db = db }, name);
 
     // Unlink symlinks
-    var lnk = linker.Linker.init(ctx.io, allocator, &db, prefix);
+    var lnk = linker.Linker.init(ctx.io, allocator, db, prefix);
     // Only a DB error surfaces here (filesystem misses are skipped inside).
     // Carrying on would CASCADE away the rows that track the surviving links.
-    lnk.unlink(keg_id) catch {
+    lnk.unlink(keg.id) catch {
         output.err("Could not remove the links for {s}: {s}", .{ name, db.errMsg() });
         return error.Aborted;
     };
@@ -161,7 +310,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Land the DB writes before any Cellar teardown so a SIGKILL
     // between filesystem and database steps can't leave a keg row
     // pointing at a Cellar dir that is gone. CASCADE drops deps/links rows.
-    finalizeDbRemoval(&db, keg_id, name) catch {
+    finalizeDbRemoval(db, keg.id, name) catch {
         output.warnAlways("{s} is still installed, but its links and any service were removed. Run `mt link {s}` to restore the links, or `mt uninstall {s}` to retry.", .{ name, name, name });
         return error.Aborted;
     };
@@ -181,7 +330,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 // A link is indivisible: unlinking it cuts off every version
                 // behind it, so the DB has to stand in for the emptiness
                 // check the directory branch gets for free.
-                if (!nameStillRecorded(&db, name))
+                if (!nameStillRecorded(db, name))
                     std.Io.Dir.cwd().deleteFile(ctx.io, parent_path) catch {};
             } else {
                 std.Io.Dir.deleteDirAbsolute(ctx.io, parent_path) catch {}; // Only succeeds when empty; sibling versions keep the dir alive.
@@ -283,6 +432,42 @@ fn testKegPresent(db: *sqlite.Database, keg_id: i64) !bool {
     return try sel.step();
 }
 
+test "batchIndex matches the batch's own rows, not every row sharing a name" {
+    const batch = [_]Target{
+        // A cask removes no keg, even one with the same name.
+        .{ .name = "foo", .keg = null },
+        .{ .name = "foo", .keg = .{ .id = 1, .version = "1.0", .revision = 0 } },
+    };
+    try testing.expectEqual(@as(?usize, 1), batchIndex(&batch, 1));
+    // Another installed version of foo stays behind.
+    try testing.expectEqual(@as(?usize, null), batchIndex(&batch, 2));
+    try testing.expectEqual(@as(?usize, null), batchIndex(&.{}, 1));
+}
+
+fn expectOrder(expected: []const usize, n: usize, edges: []const Edge) !void {
+    const order = try removalOrder(testing.allocator, n, edges);
+    defer testing.allocator.free(order);
+    try testing.expectEqualSlices(usize, expected, order);
+}
+
+test "removalOrder puts every dependent ahead of its dependency and keeps argv order otherwise" {
+    try expectOrder(&.{}, 0, &.{});
+    try expectOrder(&.{ 0, 1, 2 }, 3, &.{});
+    // 1 depends on 0.
+    try expectOrder(&.{ 1, 0 }, 2, &.{.{ .dep = 0, .dependent = 1 }});
+    // Chain 2 -> 1 -> 0, typed dependency-first.
+    try expectOrder(&.{ 2, 1, 0 }, 3, &.{ .{ .dep = 0, .dependent = 1 }, .{ .dep = 1, .dependent = 2 } });
+    // Both 1 and 2 need 0; the unrelated 3 keeps its place after them.
+    try expectOrder(&.{ 1, 2, 0, 3 }, 4, &.{ .{ .dep = 0, .dependent = 1 }, .{ .dep = 0, .dependent = 2 } });
+    // A self-edge can't block its own keg.
+    try expectOrder(&.{ 0, 1 }, 2, &.{.{ .dep = 0, .dependent = 0 }});
+}
+
+test "removalOrder breaks a dependency cycle in argv order instead of stalling" {
+    // The unrelated 2 is ready first; the cycle then falls back to argv order.
+    try expectOrder(&.{ 2, 0, 1 }, 3, &.{ .{ .dep = 0, .dependent = 1 }, .{ .dep = 1, .dependent = 0 } });
+}
+
 test "finalizeDbRemoval drops the kegs row and leaves the store claim for the orphan sweep" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -344,29 +529,22 @@ test "finalizeDbRemoval reports a failed BEGIN and leaves a transaction it does 
     try testing.expect(try testKegPresent(&db, keg_id));
 }
 
+/// `--force` overrides dependents, not a live app: the installer refuses to
+/// remove one regardless, and by then the stored phases have already acted
+/// on the version that is staying.
+fn refuseIfRunning(io: std.Io, token: []const u8, info: *const cask_mod.InstalledCask) error{Aborted}!void {
+    const app_path = info.appPath() orelse return;
+    if (!cask_mod.CaskInstaller.isAppRunningPub(io, app_path)) return;
+    output.err("{s} appears to be running. Quit the app first.", .{token});
+    return error.Aborted;
+}
+
 /// Uninstall a cask by token.
-fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, force: bool, dry_run: bool) !void {
+fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, cache_dir: []const u8, force: bool, dry_run: bool) !void {
     const info = cask_mod.lookupInstalled(db, token) orelse {
         output.err("{s} is not installed as a cask", .{token});
         return error.Aborted;
     };
-
-    // `--force` overrides dependents, not a live app: the installer refuses
-    // to remove one regardless, and by then the stored phases have already
-    // acted on the version that is staying.
-    if (info.appPath()) |app_path| {
-        if (cask_mod.CaskInstaller.isAppRunningPub(ctx.io, app_path)) {
-            output.err("{s} appears to be running. Quit the app first.", .{token});
-            return error.Aborted;
-        }
-    }
-
-    // Resolved before the preview: a malformed MALT_CACHE fails both runs alike.
-    const cache_dir = atomic.maltCacheDir(allocator) catch {
-        output.err("Failed to resolve cache directory", .{});
-        return error.Aborted;
-    };
-    defer allocator.free(cache_dir);
 
     // Stored flight steps are recorded side effects, not checks, so the
     // preview stops before them.
@@ -374,6 +552,10 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
         output.info("Dry run: would uninstall cask {s} {s}", .{ token, info.version() });
         return;
     }
+
+    // Again, right before the stored steps: an earlier removal in the batch
+    // may have started it.
+    try refuseIfRunning(ctx.io, token, &info);
 
     output.info("Uninstalling cask {s}...", .{token});
     artefact_cache.adoptLegacy(ctx.io, prefix, cache_dir);
@@ -411,4 +593,51 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
     if (stored) |*s| _ = flight.runPhase(&installer, token, info.version(), s.get(.uninstall_postflight), .uninstall_postflight, sink_mod.terminal);
 
     output.success("{s} uninstalled", .{token});
+}
+
+test "uninstallCask refuses an app started after the batch checked it, before any stored step runs" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // Never created: only the stand-in's argv carries it.
+    const app_path = "/nonexistent/malt-uninstall-recheck/Recheck.app";
+    const cask_json =
+        \\{"token":"recheck","name":["Recheck"],"version":"1.0","desc":"","homepage":"",
+        \\ "url":"https://example.invalid/recheck.dmg",
+        \\ "sha256":"00000000000000000000000000000000000000000000000000000000deadbeef",
+        \\ "auto_updates":false,"artifacts":[{"app":["Recheck.app"]}]}
+    ;
+    var parsed = try cask_mod.parseCask(testing.allocator, cask_json);
+    defer parsed.deinit();
+    try cask_mod.recordInstall(&db, &parsed, app_path, null);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = app_ctx.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+    // Stands in for the app: `pgrep -f` sees the path in argv, and cat
+    // blocks on its open stdin until the kill.
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/bin/cat", "-", app_path },
+        .stdin = .pipe,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    defer child.kill(io);
+    var tries: usize = 0;
+    // Spawn to exec is async: poll every 10ms, for up to 3s.
+    while (tries < 300 and !cask_mod.CaskInstaller.isAppRunningPub(io, app_path)) : (tries += 1)
+        std.Io.sleep(io, .fromNanoseconds(10 * std.time.ns_per_ms), .awake) catch {};
+    try testing.expect(cask_mod.CaskInstaller.isAppRunningPub(io, app_path));
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+    // Aborted, not the installer's own AppRunning: that refusal only comes
+    // after the stored uninstall steps have run.
+    try testing.expectError(error.Aborted, uninstallCask(&ctx, testing.allocator, "recheck", &db, "/nonexistent/malt-uninstall-recheck/prefix", "/nonexistent/malt-uninstall-recheck/cache", false, false));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "recheck appears to be running") != null);
+    try testing.expect(cask_mod.isInstalled(&db, "recheck"));
 }
