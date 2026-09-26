@@ -224,6 +224,9 @@ jobs:
       - name: Regression guard - uninstall fails loud on a database error and keeps the package
         run: ./scripts/regressions/uninstall-aborts-on-db-failure-uninstall-swallows-db-failures-and-exits-zero.sh
 
+      - name: Regression guard - uninstall --dry-run previews and keeps the package
+        run: ./scripts/regressions/uninstall-dry-run-keeps-package-uninstall-dry-run-removes-the-package.sh
+
       # Needs root to mint the setuid copy; the runner's passwordless sudo
       # keeps SUDO_USER set so the probe runs as the unprivileged caller.
       - name: Regression guard - setuid wrapper is refused
