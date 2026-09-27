@@ -454,6 +454,47 @@ test "execute --json --output - emits to stdout instead of a default file" {
     try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "]}\n"));
 }
 
+test "execute --json keeps a control-byte local keg but prints no rebuild hint for it" {
+    // A row stored before install screened paths: the scrubber would pass
+    // the UTF-8 C1 in the hint, and install refuses that path anyway.
+    var s = try Scratch.init(testing.allocator, "json_local_control");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, tap, install_reason) VALUES
+            \\  ('la', '/w/la.rb', '1.0', 'a', '/c/la', 'local', 'direct'),
+            \\  ('lx', '/w/x' || char(155) || '2Jy/lx.rb', '1.0', 'b', '/c/lx', 'local', 'direct');
+        );
+    }
+
+    const prior = withJson();
+    defer restoreJson(prior);
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
+
+    // The JSON record is unchanged: it is data, not a terminal line.
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"lx\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "\xc2\x9b") == null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "mt install --local '/w/x") == null);
+    // Named with its path, escaped, as the text backup does.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
+    // A clean local keg keeps its hint.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "la is a local formula") != null);
+}
+
 // --- --services round-trip -------------------------------------------
 //
 // `mt bundle export` populates services into the manifest; the JSON

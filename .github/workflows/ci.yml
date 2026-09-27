@@ -137,6 +137,9 @@ jobs:
       - name: Regression guard - a local recipe's backup note never splits into a restore entry
         run: ./scripts/regressions/local-note-injection-backup-local-note-path-newline-splits-into-restore-line.sh
 
+      - name: Regression guard - a local recipe's backup note never carries a terminal control byte
+        run: ./scripts/regressions/local-note-control-byte-backup-fitsoneline-duplicates-control-byte-predicate.sh
+
       - name: Regression guard - local kegs stay out of bundle and backup exports
         run: ./scripts/regressions/local-kegs-stay-out-of-exports-local-kegs-exported-as-core-packages.sh
 

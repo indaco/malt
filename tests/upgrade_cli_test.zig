@@ -419,3 +419,35 @@ test "execute --dry-run skips a local keg and warms the snapshot with the core k
     try testing.expect(std.mem.indexOf(u8, body, "\"wget\"") != null);
     try testing.expect(std.mem.indexOf(u8, body, "older") == null);
 }
+
+test "execute points a named local keg at a shell-quoted rebuild, and names a control-byte one" {
+    // A row stored before install screened recipe paths: the scrubber passes
+    // a UTF-8 C1, and install refuses that path anyway. An unquoted path
+    // with a space or quote would not paste back as one argument.
+    var s = try Scratch.init(testing.allocator, "named_local_hint");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path) VALUES
+            \\  ('la', '/w/my dir/l''a.rb', '1.0', 0, 'local', 'a', '/c/la/1.0'),
+            \\  ('lx', '/w/x' || char(155) || '2Jy/lx.rb', '1.0', 0, 'local', 'b', '/c/lx/1.0');
+        );
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    var ctx = malt.app_ctx.debug_ctx;
+    ctx.offline = true;
+    upgrade.execute(&ctx, testing.allocator, &.{ "la", "lx" }) catch {};
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "\xc2\x9b") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "mt install --local '/w/my dir/l'\\''a.rb'") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
+}

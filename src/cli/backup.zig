@@ -12,7 +12,7 @@
 //!   formula user/repo/tool   (a third-party tap package: its owning tap)
 //!   cask user/repo/app       (also a tap keg built from the tap's Casks/)
 //!   # local lx /src/lx.rb    (a `--local` keg: restore can only point at it;
-//!                             left out when its name or path holds a line break)
+//!                             left out when its name or path holds a control character)
 //!
 //! `--versions` adds the installed version as a second field. It is a record,
 //! not a pin: restore installs the current release.
@@ -23,6 +23,7 @@ const AppCtx = @import("../app_ctx.zig").AppCtx;
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const path_component = @import("../fs/path_component.zig");
 const path_write = @import("../fs/path_write.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
@@ -156,14 +157,15 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
             // as a rebuild hint.
             if (install_args.isLocalTap(tap)) {
                 const path = if (fstmt.columnText(4)) |p| std.mem.sliceTo(p, 0) else "";
-                // A line break would turn the rest of the note into an
-                // entry restore installs. With no note left, nothing else
-                // records the keg, so say so even under --quiet.
-                if (fitsOneLine(name) and fitsOneLine(path)) {
+                // A line break would turn the rest of the note into an entry
+                // restore installs; ESC or C1 would reach the terminal. With
+                // no note left, nothing else records the keg, so say so even
+                // under --quiet.
+                if (install_args.localRecipePrintable(name, path)) {
                     w.print(local_note_prefix ++ "{s} {s}\n", .{ name, path }) catch return RowsError.WriteFailed;
                     warnLocal(name, path);
                 } else {
-                    output.warnAlways("{s} is a local formula whose name or recipe path holds a line break; it is left out of the backup", .{name});
+                    output.warnAlways(install_args.unprintable_local_fmt ++ "; it is left out of the backup", .{ std.zig.fmtString(name), std.zig.fmtString(path) });
                 }
                 continue;
             }
@@ -218,11 +220,6 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
 }
 
 const local_note_prefix = "# local ";
-
-/// Screens CR too: editors break a hand-edited line on a bare CR.
-fn fitsOneLine(s: []const u8) bool {
-    return std.mem.indexOfAny(u8, s, "\r\n") == null;
-}
 
 /// A local keg's service is left out with its package: on another machine the
 /// name would start an unrelated namesake's service.
@@ -303,7 +300,11 @@ fn executeJson(
                     return Error.WriteFailed;
                 locals.append(a, .{ .name = name, .version = version, .path = path }) catch
                     return Error.WriteFailed;
-                warnLocal(name, path);
+                // The JSON entry is data; only the terminal hint needs the screen.
+                if (install_args.localRecipePrintable(name, path))
+                    warnLocal(name, path)
+                else
+                    output.warn(install_args.unprintable_local_fmt ++ "; the backup keeps it without a rebuild command", .{ std.zig.fmtString(name), std.zig.fmtString(path) });
                 continue;
             }
             const tap = a.dupe(u8, install_args.thirdPartyTap(tap_label)) catch
@@ -514,6 +515,7 @@ pub fn writeEntry(w: *std.Io.Writer, kind: Kind, name: []const u8, version: []co
 /// Parse a single line. Returns null for blank lines, comments, and any line
 /// that does not match the canonical `<kind> <name> [<version>]` shape.
 /// The returned `name` and `version` slices point into `line`.
+/// Unscreened; `parseBackup` drops an entry holding a control byte.
 pub fn parseLine(line: []const u8) ?Entry {
     var s = std.mem.trim(u8, line, " \t\r\n");
     if (s.len == 0) return null;
@@ -548,6 +550,8 @@ pub const LocalNote = struct { name: []const u8, path: []const u8 };
 
 /// Recognise the `# local <name> <path>` note `writeRows` leaves for a
 /// `--local` keg. The path is the rest of the line, spaces included.
+/// Unscreened so restore can name a note it refuses; check
+/// `install_args.localRecipePrintable` before printing one.
 pub fn parseLocalNote(line: []const u8) ?LocalNote {
     const s = std.mem.trim(u8, line, " \t\r\n");
     if (!std.mem.startsWith(u8, s, local_note_prefix)) return null;
@@ -567,9 +571,14 @@ pub fn parseBackup(allocator: std.mem.Allocator, text: []const u8) ![]Entry {
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
-        if (parseLine(line)) |entry| {
-            try list.append(allocator, entry);
+        const entry = parseLine(line) orelse continue;
+        // Restore prints every entry and install refuses these names, so a
+        // shared or hand-edited line is named, escaped, and left out.
+        if (path_component.hasControlByte(entry.name) or path_component.hasControlByte(entry.version)) {
+            output.warnAlways("Skipping `{f}`: it holds a control character", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            continue;
         }
+        try list.append(allocator, entry);
     }
     return try list.toOwnedSlice(allocator);
 }
@@ -860,6 +869,59 @@ test "writeRows drops a local note whose name or path would split into a restora
     try std.testing.expectEqual(@as(usize, 0), entries.len);
 }
 
+test "writeRows drops a local note that would print a terminal control byte" {
+    // Rows stored before install screened names and paths can hold ESC or a
+    // UTF-8 C1, which the display scrubber passes as a valid sequence.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, tap) VALUES
+        \\  ('la', '/w/x' || char(27) || '[2Jy/la.rb', '1.0', 'a', '/c/la', 'local'),
+        \\  ('lb', '/w/x' || char(155) || '2Jy/lb.rb', '1.0', 'b', '/c/lb', 'local'),
+        \\  ('l' || char(27) || 'c', '/w/lc.rb', '1.0', 'c', '/c/lc', 'local'),
+        \\  ('ld' || char(128), '/w/ld.rb', '1.0', 'd', '/c/ld', 'local'),
+        \\  ('le', '/w/e' || char(9) || 'x/le.rb', '1.0', 'e', '/c/le', 'local');
+    );
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    const count = try writeRows(&aw.writer, &db, true, true);
+
+    try std.testing.expectEqual(@as(usize, 0), count);
+    try std.testing.expectEqualStrings("", aw.written());
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\xc2\x80") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\xc2\x9b") == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
+    // Name and recipe path, escaped: after `purge --wipe` this line is the
+    // only record of where the recipe was.
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "l\\x1bc (/w/lc.rb) is a local formula whose name or recipe path holds a control character") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ld\\xc2\\x80 (/w/ld.rb) is a local formula") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "lb (/w/x\\xc2\\x9b2Jy/lb.rb) is a local formula") != null);
+}
+
+test "writeRows keeps a local note whose path is clean or plain UTF-8" {
+    // The screen targets control bytes, not every non-ASCII path.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, tap) VALUES
+        \\  ('la', '/w/la.rb', '1.0', 'a', '/c/la', 'local'),
+        \\  ('lb', '/w/caf' || char(233) || '/lb.rb', '1.0', 'b', '/c/lb', 'local');
+    );
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    _ = try writeRows(&aw.writer, &db, true, true);
+
+    try std.testing.expectEqualStrings("# local la /w/la.rb\n# local lb /w/caf\xc3\xa9/lb.rb\n", aw.written());
+}
+
 test "writeRows still names a dropped local keg under --quiet" {
     // `backup -q` and `purge --wipe -q` would otherwise lose the keg without
     // a trace: the note is gone, and wipe then deletes the row.
@@ -881,7 +943,7 @@ test "writeRows still names a dropped local keg under --quiet" {
 
     _ = try writeRows(&aw.writer, &db, true, false);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "lx is a local formula whose name or recipe path holds a line break") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "lx (/w/x\\ry/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
     // A hint built from the scrubbed path would name a file that does not exist.
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "mt install --local") == null);
 }

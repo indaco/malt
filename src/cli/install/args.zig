@@ -74,6 +74,24 @@ pub fn isLocalTap(tap_label: []const u8) bool {
     return std.mem.eql(u8, tap_label, local_tap_label);
 }
 
+/// Whether a `--local` keg's rebuild hint may be printed. Install refuses
+/// these bytes, so the hint could never work; rows stored before it did
+/// still carry them.
+pub fn localRecipePrintable(name: []const u8, path: []const u8) bool {
+    return !path_component.hasControlByte(name) and !path_component.hasControlByte(path);
+}
+
+/// Stands in for the rebuild hint. Both slots take `std.zig.fmtString`:
+/// the display scrubber passes a UTF-8 C1.
+pub const unprintable_local_fmt = "{f} ({f}) is a local formula whose name or recipe path holds a control character";
+
+test "localRecipePrintable refuses a control byte in the name or path, not UTF-8" {
+    try std.testing.expect(localRecipePrintable("lx", "/w/caf\xc3\xa9/lx.rb"));
+    try std.testing.expect(!localRecipePrintable("lx", "/w/x\xc2\x9by/lx.rb"));
+    try std.testing.expect(!localRecipePrintable("l\x1bx", "/w/lx.rb"));
+    try std.testing.expect(!localRecipePrintable("lx", "/w/x\x7fy/lx.rb"));
+}
+
 /// True when `tap_label` represents one of Homebrew's core taps. Empty
 /// or NULL labels also count as core so legacy keg rows that predate
 /// the tap-tracking column don't get mis-routed through the tap path.

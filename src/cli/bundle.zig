@@ -751,7 +751,11 @@ fn populateFromInstalled(
         // a `--local` recipe only rebuilds from its file on this machine.
         if (install_args.isLocalTap(if (f.columnText(1)) |p| std.mem.sliceTo(p, 0) else "")) {
             const path = if (f.columnText(3)) |p| std.mem.sliceTo(p, 0) else "";
-            output.warnAlways("{s} is a local formula; bundle skips it - rebuild with `mt install --local {f}`", .{ std.mem.sliceTo(n, 0), output.shellQuoted(path) });
+            const name = std.mem.sliceTo(n, 0);
+            if (install_args.localRecipePrintable(name, path))
+                output.warnAlways("{s} is a local formula; bundle skips it - rebuild with `mt install --local {f}`", .{ name, output.shellQuoted(path) })
+            else
+                output.warnAlways(install_args.unprintable_local_fmt ++ "; bundle skips it", .{ std.zig.fmtString(name), std.zig.fmtString(path) });
             continue;
         }
         const name = qualifiedName(a, f.columnText(1), n) catch return BundleError.DatabaseError;

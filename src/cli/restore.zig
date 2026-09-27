@@ -9,6 +9,7 @@ const AppCtx = @import("../app_ctx.zig").AppCtx;
 const output = @import("../ui/output.zig");
 const signals = @import("../core/signals.zig");
 const backup_mod = @import("backup.zig");
+const install_args = @import("install/args.zig");
 const help = @import("help.zig");
 const install_mod = @import("install.zig");
 const services_mod = @import("services.zig");
@@ -73,7 +74,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         const note = backup_mod.parseLocalNote(line) orelse continue;
-        backup_mod.warnLocal(note.name, note.path);
+        if (install_args.localRecipePrintable(note.name, note.path))
+            backup_mod.warnLocal(note.name, note.path)
+        else
+            output.warn(install_args.unprintable_local_fmt ++ "; restore skips it", .{ std.zig.fmtString(note.name), std.zig.fmtString(note.path) });
     }
 
     if (std.mem.indexOf(u8, text, backup_mod.versioned_format_marker) == null) warnLegacyPins(entries);
