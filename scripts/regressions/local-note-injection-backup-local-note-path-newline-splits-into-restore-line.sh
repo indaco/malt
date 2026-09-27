@@ -50,7 +50,7 @@ check() {
   fi
   # With the note gone, only stderr names the keg, and --quiet must not hide it.
   err=$("$BIN" backup -q -o "$tmp/b.txt" 2>&1 >/dev/null) || fail "$1: quiet backup failed"
-  grep -q 'holds a line break' <<<"$err" || fail "$1: quiet backup dropped the keg without a warning"
+  grep -q 'holds a control character' <<<"$err" || fail "$1: quiet backup dropped the keg without a warning"
   out=$("$BIN" restore --dry-run "$tmp/b.txt" 2>&1 || true)
   if grep -q 'formula evil' <<<"$out"; then
     fail "$1: restore would install the injected entry"

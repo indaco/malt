@@ -620,7 +620,12 @@ fn upgradeFormula(
     // ahead of the pin: a pin can be lifted, a missing upstream cannot, so
     // the keg reports the same way with or without --force.
     if (install_args_mod.isLocalTap(old.tap)) {
-        if (!bulk) output.skip("{s} was installed from a local formula; re-run `mt install --local '{s}'` to update it", .{ name, old.full_name });
+        if (!bulk) {
+            if (install_args_mod.localRecipePrintable(name, old.full_name))
+                output.skip("{s} was installed from a local formula; re-run `mt install --local {f}` to update it", .{ name, output.shellQuoted(old.full_name) })
+            else
+                output.skip(install_args_mod.unprintable_local_fmt ++ "; move or rename the recipe, then re-run `mt install --local` on it", .{ std.zig.fmtString(name), std.zig.fmtString(old.full_name) });
+        }
         output.emitNdjsonEvent(.local, name, null);
         return .local;
     }

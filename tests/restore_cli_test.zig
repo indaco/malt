@@ -299,6 +299,50 @@ test "execute points each local note at its rebuild command, even with no entrie
     try testing.expect(std.mem.indexOf(u8, captured.items, "No entries found") != null);
 }
 
+test "execute names a local note holding a control byte instead of echoing it" {
+    // A backup written before notes were screened; the scrubber passes a
+    // UTF-8 C1, and install refuses that path anyway.
+    var s = try Scratch.init(testing.allocator, "local_note_control");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "# local la /w/la.rb\r\n" ++
+        "# local lx /w/x\xc2\x9b2Jy/lx.rb\r\n" ++
+        "# local l\x1by /w/ly.rb\n");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCapture(path, &captured);
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "\xc2\x9b") == null);
+    try testing.expect(std.mem.indexOfScalar(u8, captured.items, 0x1b) == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character; restore skips it") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "l\\x1by (/w/ly.rb) is a local formula whose name or recipe path holds a control character") != null);
+    // A clean note in the same CRLF file keeps its hint.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "mt install --local '/w/la.rb'") != null);
+}
+
+test "execute never echoes a control byte from a formula or cask line" {
+    // No versioned header, so the legacy-pin warning runs too: every line
+    // restore prints comes from the file's author.
+    var s = try Scratch.init(testing.allocator, "entry_control");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "formula foo 1.0\xc2\x9b2J\n" ++
+        "formula bar@\xc2\x9d0;x\xc2\x9c\n" ++
+        "formula wget@1.2\n");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCapture(path, &captured);
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "\xc2") == null);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, captured.items, "holds a control character"));
+    // The clean line still restores.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "formula wget@1.2") != null);
+}
+
 test "execute treats unknown kinds as comments and reports zero entries" {
     // backup.parseBackup is line-tolerant: anything that isn't a
     // recognised `formula <name>` / `cask <name>` is silently dropped,

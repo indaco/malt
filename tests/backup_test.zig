@@ -137,6 +137,16 @@ test "parseLocalNote ignores every other comment and malformed note" {
     try testing.expect(backup.parseLine("# local lx /src/lx.rb") == null);
 }
 
+test "parseLocalNote keeps a control-byte note so restore can name the keg it skips" {
+    const c1 = backup.parseLocalNote("# local lx /w/x\xc2\x9by.rb").?;
+    try testing.expectEqualStrings("/w/x\xc2\x9by.rb", c1.path);
+    const esc = backup.parseLocalNote("# local l\x1bx /w/lx.rb").?;
+    try testing.expectEqualStrings("l\x1bx", esc.name);
+    // Plain UTF-8 in a CRLF file parses too.
+    const n = backup.parseLocalNote("# local lx /w/caf\xc3\xa9/lx.rb\r\n").?;
+    try testing.expectEqualStrings("/w/caf\xc3\xa9/lx.rb", n.path);
+}
+
 test "parseLine tolerates trailing carriage returns and surrounding whitespace" {
     const a = backup.parseLine("  formula git  \r").?;
     try testing.expectEqualStrings("git", a.name);
@@ -188,6 +198,38 @@ test "parseBackup ignores comments and parses every data line in order" {
     try testing.expectEqual(backup.Kind.cask, entries[3].kind);
     try testing.expectEqualStrings("slack", entries[3].name);
     try testing.expectEqualStrings("4.36.140", entries[3].version);
+}
+
+test "parseBackup skips an entry whose name or version holds a control byte, and says so" {
+    // A shared or hand-edited file: restore would echo the byte, and
+    // install refuses the name anyway.
+    const text =
+        "formula foo 1.0\xc2\x9b2J\n" ++
+        "formula bar@\xc2\x9d0;x\xc2\x9c\n" ++
+        "cask b\x1baz\n" ++
+        "formula caf\xc3\xa9 1.0\n";
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(true);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+
+    const entries = try backup.parseBackup(testing.allocator, text);
+    defer testing.allocator.free(entries);
+
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    try testing.expectEqualStrings("caf\xc3\xa9", entries[0].name);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "\xc2") == null);
+    try testing.expect(std.mem.indexOfScalar(u8, captured.items, 0x1b) == null);
+    // Named even under --quiet: restore would otherwise install less than
+    // the file lists without a trace.
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, captured.items, "holds a control character"));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "formula foo 1.0\\xc2\\x9b2J") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "cask b\\x1baz") != null);
 }
 
 test "parseBackup handles an empty input" {

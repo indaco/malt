@@ -796,6 +796,36 @@ test "bundle create names tap packages by their tap, and cleanup keeps them" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "nothing to clean up") != null);
 }
 
+test "bundle create names a control-byte local keg without echoing the byte" {
+    // A row stored before install screened recipe paths: the scrubber passes
+    // a UTF-8 C1, and install refuses the hint's path anyway.
+    var s = try Scratch.init(testing.allocator, "create_local_control");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, install_reason) " ++
+            "VALUES ('lx', '/w/x' || char(155) || '2Jy/lx.rb', '1.0', 'd', '/c/lx', 'local', 'direct');");
+    }
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    var warned: std.ArrayList(u8) = .empty;
+    defer warned.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &warned);
+    defer output.endStderrCapture();
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", out_path });
+
+    try testing.expect(std.mem.indexOf(u8, warned.items, "\xc2\x9b") == null);
+    try testing.expect(std.mem.indexOf(u8, warned.items, "mt install --local") == null);
+    try testing.expect(std.mem.indexOf(u8, warned.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character; bundle skips it") != null);
+}
+
 test "bundle cleanup never plans a local keg, even from an empty Brewfile" {
     // No Brewfile can declare a `--local` recipe, so no Brewfile owns one.
     var s = try Scratch.init(testing.allocator, "cleanup_skips_local");

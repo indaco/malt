@@ -244,3 +244,40 @@ test "execute points a core cask at uninstall then install instead of forcing it
     defer testing.allocator.free(lock_file);
     try testing.expect(!pathExists(lock_file));
 }
+
+test "execute names a control-byte local keg without echoing the byte" {
+    // A row stored before install screened recipe paths: the scrubber passes
+    // a UTF-8 C1, and install refuses the hint's path anyway.
+    const prefix = try setupPrefix("local_control");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+        _ = c.unsetenv("MALT_PREFIX");
+    }
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    try test_io.cwd().createDirPath(std.Options.debug_io, std.fs.path.dirname(db_path).?);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap) " ++
+            "VALUES ('lx', '/w/x' || char(155) || '2Jy/lx.rb', '1.0', 'a', '/c/lx', 'local');");
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), &.{"lx"}));
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "\xc2\x9b") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "mt install --local --force '") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
+}
