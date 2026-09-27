@@ -543,8 +543,10 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
     // Required string fields
     const name = getString(root, "name") orelse return FormulaError.MissingField;
     // The embedded name never re-passes the requested-name screen yet becomes
-    // every keg/cellar/receipt path; full_name is tap-qualified (`/`), so skip.
-    if (!path_component.isPathComponent(name)) return FormulaError.UnsafePathComponent;
+    // every keg/cellar/receipt path and a line-framed identity (progress,
+    // `list`, sidecars); full_name is tap-qualified (`/`), so skip.
+    if (!path_component.isPathComponent(name) or path_component.hasControlByte(name))
+        return FormulaError.UnsafePathComponent;
     const full_name = getString(root, "full_name") orelse name;
     const tap = getString(root, "tap") orelse "";
     const desc = getString(root, "desc") orelse "";
@@ -571,8 +573,9 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
     };
     // version feeds pkg_version → the revision-tagged cellar/keg dir, so it
     // must stay a single component. Empty included: it collapses the keg path
-    // to the package dir, which no `<name>/<version>` reader can resolve.
-    if (!path_component.isPathComponent(version_str))
+    // to the package dir, which no `<name>/<version>` reader can resolve. It is
+    // also printed as part of the keg identity, so no control bytes either.
+    if (!path_component.isPathComponent(version_str) or path_component.hasControlByte(version_str))
         return FormulaError.UnsafePathComponent;
 
     // dependencies
@@ -1069,6 +1072,27 @@ test "parseFormula rejects path separators in embedded name or version" {
         \\{"name":"ok","versions":{"stable":"../1.0"}}
         ,
         \\{"name":"ok","versions":{"stable":"1..0"}}
+        ,
+        // A control byte splits every line-framed surface the identity reaches.
+        \\{"name":"a\nb","versions":{"stable":"1.0"}}
+        ,
+        \\{"name":"a\rb","versions":{"stable":"1.0"}}
+        ,
+        \\{"name":"a\u001bb","versions":{"stable":"1.0"}}
+        ,
+        \\{"name":"a\u007fb","versions":{"stable":"1.0"}}
+        ,
+        \\{"name":"a\u009bb","versions":{"stable":"1.0"}}
+        ,
+        \\{"name":"ok","versions":{"stable":"1.0\n"}}
+        ,
+        \\{"name":"ok","versions":{"stable":"1.0\r"}}
+        ,
+        \\{"name":"ok","versions":{"stable":"1.0\u001b"}}
+        ,
+        \\{"name":"ok","versions":{"stable":"1.0\u007f"}}
+        ,
+        \\{"name":"ok","versions":{"stable":"1.0\u009b"}}
         ,
     };
     for (bad) |json| {

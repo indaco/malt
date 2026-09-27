@@ -155,8 +155,10 @@ pub fn parseCaskWithMajor(allocator: std.mem.Allocator, json_bytes: []const u8, 
     // `token` and `version` are interpolated verbatim into Caskroom,
     // cache, and mount paths, so a value that escapes its own path
     // component must be rejected here — the one ingestion choke point —
-    // before any sink sees it. A compromised tap is the threat.
+    // before any sink sees it. A compromised tap is the threat. They are also
+    // a line-framed identity (progress, `list`, sidecars): no control bytes.
     if (!path_component.isPathComponent(token) or !path_component.isPathComponent(version)) return CaskError.ParseFailed;
+    if (path_component.hasControlByte(token) or path_component.hasControlByte(version)) return CaskError.ParseFailed;
     // Artifact strings are the *other* half of the tap-controlled path surface:
     // `app` lands in `<app_dir>/<name>` ahead of a `deleteTree`, and `binary`
     // resolves under the keg and symlinks into `<prefix>/bin`. Screen them at
@@ -2587,6 +2589,27 @@ test "parseCask rejects path-traversal in token or version" {
         ,
         \\{"token":"ok","version":"1.0\u0000","url":"https://e/x.dmg"}
         ,
+        // A control byte splits every line-framed surface the identity reaches.
+        \\{"token":"a\nb","version":"1.0","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"a\rb","version":"1.0","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"a\u001bb","version":"1.0","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"a\u007fb","version":"1.0","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"a\u009bb","version":"1.0","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"ok","version":"1.0\n","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"ok","version":"1.0\r","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"ok","version":"1.0\u001b","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"ok","version":"1.0\u007f","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"ok","version":"1.0\u009b","url":"https://e/x.dmg"}
+        ,
     };
     for (bad) |json| {
         try std.testing.expectError(error.ParseFailed, parseCask(a, json));
@@ -3404,6 +3427,16 @@ test "variation overlay is screened like the top-level fields" {
         \\{"token":"t","version":"1","url":"https://e/x.dmg",
         \\ "variations":{"arm64_sonoma":{"artifacts":[{"app":["../Evil.app"]}]},
         \\               "sonoma":{"artifacts":[{"app":["../Evil.app"]}]}}}
+    ;
+    try std.testing.expectError(CaskError.ParseFailed, parseCaskWithMajor(std.testing.allocator, json, 14));
+}
+
+test "a variation cannot smuggle a control byte into the version" {
+    // The identity screen must run after the overlay, or a host-specific
+    // version would bypass it.
+    const json =
+        \\{"token":"t","version":"1","url":"https://e/x.dmg",
+        \\ "variations":{"arm64_sonoma":{"version":"2\n"},"sonoma":{"version":"2\n"}}}
     ;
     try std.testing.expectError(CaskError.ParseFailed, parseCaskWithMajor(std.testing.allocator, json, 14));
 }
