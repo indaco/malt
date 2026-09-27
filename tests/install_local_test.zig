@@ -602,6 +602,32 @@ test "execute --local --dry-run with a valid .rb prints a plan" {
     try install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", "--quiet", rb_path });
 }
 
+test "execute --local --dry-run refuses a recipe whose directory holds a line break" {
+    // The realpath becomes `kegs.full_name` and the security warning; a line
+    // break in any directory component would split both. The basename is
+    // clean, so only the realpath screen can refuse this one - and the dry
+    // run proves it fires before the plan, not at the Cellar write.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/x\nformula evil", .{prefix});
+    defer testing.allocator.free(dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{dir});
+    defer testing.allocator.free(rb_path);
+    try writeFile(rb_path, sample_rb);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", "--quiet", rb_path }),
+    );
+}
+
 test "execute autodetects a .rb path even without --local (tilde-style hint)" {
     // Shape-based detection: a `./`-prefixed or absolute `.rb` path is
     // routed through installLocalFormula without the explicit flag. The
