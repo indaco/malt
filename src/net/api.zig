@@ -76,8 +76,9 @@ pub fn extractNames(
             );
             for (parsed) |e| {
                 // Drop tap-controlled names that aren't a clean path component;
-                // the search index feeds path-building sinks downstream.
-                if (!path_component.isPathComponent(e.name)) continue;
+                // the search index feeds path-building sinks downstream, and
+                // `search` prints it raw.
+                if (!path_component.isPathComponent(e.name) or path_component.hasControlByte(e.name)) continue;
                 try out.appendSlice(allocator, e.name);
                 try out.append(allocator, '\n');
             }
@@ -91,7 +92,7 @@ pub fn extractNames(
                 .{ .ignore_unknown_fields = true },
             );
             for (parsed) |e| {
-                if (!path_component.isPathComponent(e.token)) continue;
+                if (!path_component.isPathComponent(e.token) or path_component.hasControlByte(e.token)) continue;
                 try out.appendSlice(allocator, e.token);
                 try out.append(allocator, '\n');
             }
@@ -217,9 +218,9 @@ fn appendVersionLine(
     // it keys the outdated map against on-disk kegs.
     if (!path_component.isPathComponent(name)) return;
     // Untrusted dump fields: a tab or newline would corrupt the line-
-    // delimited side-car the consumer splits on, so drop the whole entry
-    // rather than emit a record that mis-parses downstream.
-    if (containsDelimiter(name) or containsDelimiter(stable)) return;
+    // delimited side-car, and `outdated` prints the rest raw, so drop the
+    // whole entry on any control byte.
+    if (path_component.hasControlByte(name) or path_component.hasControlByte(stable)) return;
     try out.appendSlice(allocator, name);
     try out.append(allocator, '\t');
     try out.appendSlice(allocator, stable);
@@ -232,12 +233,6 @@ fn appendVersionLine(
     const rstr = std.fmt.bufPrint(&rbuf, "{d}", .{rev}) catch unreachable;
     try out.appendSlice(allocator, rstr);
     try out.append(allocator, '\n');
-}
-
-/// True when `s` carries a tab or newline — the two bytes that delimit the
-/// version side-car. Such an entry can't be represented and is dropped.
-fn containsDelimiter(s: []const u8) bool {
-    return std.mem.indexOfAny(u8, s, "\t\n") != null;
 }
 
 /// Case-insensitive substring scan over a newline-delimited names index.
@@ -1001,6 +996,38 @@ test "extractVersions drops a name that isn't a clean path component" {
     const out = try extractVersions(testing.allocator, .formula, body);
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("ok\t2.0\t0\n", out);
+}
+
+test "extractNames drops a name holding a control byte" {
+    // `search` prints index names raw; a newline would also split one entry
+    // into two.
+    const formulas =
+        \\[{"name":"wget\u001b]52;c;x\u0007"},{"name":"x\nwget"},{"name":"c\u009b"},{"name":"redis"}]
+    ;
+    const f = try extractNames(testing.allocator, .formula, formulas);
+    defer testing.allocator.free(f);
+    try testing.expectEqualStrings("redis\n", f);
+
+    const casks =
+        \\[{"token":"a\rb"},{"token":"firefox"}]
+    ;
+    const c = try extractNames(testing.allocator, .cask, casks);
+    defer testing.allocator.free(c);
+    try testing.expectEqualStrings("firefox\n", c);
+}
+
+test "extractVersions drops a version holding any control byte" {
+    // `outdated` renders the side-car version raw, so an ESC is as bad as a
+    // delimiter.
+    const body =
+        \\[{"name":"esc","versions":{"stable":"2.0\u001b]52;c;x\u0007"}},
+        \\ {"name":"cr","versions":{"stable":"2.0\r"}},
+        \\ {"name":"c1\u009b","versions":{"stable":"2.0"}},
+        \\ {"name":"ok","versions":{"stable":"4.0"}}]
+    ;
+    const out = try extractVersions(testing.allocator, .formula, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("ok\t4.0\t0\n", out);
 }
 
 test "extractNames drops a name that isn't a clean path component" {

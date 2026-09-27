@@ -13,6 +13,7 @@ const cask_mod = @import("../../core/cask.zig");
 const formula_mod = @import("../../core/formula.zig");
 const tap_mod = @import("../../core/tap.zig");
 const forge = @import("../../core/forge.zig");
+const path_component = @import("../../fs/path_component.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
@@ -1085,6 +1086,8 @@ pub fn parseFormulaLatest(allocator: std.mem.Allocator, json_bytes: []const u8) 
         .string => |s| s,
         else => return null,
     };
+    // Printed raw by `outdated`, and `upgrade` refuses the same record.
+    if (path_component.hasControlByte(stable)) return null;
     // Qualify with the top-level revision so the fetch fallback catches a
     // revision-only bump (1.2.3 -> 1.2.3_1), mirroring the map path. Absent or
     // non-integer revision is treated as 0; an overflow degrades to the bare
@@ -2024,6 +2027,18 @@ test "parseFormulaLatest pulls versions.stable from a real-shape document" {
     const v = parseFormulaLatest(std.testing.allocator, json) orelse return error.UnexpectedNull;
     defer std.testing.allocator.free(v);
     try std.testing.expectEqualStrings("2.1.1", v);
+}
+
+test "parseFormulaLatest refuses a stable version holding a control byte" {
+    // The fetched version is printed raw by `outdated`, and `upgrade` would
+    // refuse the same record, so the row would never clear.
+    for ([_][]const u8{
+        "{\"versions\":{\"stable\":\"2.0\\u001b]52;c;x\\u0007\"}}",
+        "{\"versions\":{\"stable\":\"2.0\\r\"}}",
+        "{\"versions\":{\"stable\":\"2.0\\u009b\"}}",
+    }) |c| {
+        try std.testing.expect(parseFormulaLatest(std.testing.allocator, c) == null);
+    }
 }
 
 test "parseFormulaLatest returns null for every malformed or missing shape" {
