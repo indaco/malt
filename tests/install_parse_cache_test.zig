@@ -477,3 +477,257 @@ test "findFailedDep reads from cache without re-parsing the JSON" {
     // Lookup hit the cache; no second parse.
     try testing.expectEqual(@as(usize, 1), cache.parse_count);
 }
+
+const Seed = struct { name: []const u8, json: []const u8 };
+
+/// Seeds `seeds` into a fresh API cache and runs `collectFormulaJobs` for the
+/// first seed. Caller frees `jobs` with `freeJobs`.
+const CollectOpts = struct {
+    offline: bool = false,
+    only_deps: bool = false,
+    /// Allocator for the collect itself (and `jobs`); setup stays on `alloc`.
+    collect_alloc: ?std.mem.Allocator = null,
+};
+
+fn collectFirst(
+    alloc: std.mem.Allocator,
+    tag: []const u8,
+    seeds: []const Seed,
+    opts: CollectOpts,
+    jobs: *std.ArrayList(install_download.DownloadJob),
+) !void {
+    const offline = opts.offline;
+    const collect_alloc = opts.collect_alloc orelse alloc;
+    var tdb = try TempDb.init(alloc, tag);
+    defer tdb.deinit();
+
+    const cache_dir = try uniqueTempPath(alloc, tag);
+    defer alloc.free(cache_dir);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    for (seeds) |s| {
+        try seedCache(cache_dir, s.name, s.json);
+        if (offline) try ageCacheEntry(cache_dir, s.name);
+    }
+
+    var http_pool = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
+    defer http_pool.deinit();
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
+    defer real_http.deinit();
+    var api = malt.api.BrewApi.init(std.Options.debug_io, collect_alloc, &real_http, cache_dir);
+    api.offline = offline;
+    // A dead loopback port: any fetch that ignores offline fails fast here.
+    if (offline) api.base_url = "http://127.0.0.1:9";
+
+    var store_inst: malt.store.Store = undefined;
+    var formula_cache = deps_mod.FormulaCache.init(alloc);
+    defer formula_cache.deinit();
+
+    return install_download.collectFormulaJobs(.{
+        .io = std.Options.debug_io,
+        .allocator = collect_alloc,
+        .api = &api,
+        .http_pool = &http_pool,
+        .db = &tdb.db,
+        .store = &store_inst,
+        .cache = &formula_cache,
+        .worker_backing = alloc,
+        .only_deps = opts.only_deps,
+    }, seeds[0].name, seeds[0].json, false, jobs);
+}
+
+/// Past the API cache TTL, so only an offline read may serve it.
+fn ageCacheEntry(cache_dir: []const u8, name: []const u8) !void {
+    var path_buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
+    const f = try test_io.cwd().openFile(std.Options.debug_io, path, .{ .mode = .write_only });
+    defer f.close(std.Options.debug_io);
+    try f.setTimestamps(std.Options.debug_io, .{
+        .access_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+        .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+    });
+}
+
+fn freeJobs(alloc: std.mem.Allocator, jobs: *std.ArrayList(install_download.DownloadJob)) void {
+    for (jobs.items) |job| {
+        alloc.free(job.name);
+        alloc.free(job.version_str);
+        alloc.free(job.sha256);
+        alloc.free(job.bottle_url);
+        alloc.free(job.cellar_type);
+        if (job.is_dep) alloc.free(job.formula_json);
+    }
+    jobs.deinit(alloc);
+}
+
+/// `json` with its empty dependency list replaced by `deps`.
+fn withDeps(comptime json: []const u8, comptime deps: []const u8) []const u8 {
+    const empty = "\"dependencies\":[]";
+    const at = comptime std.mem.indexOf(u8, json, empty).?;
+    return comptime json[0..at] ++ "\"dependencies\":[" ++ deps ++ "]" ++ json[at + empty.len ..];
+}
+
+/// A control byte in the version: the record parser refuses it.
+fn refusedRecord(comptime name: []const u8, comptime tag: []const u8) []const u8 {
+    const valid = comptime bottleJsonUniqueSha(name, tag);
+    const stable = "\"stable\":\"1.0\"";
+    const at = comptime std.mem.indexOf(u8, valid, stable).?;
+    return comptime valid[0..at] ++ "\"stable\":\"1.\\r\"" ++ valid[at + stable.len ..];
+}
+
+/// `p` must fail with `want`, name `refused` on stderr, and queue nothing.
+fn expectParentRefused(tag: []const u8, seeds: []const Seed, refused: []const u8, want: anyerror) !void {
+    const alloc = testing.allocator;
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(alloc);
+    malt.output.beginStderrCapture(alloc, &captured);
+    defer malt.output.endStderrCapture();
+
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
+    defer freeJobs(alloc, &jobs);
+
+    try testing.expectError(want, collectFirst(alloc, tag, seeds, .{}, &jobs));
+
+    try testing.expectEqual(@as(usize, 0), jobs.items.len);
+    const line = try std.fmt.allocPrint(alloc, "Cannot install p: dependency {s} ", .{refused});
+    defer alloc.free(line);
+    try testing.expect(std.mem.indexOf(u8, captured.items, line) != null);
+}
+
+// `q_ok` is listed before the refused dep, so a check made while queueing
+// would already have queued it: nothing may reach the plan.
+test "collectFormulaJobs refuses the parent of a dependency whose record is refused" {
+    try expectParentRefused("refused_dep_record", &.{
+        .{ .name = "p", .json = withDeps(bottleJsonUniqueSha("p", "c0"), "\"q_ok\",\"q_bad\"") },
+        .{ .name = "q_ok", .json = bottleJsonUniqueSha("q_ok", "c1") },
+        .{ .name = "q_bad", .json = refusedRecord("q_bad", "c2") },
+    }, "q_bad", error.DependencyFailed);
+}
+
+test "collectFormulaJobs refuses the parent of a dependency with no bottle" {
+    const no_bottle =
+        \\{"name":"q_nob","full_name":"q_nob","tap":"homebrew/core","desc":"","homepage":"",
+        \\"revision":0,"keg_only":false,"post_install_defined":false,
+        \\"versions":{"stable":"1.0"},"dependencies":[],"oldnames":[],"bottle":{}}
+    ;
+    try expectParentRefused("refused_dep_bottle", &.{
+        .{ .name = "p", .json = withDeps(bottleJsonUniqueSha("p", "c0"), "\"q_ok\",\"q_nob\"") },
+        .{ .name = "q_ok", .json = bottleJsonUniqueSha("q_ok", "c1") },
+        .{ .name = "q_nob", .json = no_bottle },
+    }, "q_nob", error.DependencyFailed);
+}
+
+// The refused record sits two levels down, reached only through a valid dep.
+test "collectFormulaJobs refuses the parent of a refused transitive dependency" {
+    try expectParentRefused("refused_dep_transitive", &.{
+        .{ .name = "p", .json = withDeps(bottleJsonUniqueSha("p", "c0"), "\"q_ok\"") },
+        .{ .name = "q_ok", .json = withDeps(bottleJsonUniqueSha("q_ok", "c1"), "\"q_bad\"") },
+        .{ .name = "q_bad", .json = refusedRecord("q_bad", "c2") },
+    }, "q_bad", error.DependencyFailed);
+}
+
+// The refusal must not turn a stale offline cache into "could not be
+// fetched": offline serves a cached record at any age.
+test "collectFormulaJobs queues a stale cached dependency when offline" {
+    const alloc = testing.allocator;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
+    defer freeJobs(alloc, &jobs);
+
+    try collectFirst(alloc, "offline_stale_dep", &.{
+        .{ .name = "p", .json = withDeps(bottleJsonUniqueSha("p", "c0"), "\"q_ok\"") },
+        .{ .name = "q_ok", .json = bottleJsonUniqueSha("q_ok", "c1") },
+    }, .{ .offline = true }, &jobs);
+
+    try testing.expectEqual(@as(usize, 2), jobs.items.len);
+}
+
+fn noBottleRecord(comptime name: []const u8) []const u8 {
+    return comptime "{\"name\":\"" ++ name ++ "\",\"full_name\":\"" ++ name ++ "\"," ++
+        "\"tap\":\"homebrew/core\",\"desc\":\"\",\"homepage\":\"\",\"revision\":0," ++
+        "\"keg_only\":false,\"post_install_defined\":false,\"versions\":{\"stable\":\"1.0\"}," ++
+        "\"dependencies\":[],\"oldnames\":[],\"bottle\":{}}";
+}
+
+test "collectFormulaJobs queues none of a bottle-less parent's deps" {
+    const alloc = testing.allocator;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
+    defer freeJobs(alloc, &jobs);
+
+    try testing.expectError(error.NoBottle, collectFirst(alloc, "nobottle_parent", &.{
+        .{ .name = "p", .json = withDeps(noBottleRecord("p"), "\"q_ok\"") },
+        .{ .name = "q_ok", .json = bottleJsonUniqueSha("q_ok", "c1") },
+    }, .{}, &jobs));
+    try testing.expectEqual(@as(usize, 0), jobs.items.len);
+}
+
+// --only-deps never installs the parent, so its deps still go ahead.
+test "collectFormulaJobs still queues a bottle-less parent's deps under --only-deps" {
+    const alloc = testing.allocator;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
+    defer freeJobs(alloc, &jobs);
+
+    try testing.expectError(error.NoBottle, collectFirst(alloc, "nobottle_parent_only_deps", &.{
+        .{ .name = "p", .json = withDeps(noBottleRecord("p"), "\"q_ok\"") },
+        .{ .name = "q_ok", .json = bottleJsonUniqueSha("q_ok", "c1") },
+    }, .{ .only_deps = true }, &jobs));
+    try testing.expectEqual(@as(usize, 1), jobs.items.len);
+    try testing.expectEqualStrings("q_ok", jobs.items[0].name);
+}
+
+/// A job another package queued earlier in the same run.
+fn earlierJob(a: std.mem.Allocator) !install_download.DownloadJob {
+    return .{
+        .name = try a.dupe(u8, "earlier"),
+        .version_str = try a.dupe(u8, "1.0"),
+        .sha256 = try a.dupe(u8, "e0"),
+        .bottle_url = try a.dupe(u8, "https://example.invalid/earlier"),
+        .is_dep = false,
+        .keg_only = false,
+        .wants_post_install = false,
+        .formula_json = "",
+        .cellar_type = try a.dupe(u8, ":any"),
+        .label_width = 0,
+        .line_index = 0,
+        .multi = null,
+        .bar = null,
+        .store_sha256 = "",
+        .succeeded = false,
+    };
+}
+
+// Every allocation in turn fails: a failed collect must drop only its own
+// jobs, keep the ones earlier packages queued, and leak nothing.
+test "collectFormulaJobs drops only its own jobs when an allocation fails" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    const seeds: []const Seed = &.{
+        .{ .name = "p", .json = withDeps(bottleJsonUniqueSha("p", "c0"), "\"q_a\",\"q_b\"") },
+        .{ .name = "q_a", .json = bottleJsonUniqueSha("q_a", "c1") },
+        .{ .name = "q_b", .json = bottleJsonUniqueSha("q_b", "c2") },
+    };
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        const fa = failing.allocator();
+        var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
+        defer freeJobs(fa, &jobs);
+        try jobs.append(testing.allocator, try earlierJob(testing.allocator));
+
+        if (collectFirst(testing.allocator, "oom_rollback", seeds, .{ .collect_alloc = fa }, &jobs)) |_| {
+            if (!failing.has_induced_failure) break;
+        } else |_| {
+            try testing.expectEqual(@as(usize, 1), jobs.items.len);
+            try testing.expectEqualStrings("earlier", jobs.items[0].name);
+        }
+    }
+    // The sweep must have reached past the queueing, not stopped at setup.
+    try testing.expect(fail_index > 3);
+}

@@ -48,6 +48,9 @@ pub const InstallJobDeps = struct {
     /// version bump lands in the store ahead of the upgrade that needs it.
     /// The pool still stops before materialise/link/record.
     download_only: bool = false,
+    /// `--only-deps`: the parent is never installed, so a bottle-less parent
+    /// must not stop its deps from being queued.
+    only_deps: bool = false,
 };
 
 /// A bottle download job for parallel processing.
@@ -151,6 +154,8 @@ const FetchFormulaCtx = struct {
     /// Snapshot of `api.base_url` so workers inherit the mirror
     /// override without re-reading the env on a worker thread.
     api_base: []const u8,
+    /// Offline serves a stale cached record instead of dialing out.
+    offline: bool,
     dep_name: []const u8,
     result: ?[]const u8 = null,
 
@@ -159,6 +164,7 @@ const FetchFormulaCtx = struct {
         defer self.pool.release(http);
         var local_api = api_mod.BrewApi.init(self.io, self.arena.allocator(), http, self.cache_dir);
         local_api.base_url = self.api_base;
+        local_api.offline = self.offline;
         self.result = local_api.fetchFormula(self.dep_name) catch null;
     }
 };
@@ -276,6 +282,10 @@ pub fn collectFormulaJobs(
         return;
     }
 
+    // A bottle-less parent fails before its deps are resolved or queued.
+    const bottle: ?formula_mod.BottleFile = formula_mod.resolveBottle(formula) catch null;
+    if (bottle == null and !ctx.only_deps) return refuseNoBottle(ctx.sink, formula.name);
+
     // Resolve dependencies. `deps_mod.resolve` forwards the allocator
     // into `api.fetchFormula`, whose bytes come from `api.allocator`
     // (the same caller allocator) — so the allocator here must match
@@ -310,8 +320,12 @@ pub fn collectFormulaJobs(
     // arena until after `join`, then get duped into the caller's
     // `allocator` so they outlive the per-worker deinit.
     const dep_jsons = allocator.alloc(?[]const u8, deps.len) catch return InstallError.DownloadFailed;
-    defer allocator.free(dep_jsons);
     @memset(dep_jsons, null);
+    // A slot still set here was never moved into a job.
+    defer {
+        for (dep_jsons) |j| if (j) |bytes| allocator.free(bytes);
+        allocator.free(dep_jsons);
+    }
 
     if (deps.len > 0) {
         const ctxs = allocator.alloc(FetchFormulaCtx, deps.len) catch return InstallError.DownloadFailed;
@@ -326,6 +340,7 @@ pub fn collectFormulaJobs(
                 .pool = http_pool,
                 .cache_dir = api.cache_dir,
                 .api_base = api.base_url,
+                .offline = api.offline,
                 .dep_name = deps[i].name,
             };
         }
@@ -374,19 +389,36 @@ pub fn collectFormulaJobs(
         }
     }
 
-    // Serial post-processing: cache hits on the warm path, parses-then-
-    // caches on miss so findFailedDep later sees a hit.
+    // Check every dep before queueing any: a skipped dep links the parent
+    // against a missing keg, and a refusal mid-queue leaves half the graph.
     for (deps, 0..) |dep, i| {
         if (dep.already_installed) continue;
-        const dep_json = dep_jsons[i] orelse continue;
+        // One format string keeps this to a single formatter instantiation.
+        const reason: []const u8, const detail: []const u8, const e: InstallError = blk: {
+            const dep_json = dep_jsons[i] orelse
+                break :blk .{ "could not be fetched", "", InstallError.DependencyFailed };
+            const dep_formula = cache.getOrParse(dep.name, dep_json) catch |pe|
+                break :blk .{ "was refused: ", @errorName(pe), InstallError.DependencyFailed };
+            _ = formula_mod.resolveBottle(dep_formula) catch
+                break :blk .{ "has no bottle for this platform", "", InstallError.DependencyFailed };
+            continue;
+        };
+        ctx.sink.err("Cannot install {s}: dependency {s} {s}{s}", .{ formula.name, dep.name, reason, detail });
+        return e;
+    }
 
-        // dep_json is moved into the job on success; any continue path
-        // before that transfer must free the bytes.
-        var dep_json_consumed = false;
-        defer if (!dep_json_consumed) allocator.free(dep_json);
+    // Only OOM fails from here on, so drop this call's jobs rather than leave
+    // half a graph queued; the --only-deps refusal keeps its deps on purpose.
+    const base = jobs.items.len;
+    var keep_queued = false;
+    errdefer if (!keep_queued) dropJobsFrom(allocator, jobs, base);
 
-        const dep_formula = cache.getOrParse(dep.name, dep_json) catch continue;
-        const dep_bottle = formula_mod.resolveBottle(dep_formula) catch continue;
+    // Every dep here passed the checks above; its parse is a cache hit.
+    for (deps, 0..) |dep, i| {
+        if (dep.already_installed) continue;
+        const dep_json = dep_jsons[i].?;
+        const dep_formula = cache.getOrParse(dep.name, dep_json) catch unreachable;
+        const dep_bottle = formula_mod.resolveBottle(dep_formula) catch unreachable;
 
         // Check for duplicate (another top-level pkg may share a dep)
         var is_dup = false;
@@ -399,7 +431,7 @@ pub fn collectFormulaJobs(
         if (is_dup) continue;
 
         // Dupe the five slices so the job stays self-contained.
-        const strs = dupeJobStrings(allocator, dep_formula, dep_bottle) catch continue;
+        const strs = dupeJobStrings(allocator, dep_formula, dep_bottle) catch return InstallError.DownloadFailed;
 
         jobs.append(allocator, .{
             .name = strs.name,
@@ -421,15 +453,16 @@ pub fn collectFormulaJobs(
             .succeeded = false,
         }) catch {
             strs.freeAll(allocator);
-            continue;
+            return InstallError.DownloadFailed;
         };
-        dep_json_consumed = true;
+        dep_jsons[i] = null;
     }
 
-    // Add main formula
-    const bottle = formula_mod.resolveBottle(formula) catch {
-        ctx.sink.err("No bottle available for {s} on this platform", .{formula.name});
-        return InstallError.NoBottle;
+    // Add main formula. Under --only-deps a bottle-less parent fails here, and
+    // its deps above stay queued.
+    const main_bottle = bottle orelse {
+        keep_queued = true;
+        return refuseNoBottle(ctx.sink, formula.name);
     };
 
     // A package can arrive as another job's dependency and then as its own
@@ -445,7 +478,7 @@ pub fn collectFormulaJobs(
         // package the user named is no longer reclaimable as an unused dep.
         job.is_dep = false;
     } else {
-        const main_strs = dupeJobStrings(allocator, formula, bottle) catch return InstallError.DownloadFailed;
+        const main_strs = dupeJobStrings(allocator, formula, main_bottle) catch return InstallError.DownloadFailed;
         errdefer main_strs.freeAll(allocator);
 
         jobs.append(allocator, .{
@@ -471,6 +504,24 @@ pub fn collectFormulaJobs(
 
     const pkg_word: []const u8 = if (jobs.items.len == 1) "package" else "packages";
     ctx.sink.info("Resolved {s} {s} ({d} {s})", .{ formula.name, formula.version, jobs.items.len, pkg_word });
+}
+
+fn refuseNoBottle(sink: OutputSink, name: []const u8) InstallError {
+    sink.err("No bottle available for {s} on this platform", .{name});
+    return InstallError.NoBottle;
+}
+
+/// Free the jobs queued at or after `base`.
+fn dropJobsFrom(allocator: std.mem.Allocator, jobs: *std.ArrayList(DownloadJob), base: usize) void {
+    for (jobs.items[base..]) |job| {
+        allocator.free(job.name);
+        allocator.free(job.version_str);
+        allocator.free(job.sha256);
+        allocator.free(job.bottle_url);
+        allocator.free(job.cellar_type);
+        if (job.is_dep) allocator.free(job.formula_json);
+    }
+    jobs.shrinkRetainingCapacity(base);
 }
 
 /// Stamp a contiguous `line_index` on every job that still needs to download,
@@ -1211,6 +1262,7 @@ test "FetchFormulaCtx: arena backed by testing.allocator runs leak-clean across 
         .pool = undefined,
         .cache_dir = "",
         .api_base = "",
+        .offline = false,
         .dep_name = "",
     };
     defer ctx_value.arena.deinit();

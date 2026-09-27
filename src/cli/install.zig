@@ -896,8 +896,12 @@ fn runInstall(
                 .worker_backing = std.heap.smp_allocator,
                 .sink = sink,
                 .download_only = flags.download_only,
+                .only_deps = flags.only_deps,
             }, pkg_name, formula_json, flags.force, &all_jobs) catch |e| {
-                sink.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
+                // The dependency line already named the cause.
+                if (e != InstallError.DependencyFailed) {
+                    sink.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
+                }
                 failed_count += 1;
                 continue;
             };
