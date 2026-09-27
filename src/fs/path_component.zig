@@ -27,6 +27,15 @@ pub fn isPathComponent(s: []const u8) bool {
     return true;
 }
 
+/// Line- and tab-framed surfaces (sidecars, progress lines, `list`) split a
+/// record on a control byte, and a scrubbed ESC shows a name that cannot be
+/// typed back. Kept apart from `isPathComponent` so sinks still reach rows
+/// stored before the screens existed.
+pub fn hasControlByte(s: []const u8) bool {
+    for (s) |c| if (std.ascii.isControl(c)) return true;
+    return false;
+}
+
 /// True when `s` is a usable *relative subpath* — one or more components that
 /// stay inside the directory it is resolved against. Unlike `isPathComponent`
 /// it tolerates `/`, because some tap-controlled strings legitimately nest
@@ -45,6 +54,14 @@ pub fn isRelativeSubpath(s: []const u8) bool {
         if (std.mem.eql(u8, comp, "..")) return false;
     }
     return true;
+}
+
+test "hasControlByte flags the bytes that split or rewrite a printed line" {
+    for ([_][]const u8{ "a\nb", "a\rb", "a\tb", "a\x1bz", "a\x7fb", "\x00" }) |s|
+        try std.testing.expect(hasControlByte(s));
+    // Space and UTF-8 are printable: real directory names carry both.
+    for ([_][]const u8{ "python@3.14", "3.2.1+dfsg", "a b", "caf\xc3\xa9", "" }) |s|
+        try std.testing.expect(!hasControlByte(s));
 }
 
 test "isRelativeSubpath rejects shapes that leave the base directory" {

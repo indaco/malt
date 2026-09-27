@@ -717,14 +717,7 @@ fn firstComponent(path: []const u8) []const u8 {
 fn binaryLinkName(target: []const u8) ?[]const u8 {
     const bin_dir = homebrew_prefix_var ++ "bin/";
     const name = if (std.mem.startsWith(u8, target, bin_dir)) target[bin_dir.len..] else target;
-    return if (path_component.isPathComponent(name) and !hasControlByte(name)) name else null;
-}
-
-/// The sidecar and the links manifest are line- and tab-framed, so a
-/// control byte in a name would split one record into two.
-fn hasControlByte(s: []const u8) bool {
-    for (s) |c| if (std.ascii.isControl(c)) return true;
-    return false;
+    return if (path_component.isPathComponent(name) and !path_component.hasControlByte(name)) name else null;
 }
 
 /// Reject any `app` or `binary` artifact string that would escape the directory
@@ -760,7 +753,7 @@ fn validateArtifactPaths(obj: std.json.ObjectMap) CaskError!void {
                         s[homebrew_prefix_var.len..]
                     else
                         s;
-                    if (!path_component.isRelativeSubpath(rel) or hasControlByte(rel)) return CaskError.ParseFailed;
+                    if (!path_component.isRelativeSubpath(rel) or path_component.hasControlByte(rel)) return CaskError.ParseFailed;
                 },
                 .object => |o| {
                     // Only the first element is the source; later objects are
