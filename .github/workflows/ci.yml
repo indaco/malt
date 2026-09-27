@@ -158,6 +158,9 @@ jobs:
       - name: Regression guard - a named dependency is recorded as installed on request
         run: ./scripts/regressions/named-dependency-becomes-on-request.sh
 
+      - name: Regression guard - a package whose dependency is refused is refused too
+        run: ./scripts/regressions/refused-dependency-fails-parent-install-silently-drops-a-refused-dependency.sh
+
       - name: Regression guard - store entry without the requested keg is refused
         run: ./scripts/regressions/materialize-refuses-store-entry-root-keg-source-falls-back-to-store-entry-root.sh
 
