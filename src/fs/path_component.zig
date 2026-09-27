@@ -27,6 +27,20 @@ pub fn isPathComponent(s: []const u8) bool {
     return true;
 }
 
+/// Line- and tab-framed surfaces (sidecars, progress lines, `list`) split a
+/// record on a control byte, and a scrubbed ESC shows a name that cannot be
+/// typed back. C1 counts too when spelled as UTF-8: the display scrubber
+/// passes it as a valid sequence. Kept apart from `isPathComponent` so sinks
+/// still reach rows stored before the screens existed.
+pub fn hasControlByte(s: []const u8) bool {
+    for (s, 0..) |c, i| {
+        if (std.ascii.isControl(c)) return true;
+        // U+0080-U+009F encode as 0xC2 0x80-0x9F.
+        if (c == 0xC2 and i + 1 < s.len and s[i + 1] >= 0x80 and s[i + 1] <= 0x9F) return true;
+    }
+    return false;
+}
+
 /// True when `s` is a usable *relative subpath* — one or more components that
 /// stay inside the directory it is resolved against. Unlike `isPathComponent`
 /// it tolerates `/`, because some tap-controlled strings legitimately nest
@@ -45,6 +59,19 @@ pub fn isRelativeSubpath(s: []const u8) bool {
         if (std.mem.eql(u8, comp, "..")) return false;
     }
     return true;
+}
+
+test "hasControlByte flags the bytes that split or rewrite a printed line" {
+    for ([_][]const u8{ "a\nb", "a\rb", "a\tb", "a\x1bz", "a\x7fb", "\x00" }) |s|
+        try std.testing.expect(hasControlByte(s));
+    // C1 as UTF-8 (U+0080-U+009F): the display scrubber passes it as a valid
+    // sequence, and U+009B is a one-byte CSI to the terminal.
+    for ([_][]const u8{ "1.0\xc2\x9b2J", "a\xc2\x85b", "\xc2\x80", "\xc2\x9f" }) |s|
+        try std.testing.expect(hasControlByte(s));
+    // Space and UTF-8 are printable: real directory names carry both. NBSP is
+    // the first codepoint past C1; a trailing lead byte has no continuation.
+    for ([_][]const u8{ "python@3.14", "3.2.1+dfsg", "a b", "caf\xc3\xa9", "\xc2\xa0", "a\xc2", "" }) |s|
+        try std.testing.expect(!hasControlByte(s));
 }
 
 test "isRelativeSubpath rejects shapes that leave the base directory" {

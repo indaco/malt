@@ -148,8 +148,17 @@ fn screenRubyIdentity(sink: OutputSink, name: []const u8, version: []const u8) I
         sink.err("Formula declares an unsafe name: {s}", .{name});
         return InstallError.FormulaNotFound;
     }
+    // Not echoed: the byte itself would split the error line.
+    if (path_component.hasControlByte(name)) {
+        sink.err("Formula name holds a control character", .{});
+        return InstallError.FormulaNotFound;
+    }
     if (!path_component.isPathComponent(version)) {
         sink.err("Formula declares an unsafe version: {s}", .{version});
+        return InstallError.FormulaNotFound;
+    }
+    if (path_component.hasControlByte(version)) {
+        sink.err("{s} declares a version holding a control character", .{name});
         return InstallError.FormulaNotFound;
     }
 }
@@ -605,6 +614,12 @@ pub fn installLocalFormula(
         return InstallError.LocalFormulaNotReadable;
     };
     const realpath = real_buf[0..real_n];
+    // A directory component the name screen never sees still lands in
+    // `kegs.full_name` and the warning below.
+    if (path_component.hasControlByte(realpath)) {
+        sink.err("Local formula path holds a control character; move or rename it", .{});
+        return InstallError.LocalFormulaNotReadable;
+    }
 
     // Security warning on every install — the `.rb` is a code-execution
     // vector (parse is pure, but post_install + the archive URL trust
@@ -2283,6 +2298,15 @@ test "screenRubyIdentity also screens a version derived from the URL" {
     const rb = parseRubyFormula(body).?;
     try std.testing.expectEqualStrings("1..", rb.version);
     try std.testing.expectError(InstallError.FormulaNotFound, screenRubyIdentity(sink_mod.silent, "probe", rb.version));
+}
+
+test "screenRubyIdentity refuses a name or version holding a control byte" {
+    // A line break splits every progress and `list` line; an ESC is scrubbed
+    // on display, so the name shown could not be typed back to `uninstall`.
+    try std.testing.expectError(InstallError.FormulaNotFound, screenRubyIdentity(sink_mod.silent, "lx\nformula evil", "1.0"));
+    try std.testing.expectError(InstallError.FormulaNotFound, screenRubyIdentity(sink_mod.silent, "lx\rz", "1.0"));
+    try std.testing.expectError(InstallError.FormulaNotFound, screenRubyIdentity(sink_mod.silent, "probe", "1.0\x1bz"));
+    try std.testing.expectError(InstallError.FormulaNotFound, screenRubyIdentity(sink_mod.silent, "probe", "1.0\xc2\x9b2J"));
 }
 
 test "screenRubyIdentity accepts the shapes real formula versions take" {
