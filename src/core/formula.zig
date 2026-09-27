@@ -549,6 +549,9 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         return FormulaError.UnsafePathComponent;
     const full_name = getString(root, "full_name") orelse name;
     const tap = getString(root, "tap") orelse "";
+    // Both are stored on the keg and written back into backup lines.
+    if (path_component.hasControlByte(full_name) or path_component.hasControlByte(tap))
+        return FormulaError.UnsafePathComponent;
     const desc = getString(root, "desc") orelse "";
     const homepage = getString(root, "homepage") orelse "";
     const license = getString(root, "license");
@@ -580,6 +583,10 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
 
     // dependencies
     const dependencies = try getStringArray(arena, root, "dependencies");
+    // `info` and `deps` print these raw.
+    for (dependencies) |dep| {
+        if (path_component.hasControlByte(dep)) return FormulaError.UnsafePathComponent;
+    }
 
     // oldnames (may be absent)
     const oldnames = try getStringArray(arena, root, "oldnames");
@@ -1050,6 +1057,31 @@ test "parsePkgVersion round-trips with pkgVersion" {
     const r = parsePkgVersion(formatted);
     try testing.expectEqualStrings("3.14.4", r.version);
     try testing.expectEqual(@as(i64, 1), r.revision);
+}
+
+test "parseFormula refuses a control byte in dependencies, tap or full_name" {
+    // `info`/`deps` print dependency names raw, and tap/full_name are stored
+    // and written back into backup lines, so each would carry the byte out.
+    const bad = [_][]const u8{
+        \\{"name":"ok","versions":{"stable":"1.0"},"dependencies":["x\u001b[2J"]}
+        ,
+        \\{"name":"ok","versions":{"stable":"1.0"},"dependencies":["zlib","a\nb"]}
+        ,
+        \\{"name":"ok","versions":{"stable":"1.0"},"tap":"a/b\nformula attacker/tap"}
+        ,
+        \\{"name":"ok","versions":{"stable":"1.0"},"full_name":"a/b/ok\u009b"}
+        ,
+    };
+    for (bad) |json| {
+        try testing.expectError(FormulaError.UnsafePathComponent, parseFormula(testing.allocator, json));
+    }
+
+    const ok =
+        \\{"name":"ok","full_name":"user/tap/ok","tap":"user/tap","versions":{"stable":"1.0"},"dependencies":["openssl@3"]}
+    ;
+    var formula = try parseFormula(testing.allocator, ok);
+    defer formula.deinit();
+    try testing.expectEqualStrings("openssl@3", formula.dependencies[0]);
 }
 
 test "parseFormula rejects path separators in embedded name or version" {
