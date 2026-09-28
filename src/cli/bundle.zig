@@ -29,10 +29,10 @@ const uninstall_cmd = @import("uninstall.zig");
 // process-wide AppCtx so the dispatch helpers can thread io / environ
 // through to install/tap/services without re-deriving them.
 //
-// CLI primitives already print rich per-failure diagnostics before
-// returning, so the wrapper narrows everything except OOM to
-// DispatchFailed — the runner records the kind+name and the dispatcher
-// type stays closed.
+// The error value carries no cause, so the wrapper narrows everything
+// except OOM to DispatchFailed and keeps the dispatcher type closed. Install
+// members carry the cause on `MemberError.reason`; tap, services and
+// uninstall print their own through the global output.
 fn narrowDispatch(e: anyerror) runner_mod.DispatchError {
     return switch (e) {
         error.OutOfMemory => runner_mod.DispatchError.OutOfMemory,
@@ -54,24 +54,38 @@ fn bundleInstallCtxFromOpaque(ctx: ?*anyopaque) *const BundleInstallCtx {
     return @ptrCast(@alignCast(non_null));
 }
 
-fn cliInstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
-    const bd = bundleInstallCtxFromOpaque(ctx);
-    // Silent sink: the bundle `Report` is the per-member channel, so the
-    // install pipeline's per-keg lines would only be noise over it.
-    install_cmd.installAll(bd.app, allocator, &.{name}, .{ .isolate_deps = bd.isolate_deps, .sink = install_sink_mod.silent }) catch |e| return narrowDispatch(e);
+fn captureErr(ctx: ?*anyopaque, msg: []const u8) void {
+    const reason: *runner_mod.MemberReason = @ptrCast(@alignCast(ctx.?));
+    reason.record(msg);
 }
 
-fn cliInstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
-    const bd = bundleInstallCtxFromOpaque(ctx);
-    install_cmd.installAll(bd.app, allocator, &.{name}, .{ .cask = true, .isolate_deps = bd.isolate_deps, .sink = install_sink_mod.silent }) catch |e| return narrowDispatch(e);
+/// The bundle `Report` is the per-member channel, so the install pipeline's
+/// per-keg lines would only be noise over it; its first error line (or the
+/// detail under an error header) is kept as the member's failure reason.
+pub fn captureSink(reason: *runner_mod.MemberReason) install_sink_mod.OutputSink {
+    var s = install_sink_mod.silent;
+    s.ctx = reason;
+    s.writeErr = captureErr;
+    return s;
 }
 
-fn cliTapAdd(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
+fn cliInstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, reason: *runner_mod.MemberReason) runner_mod.DispatchError!void {
+    const bd = bundleInstallCtxFromOpaque(ctx);
+    install_cmd.installAll(bd.app, allocator, &.{name}, .{ .isolate_deps = bd.isolate_deps, .sink = captureSink(reason) }) catch |e| return narrowDispatch(e);
+}
+
+fn cliInstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, reason: *runner_mod.MemberReason) runner_mod.DispatchError!void {
+    const bd = bundleInstallCtxFromOpaque(ctx);
+    install_cmd.installAll(bd.app, allocator, &.{name}, .{ .cask = true, .isolate_deps = bd.isolate_deps, .sink = captureSink(reason) }) catch |e| return narrowDispatch(e);
+}
+
+// Tap and services primitives print their cause through the global output.
+fn cliTapAdd(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, _: *runner_mod.MemberReason) runner_mod.DispatchError!void {
     const bd = bundleInstallCtxFromOpaque(ctx);
     tap_cmd.tapAdd(bd.app, allocator, name) catch |e| return narrowDispatch(e);
 }
 
-fn cliServiceStart(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
+fn cliServiceStart(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, _: *runner_mod.MemberReason) runner_mod.DispatchError!void {
     const bd = bundleInstallCtxFromOpaque(ctx);
     services_cmd.servicesStart(bd.app, allocator, name) catch |e| return narrowDispatch(e);
 }
@@ -202,23 +216,7 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
         .cask => output.info("would run: malt install --cask {s}", .{p.name}),
         .service_start => output.info("would run: malt services start {s}", .{p.name}),
     };
-    var any_hard = false;
-    for (report.failures) |f| switch (f.kind) {
-        .tap => {
-            output.err("tap failed: {s}", .{f.name});
-            any_hard = true;
-        },
-        .formula => {
-            output.err("install failed: {s}", .{f.name});
-            any_hard = true;
-        },
-        .cask => {
-            output.err("cask install failed: {s}", .{f.name});
-            any_hard = true;
-        },
-        // Service auto-start is best-effort; warn but don't fail the bundle.
-        .service_start => output.warn("could not auto-start service: {s}", .{f.name}),
-    };
+    var any_hard = renderFailures(report.failures);
     if (report.db_record_error) |name| {
         output.err("could not record bundle in database: {s}", .{name});
         any_hard = true;
@@ -231,6 +229,30 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     }
     if (any_hard) return BundleError.RunnerFailed;
     output.success("bundle install complete", .{});
+}
+
+/// Renders one line per failed member; true when any failure is hard.
+fn renderFailures(failures: []const runner_mod.MemberError) bool {
+    var any_hard = false;
+    for (failures) |*f| {
+        const label = switch (f.kind) {
+            .tap => "tap failed",
+            .formula => "install failed",
+            .cask => "cask install failed",
+            // Service auto-start is best-effort; warn but don't fail the bundle.
+            .service_start => {
+                output.warn("could not auto-start service: {s}", .{f.name});
+                continue;
+            },
+        };
+        const why = f.reason.slice();
+        if (why.len > 0)
+            output.err("{s}: {s}: {s}", .{ label, f.name, why })
+        else
+            output.err("{s}: {s}", .{ label, f.name });
+        any_hard = true;
+    }
+    return any_hard;
 }
 
 fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
@@ -986,4 +1008,88 @@ test "writeManifest creates parent directories for a nested output path" {
 
     const f = try std.Io.Dir.cwd().openFile(io, dest, .{});
     f.close(io);
+}
+
+fn testFailure(kind: runner_mod.MemberKind, name: []const u8, why: []const u8) runner_mod.MemberError {
+    var f: runner_mod.MemberError = .{ .kind = kind, .name = name, .err = runner_mod.DispatchError.DispatchFailed };
+    f.reason.record(why);
+    return f;
+}
+
+test "renderFailures appends the captured reason to install failure lines" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    const failures = [_]runner_mod.MemberError{
+        testFailure(.formula, "foo", "offline mode: formula 'foo' not cached"),
+        testFailure(.cask, "bar", "no download for this cask"),
+    };
+    try std.testing.expect(renderFailures(&failures));
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "install failed: foo: offline mode: formula 'foo' not cached") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "cask install failed: bar: no download for this cask") != null);
+}
+
+test "renderFailures keeps the bare line when no reason was captured" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    const failures = [_]runner_mod.MemberError{
+        testFailure(.formula, "foo", ""),
+        testFailure(.tap, "user/tap", ""),
+    };
+    try std.testing.expect(renderFailures(&failures));
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "install failed: foo\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "install failed: foo:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "tap failed: user/tap\n") != null);
+}
+
+test "renderFailures scrubs escape sequences out of the reason" {
+    // The reason quotes API-supplied names, so it must not reach the terminal raw.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    const failures = [_]runner_mod.MemberError{testFailure(.formula, "foo", "formula '\x1b]0;pwned\x07' not cached")};
+    _ = renderFailures(&failures);
+
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "not cached") != null);
+}
+
+test "renderFailures: a failed service start alone is not a hard failure" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    const failures = [_]runner_mod.MemberError{testFailure(.service_start, "svc", "")};
+    try std.testing.expect(!renderFailures(&failures));
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "could not auto-start service: svc") != null);
+}
+
+test "captureSink keeps the actionable error line and prints nothing" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    var reason: runner_mod.MemberReason = .{};
+    const sink = captureSink(&reason);
+    sink.info("installing {s}", .{"foo"});
+    sink.warn("careful", .{});
+    sink.err("foo: {d} symlink conflict(s) detected:", .{2});
+    sink.err("  {s} already linked by {s}", .{ "bin/foo", "Cellar/bar/1.0" });
+    sink.err("Uninstall the conflicting package first.", .{});
+    sink.success("done", .{});
+
+    try std.testing.expectEqualStrings("bin/foo already linked by Cellar/bar/1.0", reason.slice());
+    try std.testing.expect(!sink.show_progress);
+    try std.testing.expectEqual(@as(usize, 0), buf.items.len);
 }

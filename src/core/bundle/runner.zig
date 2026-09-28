@@ -49,9 +49,9 @@ pub const DispatchError = error{
     NoDispatcher,
     /// Subprocess dispatch (`malt_bin`) exited non-zero.
     MemberFailed,
-    /// Boundary narrowing tag: the underlying CLI primitive already
-    /// surfaced a user-facing diagnostic; the runner records the failure
-    /// without re-rendering the cause.
+    /// Boundary narrowing tag: the error value carries no cause. Install
+    /// members carry it on `MemberError.reason`; the uninstall primitive
+    /// behind `cleanup.zig` prints its own.
     DispatchFailed,
     OutOfMemory,
 };
@@ -69,6 +69,44 @@ pub fn describeError(err: RunnerError) []const u8 {
 
 pub const MemberKind = enum { tap, formula, cask, service_start };
 
+/// First error line a member's install emitted, so the report can say why it
+/// failed. Fixed-size and by value: failures stay allocation-free.
+pub const MemberReason = struct {
+    pub const capacity = 256;
+
+    const State = enum(u8) { empty, header, busy, final };
+
+    buf: [capacity]u8 = undefined,
+    len: usize = 0,
+    /// Install workers share the sink, so a recorder claims the slot before
+    /// writing. Readers only look after `installAll` has joined them.
+    state: std.atomic.Value(State) = .init(.empty),
+
+    pub fn record(self: *MemberReason, line: []const u8) void {
+        const msg = std.mem.trimStart(u8, line, " \t");
+        // A blank line says nothing and must not displace a header.
+        if (msg.len == 0) return;
+        // A line ending in ':' only introduces the detail below it.
+        const next: State = if (std.mem.endsWith(u8, msg, ":")) .header else .final;
+        var cur = self.state.load(.acquire);
+        while (cur == .empty or cur == .header) {
+            cur = self.state.cmpxchgWeak(cur, .busy, .acq_rel, .acquire) orelse {
+                var n = @min(msg.len, capacity);
+                // Never end on a split codepoint: the terminal sanitizer would see garbage.
+                if (n < msg.len) while (n > 0 and (msg[n] & 0xC0) == 0x80) : (n -= 1) {};
+                @memcpy(self.buf[0..n], msg[0..n]);
+                self.len = n;
+                self.state.store(next, .release);
+                return;
+            };
+        }
+    }
+
+    pub fn slice(self: *const MemberReason) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
 /// One member whose install call returned a non-null error. `name` is
 /// borrowed from the caller's `Manifest`; the caller must keep the
 /// manifest alive until `Report.deinit`.
@@ -76,6 +114,7 @@ pub const MemberError = struct {
     kind: MemberKind,
     name: []const u8,
     err: DispatchError,
+    reason: MemberReason = .{},
 };
 
 /// Entry in the dry-run preview list — what the CLI would render as
@@ -111,10 +150,10 @@ pub const Report = struct {
 /// interface is what lets `core/bundle/runner.zig` avoid a `cli/*` import.
 pub const Dispatcher = struct {
     ctx: ?*anyopaque = null,
-    installFormula: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) DispatchError!void,
-    installCask: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) DispatchError!void,
-    tapAdd: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) DispatchError!void,
-    serviceStart: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) DispatchError!void,
+    installFormula: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, reason: *MemberReason) DispatchError!void,
+    installCask: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, reason: *MemberReason) DispatchError!void,
+    tapAdd: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, reason: *MemberReason) DispatchError!void,
+    serviceStart: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, reason: *MemberReason) DispatchError!void,
 };
 
 pub const Options = struct {
@@ -258,26 +297,28 @@ fn recordMember(
         return;
     }
 
-    callMember(io, allocator, call, opts) catch |e| {
+    var reason: MemberReason = .{};
+    callMember(io, allocator, call, opts, &reason) catch |e| {
         failures.append(allocator, .{
             .kind = call.kind(),
             .name = call.name(),
             .err = e,
+            .reason = reason,
         }) catch return RunnerError.OutOfMemory;
     };
 }
 
-fn callMember(io: std.Io, allocator: std.mem.Allocator, call: MemberCall, opts: Options) DispatchError!void {
+fn callMember(io: std.Io, allocator: std.mem.Allocator, call: MemberCall, opts: Options, reason: *MemberReason) DispatchError!void {
     // Test escape hatch: when malt_bin is set, fall back to subprocess so
     // tests can substitute /usr/bin/false to assert exit-code propagation.
     if (opts.malt_bin) |bin| return runSubprocess(io, allocator, bin, call);
 
     const d = opts.dispatcher orelse return DispatchError.NoDispatcher;
     switch (call) {
-        .tap => |n| try d.tapAdd(d.ctx, allocator, n),
-        .formula => |n| try d.installFormula(d.ctx, allocator, n),
-        .cask => |n| try d.installCask(d.ctx, allocator, n),
-        .service_start => |n| try d.serviceStart(d.ctx, allocator, n),
+        .tap => |n| try d.tapAdd(d.ctx, allocator, n, reason),
+        .formula => |n| try d.installFormula(d.ctx, allocator, n, reason),
+        .cask => |n| try d.installCask(d.ctx, allocator, n, reason),
+        .service_start => |n| try d.serviceStart(d.ctx, allocator, n, reason),
     }
 }
 
@@ -378,4 +419,113 @@ test "describeError gives every tag a distinct, non-empty message" {
             try std.testing.expect(!std.mem.eql(u8, describeError(a), describeError(b)));
         }
     }
+}
+
+test "MemberReason keeps the first message and ignores later ones" {
+    var r: MemberReason = .{};
+    try std.testing.expectEqualStrings("", r.slice());
+    r.record("offline mode: formula 'a' not cached");
+    r.record("second line");
+    try std.testing.expectEqualStrings("offline mode: formula 'a' not cached", r.slice());
+}
+
+test "MemberReason gives a trailing-colon header way to the detail line below it" {
+    // A header alone ("N conflict(s) detected:") names no cause.
+    var r: MemberReason = .{};
+    r.record("foo: 2 symlink conflict(s) detected:");
+    r.record("  bin/foo already linked by Cellar/bar/1.0");
+    r.record("Uninstall the conflicting package first.");
+    try std.testing.expectEqualStrings("bin/foo already linked by Cellar/bar/1.0", r.slice());
+
+    // With no detail after it, the header is still better than nothing.
+    var lone: MemberReason = .{};
+    lone.record("foo: failed:");
+    try std.testing.expectEqualStrings("foo: failed:", lone.slice());
+
+    lone.record("   ");
+    try std.testing.expectEqualStrings("foo: failed:", lone.slice());
+}
+
+test "MemberReason drops the indentation of a sub-line" {
+    var r: MemberReason = .{};
+    r.record("  \tfoo: DownloadFailed (after 3 attempts)");
+    try std.testing.expectEqualStrings("foo: DownloadFailed (after 3 attempts)", r.slice());
+}
+
+test "MemberReason truncates at the buffer size on a UTF-8 boundary" {
+    var r: MemberReason = .{};
+    // A 2-byte codepoint straddling the cap must be dropped whole.
+    var msg: [MemberReason.capacity + 1]u8 = undefined;
+    @memset(msg[0 .. MemberReason.capacity - 1], 'a');
+    msg[MemberReason.capacity - 1] = 0xC3;
+    msg[MemberReason.capacity] = 0xA9;
+    r.record(&msg);
+    try std.testing.expectEqual(MemberReason.capacity - 1, r.slice().len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(r.slice()));
+
+    // A message that exactly fills the buffer is kept whole.
+    var exact: MemberReason = .{};
+    @memset(&msg, 'b');
+    exact.record(msg[0..MemberReason.capacity]);
+    try std.testing.expectEqual(MemberReason.capacity, exact.slice().len);
+
+    // A 4-byte codepoint cut after its second byte backs off past all of it.
+    var wide: [MemberReason.capacity + 2]u8 = undefined;
+    @memset(wide[0 .. MemberReason.capacity - 2], 'c');
+    @memcpy(wide[MemberReason.capacity - 2 ..], "\u{1F37A}");
+    var w: MemberReason = .{};
+    w.record(&wide);
+    try std.testing.expectEqual(MemberReason.capacity - 2, w.slice().len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(w.slice()));
+}
+
+test "MemberReason: concurrent recorders leave exactly one whole message" {
+    // Install workers share the sink, so racing errs must never interleave.
+    const msgs = [_][]const u8{ "first worker failed", "second worker failed", "third worker failed", "fourth worker failed" };
+    var r: MemberReason = .{};
+    var threads: [msgs.len]std.Thread = undefined;
+    for (&threads, msgs) |*t, m| t.* = try std.Thread.spawn(.{}, MemberReason.record, .{ &r, m });
+    for (threads) |t| t.join();
+    for (msgs) |m| {
+        if (std.mem.eql(u8, r.slice(), m)) return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+const ReasonMock = struct {
+    fn failWithReason(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8, reason: *MemberReason) DispatchError!void {
+        reason.record("offline mode: formula 'x' not cached");
+        return DispatchError.DispatchFailed;
+    }
+    fn failSilently(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8, _: *MemberReason) DispatchError!void {
+        return DispatchError.DispatchFailed;
+    }
+    fn succeedAfterNote(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8, reason: *MemberReason) DispatchError!void {
+        reason.record("noise");
+    }
+};
+
+test "recordMember carries the dispatcher's reason onto the failure" {
+    const d: Dispatcher = .{
+        .installFormula = ReasonMock.failWithReason,
+        .installCask = ReasonMock.failSilently,
+        .tapAdd = ReasonMock.succeedAfterNote,
+        .serviceStart = ReasonMock.failSilently,
+    };
+    const opts: Options = .{ .dispatcher = &d };
+    const a = std.testing.allocator;
+    var failures: std.ArrayList(MemberError) = .empty;
+    defer failures.deinit(a);
+    var previews: std.ArrayList(MemberPreview) = .empty;
+    defer previews.deinit(a);
+
+    try recordMember(std.Options.debug_io, a, .{ .formula = "x" }, opts, &failures, &previews);
+    try recordMember(std.Options.debug_io, a, .{ .cask = "y" }, opts, &failures, &previews);
+    // A member that succeeds is not a failure, whatever it reported.
+    try recordMember(std.Options.debug_io, a, .{ .tap = "z" }, opts, &failures, &previews);
+
+    try std.testing.expectEqual(@as(usize, 2), failures.items.len);
+    try std.testing.expectEqualStrings("offline mode: formula 'x' not cached", failures.items[0].reason.slice());
+    // No reason recorded: the per-member slot starts empty, not stale.
+    try std.testing.expectEqualStrings("", failures.items[1].reason.slice());
 }

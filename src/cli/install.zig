@@ -457,7 +457,7 @@ pub const InstallAllOpts = struct {
     isolate_deps: bool = false,
     /// Where per-keg human output goes. Defaults to the terminal sink
     /// (behaviour identical to `mt install`); the bundle runner passes a
-    /// silent sink so its `Report` is the only channel.
+    /// capture sink so its `Report` is the only channel.
     sink: OutputSink = sink_mod.terminal,
     /// Tap whose formula declared these packages as dependencies. Lets an
     /// unqualified sibling resolve inside that tap after core misses.
