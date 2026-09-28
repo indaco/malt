@@ -582,7 +582,7 @@ fn resultsDetailOpen(s: *const State, sel: Match) bool {
 
 fn openSearchInfoCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State) cmd.Cmd {
     const m = selectedMatch(s) orelse return .none; // empty list: no-op
-    const argv = cmd.jsonArgv(allocator, mt_path, &.{ "info", m.name }) catch return .none;
+    const argv = cmd.jsonArgv(allocator, mt_path, &.{ "info", kindFlag(m.kind), m.name }) catch return .none;
     return .{ .read = .{ .argv = argv, .mode = .polled, .parse = cmd.parserFor(.info, info_json.parse), .tag = .search, .fail_op = info_fail_op } };
 }
 
@@ -808,7 +808,21 @@ test "enter returns the `mt info` read for the active hit" {
     try testing.expect(eff == .read);
     try testing.expectEqual(cmd.MsgTag.search, eff.read.tag);
     try testing.expectEqualStrings("info", eff.read.argv[1]);
-    try testing.expectEqualStrings("wget", eff.read.argv[2]);
+    try testing.expectEqualStrings("--formula", eff.read.argv[2]);
+    try testing.expectEqualStrings("wget", eff.read.argv[3]);
+}
+
+test "enter on a cask hit asks `mt info` for the cask, not a same-named formula" {
+    // Without the kind, a refused same-named formula record would fail the
+    // read instead of showing the cask the user picked.
+    var s: State = .{ .items = &sample, .phase = .loaded };
+    s.chrome.view.selected = 1;
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    const eff = stepKey(&s, &storage, .enter);
+    defer testing.allocator.free(eff.read.argv);
+    try testing.expectEqualStrings("--cask", eff.read.argv[2]);
+    try testing.expectEqualStrings("firefox", eff.read.argv[3]);
 }
 
 test "enter is inert on an empty result list" {
@@ -2045,7 +2059,7 @@ test "Enter switches the results pane to a newly selected row instead of closing
     const eff = stepKey(&s, &storage, .enter);
     defer testing.allocator.free(eff.read.argv);
     try testing.expect(eff == .read); // opens wget's info
-    try testing.expectEqualStrings("wget", eff.read.argv[2]);
+    try testing.expectEqualStrings("wget", eff.read.argv[3]);
 }
 
 // ── Hit-test tests ─────────────────────────────────────────────────────────
