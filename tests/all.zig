@@ -77,6 +77,7 @@ comptime {
     _ = @import("install_execute_test.zig");
     _ = @import("install_idempotent_test.zig");
     _ = @import("install_isolation_test.zig");
+    _ = @import("install_record_rollback_test.zig");
     _ = @import("install_keg_from_bottle_test.zig");
     _ = @import("migrate_keg_claim_test.zig");
     _ = @import("install_local_test.zig");

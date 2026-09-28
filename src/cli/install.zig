@@ -214,6 +214,29 @@ pub fn unlinkSameVersionKegLinks(
     linker.unlink(keg_id) catch {};
 }
 
+/// Remove a keg whose DB record failed - unless a surviving row still
+/// points at it: a same-version `--force` pruned the old dir before
+/// materialising, so this dir is now the only copy that row has.
+pub fn dropUnrecordedKeg(io: std.Io, db: *sqlite.Database, prefix: []const u8, name: []const u8, version: []const u8, keg_path: []const u8) void {
+    var stmt = db.prepare("SELECT 1 FROM kegs WHERE cellar_path = ?1 LIMIT 1;") catch return;
+    defer stmt.finalize();
+    stmt.bindText(1, keg_path) catch return;
+    if (stmt.step() catch true) return;
+    cellar_mod.remove(io, prefix, name, version) catch {};
+}
+
+/// Put back the links the `--force` pre-link sweep cleared, so a failed
+/// reinstall leaves the prior install working.
+pub fn relinkKegs(db: *sqlite.Database, linker: *linker_mod.Linker, name: []const u8) void {
+    var stmt = db.prepare("SELECT id, cellar_path, bin_isolated FROM kegs WHERE name = ?1;") catch return;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return;
+    while (stmt.step() catch false) {
+        const path = stmt.columnText(1) orelse continue;
+        linker.link(std.mem.sliceTo(path, 0), name, stmt.columnInt(0), stmt.columnBool(2)) catch {};
+    }
+}
+
 fn deleteDependencyRows(db: *sqlite.Database, keg_id: i64) void {
     var stmt = db.prepare("DELETE FROM dependencies WHERE keg_id = ?1;") catch return;
     defer stmt.finalize();
@@ -1387,7 +1410,8 @@ fn linkAndRecord(
     if (!job.keg_only) {
         const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason, bin_isolated, .{}) catch |err| {
             sink.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
-            cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
+            dropUnrecordedKeg(io, db, prefix, job.name, job.version_str, keg_path);
+            if (flags.force) relinkKegs(db, linker, job.name);
             return InstallError.RecordFailed;
         };
 
@@ -1410,7 +1434,8 @@ fn linkAndRecord(
     } else {
         _ = recordKeg(db, formula, job.store_sha256, keg_path, reason, bin_isolated, .{}) catch |err| {
             sink.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
-            cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
+            // Keg-only kegs were never publicly linked: nothing to relink.
+            dropUnrecordedKeg(io, db, prefix, job.name, job.version_str, keg_path);
             return InstallError.RecordFailed;
         };
         // keg-only has no public link phase to roll back.
