@@ -28,6 +28,7 @@ const path_write = @import("../fs/path_write.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 const install_args = @import("install/args.zig");
+const tap_cmd = @import("tap.zig");
 
 pub const Kind = enum { formula, cask, service };
 
@@ -515,7 +516,8 @@ pub fn writeEntry(w: *std.Io.Writer, kind: Kind, name: []const u8, version: []co
 /// Parse a single line. Returns null for blank lines, comments, and any line
 /// that does not match the canonical `<kind> <name> [<version>]` shape.
 /// The returned `name` and `version` slices point into `line`.
-/// Unscreened; `parseBackup` drops an entry holding a control byte.
+/// Unscreened; `parseBackup` drops an entry holding a control byte or a
+/// name that is not a package name.
 pub fn parseLine(line: []const u8) ?Entry {
     var s = std.mem.trim(u8, line, " \t\r\n");
     if (s.len == 0) return null;
@@ -578,9 +580,26 @@ pub fn parseBackup(allocator: std.mem.Allocator, text: []const u8) ![]Entry {
             output.warnAlways("Skipping `{f}`: it holds a control character", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
             continue;
         }
+        if (!isEntryName(entry.kind, entry.name)) {
+            output.warnAlways("Skipping `{f}`: it does not name a package", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            continue;
+        }
         try list.append(allocator, entry);
     }
     return try list.toOwnedSlice(allocator);
+}
+
+/// A bare name, or a formula/cask as `user/repo/name`; the version is
+/// display-only, so only the name is held to a shape.
+fn isEntryName(kind: Kind, name: []const u8) bool {
+    // Install runs a `.rb` path as a local recipe, which restore never does.
+    if (install_args.isLocalFormulaPath(name)) return false;
+    if (path_component.isPathComponent(name)) return true;
+    if (kind == .service) return false;
+    const t = install_args.parseTapName(name) orelse return false;
+    // Install screens only the leaf; user/repo reach a forge URL.
+    tap_cmd.validateTapName(name[0 .. t.user.len + 1 + t.repo.len]) catch return false;
+    return true;
 }
 
 /// Compute a default backup filename of the form
@@ -684,6 +703,19 @@ test "parseLine refuses a name restore would hand to install as a flag" {
     try std.testing.expect(parseLine("cask --force") == null);
     try std.testing.expect(parseLine("service -x") == null);
     try std.testing.expect(parseLine("formula wget-2") != null);
+}
+
+test "isEntryName admits a bare name or a tap slug and nothing path-shaped" {
+    // Backups write tap packages as `user/repo/name`; a service is a label.
+    for ([_][]const u8{ "wget", "postgresql@16", "acme/tools/foo", "user/some.repo_v2/foo", "acme/tools..v2/foo" }) |ok|
+        try std.testing.expect(isEntryName(.formula, ok));
+    try std.testing.expect(isEntryName(.cask, "acme/tools/baz"));
+    try std.testing.expect(isEntryName(.service, "postgresql@16"));
+    for ([_][]const u8{ ".", "..", "../../etc", "a/b/../../x", "a/b", "a/b/c/d", "a//b", "/a/b", "a/b/", "wget/", "acme/tools/foo/", "a/./b", "a/b/..", "a/b/c.rb", "~/a/b.rb", ".x.rb", "a%2e%2e/b/foo", ".hidden/x/foo", "a/x?y/foo" }) |bad|
+        try std.testing.expect(!isEntryName(.formula, bad));
+    try std.testing.expect(!isEntryName(.cask, ".."));
+    try std.testing.expect(!isEntryName(.service, "acme/tools/foo"));
+    try std.testing.expect(!isEntryName(.service, ".."));
 }
 
 test "parseLine parses a service line and keeps `@` inside the name" {
