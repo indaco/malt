@@ -76,6 +76,9 @@ jobs:
       - name: Regression guard - bundle install says why a member failed
         run: ./scripts/regressions/bundle-failure-reason-bundle-install-failure-has-no-reason.sh
 
+      - name: Regression guard - list is compact on a terminal, bare names when piped
+        run: ./scripts/regressions/list-compact-default-mt-info-compact.sh
+
       # Security smoke: flag-scope enforcement, argv-only lint,
       # pins-manifest shape, install.sh fail-closed regression suite.
       # Subsumes the individual install.sh step that used to live in
