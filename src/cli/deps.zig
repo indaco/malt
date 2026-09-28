@@ -136,8 +136,8 @@ fn fetchEither(
 }
 
 /// Preserve OOM up the stack so the caller's allocator-failure tests
-/// see the right error; everything else (an API record already reported
-/// as unreadable or uncached) surfaces as `Aborted` so the user gets a
+/// see the right error; everything else (an unreadable DB or API record,
+/// already reported) surfaces as `Aborted` so the user gets a
 /// single exit code, not a noisy backtrace through unrelated internals.
 fn mapLookupErr(e: anyerror) DepError {
     return switch (e) {
@@ -290,6 +290,7 @@ pub fn encodeJson(w: *std.Io.Writer, entries: []const Entry) !void {
 /// Build a `DepLookup` that reads the local kegs/dependencies tables.
 /// Returns null for any keg that isn't installed; returns an empty
 /// slice for an installed leaf so the walker still emits a node for it.
+/// A query failure is reported, not read as either of those.
 pub fn dbDepLookup(db: *sqlite.Database) DepLookup {
     return .{ .ctx = @ptrCast(db), .fetchFn = dbFetch };
 }
@@ -300,17 +301,17 @@ fn dbFetch(ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8) anye
     // First check the keg row exists — distinguishes "installed leaf"
     // (empty deps) from "not installed" (null), which the renderer
     // relies on to pick "(not installed)" vs the bare-leaf path.
-    var keg_stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return null;
+    var keg_stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return dbUnreadable(name);
     defer keg_stmt.finalize();
-    keg_stmt.bindText(1, name) catch return null;
-    if (!(keg_stmt.step() catch false)) return null;
+    keg_stmt.bindText(1, name) catch return dbUnreadable(name);
+    if (!(keg_stmt.step() catch return dbUnreadable(name))) return null;
     const keg_id = keg_stmt.columnInt(0);
 
     var stmt = db.prepare(
         "SELECT dep_name FROM dependencies WHERE keg_id = ?1 ORDER BY dep_name;",
-    ) catch return null;
+    ) catch return dbUnreadable(name);
     defer stmt.finalize();
-    stmt.bindInt(1, keg_id) catch return null;
+    stmt.bindInt(1, keg_id) catch return dbUnreadable(name);
 
     var out: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -318,7 +319,7 @@ fn dbFetch(ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8) anye
         out.deinit(allocator);
     }
 
-    while (stmt.step() catch false) {
+    while (stmt.step() catch return dbUnreadable(name)) {
         const raw = stmt.columnText(0) orelse continue;
         const dep = std.mem.sliceTo(raw, 0);
         const owned = try allocator.dupe(u8, dep);
@@ -327,6 +328,11 @@ fn dbFetch(ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8) anye
     }
 
     return try out.toOwnedSlice(allocator);
+}
+
+fn dbUnreadable(name: []const u8) error{Aborted} {
+    output.err("could not read the install database to look up '{s}'", .{name});
+    return error.Aborted;
 }
 
 // --- API adapter: BrewApi.fetchFormula → DepLookup --------------------------
@@ -405,6 +411,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const prefix = atomic.maltPrefixOrAbort();
     var db_opt: ?sqlite.Database = cli_info.openDb(prefix);
     defer if (db_opt) |*d| d.close();
+    if (db_opt == null) try refuseUnopenableDb(ctx.io, prefix);
     if (db_opt) |*db| schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(db, e, prefix);
 
     var stdout_buf: [4096]u8 = undefined;
@@ -468,6 +475,15 @@ fn collectGraph(
     const api_lookup = apiDepLookup(&api_ctx);
 
     return collectDeps(allocator, db_lookup, api_lookup, name, .{ .recursive = opts.recursive });
+}
+
+/// A DB that exists but will not open is not an empty install.
+fn refuseUnopenableDb(io: std.Io, prefix: []const u8) error{Aborted}!void {
+    var buf: [512]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/db/malt.db", .{prefix}) catch return;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return;
+    output.err("could not open the install database at {s}", .{path});
+    return error.Aborted;
 }
 
 fn reportInterrupt() error{UserInterrupted} {
