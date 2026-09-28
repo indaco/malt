@@ -100,9 +100,11 @@ pub fn parseInstallReceipt(parent: std.mem.Allocator, json_text: []const u8) Par
         }
     };
 
-    // A foreign tool writes this receipt and the version lands in a Cellar
-    // path. Absent stays tolerated; present must be a single component.
-    if (version.len != 0 and !path_component.isPathComponent(version)) return ParseError.InvalidReceipt;
+    // Brew copies these from the tap verbatim into line-framed output and the
+    // DB; the version also names a Cellar dir. An absent version is tolerated.
+    if (path_component.hasControlByte(tap)) return ParseError.InvalidReceipt;
+    if (version.len != 0 and (!path_component.isPathComponent(version) or
+        path_component.hasControlByte(version))) return ParseError.InvalidReceipt;
 
     const source_path = blk: {
         const src = source_obj orelse break :blk "";
@@ -131,6 +133,9 @@ pub fn parseInstallReceipt(parent: std.mem.Allocator, json_text: []const u8) Par
                 .string => |s| s,
                 else => continue,
             };
+            // A control byte refuses the receipt rather than dropping this
+            // entry, which would migrate the keg without that dependency.
+            if (path_component.hasControlByte(name)) return ParseError.InvalidReceipt;
             const owned = a.dupe(u8, name) catch return ParseError.OutOfMemory;
             list.append(a, owned) catch return ParseError.OutOfMemory;
         }
@@ -329,6 +334,59 @@ test "parseInstallReceipt rejects a stable version that is not a path component"
             parseInstallReceipt(std.testing.allocator, json),
         );
     }
+}
+
+test "parseInstallReceipt rejects a version, tap or dependency carrying a control character" {
+    // Escaped so the JSON itself is well-formed: the guard must be what
+    // rejects it, not the parser.
+    const bad = [_][]const u8{
+        \\{"source":{"tap":"x/y","versions":{"stable":"1.0\nX"}}}
+        ,
+        \\{"source":{"tap":"x/y","versions":{"stable":"1.0\rX"}}}
+        ,
+        \\{"source":{"tap":"x/y","versions":{"stable":"1.0\u001b[2J"}}}
+        ,
+        \\{"source":{"tap":"x/y","versions":{"stable":"1.0\u007f"}}}
+        ,
+        \\{"source":{"tap":"x/y","versions":{"stable":"1.0\u009b2J"}}}
+        ,
+        \\{"source":{"tap":"x/\ny","versions":{"stable":"1.0"}}}
+        ,
+        \\{"source":{"tap":"x/y\u009b","versions":{"stable":"1.0"}}}
+        ,
+        \\{"source":{"tap":"x/\ty"}}
+        ,
+        \\{"runtime_dependencies":[{"full_name":"good"},{"full_name":"a\rb"}]}
+        ,
+        \\{"runtime_dependencies":[{"full_name":"a\u0085b"}]}
+        ,
+    };
+    for (bad) |json| {
+        try std.testing.expectError(
+            ParseError.InvalidReceipt,
+            parseInstallReceipt(std.testing.allocator, json),
+        );
+    }
+}
+
+test "parseInstallReceipt keeps the taps and dependency names real kegs ship" {
+    const src =
+        \\{
+        \\  "source": {"tap": "homebrew/core", "versions": {"stable": "3.14.0"}},
+        \\  "runtime_dependencies": [
+        \\    {"full_name": "python@3.14"},
+        \\    {"full_name": "charmbracelet/tap/gum"},
+        \\    {"full_name": "caf\u00e9"}
+        \\  ]
+        \\}
+    ;
+    var r = try parseInstallReceipt(std.testing.allocator, src);
+    defer r.deinit();
+    try std.testing.expectEqualStrings("homebrew/core", r.tap);
+    try std.testing.expectEqual(@as(usize, 3), r.runtime_deps.len);
+    try std.testing.expectEqualStrings("python@3.14", r.runtime_deps[0]);
+    try std.testing.expectEqualStrings("charmbracelet/tap/gum", r.runtime_deps[1]);
+    try std.testing.expectEqualStrings("caf\xc3\xa9", r.runtime_deps[2]);
 }
 
 test "parseInstallReceipt keeps the versions real formulae ship" {
