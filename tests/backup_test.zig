@@ -232,6 +232,56 @@ test "parseBackup skips an entry whose name or version holds a control byte, and
     try testing.expect(std.mem.indexOf(u8, captured.items, "cask b\\x1baz") != null);
 }
 
+test "parseBackup skips an entry that does not name a package, and says so" {
+    // A shared or hand-edited file: restore listed these, and install
+    // resolved `../../etc` as tap `../..` or ran a `.rb` name as a recipe.
+    const text =
+        "formula ..\n" ++
+        "formula .\n" ++
+        "formula ../../etc\n" ++
+        "formula a/b/../../x\n" ++
+        "formula a/b\n" ++
+        "formula a/b/c/d\n" ++
+        "formula a//b\n" ++
+        "formula /a/b\n" ++
+        "cask ..\n" ++
+        "service a/b/c\n" ++
+        "service ..\n" ++
+        "formula a/b/c.rb\n" ++
+        "formula ~/kit/tool.rb\n" ++
+        "cask .evil.rb\n" ++
+        "formula postgresql@16 16.4\n" ++
+        "formula acme/tools/foo\n" ++
+        "formula acme/tools..v2/foo\n" ++
+        "cask acme/tools/baz 3.0\n" ++
+        "formula wget 1.2 beta\n" ++
+        "formula wget 1.0/../../x\n" ++
+        "service postgresql@16\n";
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(true);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+
+    const entries = try backup.parseBackup(testing.allocator, text);
+    defer testing.allocator.free(entries);
+
+    const kept = [_][]const u8{ "postgresql@16", "acme/tools/foo", "acme/tools..v2/foo", "acme/tools/baz", "wget", "wget", "postgresql@16" };
+    try testing.expectEqual(kept.len, entries.len);
+    for (kept, entries) |name, e| try testing.expectEqualStrings(name, e.name);
+    // The version is display-only, never argv, so its shape is left alone.
+    try testing.expectEqualStrings("1.0/../../x", entries[5].version);
+    try testing.expectEqual(backup.Kind.service, entries[6].kind);
+    // Named even under --quiet, once per line.
+    try testing.expectEqual(@as(usize, 14), std.mem.count(u8, captured.items, "does not name a package"));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "`formula a/b/../../x`") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "`service a/b/c`") != null);
+}
+
 test "parseBackup handles an empty input" {
     const entries = try backup.parseBackup(testing.allocator, "");
     defer testing.allocator.free(entries);

@@ -655,7 +655,8 @@ const restore_help =
     \\release. A `--local` keg is not installed; restore prints the command
     \\that rebuilds it from its recipe. A local keg whose name or recipe
     \\path holds a control character is left out of the backup, with a
-    \\warning.
+    \\warning. Restore skips, with a warning, a line whose name holds a
+    \\control character or does not name a package.
     \\
     \\Flags:
     \\  --dry-run     Print the list of packages that would be installed

@@ -343,6 +343,32 @@ test "execute never echoes a control byte from a formula or cask line" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "formula wget@1.2") != null);
 }
 
+test "execute --dry-run leaves a path-shaped name out of the preview and the counts" {
+    // Install resolved `../../etc` as tap `../..` over the network before
+    // failing; restore now names the line and moves on.
+    var s = try Scratch.init(testing.allocator, "path_shaped");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\formula ../../etc
+        \\cask ..
+        \\service ..
+        \\formula acme/tools/foo
+        \\
+    );
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCapture(path, &captured);
+
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, captured.items, "does not name a package"));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Restoring 1 formula(e), 0 cask(s) and 0 service(s)") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "  formula acme/tools/foo\n") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "  formula ../../etc\n") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, " ..\n") == null);
+}
+
 test "execute treats unknown kinds as comments and reports zero entries" {
     // backup.parseBackup is line-tolerant: anything that isn't a
     // recognised `formula <name>` / `cask <name>` is silently dropped,
