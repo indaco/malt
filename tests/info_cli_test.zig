@@ -45,11 +45,17 @@ const Scratch = struct {
             try test_io.cwd().createDirPath(std.Options.debug_io, dir);
         }
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
+        // An inherited MALT_CACHE would miss the seeded records, and a miss
+        // aborts just like a refusal does.
+        var cache_buf: [512]u8 = undefined;
+        const cache = try std.fmt.bufPrintSentinel(&cache_buf, "{s}/cache", .{path}, 0);
+        _ = c.setenv("MALT_CACHE", cache.ptr, 1);
         return .{ .path = path };
     }
 
     fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
         _ = c.unsetenv("MALT_PREFIX");
+        _ = c.unsetenv("MALT_CACHE");
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
         allocator.free(self.path);
     }
@@ -269,6 +275,59 @@ test "execute on a missing package offline with --json is the same error" {
     }
 
     try testing.expectError(error.Aborted, info.execute(&offline_ctx, testing.allocator, &.{"ghost-pkg"}));
+}
+
+// --- refused API record path ------------------------------------------
+
+fn seedApiCache(prefix: []const u8, file: []const u8, body: []const u8) !void {
+    var path_buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/cache/api/{s}", .{ prefix, file });
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, body);
+}
+
+test "execute reports a refused formula record instead of not-installed" {
+    // The record was fetched but refused at parse: that is an unreadable
+    // answer, not a missing package.
+    var s = try Scratch.init(testing.allocator, "refused_formula");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path, "formula_demo.json",
+        \\{"name":"demo","versions":{"stable":"1.0"},"dependencies":["x\u001b[2J"]}
+    );
+    quiet();
+    defer unquiet();
+
+    try testing.expectError(error.Aborted, info.execute(&offline_ctx, testing.allocator, &.{ "--formula", "demo" }));
+}
+
+test "execute reports a refused cask record instead of not-installed" {
+    var s = try Scratch.init(testing.allocator, "refused_cask");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path, "cask_c2.json",
+        \\{"token":"c2","version":"../x","url":"https://e/x.dmg"}
+    );
+    quiet();
+    defer unquiet();
+
+    try testing.expectError(error.Aborted, info.execute(&offline_ctx, testing.allocator, &.{ "--cask", "c2" }));
+}
+
+test "execute stops at a refused formula instead of showing a same-named cask" {
+    // Falling through would present a different package under the name
+    // the user asked about.
+    var s = try Scratch.init(testing.allocator, "refused_shadow");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path, "formula_both.json",
+        \\{"name":"both","versions":{"stable":"1.0\u001b"}}
+    );
+    try seedApiCache(s.path, "cask_both.json",
+        \\{"token":"both","version":"1.0","url":"https://e/x.dmg"}
+    );
+    quiet();
+    defer unquiet();
+
+    try testing.expectError(error.Aborted, info.execute(&offline_ctx, testing.allocator, &.{"both"}));
 }
 
 /// Answers every request with one fixed status and hangs up, so the API leg
