@@ -10,8 +10,8 @@
 //! function pointers, so a future headless consumer injects its own sink
 //! rather than picking from a closed mode enum. The built-in `terminal`
 //! sink forwards to `ui/output` (behaviour identical to today); `silent`
-//! swallows the human lines so bundle's structured `Report` is the only
-//! channel. ndjson events and `--dry-run`/`--json` queries stay on the
+//! swallows the human lines, and bundle's capture sink keeps only the first
+//! error for its structured `Report`. ndjson events and `--dry-run`/`--json` queries stay on the
 //! global on purpose — they are an always-on machine channel and run
 //! configuration, not suppressible human output.
 
@@ -82,7 +82,7 @@ pub const terminal: OutputSink = .{
 };
 
 /// Non-terminal sink: human lines are dropped so a structured consumer
-/// (the bundle runner's `Report`) owns reporting. ndjson still flows.
+/// owns reporting. ndjson still flows.
 pub const silent: OutputSink = .{
     .writeInfo = swallow,
     .writeWarn = swallow,

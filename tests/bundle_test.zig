@@ -235,19 +235,19 @@ const Calls = struct {
         return @ptrCast(@alignCast(ctx.?));
     }
 
-    fn tapAddFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner.DispatchError!void {
+    fn tapAddFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, _: *runner.MemberReason) runner.DispatchError!void {
         const self = unwrap(ctx);
         record(&self.taps, allocator, name) catch return runner.DispatchError.OutOfMemory;
     }
-    fn installFormulaFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner.DispatchError!void {
+    fn installFormulaFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, _: *runner.MemberReason) runner.DispatchError!void {
         const self = unwrap(ctx);
         record(&self.formulas, allocator, name) catch return runner.DispatchError.OutOfMemory;
     }
-    fn installCaskFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner.DispatchError!void {
+    fn installCaskFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, _: *runner.MemberReason) runner.DispatchError!void {
         const self = unwrap(ctx);
         record(&self.casks, allocator, name) catch return runner.DispatchError.OutOfMemory;
     }
-    fn serviceStartFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner.DispatchError!void {
+    fn serviceStartFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, _: *runner.MemberReason) runner.DispatchError!void {
         const self = unwrap(ctx);
         record(&self.services, allocator, name) catch return runner.DispatchError.OutOfMemory;
     }
@@ -344,7 +344,7 @@ test "dispatcher returning DispatchFailed lands as a typed MemberError" {
     defer t.deinit();
 
     const Failing = struct {
-        fn fail(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8) runner.DispatchError!void {
+        fn fail(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8, _: *runner.MemberReason) runner.DispatchError!void {
             return runner.DispatchError.DispatchFailed;
         }
     };
@@ -492,25 +492,25 @@ test "real-world Brewfile shapes parse without error" {
 }
 
 /// Mirrors `cli/bundle.zig`'s real dispatcher: route a member install
-/// through `installAll` with the silent sink, mapping any failure to a
-/// structured `MemberFailed` so the runner's `Report` carries it.
-const SilentInstallCtx = struct {
+/// through `installAll` with the bundle capture sink, mapping any failure
+/// to a structured `MemberFailed` so the runner's `Report` carries it.
+const CaptureInstallCtx = struct {
     app: *const malt.app_ctx.AppCtx,
 
-    fn installFormulaFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner.DispatchError!void {
-        const self: *SilentInstallCtx = @ptrCast(@alignCast(ctx.?));
+    fn installFormulaFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8, reason: *runner.MemberReason) runner.DispatchError!void {
+        const self: *CaptureInstallCtx = @ptrCast(@alignCast(ctx.?));
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        install.installAll(self.app, arena.allocator(), &.{name}, .{ .sink = install_sink.silent }) catch
+        install.installAll(self.app, arena.allocator(), &.{name}, .{ .sink = malt.cli_bundle.captureSink(reason) }) catch
             return runner.DispatchError.MemberFailed;
     }
-    fn unusedFn(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8) runner.DispatchError!void {
+    fn unusedFn(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8, _: *runner.MemberReason) runner.DispatchError!void {
         unreachable;
     }
 };
 
-test "silent-sink dispatcher: member failure surfaces via Report with no stderr spam" {
-    var t = try TempDb.init("silent_sink");
+test "capture-sink dispatcher: member failure carries its reason via Report with no stderr spam" {
+    var t = try TempDb.init("capture_sink");
     defer t.deinit();
 
     // installAll resolves its prefix from MALT_PREFIX; pin it to the temp dir.
@@ -536,13 +536,13 @@ test "silent-sink dispatcher: member failure surfaces via Report with no stderr 
     // test never races on connectivity and the HTTP/TLS layer never writes to the
     // global stderr we assert is empty — the source of the parallel-batch flake.
     const app: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
-    var ictx: SilentInstallCtx = .{ .app = &app };
+    var ictx: CaptureInstallCtx = .{ .app = &app };
     const dispatcher = runner.Dispatcher{
         .ctx = &ictx,
-        .installFormula = SilentInstallCtx.installFormulaFn,
-        .installCask = SilentInstallCtx.unusedFn,
-        .tapAdd = SilentInstallCtx.unusedFn,
-        .serviceStart = SilentInstallCtx.unusedFn,
+        .installFormula = CaptureInstallCtx.installFormulaFn,
+        .installCask = CaptureInstallCtx.unusedFn,
+        .tapAdd = CaptureInstallCtx.unusedFn,
+        .serviceStart = CaptureInstallCtx.unusedFn,
     };
 
     var out_buf: std.ArrayList(u8) = .empty;
@@ -557,11 +557,13 @@ test "silent-sink dispatcher: member failure surfaces via Report with no stderr 
     });
     defer report.deinit();
 
-    // Structured per-member outcome survives the silent sink...
+    // Structured per-member outcome survives the capture sink...
     try testing.expect(report.hasFailure());
     try testing.expectEqual(@as(usize, 1), report.failures.len);
     try testing.expectEqual(runner.DispatchError.MemberFailed, report.failures[0].err);
     try testing.expectEqualStrings("zz_nonexistent_formula_xyz", report.failures[0].name);
+    // ...and names the cause the pipeline would have printed...
+    try testing.expect(std.mem.indexOf(u8, report.failures[0].reason.slice(), "not cached") != null);
     // ...while the per-keg lines never reach the global stderr channel.
     try testing.expectEqual(@as(usize, 0), out_buf.items.len);
 }
