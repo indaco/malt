@@ -248,10 +248,13 @@ const outdated_help =
 const list_help =
     \\Usage: malt list [flags]
     \\
-    \\List installed packages.
+    \\List installed packages. On a terminal, names are packed into columns
+    \\under Formulae and Casks headers; piped, they print one bare name per
+    \\line. --versions and -v print one bulleted row per package instead.
+    \\Scripts should use --quiet or --json.
     \\
     \\Flags:
-    \\  --versions     Show version numbers
+    \\  --versions     Show version numbers (one package per line)
     \\  --formula      Formulas only
     \\  --cask         Casks only
     \\  --pinned       Pinned packages only
@@ -266,6 +269,7 @@ const list_help =
     \\  --linked       With --json: add linked (is the keg active in the
     \\                 prefix). Casks are always linked once installed.
     \\  --quiet, -q    Names only, one per line
+    \\  --verbose, -v  One package per line, with the [pinned] tag
     \\
 ;
 

@@ -67,7 +67,8 @@ ln -s "$PREFIX/Cellar/jq/1.7.1/bin/jq" "$PREFIX/bin/jq"
 CMDS=(
   "info jq"
   "which jq"
-  "list"
+  # -v: the default piped `list` is bare names with nothing to style.
+  "list -v"
   "search --installed jq"
   "uses jq"
 )

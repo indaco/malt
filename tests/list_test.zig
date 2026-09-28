@@ -154,9 +154,7 @@ fn trimTimeSuffix(out: []const u8) []const u8 {
     return out;
 }
 
-/// Emit `writeHumanOutput` into a freshly allocated buffer with `quiet`
-/// honoured around the call so the global state mutation never leaks
-/// to neighbouring tests.
+/// Emit `writeHumanOutput` into a freshly allocated buffer.
 fn runHuman(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
@@ -179,9 +177,6 @@ fn runHumanTap(
     quiet: bool,
     tap_filter: ?[]const u8,
 ) ![]u8 {
-    const prior_quiet = malt.output.isQuiet();
-    malt.output.setQuiet(quiet);
-    defer malt.output.setQuiet(prior_quiet);
     // `writeHumanOutput` reads colour state via the global; pin to no-color
     // so assertions below stay independent of the host terminal.
     malt.color.setForTest(false, false);
@@ -189,7 +184,7 @@ fn runHumanTap(
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
-    try cli_list.writeHumanOutput(db, show_formula, show_cask, show_versions, show_pinned, tap_filter, &aw.writer);
+    try cli_list.writeHumanOutput(db, show_formula, show_cask, show_versions, show_pinned, tap_filter, quiet, &aw.writer);
     return aw.toOwnedSlice();
 }
 
@@ -1003,4 +998,196 @@ test "buildListJson --pinned --linked marks pinned casks linked" {
         out,
         "\"type\":\"cask\",\"pinned\":true,\"linked\":true",
     ) != null);
+}
+
+// --- compact (default terminal) layout ----------------------------------
+
+/// Run `writeCompactOutput` with colour pinned off so byte assertions do not
+/// depend on the host terminal.
+fn runCompact(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    show_formula: bool,
+    show_cask: bool,
+    show_versions: bool,
+    show_pinned: bool,
+    tap_filter: ?[]const u8,
+    width: ?u16,
+) ![]u8 {
+    malt.color.setForTest(false, false);
+    defer malt.color.setForTest(null, null);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try cli_list.writeCompactOutput(allocator, db, show_formula, show_cask, show_versions, show_pinned, tap_filter, width, &aw.writer);
+    return aw.toOwnedSlice();
+}
+
+test "compact layout sections formulae then casks, one blank line apart" {
+    var t = try TempDb.init("compact_both");
+    defer t.deinit();
+    try insertKeg(&t.db, "bravo", "2.0", false);
+    try insertKeg(&t.db, "alpha", "1.0", false);
+    try insertCask(&t.db, "charlie", "3.0");
+
+    const out = try runCompact(testing.allocator, &t.db, true, true, false, false, null, 80);
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("Formulae\nalpha  bravo\n\nCasks\ncharlie\n", out);
+}
+
+test "compact layout bolds the section headers when colour is on" {
+    var t = try TempDb.init("compact_bold");
+    defer t.deinit();
+    try insertKeg(&t.db, "alpha", "1.0", false);
+
+    malt.color.setForTest(true, false);
+    defer malt.color.setForTest(null, null);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try cli_list.writeCompactOutput(testing.allocator, &t.db, true, true, false, false, null, 80, &aw.writer);
+
+    try testing.expect(std.mem.startsWith(u8, aw.written(), "\x1b[1mFormulae"));
+}
+
+test "compact layout with --formula prints no header (only one kind in scope)" {
+    var t = try TempDb.init("compact_formula_only");
+    defer t.deinit();
+    try insertKeg(&t.db, "alpha", "1.0", false);
+    try insertKeg(&t.db, "bravo", "2.0", false);
+    try insertCask(&t.db, "charlie", "3.0");
+
+    const out = try runCompact(testing.allocator, &t.db, true, false, false, false, null, 80);
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("alpha  bravo\n", out);
+}
+
+test "compact layout with --cask prints no header" {
+    var t = try TempDb.init("compact_cask_only");
+    defer t.deinit();
+    try insertKeg(&t.db, "alpha", "1.0", false);
+    try insertCask(&t.db, "charlie", "3.0");
+
+    const out = try runCompact(testing.allocator, &t.db, false, true, false, false, null, 80);
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("charlie\n", out);
+}
+
+test "compact layout drops an empty kind's section and header entirely" {
+    var t = try TempDb.init("compact_no_casks");
+    defer t.deinit();
+    try insertKeg(&t.db, "alpha", "1.0", false);
+
+    const out = try runCompact(testing.allocator, &t.db, true, true, false, false, null, 80);
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("Formulae\nalpha\n", out);
+}
+
+test "compact layout with only casks installed starts at the Casks header" {
+    var t = try TempDb.init("compact_no_formulae");
+    defer t.deinit();
+    try insertCask(&t.db, "charlie", "3.0");
+
+    const out = try runCompact(testing.allocator, &t.db, true, true, false, false, null, 80);
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("Casks\ncharlie\n", out);
+}
+
+test "compact layout on an empty DB prints nothing" {
+    var t = try TempDb.init("compact_empty");
+    defer t.deinit();
+
+    const out = try runCompact(testing.allocator, &t.db, true, true, false, false, null, 80);
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("", out);
+}
+
+test "compact layout wraps names into columns at the terminal width" {
+    var t = try TempDb.init("compact_wrap");
+    defer t.deinit();
+    for ([_][]const u8{ "aa", "bb", "cc", "dd", "ee" }) |n| try insertKeg(&t.db, n, "1", false);
+
+    // col_w = 4, so width 8 fits 2 columns -> 3 rows filled down each column.
+    const out = try runCompact(testing.allocator, &t.db, true, false, false, false, null, 8);
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("aa  dd\nbb  ee\ncc\n", out);
+}
+
+test "compact layout off a terminal is the --quiet bytes, so pipes stay grep -x friendly" {
+    var t = try TempDb.init("compact_piped");
+    defer t.deinit();
+    try insertKeg(&t.db, "alpha", "1.0", false);
+    try insertKeg(&t.db, "bravo", "2.1", true);
+    try insertCask(&t.db, "charlie", "3.0");
+
+    const piped = try runCompact(testing.allocator, &t.db, true, true, false, false, null, null);
+    defer testing.allocator.free(piped);
+    const quiet = try runHuman(testing.allocator, &t.db, true, true, false, false, true);
+    defer testing.allocator.free(quiet);
+
+    try testing.expectEqualStrings("alpha\nbravo\ncharlie\n", piped);
+    try testing.expectEqualStrings(quiet, piped);
+}
+
+test "compact layout with --versions falls through to the row layout" {
+    // A version column makes the grid ragged; brew's --versions is one per line too.
+    var t = try TempDb.init("compact_versions");
+    defer t.deinit();
+    try insertKeg(&t.db, "alpha", "1.0", false);
+    try insertCask(&t.db, "charlie", "3.0");
+
+    const out = try runCompact(testing.allocator, &t.db, true, true, true, false, null, 80);
+    defer testing.allocator.free(out);
+    const rows = try runHuman(testing.allocator, &t.db, true, true, true, false, false);
+    defer testing.allocator.free(rows);
+
+    try testing.expectEqualStrings("  ▸ alpha (1.0)\n  ▸ charlie (3.0)\n", out);
+    try testing.expectEqualStrings(rows, out);
+}
+
+test "compact layout drops the [pinned] tag" {
+    var t = try TempDb.init("compact_no_pinned_tag");
+    defer t.deinit();
+    try insertKeg(&t.db, "alpha", "1.0", true);
+
+    const out = try runCompact(testing.allocator, &t.db, true, false, false, false, null, 80);
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("alpha\n", out);
+}
+
+test "compact --pinned splits pinned rows into sections instead of tagging [cask]" {
+    var t = try TempDb.init("compact_pinned");
+    defer t.deinit();
+    try insertKeg(&t.db, "loose", "1.0", false);
+    try insertKeg(&t.db, "zsh", "5.9", true);
+    try t.db.exec(
+        \\INSERT INTO casks (token, name, version, url, pinned)
+        \\VALUES ('firefox', 'firefox', '120.0', 'https://example.invalid', 1);
+    );
+    try insertCask(&t.db, "slack", "4.0");
+
+    const out = try runCompact(testing.allocator, &t.db, true, true, false, true, null, 80);
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("Formulae\nzsh\n\nCasks\nfirefox\n", out);
+}
+
+test "compact --tap scopes both sections to that tap" {
+    var t = try TempDb.init("compact_tap");
+    defer t.deinit();
+    try insertKegTap(&t.db, "mine", "1.0", "user/repo");
+    try insertKegTap(&t.db, "other", "1.0", "homebrew/core");
+    try insertCaskTap(&t.db, "mycask", "1.0", "user/repo");
+    try insertCaskTap(&t.db, "theirs", "1.0", "homebrew/cask");
+
+    const out = try runCompact(testing.allocator, &t.db, true, true, false, false, "user/repo", 80);
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("Formulae\nmine\n\nCasks\nmycask\n", out);
 }

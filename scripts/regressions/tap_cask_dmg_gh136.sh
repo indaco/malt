@@ -99,8 +99,8 @@ for spec in "${CASKS[@]}"; do
     fail "${full}: uninstall reported failure"
   [[ ! -d "$app_path" ]] ||
     fail "${full}: uninstall left ${app_path} behind"
-  "$BIN" list >"$PREFIX/list_${token}_after.txt" 2>&1
-  if grep -q "^[[:space:]]*[▸>][[:space:]]*${token}\$" "$PREFIX/list_${token}_after.txt"; then
+  "$BIN" list -q >"$PREFIX/list_${token}_after.txt" 2>&1
+  if grep -Fqx "$token" "$PREFIX/list_${token}_after.txt"; then
     fail "${full}: ${token} still in \`mt list\` after uninstall"
   fi
   pass "${full}: uninstall removed the bundle and DB row"

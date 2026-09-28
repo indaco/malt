@@ -176,3 +176,46 @@ test "execute --json emits a JSON dump" {
     const ctx = ctxWithSink();
     try list.execute(&ctx, &.{});
 }
+
+// --- layout dispatch --------------------------------------------------
+
+/// Run `execute` with stdout on a scratch file: a non-terminal stdout, the
+/// shape of `mt list > out.txt` or a pipe.
+fn executeToFile(s: *const Scratch, args: []const []const u8, verbose: bool) ![]u8 {
+    const io = std.Options.debug_io;
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/stdout.txt", .{s.path});
+    defer testing.allocator.free(out_path);
+    const f = try std.Io.Dir.createFileAbsolute(io, out_path, .{});
+    output.setVerbose(verbose);
+    defer output.setVerbose(false);
+    malt.color.setForTest(false, false);
+    defer malt.color.setForTest(null, null);
+    var ctx = ctxWithSink();
+    ctx.stdout = f;
+    list.execute(&ctx, args) catch |e| {
+        f.close(io);
+        return e;
+    };
+    f.close(io);
+    return test_io.cwd().readFileAlloc(io, out_path, testing.allocator, .limited(1 << 16));
+}
+
+test "execute off a terminal prints bare names so pipes and redirects stay grep -x friendly" {
+    var s = try Scratch.init(testing.allocator, "dispatch_piped");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+
+    const out = try executeToFile(&s, &.{}, false);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("jq\nwget\nfirefox\n", out);
+}
+
+test "execute -v keeps the bulleted row layout with the [pinned] tag" {
+    var s = try Scratch.init(testing.allocator, "dispatch_verbose");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+
+    const out = try executeToFile(&s, &.{}, true);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("  ▸ jq [pinned]\n  ▸ wget\n  ▸ firefox\n", out);
+}
