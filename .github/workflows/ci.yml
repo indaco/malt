@@ -89,6 +89,9 @@ jobs:
       - name: Regression guard - an API formula or cask with a control character is refused
         run: ./scripts/regressions/api-identity-control-bytes-api-and-service-identities-accept-control-bytes.sh
 
+      - name: Regression guard - info reports a refused API record instead of not installed
+        run: ./scripts/regressions/info-refused-record-info-reports-a-refused-record-as-not-installed.sh
+
       - name: Regression guard - tap raw binary stays in its keg
         run: ./scripts/regressions/raw-binary-name-escapes-keg-tap-raw-binary-target-not-a-path-component.sh
 
