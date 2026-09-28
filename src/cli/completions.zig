@@ -380,7 +380,8 @@ pub const zsh_script =
     \\                        '--json[Output as JSON]' \
     \\                        '--size[With --json: add on-disk size_bytes per row]' \
     \\                        '--linked[With --json: add link status per row]' \
-    \\                        '(--quiet -q)'{--quiet,-q}'[Names only]'
+    \\                        '(--quiet -q)'{--quiet,-q}'[Names only]' \
+    \\                        '(--verbose -v)'{--verbose,-v}'[One package per line, with the pinned tag]'
     \\                    ;;
     \\                info)
     \\                    _arguments \

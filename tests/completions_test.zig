@@ -165,6 +165,14 @@ test "purge completions expose --verbose with command-specific semantics" {
     try expectContains(completions.zsh_script, "Show every per-scope item");
 }
 
+test "list completions expose --verbose for the one-per-line layout" {
+    // zsh only offers a subcommand's own _arguments after the verb, so
+    // `mt list -<TAB>` would never reach the row layout without this.
+    try expectContains(completions.bash_script, "--verbose -v");
+    try expectContains(completions.fish_script, "-l verbose");
+    try expectContains(completions.zsh_script, "[One package per line, with the pinned tag]");
+}
+
 test "purge completions surface --json and --output-format=ndjson" {
     // Same shape as --verbose: bash and fish merge global flags into the
     // per-subcommand list automatically; zsh's per-command _arguments

@@ -13,6 +13,7 @@ const dirsize = @import("../fs/dirsize.zig");
 const tap_slug = @import("../tap_slug.zig");
 const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
+const termsize = @import("../ui/termsize.zig");
 const help = @import("help.zig");
 
 pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
@@ -88,17 +89,103 @@ pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
 
     if (json_mode) {
         try writeJsonOutput(ctx, &db, prefix, show_formula, show_cask, show_pinned, show_size, show_linked, tap_filter, stdout);
+    } else if (output.isVerbose() or output.isQuiet()) {
+        // --debug implies verbose, so a debug transcript shows rows, not the grid.
+        try writeHumanOutput(&db, show_formula, show_cask, show_versions, show_pinned, tap_filter, output.isQuiet(), stdout);
     } else {
-        try writeHumanOutput(&db, show_formula, show_cask, show_versions, show_pinned, tap_filter, stdout);
+        const width: ?u16 = if (termsize.winsize(ctx.stdout.handle)) |s| s.cols else |_| null;
+        try writeCompactOutput(std.heap.page_allocator, &db, show_formula, show_cask, show_versions, show_pinned, tap_filter, width, stdout);
     }
 }
 
-/// Pub for tests: assert the exact bytes for the human path without
-/// staging a real DB-on-prefix + stdout-capture rig.
+/// Default human layout: `Formulae` / `Casks` sections of names packed into
+/// columns, like `brew list`. `width` is the terminal's column count; null
+/// means stdout is not a terminal.
+pub fn writeCompactOutput(
+    gpa: std.mem.Allocator,
+    db: *sqlite.Database,
+    show_formula: bool,
+    show_cask: bool,
+    show_versions: bool,
+    show_pinned: bool,
+    tap_filter: ?[]const u8,
+    width: ?u16,
+    stdout: *std.Io.Writer,
+) !void {
+    // A version column makes the grid ragged; keep brew's one-per-line shape.
+    if (show_versions) return writeHumanOutput(db, show_formula, show_cask, true, show_pinned, tap_filter, false, stdout);
+    // Piped output stays one bare name per line so `mt list | grep -x` works.
+    const cols = width orelse return writeHumanOutput(db, show_formula, show_cask, false, show_pinned, tap_filter, true, stdout);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const has_tap = tap_filter != null;
+    const formulae = if (show_formula) try collectNames(a, db, formulaListSql(show_pinned, has_tap), tap_filter) else &.{};
+    const casks = if (show_cask) try collectNames(a, db, caskListSql(show_pinned, has_tap), tap_filter) else &.{};
+
+    // Headers only disambiguate when both kinds are in scope.
+    const headed = show_formula and show_cask;
+    if (formulae.len > 0) try writeSection(stdout, headed, "Formulae", formulae, cols);
+    if (casks.len > 0) {
+        if (formulae.len > 0) try stdout.writeAll("\n");
+        try writeSection(stdout, headed, "Casks", casks, cols);
+    }
+}
+
+/// Column 0 of `sql`, duped into `a` so the grid can measure every name
+/// before printing the first line.
+fn collectNames(a: std.mem.Allocator, db: *sqlite.Database, sql: [:0]const u8, tap_filter: ?[]const u8) ![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    var stmt = db.prepare(sql) catch return &.{};
+    defer stmt.finalize();
+    if (tap_filter) |t| stmt.bindText(1, t) catch return &.{};
+    while (stmt.step() catch false) {
+        const name = stmt.columnText(0) orelse continue;
+        try names.append(a, try a.dupe(u8, std.mem.sliceTo(name, 0)));
+    }
+    return names.items;
+}
+
+fn writeSection(w: *std.Io.Writer, headed: bool, title: []const u8, names: []const []const u8, width: u16) !void {
+    if (headed) {
+        writeStyledSpan(w, color.Style.bold.code(), title, "", "");
+        try w.writeAll("\n");
+    }
+    try writeColumns(w, names, width);
+}
+
+/// Column-major grid (`ls -C` order). Never a trailing space.
+fn writeColumns(w: *std.Io.Writer, names: []const []const u8, width: u16) !void {
+    if (names.len == 0) return;
+    var max_len: usize = 0;
+    var ascii = true;
+    for (names) |n| {
+        max_len = @max(max_len, n.len);
+        for (n) |b| ascii = ascii and std.ascii.isAscii(b);
+    }
+    const col_w = max_len + 2;
+    // Byte length is display width only for ASCII, and a bidi control in a
+    // tap-cask token would reorder its row, so non-ASCII gets one column.
+    const ncols = if (ascii) @max(1, width / col_w) else 1;
+    const nrows = (names.len + ncols - 1) / ncols;
+    for (0..nrows) |r| {
+        var i = r;
+        while (i < names.len) : (i += nrows) {
+            try w.writeAll(names[i]);
+            if (i + nrows < names.len) try w.splatByteAll(' ', col_w - names[i].len);
+        }
+        try w.writeAll("\n");
+    }
+}
+
+/// Row layout behind `--verbose`/`--quiet`. Pub for tests: assert the exact
+/// bytes for the human path without staging a real DB-on-prefix +
+/// stdout-capture rig.
 ///
-/// Honours `output.isQuiet()`: under `--quiet` the help text promises
-/// "Names only, one per line", so decorations (bullet, version suffix,
-/// `[pinned]` tag) are suppressed and each row is a bare name + `\n`.
+/// `quiet`: the help text promises "Names only, one per line", so
+/// decorations (bullet, version suffix, `[pinned]` tag) are suppressed and
+/// each row is a bare name + `\n`.
 pub fn writeHumanOutput(
     db: *sqlite.Database,
     show_formula: bool,
@@ -106,10 +193,9 @@ pub fn writeHumanOutput(
     show_versions: bool,
     show_pinned: bool,
     tap_filter: ?[]const u8,
+    quiet: bool,
     stdout: *std.Io.Writer,
 ) !void {
-    const quiet = output.isQuiet();
-
     if (show_pinned) {
         try writePinnedHuman(db, show_formula, show_cask, show_versions, tap_filter, quiet, stdout);
         return;
@@ -591,4 +677,56 @@ fn writeLinkedField(w: *std.Io.Writer, extras: Extras, src: LinkSource, db: *sql
     };
     try w.writeAll(",\"linked\":");
     try w.writeAll(if (is_linked) "true" else "false");
+}
+
+fn columnsFor(names: []const []const u8, width: u16) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    errdefer aw.deinit();
+    try writeColumns(&aw.writer, names, width);
+    return aw.toOwnedSlice();
+}
+
+test "writeColumns fills column-major: reading down column 1 is names[0..nrows]" {
+    const names = [_][]const u8{ "n0", "n1", "n2", "n3", "n4", "n5", "n6" };
+    // col_w = 4; width 12 fits exactly 3 columns -> ceil(7/3) = 3 rows.
+    const out = try columnsFor(&names, 12);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("n0  n3  n6\nn1  n4\nn2  n5\n", out);
+}
+
+test "writeColumns narrower than the longest name degrades to one column" {
+    const names = [_][]const u8{ "a-very-long-name", "b" };
+    const out = try columnsFor(&names, 4);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("a-very-long-name\nb\n", out);
+}
+
+test "writeColumns survives a zero width (pty reporting 0 cols)" {
+    const names = [_][]const u8{ "a", "b" };
+    const out = try columnsFor(&names, 0);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("a\nb\n", out);
+}
+
+test "writeColumns pads to the widest name and never leaves a trailing space" {
+    const names = [_][]const u8{ "x", "longer", "yy", "z", "mid" };
+    const out = try columnsFor(&names, 80);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("x       longer  yy      z       mid\n", out);
+    var lines = std.mem.splitScalar(u8, out, '\n');
+    while (lines.next()) |line| try std.testing.expect(!std.mem.endsWith(u8, line, " "));
+}
+
+test "writeColumns with no names writes nothing" {
+    const out = try columnsFor(&.{}, 80);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("", out);
+}
+
+test "writeColumns gives a non-ASCII name its own line so it cannot skew or reorder neighbours" {
+    // "café" pads by bytes not cells; U+202E would flip the rest of its row.
+    const names = [_][]const u8{ "café", "b", "evil\u{202E}", "d" };
+    const out = try columnsFor(&names, 80);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("café\nb\nevil\u{202E}\nd\n", out);
 }
