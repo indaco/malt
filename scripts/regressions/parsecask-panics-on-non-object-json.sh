@@ -44,12 +44,18 @@ mkdir -p "$SANDBOX/cache/api"
 for body in '[]' '"x"' '42' 'null' 'true'; do
   printf '%s' "$body" >"$SANDBOX/cache/api/cask_ghostty.json"
   set +e
-  MALT_PREFIX="$SANDBOX/prefix" MALT_CACHE="$SANDBOX/cache" \
-    "$ROOT/zig-out/bin/malt" info --cask ghostty --offline >/dev/null 2>&1
+  env -u MALT_API_DOMAIN MALT_PREFIX="$SANDBOX/prefix" MALT_CACHE="$SANDBOX/cache" \
+    "$ROOT/zig-out/bin/malt" info --cask ghostty --offline >/dev/null 2>"$SANDBOX/err"
   rc=$?
   set -e
-  if [[ "$rc" -ne 0 ]]; then
+  if ((rc >= 128)); then
     echo "FAIL: cask body '$body' aborted malt (exit $rc); parseCask does not check the JSON root tag" >&2
+    exit 1
+  fi
+  # A cache miss exits cleanly too; only the refusal message proves parseCask ran.
+  if ! grep -q 'unreadable answer' "$SANDBOX/err"; then
+    cat "$SANDBOX/err" >&2
+    echo "FAIL: cask body '$body' was not reported as a parse failure (exit $rc)" >&2
     exit 1
   fi
 done

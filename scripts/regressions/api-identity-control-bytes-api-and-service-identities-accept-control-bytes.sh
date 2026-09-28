@@ -48,8 +48,9 @@ fail() {
 URL='"url":"https://example.invalid/a.dmg"'
 
 # info <cache file> <json> <info args...> -> combined output in $SB/out.
-# Only one record is cached at a time: `info evil` falls back to a cask of
-# the same name, so a leftover fixture would render in a refused case.
+# Only one record is cached at a time: `info evil` shows a cask of the same
+# name when no formula is cached, so a leftover fixture would render in a
+# refused case.
 info() {
   rm -f "$MALT_CACHE"/api/*.json
   printf '%s' "$2" >"$MALT_CACHE/api/$1"
@@ -88,6 +89,11 @@ refused() {
     cat "$SB/out" >&2
     fail "$label was accepted"
   fi
+  # A cache miss renders nothing either; the message proves the parser refused it.
+  grep -q 'unreadable answer' "$SB/out" || {
+    cat "$SB/out" >&2
+    fail "$label was not reported as refused"
+  }
   pass "$label is refused"
 }
 

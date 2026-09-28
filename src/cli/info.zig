@@ -308,6 +308,15 @@ fn apiMiss(e: api_mod.ApiError, name: []const u8) !bool {
     return error.Aborted;
 }
 
+/// A record the API served but the parser refused is an unreadable answer,
+/// not a missing package, and must not fall through to the other kind.
+fn refusedRecord(e: anyerror, name: []const u8) !bool {
+    // Only an OOM after the JSON parse gets here; the parsers fold one
+    // inside it into a parse error.
+    if (e == error.OutOfMemory) return error.OutOfMemory;
+    return apiMiss(error.InvalidResponse, name);
+}
+
 fn emitApiFormula(
     allocator: std.mem.Allocator,
     api: *api_mod.BrewApi,
@@ -319,7 +328,7 @@ fn emitApiFormula(
     const body = api.fetchFormula(name) catch |e| return apiMiss(e, name);
     defer allocator.free(body);
 
-    var f = formula_mod.parseFormula(allocator, body) catch return false;
+    var f = formula_mod.parseFormula(allocator, body) catch |e| return refusedRecord(e, name);
     defer f.deinit();
 
     if (json_mode) try writeApiFormulaJson(&f, stdout) else try writeApiFormulaHuman(&f, stdout, colorize);
@@ -337,7 +346,7 @@ fn emitApiCask(
     const body = api.fetchCask(name) catch |e| return apiMiss(e, name);
     defer allocator.free(body);
 
-    var c = cask_mod.parseCask(allocator, body) catch return false;
+    var c = cask_mod.parseCask(allocator, body) catch |e| return refusedRecord(e, name);
     defer c.deinit();
 
     if (json_mode) try writeApiCaskJson(&c, stdout) else try writeApiCaskHuman(&c, stdout, colorize);
@@ -1361,4 +1370,14 @@ test "encodeInstalledCaskJson output parses as JSON with .tap reachable" {
     try testing.expectEqualStrings("yuzeguitarist/deck", tap_val.string);
     const type_val = parsed.value.object.get("type") orelse return error.MissingTypeKey;
     try testing.expectEqualStrings("cask", type_val.string);
+}
+
+test "refusedRecord keeps OOM fatal and reports any other parse refusal" {
+    // OOM is not the API's fault, so it must not read as an unreadable answer.
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(true);
+    defer output.setQuiet(prior_quiet);
+
+    try testing.expectError(error.OutOfMemory, refusedRecord(error.OutOfMemory, "x"));
+    try testing.expectError(error.Aborted, refusedRecord(error.ParseFailed, "x"));
 }
