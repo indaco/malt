@@ -164,6 +164,7 @@ fn worker(pool: *Pool) void {
         defer pool.http_pool.release(http);
         var api = api_mod.BrewApi.init(io, a, http, pool.cache_dir);
         api.base_url = pool.app_ctx.mirrors.api_base;
+        api.offline = pool.app_ctx.offline;
         var ghcr = ghcr_mod.GhcrClient.init(io, a, http);
         ghcr.base_url = pool.app_ctx.mirrors.bottle_base;
         defer ghcr.deinit();

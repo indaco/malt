@@ -2018,6 +2018,100 @@ test "--parallel honours the resume manifest the same way serial does" {
     try testing.expectEqual(@as(usize, 0), root.get("failed").?.array.items.len);
 }
 
+// Offline, parallel and serial must resolve the API cache the same way;
+// otherwise an air-gapped `--parallel` run fails every keg.
+fn migrateOffline(args: []const []const u8, seed_stale: bool, errbuf: *std.ArrayList(u8)) !std.json.Parsed(std.json.Value) {
+    const brew = try scratchDir("brew_off");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt_z = try scratchDir("mt_of");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+        testing.allocator.free(mt_z);
+    }
+    try seedFakeBrew(brew, &.{"noplatform"});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    if (seed_stale) {
+        const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+        defer testing.allocator.free(cache_api);
+        try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+        const cache_path = try std.fmt.allocPrint(testing.allocator, "{s}/formula_noplatform.json", .{cache_api});
+        defer testing.allocator.free(cache_path);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\{"name":"noplatform","full_name":"noplatform","tap":"homebrew/core","versions":{"stable":"1.0"}}
+        );
+        // A fresh entry is served online too and would hide the bug.
+        try f.setTimestamps(std.Options.debug_io, .{
+            .access_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+            .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+        });
+    }
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+    io_mod.beginStderrCapture(testing.allocator, errbuf);
+    defer io_mod.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron(), .offline = true };
+    try migrate.execute(&ctx, arena.allocator(), args);
+
+    return parseAndCheck(buf.items);
+}
+
+const serial_and_parallel = [_][]const []const u8{ &.{}, &.{"--parallel"} };
+
+test "--parallel offline serves a stale API cache entry like serial does" {
+    resetOutput();
+    defer migrate.last_run_parallel = false;
+
+    for (serial_and_parallel) |args| {
+        var errbuf: std.ArrayList(u8) = .empty;
+        defer errbuf.deinit(testing.allocator);
+        const parsed = try migrateOffline(args, true, &errbuf);
+        defer parsed.deinit();
+        const root = parsed.value.object;
+        try testing.expectEqual(@as(usize, 0), root.get("failed").?.array.items.len);
+        try testing.expectEqual(@as(usize, 1), root.get("skipped_no_bottle").?.array.items.len);
+        try testing.expectEqualStrings("noplatform", root.get("skipped_no_bottle").?.array.items[0].string);
+        if (args.len > 0) try testing.expect(migrate.last_run_parallel);
+    }
+}
+
+// An uncached keg must read as "needs network", not as an API outage.
+test "--parallel offline reports an uncached keg as offline like serial does" {
+    resetOutput();
+    defer migrate.last_run_parallel = false;
+
+    for (serial_and_parallel) |args| {
+        var errbuf: std.ArrayList(u8) = .empty;
+        defer errbuf.deinit(testing.allocator);
+        const parsed = try migrateOffline(args, false, &errbuf);
+        defer parsed.deinit();
+        try testing.expectEqual(@as(usize, 1), parsed.value.object.get("failed").?.array.items.len);
+        try testing.expect(std.mem.indexOf(u8, errbuf.items, "(OfflineRequired)") != null);
+        try testing.expect(std.mem.indexOf(u8, errbuf.items, "ApiUnreachable") == null);
+        if (args.len > 0) try testing.expect(migrate.last_run_parallel);
+    }
+}
+
 // ── Manifest contract on failure ───────────────────────────────────
 //
 // A failed keg must never end up in `migrate.progress.json`; otherwise
