@@ -29,12 +29,21 @@ const Scratch = struct {
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+        const api_dir = try std.fmt.allocPrint(allocator, "{s}/cache/api", .{path});
+        defer allocator.free(api_dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, api_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
+        // An inherited MALT_CACHE would miss the seeded records, and a miss
+        // aborts just like a refusal does.
+        var cache_buf: [512]u8 = undefined;
+        const cache = try std.fmt.bufPrintSentinel(&cache_buf, "{s}/cache", .{path}, 0);
+        _ = c.setenv("MALT_CACHE", cache.ptr, 1);
         return .{ .path = path };
     }
 
     fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
         _ = c.unsetenv("MALT_PREFIX");
+        _ = c.unsetenv("MALT_CACHE");
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
         allocator.free(self.path);
     }
@@ -183,6 +192,124 @@ test "execute --installed --json emits an array shape" {
     try deps_cli.execute(&ctx, testing.allocator, &.{ "--installed", "wget" });
 }
 
+// --- API records that could not be read -------------------------------
+
+fn offlineCtx() malt.app_ctx.AppCtx {
+    var ctx = ctxWithSink();
+    ctx.offline = true;
+    return ctx;
+}
+
+/// `demo` carries a control byte in a dependency name, so the parser refuses
+/// it; `top` reaches it only through a transitive walk.
+fn seedApiCache(prefix: []const u8) !void {
+    const records = [_]struct { []const u8, []const u8 }{
+        .{
+            "demo",
+            \\{"name":"demo","versions":{"stable":"1.0"},"dependencies":["x\u001b[2J"]}
+        },
+        .{
+            "top",
+            \\{"name":"top","versions":{"stable":"1.0"},"dependencies":["demo","leaf"]}
+        },
+        .{
+            "leaf",
+            \\{"name":"leaf","versions":{"stable":"1.0"},"dependencies":[]}
+        },
+    };
+    for (records) |r| {
+        var path_buf: [512]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/cache/api/formula_{s}.json", .{ prefix, r[0] });
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, r[1]);
+    }
+}
+
+fn expectDepsAborts(args: []const []const u8) !void {
+    const ctx = offlineCtx();
+    quiet();
+    defer unquiet();
+    try testing.expectError(error.Aborted, deps_cli.execute(&ctx, testing.allocator, args));
+}
+
+test "execute reports a refused root record instead of not-found" {
+    var s = try Scratch.init(testing.allocator, "refused_root");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path);
+    try expectDepsAborts(&.{"demo"});
+}
+
+test "execute -r aborts on a refused inner record instead of rendering it missing" {
+    // A tree with the branch silently marked "(not installed)" reads as a
+    // complete answer.
+    var s = try Scratch.init(testing.allocator, "refused_inner");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path);
+    try expectDepsAborts(&.{ "-r", "top" });
+}
+
+test "execute reports an offline cache miss instead of not-found" {
+    var s = try Scratch.init(testing.allocator, "offline_miss");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path);
+    try expectDepsAborts(&.{"nope"});
+}
+
+test "execute reports an interrupt that cut a lookup short, not the lookup failure" {
+    // Ctrl-C cancels the in-flight fetch, so the lookup fails too; the
+    // user asked to stop and must get the interrupt exit code.
+    var s = try Scratch.init(testing.allocator, "interrupted_lookup");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path);
+
+    const prior = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior);
+    malt.signals.setInterruptedForTest(true);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    const ctx = offlineCtx();
+    try testing.expectError(error.UserInterrupted, deps_cli.execute(&ctx, testing.allocator, &.{"nope"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Interrupted") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "not cached") == null);
+}
+
+test "execute still renders clean API records offline" {
+    // Guards against a fix that aborts on every API lookup.
+    var s = try Scratch.init(testing.allocator, "clean_api");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path);
+
+    const ctx = offlineCtx();
+    quiet();
+    defer unquiet();
+    try deps_cli.execute(&ctx, testing.allocator, &.{"leaf"});
+    // Non-recursive never looks up direct deps, so the refused `demo` is
+    // only a name here.
+    try deps_cli.execute(&ctx, testing.allocator, &.{"top"});
+    try deps_cli.execute(&ctx, testing.allocator, &.{ "-r", "leaf" });
+}
+
+test "execute reports an install database it cannot open instead of not-found" {
+    // An existing DB that fails to open says nothing about what is
+    // installed; with or without --installed it must not read as empty.
+    var s = try Scratch.init(testing.allocator, "db_unopenable");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path);
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{s.path});
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, "not a sqlite database, just garbage bytes" ** 4);
+
+    try expectDepsAborts(&.{ "--installed", "wget" });
+    try expectDepsAborts(&.{"leaf"});
+}
+
 // --- DB adapter contract ------------------------------------------------
 
 test "dbDepLookup returns null for an unknown keg" {
@@ -218,6 +345,101 @@ test "dbDepLookup returns owned strings for an installed keg" {
     }
     try testing.expectEqual(@as(usize, 1), got.len);
     try testing.expectEqualStrings("openssl@3", got[0]);
+}
+
+// An unreadable DB says nothing about what is installed; reading it as a
+// miss renders an installed keg as "(not installed)" or "not found".
+test "dbDepLookup reports a database it cannot query instead of a miss" {
+    var s = try Scratch.init(testing.allocator, "db_no_kegs");
+    defer s.deinit(testing.allocator);
+
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+
+    quiet();
+    defer unquiet();
+    try testing.expectError(error.Aborted, deps_cli.dbDepLookup(&db).fetch(testing.allocator, "wget"));
+}
+
+test "dbDepLookup reports an unreadable dependency table instead of a leaf" {
+    // The keg row resolves, so a swallowed failure here would render wget
+    // as having no dependencies.
+    var s = try Scratch.init(testing.allocator, "db_no_deps");
+    defer s.deinit(testing.allocator);
+    try seedDeps(s.path);
+
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try db.exec("DROP TABLE dependencies;");
+
+    quiet();
+    defer unquiet();
+    try testing.expectError(error.Aborted, deps_cli.dbDepLookup(&db).fetch(testing.allocator, "wget"));
+}
+
+/// Overwrite every b-tree page of `table` (and its indexes) on disk. The
+/// schema stays intact, so statements prepare and only `step` fails, the
+/// way page corruption or an I/O error shows up at runtime.
+fn corruptTable(db_path: [:0]const u8, table: []const u8) !void {
+    var pages: [8]i64 = undefined;
+    var n: usize = 0;
+    var page_size: i64 = 0;
+    {
+        // Closing the last connection checkpoints the WAL into the main file.
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        var ps = try db.prepare("PRAGMA page_size;");
+        defer ps.finalize();
+        _ = try ps.step();
+        page_size = ps.columnInt(0);
+        var st = try db.prepare("SELECT rootpage FROM sqlite_master WHERE tbl_name = ?1 AND rootpage > 0;");
+        defer st.finalize();
+        try st.bindText(1, table);
+        while (try st.step()) : (n += 1) pages[n] = st.columnInt(0);
+    }
+    const f = try std.Io.Dir.openFileAbsolute(std.Options.debug_io, db_path, .{ .mode = .read_write });
+    defer f.close(std.Options.debug_io);
+    const junk = [_]u8{0xff} ** 65536;
+    for (pages[0..n]) |p| {
+        const len: usize = @intCast(page_size);
+        try f.writePositionalAll(std.Options.debug_io, junk[0..len], @intCast((p - 1) * page_size));
+    }
+}
+
+test "dbDepLookup reports a keg table it cannot read instead of a miss" {
+    var s = try Scratch.init(testing.allocator, "db_corrupt_kegs");
+    defer s.deinit(testing.allocator);
+    try seedDeps(s.path);
+
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    try corruptTable(db_path, "kegs");
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+
+    quiet();
+    defer unquiet();
+    try testing.expectError(error.Aborted, deps_cli.dbDepLookup(&db).fetch(testing.allocator, "wget"));
+}
+
+test "dbDepLookup reports dependency rows it cannot read instead of a leaf" {
+    var s = try Scratch.init(testing.allocator, "db_corrupt_deps");
+    defer s.deinit(testing.allocator);
+    try seedDeps(s.path);
+
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    try corruptTable(db_path, "dependencies");
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+
+    quiet();
+    defer unquiet();
+    try testing.expectError(error.Aborted, deps_cli.dbDepLookup(&db).fetch(testing.allocator, "wget"));
 }
 
 test "dbDepLookup returns an empty slice for an installed leaf keg" {

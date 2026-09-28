@@ -38,7 +38,8 @@ pub const Options = struct {
 /// Pluggable dep source — either the local DB (installed kegs) or the
 /// upstream API (uninstalled formulas). The `fetchFn` returns owned
 /// strings the caller must free, or null when the source has no record
-/// of this name.
+/// of this name. An error means the source could not answer and aborts
+/// the walk.
 pub const DepLookup = struct {
     ctx: *anyopaque,
     fetchFn: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!?[][]const u8,
@@ -55,6 +56,7 @@ pub const DepLookup = struct {
 ///   2. On miss, try `api` if provided (null = `--installed` mode).
 ///   3. Unresolved root: returns an empty slice (the caller renders
 ///      "not found"); unresolved transitive deps are simply not walked.
+///   4. A lookup error aborts the walk: a partial graph is not an answer.
 ///
 /// Caller owns the returned slice and every string inside it; use
 /// `freeEntries` to drop them.
@@ -98,7 +100,7 @@ pub fn collectDeps(
 
 /// Resolve `name` via db (then api) and append one entry. Already-visited
 /// names are skipped. Unresolved names are silently dropped — the BFS
-/// caller doesn't error on a transitive miss.
+/// caller doesn't error on a transitive miss; lookup errors propagate.
 fn appendEntry(
     allocator: std.mem.Allocator,
     entries: *std.ArrayList(Entry),
@@ -134,9 +136,9 @@ fn fetchEither(
 }
 
 /// Preserve OOM up the stack so the caller's allocator-failure tests
-/// see the right error; everything else (DB closed, parse failure)
-/// surfaces as `Aborted` so the user gets a single exit code, not a
-/// noisy backtrace through unrelated internals.
+/// see the right error; everything else (an unreadable DB or API record,
+/// already reported) surfaces as `Aborted` so the user gets a
+/// single exit code, not a noisy backtrace through unrelated internals.
 fn mapLookupErr(e: anyerror) DepError {
     return switch (e) {
         error.OutOfMemory => DepError.OutOfMemory,
@@ -288,6 +290,7 @@ pub fn encodeJson(w: *std.Io.Writer, entries: []const Entry) !void {
 /// Build a `DepLookup` that reads the local kegs/dependencies tables.
 /// Returns null for any keg that isn't installed; returns an empty
 /// slice for an installed leaf so the walker still emits a node for it.
+/// A query failure is reported, not read as either of those.
 pub fn dbDepLookup(db: *sqlite.Database) DepLookup {
     return .{ .ctx = @ptrCast(db), .fetchFn = dbFetch };
 }
@@ -298,17 +301,17 @@ fn dbFetch(ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8) anye
     // First check the keg row exists — distinguishes "installed leaf"
     // (empty deps) from "not installed" (null), which the renderer
     // relies on to pick "(not installed)" vs the bare-leaf path.
-    var keg_stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return null;
+    var keg_stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return dbUnreadable(name);
     defer keg_stmt.finalize();
-    keg_stmt.bindText(1, name) catch return null;
-    if (!(keg_stmt.step() catch false)) return null;
+    keg_stmt.bindText(1, name) catch return dbUnreadable(name);
+    if (!(keg_stmt.step() catch return dbUnreadable(name))) return null;
     const keg_id = keg_stmt.columnInt(0);
 
     var stmt = db.prepare(
         "SELECT dep_name FROM dependencies WHERE keg_id = ?1 ORDER BY dep_name;",
-    ) catch return null;
+    ) catch return dbUnreadable(name);
     defer stmt.finalize();
-    stmt.bindInt(1, keg_id) catch return null;
+    stmt.bindInt(1, keg_id) catch return dbUnreadable(name);
 
     var out: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -316,7 +319,7 @@ fn dbFetch(ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8) anye
         out.deinit(allocator);
     }
 
-    while (stmt.step() catch false) {
+    while (stmt.step() catch return dbUnreadable(name)) {
         const raw = stmt.columnText(0) orelse continue;
         const dep = std.mem.sliceTo(raw, 0);
         const owned = try allocator.dupe(u8, dep);
@@ -327,6 +330,11 @@ fn dbFetch(ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8) anye
     return try out.toOwnedSlice(allocator);
 }
 
+fn dbUnreadable(name: []const u8) error{Aborted} {
+    output.err("could not read the install database to look up '{s}'", .{name});
+    return error.Aborted;
+}
+
 // --- API adapter: BrewApi.fetchFormula → DepLookup --------------------------
 
 const ApiCtx = struct {
@@ -335,18 +343,29 @@ const ApiCtx = struct {
 };
 
 /// Build a `DepLookup` that fetches + parses formula JSON from the API.
-/// Returns null on any network/parse failure so the walker degrades to
-/// "skip this branch" rather than aborting.
+/// Returns null only when the API has no such formula; a record that
+/// could not be fetched or was refused is reported here, where the name
+/// is known.
 pub fn apiDepLookup(ctx: *ApiCtx) DepLookup {
     return .{ .ctx = @ptrCast(ctx), .fetchFn = apiFetch };
 }
 
 fn apiFetch(ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!?[][]const u8 {
     const ac: *ApiCtx = @ptrCast(@alignCast(ctx));
-    const body = ac.api.fetchFormula(name) catch return null;
+    const body = ac.api.fetchFormula(name) catch |e| {
+        // A cancelled fetch is not an unreachable API; `execute` reports it.
+        if (signals.isInterrupted()) return error.Aborted;
+        // Reports and errors on anything but a real miss.
+        _ = try cli_info.apiMiss(e, name);
+        return null;
+    };
     defer ac.allocator.free(body);
 
-    var f = formula_mod.parseFormula(allocator, body) catch return null;
+    var f = formula_mod.parseFormula(allocator, body) catch |e| {
+        // Always reports and errors; the return only satisfies the type.
+        _ = try cli_info.refusedRecord(e, name);
+        return error.Aborted;
+    };
     defer f.deinit();
 
     var out: std.ArrayList([]const u8) = .empty;
@@ -392,6 +411,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const prefix = atomic.maltPrefixOrAbort();
     var db_opt: ?sqlite.Database = cli_info.openDb(prefix);
     defer if (db_opt) |*d| d.close();
+    if (db_opt == null) try refuseUnopenableDb(ctx.io, prefix);
     if (db_opt) |*db| schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(db, e, prefix);
 
     var stdout_buf: [4096]u8 = undefined;
@@ -399,17 +419,17 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     defer stdout.flush() catch {};
 
-    const empty_entries: []Entry = &.{};
     const entries: []Entry = collectGraph(allocator, ctx, db_opt, name, .{
         .recursive = recursive,
         .installed_only = installed_only,
-    }) catch empty_entries;
+    }) catch |e| {
+        // Ctrl-C cancels the in-flight fetch, so the interrupt is the cause.
+        if (signals.isInterrupted()) return reportInterrupt();
+        return e;
+    };
     defer freeEntries(allocator, entries);
 
-    if (signals.isInterrupted()) {
-        output.warn("Interrupted.", .{});
-        return error.UserInterrupted;
-    }
+    if (signals.isInterrupted()) return reportInterrupt();
 
     if (json_mode) {
         try encodeJson(stdout, entries);
@@ -455,6 +475,20 @@ fn collectGraph(
     const api_lookup = apiDepLookup(&api_ctx);
 
     return collectDeps(allocator, db_lookup, api_lookup, name, .{ .recursive = opts.recursive });
+}
+
+/// A DB that exists but will not open is not an empty install.
+fn refuseUnopenableDb(io: std.Io, prefix: []const u8) error{Aborted}!void {
+    var buf: [512]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/db/malt.db", .{prefix}) catch return;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return;
+    output.err("could not open the install database at {s}", .{path});
+    return error.Aborted;
+}
+
+fn reportInterrupt() error{UserInterrupted} {
+    output.warn("Interrupted.", .{});
+    return error.UserInterrupted;
 }
 
 fn alwaysMiss(_: *anyopaque, _: std.mem.Allocator, _: []const u8) anyerror!?[][]const u8 {
@@ -926,6 +960,28 @@ test "collectDeps recursive blends DB hits with API fallback for transitive deps
     try testing.expect(findEntryByName(entries, "ffmpeg") != null);
     try testing.expect(findEntryByName(entries, "x264") != null);
     try testing.expect(findEntryByName(entries, "nasm") != null);
+}
+
+test "collectDeps --recursive aborts when an inner lookup fails" {
+    // A failed inner lookup must not be read as "no such formula": the
+    // entries already built for the root and `leaf` are freed, not rendered.
+    const failing = struct {
+        fn fetch(_: *anyopaque, _: std.mem.Allocator, _: []const u8) anyerror!?[][]const u8 {
+            return error.Aborted;
+        }
+    }.fetch;
+    var db_stub = StubLookup.init(testing.allocator);
+    defer db_stub.deinit();
+    try db_stub.add("top", &.{ "leaf", "demo" });
+    try db_stub.add("leaf", &.{});
+
+    try testing.expectError(DepError.Aborted, collectDeps(
+        testing.allocator,
+        db_stub.lookup(),
+        .{ .ctx = undefined, .fetchFn = failing },
+        "top",
+        .{ .recursive = true },
+    ));
 }
 
 test "collectDeps surfaces allocator failure cleanly" {

@@ -297,7 +297,7 @@ fn emitApiMetadata(
 
 /// A 404 (or a name the API could never hold) is a real "no such package";
 /// an API that could not answer is reported instead.
-fn apiMiss(e: api_mod.ApiError, name: []const u8) !bool {
+pub fn apiMiss(e: api_mod.ApiError, name: []const u8) !bool {
     switch (e) {
         error.NotFound, error.InvalidName => return false,
         error.OfflineRequired => output.err("offline mode: '{s}' not cached", .{name}),
@@ -310,7 +310,7 @@ fn apiMiss(e: api_mod.ApiError, name: []const u8) !bool {
 
 /// A record the API served but the parser refused is an unreadable answer,
 /// not a missing package, and must not fall through to the other kind.
-fn refusedRecord(e: anyerror, name: []const u8) !bool {
+pub fn refusedRecord(e: anyerror, name: []const u8) !bool {
     // Only an OOM after the JSON parse gets here; the parsers fold one
     // inside it into a parse error.
     if (e == error.OutOfMemory) return error.OutOfMemory;
