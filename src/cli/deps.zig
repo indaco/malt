@@ -38,7 +38,8 @@ pub const Options = struct {
 /// Pluggable dep source — either the local DB (installed kegs) or the
 /// upstream API (uninstalled formulas). The `fetchFn` returns owned
 /// strings the caller must free, or null when the source has no record
-/// of this name.
+/// of this name. An error means the source could not answer and aborts
+/// the walk.
 pub const DepLookup = struct {
     ctx: *anyopaque,
     fetchFn: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!?[][]const u8,
@@ -55,6 +56,7 @@ pub const DepLookup = struct {
 ///   2. On miss, try `api` if provided (null = `--installed` mode).
 ///   3. Unresolved root: returns an empty slice (the caller renders
 ///      "not found"); unresolved transitive deps are simply not walked.
+///   4. A lookup error aborts the walk: a partial graph is not an answer.
 ///
 /// Caller owns the returned slice and every string inside it; use
 /// `freeEntries` to drop them.
@@ -98,7 +100,7 @@ pub fn collectDeps(
 
 /// Resolve `name` via db (then api) and append one entry. Already-visited
 /// names are skipped. Unresolved names are silently dropped — the BFS
-/// caller doesn't error on a transitive miss.
+/// caller doesn't error on a transitive miss; lookup errors propagate.
 fn appendEntry(
     allocator: std.mem.Allocator,
     entries: *std.ArrayList(Entry),
@@ -134,9 +136,9 @@ fn fetchEither(
 }
 
 /// Preserve OOM up the stack so the caller's allocator-failure tests
-/// see the right error; everything else (DB closed, parse failure)
-/// surfaces as `Aborted` so the user gets a single exit code, not a
-/// noisy backtrace through unrelated internals.
+/// see the right error; everything else (an API record already reported
+/// as unreadable or uncached) surfaces as `Aborted` so the user gets a
+/// single exit code, not a noisy backtrace through unrelated internals.
 fn mapLookupErr(e: anyerror) DepError {
     return switch (e) {
         error.OutOfMemory => DepError.OutOfMemory,
@@ -335,18 +337,29 @@ const ApiCtx = struct {
 };
 
 /// Build a `DepLookup` that fetches + parses formula JSON from the API.
-/// Returns null on any network/parse failure so the walker degrades to
-/// "skip this branch" rather than aborting.
+/// Returns null only when the API has no such formula; a record that
+/// could not be fetched or was refused is reported here, where the name
+/// is known.
 pub fn apiDepLookup(ctx: *ApiCtx) DepLookup {
     return .{ .ctx = @ptrCast(ctx), .fetchFn = apiFetch };
 }
 
 fn apiFetch(ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!?[][]const u8 {
     const ac: *ApiCtx = @ptrCast(@alignCast(ctx));
-    const body = ac.api.fetchFormula(name) catch return null;
+    const body = ac.api.fetchFormula(name) catch |e| {
+        // A cancelled fetch is not an unreachable API; `execute` reports it.
+        if (signals.isInterrupted()) return error.Aborted;
+        // Reports and errors on anything but a real miss.
+        _ = try cli_info.apiMiss(e, name);
+        return null;
+    };
     defer ac.allocator.free(body);
 
-    var f = formula_mod.parseFormula(allocator, body) catch return null;
+    var f = formula_mod.parseFormula(allocator, body) catch |e| {
+        // Always reports and errors; the return only satisfies the type.
+        _ = try cli_info.refusedRecord(e, name);
+        return error.Aborted;
+    };
     defer f.deinit();
 
     var out: std.ArrayList([]const u8) = .empty;
@@ -399,17 +412,17 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     defer stdout.flush() catch {};
 
-    const empty_entries: []Entry = &.{};
     const entries: []Entry = collectGraph(allocator, ctx, db_opt, name, .{
         .recursive = recursive,
         .installed_only = installed_only,
-    }) catch empty_entries;
+    }) catch |e| {
+        // Ctrl-C cancels the in-flight fetch, so the interrupt is the cause.
+        if (signals.isInterrupted()) return reportInterrupt();
+        return e;
+    };
     defer freeEntries(allocator, entries);
 
-    if (signals.isInterrupted()) {
-        output.warn("Interrupted.", .{});
-        return error.UserInterrupted;
-    }
+    if (signals.isInterrupted()) return reportInterrupt();
 
     if (json_mode) {
         try encodeJson(stdout, entries);
@@ -455,6 +468,11 @@ fn collectGraph(
     const api_lookup = apiDepLookup(&api_ctx);
 
     return collectDeps(allocator, db_lookup, api_lookup, name, .{ .recursive = opts.recursive });
+}
+
+fn reportInterrupt() error{UserInterrupted} {
+    output.warn("Interrupted.", .{});
+    return error.UserInterrupted;
 }
 
 fn alwaysMiss(_: *anyopaque, _: std.mem.Allocator, _: []const u8) anyerror!?[][]const u8 {
@@ -926,6 +944,28 @@ test "collectDeps recursive blends DB hits with API fallback for transitive deps
     try testing.expect(findEntryByName(entries, "ffmpeg") != null);
     try testing.expect(findEntryByName(entries, "x264") != null);
     try testing.expect(findEntryByName(entries, "nasm") != null);
+}
+
+test "collectDeps --recursive aborts when an inner lookup fails" {
+    // A failed inner lookup must not be read as "no such formula": the
+    // entries already built for the root and `leaf` are freed, not rendered.
+    const failing = struct {
+        fn fetch(_: *anyopaque, _: std.mem.Allocator, _: []const u8) anyerror!?[][]const u8 {
+            return error.Aborted;
+        }
+    }.fetch;
+    var db_stub = StubLookup.init(testing.allocator);
+    defer db_stub.deinit();
+    try db_stub.add("top", &.{ "leaf", "demo" });
+    try db_stub.add("leaf", &.{});
+
+    try testing.expectError(DepError.Aborted, collectDeps(
+        testing.allocator,
+        db_stub.lookup(),
+        .{ .ctx = undefined, .fetchFn = failing },
+        "top",
+        .{ .recursive = true },
+    ));
 }
 
 test "collectDeps surfaces allocator failure cleanly" {

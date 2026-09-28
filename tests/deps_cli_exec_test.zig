@@ -29,12 +29,21 @@ const Scratch = struct {
         const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+        const api_dir = try std.fmt.allocPrint(allocator, "{s}/cache/api", .{path});
+        defer allocator.free(api_dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, api_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
+        // An inherited MALT_CACHE would miss the seeded records, and a miss
+        // aborts just like a refusal does.
+        var cache_buf: [512]u8 = undefined;
+        const cache = try std.fmt.bufPrintSentinel(&cache_buf, "{s}/cache", .{path}, 0);
+        _ = c.setenv("MALT_CACHE", cache.ptr, 1);
         return .{ .path = path };
     }
 
     fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
         _ = c.unsetenv("MALT_PREFIX");
+        _ = c.unsetenv("MALT_CACHE");
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
         allocator.free(self.path);
     }
@@ -181,6 +190,108 @@ test "execute --installed --json emits an array shape" {
 
     const ctx = ctxWithSink();
     try deps_cli.execute(&ctx, testing.allocator, &.{ "--installed", "wget" });
+}
+
+// --- API records that could not be read -------------------------------
+
+fn offlineCtx() malt.app_ctx.AppCtx {
+    var ctx = ctxWithSink();
+    ctx.offline = true;
+    return ctx;
+}
+
+/// `demo` carries a control byte in a dependency name, so the parser refuses
+/// it; `top` reaches it only through a transitive walk.
+fn seedApiCache(prefix: []const u8) !void {
+    const records = [_]struct { []const u8, []const u8 }{
+        .{
+            "demo",
+            \\{"name":"demo","versions":{"stable":"1.0"},"dependencies":["x\u001b[2J"]}
+        },
+        .{
+            "top",
+            \\{"name":"top","versions":{"stable":"1.0"},"dependencies":["demo","leaf"]}
+        },
+        .{
+            "leaf",
+            \\{"name":"leaf","versions":{"stable":"1.0"},"dependencies":[]}
+        },
+    };
+    for (records) |r| {
+        var path_buf: [512]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/cache/api/formula_{s}.json", .{ prefix, r[0] });
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, r[1]);
+    }
+}
+
+fn expectDepsAborts(args: []const []const u8) !void {
+    const ctx = offlineCtx();
+    quiet();
+    defer unquiet();
+    try testing.expectError(error.Aborted, deps_cli.execute(&ctx, testing.allocator, args));
+}
+
+test "execute reports a refused root record instead of not-found" {
+    var s = try Scratch.init(testing.allocator, "refused_root");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path);
+    try expectDepsAborts(&.{"demo"});
+}
+
+test "execute -r aborts on a refused inner record instead of rendering it missing" {
+    // A tree with the branch silently marked "(not installed)" reads as a
+    // complete answer.
+    var s = try Scratch.init(testing.allocator, "refused_inner");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path);
+    try expectDepsAborts(&.{ "-r", "top" });
+}
+
+test "execute reports an offline cache miss instead of not-found" {
+    var s = try Scratch.init(testing.allocator, "offline_miss");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path);
+    try expectDepsAborts(&.{"nope"});
+}
+
+test "execute reports an interrupt that cut a lookup short, not the lookup failure" {
+    // Ctrl-C cancels the in-flight fetch, so the lookup fails too; the
+    // user asked to stop and must get the interrupt exit code.
+    var s = try Scratch.init(testing.allocator, "interrupted_lookup");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path);
+
+    const prior = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior);
+    malt.signals.setInterruptedForTest(true);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    const ctx = offlineCtx();
+    try testing.expectError(error.UserInterrupted, deps_cli.execute(&ctx, testing.allocator, &.{"nope"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Interrupted") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "not cached") == null);
+}
+
+test "execute still renders clean API records offline" {
+    // Guards against a fix that aborts on every API lookup.
+    var s = try Scratch.init(testing.allocator, "clean_api");
+    defer s.deinit(testing.allocator);
+    try seedApiCache(s.path);
+
+    const ctx = offlineCtx();
+    quiet();
+    defer unquiet();
+    try deps_cli.execute(&ctx, testing.allocator, &.{"leaf"});
+    // Non-recursive never looks up direct deps, so the refused `demo` is
+    // only a name here.
+    try deps_cli.execute(&ctx, testing.allocator, &.{"top"});
+    try deps_cli.execute(&ctx, testing.allocator, &.{ "-r", "leaf" });
 }
 
 // --- DB adapter contract ------------------------------------------------
