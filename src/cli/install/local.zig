@@ -1335,11 +1335,8 @@ pub fn materializeRubyFormula(
             .bin_isolated = false,
             .tap_commit_sha = if (resolved.tap_registration) |t| t.commit_sha else null,
             .tap_rb_subtree = resolved.tap_rb_subtree,
+            .dependencies = resolved.dependencies,
         }, .{ .in_transaction = true }) catch return InstallError.RecordFailed;
-
-        // Without these rows `mt cleanup` sees the deps as orphans and
-        // reaps the libraries this keg links against.
-        record.recordDepNames(db, keg_id, resolved.dependencies);
 
         if (resolved.tap_registration) |t| {
             // `COALESCE` in tap_mod.add pins the commit on first install

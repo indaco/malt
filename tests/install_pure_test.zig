@@ -1006,7 +1006,7 @@ test "install_record.recordKeg with inherit_pin=true carries the prior pin (opti
     try testing.expectEqual(true, stmt.columnBool(0));
 }
 
-test "recordDeps inserts one row per dependency in the dependencies table" {
+test "recordKeg inserts one row per dependency in the dependencies table" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var db = try openDb();
@@ -1016,7 +1016,6 @@ test "recordDeps inserts one row per dependency in the dependencies table" {
     var f = try parseFake(arena.allocator());
     defer f.deinit();
     const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
-    install_record.recordDeps(&db, keg_id, &f);
 
     var stmt = try db.prepare("SELECT COUNT(*) FROM dependencies WHERE keg_id = ?1;");
     defer stmt.finalize();

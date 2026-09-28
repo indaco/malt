@@ -1328,6 +1328,7 @@ test "materializeRubyFormula records the declared dependencies of a tap formula"
             .cellar_path = dep_cellar,
             .install_reason = "dependency",
             .bin_isolated = false,
+            .dependencies = &.{},
         }, .{}) catch return error.SeedFailed;
     }
 

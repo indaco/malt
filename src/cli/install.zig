@@ -68,7 +68,6 @@ const InstallError = record_mod.InstallError;
 pub const isReportedInstallError = record_mod.isReportedInstallError;
 const recordKeg = record_mod.recordKeg;
 const deleteKeg = record_mod.deleteKeg;
-const recordDeps = record_mod.recordDeps;
 const ensureDirs = record_mod.ensureDirs;
 const localErrorIsAnnounced = record_mod.localErrorIsAnnounced;
 const sink_mod = @import("install/sink.zig");
@@ -1408,9 +1407,8 @@ fn linkAndRecord(
         linker.linkOpt(job.name, job.version_str) catch |e| {
             sink.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ job.name, @errorName(e) });
         };
-        recordDeps(db, keg_id, formula);
     } else {
-        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason, bin_isolated, .{}) catch |err| {
+        _ = recordKeg(db, formula, job.store_sha256, keg_path, reason, bin_isolated, .{}) catch |err| {
             sink.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
@@ -1420,7 +1418,6 @@ fn linkAndRecord(
         linker.linkOpt(job.name, job.version_str) catch |e| {
             sink.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ job.name, @errorName(e) });
         };
-        recordDeps(db, keg_id, formula);
     }
     service_mod.register(io, environ, allocator, db, formula, prefix, sink);
     // Annotate keg-only packages inline so the single line reads as success,
