@@ -98,6 +98,9 @@ jobs:
       - name: Regression guard - Cellar delete confinement
         run: ./scripts/regressions/formula-name-version-reach-deletetree-unguarded.sh
 
+      - name: Regression guard - a Homebrew receipt with a control character is refused
+        run: ./scripts/regressions/migrate-receipt-control-bytes-migrate-receipt-version-accepts-control-bytes.sh
+
       - name: Regression guard - Cellar symlink confinement
         run: ./scripts/regressions/cellar-sinks-follow-a-symlinked-package-dir.sh
 
