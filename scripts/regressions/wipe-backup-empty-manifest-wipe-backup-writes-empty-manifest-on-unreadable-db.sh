@@ -44,18 +44,21 @@ fi
 grep -qi 'database' "$tmp/out" || fail "abort message does not name the database"
 grep -qi 'refusing to wipe' "$tmp/out" || fail "abort did not explain why the wipe stopped"
 
-# 1b. a db/ it cannot look into, or a `db` file where the directory should
-# be, hides whether malt.db exists: neither is a fresh prefix
-for shape in walled notdir; do
+# 1b. a db/ it cannot look into, a `db` file where the directory should
+# be, or a db/ symlink whose target is gone (an unmounted volume) hides
+# whether malt.db exists: none is a fresh prefix
+for shape in walled notdir dangling; do
   P="$tmp/$shape"
   mkdir -p "$P/Cellar"
   : >"$P/Cellar/marker"
-  if [ "$shape" = walled ]; then
+  case $shape in
+  walled)
     mkdir "$P/db"
     chmod 000 "$P/db"
-  else
-    : >"$P/db"
-  fi
+    ;;
+  notdir) : >"$P/db" ;;
+  dangling) ln -s "$tmp/unmounted/malt-db" "$P/db" ;;
+  esac
   man="$tmp/m-$shape.txt"
   if MALT_PREFIX="$P" "$BIN" purge --wipe --backup="$man" --yes >"$tmp/out" 2>&1; then
     fail "wipe succeeded with a $shape db/"
@@ -64,6 +67,18 @@ for shape in walled notdir; do
   [ -e "$P/Cellar/marker" ] || fail "prefix destroyed after a failed backup ($shape db/)"
   grep -qi 'refusing to wipe' "$tmp/out" || fail "abort did not explain why the wipe stopped ($shape db/)"
 done
+
+# 1c. a prefix symlinked to an unmounted volume must not wipe the cache
+P="$tmp/dangling-prefix"
+ln -s "$tmp/unmounted/malt" "$P"
+mkdir -p "$MALT_CACHE"
+: >"$MALT_CACHE/marker"
+man="$tmp/m-dangling-prefix.txt"
+if MALT_PREFIX="$P" "$BIN" purge --wipe --backup="$man" --yes >"$tmp/out" 2>&1; then
+  fail "wipe succeeded with a dangling prefix"
+fi
+[ -e "$man" ] && fail "manifest written despite a dangling prefix"
+[ -e "$MALT_CACHE/marker" ] || fail "cache wiped after a failed backup (dangling prefix)"
 
 # 2. absent DB is an honest empty manifest, not a failure
 P2="$tmp/fresh"

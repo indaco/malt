@@ -85,4 +85,20 @@ refuses mode000-dir uses openssl@3
 refuses mode000-dir info wget
 refuses mode000-dir deps --installed wget
 
+# db/ symlinked somewhere that is gone (an unmounted volume)
+reset
+rmdir "$SB/p/db"
+ln -s "$SB/unmounted/malt-db" "$SB/p/db"
+refuses dangling-db uses openssl@3
+refuses dangling-db info wget
+refuses dangling-db deps --installed wget
+
+# MALT_PREFIX pointing at a file
+reset
+rm -rf "$SB/p"
+: >"$SB/p"
+refuses prefix-is-file uses openssl@3
+refuses prefix-is-file info wget
+refuses prefix-is-file deps --installed wget
+
 echo "OK: uses, info and deps refuse an install database they cannot open"
