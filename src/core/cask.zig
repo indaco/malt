@@ -2370,7 +2370,8 @@ fn applicationsDir(io: std.Io, environ: std.process.Environ, prefix: []const u8,
 
 /// Installed cask info with owned copies of strings.
 pub const InstalledCask = struct {
-    version_buf: [128]u8 = undefined,
+    // The version names a Caskroom dir, so a filename bounds any recorded one.
+    version_buf: [std.Io.Dir.max_name_bytes]u8 = undefined,
     version_len: usize = 0,
     app_path_buf: [512]u8 = undefined,
     app_path_len: usize = 0,
@@ -2399,7 +2400,7 @@ pub const InstalledCask = struct {
 
 /// Look up installed cask info from DB. Copies data to avoid dangling pointers.
 /// `Unreadable` is not a miss: a miss sends callers to a same-named formula
-/// or a fresh install. A version too long to copy still reads as null.
+/// or a fresh install. A version no install could record counts as damage.
 pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unreadable}!?InstalledCask {
     var stmt = db.prepare(
         "SELECT version, app_path, tap FROM casks WHERE token = ?1 LIMIT 1;",
@@ -2414,7 +2415,7 @@ pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unr
 
     const ver_ptr = stmt.columnText(0) orelse return null;
     const ver_slice = std.mem.sliceTo(ver_ptr, 0);
-    if (ver_slice.len > result.version_buf.len) return null;
+    if (ver_slice.len > result.version_buf.len) return error.Unreadable;
     @memcpy(result.version_buf[0..ver_slice.len], ver_slice);
     result.version_len = ver_slice.len;
 
@@ -3613,4 +3614,25 @@ test "placedBundleName on a restore refuses a casks table it cannot query" {
     installer.restoring = true;
     var buf: [256]u8 = undefined;
     try std.testing.expectError(error.InstallFailed, installer.placedBundleName(&c, "/nonexistent/malt-placed/stage", &buf));
+}
+
+test "lookupInstalledChecked keeps a long version any install could have recorded" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
+    // parseCask places no length cap on a version; only the path-component
+    // limit bounds what an install can record.
+    const ver = "9" ** std.Io.Dir.max_name_bytes;
+    try db.exec("INSERT INTO casks(token,version) VALUES('box','" ++ ver ++ "');");
+    const row = (try lookupInstalledChecked(&db, "box")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(ver, row.version());
+}
+
+test "lookupInstalledChecked reports a version no install could record, not a miss" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
+    const ver = "9" ** (std.Io.Dir.max_name_bytes + 1);
+    try db.exec("INSERT INTO casks(token,version) VALUES('box','" ++ ver ++ "');");
+    try std.testing.expectError(error.Unreadable, lookupInstalledChecked(&db, "box"));
 }
