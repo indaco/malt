@@ -220,7 +220,7 @@ fn emitInstalledCask(
     json_mode: bool,
     colorize: bool,
 ) !bool {
-    if (cask_mod.lookupInstalled(db, name) == null) return false;
+    if ((cask_mod.lookupInstalledChecked(db, name) catch return dbUnreadable(name)) == null) return false;
 
     const cur_ver_opt = rollback.currentCaskVersion(allocator, db, name);
     defer if (cur_ver_opt) |v| allocator.free(v);

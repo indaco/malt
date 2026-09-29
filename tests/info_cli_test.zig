@@ -785,3 +785,16 @@ test "execute on a prefix with no db/ still falls back to the API record" {
     defer unquiet();
     try info.execute(&offline_ctx, testing.allocator, &.{"wget"});
 }
+
+test "execute --cask reports a casks table it cannot read instead of not-installed" {
+    var s = try Scratch.init(testing.allocator, "corrupt_casks");
+    defer s.deinit(testing.allocator);
+    try seedCaskRow(s.path);
+    try seedApiCache(s.path, "cask_firefox.json",
+        \\{"token":"firefox","version":"120.0","url":"https://e/x.dmg"}
+    );
+    var buf: [512]u8 = undefined;
+    try test_io.corruptTable(try dbPath(&buf, s.path), "casks");
+
+    try expectInfoRefusesDb(&.{ "--cask", "firefox" });
+}
