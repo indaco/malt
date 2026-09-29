@@ -979,3 +979,44 @@ test "bundle create refuses a table it cannot read instead of writing a Brewfile
         try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
     }
 }
+
+test "bundle cleanup removes the dropped formula, not the kept cask of the same name" {
+    // A bare name resolves cask-first in `uninstall`, so dropping the formula
+    // used to remove the cask the Brewfile keeps.
+    var s = try Scratch.init(testing.allocator, "cleanup_same_name");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason)
+            \\VALUES ('box', 'box', '1.0', 0, '', 'Cellar/box/1.0', 'direct');
+            \\INSERT INTO casks (token, name, version, url) VALUES ('box', 'Box', '1.0', 'https://example.invalid/b.zip');
+        );
+    }
+    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/box/1.0", .{s.path});
+    defer testing.allocator.free(cellar);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar);
+    const brewfile = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(brewfile);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, brewfile, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "cask \"box\"\n");
+    }
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "cleanup", "--yes", brewfile });
+
+    var db_path_buf: [512]u8 = undefined;
+    var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+    defer db.close();
+    try testing.expect(try malt.cask.isInstalled(&db, "box"));
+    var keg = try db.prepare("SELECT 1 FROM kegs WHERE name = 'box';");
+    defer keg.finalize();
+    try testing.expect(!try keg.step());
+}
