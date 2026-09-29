@@ -444,6 +444,13 @@ pub fn runDownloads(ctx: *const AppCtx, cache_dir: []const u8, dry_run: bool) !T
 
 // ── Tier: --stale-casks ─────────────────────────────────────────────────────
 
+fn lookupFailed(result: *TierResult, e: anyerror) TierResult {
+    output.err("stale-casks: cannot read the casks table ({s})", .{@errorName(e)});
+    result.status = .err;
+    result.error_kind = "db_step";
+    return result.*;
+}
+
 pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, cache_dir: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
     const io = ctx.io;
@@ -536,7 +543,8 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
                 output.warn("stale-casks: skipping {s}: bind failed ({s})", .{ stem, @errorName(e) });
                 continue;
             };
-            if (cache_lookup.step() catch false) continue; // still installed
+            // Read as "not installed", a failed step would sweep every artefact.
+            if (cache_lookup.step() catch |e| return lookupFailed(&result, e)) continue; // still installed
 
             const stat = dir.statFile(io, entry.name, .{}) catch continue;
             const dup = allocator.dupe(u8, entry.name) catch continue;
@@ -566,7 +574,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
                 output.warn("stale-casks: skipping {s}: bind failed ({s})", .{ entry.name, @errorName(e) });
                 continue;
             };
-            if (lookup.step() catch false) continue;
+            if (lookup.step() catch |e| return lookupFailed(&result, e)) continue;
 
             var path_buf: [512]u8 = undefined;
             const full = std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}", .{ prefix, entry.name }) catch continue;
