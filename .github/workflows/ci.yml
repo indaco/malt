@@ -104,6 +104,9 @@ jobs:
       - name: Regression guard - uses, info and deps report an install database they cannot open
         run: ./scripts/regressions/uses-info-refuse-unreadable-db-uses-and-info-read-an-unreadable-db-as-empty.sh
 
+      - name: Regression guard - purge --wipe refuses a database it cannot read before wiping
+        run: ./scripts/regressions/wipe-backup-empty-manifest-wipe-backup-writes-empty-manifest-on-unreadable-db.sh
+
       - name: Regression guard - tap raw binary stays in its keg
         run: ./scripts/regressions/raw-binary-name-escapes-keg-tap-raw-binary-target-not-a-path-component.sh
 
