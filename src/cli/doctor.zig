@@ -696,8 +696,9 @@ fn checkMaltPrefix(ctx: CheckCtx, name: []const u8) CheckResult {
 }
 
 /// A DB migrated by a newer malt is structurally perfect, so the integrity
-/// probe below stays green; this row is where that fact lands. Every other
-/// state — no DB, unopenable, unwritable — is the integrity row's verdict.
+/// probe below stays green; this row is where that fact lands. An
+/// unopenable or unwritable DB is the integrity row's verdict, and a
+/// missing db/ is the directory row's.
 fn checkDatabaseSchema(ctx: CheckCtx, name: []const u8) CheckResult {
     var db = cli_info.openDb(ctx.prefix) orelse {
         printCheck(name, .ok, null);
@@ -721,6 +722,11 @@ fn checkSqliteIntegrity(ctx: CheckCtx, name: []const u8) CheckResult {
         return .err_status;
     };
     var db = sqlite.Database.open(db_path) catch {
+        // Nothing installed yet; the directory row already flags the missing db/.
+        if (cli_info.isFreshPrefix(ctx.io, db_path)) {
+            printCheck(name, .ok, null);
+            return .ok;
+        }
         printCheck(name, .err_status, "Cannot open database");
         return .err_status;
     };

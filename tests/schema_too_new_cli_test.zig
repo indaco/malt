@@ -198,7 +198,7 @@ test "doctor's schema row fails on a too-new DB and passes once the marker is go
 }
 
 test "doctor's schema row has nothing to compare without a database and stays ok" {
-    // A db-less prefix is `SQLite integrity`'s verdict to give; a second error
+    // A db-less prefix is `Directory structure`'s warning to give; a second
     // row for the same cause would double the tally.
     const base = try test_io.uniqueTempPath(testing.allocator, "schema_too_new", "doctor_no_db");
     defer testing.allocator.free(base);

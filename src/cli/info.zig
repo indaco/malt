@@ -513,23 +513,28 @@ pub fn encodeInstallHint(
     );
 }
 
-/// Open the install database for a read that must not guess. Only a
-/// missing `db/` directory is a fresh prefix (null); anything there that
-/// will not open says nothing about what is installed. Probing the file
-/// instead would read EACCES on `db/`, or a stray `db` file, as absent.
+/// Open the install database for a read that must not guess: null for a
+/// fresh prefix, an error for anything else that will not open.
 pub fn openInstallDb(io: std.Io, prefix: []const u8) error{Aborted}!?sqlite.Database {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch {
         output.err("could not open the install database under {s}", .{prefix});
         return error.Aborted;
     };
-    const db_dir = std.fs.path.dirname(db_path) orelse unreachable;
-    const present = if (std.Io.Dir.cwd().access(io, db_dir, .{})) true else |e| e != error.FileNotFound;
     return sqlite.Database.open(db_path) catch {
-        if (!present) return null;
+        if (isFreshPrefix(io, db_path)) return null;
         output.err("could not open the install database at {s}", .{db_path});
         return error.Aborted;
     };
+}
+
+/// True only when the `db/` directory holding `db_path` does not exist.
+/// Any other probe failure (EACCES, a stray `db` file) hides whether the
+/// database is there, so it never reads as "nothing installed".
+pub fn isFreshPrefix(io: std.Io, db_path: []const u8) bool {
+    const db_dir = std.fs.path.dirname(db_path) orelse return false;
+    std.Io.Dir.cwd().access(io, db_dir, .{}) catch |e| return e == error.FileNotFound;
+    return false;
 }
 
 /// A query that fails says nothing about `name`; reading it as a miss
