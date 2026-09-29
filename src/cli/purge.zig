@@ -259,9 +259,14 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const sz = formatBytes(grand_total.bytes, &sz_buf);
     if (dry_run) {
         output.info("dry run: would remove {d} {s}, ~{s}", .{ grand_total.removed, item_noun, sz });
+    } else if (grand_total.status == .err) {
+        output.warn("removed {d} {s}, freed ~{s}", .{ grand_total.removed, item_noun, sz });
     } else {
         output.success("removed {d} {s}, freed ~{s}", .{ grand_total.removed, item_noun, sz });
     }
+    // Each failed scope already printed its own line; the exit status is
+    // what lets scripts tell a refusal from "nothing to remove".
+    if (grand_total.status == .err) return error.Aborted;
 }
 
 /// `mt cleanup` shim — Homebrew-shaped verb that forwards to the safe
