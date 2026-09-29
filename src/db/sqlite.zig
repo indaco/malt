@@ -139,10 +139,11 @@ pub const Database = struct {
         var self = Database{ ._handle = db.? };
         errdefer self.close();
 
-        // Set recommended pragmas.
+        // busy_timeout first: the WAL switch needs a lock, and without the
+        // timeout a writer holding one fails the open instead of waiting.
+        self.exec("PRAGMA busy_timeout=5000;") catch return SqliteError.OpenFailed;
         self.exec("PRAGMA journal_mode=WAL;") catch return SqliteError.OpenFailed;
         self.exec("PRAGMA foreign_keys=ON;") catch return SqliteError.OpenFailed;
-        self.exec("PRAGMA busy_timeout=5000;") catch return SqliteError.OpenFailed;
 
         return self;
     }
@@ -367,4 +368,30 @@ test "Database.close releases the connection once a straggling statement finaliz
     const after = std.c.dup(0);
     defer _ = std.c.close(after);
     try testing.expectEqual(before, after);
+}
+
+fn commitAfter(holder: *Database, ms: i64) void {
+    std.Io.sleep(std.Options.debug_io, .fromMilliseconds(ms), .awake) catch {};
+    holder.exec("COMMIT;") catch {};
+}
+
+test "Database.open waits out a lock held by another connection instead of failing" {
+    // A rollback-journal DB under a write lock makes the WAL pragma return
+    // BUSY; that is a wait, not an unopenable database.
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-busy-open-{d}.db", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    deleteWithSidecars(io, path);
+    defer deleteWithSidecars(io, path);
+
+    var holder = try Database.open(path);
+    defer holder.close();
+    try holder.exec("PRAGMA journal_mode=DELETE;");
+    try holder.exec("BEGIN EXCLUSIVE; CREATE TABLE t(x);");
+
+    const releaser = try std.Thread.spawn(.{}, commitAfter, .{ &holder, 300 });
+    defer releaser.join();
+
+    var db = try Database.open(path);
+    db.close();
 }
