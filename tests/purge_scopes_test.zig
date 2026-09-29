@@ -300,26 +300,30 @@ test "--stale-casks --yes keeps a Caskroom dir when the casks table cannot be re
 
 // --- a scope that cannot run fails the command ----------------------------
 
-/// Runs `--store-orphans --yes` over `db_bytes` (null = no DB file),
+/// Runs a non-dry purge with `args` over `db_bytes` (null = no DB file),
 /// capturing stderr into `out`.
-fn runStoreOrphans(allocator: std.mem.Allocator, tag: []const u8, db_bytes: ?[]const u8, out: *std.ArrayList(u8)) !void {
+fn runPurge(allocator: std.mem.Allocator, tag: []const u8, db_bytes: ?[]const u8, args: []const []const u8, quiet: bool, out: *std.ArrayList(u8)) !void {
     var prefix = try ScratchPrefix.init(allocator, tag);
     defer prefix.deinit(allocator);
     if (db_bytes) |b| try writeFileAt(allocator, &.{ prefix.path, "db", "malt.db" }, b);
+    try makeDirAt(allocator, &.{ prefix.path, "Cellar" });
 
     const prior = OutputState.save();
     defer prior.restore();
     output.setMode(.human);
     output.setDryRun(false);
     output.setNdjson(false);
-    output.setQuiet(false);
+    output.setQuiet(quiet);
 
     output.beginStderrCapture(allocator, out);
     defer output.endStderrCapture();
 
     const ctx = malt.app_ctx.debug_ctx;
-    try purge.execute(&ctx, allocator, &.{ "--store-orphans", "--yes" });
+    try purge.execute(&ctx, allocator, args);
 }
+
+const store_orphans_yes: []const []const u8 = &.{ "--store-orphans", "--yes" };
+const old_versions_yes: []const []const u8 = &.{ "--old-versions", "--yes" };
 
 fn hasSuccessFooter(out: []const u8) bool {
     return std.mem.indexOf(u8, out, "✓ removed") != null or std.mem.indexOf(u8, out, "* removed") != null;
@@ -332,8 +336,8 @@ test "an unreadable database fails purge while a missing one is just nothing to 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
 
-    try testing.expectError(error.Aborted, runStoreOrphans(allocator, "exit_corrupt", "not a sqlite file\n", &out));
-    try runStoreOrphans(allocator, "exit_absent", null, &out);
+    try testing.expectError(error.Aborted, runPurge(allocator, "exit_corrupt", "not a sqlite file\n", store_orphans_yes, false, &out));
+    try runPurge(allocator, "exit_absent", null, store_orphans_yes, false, &out);
 }
 
 test "a failed purge never ends on a success footer" {
@@ -342,14 +346,34 @@ test "a failed purge never ends on a success footer" {
 
     var bad: std.ArrayList(u8) = .empty;
     defer bad.deinit(allocator);
-    try testing.expectError(error.Aborted, runStoreOrphans(allocator, "footer_corrupt", "not a sqlite file\n", &bad));
+    try testing.expectError(error.Aborted, runPurge(allocator, "footer_corrupt", "not a sqlite file\n", store_orphans_yes, false, &bad));
     try testing.expect(std.mem.indexOf(u8, bad.items, "removed 0 items") != null);
     try testing.expect(!hasSuccessFooter(bad.items));
 
     var fresh: std.ArrayList(u8) = .empty;
     defer fresh.deinit(allocator);
-    try runStoreOrphans(allocator, "footer_absent", null, &fresh);
+    try runPurge(allocator, "footer_absent", null, store_orphans_yes, false, &fresh);
     try testing.expect(hasSuccessFooter(fresh.items));
+}
+
+test "--old-versions --quiet still says why it failed over an unreadable database" {
+    // --quiet hides progress, not the reason for a non-zero exit.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try testing.expectError(error.Aborted, runPurge(allocator, "old_quiet_corrupt", "not a sqlite file\n", old_versions_yes, true, &out));
+    try testing.expect(std.mem.indexOf(u8, out.items, "old-versions: cannot open database") != null);
+}
+
+test "--old-versions over an unreadable database never reports nothing to remove" {
+    // "Nothing to remove" after a refusal is the ambiguity the exit code fixes.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try testing.expectError(error.Aborted, runPurge(allocator, "old_empty_corrupt", "not a sqlite file\n", old_versions_yes, false, &out));
+    try testing.expect(std.mem.indexOf(u8, out.items, "nothing to remove") == null);
 }
 
 test "--housekeeping over an unreadable database still runs the scopes that need no database" {
