@@ -897,7 +897,7 @@ test "execute --dry-run previews a cask and keeps its row, files and snapshot" {
         const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
-        try testing.expect(cask.isInstalled(&db, token));
+        try testing.expect(try cask.isInstalled(&db, token));
     }
     const after = try readSnapshotRaw(prefix.path);
     defer testing.allocator.free(after);

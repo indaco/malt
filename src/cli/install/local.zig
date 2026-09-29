@@ -1460,7 +1460,10 @@ fn materializeTapCask(
     // can refresh the cached artefact ahead of an `mt upgrade` even
     // when an older revision is on disk. The regular install path
     // keeps the "already installed" short-circuit.
-    if (!download_only and !force and cask_mod.isInstalled(db, resolved.name)) {
+    if (!download_only and !force and (cask_mod.isInstalled(db, resolved.name) catch {
+        sink.err("Could not read the package database: {s}", .{db.errMsg()});
+        return InstallError.DatabaseError;
+    })) {
         sink.info("{s} is already installed", .{resolved.name});
         return;
     }

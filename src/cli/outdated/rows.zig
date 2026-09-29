@@ -14,7 +14,7 @@ const sqlite = @import("../../db/sqlite.zig");
 /// One row of the installed-package list fed to the worker pool.
 /// `tap` is the third-party tap label for tap-installed casks (drives
 /// outdated's pre-routing the same way `upgradeCask` uses
-/// `lookupInstalled.tap()`); null for kegs and for casks installed
+/// `lookupInstalledChecked`'s `tap()`); null for kegs and for casks installed
 /// from the core Homebrew API. Owned by the same allocator as `name`
 /// and `version`; freed by `freeKegRows`.
 pub const KegRow = struct {

@@ -347,7 +347,8 @@ fn openExistingDb(ctx: *const AppCtx, prefix: []const u8) ?sqlite.Database {
 fn caskPresent(ctx: *const AppCtx, prefix: []const u8, token: []const u8) bool {
     var db = openExistingDb(ctx, prefix) orelse return false;
     defer db.close();
-    return cask_mod.isInstalled(&db, token);
+    // A fast-path gate only: the slow path refuses the unreadable table.
+    return cask_mod.isInstalled(&db, token) catch false;
 }
 
 /// Presence probe for the `owner/repo/leaf` form, which resolves to either
@@ -1541,6 +1542,15 @@ pub fn confirmPkgSudo(token: []const u8) bool {
     return true;
 }
 
+/// "Already installed" guard. An unreadable table refuses: read as a miss,
+/// the install would fetch and place over whatever the row describes.
+fn caskRecorded(db: *sqlite.Database, token: []const u8, sink: OutputSink) error{Aborted}!bool {
+    return cask_mod.isInstalled(db, token) catch {
+        sink.err("Could not read the package database: {s}", .{db.errMsg()});
+        return error.Aborted;
+    };
+}
+
 /// Install a cask (DMG, ZIP, or PKG). Under `flags.download_only`, the
 /// flow stops after `<prefix>/cache/Cask/<file>` is sha-verified — no
 /// `/Applications` writes, no DB inserts.
@@ -1556,7 +1566,7 @@ fn installCask(
     // Callers that legitimately bypass the fast path would otherwise fetch
     // just to discover there is nothing to do. The post-parse check below
     // stays for a cask that ever renames its token.
-    if (!flags.download_only and cask_mod.isInstalled(db, token)) {
+    if (!flags.download_only and try caskRecorded(db, token, sink)) {
         sink.info("{s} is already installed", .{token});
         return;
     }
@@ -1584,7 +1594,7 @@ fn installCask(
     // refresh the cached artefact ahead of an `mt upgrade` even when an
     // older revision is on disk. The real install path keeps the
     // "already installed" short-circuit.
-    if (!flags.download_only and cask_mod.isInstalled(db, cask.token)) {
+    if (!flags.download_only and try caskRecorded(db, cask.token, sink)) {
         sink.info("{s} is already installed", .{cask.token});
         return;
     }

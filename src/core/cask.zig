@@ -1106,7 +1106,7 @@ pub const CaskInstaller = struct {
             (try collectBinaryArtifacts(self.allocator, obj)) orelse return;
         defer self.allocator.free(entries);
         // Stays set for the link pass that follows; `install` clears it.
-        self.recorded_bundle = lookupInstalled(self.db, cask.token);
+        self.recorded_bundle = lookupInstalledChecked(self.db, cask.token) catch return error.InstallFailed;
         // The bundle this install will place, when the cask names it; the
         // one on record covers a rollback's synthetic cask.
         var app_dir_buf: [512]u8 = undefined;
@@ -1411,7 +1411,7 @@ pub const CaskInstaller = struct {
         // survive, pointing at a helper the older bundle no longer ships.
         // Only after the install: a failed one must leave the outgoing
         // version whole.
-        if (lookupInstalled(self.db, token)) |*cur| {
+        if (lookupInstalledChecked(self.db, token) catch return error.InstallFailed) |*cur| {
             var new_buf: [512]u8 = undefined;
             const new_manifest = std.fmt.bufPrint(&new_buf, "{s}/Caskroom/{s}/{s}/{s}", .{ self.prefix, token, row.version, LINKS_MANIFEST_NAME }) catch "";
             const keep = if (new_manifest.len == 0) null else cask_font.readManifest(self.io, self.allocator, new_manifest) catch null;
@@ -1621,7 +1621,7 @@ pub const CaskInstaller = struct {
         const stanzas = try self.binaryStanzas(cask);
         defer if (stanzas) |e| self.allocator.free(e);
         var app_name_buf: [256]u8 = undefined;
-        const bundle_name = self.placedBundleName(cask, extract_dir, &app_name_buf);
+        const bundle_name = try self.placedBundleName(cask, extract_dir, &app_name_buf);
         if (bundle_name == null) if (stanzas) |entries| if (hasCaskroomBinary(entries)) {
             var caskroom_buf: [512]u8 = undefined;
             const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch
@@ -1645,10 +1645,10 @@ pub const CaskInstaller = struct {
     /// declares nothing) the one the stage holds - but only when the row
     /// says the outgoing version placed a bundle. A binary-only cask's
     /// archive may carry a `.app` that was never meant to be installed.
-    fn placedBundleName(self: *CaskInstaller, cask: *const Cask, stage: []const u8, buf: []u8) ?[]const u8 {
+    fn placedBundleName(self: *CaskInstaller, cask: *const Cask, stage: []const u8, buf: []u8) CaskError!?[]const u8 {
         if (parseAppName(cask.parsed.value.object)) |name| return name;
         if (!self.restoring) return null;
-        if (lookupInstalled(self.db, cask.token)) |*cur| {
+        if (lookupInstalledChecked(self.db, cask.token) catch return error.InstallFailed) |*cur| {
             var bin_buf: [512]u8 = undefined;
             const bin_dir = std.fmt.bufPrint(&bin_buf, "{s}/bin/", .{self.prefix}) catch return null;
             if (std.mem.startsWith(u8, cur.appPath() orelse "", bin_dir)) return null;
@@ -1937,7 +1937,7 @@ pub const CaskInstaller = struct {
         const stanzas = try self.binaryStanzas(cask);
         defer if (stanzas) |e| self.allocator.free(e);
         var app_name_buf: [256]u8 = undefined;
-        const bundle_name = self.placedBundleName(cask, caskroom_ver, &app_name_buf);
+        const bundle_name = try self.placedBundleName(cask, caskroom_ver, &app_name_buf);
         if (bundle_name == null) if (stanzas) |entries| if (hasCaskroomBinary(entries))
             return (try self.linkStanzas(cask, null, caskroom_ver, entries)) orelse error.InstallFailed;
 
@@ -2398,12 +2398,8 @@ pub const InstalledCask = struct {
 };
 
 /// Look up installed cask info from DB. Copies data to avoid dangling pointers.
-/// Reads a failed query as "not installed"; readers that must tell the two
-/// apart use `lookupInstalledChecked`.
-pub fn lookupInstalled(db: *sqlite.Database, token: []const u8) ?InstalledCask {
-    return lookupInstalledChecked(db, token) catch null;
-}
-
+/// `Unreadable` is not a miss: a miss sends callers to a same-named formula
+/// or a fresh install. A version too long to copy still reads as null.
 pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unreadable}!?InstalledCask {
     var stmt = db.prepare(
         "SELECT version, app_path, tap FROM casks WHERE token = ?1 LIMIT 1;",
@@ -2444,8 +2440,8 @@ pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unr
 }
 
 /// Check if a cask is installed (by token).
-pub fn isInstalled(db: *sqlite.Database, token: []const u8) bool {
-    return lookupInstalled(db, token) != null;
+pub fn isInstalled(db: *sqlite.Database, token: []const u8) error{Unreadable}!bool {
+    return try lookupInstalledChecked(db, token) != null;
 }
 
 // --- JSON helpers ---
@@ -3602,5 +3598,5 @@ test "lookupInstalledChecked reports a casks table it cannot query instead of a 
     defer db.close();
     // No schema: prepare fails, the way a damaged table would.
     try std.testing.expectError(error.Unreadable, lookupInstalledChecked(&db, "firefox"));
-    try std.testing.expect(lookupInstalled(&db, "firefox") == null);
+    try std.testing.expectError(error.Unreadable, isInstalled(&db, "firefox"));
 }
