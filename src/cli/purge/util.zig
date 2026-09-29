@@ -11,10 +11,9 @@ const args_mod = @import("args.zig");
 pub const Error = args_mod.Error;
 
 /// Outcome discriminator for a scope run. `.ok` is the silent default;
-/// `.err` signals an internal failure that the orchestrator surfaced
-/// via stderr but did not propagate as a Zig error — the wire format
-/// needs a positive marker so consumers can distinguish a clean no-op
-/// from a swallowed fault.
+/// `.err` marks a scope that could not run: it is data, not a Zig error,
+/// so the remaining scopes still run before the command fails, and the
+/// wire format can tell a clean no-op from a refusal.
 pub const ScopeStatus = enum { ok, err };
 
 pub const TierResult = struct {

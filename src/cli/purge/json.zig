@@ -47,8 +47,8 @@
 //!   the stream. Consumers can rely on strict open/close brackets.
 //! - `status` is `"ok"` or `"error"` on every `scope_completed` and
 //!   `purge_complete` event (and on every summary scope row + the
-//!   summary itself). Distinguishes a clean no-op from a swallowed
-//!   internal failure that the human stderr path already surfaced.
+//!   summary itself). Distinguishes a clean no-op from a scope that
+//!   could not run; the latter also makes the command exit 1.
 //! - `error_kind` is a stable lowercase token included only when
 //!   `status == "error"` so scripts can branch without parsing
 //!   free-form errno strings.
@@ -74,7 +74,7 @@ const util = @import("util.zig");
 pub const ScopeStatus = util.ScopeStatus;
 
 /// v2 added `status` (and optional `error_kind`) so consumers can tell
-/// a clean no-op apart from a swallowed scope failure.
+/// a clean no-op apart from a scope that could not run.
 pub const schema_version: u32 = 2;
 
 /// Wire-format event names. Mirrors the closed-vocabulary pattern in

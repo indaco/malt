@@ -697,7 +697,7 @@ test "long-but-valid MALT_PREFIX runs to completion instead of silently exiting 
     // `catch return` and exited 0 *before* registering the summary-emitting
     // defers — a silent success with no output at all. With the buffer grown
     // to prefix_path.path_buf_len the lock-path format fits, so execute()
-    // runs to completion and emits the v1 JSON summary. Presence of that
+    // runs every scope and emits the JSON summary. Presence of that
     // summary on stdout is the observable that isolates the lock-path site
     // from every downstream best-effort path helper.
     const allocator = testing.allocator;
