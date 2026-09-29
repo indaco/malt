@@ -10,6 +10,7 @@ const schema = @import("../db/schema.zig");
 const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const tap_slug = @import("../tap_slug.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
@@ -1245,12 +1246,11 @@ fn warnAuditIncomplete() void {
 
 /// Only a missing `db/` directory may read as "nothing installed":
 /// anything that exists there but cannot be opened is an error, never
-/// an all-clear. SQLite's CREATE flag alone would hide that difference,
-/// and probing the file itself would report a stray `db` file as absent.
+/// an all-clear. SQLite's CREATE flag alone would hide that difference.
 pub fn openPrefixDb(io: std.Io, db_path: [:0]const u8) error{ Absent, Unreadable }!sqlite.Database {
     const db_dir = std.fs.path.dirname(db_path) orelse unreachable;
-    const present = if (std.Io.Dir.accessAbsolute(io, db_dir, .{})) true else |e| e != error.FileNotFound;
-    return sqlite.Database.open(db_path) catch if (present) error.Unreadable else error.Absent;
+    return sqlite.Database.open(db_path) catch
+        if (prefix_path.dirMissing(io, db_dir)) error.Absent else error.Unreadable;
 }
 
 /// Shared with `mt update --check` so both snapshot writers say the
@@ -1324,6 +1324,15 @@ test "openPrefixDb refuses a db that is a file where the directory should be" {
     const db_path = try scratchDbPath(&s);
     const blocker = try s.dir.createFile(fs_test_io, "db", .{});
     blocker.close(fs_test_io);
+    try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path));
+}
+
+test "openPrefixDb refuses a db/ symlink whose target is gone" {
+    // e.g. db/ on a volume that is not mounted: not an all-clear.
+    var s = try Scratch.init("openPrefixDb_dangling");
+    defer s.deinit();
+    const db_path = try scratchDbPath(&s);
+    try s.dir.symLink(fs_test_io, "/nonexistent/malt-db", "db", .{});
     try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path));
 }
 

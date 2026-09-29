@@ -1107,3 +1107,17 @@ test "SQLite integrity fails a db file where the directory should be" {
 
     try expectIntegrityErr(s.path);
 }
+
+test "SQLite integrity fails a prefix that is a symlink to nowhere" {
+    // An unmounted volume: nothing resolves, yet the prefix is not fresh.
+    const base = try test_io.uniqueTempPath(testing.allocator, "doctor_disp", "integrity_dangling");
+    defer testing.allocator.free(base);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var link_buf: [512]u8 = undefined;
+    const link = try std.fmt.bufPrint(&link_buf, "{s}/prefix", .{base});
+    try test_io.symLinkAbsolute(std.Options.debug_io, "/nonexistent/malt", link, .{});
+
+    try expectIntegrityErr(link);
+}

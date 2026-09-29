@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
+const prefix_path = @import("../../fs/prefix_path.zig");
 const output = @import("../../ui/output.zig");
 const bytes = @import("../../ui/bytes.zig");
 const args_mod = @import("args.zig");
@@ -71,15 +72,12 @@ pub fn openDbTri(io: std.Io, prefix: []const u8) DbOutcome {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return .{ .unreadable = error.OpenFailed };
-    // SQLite's OPEN_CREATE masks "no DB yet" vs "file is there but dead",
-    // and a probe of the file reads EACCES on db/ or a stray `db` file as
-    // absent, so probe the directory.
+    // SQLite's OPEN_CREATE masks "no DB yet" vs "file is there but dead".
     const db_dir = std.fs.path.dirname(db_path) orelse unreachable;
-    const present = if (std.Io.Dir.cwd().access(io, db_dir, .{})) true else |e| e != error.FileNotFound;
     if (sqlite.Database.open(db_path)) |db| {
         return .{ .opened = db };
     } else |e| {
-        return if (present) .{ .unreadable = e } else .absent;
+        return if (prefix_path.dirMissing(io, db_dir)) .absent else .{ .unreadable = e };
     }
 }
 
@@ -257,6 +255,17 @@ test "openDbTri returns .unreadable for a db file where the directory should be"
     try std.Io.Dir.cwd().createDirPath(fs_test_io, s.base);
     const f = try std.Io.Dir.createFileAbsolute(fs_test_io, s.p("/db"), .{});
     f.close(fs_test_io);
+
+    try expectUnreadable(s.base);
+}
+
+test "openDbTri returns .unreadable for a db/ symlink whose target is gone" {
+    // e.g. db/ on a volume that is not mounted: `--wipe --backup` must not
+    // write an empty manifest for it.
+    var s = try Scratch.init("openDbTri_dangling");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.base);
+    try std.Io.Dir.cwd().symLink(fs_test_io, "/nonexistent/malt-db", s.p("/db"), .{});
 
     try expectUnreadable(s.base);
 }

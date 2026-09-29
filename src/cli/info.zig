@@ -7,6 +7,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const schema_report = @import("schema_report.zig");
 const atomic = @import("../fs/atomic.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const output = @import("../ui/output.zig");
 const color = @import("../ui/color.zig");
 const api_mod = @import("../net/api.zig");
@@ -522,19 +523,10 @@ pub fn openInstallDb(io: std.Io, prefix: []const u8) error{Aborted}!?sqlite.Data
         return error.Aborted;
     };
     return sqlite.Database.open(db_path) catch {
-        if (isFreshPrefix(io, db_path)) return null;
+        if (prefix_path.dirMissing(io, std.fs.path.dirname(db_path).?)) return null;
         output.err("could not open the install database at {s}", .{db_path});
         return error.Aborted;
     };
-}
-
-/// True only when the `db/` directory holding `db_path` does not exist.
-/// Any other probe failure (EACCES, a stray `db` file) hides whether the
-/// database is there, so it never reads as "nothing installed".
-pub fn isFreshPrefix(io: std.Io, db_path: []const u8) bool {
-    const db_dir = std.fs.path.dirname(db_path) orelse return false;
-    std.Io.Dir.cwd().access(io, db_dir, .{}) catch |e| return e == error.FileNotFound;
-    return false;
 }
 
 /// A query that fails says nothing about `name`; reading it as a miss
@@ -544,9 +536,8 @@ pub fn dbUnreadable(name: []const u8) error{Aborted} {
     return error.Aborted;
 }
 
-/// Open the malt database if present. Returns `null` for any failure
-/// (missing parent directory, permission error, corrupt file) so the
-/// caller can degrade to a stateless response instead of bailing.
+/// Open the malt database, or `null` for any failure. Only for callers
+/// that report the failure themselves (doctor's integrity row).
 pub fn openDb(prefix: []const u8) ?sqlite.Database {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;

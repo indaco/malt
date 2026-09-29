@@ -16,6 +16,7 @@ const schema = @import("../db/schema.zig");
 const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const symlink = @import("../fs/symlink.zig");
 const tap_cache_mod = @import("../core/tap_cache.zig");
 const tap_mod = @import("../core/tap.zig");
@@ -722,8 +723,8 @@ fn checkSqliteIntegrity(ctx: CheckCtx, name: []const u8) CheckResult {
         return .err_status;
     };
     var db = sqlite.Database.open(db_path) catch {
-        // Nothing installed yet; the directory row already flags the missing db/.
-        if (cli_info.isFreshPrefix(ctx.io, db_path)) {
+        // Nothing installed yet; the directory row flags the missing db/.
+        if (prefix_path.dirMissing(ctx.io, std.fs.path.dirname(db_path).?)) {
             printCheck(name, .ok, null);
             return .ok;
         }

@@ -131,6 +131,22 @@ test "openInstallDb refuses a db/ directory it cannot look into" {
     try expectRefused(fx.base);
 }
 
+test "openInstallDb refuses a db/ symlink whose target is gone" {
+    // e.g. db/ on a volume that is not mounted: not a fresh prefix.
+    var fx = try Fixture.init("install_db_dangling");
+    defer fx.deinit();
+    try test_io.symLinkAbsolute(std.Options.debug_io, "/nonexistent/malt-db", fx.p("db"), .{});
+    try expectRefused(fx.base);
+}
+
+test "openInstallDb refuses a prefix that is a file" {
+    var fx = try Fixture.init("install_db_prefix_file");
+    defer fx.deinit();
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, fx.p("prefix"), .{});
+    f.close(std.Options.debug_io);
+    try expectRefused(fx.p("prefix"));
+}
+
 test "openInstallDb refuses a prefix too long to hold the database path" {
     // A valid prefix can be 512 bytes; silently reading that as "no db/"
     // would hide every install under it.

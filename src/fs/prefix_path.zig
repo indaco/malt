@@ -116,6 +116,29 @@ pub fn joinZ(buf: []u8, base: []const u8, comptime suffix: []const u8) error{Nam
     return std.fmt.bufPrintSentinel(buf, "{s}{s}", .{ base, suffix }, 0) catch error.NameTooLong;
 }
 
+/// True only when nothing at all exists at `path`. A path that cannot be
+/// looked at (EACCES, a file where a parent directory should be) or a
+/// dangling symlink hides what is there, so it never reads as missing.
+pub fn dirMissing(io: std.Io, path: []const u8) bool {
+    const cwd = std.Io.Dir.cwd();
+    // Not `access`: std folds ENOTDIR into FileNotFound there, openDir keeps it.
+    const dir = cwd.openDir(io, path, .{}) catch |e| {
+        if (e != error.FileNotFound) return false;
+        // ENOENT also comes from a dangling symlink at any level, so the
+        // nearest ancestor that exists decides: missing only if it resolves.
+        var p = path;
+        while (true) {
+            if (cwd.access(io, p, .{ .follow_symlinks = false })) {
+                cwd.access(io, p, .{}) catch return false;
+                return true;
+            } else |ae| if (ae != error.FileNotFound) return false;
+            p = std.fs.path.dirname(p) orelse return true;
+        }
+    };
+    dir.close(io);
+    return false;
+}
+
 test "join fits" {
     var buf: [8]u8 = undefined;
     const s = try join(&buf, "abc", "/x");
@@ -322,4 +345,104 @@ test "describePrefixError: every error has a descriptive string" {
         const desc = describePrefixError(e);
         try std.testing.expect(desc.len > 0);
     }
+}
+
+// --- dirMissing -------------------------------------------------------
+
+var scratch_seq = std.atomic.Value(u32).init(0);
+
+/// Unique scratch dir under /tmp; `.zig-cache` is rewritten under
+/// concurrent test runs, so it is no place for fixtures.
+fn scratchDir(buf: []u8) ![]const u8 {
+    const io = std.Options.debug_io;
+    const base = try std.fmt.bufPrint(buf, "/tmp/malt_prefix_path_{d}_{d}", .{
+        std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic),
+    });
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, base);
+    return base;
+}
+
+fn sub(buf: []u8, base: []const u8, rel: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ base, rel }) catch unreachable;
+}
+
+test "dirMissing: a path that does not exist, or whose parent does not, is missing" {
+    const io = std.Options.debug_io;
+    var base_buf: [128]u8 = undefined;
+    const base = try scratchDir(&base_buf);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var p: [192]u8 = undefined;
+
+    try std.testing.expect(dirMissing(io, sub(&p, base, "db")));
+    try std.testing.expect(dirMissing(io, sub(&p, base, "absent/db")));
+}
+
+test "dirMissing: an existing directory is not missing" {
+    const io = std.Options.debug_io;
+    var base_buf: [128]u8 = undefined;
+    const base = try scratchDir(&base_buf);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var p: [192]u8 = undefined;
+
+    try std.Io.Dir.cwd().createDirPath(io, sub(&p, base, "db"));
+    try std.testing.expect(!dirMissing(io, sub(&p, base, "db")));
+}
+
+test "dirMissing: a file at the path, or where a parent should be, is not missing" {
+    // ENOTDIR says something is in the way; reading it as ENOENT would call
+    // a misconfigured prefix empty.
+    const io = std.Options.debug_io;
+    var base_buf: [128]u8 = undefined;
+    const base = try scratchDir(&base_buf);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var p: [192]u8 = undefined;
+
+    const f = try std.Io.Dir.cwd().createFile(io, sub(&p, base, "file"), .{});
+    f.close(io);
+    try std.testing.expect(!dirMissing(io, sub(&p, base, "file")));
+    try std.testing.expect(!dirMissing(io, sub(&p, base, "file/db")));
+}
+
+test "dirMissing: a dangling symlink is not missing" {
+    // e.g. db/ on a volume that is not mounted right now.
+    const io = std.Options.debug_io;
+    var base_buf: [128]u8 = undefined;
+    const base = try scratchDir(&base_buf);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var p: [192]u8 = undefined;
+
+    try std.Io.Dir.cwd().symLink(io, "/nonexistent/malt-db", sub(&p, base, "db"), .{});
+    try std.testing.expect(!dirMissing(io, sub(&p, base, "db")));
+}
+
+test "dirMissing: a path under a dangling symlink is not missing" {
+    // A prefix symlinked to an unmounted volume: the link is there even
+    // though nothing below it resolves.
+    const io = std.Options.debug_io;
+    var base_buf: [128]u8 = undefined;
+    const base = try scratchDir(&base_buf);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var p: [192]u8 = undefined;
+
+    try std.Io.Dir.cwd().symLink(io, "/nonexistent/malt", sub(&p, base, "prefix"), .{});
+    try std.testing.expect(!dirMissing(io, sub(&p, base, "prefix/db")));
+    try std.testing.expect(!dirMissing(io, sub(&p, base, "prefix/a/db")));
+}
+
+test "dirMissing: a directory it cannot look into is not missing" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+    const io = std.Options.debug_io;
+    var base_buf: [128]u8 = undefined;
+    const base = try scratchDir(&base_buf);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var p: [192]u8 = undefined;
+
+    try std.Io.Dir.cwd().createDirPath(io, sub(&p, base, "walled/db"));
+    var walled = try std.Io.Dir.cwd().openDir(io, sub(&p, base, "walled"), .{});
+    defer walled.close(io);
+    try walled.setPermissions(io, std.Io.File.Permissions.fromMode(0));
+    defer walled.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+    try std.testing.expect(!dirMissing(io, sub(&p, base, "walled")));
+    try std.testing.expect(!dirMissing(io, sub(&p, base, "walled/db")));
 }
