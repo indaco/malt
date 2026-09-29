@@ -9,6 +9,7 @@ const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
 const archive_mod = @import("../fs/archive.zig");
 const path_component = @import("../fs/path_component.zig");
+const tap_slug = @import("../tap_slug.zig");
 const confined_source = @import("../fs/confined_source.zig");
 const prefix_path = @import("../fs/prefix_path.zig");
 const hash_mod = @import("hash.zig");
@@ -2373,10 +2374,10 @@ pub const InstalledCask = struct {
     // The version names a Caskroom dir, so a filename bounds any recorded one.
     version_buf: [std.Io.Dir.max_name_bytes]u8 = undefined,
     version_len: usize = 0,
-    app_path_buf: [512]u8 = undefined,
+    app_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined,
     app_path_len: usize = 0,
     has_app_path: bool = false,
-    tap_buf: [128]u8 = undefined,
+    tap_buf: [tap_slug.max_slug_len]u8 = undefined,
     tap_len: usize = 0,
     has_tap: bool = false,
 
@@ -2400,7 +2401,8 @@ pub const InstalledCask = struct {
 
 /// Look up installed cask info from DB. Copies data to avoid dangling pointers.
 /// `Unreadable` is not a miss: a miss sends callers to a same-named formula
-/// or a fresh install. A version no install could record counts as damage.
+/// or a fresh install. A field too long for any value malt records counts as
+/// damage, never as an absent one.
 pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unreadable}!?InstalledCask {
     var stmt = db.prepare(
         "SELECT version, app_path, tap FROM casks WHERE token = ?1 LIMIT 1;",
@@ -2421,20 +2423,18 @@ pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unr
 
     if (stmt.columnText(1)) |path_ptr| {
         const path_slice = std.mem.sliceTo(path_ptr, 0);
-        if (path_slice.len <= result.app_path_buf.len) {
-            @memcpy(result.app_path_buf[0..path_slice.len], path_slice);
-            result.app_path_len = path_slice.len;
-            result.has_app_path = true;
-        }
+        if (path_slice.len > result.app_path_buf.len) return error.Unreadable;
+        @memcpy(result.app_path_buf[0..path_slice.len], path_slice);
+        result.app_path_len = path_slice.len;
+        result.has_app_path = true;
     }
 
     if (stmt.columnText(2)) |tap_ptr| {
         const tap_slice = std.mem.sliceTo(tap_ptr, 0);
-        if (tap_slice.len <= result.tap_buf.len) {
-            @memcpy(result.tap_buf[0..tap_slice.len], tap_slice);
-            result.tap_len = tap_slice.len;
-            result.has_tap = true;
-        }
+        if (tap_slice.len > result.tap_buf.len) return error.Unreadable;
+        @memcpy(result.tap_buf[0..tap_slice.len], tap_slice);
+        result.tap_len = tap_slice.len;
+        result.has_tap = true;
     }
 
     return result;
@@ -3635,4 +3635,28 @@ test "lookupInstalledChecked reports a version no install could record, not a mi
     const ver = "9" ** (std.Io.Dir.max_name_bytes + 1);
     try db.exec("INSERT INTO casks(token,version) VALUES('box','" ++ ver ++ "');");
     try std.testing.expectError(error.Unreadable, lookupInstalledChecked(&db, "box"));
+}
+
+test "lookupInstalledChecked keeps the longest tap slug and app path malt can record" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
+    // Dropping either would route an upgrade off its tap or skip the
+    // running-app check, so both must survive at their real limits.
+    const tap = "a" ** tap_slug.max_slug_len;
+    const app = "/" ++ "b" ** (std.Io.Dir.max_path_bytes - 1);
+    try db.exec("INSERT INTO casks(token,version,app_path,tap) VALUES('box','1.0','" ++ app ++ "','" ++ tap ++ "');");
+    const row = (try lookupInstalledChecked(&db, "box")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(tap, row.tap().?);
+    try std.testing.expectEqualStrings(app, row.appPath().?);
+}
+
+test "lookupInstalledChecked reports a tap or app path past its limit, not a row without one" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
+    try db.exec("INSERT INTO casks(token,version,tap) VALUES('t','1.0','" ++ "a" ** (tap_slug.max_slug_len + 1) ++ "');");
+    try db.exec("INSERT INTO casks(token,version,app_path) VALUES('p','1.0','/" ++ "b" ** std.Io.Dir.max_path_bytes ++ "');");
+    try std.testing.expectError(error.Unreadable, lookupInstalledChecked(&db, "t"));
+    try std.testing.expectError(error.Unreadable, lookupInstalledChecked(&db, "p"));
 }
