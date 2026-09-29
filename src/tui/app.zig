@@ -1193,7 +1193,7 @@ test "a committed filter survives a tab round-trip" {
 
 test "esc in normal mode routes to the active tab so it can cancel its guard" {
     var a: App = .{ .active = .installed };
-    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl");
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
     stepA(&a, .esc); // not editing → must reach the tab, which lowers the guard
     try std.testing.expect(a.states.installed.confirm_uninstall == null);
 }
