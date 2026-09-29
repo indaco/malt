@@ -160,6 +160,9 @@ pub fn parseCaskWithMajor(allocator: std.mem.Allocator, json_bytes: []const u8, 
     // a line-framed identity (progress, `list`, sidecars): no control bytes.
     if (!path_component.isPathComponent(token) or !path_component.isPathComponent(version)) return CaskError.ParseFailed;
     if (path_component.hasControlByte(token) or path_component.hasControlByte(version)) return CaskError.ParseFailed;
+    // Caskroom/<token>/<version> is best-effort on install, so a longer
+    // version would be recorded yet never read back.
+    if (version.len > std.Io.Dir.max_name_bytes) return CaskError.ParseFailed;
     // Artifact strings are the *other* half of the tap-controlled path surface:
     // `app` lands in `<app_dir>/<name>` ahead of a `deleteTree`, and `binary`
     // resolves under the keg and symlinks into `<prefix>/bin`. Screen them at
@@ -2371,7 +2374,7 @@ fn applicationsDir(io: std.Io, environ: std.process.Environ, prefix: []const u8,
 
 /// Installed cask info with owned copies of strings.
 pub const InstalledCask = struct {
-    // The version names a Caskroom dir, so a filename bounds any recorded one.
+    // parseCask caps a version at a filename, so this fits any recorded one.
     version_buf: [std.Io.Dir.max_name_bytes]u8 = undefined,
     version_len: usize = 0,
     app_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined,
@@ -3111,9 +3114,8 @@ test "installZip bounds what an unpinned zip inflates to, and only an unpinned o
 
 test "parseCask does not length-cap a clean version" {
     const a = std.testing.allocator;
-    // Versions have no length convention, so the guard must stay length-
-    // agnostic — this locks out a future regression that grows an
-    // over-eager cap and rejects a long but otherwise-clean version.
+    // Versions have no length convention: the only cap is the filename
+    // limit they have to fit, and a long clean version stays under it.
     var ver: [200]u8 = undefined;
     @memset(&ver, '9');
     const json = try std.fmt.allocPrint(
@@ -3125,6 +3127,21 @@ test "parseCask does not length-cap a clean version" {
     defer a.free(json);
     var cask = try parseCask(a, json);
     cask.deinit();
+}
+
+test "parseCask caps a version at the filename limit it has to fit" {
+    const a = std.testing.allocator;
+    // The version names Caskroom/<token>/<version>; a longer one could be
+    // recorded but never read back or removed.
+    inline for (.{ std.Io.Dir.max_name_bytes, std.Io.Dir.max_name_bytes + 1 }) |len| {
+        const json = "{\"token\":\"box\",\"version\":\"" ++ "9" ** len ++ "\",\"url\":\"https://e/x.dmg\"}";
+        if (len <= std.Io.Dir.max_name_bytes) {
+            var cask = try parseCask(a, json);
+            cask.deinit();
+        } else {
+            try std.testing.expectError(CaskError.ParseFailed, parseCask(a, json));
+        }
+    }
 }
 
 test "installDmg does not adopt a predictable pre-existing mount point" {
@@ -3620,8 +3637,7 @@ test "lookupInstalledChecked keeps a long version any install could have recorde
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
-    // parseCask places no length cap on a version; only the path-component
-    // limit bounds what an install can record.
+    // parseCask caps a version at a filename; the longest must read back.
     const ver = "9" ** std.Io.Dir.max_name_bytes;
     try db.exec("INSERT INTO casks(token,version) VALUES('box','" ++ ver ++ "');");
     const row = (try lookupInstalledChecked(&db, "box")) orelse return error.TestUnexpectedResult;
