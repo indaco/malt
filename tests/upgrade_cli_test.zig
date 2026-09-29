@@ -478,3 +478,31 @@ test "execute --cask reports an unreadable casks table instead of not installed"
     try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
 }
+
+test "execute --cask names the cask of an over-long casks row instead of a meaningless error" {
+    var s = try Scratch.init(testing.allocator, "long_version");
+    defer s.deinit(testing.allocator);
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        // Written by a malt from before the version cap, or by hand.
+        try db.exec("INSERT INTO casks (token, name, version, url) VALUES ('box', 'Box', '" ++ "9" ** 300 ++ "', 'https://e/x.dmg');");
+    }
+
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(false);
+    defer output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    try testing.expectError(error.Aborted, upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "box" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "longer than malt accepts") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "cask box") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "not an error") == null);
+}
