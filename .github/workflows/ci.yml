@@ -101,6 +101,9 @@ jobs:
       - name: Regression guard - deps reports an unreadable API record instead of not found
         run: ./scripts/regressions/deps-refused-record-deps-reports-a-refused-record-as-not-found.sh
 
+      - name: Regression guard - uses, info and deps report an install database they cannot open
+        run: ./scripts/regressions/uses-info-refuse-unreadable-db-uses-and-info-read-an-unreadable-db-as-empty.sh
+
       - name: Regression guard - tap raw binary stays in its keg
         run: ./scripts/regressions/raw-binary-name-escapes-keg-tap-raw-binary-target-not-a-path-component.sh
 
