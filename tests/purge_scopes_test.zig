@@ -280,10 +280,10 @@ fn expectStaleCasksKeeps(tag: []const u8, rel: []const u8) !void {
     output.setNdjson(false);
     output.setQuiet(true);
 
-    // The scope reports the error in its row; `purge` itself exits 0 for a
-    // failed scope, as it does when the lookup cannot be prepared.
+    // A scope that could not read the table fails the command, so scripts
+    // never mistake the refusal for "nothing stale".
     const ctx = malt.app_ctx.debug_ctx;
-    try purge.execute(&ctx, allocator, &.{ "--stale-casks", "--yes" });
+    try testing.expectError(error.Aborted, purge.execute(&ctx, allocator, &.{ "--stale-casks", "--yes" }));
 
     const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix.path, rel });
     defer allocator.free(path);
@@ -296,6 +296,93 @@ test "--stale-casks --yes keeps a cached download when the casks table cannot be
 
 test "--stale-casks --yes keeps a Caskroom dir when the casks table cannot be read" {
     try expectStaleCasksKeeps("stale_casks_corrupt_room", "Caskroom/flux/2.0/marker");
+}
+
+// --- a scope that cannot run fails the command ----------------------------
+
+/// Runs `--store-orphans --yes` over `db_bytes` (null = no DB file),
+/// capturing stderr into `out`.
+fn runStoreOrphans(allocator: std.mem.Allocator, tag: []const u8, db_bytes: ?[]const u8, out: *std.ArrayList(u8)) !void {
+    var prefix = try ScratchPrefix.init(allocator, tag);
+    defer prefix.deinit(allocator);
+    if (db_bytes) |b| try writeFileAt(allocator, &.{ prefix.path, "db", "malt.db" }, b);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(false);
+
+    output.beginStderrCapture(allocator, out);
+    defer output.endStderrCapture();
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try purge.execute(&ctx, allocator, &.{ "--store-orphans", "--yes" });
+}
+
+fn hasSuccessFooter(out: []const u8) bool {
+    return std.mem.indexOf(u8, out, "✓ removed") != null or std.mem.indexOf(u8, out, "* removed") != null;
+}
+
+test "an unreadable database fails purge while a missing one is just nothing to do" {
+    // Cron jobs only see the exit status: a damaged DB must not look like
+    // an empty one.
+    const allocator = testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try testing.expectError(error.Aborted, runStoreOrphans(allocator, "exit_corrupt", "not a sqlite file\n", &out));
+    try runStoreOrphans(allocator, "exit_absent", null, &out);
+}
+
+test "a failed purge never ends on a success footer" {
+    // A green check after a refusal tells the user the cleanup worked.
+    const allocator = testing.allocator;
+
+    var bad: std.ArrayList(u8) = .empty;
+    defer bad.deinit(allocator);
+    try testing.expectError(error.Aborted, runStoreOrphans(allocator, "footer_corrupt", "not a sqlite file\n", &bad));
+    try testing.expect(std.mem.indexOf(u8, bad.items, "removed 0 items") != null);
+    try testing.expect(!hasSuccessFooter(bad.items));
+
+    var fresh: std.ArrayList(u8) = .empty;
+    defer fresh.deinit(allocator);
+    try runStoreOrphans(allocator, "footer_absent", null, &fresh);
+    try testing.expect(hasSuccessFooter(fresh.items));
+}
+
+test "--housekeeping over an unreadable database still runs the scopes that need no database" {
+    // Failing must not cost the healthy scopes their sweep, nor hide it.
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "housekeeping_corrupt");
+    defer prefix.deinit(allocator);
+
+    try writeFileAt(allocator, &.{ prefix.path, "db", "malt.db" }, "not a sqlite file\n");
+    try makeDirAt(allocator, &.{ prefix.path, "bin" });
+    const link = try std.fmt.allocPrint(allocator, "{s}/bin/dangling", .{prefix.path});
+    defer allocator.free(link);
+    try test_io.symLinkAbsolute(std.Options.debug_io, "/nonexistent/malt-target", link, .{});
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(false);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    output.beginStderrCapture(allocator, &out);
+    defer output.endStderrCapture();
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try testing.expectError(error.Aborted, purge.execute(&ctx, allocator, &.{ "--housekeeping", "--yes" }));
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectError(error.FileNotFound, test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
+    try testing.expect(std.mem.indexOf(u8, out.items, "removed 1 item,") != null);
+    try testing.expect(!hasSuccessFooter(out.items));
 }
 
 // --- --old-versions ------------------------------------------------------
@@ -605,8 +692,10 @@ test "long-but-valid MALT_PREFIX runs to completion instead of silently exiting 
     output.beginStdoutCapture(allocator, &stdout_buf);
     defer output.endStdoutCapture();
 
+    // SQLite cannot open a DB path this long, so the DB-backed scopes fail
+    // and so does the run — but only after the summary is out.
     const ctx = malt.app_ctx.debug_ctx;
-    try purge.execute(&ctx, allocator, &.{"--housekeeping"});
+    try testing.expectError(error.Aborted, purge.execute(&ctx, allocator, &.{"--housekeeping"}));
 
     const trimmed = std.mem.trim(u8, stdout_buf.items, " \r\n\t");
     try testing.expect(trimmed.len > 0);
