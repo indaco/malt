@@ -167,6 +167,9 @@ jobs:
       - name: Regression guard - restore skips a backup line naming malt itself
         run: ./scripts/regressions/restore-self-install-line-restore-self-install-line-aborts-whole-batch.sh
 
+      - name: Regression guard - restore exits non-zero when it skipped backup lines
+        run: ./scripts/regressions/skipped-backup-lines-exit-status-restore-all-lines-skipped-exits-zero.sh
+
       - name: Regression guard - local kegs stay out of bundle and backup exports
         run: ./scripts/regressions/local-kegs-stay-out-of-exports-local-kegs-exported-as-core-packages.sh
 
