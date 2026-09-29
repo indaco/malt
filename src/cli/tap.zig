@@ -693,8 +693,11 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             pin_slug = args[i + 1];
             pin_sha = args[i + 2];
             i += 2;
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
-            if (positional == null) positional = arg;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
+        } else if (positional == null) {
+            positional = arg;
         }
     }
     if (refresh_target) |rt| {

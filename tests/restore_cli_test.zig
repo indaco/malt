@@ -227,7 +227,8 @@ test "execute asks install for the bare name of a pinned line" {
 
     var ctx = malt.app_ctx.debug_ctx;
     ctx.offline = true;
-    try testing.expectError(error.RestoreFailed, restore.execute(&ctx, testing.allocator, &.{path}));
+    // Each failure is already printed, so main must exit without a trace.
+    try testing.expectError(error.Aborted, restore.execute(&ctx, testing.allocator, &.{path}));
     try testing.expect(std.mem.indexOf(u8, captured.items, "'zzrestore'") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "zzrestore@") == null);
 }

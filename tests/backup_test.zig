@@ -282,6 +282,46 @@ test "parseBackup skips an entry that does not name a package, and says so" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "`service a/b/c`") != null);
 }
 
+test "parseBackup skips an entry naming malt itself, and says so" {
+    // Install refuses a self-install name for its whole package list, so one
+    // such line lost every other formula (or cask) in the restore batch.
+    const text =
+        "formula malt\n" ++
+        "formula wget\n" ++
+        "formula mt 1.0\n" ++
+        "formula maltose\n" ++
+        "formula acme/tools/mt\n" ++
+        "formula acme/tools/smt\n" ++
+        "cask malt.rb\n" ++
+        "cask mtr\n" ++
+        "service mt\n" ++
+        "formula MT\n" ++
+        "formula a/b/malt.rb\n";
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(true);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+
+    const entries = try backup.parseBackup(testing.allocator, text);
+    defer testing.allocator.free(entries);
+
+    // Install matches case-sensitively, so `MT` is a package like any other.
+    const kept = [_][]const u8{ "wget", "maltose", "acme/tools/smt", "mtr", "MT" };
+    try testing.expectEqual(kept.len, entries.len);
+    for (kept, entries) |name, e| try testing.expectEqualStrings(name, e.name);
+    // Named even under --quiet, once per line.
+    try testing.expectEqual(@as(usize, 5), std.mem.count(u8, captured.items, "restore never installs malt itself"));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "`formula acme/tools/mt`") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "`service mt`") != null);
+    // A path-shaped recipe is refused by shape first, so it is warned once.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "does not name a package"));
+}
+
 test "parseBackup handles an empty input" {
     const entries = try backup.parseBackup(testing.allocator, "");
     defer testing.allocator.free(entries);

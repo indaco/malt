@@ -224,3 +224,49 @@ test "executeUntap --refresh is rejected (refresh is tap-only)" {
         tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "user/repo", "--refresh" }),
     );
 }
+
+// --- unknown flags ---------------------------------------------------
+
+fn tapRowCount(prefix: []const u8, name: []const u8) !i64 {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT COUNT(*) FROM taps WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    _ = try stmt.step();
+    return stmt.columnInt(0);
+}
+
+test "execute refuses an unknown flag instead of listing taps and exiting clean" {
+    var s = try Scratch.init(testing.allocator, "tap_unknown_flag");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try testing.expectError(
+        error.Aborted,
+        tap.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--nope"}),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--nope") != null);
+}
+
+test "executeUntap refuses an unknown flag and leaves the tap registered" {
+    // A mistyped flag must not be dropped while the slug beside it is acted on.
+    var s = try Scratch.init(testing.allocator, "untap_unknown_flag");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    quiet();
+    defer unquiet();
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--prune", "user/repo" }),
+    );
+    try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
+}

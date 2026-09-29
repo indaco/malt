@@ -76,7 +76,8 @@ if ! reg_out=$("$MALT_BIN" tap "$TAP_BARE" 2>&1); then
   exit 0
 fi
 "$MALT_BIN" untap "$TAP_PREFIXED" >/dev/null 2>&1 || true
-listing=$("$MALT_BIN" tap --list 2>&1 || true)
+# No `|| true`: a refused listing must turn the guard red, not pass it.
+listing=$("$MALT_BIN" tap 2>&1)
 if grep -qi -- "$TAP_BARE" <<<"$listing"; then
   printf "FAIL: '%s' survived untap of '%s' — two rows for one tap:\n\n" \
     "$TAP_BARE" "$TAP_PREFIXED" >&2

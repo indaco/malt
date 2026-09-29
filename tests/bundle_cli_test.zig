@@ -181,17 +181,20 @@ test "import with no path returns InvalidArgs" {
     );
 }
 
-test "import on a missing path surfaces BundlefileNotFound" {
+test "import on a missing path names the file it could not read" {
     var s = try Scratch.init(testing.allocator, "import_missing");
     defer s.deinit(testing.allocator);
     try initDb(s.path);
 
-    quiet();
-    defer unquiet();
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
     try testing.expectError(
-        bundle.BundleError.BundlefileNotFound,
+        error.Aborted,
         bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", "/tmp/malt_bundle_cli_does_not_exist_xyz.json" }),
     );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Cannot read bundle file /tmp/malt_bundle_cli_does_not_exist_xyz.json") != null);
 }
 
 test "import registers a Maltfile.json by reading the manifest name" {
@@ -273,7 +276,7 @@ test "cleanup --dry-run on a Brewfile that matches no installed packages prints 
     try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "cleanup", "--dry-run", "--yes", brewfile });
 }
 
-test "import on a malformed Maltfile.json surfaces BundlefileParse" {
+test "import on a malformed Maltfile.json says why it could not parse it" {
     var s = try Scratch.init(testing.allocator, "import_bad");
     defer s.deinit(testing.allocator);
     try initDb(s.path);
@@ -286,12 +289,62 @@ test "import on a malformed Maltfile.json surfaces BundlefileParse" {
         try f.writeStreamingAll(std.Options.debug_io, "this is not json");
     }
 
-    quiet();
-    defer unquiet();
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
     try testing.expectError(
-        bundle.BundleError.BundlefileParse,
+        error.Aborted,
         bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path }),
     );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "malformed bundle JSON") != null);
+}
+
+// --- install: an unreadable bundle file is named, not a bare error -----
+
+fn expectInstallRefusal(path: []const u8, needle: []const u8) !void {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(
+        error.Aborted,
+        bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "install", path }),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, needle) != null);
+}
+
+test "install on a missing bundle file says it cannot read it" {
+    var s = try Scratch.init(testing.allocator, "install_missing");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    const needle = try std.fmt.allocPrint(testing.allocator, "Cannot read bundle file {s}", .{path});
+    defer testing.allocator.free(needle);
+    try expectInstallRefusal(path, needle);
+}
+
+test "install on a directory says it cannot read it" {
+    var s = try Scratch.init(testing.allocator, "install_dir");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    try expectInstallRefusal(s.path, "Cannot read bundle file");
+}
+
+test "install on an oversized bundle file names the size cap" {
+    var s = try Scratch.init(testing.allocator, "install_big");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    {
+        // Sparse: one byte past the cap without writing 8 MiB.
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.setLength(std.Options.debug_io, 8 * 1024 * 1024 + 1);
+    }
+    try expectInstallRefusal(path, "larger than 8 MiB");
 }
 
 // --- import: manifest_path canonicalisation ---------------------------

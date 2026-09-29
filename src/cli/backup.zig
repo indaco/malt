@@ -584,6 +584,11 @@ pub fn parseBackup(allocator: std.mem.Allocator, text: []const u8) ![]Entry {
             output.warnAlways("Skipping `{f}`: it does not name a package", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
             continue;
         }
+        // One such name makes install refuse the whole restore batch.
+        if (install_args.isSelfInstall(entry.name)) {
+            output.warnAlways("Skipping `{f}`: restore never installs malt itself", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            continue;
+        }
         try list.append(allocator, entry);
     }
     return try list.toOwnedSlice(allocator);
