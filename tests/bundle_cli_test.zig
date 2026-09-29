@@ -956,3 +956,26 @@ test "remove --purge never takes a local keg for a same-named core line" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "- wget") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "- lx") == null);
 }
+
+test "bundle create refuses a table it cannot read instead of writing a Brewfile without it" {
+    // A manifest missing every cask (or formula, tap, service) reads as a
+    // complete snapshot, and a later restore would leave them off.
+    inline for (.{ "taps", "kegs", "casks", "services" }) |table| {
+        var s = try Scratch.init(testing.allocator, "create_corrupt_" ++ table);
+        defer s.deinit(testing.allocator);
+        try initDb(s.path);
+        var db_path_buf: [512]u8 = undefined;
+        try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0), table);
+
+        const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+        defer testing.allocator.free(out_path);
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try testing.expectError(error.Aborted, bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", "--services", out_path }));
+        try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, out_path, .{}));
+        // Said in words, not as a raw error name and trace.
+        try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+    }
+}
