@@ -3,7 +3,7 @@
 # cask". `uninstall <name>` used to fall through to a same-named formula and
 # remove it; `uninstall --cask`, `upgrade --cask`, `install --cask` and
 # `rollback` called the cask absent, and install would fetch before hitting
-# the same table.
+# the same table. `uninstall --formula` is the way out and must still work.
 #
 # Exits 0 when the bug is absent, non-zero (with a clear message) when present.
 # No network; all state lives under a throwaway prefix removed on EXIT.
@@ -67,6 +67,10 @@ for cmd in "uninstall --dry-run box" "uninstall box" "uninstall --cask --dry-run
   fi
   grep -q "package database" <<<"$out" || fail "'$cmd' did not report the database: $out"
 done
+
+# `--formula` never reads the damaged table, so the formula stays removable.
+out=$("$BIN" --offline uninstall --formula --dry-run box 2>&1) || fail "uninstall --formula refused: $out"
+grep -q "would uninstall box 1.0" <<<"$out" || fail "uninstall --formula did not preview the formula: $out"
 
 [ -e "$tmp/Brewfile" ] && fail "bundle create wrote a Brewfile without the casks"
 [ -d "$MALT_PREFIX/Cellar/box/1.0" ] || fail "same-named formula keg removed"
