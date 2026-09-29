@@ -162,10 +162,11 @@ const uninstall_help =
     \\installed, or is still needed by a package left behind, nothing is removed.
     \\
     \\Flags:
-    \\  --cask         Treat every <package> as a cask
-    \\  --force, -f    Remove even if other packages depend on it, or that can't be checked
-    \\  --dry-run      Show what would be removed
-    \\  --quiet, -q    Suppress non-error output
+    \\  --formula, --formulae  Treat all named arguments as formulae
+    \\  --cask, --casks        Treat all named arguments as casks
+    \\  --force, -f            Remove even if other packages depend on it, or that can't be checked
+    \\  --dry-run              Show what would be removed
+    \\  --quiet, -q            Suppress non-error output
     \\
 ;
 
