@@ -1264,6 +1264,8 @@ test "execute --cask reports an unreadable casks table instead of not installed"
     try expectKegIntact(prefix.path, "box", "1.0");
     try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+    // The user named a cask; pointing at --formula would contradict them.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--formula") == null);
 }
 
 test "execute --dry-run on a long-versioned cask previews the cask, not a same-named formula" {
@@ -1278,4 +1280,73 @@ test "execute --dry-run on a long-versioned cask previews the cask, not a same-n
 
     try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall cask box") != null);
     try expectKegIntact(prefix.path, "box", "1.0");
+}
+
+test "execute --formula removes a formula while the casks table cannot be read" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "formula_flag_corrupt");
+    defer prefix.deinit(testing.allocator);
+    try seedCorruptCaskOverKeg(prefix.path, "box");
+
+    quiet();
+    defer unquiet();
+    try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--formula", "box" });
+    try expectKegGone(prefix.path, "box");
+}
+
+test "execute without --formula points at it when the casks table cannot be read" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "formula_flag_hint");
+    defer prefix.deinit(testing.allocator);
+    try seedCorruptCaskOverKeg(prefix.path, "box");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{"box"});
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--formula") != null);
+}
+
+test "execute --formula takes the formula over a same-named cask and keeps the cask" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "formula_flag_both");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "box", "1.0");
+    try seedCask(prefix.path, "box");
+
+    quiet();
+    defer unquiet();
+    try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--formulae", "box" });
+    try expectKegGone(prefix.path, "box");
+    try testing.expect(try caskInstalled(prefix.path, "box"));
+}
+
+test "execute --formula on a cask-only name refuses and keeps the cask" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "formula_flag_cask_only");
+    defer prefix.deinit(testing.allocator);
+    try seedCask(prefix.path, "box");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{ "--formula", "box" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "box is not installed as a formula") != null);
+    try testing.expect(try caskInstalled(prefix.path, "box"));
+}
+
+test "execute refuses --cask with --formula before touching anything" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "formula_flag_conflict");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "box", "1.0");
+    try seedCask(prefix.path, "box");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{ "--casks", "--formula", "box" });
+    // Brew's wording, so a brew user reads the same refusal.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Options --formula and --cask are mutually exclusive") != null);
+    try expectKegIntact(prefix.path, "box", "1.0");
+    try testing.expect(try caskInstalled(prefix.path, "box"));
+}
+
+test "execute refuses --formula with --cask even with no package named, as brew does" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{ "--formula", "--cask" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "mutually exclusive") != null);
 }
