@@ -51,12 +51,6 @@ pub fn pathSize(io: std.Io, allocator: std.mem.Allocator, path: []const u8) u64 
     return total;
 }
 
-pub fn openDb(prefix: []const u8) ?sqlite.Database {
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
-    return sqlite.Database.open(db_path) catch null;
-}
-
 /// Tri-state DB open: distinguishes "fresh prefix, nothing yet" from
 /// "the file is there but cannot be opened" (corruption, permissions).
 /// Callers route the two to different UX paths — soft skip vs loud err.
