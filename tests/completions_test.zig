@@ -409,3 +409,29 @@ fn expectNotContains(haystack: []const u8, needle: []const u8) !void {
         return error.UnexpectedSubstring;
     }
 }
+
+test "all uninstall completions expose brew's kind flags on both verbs" {
+    // Regression guard: `--formula` is the way out when casks cannot be read,
+    // and `remove` is the same verb, so no shell may drop a spelling for either.
+    inline for (.{ "--formula", "--formulae", "--cask", "--casks" }) |flag| {
+        try testing.expect(hasFlagToken(try bashFlagsFor("uninstall|remove)"), flag));
+        try expectContains(try zshCaseFor("                uninstall|remove)"), "'" ++ flag ++ "[");
+        inline for (.{ "uninstall", "remove" }) |verb| {
+            try testing.expect(fishHasLong(verb, flag[2..]));
+        }
+    }
+}
+
+fn fishHasLong(verb: []const u8, long: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, completions.fish_script, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "__malt_using_command ") == null) continue;
+        const after = line[std.mem.indexOf(u8, line, "__malt_using_command ").? + "__malt_using_command ".len ..];
+        if (!std.mem.startsWith(u8, after, verb) or after.len <= verb.len or after[verb.len] != '\'') continue;
+        var it = std.mem.tokenizeScalar(u8, after, ' ');
+        while (it.next()) |tok| if (std.mem.eql(u8, tok, "-l")) {
+            if (it.next()) |name| if (std.mem.eql(u8, name, long)) return true;
+        };
+    }
+    return false;
+}
