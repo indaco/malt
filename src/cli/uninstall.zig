@@ -131,7 +131,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // same-named formula, unless `--formula` asked for exactly that.
         const cask_row = if (force_formula) null else cask_mod.lookupInstalledChecked(&db, name) catch |e| {
             if (force_cask) return caskReadFailed(&db, e, name);
-            output.err("Could not read the package database for cask {s}: {s}. Pass --formula to remove only a formula.", .{ name, cask_mod.lookupDetail(e, &db) });
+            output.err("Could not read the package database for cask {s}: {s}. If {s} is a formula, pass --formula.", .{ name, cask_mod.lookupDetail(e, &db), name });
             return error.Aborted;
         };
         if (cask_row) |info| {
