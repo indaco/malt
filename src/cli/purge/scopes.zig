@@ -24,6 +24,7 @@ const supervisor_mod = @import("../../core/services/supervisor.zig");
 const symlink = @import("../../fs/symlink.zig");
 const store_path = @import("../../fs/store_path.zig");
 const util = @import("util.zig");
+const schema_report = @import("../schema_report.zig");
 const report = @import("report.zig");
 
 const TierResult = util.TierResult;
@@ -51,6 +52,7 @@ pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix:
     };
     defer db.close();
     schema.initSchema(&db) catch |e| {
+        if (reportSchemaTooNew("store-orphans", &db, e, prefix, &result)) return result;
         output.err("store-orphans: cannot init schema ({s})", .{@errorName(e)});
         result.status = .err;
         result.error_kind = "schema_init";
@@ -117,6 +119,7 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     };
     defer db.close();
     schema.initSchema(&db) catch |e| {
+        if (reportSchemaTooNew("unused-deps", &db, e, prefix, &result)) return result;
         output.err("unused-deps: cannot init schema ({s})", .{@errorName(e)});
         result.status = .err;
         result.error_kind = "schema_init";
@@ -472,6 +475,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     };
     defer db.close();
     schema.initSchema(&db) catch |e| {
+        if (reportSchemaTooNew("stale-casks", &db, e, prefix, &result)) return result;
         output.err("stale-casks: cannot init schema ({s})", .{@errorName(e)});
         result.status = .err;
         result.error_kind = "schema_init";
@@ -877,6 +881,7 @@ fn collectCaskOldVersions(
     };
     defer db.close();
     schema.initSchema(&db) catch |e| {
+        if (reportSchemaTooNew("old-versions", &db, e, prefix, result)) return;
         output.err("old-versions: cannot init schema for cask history ({s})", .{@errorName(e)});
         result.status = .err;
         result.error_kind = "schema_init";
@@ -921,6 +926,17 @@ fn collectCaskOldVersions(
             continue;
         };
     }
+}
+
+/// Gives a DB from a newer malt the upgrade hint instead of a generic
+/// schema failure. Returns false for every other error.
+fn reportSchemaTooNew(label: []const u8, db: *sqlite.Database, e: schema.MigrateError, prefix: []const u8, result: *TierResult) bool {
+    if (e != error.SchemaTooNew) return false;
+    var buf: [512]u8 = undefined;
+    output.err("{s}: {s}", .{ label, schema_report.initFailureMessage(&buf, e, schema.currentVersion(db) catch 0, prefix) });
+    result.status = .err;
+    result.error_kind = util.schema_too_new_kind;
+    return true;
 }
 
 fn reopenDbForRowDeletes(io: std.Io, prefix: []const u8, result: *TierResult) ?sqlite.Database {

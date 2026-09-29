@@ -23,6 +23,10 @@ pub const TierResult = struct {
     error_kind: ?[]const u8 = null,
 };
 
+/// `error_kind` of a scope that met a DB written by a newer malt; `purge`
+/// turns it into the same exit status every other command uses.
+pub const schema_too_new_kind = "schema_too_new";
+
 /// Canonical CLI name, preserved as a one-line delegator onto the shared
 /// ui/ humanizer; the `purge.zig` re-export stays valid.
 pub fn formatBytes(bytes_val: u64, buf: []u8) []const u8 {
