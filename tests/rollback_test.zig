@@ -384,6 +384,28 @@ test "rollback --to <version> refuses with the listing when the version is absen
 
 // --- cask `--list` / `--to` integration ---------------------------------
 
+test "rollback reports a casks table it cannot read instead of not installed" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "cask_unreadable");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try seedCask(prefix, "flux-markdown", "1.32.427");
+    var db_path_buf: [512]u8 = undefined;
+    try test_io.corruptTable(try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix}), "casks");
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer malt.output.endStderrCapture();
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
+    try testing.expectError(error.Aborted, rollback.execute(&ctx, testing.allocator, &.{"flux-markdown"}));
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "is not installed") == null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "package database") != null);
+}
+
 fn seedCask(prefix: [:0]const u8, token: []const u8, version: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
     const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
