@@ -1265,3 +1265,17 @@ test "execute --cask reports an unreadable casks table instead of not installed"
     try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
 }
+
+test "execute --dry-run on a long-versioned cask previews the cask, not a same-named formula" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "long_cask_version");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "box", "1.0");
+    try sabotage(prefix.path, "INSERT INTO casks (token, name, version, url) VALUES ('box', 'box', '" ++ "9" ** 200 ++ "', 'https://example.invalid/c.zip');");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCaptured(&captured, &.{"box"});
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall cask box") != null);
+    try expectKegIntact(prefix.path, "box", "1.0");
+}
