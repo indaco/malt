@@ -386,6 +386,106 @@ test "execute treats unknown kinds as comments and reports zero entries" {
     try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
 }
 
+test "execute fails when every line was skipped, even under --quiet" {
+    // Before the screens these lines failed in install; a script running
+    // `mt restore f || alert` must still see a file it could not restore.
+    var s = try Scratch.init(testing.allocator, "all_skipped");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "formula ../../etc\nformula foo\x1b[2J\n# comment\npotato wget\n");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    // `--quiet` sets process-wide state the later tests capture through.
+    defer output.setQuiet(false);
+
+    // Each skip is already printed, so main must exit without a trace.
+    try testing.expectError(error.Aborted, restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--quiet", path }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "2 lines skipped, nothing to restore") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No entries found") == null);
+}
+
+test "execute --dry-run still succeeds when every line was skipped" {
+    // A preview never installs; the skip lines already name what was refused.
+    var s = try Scratch.init(testing.allocator, "all_skipped_dry");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "formula ../../etc\n");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCapture(path, &captured);
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "does not name a package") != null);
+    // Same verdict as the real run, not an "empty backup".
+    try testing.expect(std.mem.indexOf(u8, captured.items, "1 line skipped, nothing to restore") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No entries found") == null);
+}
+
+test "execute does not count a refused local note as a skipped line" {
+    // A local keg was never an entry and never reached install, so a
+    // backup of only such notes still restores cleanly.
+    var s = try Scratch.init(testing.allocator, "refused_local_note");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "# local l\x1by /w/ly.rb\n# local lx /w/lx.rb\n");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
+    try testing.expect(std.mem.indexOf(u8, captured.items, "restore skips it") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "skipped") == null);
+}
+
+test "execute attempts every surviving line, then fails because one was skipped" {
+    // A missing service is warn-and-continue, so the failure is the skip alone.
+    var s = try Scratch.init(testing.allocator, "partly_skipped");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{s.path});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+    try writeFile(path, "formula ../../etc\nservice ghost_service\n");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try testing.expectError(error.Aborted, restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "service ghost_service skipped") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "1 line skipped") != null);
+}
+
+test "execute still recaps skipped lines when an install batch also failed" {
+    // The recap matters most when the failure output around it is longest.
+    var s = try Scratch.init(testing.allocator, "skipped_and_failed");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "formula ../../etc\nformula malt\nformula zzrestore\n");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    var ctx = malt.app_ctx.debug_ctx;
+    ctx.offline = true;
+    try testing.expectError(error.Aborted, restore.execute(&ctx, testing.allocator, &.{path}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "'zzrestore'") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "2 lines skipped") != null);
+}
+
 // --- service-entry dispatch ---------------------------------------------
 
 test "execute summary line carries formula + cask + service counts in that order" {
