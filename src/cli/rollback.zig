@@ -100,7 +100,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // installed cask. The cask listing and reinstall flow live
         // alongside the keg flow so the user-facing `--list` / `--to`
         // / default behaviours are consistent across package types.
-        if (isCaskInstalled(&db, name)) {
+        const is_cask = cask_mod.isInstalled(&db, name) catch {
+            output.err("Could not read the package database: {s}", .{db.errMsg()});
+            return error.Aborted;
+        };
+        if (is_cask) {
             return dispatchCask(ctx, allocator, &db, name, parsed);
         }
         output.err("{s} is not installed", .{name});
@@ -475,18 +479,6 @@ fn dispatchCask(
     // See the keg path: the downgraded cask is not in the snapshot to prune.
     reconcileOutdatedSnapshot(ctx.io, allocator, db, .casks, token, target_pkg_version);
     output.info("{s} rolled back to {s}", .{ token, target_pkg_version });
-}
-
-/// Best-effort lookup: is `token` registered as an installed cask? Used to
-/// split the rollback "not installed" diagnostic so a cask token doesn't
-/// read as a missing package. Any SQL failure collapses to `false` — the
-/// caller falls back to the original message rather than masking the
-/// underlying error.
-fn isCaskInstalled(db: *sqlite.Database, token: []const u8) bool {
-    var stmt = db.prepare("SELECT 1 FROM casks WHERE token = ?1 LIMIT 1;") catch return false;
-    defer stmt.finalize();
-    stmt.bindText(1, token) catch return false;
-    return stmt.step() catch false;
 }
 
 /// Read the currently-installed cask version for `token` so the rollback
