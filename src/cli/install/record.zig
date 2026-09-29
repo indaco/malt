@@ -148,8 +148,8 @@ pub const RecordOpts = struct {
     in_transaction: bool = false,
 };
 
-/// The flat write surface for the `kegs` INSERT — exactly the ten
-/// columns the SQL binds, nothing more. Callers holding a `Formula` go
+/// The flat write surface for one keg: its `kegs` row plus its
+/// `dependencies` rows. Callers holding a `Formula` go
 /// through the `recordKeg` adapter; the tap/local path (which holds a
 /// `ResolvedRubyFormula`, not a `Formula`) builds this directly instead
 /// of synthesizing a fake `Formula`.
@@ -168,6 +168,9 @@ pub const KegFields = struct {
     tap_commit_sha: ?[]const u8 = null,
     /// Tap subtree that served the `.rb`; null for core and local kegs.
     tap_rb_subtree: ?forge.RawKind = null,
+    /// Runtime dependency names, written in the keg row's transaction.
+    /// No default: a forgotten list would record a keg with no edges.
+    dependencies: []const []const u8,
 };
 
 /// The one `kegs` INSERT for the install path. Returns the keg_id.
@@ -215,6 +218,19 @@ pub fn recordKegFields(
 
     const keg_id = try getLastInsertId(db);
 
+    // Same transaction as the keg row: a keg recorded without its
+    // dependencies lets `purge --unused-deps` reap libraries it still loads.
+    var dep_stmt = try db.prepare(
+        "INSERT OR IGNORE INTO dependencies (keg_id, dep_name, dep_type) VALUES (?1, ?2, 'runtime');",
+    );
+    defer dep_stmt.finalize();
+    try dep_stmt.bindInt(1, keg_id);
+    for (f.dependencies) |dep_name| {
+        try dep_stmt.bindText(2, dep_name);
+        _ = try dep_stmt.step();
+        try dep_stmt.reset();
+    }
+
     if (!opts.in_transaction) {
         try db.commit();
     }
@@ -258,15 +274,15 @@ pub fn kegFields(
         .cellar_path = cellar_path,
         .install_reason = install_reason,
         .bin_isolated = bin_isolated,
+        .dependencies = formula.dependencies,
     };
 }
 
 /// Delete a keg record (rollback / replaced-old-row helper). Wipes
 /// `dependencies` and `links` rows before the kegs row so the upgrade
-/// path can call this on a fully-populated old keg; the install
-/// rollback path arrives before those rows exist, where the extra
-/// deletes are harmless no-ops. Best-effort: a failed delete leaves a
-/// stale row that `doctor` cleans.
+/// path can call this on a fully-populated old keg, and a failed link
+/// drops the dependency rows recorded with the keg. Best-effort: a
+/// failed delete leaves a stale row that `doctor` cleans.
 pub fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
     {
         var dep_stmt = db.prepare("DELETE FROM dependencies WHERE keg_id = ?1;") catch return;
@@ -284,28 +300,6 @@ pub fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
     defer stmt.finalize();
     stmt.bindInt(1, keg_id) catch return;
     _ = stmt.step() catch {};
-}
-
-/// Record dependencies for a keg. Each row is independent; on per-row
-/// failure we skip and continue so a partial dep table is preferred to
-/// the install being rolled back wholesale.
-pub fn recordDeps(db: *sqlite.Database, keg_id: i64, formula: *const formula_mod.Formula) void {
-    recordDepNames(db, keg_id, formula.dependencies);
-}
-
-/// Same rows from a bare name list — tap formulas have no `Formula`, their
-/// deps come straight off the `.rb`. One SQL site so the two cannot drift.
-pub fn recordDepNames(db: *sqlite.Database, keg_id: i64, dep_names: []const []const u8) void {
-    for (dep_names) |dep_name| {
-        var stmt = db.prepare(
-            "INSERT OR IGNORE INTO dependencies (keg_id, dep_name, dep_type) VALUES (?1, ?2, 'runtime');",
-        ) catch continue;
-        defer stmt.finalize();
-
-        stmt.bindInt(1, keg_id) catch continue;
-        stmt.bindText(2, dep_name) catch continue;
-        _ = stmt.step() catch {};
-    }
 }
 
 /// Get the last inserted row id from SQLite. Pub so the ruby-formula
@@ -408,6 +402,7 @@ test "recordKegFields round-trips a zero revision and bin_isolated as zero" {
         .cellar_path = "/opt/malt/Cellar/roundtrip/1.0.0",
         .install_reason = "direct",
         .bin_isolated = false,
+        .dependencies = &.{},
     }, .{});
 
     try testing.expectEqual(@as(i64, 0), try readIntCol(&db, "SELECT revision FROM kegs WHERE name = ?1;", "roundtrip"));
@@ -428,6 +423,7 @@ test "recordKegFields persists the fetch commit so the upgrade gate can read a k
         .cellar_path = "/opt/malt/Cellar/tapkeg/1.0.0",
         .install_reason = "direct",
         .bin_isolated = false,
+        .dependencies = &.{},
         .tap_commit_sha = "abc123",
     };
     _ = try recordKegFields(&db, f, .{});
@@ -456,6 +452,7 @@ test "recordKegFields persists which tap subtree served the .rb" {
         .cellar_path = "/opt/malt/Cellar/dual/1.0.0",
         .install_reason = "direct",
         .bin_isolated = false,
+        .dependencies = &.{},
         .tap_rb_subtree = .cask,
     };
     _ = try recordKegFields(&db, f, .{});
@@ -491,6 +488,25 @@ test "recordKeg adapter persists the formula's fields identically" {
     try testing.expectEqual(@as(i64, 1), try readIntCol(&db, "SELECT tap_commit_sha IS NULL FROM kegs WHERE name = ?1;", "adapter"));
 }
 
+test "recordKeg leaves no keg row when a dependency row cannot be written" {
+    // A keg recorded without its dependencies is worse than no record: the
+    // caller's failure path removes the unlinked keg, a retry starts clean.
+    var db = try openTestDb();
+    defer db.close();
+    try db.exec("CREATE TRIGGER no_deps BEFORE INSERT ON dependencies BEGIN SELECT RAISE(ABORT, 'refused'); END;");
+
+    const json =
+        \\{"name":"halfdeps","versions":{"stable":"1.0"},"dependencies":["libbar"]}
+    ;
+    var formula = try formula_mod.parseFormula(testing.allocator, json);
+    defer formula.deinit();
+
+    if (recordKeg(&db, &formula, "sha", "/opt/malt/Cellar/halfdeps/1.0", "direct", false, .{})) |_| {
+        return error.TestUnexpectedSuccess;
+    } else |_| {}
+    try testing.expectEqual(@as(i64, 0), try readIntCol(&db, "SELECT COUNT(*) FROM kegs WHERE name = ?1;", "halfdeps"));
+}
+
 test "recordKegFields opens its own transaction under default opts" {
     var db = try openTestDb();
     defer db.close();
@@ -506,6 +522,7 @@ test "recordKegFields opens its own transaction under default opts" {
         .cellar_path = "/c",
         .install_reason = "direct",
         .bin_isolated = false,
+        .dependencies = &.{},
     }, .{});
 
     // Committed → a fresh BEGIN succeeds (no lingering open transaction).
@@ -529,6 +546,7 @@ test "recordKegFields leaves the caller's transaction intact when in_transaction
         .cellar_path = "/c",
         .install_reason = "direct",
         .bin_isolated = false,
+        .dependencies = &.{},
     }, .{ .in_transaction = true });
     // The fn must not have COMMITted: the caller's txn is still open, so this
     // commit succeeds. A premature inner commit would make this error.
@@ -551,6 +569,7 @@ test "recordKegFields inherits an existing pin via COALESCE-MAX on force-reinsta
         .cellar_path = "/c",
         .install_reason = "direct",
         .bin_isolated = false,
+        .dependencies = &.{},
     };
     _ = try recordKegFields(&db, fields, .{});
 

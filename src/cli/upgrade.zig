@@ -1541,6 +1541,9 @@ pub fn upgradeDbAtomic(
         }
         break :blk "direct";
     };
+    // recordKeg re-records the runtime deps on the new id: deleteKeg wipes
+    // the old keg's `dependencies` rows, and an edge-less keg would let
+    // `cleanup`'s orphan scan reap a still-live dependency.
     const new_keg_id = try install_record_mod.recordKeg(
         db,
         formula,
@@ -1550,11 +1553,6 @@ pub fn upgradeDbAtomic(
         bin_isolated,
         .{ .in_transaction = true },
     );
-    // Re-record the upgraded keg's runtime deps on the new id: deleteKeg
-    // wipes the old keg's `dependencies` rows, and without rebuilding them
-    // the keg ends up edge-less — `cleanup`'s orphan scan would then reap
-    // a still-live dependency. Same call the install/migrate paths make.
-    install_record_mod.recordDeps(db, new_keg_id, formula);
     try linker.link(new_cellar_path, formula.name, new_keg_id, bin_isolated);
     install_record_mod.deleteKeg(db, old_keg_id);
     return new_keg_id;

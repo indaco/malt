@@ -193,7 +193,7 @@ pub fn migrateKeg(
     if (deps.db_mu) |m| m.lockUncancelable(ctx.io);
     defer if (deps.db_mu) |m| if (!db_mu_unlocked) m.unlock(ctx.io);
 
-    const keg_id = recordAndLink(ctx.io, deps, record.kegFields(&formula, bottle.sha256, keg.path, install_reason, false), keg_name, !formula.keg_only) catch |e| {
+    recordAndLink(ctx.io, deps, record.kegFields(&formula, bottle.sha256, keg.path, install_reason, false), keg_name, !formula.keg_only) catch |e| {
         if (e == error.LinkFailed) output.emitNdjsonEvent(.linked, keg_name, "failed");
         return .failed_install;
     };
@@ -201,7 +201,6 @@ pub fn migrateKeg(
     // row back, so an early emit would lie.
     if (!formula.keg_only) output.emitNdjsonEvent(.linked, keg_name, "ok");
     output.emitNdjsonEvent(.recorded, keg_name, "ok");
-    recordDepsFromList(deps.db, keg_id, formula.dependencies);
 
     // Claim only once a keg row references the bytes: a row with no keg
     // reads as an orphan, so claiming before materialise would hand a
@@ -319,7 +318,7 @@ fn migrateFromLocalCellar(
     var full_name_buf: [full_name_buf_len]u8 = undefined;
     const full_name = std.fmt.bufPrint(&full_name_buf, "{s}/{s}", .{ receipt.tap, keg_name }) catch keg_name;
 
-    const keg_id = recordAndLink(ctx.io, deps, .{
+    recordAndLink(ctx.io, deps, .{
         .name = keg_name,
         .full_name = full_name,
         .version = receipt.version,
@@ -329,8 +328,8 @@ fn migrateFromLocalCellar(
         .cellar_path = keg.path,
         .install_reason = if (receipt.on_request) "direct" else "dependency",
         .bin_isolated = false,
+        .dependencies = receipt.runtime_deps,
     }, keg_name, true) catch return .failed_install;
-    recordDepsFromList(deps.db, keg_id, receipt.runtime_deps);
 
     // Tap kegs aren't reachable from the bottle DSL pipeline (its body
     // locator only knows homebrew-core), so a `def post_install` in the
@@ -627,7 +626,7 @@ const RecordError = error{ RecordFailed, LinkFailed };
 
 /// One record → link → rollback path for every route, so an undo step
 /// cannot go missing from a copy; the caller only decides what to emit.
-fn recordAndLink(io: std.Io, deps: MigrateDeps, fields: record.KegFields, keg_name: []const u8, do_link: bool) RecordError!i64 {
+fn recordAndLink(io: std.Io, deps: MigrateDeps, fields: record.KegFields, keg_name: []const u8, do_link: bool) RecordError!void {
     // The Cellar dir is revision-tagged (`1.0_2`) while the row keeps the
     // bare version, so the dir is addressed by its own name.
     const keg_version = std.fs.path.basename(fields.cellar_path);
@@ -646,22 +645,6 @@ fn recordAndLink(io: std.Io, deps: MigrateDeps, fields: record.KegFields, keg_na
     deps.linker.linkOpt(fields.name, keg_version) catch |e| {
         output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ fields.name, @errorName(e) });
     };
-    return keg_id;
-}
-
-/// Each row is independent; skip on per-row failure so a partial dep
-/// table is preferred to aborting a migration wholesale.
-fn recordDepsFromList(db: *sqlite.Database, keg_id: i64, dep_names: []const []const u8) void {
-    for (dep_names) |dep_name| {
-        var stmt = db.prepare(
-            "INSERT OR IGNORE INTO dependencies (keg_id, dep_name, dep_type) VALUES (?1, ?2, 'runtime');",
-        ) catch continue;
-        defer stmt.finalize();
-
-        stmt.bindInt(1, keg_id) catch continue;
-        stmt.bindText(2, dep_name) catch continue;
-        _ = stmt.step() catch {};
-    }
 }
 
 pub fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
@@ -1029,8 +1012,8 @@ test "claim under db_mu keeps each worker's keg_id bound to its own kegs row" {
                     .cellar_path = "",
                     .install_reason = "direct",
                     .bin_isolated = false,
+                    .dependencies = &.{"libdep"},
                 }, .{})) |keg_id| {
-                    recordDepsFromList(c.db, keg_id, &.{"libdep"});
                     if (!nameMatches(c.db, keg_id, name)) c.leaked.store(true, .monotonic);
                 } else |_| {}
                 c.db_mu.unlock(c.io);
@@ -1083,6 +1066,7 @@ test "migrate keg record through the shared seam preserves pin inheritance, bin_
         .install_reason = "direct",
         // migrate has no bin-isolation intent — byte-identical to the old omit→default.
         .bin_isolated = false,
+        .dependencies = &.{},
     };
 
     // First migrate-style record, then a user pin, then a re-migrate of the
@@ -1134,6 +1118,7 @@ fn rollbackFixture(s: *Scratch, db: *sqlite.Database, linker: *linker_mod.Linker
             .cellar_path = keg_dir,
             .install_reason = "direct",
             .bin_isolated = false,
+            .dependencies = &.{},
         },
     };
 }

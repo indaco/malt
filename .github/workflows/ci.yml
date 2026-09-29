@@ -110,6 +110,9 @@ jobs:
       - name: Regression guard - a Homebrew receipt with a control character is refused
         run: ./scripts/regressions/migrate-receipt-control-bytes-migrate-receipt-version-accepts-control-bytes.sh
 
+      - name: Regression guard - a Homebrew receipt with a malformed dependency list is refused
+        run: ./scripts/regressions/migrate-receipt-malformed-deps-migrate-receipt-silently-drops-malformed-dependency-entries.sh
+
       - name: Regression guard - Cellar symlink confinement
         run: ./scripts/regressions/cellar-sinks-follow-a-symlinked-package-dir.sh
 

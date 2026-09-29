@@ -5,7 +5,8 @@
 //! version, runtime dependency names, and whether the keg was installed on
 //! request. The parser is deliberately
 //! lenient — newer brew versions add fields we don't read, older ones
-//! omit fields we tolerate as null/absent.
+//! omit fields we tolerate as null/absent. The dependency list is the
+//! exception: a malformed entry refuses the receipt.
 
 const std = @import("std");
 const path_component = @import("../fs/path_component.zig");
@@ -116,26 +117,30 @@ pub fn parseInstallReceipt(parent: std.mem.Allocator, json_text: []const u8) Par
         }
     };
 
+    // Any malformed entry refuses the receipt: dropping it would migrate the
+    // keg without that dependency. Absent or null reads as none - the one case
+    // where "no deps" and "unrecorded" can't be told apart.
     const deps = blk: {
         const v = root.get("runtime_dependencies") orelse break :blk &[_][]const u8{};
         const arr = switch (v) {
             .array => |arr| arr,
-            else => break :blk &[_][]const u8{},
+            .null => break :blk &[_][]const u8{},
+            else => return ParseError.InvalidReceipt,
         };
         var list: std.ArrayList([]const u8) = .empty;
         for (arr.items) |item| {
             const obj = switch (item) {
                 .object => |o| o,
-                else => continue,
+                else => return ParseError.InvalidReceipt,
             };
-            const name_v = obj.get("full_name") orelse continue;
+            const name_v = obj.get("full_name") orelse return ParseError.InvalidReceipt;
             const name = switch (name_v) {
                 .string => |s| s,
-                else => continue,
+                else => return ParseError.InvalidReceipt,
             };
-            // A control byte refuses the receipt rather than dropping this
-            // entry, which would migrate the keg without that dependency.
-            if (path_component.hasControlByte(name)) return ParseError.InvalidReceipt;
+            // No formula name holds a space, so one can only be a corrupt entry.
+            if (name.len == 0 or std.mem.indexOfScalar(u8, name, ' ') != null or
+                path_component.hasControlByte(name)) return ParseError.InvalidReceipt;
             const owned = a.dupe(u8, name) catch return ParseError.OutOfMemory;
             list.append(a, owned) catch return ParseError.OutOfMemory;
         }
@@ -288,23 +293,57 @@ test "parseInstallReceipt tolerates a missing source object" {
     try std.testing.expectEqualStrings("", r.version);
 }
 
-test "parseInstallReceipt skips runtime_dependencies entries lacking full_name" {
-    const src =
-        \\{
-        \\  "source": {"tap": "x/y", "versions": {"stable": "1.0"}},
-        \\  "runtime_dependencies": [
-        \\    {"full_name": "good"},
-        \\    {"version": "1.0"},
-        \\    "raw-string-not-an-object",
-        \\    {"full_name": "also-good"}
-        \\  ]
-        \\}
-    ;
-    var r = try parseInstallReceipt(std.testing.allocator, src);
-    defer r.deinit();
-    try std.testing.expectEqual(@as(usize, 2), r.runtime_deps.len);
-    try std.testing.expectEqualStrings("good", r.runtime_deps[0]);
-    try std.testing.expectEqualStrings("also-good", r.runtime_deps[1]);
+test "parseInstallReceipt refuses a malformed runtime_dependencies list or entry" {
+    // Dropping the entry instead would migrate the keg without that
+    // dependency row, leaving the dependency open to `purge --unused-deps`.
+    const bad = [_][]const u8{
+        \\{"runtime_dependencies":"libbar"}
+        ,
+        \\{"runtime_dependencies":{}}
+        ,
+        \\{"runtime_dependencies":7}
+        ,
+        \\{"runtime_dependencies":true}
+        ,
+        \\{"runtime_dependencies":[{"full_name":"good"},{"version":"1.0"}]}
+        ,
+        \\{"runtime_dependencies":[{"full_name":"good"},"raw-string"]}
+        ,
+        \\{"runtime_dependencies":[{"full_name":null}]}
+        ,
+        \\{"runtime_dependencies":[{"full_name":7}]}
+        ,
+        \\{"runtime_dependencies":[{"full_name":""}]}
+        ,
+        \\{"runtime_dependencies":[{"full_name":" "}]}
+        ,
+        \\{"runtime_dependencies":[{"full_name":"lib bar"}]}
+        ,
+    };
+    for (bad) |json| {
+        try std.testing.expectError(
+            ParseError.InvalidReceipt,
+            parseInstallReceipt(std.testing.allocator, json),
+        );
+    }
+}
+
+test "parseInstallReceipt reads an empty, null or absent runtime_dependencies as none" {
+    // Legacy brew tabs write null for "not recorded"; refusing it would
+    // strand those kegs.
+    const ok = [_][]const u8{
+        \\{"runtime_dependencies":[]}
+        ,
+        \\{"runtime_dependencies":null}
+        ,
+        \\{"source":{"tap":"x/y"}}
+        ,
+    };
+    for (ok) |json| {
+        var r = try parseInstallReceipt(std.testing.allocator, json);
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 0), r.runtime_deps.len);
+    }
 }
 
 test "parseInstallReceipt rejects invalid JSON with InvalidReceipt" {

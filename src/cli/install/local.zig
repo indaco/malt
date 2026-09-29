@@ -1176,9 +1176,13 @@ pub fn materializeRubyFormula(
     // `--force` extracts into a clean target, but a same-version reinstall
     // (every `version :latest` upgrade) replaces the working keg in place:
     // park it, and put it back if anything fails before the commit.
+    // Registered ahead of the park so it relinks after the unpark and rollback.
+    var swept_prior_links = false;
+    errdefer if (swept_prior_links) install_mod.relinkKegs(db, linker, resolved.name);
     var aside_buf: [512]u8 = undefined;
     const aside: ?[]const u8 = if (force) parkKeg(ctx.io, &aside_buf, prefix, resolved.name, cellar_path) else null;
     errdefer if (aside) |a| unparkKeg(ctx.io, a, cellar_path);
+    errdefer if (aside == null) install_mod.dropUnrecordedKeg(ctx.io, db, prefix, resolved.name, pkg_version, cellar_path);
     if (force and aside == null) install_mod.pruneCellarForReinstall(ctx, prefix, resolved.name, pkg_version);
     std.Io.Dir.createDirAbsolute(ctx.io, cellar_path, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
@@ -1314,6 +1318,7 @@ pub fn materializeRubyFormula(
     if (force) {
         install_mod.unlinkSameVersionKegLinks(linker, db, resolved.name, cellar_path);
         install_mod.unlinkStaleKegLinks(db, linker, resolved.name, cellar_path);
+        swept_prior_links = true;
     }
 
     var keg_id: i64 = 0;
@@ -1335,11 +1340,8 @@ pub fn materializeRubyFormula(
             .bin_isolated = false,
             .tap_commit_sha = if (resolved.tap_registration) |t| t.commit_sha else null,
             .tap_rb_subtree = resolved.tap_rb_subtree,
+            .dependencies = resolved.dependencies,
         }, .{ .in_transaction = true }) catch return InstallError.RecordFailed;
-
-        // Without these rows `mt cleanup` sees the deps as orphans and
-        // reaps the libraries this keg links against.
-        record.recordDepNames(db, keg_id, resolved.dependencies);
 
         if (resolved.tap_registration) |t| {
             // `COALESCE` in tap_mod.add pins the commit on first install
