@@ -4,8 +4,8 @@
 # Six behaviours exercised end-to-end against a throwaway prefix:
 #   1. `mt install <uncached>` under offline fails with the canonical
 #      "offline" diagnostic instead of stalling on connect.
-#   2. `mt info <uncached>` under offline succeeds (falls through to
-#      "not installed") — read commands stay graceful on cache miss.
+#   2. `mt info <uncached>` under offline exits non-zero with "not
+#      cached" - offline, a cache miss is not "not installed".
 #   3. `mt info <pkg>` under offline serves a pre-seeded cache hit.
 #   4. `mt update --check` under offline refuses with a non-zero exit
 #      and the canonical message.
@@ -49,11 +49,14 @@ out=$(MALT_OFFLINE=1 "$BIN" install ghost-pkg-no-such-thing 2>&1 || true)
 echo "$out" | grep -qiE "offline|OfflineRequired" || fail "missing offline diagnostic on uncached install"
 pass "uncached install fails with offline diagnostic"
 
-# ── 2. info <uncached> under offline stays graceful ──────────────────
-printf '▸ MALT_OFFLINE=1 mt info <uncached> degrades cleanly\n'
-out=$(MALT_OFFLINE=1 "$BIN" info ghost-pkg-no-such-thing 2>&1 || true)
-echo "$out" | grep -q "not installed" || fail "info should fall through to 'not installed' on cache miss"
-pass "info falls through cleanly on cache miss"
+# ── 2. info <uncached> under offline reports the miss ────────────────
+# "Not installed" would be a guess: offline, the cache is the only answer.
+printf '▸ MALT_OFFLINE=1 mt info <uncached> reports the cache miss\n'
+rc=0
+out=$(MALT_OFFLINE=1 "$BIN" info ghost-pkg-no-such-thing 2>&1) || rc=$?
+[ "$rc" -ne 0 ] || fail "info on a cache miss should exit non-zero"
+echo "$out" | grep -q "not cached" || fail "info should say the package is not cached"
+pass "info reports a cache miss under offline"
 
 # ── 3. info <pkg> under offline serves a pre-seeded cache hit ────────
 printf '▸ MALT_OFFLINE=1 mt info <cached> reads from the cache\n'

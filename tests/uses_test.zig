@@ -179,6 +179,59 @@ test "collectDependents returns empty slice when nothing depends on target" {
     try testing.expectEqual(@as(usize, 0), hits.len);
 }
 
+// A failed reverse-dependency query must not read as "nothing uses this":
+// the empty answer is what tells a user a formula is safe to remove.
+test "collectDependents reports dependency rows it cannot read instead of no dependents" {
+    var tdb = try TempDb.init("corrupt_deps");
+    defer tdb.deinit();
+    const wget_id = try insertKeg(&tdb.db, "wget");
+    try addDep(&tdb.db, wget_id, "openssl@3");
+    // Reopen around the corruption: only the last connection's close
+    // checkpoints the WAL, and the pages must be on disk to be overwritten.
+    tdb.db.close();
+    try test_io.corruptTable(tdb.path, "dependencies");
+    tdb.db = try sqlite.Database.open(tdb.path);
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &err_buf);
+    defer malt.output.endStderrCapture();
+
+    try testing.expectError(error.Aborted, uses.collectDependents(testing.allocator, &tdb.db, "openssl@3", false));
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "install database") != null);
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "openssl@3") != null);
+}
+
+test "collectDependents reports a dependencies table it cannot query instead of no dependents" {
+    var tdb = try TempDb.init("no_deps_table");
+    defer tdb.deinit();
+    try tdb.db.exec("DROP TABLE dependencies;");
+
+    malt.output.setQuiet(true);
+    defer malt.output.setQuiet(false);
+    try testing.expectError(error.Aborted, uses.collectDependents(testing.allocator, &tdb.db, "openssl@3", true));
+}
+
+fn walkAndFree(allocator: std.mem.Allocator, db: *sqlite.Database, target: []const u8) !void {
+    const hits = try uses.collectDependents(allocator, db, target, true);
+    uses.freeDependents(allocator, hits);
+}
+
+test "collectDependents frees every collected name when the walk fails part-way" {
+    // Errors now leave the walk instead of degrading to empty, so a failure
+    // after some names are collected must not leak them.
+    var tdb = try TempDb.init("alloc_failures");
+    defer tdb.deinit();
+    const node_id = try insertKeg(&tdb.db, "node");
+    const whisper_id = try insertKeg(&tdb.db, "whisper");
+    const tauri_id = try insertKeg(&tdb.db, "tauri");
+    try addDep(&tdb.db, node_id, "icu4c");
+    try addDep(&tdb.db, whisper_id, "node");
+    try addDep(&tdb.db, tauri_id, "node");
+
+    try testing.checkAllAllocationFailures(testing.allocator, walkAndFree, .{ &tdb.db, "icu4c" });
+}
+
 test "collectDependents tolerates cycles without spinning" {
     // Shouldn't happen in a real malt DB (install refuses cyclic deps)
     // but the BFS must terminate regardless so a corrupt database can

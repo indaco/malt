@@ -2398,14 +2398,20 @@ pub const InstalledCask = struct {
 };
 
 /// Look up installed cask info from DB. Copies data to avoid dangling pointers.
+/// Reads a failed query as "not installed"; readers that must tell the two
+/// apart use `lookupInstalledChecked`.
 pub fn lookupInstalled(db: *sqlite.Database, token: []const u8) ?InstalledCask {
+    return lookupInstalledChecked(db, token) catch null;
+}
+
+pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unreadable}!?InstalledCask {
     var stmt = db.prepare(
         "SELECT version, app_path, tap FROM casks WHERE token = ?1 LIMIT 1;",
-    ) catch return null;
+    ) catch return error.Unreadable;
     defer stmt.finalize();
-    stmt.bindText(1, token) catch return null;
+    stmt.bindText(1, token) catch return error.Unreadable;
 
-    const found = stmt.step() catch return null;
+    const found = stmt.step() catch return error.Unreadable;
     if (!found) return null;
 
     var result: InstalledCask = .{};
@@ -3589,4 +3595,12 @@ test "collectBinaryArtifacts is null when the cask declares no binary" {
         defer parsed.deinit();
         try std.testing.expect((try collectBinaryArtifacts(std.testing.allocator, parsed.value.object)) == null);
     }
+}
+
+test "lookupInstalledChecked reports a casks table it cannot query instead of a miss" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    // No schema: prepare fails, the way a damaged table would.
+    try std.testing.expectError(error.Unreadable, lookupInstalledChecked(&db, "firefox"));
+    try std.testing.expect(lookupInstalled(&db, "firefox") == null);
 }

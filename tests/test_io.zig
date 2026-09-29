@@ -195,3 +195,47 @@ pub fn readFileToEndAlloc(file: std.Io.File, allocator: std.mem.Allocator, max_b
     var r = file.readerStreaming(threaded.io(), &buf);
     return r.interface.allocRemaining(allocator, std.Io.Limit.limited(max_bytes));
 }
+
+/// Overwrite every b-tree page of `table` (and its indexes) on disk. The
+/// schema stays intact, so statements prepare and only `step` fails, the
+/// way page corruption or an I/O error shows up at runtime.
+pub fn corruptTable(db_path: [:0]const u8, table: []const u8) !void {
+    var pages: [8]i64 = undefined;
+    var n: usize = 0;
+    var page_size: i64 = 0;
+    {
+        // Closing the last connection checkpoints the WAL into the main file.
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        var ps = try db.prepare("PRAGMA page_size;");
+        defer ps.finalize();
+        _ = try ps.step();
+        page_size = ps.columnInt(0);
+        var st = try db.prepare("SELECT rootpage FROM sqlite_master WHERE tbl_name = ?1 AND rootpage > 0;");
+        defer st.finalize();
+        try st.bindText(1, table);
+        while (try st.step()) : (n += 1) pages[n] = st.columnInt(0);
+    }
+    const f = try std.Io.Dir.openFileAbsolute(std.Options.debug_io, db_path, .{ .mode = .read_write });
+    defer f.close(std.Options.debug_io);
+    const junk = [_]u8{0xff} ** 65536;
+    for (pages[0..n]) |p| {
+        const len: usize = @intCast(page_size);
+        try f.writePositionalAll(std.Options.debug_io, junk[0..len], @intCast((p - 1) * page_size));
+    }
+}
+
+/// Drop every permission bit on the directory at `abs_path`. The returned
+/// handle is what restores it: a mode-000 directory can't be reopened, and
+/// the fixture's `deleteTree` fails until it is readable again.
+pub fn wallDir(io: std.Io, abs_path: []const u8) !std.Io.Dir {
+    const d = try std.Io.Dir.openDirAbsolute(io, abs_path, .{});
+    errdefer d.close(io);
+    try d.setPermissions(io, std.Io.File.Permissions.fromMode(0));
+    return d;
+}
+
+pub fn unwallDir(io: std.Io, d: std.Io.Dir) void {
+    d.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+    d.close(io);
+}

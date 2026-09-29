@@ -1031,3 +1031,93 @@ test "resetFixHint clears state between runs so a clean walker stays silent" {
 
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "safe-class fixes") == null);
 }
+
+// --- SQLite integrity: fresh prefix vs unreadable database -------------
+//
+// Only a missing db/ is a fresh prefix, and the directory row already
+// warns about it; everything else that will not open is an error.
+
+fn integrityCheck() !doctor.Check {
+    for (doctor.checks) |ck| if (std.mem.eql(u8, ck.name, "SQLite integrity")) return ck;
+    return error.MissingIntegrityCheck;
+}
+
+/// Run the integrity row against `prefix`; the caller owns `captured`.
+fn runIntegrity(prefix: []const u8, captured: *std.ArrayList(u8)) !doctor.CheckStatus {
+    output.beginStderrCapture(testing.allocator, captured);
+    defer output.endStderrCapture();
+    const ck = try integrityCheck();
+    return ck.run(.{
+        .allocator = testing.allocator,
+        .prefix = prefix,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, ck.name);
+}
+
+fn expectIntegrityErr(prefix: []const u8) !void {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckStatus.err_status, try runIntegrity(prefix, &captured));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Cannot open database") != null);
+}
+
+test "SQLite integrity passes a fresh prefix with no db/ directory" {
+    var s = try Scratch.init(testing.allocator, "integrity_fresh");
+    defer s.deinit(testing.allocator);
+    var dir_buf: [512]u8 = undefined;
+    try test_io.deleteDirAbsolute(std.Options.debug_io, try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path}));
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckStatus.ok, try runIntegrity(s.path, &captured));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Cannot open database") == null);
+}
+
+test "SQLite integrity fails a malt.db that is not a database" {
+    var s = try Scratch.init(testing.allocator, "integrity_garbage");
+    defer s.deinit(testing.allocator);
+    var path_buf: [512]u8 = undefined;
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, try std.fmt.bufPrint(&path_buf, "{s}/db/malt.db", .{s.path}), .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, "not a sqlite database, just garbage bytes" ** 4);
+
+    try expectIntegrityErr(s.path);
+}
+
+test "SQLite integrity fails a db/ directory it cannot look into" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+    var s = try Scratch.init(testing.allocator, "integrity_walled");
+    defer s.deinit(testing.allocator);
+    var dir_buf: [512]u8 = undefined;
+    const walled = try test_io.wallDir(std.Options.debug_io, try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path}));
+    defer test_io.unwallDir(std.Options.debug_io, walled);
+
+    try expectIntegrityErr(s.path);
+}
+
+test "SQLite integrity fails a db file where the directory should be" {
+    var s = try Scratch.init(testing.allocator, "integrity_notdir");
+    defer s.deinit(testing.allocator);
+    var dir_buf: [512]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path});
+    try test_io.deleteDirAbsolute(std.Options.debug_io, db_dir);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, db_dir, .{});
+    f.close(std.Options.debug_io);
+
+    try expectIntegrityErr(s.path);
+}
+
+test "SQLite integrity fails a prefix that is a symlink to nowhere" {
+    // An unmounted volume: nothing resolves, yet the prefix is not fresh.
+    const base = try test_io.uniqueTempPath(testing.allocator, "doctor_disp", "integrity_dangling");
+    defer testing.allocator.free(base);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    var link_buf: [512]u8 = undefined;
+    const link = try std.fmt.bufPrint(&link_buf, "{s}/prefix", .{base});
+    try test_io.symLinkAbsolute(std.Options.debug_io, "/nonexistent/malt", link, .{});
+
+    try expectIntegrityErr(link);
+}

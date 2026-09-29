@@ -310,6 +310,20 @@ test "execute reports an install database it cannot open instead of not-found" {
     try expectDepsAborts(&.{"leaf"});
 }
 
+test "execute reports a db/ directory it cannot look into instead of not-found" {
+    // A probe of the file under a mode-000 db/ fails with EACCES, which
+    // must not read as "no database yet".
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+    var s = try Scratch.init(testing.allocator, "db_walled");
+    defer s.deinit(testing.allocator);
+    try seedDeps(s.path);
+    var dir_buf: [512]u8 = undefined;
+    const walled = try test_io.wallDir(std.Options.debug_io, try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path}));
+    defer test_io.unwallDir(std.Options.debug_io, walled);
+
+    try expectDepsAborts(&.{ "--installed", "wget" });
+}
+
 // --- DB adapter contract ------------------------------------------------
 
 test "dbDepLookup returns null for an unknown keg" {
@@ -381,35 +395,6 @@ test "dbDepLookup reports an unreadable dependency table instead of a leaf" {
     try testing.expectError(error.Aborted, deps_cli.dbDepLookup(&db).fetch(testing.allocator, "wget"));
 }
 
-/// Overwrite every b-tree page of `table` (and its indexes) on disk. The
-/// schema stays intact, so statements prepare and only `step` fails, the
-/// way page corruption or an I/O error shows up at runtime.
-fn corruptTable(db_path: [:0]const u8, table: []const u8) !void {
-    var pages: [8]i64 = undefined;
-    var n: usize = 0;
-    var page_size: i64 = 0;
-    {
-        // Closing the last connection checkpoints the WAL into the main file.
-        var db = try sqlite.Database.open(db_path);
-        defer db.close();
-        var ps = try db.prepare("PRAGMA page_size;");
-        defer ps.finalize();
-        _ = try ps.step();
-        page_size = ps.columnInt(0);
-        var st = try db.prepare("SELECT rootpage FROM sqlite_master WHERE tbl_name = ?1 AND rootpage > 0;");
-        defer st.finalize();
-        try st.bindText(1, table);
-        while (try st.step()) : (n += 1) pages[n] = st.columnInt(0);
-    }
-    const f = try std.Io.Dir.openFileAbsolute(std.Options.debug_io, db_path, .{ .mode = .read_write });
-    defer f.close(std.Options.debug_io);
-    const junk = [_]u8{0xff} ** 65536;
-    for (pages[0..n]) |p| {
-        const len: usize = @intCast(page_size);
-        try f.writePositionalAll(std.Options.debug_io, junk[0..len], @intCast((p - 1) * page_size));
-    }
-}
-
 test "dbDepLookup reports a keg table it cannot read instead of a miss" {
     var s = try Scratch.init(testing.allocator, "db_corrupt_kegs");
     defer s.deinit(testing.allocator);
@@ -417,7 +402,7 @@ test "dbDepLookup reports a keg table it cannot read instead of a miss" {
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
-    try corruptTable(db_path, "kegs");
+    try test_io.corruptTable(db_path, "kegs");
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 
@@ -433,7 +418,7 @@ test "dbDepLookup reports dependency rows it cannot read instead of a leaf" {
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
-    try corruptTable(db_path, "dependencies");
+    try test_io.corruptTable(db_path, "dependencies");
     var db = try sqlite.Database.open(db_path);
     defer db.close();
 

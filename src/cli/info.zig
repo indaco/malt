@@ -7,6 +7,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const schema_report = @import("schema_report.zig");
 const atomic = @import("../fs/atomic.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const output = @import("../ui/output.zig");
 const color = @import("../ui/color.zig");
 const api_mod = @import("../net/api.zig");
@@ -71,15 +72,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return error.Aborted;
     };
 
-    // Open DB (optional). On a fresh machine the prefix's `db/` dir
-    // may not exist yet — SQLite's OPEN_CREATE creates the file but
-    // not intermediate directories, so the first-ever open fails.
-    // `info` is purely informational: if we can't read local state
-    // we fall through to the "not installed" output rather than
-    // erroring, which matches what a populated DB would report for
-    // a package that has never been installed.
+    // A fresh prefix has no `db/` yet and falls through to the API
+    // metadata; a DB that exists but will not open must not print
+    // "Not installed".
     const prefix = atomic.maltPrefixOrAbort();
-    var db_opt: ?sqlite.Database = openDb(prefix);
+    var db_opt: ?sqlite.Database = try openInstallDb(ctx.io, prefix);
     defer if (db_opt) |*d| d.close();
 
     var stdout_buf: [4096]u8 = undefined;
@@ -98,8 +95,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const sel = selectKinds(force_cask, force_formula);
 
     if (db_opt) |*db| {
-        // Schema is idempotent; info's API fallback handles a broken DB, but
-        // a newer-than-us DB must not be read as "not installed".
+        // Schema is idempotent; a newer-than-us DB must not be read as
+        // "not installed".
         schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(db, e, prefix);
         if (sel.formula and try emitInstalledFormula(ctx, allocator, db, name, prefix, stdout, json_mode, colorize)) return;
         if (sel.cask and try emitInstalledCask(allocator, db, name, stdout, json_mode, colorize)) return;
@@ -130,11 +127,11 @@ fn emitInstalledFormula(
 ) !bool {
     var stmt = db.prepare(
         "SELECT name, version, tap, cellar_path, pinned, installed_at, revision FROM kegs WHERE name = ?1 LIMIT 1;",
-    ) catch return false;
+    ) catch return dbUnreadable(name);
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return false;
+    stmt.bindText(1, name) catch return dbUnreadable(name);
 
-    const installed = stmt.step() catch false;
+    const installed = stmt.step() catch return dbUnreadable(name);
     if (!installed) return false;
 
     const ver_ptr = stmt.columnText(1);
@@ -158,7 +155,7 @@ fn emitInstalledFormula(
     if (json_mode) {
         // Deps are read from the local `dependencies` table, never the
         // network, so the detail pane works offline for installed packages.
-        const deps = collectInstalledDeps(allocator, db, name);
+        const deps = try collectInstalledDeps(allocator, db, name);
         defer freeDeps(allocator, deps);
         try writeJsonInfo(name, &stmt, history.items, deps, stdout);
     } else {
@@ -171,44 +168,40 @@ fn emitInstalledFormula(
 /// local `dependencies` table. Offline by construction — the dashboard's
 /// detail pane must show deps for already-installed packages without a
 /// network round-trip. Returns an empty slice (never null) for a leaf or
-/// an unrecorded keg so the JSON emits `[]`. Degrades to empty on any DB
-/// error: info is informational and must not fail on a partial dep table.
-/// Caller owns the slice and every string; free with `freeDeps`.
+/// an unrecorded keg so the JSON emits `[]`. A failed query is reported,
+/// never rendered as a leaf. Caller owns the slice and every string; free
+/// with `freeDeps`.
 pub fn collectInstalledDeps(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     name: []const u8,
-) []const []const u8 {
-    var keg_stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return &.{};
+) ![]const []const u8 {
+    var keg_stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return dbUnreadable(name);
     defer keg_stmt.finalize();
-    keg_stmt.bindText(1, name) catch return &.{};
-    if (!(keg_stmt.step() catch false)) return &.{};
+    keg_stmt.bindText(1, name) catch return dbUnreadable(name);
+    if (!(keg_stmt.step() catch return dbUnreadable(name))) return &.{};
     const keg_id = keg_stmt.columnInt(0);
 
     // Stable alphabetical order matches `mt deps`'s DB reader so both
     // commands present the same list for the same keg.
     var stmt = db.prepare(
         "SELECT dep_name FROM dependencies WHERE keg_id = ?1 ORDER BY dep_name;",
-    ) catch return &.{};
+    ) catch return dbUnreadable(name);
     defer stmt.finalize();
-    stmt.bindInt(1, keg_id) catch return &.{};
+    stmt.bindInt(1, keg_id) catch return dbUnreadable(name);
 
     var out: std.ArrayList([]const u8) = .empty;
-    while (stmt.step() catch false) {
-        const raw = stmt.columnText(0) orelse continue;
-        const owned = allocator.dupe(u8, std.mem.sliceTo(raw, 0)) catch break;
-        out.append(allocator, owned) catch {
-            allocator.free(owned);
-            break;
-        };
-    }
-    return out.toOwnedSlice(allocator) catch blk: {
-        // Shrink-realloc OOM: `out` still owns every name, so free them
-        // all before degrading to the empty sentinel.
-        for (out.items) |s| allocator.free(s);
+    errdefer {
+        for (out.items) |d| allocator.free(d);
         out.deinit(allocator);
-        break :blk &.{};
-    };
+    }
+    while (stmt.step() catch return dbUnreadable(name)) {
+        const raw = stmt.columnText(0) orelse continue;
+        const owned = try allocator.dupe(u8, std.mem.sliceTo(raw, 0));
+        errdefer allocator.free(owned);
+        try out.append(allocator, owned);
+    }
+    return try out.toOwnedSlice(allocator);
 }
 
 /// Free a slice returned by `collectInstalledDeps`. Safe on the empty
@@ -227,7 +220,7 @@ fn emitInstalledCask(
     json_mode: bool,
     colorize: bool,
 ) !bool {
-    if (cask_mod.lookupInstalled(db, name) == null) return false;
+    if ((cask_mod.lookupInstalledChecked(db, name) catch return dbUnreadable(name)) == null) return false;
 
     const cur_ver_opt = rollback.currentCaskVersion(allocator, db, name);
     defer if (cur_ver_opt) |v| allocator.free(v);
@@ -521,9 +514,30 @@ pub fn encodeInstallHint(
     );
 }
 
-/// Open the malt database if present. Returns `null` for any failure
-/// (missing parent directory, permission error, corrupt file) so the
-/// caller can degrade to a stateless response instead of bailing.
+/// Open the install database for a read that must not guess: null for a
+/// fresh prefix, an error for anything else that will not open.
+pub fn openInstallDb(io: std.Io, prefix: []const u8) error{Aborted}!?sqlite.Database {
+    var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch {
+        output.err("could not open the install database under {s}", .{prefix});
+        return error.Aborted;
+    };
+    return sqlite.Database.open(db_path) catch {
+        if (prefix_path.dirMissing(io, std.fs.path.dirname(db_path).?)) return null;
+        output.err("could not open the install database at {s}", .{db_path});
+        return error.Aborted;
+    };
+}
+
+/// A query that fails says nothing about `name`; reading it as a miss
+/// would print "not installed" or an empty list for an installed keg.
+pub fn dbUnreadable(name: []const u8) error{Aborted} {
+    output.err("could not read the install database to look up '{s}'", .{name});
+    return error.Aborted;
+}
+
+/// Open the malt database, or `null` for any failure. Only for callers
+/// that report the failure themselves (doctor's integrity row).
 pub fn openDb(prefix: []const u8) ?sqlite.Database {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
