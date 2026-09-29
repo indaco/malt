@@ -89,6 +89,23 @@ test "a binary-only zip cask links its executable from a persisted Caskroom copy
     try testing.expect(@intFromEnum(st.permissions) & 0o111 != 0);
 }
 
+test "the link conflict check refuses a casks table it cannot read" {
+    var fx = try Fixture.init("conflict_unreadable");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    // No schema: the recorded-bundle lookup fails the way a damaged table
+    // would. Read as a miss, the bundle on record would screen as foreign.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var c = try cask.parseCask(testing.allocator, rabbit_json);
+    defer c.deinit();
+
+    var installer = cask.CaskInstaller.init(threaded.io(), .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try testing.expectError(error.InstallFailed, installer.checkLinkConflicts(&c));
+}
+
 test "a binary target outside the prefix bin dir is refused at parse time" {
     for ([_][]const u8{
         \\{"token":"x","version":"1","url":"https://e/x.zip","artifacts":[{"binary":["x"],"target":"$HOMEBREW_PREFIX/etc/x"}]}

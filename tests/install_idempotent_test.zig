@@ -508,3 +508,37 @@ test "execute --dry-run skips the fast path so the plan still reaches the user" 
 
     try testing.expect(pathExists(db_file));
 }
+
+test "execute --cask refuses an unreadable casks table before fetching the cask" {
+    const prefix = try setupPrefix("caskcorrupt");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+        _ = c.unsetenv("MALT_PREFIX");
+    }
+    try seedDb(prefix,
+        \\INSERT INTO casks(token,name,version,url) VALUES('seedcask','SeedCask','1.0','https://example.invalid/a.dmg');
+    );
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    try test_io.corruptTable(db_path, "casks");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    // Offline with no cached record: reaching the fetch would fail
+    // OfflineRequired, so a database error proves the guard ran first.
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    // A per-package failure; the message is what tells the DB apart from the fetch.
+    try testing.expectError(error.PartialFailure, install.execute(&ctx, arena.allocator(), &.{ "--cask", "seedcask" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+}
