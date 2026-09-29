@@ -14,6 +14,7 @@ const client_mod = @import("../net/client.zig");
 const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
+const cli_info = @import("info.zig");
 
 /// Where a `mt search` query should look. Default is local-first with a
 /// fall-through to the API; explicit flags pin the choice.
@@ -403,14 +404,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var cask: KindResults = .{};
 
     if (shouldRunLocal(scope)) {
-        if (openLocalDb(ctx)) |db_opt| {
-            if (db_opt) |db_in| {
-                var db = db_in;
-                defer db.close();
-                if (search_formula) formula = runKindLocal(f_alloc, &db, .formula, search_query) catch .{};
-                if (search_cask) cask = runKindLocal(c_alloc, &db, .cask, search_query) catch .{};
-            }
-        } else |e| if (e == error.SchemaTooNew) return e; // a newer DB must not read as "nothing installed"
+        if (try openLocalDb(ctx)) |db_in| {
+            var db = db_in;
+            defer db.close();
+            if (search_formula) formula = runKindLocal(f_alloc, &db, .formula, search_query) catch |e| return localReadFailed(e, search_query);
+            if (search_cask) cask = runKindLocal(c_alloc, &db, .cask, search_query) catch |e| return localReadFailed(e, search_query);
+        }
     }
 
     if (shouldRunApi(scope)) {
@@ -469,7 +468,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (json_mode) {
         // Installed flag is JSON-only; the set lives in the formula arena,
         // freed with everything else at function exit.
-        const set = try loadInstalledSet(ctx, f_alloc);
+        const set = try loadInstalledSet(ctx, f_alloc, search_query);
         try emitJson(f_alloc, stdout, formula, cask, search_query, set);
     } else {
         emitHuman(stdout, formula, cask, search_query);
@@ -487,16 +486,12 @@ pub fn isOfflineRequested(ctx: *const AppCtx, args: []const []const u8) bool {
     return std.mem.eql(u8, val, "1") or std.ascii.eqlIgnoreCase(val, "true");
 }
 
-/// Open `{prefix}/db/malt.db` for read-only search. Returns `null` when
-/// the file doesn't exist yet (fresh prefix) so callers can degrade to
-/// "no local matches" instead of aborting. Outer error wraps unexpected
-/// `sqlite` / `schema` failures.
+/// Open `{prefix}/db/malt.db` for search. `null` only for a fresh prefix,
+/// which has no local matches; a DB that will not open aborts, since every
+/// `installed` claim comes from it.
 fn openLocalDb(ctx: *const AppCtx) !?sqlite.Database {
     const prefix = atomic.maltPrefixOrAbort();
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
-    _ = std.Io.Dir.cwd().statFile(ctx.io, std.mem.sliceTo(db_path, 0), .{}) catch return null;
-    var db = sqlite.Database.open(db_path) catch return null;
+    var db = (try cli_info.openInstallDb(ctx.io, prefix)) orelse return null;
     errdefer db.close();
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
     return db;
@@ -756,18 +751,22 @@ fn writeSearchJson(w: *std.Io.Writer, query: []const u8, results: []const Result
     try w.writeAll("]}\n");
 }
 
-/// Build the installed set from the local DB, best-effort. A missing DB
-/// (fresh prefix) or any read failure yields an empty set — every result
-/// then reads `installed:false`, which is correct. Slices live in
-/// `allocator`, freed with the caller's arena.
-fn loadInstalledSet(ctx: *const AppCtx, allocator: std.mem.Allocator) error{SchemaTooNew}!InstalledSet {
-    const db_opt = openLocalDb(ctx) catch |e| return if (e == error.SchemaTooNew) error.SchemaTooNew else .{};
-    var db = db_opt orelse return .{};
+/// Build the installed set from the local DB. A fresh prefix has nothing
+/// installed; a DB that cannot be read aborts rather than marking every
+/// hit `installed:false`. Slices live in `allocator`, freed with the
+/// caller's arena.
+fn loadInstalledSet(ctx: *const AppCtx, allocator: std.mem.Allocator, query: []const u8) !InstalledSet {
+    var db = (try openLocalDb(ctx)) orelse return .{};
     defer db.close();
     return .{
-        .formulae = loadInstalledKind(allocator, &db, .formula) catch &.{},
-        .casks = loadInstalledKind(allocator, &db, .cask) catch &.{},
+        .formulae = loadInstalledKind(allocator, &db, .formula) catch |e| return localReadFailed(e, query),
+        .casks = loadInstalledKind(allocator, &db, .cask) catch |e| return localReadFailed(e, query),
     };
+}
+
+/// OOM keeps its name; any other failed read is the DB's, not "no match".
+fn localReadFailed(e: anyerror, query: []const u8) anyerror {
+    return if (e == error.OutOfMemory) e else cli_info.dbUnreadable(query);
 }
 
 /// Load every installed name for one kind (no substring filter) so the

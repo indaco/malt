@@ -15,6 +15,7 @@ const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
 const termsize = @import("../ui/termsize.zig");
 const help = @import("help.zig");
+const cli_info = @import("info.zig");
 
 pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "list")) return;
@@ -71,13 +72,9 @@ pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
 
     // Open DB
     const prefix = atomic.maltPrefixOrAbort();
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
-    var db = sqlite.Database.open(db_path) catch {
-        // Fresh prefix with no `db/` yet = nothing installed. Treat as
-        // empty output (rc=0), same contract as `ls` on an empty dir.
-        return;
-    };
+    // Fresh prefix with no `db/` yet = nothing installed. Treat as
+    // empty output (rc=0), same contract as `ls` on an empty dir.
+    var db = (try cli_info.openInstallDb(ctx.io, prefix)) orelse return;
     defer db.close();
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
 

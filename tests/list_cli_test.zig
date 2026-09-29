@@ -219,3 +219,45 @@ test "execute -v keeps the bulleted row layout with the [pinned] tag" {
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("  ▸ jq [pinned]\n  ▸ wget\n  ▸ firefox\n", out);
 }
+
+// --- unreadable install database ---------------------------------------
+//
+// An empty list reads as "nothing installed"; only a prefix with no db/
+// may say that without reading anything.
+
+/// Runs `list` in both output modes; each must abort and name the DB.
+fn expectListRefusesDb() !void {
+    const prior_mode: output.OutputMode = if (output.isJson()) .json else .human;
+    defer output.setMode(prior_mode);
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &err_buf);
+    defer output.endStderrCapture();
+    for ([_]output.OutputMode{ .human, .json }) |mode| {
+        output.setMode(mode);
+        err_buf.clearRetainingCapacity();
+        try testing.expectError(error.Aborted, list.execute(&ctxWithSink(), &.{}));
+        try testing.expect(std.mem.indexOf(u8, err_buf.items, "install database") != null);
+    }
+}
+
+test "execute reports a malt.db that is not a database instead of an empty list" {
+    var s = try Scratch.init(testing.allocator, "garbage_db");
+    defer s.deinit(testing.allocator);
+    var path_buf: [512]u8 = undefined;
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, try std.fmt.bufPrint(&path_buf, "{s}/db/malt.db", .{s.path}), .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, "not a sqlite database, just garbage bytes" ** 4);
+    try expectListRefusesDb();
+}
+
+test "execute reports a db/ directory it cannot look into instead of an empty list" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+    var s = try Scratch.init(testing.allocator, "walled_db");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+    var dir_buf: [512]u8 = undefined;
+    const walled = try test_io.wallDir(std.Options.debug_io, try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path}));
+    defer test_io.unwallDir(std.Options.debug_io, walled);
+    try expectListRefusesDb();
+}

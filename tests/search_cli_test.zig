@@ -397,3 +397,87 @@ test "execute MALT_OFFLINE=1 mirrors the --offline flag" {
 
     try search.execute(&ctx, testing.allocator, &.{"wget"});
 }
+
+// --- unreadable install database ---------------------------------------
+//
+// `installed` claims come from the DB, so a DB that will not open or read
+// must stop the search; only a prefix with no db/ has nothing installed.
+
+fn dbDir(buf: []u8, prefix: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}/db", .{prefix});
+}
+
+fn writeGarbageDb(prefix: []const u8) !void {
+    var dir_buf: [512]u8 = undefined;
+    try test_io.cwd().createDirPath(std.Options.debug_io, try dbDir(&dir_buf, prefix));
+    var path_buf: [512]u8 = undefined;
+    try writeFile(try std.fmt.bufPrint(&path_buf, "{s}/db/malt.db", .{prefix}), "not a sqlite database, just garbage bytes" ** 4);
+}
+
+/// Runs `search` in both output modes; each must abort and name the DB.
+fn expectSearchRefusesDb(args: []const []const u8) !void {
+    const prior = OutputState.save();
+    defer prior.restore();
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &err_buf);
+    defer output.endStderrCapture();
+    for ([_]output.OutputMode{ .human, .json }) |mode| {
+        output.setMode(mode);
+        err_buf.clearRetainingCapacity();
+        try testing.expectError(error.Aborted, search.execute(&malt.app_ctx.debug_ctx, testing.allocator, args));
+        try testing.expect(std.mem.indexOf(u8, err_buf.items, "install database") != null);
+    }
+}
+
+test "execute --installed reports a malt.db that is not a database instead of no results" {
+    var s = try Scratch.init(testing.allocator, "garbage_db");
+    defer s.deinit(testing.allocator);
+    try writeGarbageDb(s.path);
+    try expectSearchRefusesDb(&.{ "--installed", "wget" });
+}
+
+test "execute --installed reports a db/ directory it cannot look into instead of no results" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+    var s = try Scratch.init(testing.allocator, "walled_db");
+    defer s.deinit(testing.allocator);
+    try seedDb(testing.allocator, s.path);
+    var dir_buf: [512]u8 = undefined;
+    const walled = try test_io.wallDir(std.Options.debug_io, try dbDir(&dir_buf, s.path));
+    defer test_io.unwallDir(std.Options.debug_io, walled);
+    try expectSearchRefusesDb(&.{ "--installed", "wget" });
+}
+
+test "execute --installed reports package rows it cannot read instead of no results" {
+    var s = try Scratch.init(testing.allocator, "corrupt_kegs");
+    defer s.deinit(testing.allocator);
+    try seedDb(testing.allocator, s.path);
+    var path_buf: [512]u8 = undefined;
+    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&path_buf, "{s}/db/malt.db", .{s.path}, 0), "kegs");
+    try expectSearchRefusesDb(&.{ "--installed", "--formula", "wget" });
+}
+
+test "execute --json reports package rows it cannot read instead of marking hits not installed" {
+    // The API answers; only the installed flag needs the DB.
+    var s = try Scratch.init(testing.allocator, "json_corrupt_kegs");
+    defer s.deinit(testing.allocator);
+    try seedCache(testing.allocator, s.path);
+    try seedDb(testing.allocator, s.path);
+    var path_buf: [512]u8 = undefined;
+    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&path_buf, "{s}/db/malt.db", .{s.path}, 0), "kegs");
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.json);
+    output.setQuiet(true);
+    try testing.expectError(error.Aborted, search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"wget"}));
+}
+
+test "execute --installed on a prefix with no db/ is an empty answer" {
+    var s = try Scratch.init(testing.allocator, "no_db_dir");
+    defer s.deinit(testing.allocator);
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setQuiet(true);
+    try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--installed", "wget" });
+}
