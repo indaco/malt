@@ -1545,8 +1545,8 @@ pub fn confirmPkgSudo(token: []const u8) bool {
 /// "Already installed" guard. An unreadable table refuses: read as a miss,
 /// the install would fetch and place over whatever the row describes.
 fn caskRecorded(db: *sqlite.Database, token: []const u8, sink: OutputSink) error{Aborted}!bool {
-    return cask_mod.isInstalled(db, token) catch {
-        sink.err("Could not read the package database: {s}", .{db.errMsg()});
+    return cask_mod.isInstalled(db, token) catch |e| {
+        sink.err("Could not read the package database for cask {s}: {s}", .{ token, cask_mod.lookupDetail(e, db) });
         return error.Aborted;
     };
 }

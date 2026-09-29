@@ -1340,6 +1340,8 @@ pub const CaskInstaller = struct {
             return CaskError.InstallFailed;
         var row = row_opt orelse return CaskError.InstallFailed;
         defer row.deinit(self.allocator);
+        // The synthetic cask below skips parseCask and its version cap.
+        if (row.version.len > std.Io.Dir.max_name_bytes) return CaskError.InstallFailed;
 
         // Refuse if the recorded artifact type isn't one this binary can
         // install — silently picking `.unknown` would land an empty
@@ -2403,10 +2405,21 @@ pub const InstalledCask = struct {
 };
 
 /// Look up installed cask info from DB. Copies data to avoid dangling pointers.
-/// `Unreadable` is not a miss: a miss sends callers to a same-named formula
-/// or a fresh install. A field too long for any value malt records counts as
-/// damage, never as an absent one.
-pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unreadable}!?InstalledCask {
+/// Neither is a miss: a miss sends callers to a same-named formula or a fresh
+/// install. A too-long field is no value malt records, so the row is damaged.
+pub const InstalledLookupError = error{ Unreadable, FieldTooLong };
+
+/// Why a `lookupInstalledChecked` failed, for the caller's error line. A
+/// too-long field follows a successful step, so SQLite's message says nothing.
+pub fn lookupDetail(e: InstalledLookupError, db: *sqlite.Database) []const u8 {
+    return switch (e) {
+        error.Unreadable => db.errMsg(),
+        // One error for every field: a name per field grows the binary a page.
+        error.FieldTooLong => "a recorded field is longer than malt accepts",
+    };
+}
+
+pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) InstalledLookupError!?InstalledCask {
     var stmt = db.prepare(
         "SELECT version, app_path, tap FROM casks WHERE token = ?1 LIMIT 1;",
     ) catch return error.Unreadable;
@@ -2420,13 +2433,13 @@ pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unr
 
     const ver_ptr = stmt.columnText(0) orelse return null;
     const ver_slice = std.mem.sliceTo(ver_ptr, 0);
-    if (ver_slice.len > result.version_buf.len) return error.Unreadable;
+    if (ver_slice.len > result.version_buf.len) return error.FieldTooLong;
     @memcpy(result.version_buf[0..ver_slice.len], ver_slice);
     result.version_len = ver_slice.len;
 
     if (stmt.columnText(1)) |path_ptr| {
         const path_slice = std.mem.sliceTo(path_ptr, 0);
-        if (path_slice.len > result.app_path_buf.len) return error.Unreadable;
+        if (path_slice.len > result.app_path_buf.len) return error.FieldTooLong;
         @memcpy(result.app_path_buf[0..path_slice.len], path_slice);
         result.app_path_len = path_slice.len;
         result.has_app_path = true;
@@ -2434,7 +2447,7 @@ pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unr
 
     if (stmt.columnText(2)) |tap_ptr| {
         const tap_slice = std.mem.sliceTo(tap_ptr, 0);
-        if (tap_slice.len > result.tap_buf.len) return error.Unreadable;
+        if (tap_slice.len > result.tap_buf.len) return error.FieldTooLong;
         @memcpy(result.tap_buf[0..tap_slice.len], tap_slice);
         result.tap_len = tap_slice.len;
         result.has_tap = true;
@@ -2444,7 +2457,7 @@ pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unr
 }
 
 /// Check if a cask is installed (by token).
-pub fn isInstalled(db: *sqlite.Database, token: []const u8) error{Unreadable}!bool {
+pub fn isInstalled(db: *sqlite.Database, token: []const u8) InstalledLookupError!bool {
     return try lookupInstalledChecked(db, token) != null;
 }
 
@@ -3650,7 +3663,7 @@ test "lookupInstalledChecked reports a version no install could record, not a mi
     try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
     const ver = "9" ** (std.Io.Dir.max_name_bytes + 1);
     try db.exec("INSERT INTO casks(token,version) VALUES('box','" ++ ver ++ "');");
-    try std.testing.expectError(error.Unreadable, lookupInstalledChecked(&db, "box"));
+    try std.testing.expectError(error.FieldTooLong, lookupInstalledChecked(&db, "box"));
 }
 
 test "lookupInstalledChecked keeps the longest tap slug and app path malt can record" {
@@ -3673,6 +3686,15 @@ test "lookupInstalledChecked reports a tap or app path past its limit, not a row
     try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
     try db.exec("INSERT INTO casks(token,version,tap) VALUES('t','1.0','" ++ "a" ** (tap_slug.max_slug_len + 1) ++ "');");
     try db.exec("INSERT INTO casks(token,version,app_path) VALUES('p','1.0','/" ++ "b" ** std.Io.Dir.max_path_bytes ++ "');");
-    try std.testing.expectError(error.Unreadable, lookupInstalledChecked(&db, "t"));
-    try std.testing.expectError(error.Unreadable, lookupInstalledChecked(&db, "p"));
+    try std.testing.expectError(error.FieldTooLong, lookupInstalledChecked(&db, "t"));
+    try std.testing.expectError(error.FieldTooLong, lookupInstalledChecked(&db, "p"));
+}
+
+test "lookupDetail explains a too-long field instead of SQLite's message" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    // A too-long field follows a successful step, so SQLite has no error to report.
+    const detail = lookupDetail(error.FieldTooLong, &db);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "longer than malt accepts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "not an error") == null);
 }

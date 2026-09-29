@@ -121,7 +121,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     for (names.items) |name| {
         // An unreadable table aborts here: falling through would pick a
         // same-named formula the user never meant.
-        if (cask_mod.lookupInstalledChecked(&db, name) catch return readFailed(&db)) |info| {
+        if (cask_mod.lookupInstalledChecked(&db, name) catch |e| return caskReadFailed(&db, e, name)) |info| {
             refuseIfRunning(ctx.io, name, &info) catch {
                 refused = true;
                 continue;
@@ -354,6 +354,11 @@ fn readFailed(db: *sqlite.Database) error{Aborted} {
     return error.Aborted;
 }
 
+fn caskReadFailed(db: *sqlite.Database, e: cask_mod.InstalledLookupError, token: []const u8) error{Aborted} {
+    output.err("Could not read the package database for cask {s}: {s}", .{ token, cask_mod.lookupDetail(e, db) });
+    return error.Aborted;
+}
+
 fn dependentsUnreadable(db: *sqlite.Database, name: []const u8) error{Aborted} {
     output.err("Could not check what depends on {s}: {s}. Use --force to remove anyway.", .{ name, db.errMsg() });
     return error.Aborted;
@@ -543,7 +548,7 @@ fn refuseIfRunning(io: std.Io, token: []const u8, info: *const cask_mod.Installe
 
 /// Uninstall a cask by token.
 fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, cache_dir: []const u8, force: bool, dry_run: bool) !void {
-    const info = (cask_mod.lookupInstalledChecked(db, token) catch return readFailed(db)) orelse {
+    const info = (cask_mod.lookupInstalledChecked(db, token) catch |e| return caskReadFailed(db, e, token)) orelse {
         output.err("{s} is not installed as a cask", .{token});
         return error.Aborted;
     };

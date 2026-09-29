@@ -100,8 +100,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // installed cask. The cask listing and reinstall flow live
         // alongside the keg flow so the user-facing `--list` / `--to`
         // / default behaviours are consistent across package types.
-        const is_cask = cask_mod.isInstalled(&db, name) catch {
-            output.err("Could not read the package database: {s}", .{db.errMsg()});
+        const is_cask = cask_mod.isInstalled(&db, name) catch |e| {
+            output.err("Could not read the package database for cask {s}: {s}", .{ name, cask_mod.lookupDetail(e, &db) });
             return error.Aborted;
         };
         if (is_cask) {
