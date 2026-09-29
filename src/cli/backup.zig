@@ -516,8 +516,8 @@ pub fn writeEntry(w: *std.Io.Writer, kind: Kind, name: []const u8, version: []co
 /// Parse a single line. Returns null for blank lines, comments, and any line
 /// that does not match the canonical `<kind> <name> [<version>]` shape.
 /// The returned `name` and `version` slices point into `line`.
-/// Unscreened; `parseBackup` drops an entry holding a control byte or a
-/// name that is not a package name.
+/// Unscreened; `parseBackup` drops an entry holding a control byte, a
+/// name that is not a package name, or a service line with a version.
 pub fn parseLine(line: []const u8) ?Entry {
     var s = std.mem.trim(u8, line, " \t\r\n");
     if (s.len == 0) return null;
@@ -538,13 +538,10 @@ pub fn parseLine(line: []const u8) ?Entry {
     }
     var fields = std.mem.tokenizeAny(u8, s, " \t");
     const name = fields.next() orelse return null;
-    // Restore hands names to install's argv, where this would read as a flag.
-    if (name[0] == '-') return null;
     // No `@` split: a legacy `wget@1.2` line stays one name, because no rule
     // can tell it from a versioned formula like `postgresql@16`. The version
     // is the rest of the line, since a tap may declare one with spaces.
     const version = std.mem.trim(u8, fields.rest(), " \t");
-    if (kind == .service and version.len > 0) return null;
     return .{ .kind = kind, .name = name, .version = version };
 }
 
@@ -564,10 +561,18 @@ pub fn parseLocalNote(line: []const u8) ?LocalNote {
     return .{ .name = rest[0..sep], .path = path };
 }
 
+pub const Parsed = struct {
+    entries: []Entry,
+    /// Lines refused by a screen; blank, comment and unknown-kind lines
+    /// are not refusals and are not counted.
+    skipped: usize,
+};
+
 /// Parse an entire backup file into a freshly-allocated slice of entries.
 /// The entries reference slices inside `text`, which must outlive them.
-/// Callers own the returned slice and must free it via `allocator.free`.
-pub fn parseBackup(allocator: std.mem.Allocator, text: []const u8) ![]Entry {
+/// Callers own `entries` and must free it via `allocator.free`.
+pub fn parseBackup(allocator: std.mem.Allocator, text: []const u8) !Parsed {
+    var skipped: usize = 0;
     var list: std.ArrayList(Entry) = .empty;
     errdefer list.deinit(allocator);
 
@@ -578,25 +583,35 @@ pub fn parseBackup(allocator: std.mem.Allocator, text: []const u8) ![]Entry {
         // shared or hand-edited line is named, escaped, and left out.
         if (path_component.hasControlByte(entry.name) or path_component.hasControlByte(entry.version)) {
             output.warnAlways("Skipping `{f}`: it holds a control character", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            skipped += 1;
             continue;
         }
         if (!isEntryName(entry.kind, entry.name)) {
             output.warnAlways("Skipping `{f}`: it does not name a package", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            skipped += 1;
+            continue;
+        }
+        if (entry.kind == .service and entry.version.len > 0) {
+            output.warnAlways("Skipping `{f}`: a service line takes no version", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            skipped += 1;
             continue;
         }
         // One such name makes install refuse the whole restore batch.
         if (install_args.isSelfInstall(entry.name)) {
             output.warnAlways("Skipping `{f}`: restore never installs malt itself", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            skipped += 1;
             continue;
         }
         try list.append(allocator, entry);
     }
-    return try list.toOwnedSlice(allocator);
+    return .{ .entries = try list.toOwnedSlice(allocator), .skipped = skipped };
 }
 
 /// A bare name, or a formula/cask as `user/repo/name`; the version is
 /// display-only, so only the name is held to a shape.
 fn isEntryName(kind: Kind, name: []const u8) bool {
+    // Restore hands names to install's argv, where this would read as a flag.
+    if (name[0] == '-') return false;
     // Install runs a `.rb` path as a local recipe, which restore never does.
     if (install_args.isLocalFormulaPath(name)) return false;
     if (path_component.isPathComponent(name)) return true;
@@ -701,13 +716,14 @@ test "writeEntry never appends a version suffix to a service entry" {
     try std.testing.expectEqualStrings("service redis\n", aw.written());
 }
 
-test "parseLine refuses a name restore would hand to install as a flag" {
+test "isEntryName refuses a name restore would hand to install as a flag" {
     // A backup file is data; `formula --allow-unpinned` must not switch a
     // trust opt-in on for the whole restore batch.
-    try std.testing.expect(parseLine("formula --allow-unpinned") == null);
-    try std.testing.expect(parseLine("cask --force") == null);
-    try std.testing.expect(parseLine("service -x") == null);
-    try std.testing.expect(parseLine("formula wget-2") != null);
+    try std.testing.expect(!isEntryName(.formula, "--allow-unpinned"));
+    try std.testing.expect(!isEntryName(.cask, "--force"));
+    try std.testing.expect(!isEntryName(.service, "-x"));
+    try std.testing.expect(!isEntryName(.formula, "-"));
+    try std.testing.expect(isEntryName(.formula, "wget-2"));
 }
 
 test "isEntryName admits a bare name or a tap slug and nothing path-shaped" {
@@ -797,9 +813,12 @@ test "parseBackup silently drops any future unknown kind (forward-compat)" {
         "formula git\n" ++
         "widget acme\n" ++ // hypothetical newer-than-this-reader kind
         "cask firefox\n";
-    const entries = try parseBackup(std.testing.allocator, text);
-    defer std.testing.allocator.free(entries);
+    const parsed = try parseBackup(std.testing.allocator, text);
+    defer std.testing.allocator.free(parsed.entries);
+    const entries = parsed.entries;
     try std.testing.expectEqual(@as(usize, 2), entries.len);
+    // Not a refusal, so restore of such a file does not fail.
+    try std.testing.expectEqual(@as(usize, 0), parsed.skipped);
     try std.testing.expectEqualStrings("git", entries[0].name);
     try std.testing.expectEqualStrings("firefox", entries[1].name);
 }
@@ -901,9 +920,9 @@ test "writeRows drops a local note whose name or path would split into a restora
 
     try std.testing.expectEqual(@as(usize, 0), count);
     try std.testing.expectEqualStrings("", aw.written());
-    const entries = try parseBackup(std.testing.allocator, aw.written());
-    defer std.testing.allocator.free(entries);
-    try std.testing.expectEqual(@as(usize, 0), entries.len);
+    const parsed = try parseBackup(std.testing.allocator, aw.written());
+    defer std.testing.allocator.free(parsed.entries);
+    try std.testing.expectEqual(@as(usize, 0), parsed.entries.len);
 }
 
 test "writeRows drops a local note that would print a terminal control byte" {

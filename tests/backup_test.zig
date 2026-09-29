@@ -114,8 +114,9 @@ test "parseLine takes the rest of the line as the version" {
     const e = backup.parseLine("formula acme/tools/foo 1.0 beta\r").?;
     try testing.expectEqualStrings("acme/tools/foo", e.name);
     try testing.expectEqualStrings("1.0 beta", e.version);
-    // Services carry no version, so anything after the name is malformed.
-    try testing.expect(backup.parseLine("service redis extra") == null);
+    // Parsed as written; `parseBackup` refuses a service line with a version.
+    const svc = backup.parseLine("service redis extra").?;
+    try testing.expectEqualStrings("extra", svc.version);
 }
 
 // ── parseLocalNote ───────────────────────────────────────────────────────
@@ -179,8 +180,9 @@ test "parseBackup ignores comments and parses every data line in order" {
         "cask firefox\n" ++
         "cask slack 4.36.140\n";
 
-    const entries = try backup.parseBackup(testing.allocator, text);
-    defer testing.allocator.free(entries);
+    const parsed = try backup.parseBackup(testing.allocator, text);
+    defer testing.allocator.free(parsed.entries);
+    const entries = parsed.entries;
 
     try testing.expectEqual(@as(usize, 4), entries.len);
 
@@ -218,11 +220,14 @@ test "parseBackup skips an entry whose name or version holds a control byte, and
         malt.output.setQuiet(prior_quiet);
     }
 
-    const entries = try backup.parseBackup(testing.allocator, text);
-    defer testing.allocator.free(entries);
+    const parsed = try backup.parseBackup(testing.allocator, text);
+    defer testing.allocator.free(parsed.entries);
+    const entries = parsed.entries;
 
     try testing.expectEqual(@as(usize, 1), entries.len);
     try testing.expectEqualStrings("caf\xc3\xa9", entries[0].name);
+    // Restore fails on any skip, so each refused line must be counted.
+    try testing.expectEqual(@as(usize, 3), parsed.skipped);
     try testing.expect(std.mem.indexOf(u8, captured.items, "\xc2") == null);
     try testing.expect(std.mem.indexOfScalar(u8, captured.items, 0x1b) == null);
     // Named even under --quiet: restore would otherwise install less than
@@ -267,11 +272,13 @@ test "parseBackup skips an entry that does not name a package, and says so" {
         malt.output.setQuiet(prior_quiet);
     }
 
-    const entries = try backup.parseBackup(testing.allocator, text);
-    defer testing.allocator.free(entries);
+    const parsed = try backup.parseBackup(testing.allocator, text);
+    defer testing.allocator.free(parsed.entries);
+    const entries = parsed.entries;
 
     const kept = [_][]const u8{ "postgresql@16", "acme/tools/foo", "acme/tools..v2/foo", "acme/tools/baz", "wget", "wget", "postgresql@16" };
     try testing.expectEqual(kept.len, entries.len);
+    try testing.expectEqual(@as(usize, 14), parsed.skipped);
     for (kept, entries) |name, e| try testing.expectEqualStrings(name, e.name);
     // The version is display-only, never argv, so its shape is left alone.
     try testing.expectEqualStrings("1.0/../../x", entries[5].version);
@@ -307,12 +314,15 @@ test "parseBackup skips an entry naming malt itself, and says so" {
         malt.output.setQuiet(prior_quiet);
     }
 
-    const entries = try backup.parseBackup(testing.allocator, text);
-    defer testing.allocator.free(entries);
+    const parsed = try backup.parseBackup(testing.allocator, text);
+    defer testing.allocator.free(parsed.entries);
+    const entries = parsed.entries;
 
     // Install matches case-sensitively, so `MT` is a package like any other.
     const kept = [_][]const u8{ "wget", "maltose", "acme/tools/smt", "mtr", "MT" };
     try testing.expectEqual(kept.len, entries.len);
+    // Five self-install lines plus the path-shaped recipe, each counted once.
+    try testing.expectEqual(@as(usize, 6), parsed.skipped);
     for (kept, entries) |name, e| try testing.expectEqualStrings(name, e.name);
     // Named even under --quiet, once per line.
     try testing.expectEqual(@as(usize, 5), std.mem.count(u8, captured.items, "restore never installs malt itself"));
@@ -322,10 +332,46 @@ test "parseBackup skips an entry naming malt itself, and says so" {
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "does not name a package"));
 }
 
+test "parseBackup skips a flag-shaped name or a versioned service line, and says so" {
+    // Both were dropped without a word, so restore installed less than the
+    // file lists and still exited 0.
+    const text =
+        "formula --allow-unpinned\n" ++
+        "cask --force\n" ++
+        "service -x\n" ++
+        "service redis 8.0\n" ++
+        "service redis extra words\n" ++
+        "formula wget-2\n" ++
+        "service postgresql@16\n";
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(true);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer {
+        malt.output.endStderrCapture();
+        malt.output.setQuiet(prior_quiet);
+    }
+
+    const parsed = try backup.parseBackup(testing.allocator, text);
+    defer testing.allocator.free(parsed.entries);
+
+    try testing.expectEqual(@as(usize, 2), parsed.entries.len);
+    try testing.expectEqualStrings("wget-2", parsed.entries[0].name);
+    try testing.expectEqualStrings("postgresql@16", parsed.entries[1].name);
+    try testing.expectEqual(@as(usize, 5), parsed.skipped);
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, captured.items, "does not name a package"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, captured.items, "a service line takes no version"));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "`formula --allow-unpinned`") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "`service redis 8.0`") != null);
+}
+
 test "parseBackup handles an empty input" {
-    const entries = try backup.parseBackup(testing.allocator, "");
-    defer testing.allocator.free(entries);
+    const parsed = try backup.parseBackup(testing.allocator, "");
+    defer testing.allocator.free(parsed.entries);
+    const entries = parsed.entries;
     try testing.expectEqual(@as(usize, 0), entries.len);
+    try testing.expectEqual(@as(usize, 0), parsed.skipped);
 }
 
 test "parseBackup handles a file with only comments and blank lines" {
@@ -334,15 +380,18 @@ test "parseBackup handles a file with only comments and blank lines" {
         "\n" ++
         "   \n" ++
         "# another\n";
-    const entries = try backup.parseBackup(testing.allocator, text);
-    defer testing.allocator.free(entries);
+    const parsed = try backup.parseBackup(testing.allocator, text);
+    defer testing.allocator.free(parsed.entries);
+    const entries = parsed.entries;
     try testing.expectEqual(@as(usize, 0), entries.len);
+    try testing.expectEqual(@as(usize, 0), parsed.skipped);
 }
 
 test "parseBackup tolerates a file that does not end with a newline" {
     const text = "formula git\ncask firefox";
-    const entries = try backup.parseBackup(testing.allocator, text);
-    defer testing.allocator.free(entries);
+    const parsed = try backup.parseBackup(testing.allocator, text);
+    defer testing.allocator.free(parsed.entries);
+    const entries = parsed.entries;
     try testing.expectEqual(@as(usize, 2), entries.len);
     try testing.expectEqualStrings("git", entries[0].name);
     try testing.expectEqualStrings("firefox", entries[1].name);
@@ -357,11 +406,14 @@ test "parseBackup skips junk lines instead of failing" {
         "formula \n" ++ // empty name
         "cask firefox\n" ++
         "pkg nope\n";
-    const entries = try backup.parseBackup(testing.allocator, text);
-    defer testing.allocator.free(entries);
+    const parsed = try backup.parseBackup(testing.allocator, text);
+    defer testing.allocator.free(parsed.entries);
+    const entries = parsed.entries;
     try testing.expectEqual(@as(usize, 2), entries.len);
     try testing.expectEqualStrings("git", entries[0].name);
     try testing.expectEqualStrings("firefox", entries[1].name);
+    // Not refusals: restore must not fail a file over a line it never read.
+    try testing.expectEqual(@as(usize, 0), parsed.skipped);
 }
 
 test "writeEntry + parseBackup round-trip preserves every entry" {
@@ -391,8 +443,9 @@ test "writeEntry + parseBackup round-trip preserves every entry" {
         try backup.writeEntry(w, f.kind, f.name, f.version, true);
     }
 
-    const entries = try backup.parseBackup(testing.allocator, aw.written());
-    defer testing.allocator.free(entries);
+    const parsed = try backup.parseBackup(testing.allocator, aw.written());
+    defer testing.allocator.free(parsed.entries);
+    const entries = parsed.entries;
 
     try testing.expectEqual(fixtures.len, entries.len);
     inline for (fixtures, 0..) |f, i| {
@@ -423,8 +476,9 @@ test "writeRows output parses back into restore entries with the tap kept on the
     try backup.writeHeader(&aw.writer);
     _ = try backup.writeRows(&aw.writer, &db, true, true);
 
-    const entries = try backup.parseBackup(testing.allocator, aw.written());
-    defer testing.allocator.free(entries);
+    const parsed = try backup.parseBackup(testing.allocator, aw.written());
+    defer testing.allocator.free(parsed.entries);
+    const entries = parsed.entries;
 
     try testing.expectEqual(@as(usize, 3), entries.len);
     try testing.expectEqual(backup.Kind.formula, entries[0].kind);

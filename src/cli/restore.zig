@@ -65,11 +65,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
     defer allocator.free(text);
 
-    const entries = backup_mod.parseBackup(allocator, text) catch {
+    const parsed = backup_mod.parseBackup(allocator, text) catch {
         output.err("Failed to parse backup file: {s}", .{path});
         return Error.ReadFailed;
     };
-    defer allocator.free(entries);
+    defer allocator.free(parsed.entries);
+    const entries = parsed.entries;
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -83,6 +84,18 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (std.mem.indexOf(u8, text, backup_mod.versioned_format_marker) == null) warnLegacyPins(entries);
 
     if (entries.len == 0) {
+        // A file whose every line was refused is not an empty backup; a
+        // preview never installs, so it keeps exiting 0.
+        if (parsed.skipped > 0) {
+            const fmt = "{d} line{s} skipped, nothing to restore from {s}";
+            const fmt_args = .{ parsed.skipped, if (parsed.skipped == 1) "" else "s", path };
+            if (dry_run) {
+                output.warn(fmt, fmt_args);
+                return;
+            }
+            output.warnAlways(fmt, fmt_args);
+            return error.Aborted;
+        }
         output.warn("No entries found in {s}", .{path});
         return;
     }
@@ -172,10 +185,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.warn("Interrupted.", .{});
         return error.UserInterrupted;
     }
+    // A refused line means the file restored less than it lists.
+    if (parsed.skipped > 0)
+        output.warnAlways("{d} line{s} skipped from {s}", .{ parsed.skipped, if (parsed.skipped == 1) "" else "s", path });
     // Each failure is already printed; Aborted exits non-zero without a trace.
-    if (any_failed) {
-        return error.Aborted;
-    }
+    if (any_failed or parsed.skipped > 0) return error.Aborted;
 }
 
 /// Older backups wrote a pinned version as `name@version`, which now reads as
