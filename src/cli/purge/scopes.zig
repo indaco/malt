@@ -652,7 +652,8 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
     collectCaskOldVersions(io, allocator, prefix, cache_dir, &candidates, &result);
 
     if (candidates.items.len == 0) {
-        rep.empty("nothing to remove");
+        // A refusal already printed its reason; "nothing" would contradict it.
+        if (result.status == .ok) rep.empty("nothing to remove");
         return result;
     }
 
@@ -867,7 +868,7 @@ fn collectCaskOldVersions(
     var db = switch (util.openDbTri(io, prefix)) {
         .absent => return,
         .unreadable => |e| {
-            output.warn("old-versions: cannot open database for cask history ({s})", .{@errorName(e)});
+            output.err("old-versions: cannot open database for cask history ({s})", .{@errorName(e)});
             result.status = .err;
             result.error_kind = "db_unreadable";
             return;
@@ -876,7 +877,7 @@ fn collectCaskOldVersions(
     };
     defer db.close();
     schema.initSchema(&db) catch |e| {
-        output.warn("old-versions: cannot init schema for cask history ({s})", .{@errorName(e)});
+        output.err("old-versions: cannot init schema for cask history ({s})", .{@errorName(e)});
         result.status = .err;
         result.error_kind = "schema_init";
         return;
@@ -891,7 +892,7 @@ fn collectCaskOldVersions(
         \\JOIN casks c ON c.token = cv.token
         \\WHERE cv.version != c.version;
     ) catch |e| {
-        output.warn("old-versions: cannot prepare cask history query ({s})", .{@errorName(e)});
+        output.err("old-versions: cannot prepare cask history query ({s})", .{@errorName(e)});
         result.status = .err;
         result.error_kind = "db_prepare";
         return;
@@ -926,7 +927,7 @@ fn reopenDbForRowDeletes(io: std.Io, prefix: []const u8, result: *TierResult) ?s
     return switch (util.openDbTri(io, prefix)) {
         .absent => null,
         .unreadable => |e| blk: {
-            output.warn("old-versions: cannot reopen database for history rows ({s})", .{@errorName(e)});
+            output.err("old-versions: cannot reopen database for history rows ({s})", .{@errorName(e)});
             result.status = .err;
             result.error_kind = "db_unreadable";
             break :blk null;
