@@ -676,3 +676,112 @@ test "execute --json on a cask with no history emits available_rollback_versions
     const arr = parsed.value.object.get("available_rollback_versions") orelse return error.MissingKey;
     try testing.expectEqual(@as(usize, 0), arr.array.items.len);
 }
+
+// --- unreadable install database --------------------------------------
+//
+// A cached API record for the name makes the old fallthrough succeed with
+// "Not installed", so these aborts can only come from the DB being refused.
+
+fn seedWgetRecord(prefix: []const u8) !void {
+    try seedApiCache(prefix, "formula_wget.json",
+        \\{"name":"wget","full_name":"wget","tap":"homebrew/core","desc":"Internet file retriever","homepage":"https://example",
+        \\ "versions":{"stable":"1.21"},"revision":0,"dependencies":[],"oldnames":[],
+        \\ "keg_only":false,"post_install_defined":false,
+        \\ "bottle":{"stable":{"root_url":"https://example","files":{}}}
+        \\}
+    );
+}
+
+fn dbPath(buf: []u8, prefix: []const u8) ![:0]const u8 {
+    return std.fmt.bufPrintSentinel(buf, "{s}/db/malt.db", .{prefix}, 0);
+}
+
+/// Runs `execute` in both output modes; each must abort and name the DB.
+fn expectInfoRefusesDb(args: []const []const u8) !void {
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &err_buf);
+    defer output.endStderrCapture();
+
+    const prior_mode: output.OutputMode = if (output.isJson()) .json else .human;
+    defer output.setMode(prior_mode);
+    for ([_]output.OutputMode{ .human, .json }) |mode| {
+        output.setMode(mode);
+        err_buf.clearRetainingCapacity();
+        try testing.expectError(error.Aborted, info.execute(&offline_ctx, testing.allocator, args));
+        try testing.expect(std.mem.indexOf(u8, err_buf.items, "install database") != null);
+    }
+}
+
+test "execute reports a malt.db that is not a database instead of not-installed" {
+    var s = try Scratch.init(testing.allocator, "garbage_db");
+    defer s.deinit(testing.allocator);
+    try seedWgetRecord(s.path);
+    var buf: [512]u8 = undefined;
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, try dbPath(&buf, s.path), .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, "not a sqlite database, just garbage bytes" ** 4);
+
+    try expectInfoRefusesDb(&.{"wget"});
+}
+
+test "execute reports a db/ directory it cannot look into instead of not-installed" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+    var s = try Scratch.init(testing.allocator, "walled_db");
+    defer s.deinit(testing.allocator);
+    try seedFormulaKeg(testing.allocator, s.path);
+    try seedWgetRecord(s.path);
+    var dir_buf: [512]u8 = undefined;
+    const walled = try test_io.wallDir(std.Options.debug_io, try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path}));
+    defer test_io.unwallDir(std.Options.debug_io, walled);
+
+    try expectInfoRefusesDb(&.{"wget"});
+}
+
+test "execute reports a keg table it cannot read instead of falling through to the API" {
+    var s = try Scratch.init(testing.allocator, "corrupt_kegs");
+    defer s.deinit(testing.allocator);
+    try seedFormulaKeg(testing.allocator, s.path);
+    try seedWgetRecord(s.path);
+    var buf: [512]u8 = undefined;
+    try test_io.corruptTable(try dbPath(&buf, s.path), "kegs");
+
+    try expectInfoRefusesDb(&.{"wget"});
+}
+
+test "execute --json reports dependency rows it cannot read instead of an empty list" {
+    // The keg row resolves; only the JSON dump reads its dependencies.
+    var s = try Scratch.init(testing.allocator, "corrupt_deps_json");
+    defer s.deinit(testing.allocator);
+    try seedFormulaKeg(testing.allocator, s.path);
+    var buf: [512]u8 = undefined;
+    const db_path = try dbPath(&buf, s.path);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try db.exec("INSERT INTO dependencies (keg_id, dep_name) SELECT id, 'openssl@3' FROM kegs WHERE name = 'wget';");
+    }
+    try test_io.corruptTable(db_path, "dependencies");
+
+    const prior_mode: output.OutputMode = if (output.isJson()) .json else .human;
+    output.setMode(.json);
+    quiet();
+    defer {
+        unquiet();
+        output.setMode(prior_mode);
+    }
+    try testing.expectError(error.Aborted, info.execute(&offline_ctx, testing.allocator, &.{"wget"}));
+}
+
+test "execute on a prefix with no db/ still falls back to the API record" {
+    // A fresh prefix has nothing installed; that alone is not a DB error.
+    var s = try Scratch.init(testing.allocator, "no_db_dir");
+    defer s.deinit(testing.allocator);
+    try seedWgetRecord(s.path);
+    var dir_buf: [512]u8 = undefined;
+    try test_io.deleteDirAbsolute(std.Options.debug_io, try std.fmt.bufPrint(&dir_buf, "{s}/db", .{s.path}));
+
+    quiet();
+    defer unquiet();
+    try info.execute(&offline_ctx, testing.allocator, &.{"wget"});
+}

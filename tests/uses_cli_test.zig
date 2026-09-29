@@ -193,3 +193,74 @@ test "execute --json with seeded deps emits the dependents in the array" {
     const ctx = ctxWithSink();
     try uses.execute(&ctx, testing.allocator, &.{"openssl"});
 }
+
+// --- unreadable install database --------------------------------------
+//
+// "No installed formula uses X" reads as "safe to remove", so it may only
+// come from a DB that was actually read; a prefix with no db/ is the one
+// empty answer that needs no read.
+
+fn writeGarbageDb(prefix: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, "not a sqlite database, just garbage bytes" ** 4);
+}
+
+/// Runs `execute` in both output modes and expects each to abort.
+fn expectUsesAborts(args: []const []const u8) !void {
+    const prior_mode: output.OutputMode = if (output.isJson()) .json else .human;
+    quiet();
+    defer {
+        output.setMode(prior_mode);
+        unquiet();
+    }
+    const ctx = ctxWithSink();
+    for ([_]output.OutputMode{ .human, .json }) |mode| {
+        output.setMode(mode);
+        try testing.expectError(error.Aborted, uses.execute(&ctx, testing.allocator, args));
+    }
+}
+
+test "execute reports a malt.db that is not a database instead of no dependents" {
+    var s = try Scratch.init(testing.allocator, "garbage_db");
+    defer s.deinit(testing.allocator);
+    try writeGarbageDb(s.path);
+    try expectUsesAborts(&.{"openssl"});
+}
+
+test "execute reports a db/ directory it cannot look into instead of no dependents" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+    var s = try Scratch.init(testing.allocator, "walled_db");
+    defer s.deinit(testing.allocator);
+    try seedDeps(s.path);
+    var db_dir_buf: [512]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{s.path});
+    const walled = try test_io.wallDir(std.Options.debug_io, db_dir);
+    defer test_io.unwallDir(std.Options.debug_io, walled);
+
+    try expectUsesAborts(&.{"openssl"});
+}
+
+test "execute reports dependency rows it cannot read instead of no dependents" {
+    var s = try Scratch.init(testing.allocator, "corrupt_deps");
+    defer s.deinit(testing.allocator);
+    try seedDeps(s.path);
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    try test_io.corruptTable(db_path, "dependencies");
+
+    try expectUsesAborts(&.{ "-r", "openssl" });
+}
+
+test "execute on a db/ directory with no malt.db yet is still an empty prefix" {
+    // SQLite creates the file inside an existing db/: nothing is installed.
+    var s = try Scratch.init(testing.allocator, "db_dir_only");
+    defer s.deinit(testing.allocator);
+
+    const ctx = ctxWithSink();
+    quiet();
+    defer unquiet();
+    try uses.execute(&ctx, testing.allocator, &.{"openssl"});
+}

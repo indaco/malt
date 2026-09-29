@@ -36,7 +36,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const json_mode = output.isJson();
 
     const prefix = atomic.maltPrefixOrAbort();
-    var db_opt: ?sqlite.Database = cli_info.openDb(prefix);
+    var db_opt: ?sqlite.Database = try cli_info.openInstallDb(ctx.io, prefix);
     defer if (db_opt) |*d| d.close();
 
     var stdout_buf: [4096]u8 = undefined;
@@ -45,18 +45,15 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};
 
-    // Without a local DB nothing is installed, so nothing can "use"
-    // anything. Emit an empty result in the shape each mode expects
-    // rather than erroring — same graceful-degradation contract as
-    // `mt info` on a fresh prefix.
+    // A fresh prefix has no `db/`, so nothing is installed and nothing
+    // can "use" anything: the one empty answer that needs no read.
     var dependents: [][]const u8 = &.{};
     defer freeDependents(allocator, dependents);
 
     if (db_opt) |*db| {
-        // Schema is idempotent; read-only uses queries degrade to empty on
-        // a broken DB, but a newer-than-us DB must not be read at all.
+        // Schema is idempotent; a newer-than-us DB must not be read at all.
         schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(db, e, prefix);
-        dependents = collectDependents(allocator, db, name, recursive) catch &.{};
+        dependents = try collectDependents(allocator, db, name, recursive);
     }
 
     // A partial dependent set read as complete would be worse than no answer.
@@ -76,7 +73,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 /// directly (or transitively, if `recursive`) depends on `target`.
 /// The returned slice is caller-owned; each element is an
 /// `allocator.dupe`'d copy of the keg name, so the caller must free
-/// both the slice and every entry.
+/// both the slice and every entry. A failed query is reported, never
+/// read as "nothing uses this".
 pub fn collectDependents(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
@@ -85,6 +83,11 @@ pub fn collectDependents(
 ) ![][]const u8 {
     var names: std.StringHashMap(void) = .init(allocator);
     defer names.deinit();
+    // `names` owns every key until they move into the returned slice.
+    errdefer {
+        var it = names.keyIterator();
+        while (it.next()) |k| allocator.free(k.*);
+    }
 
     // Frontier borrows: root from caller's `target`, rest from
     // `names`-owned keys. One dupe per unique name, not two.
@@ -111,11 +114,11 @@ pub fn collectDependents(
             "SELECT k.name FROM kegs k " ++
                 "JOIN dependencies d ON d.keg_id = k.id " ++
                 "WHERE d.dep_name = ?1 ORDER BY k.name;",
-        ) catch continue;
+        ) catch return cli_info.dbUnreadable(current);
         defer stmt.finalize();
-        stmt.bindText(1, current) catch continue;
+        stmt.bindText(1, current) catch return cli_info.dbUnreadable(current);
 
-        while (stmt.step() catch false) {
+        while (stmt.step() catch return cli_info.dbUnreadable(current)) {
             const raw = stmt.columnText(0) orelse continue;
             const dep = std.mem.sliceTo(raw, 0);
             if (names.contains(dep)) continue;
@@ -135,7 +138,7 @@ pub fn collectDependents(
     // and test assertions depend on it. StringHashMap iteration
     // order is unspecified.
     var out: std.ArrayList([]const u8) = .empty;
-    errdefer freeDependents(allocator, out.items);
+    errdefer out.deinit(allocator);
     try out.ensureTotalCapacity(allocator, names.count());
     var it = names.keyIterator();
     while (it.next()) |k| try out.append(allocator, k.*);

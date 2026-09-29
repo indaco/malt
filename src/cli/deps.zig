@@ -330,10 +330,7 @@ fn dbFetch(ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8) anye
     return try out.toOwnedSlice(allocator);
 }
 
-fn dbUnreadable(name: []const u8) error{Aborted} {
-    output.err("could not read the install database to look up '{s}'", .{name});
-    return error.Aborted;
-}
+const dbUnreadable = cli_info.dbUnreadable;
 
 // --- API adapter: BrewApi.fetchFormula → DepLookup --------------------------
 
@@ -409,9 +406,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const json_mode = output.isJson();
 
     const prefix = atomic.maltPrefixOrAbort();
-    var db_opt: ?sqlite.Database = cli_info.openDb(prefix);
+    var db_opt: ?sqlite.Database = try cli_info.openInstallDb(ctx.io, prefix);
     defer if (db_opt) |*d| d.close();
-    if (db_opt == null) try refuseUnopenableDb(ctx.io, prefix);
     if (db_opt) |*db| schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(db, e, prefix);
 
     var stdout_buf: [4096]u8 = undefined;
@@ -475,15 +471,6 @@ fn collectGraph(
     const api_lookup = apiDepLookup(&api_ctx);
 
     return collectDeps(allocator, db_lookup, api_lookup, name, .{ .recursive = opts.recursive });
-}
-
-/// A DB that exists but will not open is not an empty install.
-fn refuseUnopenableDb(io: std.Io, prefix: []const u8) error{Aborted}!void {
-    var buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "{s}/db/malt.db", .{prefix}) catch return;
-    std.Io.Dir.cwd().access(io, path, .{}) catch return;
-    output.err("could not open the install database at {s}", .{path});
-    return error.Aborted;
 }
 
 fn reportInterrupt() error{UserInterrupted} {

@@ -77,6 +77,72 @@ test "openDb returns null when the prefix itself does not exist" {
     try testing.expect(info.openDb(prefix) == null);
 }
 
+// --- openInstallDb: only a missing db/ is a fresh prefix ----------------
+
+fn expectRefused(prefix: []const u8) !void {
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &err_buf);
+    defer output.endStderrCapture();
+    try testing.expectError(error.Aborted, info.openInstallDb(std.Options.debug_io, prefix));
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "could not open the install database") != null);
+}
+
+test "openInstallDb reads a prefix with no db/ directory as empty" {
+    var fx = try Fixture.init("install_db_absent");
+    defer fx.deinit();
+    try testing.expect(try info.openInstallDb(std.Options.debug_io, fx.base) == null);
+}
+
+test "openInstallDb creates the database when db/ exists but the file does not" {
+    var fx = try Fixture.init("install_db_dir_only");
+    defer fx.deinit();
+    try test_io.makeDirAbsolute(std.Options.debug_io, fx.p("db"));
+    var db = (try info.openInstallDb(std.Options.debug_io, fx.base)) orelse return error.ExpectedDatabase;
+    db.close();
+}
+
+test "openInstallDb refuses a file that exists but is not a database" {
+    var fx = try Fixture.init("install_db_garbage");
+    defer fx.deinit();
+    try test_io.makeDirAbsolute(std.Options.debug_io, fx.p("db"));
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, fx.p("db/malt.db"), .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, "not a sqlite database, just garbage bytes" ** 4);
+    try expectRefused(fx.base);
+}
+
+test "openInstallDb refuses a db that is a file where the directory should be" {
+    // ENOTDIR reads as "not found" to a probe of the file path itself.
+    var fx = try Fixture.init("install_db_notdir");
+    defer fx.deinit();
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, fx.p("db"), .{});
+    f.close(std.Options.debug_io);
+    try expectRefused(fx.base);
+}
+
+test "openInstallDb refuses a db/ directory it cannot look into" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+    var fx = try Fixture.init("install_db_walled");
+    defer fx.deinit();
+    try test_io.makeDirAbsolute(std.Options.debug_io, fx.p("db"));
+    const walled = try test_io.wallDir(std.Options.debug_io, fx.p("db"));
+    defer test_io.unwallDir(std.Options.debug_io, walled);
+    try expectRefused(fx.base);
+}
+
+test "openInstallDb refuses a prefix too long to hold the database path" {
+    // A valid prefix can be 512 bytes; silently reading that as "no db/"
+    // would hide every install under it.
+    const long_prefix = "/" ++ "p" ** 510;
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &err_buf);
+    defer output.endStderrCapture();
+    try testing.expectError(error.Aborted, info.openInstallDb(std.Options.debug_io, long_prefix));
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "install database") != null);
+}
+
 // --- collectInstalledDeps: DB-backed dependency read --------------------
 //
 // The detail pane must read an installed keg's deps from the recorded
@@ -130,7 +196,7 @@ test "collectInstalledDeps reads a fixture keg's recorded deps, alphabetised" {
     try addDepRow(&db, wget_id, "openssl@3");
     try addDepRow(&db, wget_id, "libidn2");
 
-    const deps = info.collectInstalledDeps(testing.allocator, &db, "wget");
+    const deps = try info.collectInstalledDeps(testing.allocator, &db, "wget");
     defer freeDepsSlice(deps);
 
     try testing.expectEqual(@as(usize, 2), deps.len);
@@ -146,7 +212,7 @@ test "collectInstalledDeps returns an empty slice for an installed leaf" {
 
     _ = try insertKegRow(&db, "tree");
 
-    const deps = info.collectInstalledDeps(testing.allocator, &db, "tree");
+    const deps = try info.collectInstalledDeps(testing.allocator, &db, "tree");
     defer freeDepsSlice(deps);
 
     try testing.expectEqual(@as(usize, 0), deps.len);
@@ -158,10 +224,59 @@ test "collectInstalledDeps returns an empty slice when the keg is not installed"
     var db = try makeDepsDb(&fx);
     defer db.close();
 
-    const deps = info.collectInstalledDeps(testing.allocator, &db, "ghost");
+    const deps = try info.collectInstalledDeps(testing.allocator, &db, "ghost");
     defer freeDepsSlice(deps);
 
     try testing.expectEqual(@as(usize, 0), deps.len);
+}
+
+test "collectInstalledDeps reports dependency rows it cannot read instead of a leaf" {
+    // An empty list would render an installed keg as having no dependencies.
+    var fx = try Fixture.init("deps_corrupt");
+    defer fx.deinit();
+    {
+        var db = try makeDepsDb(&fx);
+        defer db.close();
+        const wget_id = try insertKegRow(&db, "wget");
+        try addDepRow(&db, wget_id, "openssl@3");
+    }
+    try test_io.corruptTable(fx.p("deps.db"), "dependencies");
+    var db = try sqlite.Database.open(fx.p("deps.db"));
+    defer db.close();
+
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+    try testing.expectError(error.Aborted, info.collectInstalledDeps(testing.allocator, &db, "wget"));
+}
+
+test "collectInstalledDeps reports a keg table it cannot query instead of a leaf" {
+    var fx = try Fixture.init("deps_no_kegs");
+    defer fx.deinit();
+    var db = try makeDepsDb(&fx);
+    defer db.close();
+    try db.exec("DROP TABLE dependencies; DROP TABLE kegs;");
+
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+    try testing.expectError(error.Aborted, info.collectInstalledDeps(testing.allocator, &db, "wget"));
+}
+
+fn collectAndFree(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !void {
+    const deps = try info.collectInstalledDeps(allocator, db, name);
+    for (deps) |d| allocator.free(d);
+    allocator.free(deps);
+}
+
+test "collectInstalledDeps frees every name when an allocation fails part-way" {
+    var fx = try Fixture.init("deps_alloc_failures");
+    defer fx.deinit();
+    var db = try makeDepsDb(&fx);
+    defer db.close();
+    const wget_id = try insertKegRow(&db, "wget");
+    try addDepRow(&db, wget_id, "openssl@3");
+    try addDepRow(&db, wget_id, "libidn2");
+
+    try testing.checkAllAllocationFailures(testing.allocator, collectAndFree, .{ &db, "wget" });
 }
 
 // --- both kind-flags dispatch: --cask --formula must not hide an install -
