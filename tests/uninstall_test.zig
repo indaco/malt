@@ -1301,7 +1301,8 @@ test "execute without --formula points at it when the casks table cannot be read
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try expectAbortCaptured(&captured, &.{"box"});
-    try testing.expect(std.mem.indexOf(u8, captured.items, "--formula") != null);
+    // Conditional: the name may be a cask only, and then --formula is no way out.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "If box is a formula, pass --formula") != null);
 }
 
 test "execute --formula takes the formula over a same-named cask and keeps the cask" {
