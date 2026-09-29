@@ -130,7 +130,6 @@ fn cleanupDispatcher(ctx: *const AppCtx) cleanup_mod.Dispatcher {
 pub const BundleError = error{
     InvalidArgs,
     BundlefileNotFound,
-    BundlefileParse,
     DatabaseError,
     RunnerFailed,
     WriteFailed,
@@ -140,7 +139,6 @@ pub fn describeError(err: BundleError) []const u8 {
     return switch (err) {
         BundleError.InvalidArgs => "invalid argument to `bundle`",
         BundleError.BundlefileNotFound => "no Brewfile/Maltfile.json found in search path",
-        BundleError.BundlefileParse => "could not parse bundle file",
         BundleError.DatabaseError => "database error",
         BundleError.RunnerFailed => "one or more bundle members failed to install",
         BundleError.WriteFailed => "could not write bundle output",
@@ -679,7 +677,8 @@ fn resolveBundlefile(ctx: *const AppCtx, allocator: std.mem.Allocator, explicit:
             return p;
         }
     }
-    return BundleError.BundlefileNotFound;
+    output.err("No Brewfile or Maltfile.json in the current directory or ~/.config/malt", .{});
+    return error.Aborted;
 }
 
 fn readManifest(
@@ -690,29 +689,38 @@ fn readManifest(
 ) !manifest_mod.Manifest {
     // openFileAbsolute is just openFile on cwd (an absolute path ignores the
     // cwd handle), so one call covers both path kinds.
-    const file = std.Io.Dir.cwd().openFile(ctx.io, path, .{}) catch return BundleError.BundlefileNotFound;
+    const file = std.Io.Dir.cwd().openFile(ctx.io, path, .{}) catch |e| return unreadable(path, e);
     defer file.close(ctx.io);
 
-    const stat = file.stat(ctx.io) catch return BundleError.BundlefileNotFound;
-    if (stat.size > 8 * 1024 * 1024) return BundleError.BundlefileParse;
-    const body = allocator.alloc(u8, @intCast(stat.size)) catch return BundleError.BundlefileParse;
+    const stat = file.stat(ctx.io) catch |e| return unreadable(path, e);
+    if (stat.size > 8 * 1024 * 1024) {
+        output.err("Bundle file {s} is larger than 8 MiB", .{path});
+        return error.Aborted;
+    }
+    const body = allocator.alloc(u8, @intCast(stat.size)) catch |e| return unreadable(path, e);
     defer allocator.free(body);
-    _ = file.readPositionalAll(ctx.io, body, 0) catch return BundleError.BundlefileParse;
+    _ = file.readPositionalAll(ctx.io, body, 0) catch |e| return unreadable(path, e);
 
     if (std.mem.endsWith(u8, path, ".json")) {
-        return manifest_mod.parseJson(allocator, body) catch return BundleError.BundlefileParse;
+        return manifest_mod.parseJson(allocator, body) catch |e| {
+            output.err("Maltfile parse error: {s}", .{manifest_mod.describeError(e)});
+            return error.Aborted;
+        };
     }
     return brewfile_mod.parse(allocator, body, diag) catch |e| {
-        // Surface the specific cause (and line, when the parser recorded one);
-        // otherwise the user only sees the generic BundlefileParse.
+        // Name the cause, and the line when the parser recorded one.
         const reason = brewfile_mod.describeError(e);
-        if (diag) |d| {
-            if (d.error_line) |ln| {
-                output.err("Brewfile parse error at line {d}: {s}", .{ ln, reason });
-            } else output.err("Brewfile parse error: {s}", .{reason});
-        }
-        return BundleError.BundlefileParse;
+        const line = if (diag) |d| d.error_line else null;
+        if (line) |ln| {
+            output.err("Brewfile parse error at line {d}: {s}", .{ ln, reason });
+        } else output.err("Brewfile parse error: {s}", .{reason});
+        return error.Aborted;
     };
+}
+
+fn unreadable(path: []const u8, e: anyerror) error{Aborted} {
+    output.err("Cannot read bundle file {s}: {s}", .{ path, @errorName(e) });
+    return error.Aborted;
 }
 
 fn writeManifest(
@@ -1092,4 +1100,18 @@ test "captureSink keeps the actionable error line and prints nothing" {
     try std.testing.expectEqualStrings("bin/foo already linked by Cellar/bar/1.0", reason.slice());
     try std.testing.expect(!sink.show_progress);
     try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+test "resolveBundlefile says where it looked when no bundle file is found" {
+    const ctx = @import("../app_ctx.zig").debug_ctx; // no HOME
+    for ([_][]const u8{ "Brewfile", "Maltfile.json" }) |name| {
+        std.Io.Dir.cwd().access(ctx.io, name, .{}) catch continue;
+        return error.SkipZigTest; // the runner's cwd holds a real one
+    }
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try std.testing.expectError(error.Aborted, resolveBundlefile(&ctx, std.testing.allocator, null));
+    try std.testing.expect(std.mem.indexOf(u8, captured.items, "No Brewfile or Maltfile.json") != null);
 }
