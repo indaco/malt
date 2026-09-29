@@ -172,8 +172,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.warn("Interrupted.", .{});
         return error.UserInterrupted;
     }
+    // Each failure is already printed; Aborted exits non-zero without a trace.
     if (any_failed) {
-        return error.RestoreFailed;
+        return error.Aborted;
     }
 }
 
