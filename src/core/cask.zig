@@ -3600,3 +3600,17 @@ test "lookupInstalledChecked reports a casks table it cannot query instead of a 
     try std.testing.expectError(error.Unreadable, lookupInstalledChecked(&db, "firefox"));
     try std.testing.expectError(error.Unreadable, isInstalled(&db, "firefox"));
 }
+
+test "placedBundleName on a restore refuses a casks table it cannot query" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    // No `app` stanza, so a restore consults the row; no schema, so it fails.
+    var c = try parseCask(std.testing.allocator,
+        \\{"token":"box","version":"1.0","url":"https://example.invalid/box.zip"}
+    );
+    defer c.deinit();
+    var installer = CaskInstaller.init(std.Options.debug_io, .empty, std.testing.allocator, &db, "/nonexistent/malt-placed", "/nonexistent/malt-placed/cache");
+    installer.restoring = true;
+    var buf: [256]u8 = undefined;
+    try std.testing.expectError(error.InstallFailed, installer.placedBundleName(&c, "/nonexistent/malt-placed/stage", &buf));
+}
