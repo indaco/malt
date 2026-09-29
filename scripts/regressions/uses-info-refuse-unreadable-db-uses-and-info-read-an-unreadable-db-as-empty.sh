@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Regression: `uses`, `info` and `deps` must report an install database they
-# cannot open, not read it as an empty prefix.
+# Regression: `uses`, `info`, `deps`, `list` and `search` must report an
+# install database they cannot open, not read it as an empty prefix.
 #
 # The bug: the shared open helper mapped every open failure to "no database",
 # so a garbage, mode-000 or walled-off `malt.db` made `uses` print "No
@@ -27,7 +27,7 @@ trap 'chmod -R u+rwx "$SB"; rm -rf "$SB"' EXIT
 
 run() {
   rc=0
-  env -u MALT_API_DOMAIN -u CLICOLOR_FORCE NO_COLOR=1 MALT_PREFIX="$SB/p" MALT_CACHE="$SB/c" \
+  env -u MALT_API_DOMAIN -u CLICOLOR_FORCE NO_COLOR=1 MALT_PREFIX="$P" MALT_CACHE="$SB/c" \
     "$BIN" --offline "$@" >"$SB/out" 2>"$SB/err" || rc=$?
 }
 
@@ -55,6 +55,25 @@ reset() {
   chmod -R u+rwx "$SB"
   rm -rf "$SB/p" "$SB/c"
   mkdir -p "$SB/p/db" "$SB/c"
+  P="$SB/p"
+}
+
+refuses_all() {
+  refuses "$1" uses openssl@3
+  refuses "$1" info wget
+  refuses "$1" deps --installed wget
+  refuses "$1" list
+  refuses "$1" search --installed wget
+}
+
+# `outdated` words its refusal differently; it only has to not pass.
+outdated_fails() {
+  run outdated
+  if ((rc == 0 || rc >= 128)); then
+    cat "$SB/out" "$SB/err" >&2
+    echo "FAIL [$1] mt outdated exited $rc on a database it could not open" >&2
+    exit 1
+  fi
 }
 
 # A fresh prefix (no db/) is the one empty answer left.
@@ -69,36 +88,44 @@ fi
 
 reset
 printf 'not sqlite%.0s' {1..8} >"$SB/p/db/malt.db"
-refuses garbage uses openssl@3
-refuses garbage info wget
-refuses garbage deps --installed wget
+refuses_all garbage
+outdated_fails garbage
 
 reset
 : >"$SB/p/db/malt.db"
 chmod 000 "$SB/p/db/malt.db"
-refuses mode000-file uses openssl@3
-refuses mode000-file info wget
+refuses_all mode000-file
 
 reset
 chmod 000 "$SB/p/db"
-refuses mode000-dir uses openssl@3
-refuses mode000-dir info wget
-refuses mode000-dir deps --installed wget
+refuses_all mode000-dir
 
 # db/ symlinked somewhere that is gone (an unmounted volume)
 reset
 rmdir "$SB/p/db"
 ln -s "$SB/unmounted/malt-db" "$SB/p/db"
-refuses dangling-db uses openssl@3
-refuses dangling-db info wget
-refuses dangling-db deps --installed wget
+refuses_all dangling-db
+
+# MALT_PREFIX itself symlinked to an unmounted volume
+reset
+rm -rf "$SB/p"
+ln -s "$SB/unmounted/malt" "$SB/p"
+refuses_all dangling-prefix
 
 # MALT_PREFIX pointing at a file
 reset
 rm -rf "$SB/p"
 : >"$SB/p"
-refuses prefix-is-file uses openssl@3
-refuses prefix-is-file info wget
-refuses prefix-is-file deps --installed wget
+refuses_all prefix-is-file
 
-echo "OK: uses, info and deps refuse an install database they cannot open"
+# A valid prefix near the 512-byte cap still has to reach its database.
+reset
+P="$SB/l"
+while ((${#P} < 400)); do P="$P/$(printf 'a%.0s' {1..90})"; done
+P="$P/$(printf "%$((505 - ${#P} - 1))s" | tr ' ' b)"
+mkdir -p "$P/db"
+printf 'not sqlite%.0s' {1..8} >"$P/db/malt.db"
+refuses_all long-prefix
+outdated_fails long-prefix
+
+echo "OK: uses, info, deps, list and search refuse an install database they cannot open"
