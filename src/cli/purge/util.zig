@@ -59,6 +59,8 @@ pub fn openDb(prefix: []const u8) ?sqlite.Database {
 /// Tri-state DB open: distinguishes "fresh prefix, nothing yet" from
 /// "the file is there but cannot be opened" (corruption, permissions).
 /// Callers route the two to different UX paths — soft skip vs loud err.
+/// Only a missing `db/` directory is absent, the same rule `info` and
+/// `outdated` apply.
 pub const DbOutcome = union(enum) {
     absent,
     unreadable: sqlite.SqliteError,
@@ -67,17 +69,17 @@ pub const DbOutcome = union(enum) {
 
 pub fn openDbTri(io: std.Io, prefix: []const u8) DbOutcome {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return .absent;
-    // Probe for prior existence: SQLite's OPEN_CREATE flag would mask
-    // the difference between "no DB yet" and "file is there but dead".
-    const pre_existed = blk: {
-        std.Io.Dir.accessAbsolute(io, db_path, .{}) catch break :blk false;
-        break :blk true;
-    };
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
+        return .{ .unreadable = error.OpenFailed };
+    // SQLite's OPEN_CREATE masks "no DB yet" vs "file is there but dead",
+    // and a probe of the file reads EACCES on db/ or a stray `db` file as
+    // absent, so probe the directory.
+    const db_dir = std.fs.path.dirname(db_path) orelse unreachable;
+    const present = if (std.Io.Dir.cwd().access(io, db_dir, .{})) true else |e| e != error.FileNotFound;
     if (sqlite.Database.open(db_path)) |db| {
         return .{ .opened = db };
     } else |e| {
-        return if (pre_existed) .{ .unreadable = e } else .absent;
+        return if (present) .{ .unreadable = e } else .absent;
     }
 }
 
@@ -153,8 +155,8 @@ const Scratch = struct {
 
 test "openDbTri returns .absent when the db dir does not exist" {
     // SQLite open would otherwise CREATE a fresh file. The .absent
-    // branch only fires when the parent dir is missing AND the file
-    // never pre-existed — that's the "fresh prefix" UX contract.
+    // branch only fires when the db/ dir is missing — that's the
+    // "fresh prefix" UX contract.
     var s = try Scratch.init("openDbTri_absent");
     defer s.deinit();
     const prefix = s.base;
@@ -220,6 +222,49 @@ test "openDbTri opens a freshly created sqlite file" {
         .absent => return error.UnexpectedAbsent,
         .unreadable => return error.UnexpectedUnreadable,
     }
+}
+
+fn expectUnreadable(prefix: []const u8) !void {
+    var outcome = openDbTri(fs_test_io, prefix);
+    switch (outcome) {
+        .unreadable => {},
+        .opened => |*db| {
+            db.close();
+            return error.UnexpectedOpened;
+        },
+        .absent => return error.UnexpectedAbsent,
+    }
+}
+
+test "openDbTri returns .unreadable for a db/ directory it cannot look into" {
+    // EACCES on db/ hides whether malt.db is there, so it is no fresh prefix.
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+    var s = try Scratch.init("openDbTri_walled");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+    var db_dir = try std.Io.Dir.openDirAbsolute(fs_test_io, s.p("/db"), .{});
+    defer db_dir.close(fs_test_io);
+    try db_dir.setPermissions(fs_test_io, std.Io.File.Permissions.fromMode(0));
+    defer db_dir.setPermissions(fs_test_io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+
+    try expectUnreadable(s.base);
+}
+
+test "openDbTri returns .unreadable for a db file where the directory should be" {
+    // ENOTDIR reads as "not found" to a probe of the file path itself.
+    var s = try Scratch.init("openDbTri_notdir");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.base);
+    const f = try std.Io.Dir.createFileAbsolute(fs_test_io, s.p("/db"), .{});
+    f.close(fs_test_io);
+
+    try expectUnreadable(s.base);
+}
+
+test "openDbTri returns .unreadable for a prefix too long to hold the database path" {
+    // A valid prefix can be 512 bytes; reading it as absent would let
+    // `--wipe --backup` write an empty manifest.
+    try expectUnreadable("/" ++ "p" ** 510);
 }
 
 test "formatBytes delegates to the shared humanizer" {
