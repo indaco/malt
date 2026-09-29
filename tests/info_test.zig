@@ -148,9 +148,9 @@ test "openInstallDb refuses a prefix that is a file" {
 }
 
 test "openInstallDb refuses a prefix too long to hold the database path" {
-    // A valid prefix can be 512 bytes; silently reading that as "no db/"
-    // would hide every install under it.
-    const long_prefix = "/" ++ "p" ** 510;
+    // Silently reading an unbuildable path as "no db/" would hide every
+    // install under it.
+    const long_prefix = "/" ++ "p" ** malt.prefix_path.path_buf_len;
     var err_buf: std.ArrayList(u8) = .empty;
     defer err_buf.deinit(testing.allocator);
     output.beginStderrCapture(testing.allocator, &err_buf);

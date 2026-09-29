@@ -517,7 +517,7 @@ pub fn encodeInstallHint(
 /// Open the install database for a read that must not guess: null for a
 /// fresh prefix, an error for anything else that will not open.
 pub fn openInstallDb(io: std.Io, prefix: []const u8) error{Aborted}!?sqlite.Database {
-    var db_path_buf: [512]u8 = undefined;
+    var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch {
         output.err("could not open the install database under {s}", .{prefix});
         return error.Aborted;

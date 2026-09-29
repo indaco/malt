@@ -63,7 +63,7 @@ pub const DbOutcome = union(enum) {
 };
 
 pub fn openDbTri(io: std.Io, prefix: []const u8) DbOutcome {
-    var db_path_buf: [512]u8 = undefined;
+    var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return .{ .unreadable = error.OpenFailed };
     // SQLite's OPEN_CREATE masks "no DB yet" vs "file is there but dead".
@@ -265,9 +265,9 @@ test "openDbTri returns .unreadable for a db/ symlink whose target is gone" {
 }
 
 test "openDbTri returns .unreadable for a prefix too long to hold the database path" {
-    // A valid prefix can be 512 bytes; reading it as absent would let
-    // `--wipe --backup` write an empty manifest.
-    try expectUnreadable("/" ++ "p" ** 510);
+    // Reading an unbuildable path as absent would let `--wipe --backup`
+    // write an empty manifest.
+    try expectUnreadable("/" ++ "p" ** prefix_path.path_buf_len);
 }
 
 test "formatBytes delegates to the shared humanizer" {

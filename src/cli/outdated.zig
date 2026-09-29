@@ -1063,8 +1063,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer stdout.flush() catch {};
 
     const prefix = atomic.maltPrefixOrAbort();
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    // A validated prefix plus a fixed suffix always fits path_buf_len.
+    const db_path = prefix_path.joinZ(&db_path_buf, prefix, "/db/malt.db") catch unreachable;
     var db = openPrefixDb(ctx.io, db_path) catch |e| switch (e) {
         // Fresh prefix: nothing installed = nothing to be outdated.
         error.Absent => return,
