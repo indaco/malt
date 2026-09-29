@@ -254,6 +254,50 @@ test "--stale-casks --yes keeps an installed cask's artefacts and removes only o
     }
 }
 
+// Every artefact would read as an orphan, and removing a Caskroom dir runs
+// the cask's uninstall steps: an unreadable table must stop the scope. The
+// cache pass runs first, so each pass gets its own fixture.
+fn expectStaleCasksKeeps(tag: []const u8, rel: []const u8) !void {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, tag);
+    defer prefix.deinit(allocator);
+
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec("INSERT INTO casks (token, name, version, url) VALUES ('flux', 'flux', '2.0', 'https://example.invalid/dummy');");
+    }
+    try test_io.corruptTable(db_path, "casks");
+    try writeFileAt(allocator, &.{ prefix.path, rel }, "x");
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(true);
+
+    // The scope reports the error in its row; `purge` itself exits 0 for a
+    // failed scope, as it does when the lookup cannot be prepared.
+    const ctx = malt.app_ctx.debug_ctx;
+    try purge.execute(&ctx, allocator, &.{ "--stale-casks", "--yes" });
+
+    const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix.path, rel });
+    defer allocator.free(path);
+    try test_io.accessAbsolute(std.Options.debug_io, path, .{});
+}
+
+test "--stale-casks --yes keeps a cached download when the casks table cannot be read" {
+    try expectStaleCasksKeeps("stale_casks_corrupt_cache", "cache/Cask/flux-2.0.dmg");
+}
+
+test "--stale-casks --yes keeps a Caskroom dir when the casks table cannot be read" {
+    try expectStaleCasksKeeps("stale_casks_corrupt_room", "Caskroom/flux/2.0/marker");
+}
+
 // --- --old-versions ------------------------------------------------------
 
 test "--old-versions --yes sweeps cask per-version cache + caskroom + history row" {
