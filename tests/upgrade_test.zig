@@ -225,7 +225,7 @@ test "force-upgrade-cask orchestration: pin survives removeRecord + recordInstal
     defer db.close();
     try insertPinnedCask(&db, "firefox", "1.0");
 
-    const was_pinned = malt.cli_pin.isPinned(&db, "firefox");
+    const was_pinned = malt.cli_pin.isPinned(&db, .cask, "firefox");
     try testing.expect(was_pinned);
 
     // Step 1: uninstall side — DB row removed by removeRecord.
@@ -247,10 +247,10 @@ test "force-upgrade-cask orchestration: pin survives removeRecord + recordInstal
 
     // Step 3: orchestration must reapply the pin.
     if (was_pinned) {
-        _ = try malt.cli_pin.setPinned(&db, "firefox", true);
+        _ = try malt.cli_pin.setPinned(&db, .cask, "firefox", true);
     }
 
-    try testing.expect(malt.cli_pin.isPinned(&db, "firefox"));
+    try testing.expect(malt.cli_pin.isPinned(&db, .cask, "firefox"));
 }
 
 test "recordKeg defaults pinned=0 when no prior keg of that name exists" {
@@ -388,9 +388,9 @@ test "pinSkip honours --force and audit_mode for casks too" {
     defer db.close();
     try insertPinnedCask(&db, "held-cask", "1.0");
 
-    try testing.expect(upgrade.pinSkip(&db, "held-cask", false, false));
-    try testing.expect(!upgrade.pinSkip(&db, "held-cask", true, false));
-    try testing.expect(!upgrade.pinSkip(&db, "held-cask", false, true));
+    try testing.expect(upgrade.pinSkip(&db, .cask, "held-cask", false, false));
+    try testing.expect(!upgrade.pinSkip(&db, .cask, "held-cask", true, false));
+    try testing.expect(!upgrade.pinSkip(&db, .cask, "held-cask", false, true));
 }
 
 test "mt upgrade --pinned --dry-run reaches the cask path (no formula-only override)" {
@@ -430,16 +430,16 @@ test "pinSkip honours --force and audit_mode: pinned + override = no skip" {
     try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('loose', 'loose', '1.0', 'sha', '/cellar/loose/1.0');");
 
     // pinned + neither override = skip
-    try testing.expect(upgrade.pinSkip(&db, "forced", false, false));
+    try testing.expect(upgrade.pinSkip(&db, .formula, "forced", false, false));
     // pinned + force = no skip (the whole point of --force)
-    try testing.expect(!upgrade.pinSkip(&db, "forced", true, false));
+    try testing.expect(!upgrade.pinSkip(&db, .formula, "forced", true, false));
     // pinned + audit = no skip (so `--pinned --dry-run` walks the row)
-    try testing.expect(!upgrade.pinSkip(&db, "forced", false, true));
+    try testing.expect(!upgrade.pinSkip(&db, .formula, "forced", false, true));
     // unpinned: never skipped, force/audit or not
-    try testing.expect(!upgrade.pinSkip(&db, "loose", false, false));
-    try testing.expect(!upgrade.pinSkip(&db, "loose", true, false));
+    try testing.expect(!upgrade.pinSkip(&db, .formula, "loose", false, false));
+    try testing.expect(!upgrade.pinSkip(&db, .formula, "loose", true, false));
     // unknown name: not pinned, not skipped
-    try testing.expect(!upgrade.pinSkip(&db, "ghost", false, false));
+    try testing.expect(!upgrade.pinSkip(&db, .formula, "ghost", false, false));
 }
 
 // Regression: a Homebrew revision-bump upgrade leaves the old keg row
@@ -856,4 +856,74 @@ test "backfillCaskTap on an absent token is a silent no-op" {
     defer stmt.finalize();
     _ = try stmt.step();
     try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
+}
+
+// --- a name installed as both a formula and a cask ------------------------
+
+/// Seeds `box` as both kinds, with each row's pin set independently.
+fn seedSharedPins(prefix: [:0]const u8, keg_pinned: bool, cask_pinned: bool) !void {
+    var db = try openSeededDb(prefix);
+    defer db.close();
+    var buf: [512]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(&buf,
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('box', 'box', '1.0', 'sha', '/cellar/box/1.0', {d});
+        \\INSERT INTO casks (token, name, version, url, pinned) VALUES ('box', 'Box', '2.0', 'https://example.invalid/box.zip', {d});
+    , .{ @intFromBool(keg_pinned), @intFromBool(cask_pinned) });
+    try db.exec(sql);
+}
+
+test "pinSkip reads each kind's own pin when a formula and a cask share a name" {
+    const path = try setupPrefix("pinskip_shared");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedSharedPins(path, false, true);
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try testing.expect(upgrade.pinSkip(&db, .cask, "box", false, false));
+    try testing.expect(!upgrade.pinSkip(&db, .formula, "box", false, false));
+}
+
+/// Runs an offline `upgrade --cask --dry-run box`, capturing stderr into `captured`.
+/// Offline, a cask that clears the pin gate stops at its fetch.
+fn upgradeSharedCask(captured: *std.ArrayList(u8)) void {
+    const prior_quiet = output.isQuiet();
+    defer output.setQuiet(prior_quiet);
+    output.setQuiet(false);
+    output.beginStderrCapture(testing.allocator, captured);
+    defer output.endStderrCapture();
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    upgrade.execute(&ctx, testing.allocator, &.{ "--cask", "--dry-run", "box" }) catch {};
+}
+
+test "upgrade holds a pinned cask even when the same-named formula is not pinned" {
+    const path = try setupPrefix("upgrade_shared_cask_pinned");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedSharedPins(path, false, true);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    upgradeSharedCask(&captured);
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "box is pinned, skipped") != null);
+}
+
+test "upgrade does not hold an unpinned cask because the same-named formula is pinned" {
+    const path = try setupPrefix("upgrade_shared_keg_pinned");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedSharedPins(path, true, false);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    upgradeSharedCask(&captured);
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "is pinned, skipped") == null);
+    // Reached the fetch, which is where an unheld cask goes next.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not fetch cask info for box") != null);
 }

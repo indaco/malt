@@ -975,6 +975,21 @@ test "parseArgs picks up --dry-run regardless of position" {
     try testing.expect(p.dry_run);
 }
 
+test "parseArgs reads both spellings of each kind flag" {
+    const bare = try parseArgs(&.{"wget"});
+    try testing.expect(!bare.force_cask and !bare.force_formula);
+
+    inline for (.{ "--cask", "--casks" }) |flag| {
+        const p = try parseArgs(&.{ "wget", flag });
+        try testing.expect(p.force_cask and !p.force_formula);
+        try testing.expectEqualStrings("wget", p.name.?);
+    }
+    inline for (.{ "--formula", "--formulae" }) |flag| {
+        const p = try parseArgs(&.{ flag, "wget" });
+        try testing.expect(p.force_formula and !p.force_cask);
+    }
+}
+
 // --- formatIso8601 -------------------------------------------------------
 
 test "formatIso8601 renders the unix epoch as 1970-01-01T00:00:00Z" {

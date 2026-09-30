@@ -59,9 +59,9 @@ test "pinSkip honours --force regardless of pin state" {
     try schema.initSchema(&db);
 
     // pinSkip on an unpinned name → false regardless of force/audit.
-    try testing.expect(!upgrade.pinSkip(&db, "ghost", false, false));
-    try testing.expect(!upgrade.pinSkip(&db, "ghost", true, false));
-    try testing.expect(!upgrade.pinSkip(&db, "ghost", false, true));
+    try testing.expect(!upgrade.pinSkip(&db, .formula, "ghost", false, false));
+    try testing.expect(!upgrade.pinSkip(&db, .formula, "ghost", true, false));
+    try testing.expect(!upgrade.pinSkip(&db, .formula, "ghost", false, true));
 }
 
 // --- execute branches --------------------------------------------------

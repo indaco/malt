@@ -798,3 +798,88 @@ test "execute --cask reports a casks table it cannot read instead of not-install
 
     try expectInfoRefusesDb(&.{ "--cask", "firefox" });
 }
+
+// --- a name installed as both a formula and a cask ----------------------
+
+fn seedCaskNamedWget(prefix: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try db.exec("INSERT INTO casks (token, name, version, url) VALUES ('wget', 'Wget', '9.9', 'https://example/wget.dmg');");
+}
+
+/// Runs `info` with stdout in a file and stderr captured. Caller frees stdout.
+fn captureBoth(args: []const []const u8, tag: []const u8, stderr_buf: *std.ArrayList(u8)) ![]u8 {
+    unquiet();
+    defer quiet();
+    output.beginStderrCapture(testing.allocator, stderr_buf);
+    defer output.endStderrCapture();
+    return captureExecute(testing.allocator, args, tag);
+}
+
+const notice = "Treating wget as a formula";
+
+test "a bare info on a name shared with a cask shows the formula and says so" {
+    var s = try Scratch.init(testing.allocator, "shared_bare");
+    defer s.deinit(testing.allocator);
+    try seedFormulaKeg(testing.allocator, s.path);
+    try seedCaskNamedWget(s.path);
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    const out = try captureBoth(&.{"wget"}, "shared_bare", &err_buf);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "1.21") != null);
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) != null);
+}
+
+test "info --json on a shared name keeps stdout pure JSON" {
+    var s = try Scratch.init(testing.allocator, "shared_json");
+    defer s.deinit(testing.allocator);
+    try seedFormulaKeg(testing.allocator, s.path);
+    try seedCaskNamedWget(s.path);
+
+    const prior_mode: output.OutputMode = if (output.isJson()) .json else .human;
+    output.setMode(.json);
+    defer output.setMode(prior_mode);
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    const out = try captureBoth(&.{"wget"}, "shared_json", &err_buf);
+    defer testing.allocator.free(out);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    try testing.expect(std.mem.indexOf(u8, out, "Treating") == null);
+}
+
+test "info with a kind flag on a shared name stays silent" {
+    var s = try Scratch.init(testing.allocator, "shared_flagged");
+    defer s.deinit(testing.allocator);
+    try seedFormulaKeg(testing.allocator, s.path);
+    try seedCaskNamedWget(s.path);
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    // Both flags read as "neither" for info, but either one is an explicit choice.
+    inline for (.{ &.{ "--formula", "wget" }, &.{ "--formula", "--cask", "wget" } }, 0..) |args, i| {
+        const out = try captureBoth(args, "shared_flagged" ++ .{'0' + i}, &err_buf);
+        testing.allocator.free(out);
+    }
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
+}
+
+test "a bare info on a formula-only name prints no notice" {
+    var s = try Scratch.init(testing.allocator, "formula_only");
+    defer s.deinit(testing.allocator);
+    try seedFormulaKeg(testing.allocator, s.path);
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    const out = try captureBoth(&.{"wget"}, "formula_only", &err_buf);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
+}

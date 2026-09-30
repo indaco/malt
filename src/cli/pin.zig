@@ -118,3 +118,46 @@ fn changes(db: *sqlite.Database) i64 {
     if (!has) return 0;
     return stmt.columnInt(0);
 }
+
+const testing = std.testing;
+
+fn openSharedNameDb() !sqlite.Database {
+    var db = try sqlite.Database.open(":memory:");
+    errdefer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('box', 'box', '1.0', 'sha', '/cellar/box/1.0');
+        \\INSERT INTO casks (token, name, version, url) VALUES ('box', 'Box', '2.0', 'https://example.invalid/box.zip');
+    );
+    return db;
+}
+
+test "a cask pin is read and written on the cask row even when a formula shares the name" {
+    var db = try openSharedNameDb();
+    defer db.close();
+
+    try testing.expect(try setPinned(&db, .cask, "box", true));
+    try testing.expect(isPinned(&db, .cask, "box"));
+    try testing.expect(!isPinned(&db, .formula, "box"));
+}
+
+test "a formula pin is read and written on the keg row even when a cask shares the name" {
+    var db = try openSharedNameDb();
+    defer db.close();
+
+    try testing.expect(try setPinned(&db, .formula, "box", true));
+    try testing.expect(isPinned(&db, .formula, "box"));
+    try testing.expect(!isPinned(&db, .cask, "box"));
+}
+
+test "a kind with no row of that name is not pinned and cannot be set" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec("INSERT INTO casks (token, name, version, url, pinned) VALUES ('solo', 'Solo', '1.0', 'https://example.invalid/s.zip', 1);");
+
+    // A pinned cask must not leak into the formula's answer.
+    try testing.expect(!isPinned(&db, .formula, "solo"));
+    try testing.expect(!try setPinned(&db, .formula, "solo", true));
+    try testing.expect(isPinned(&db, .cask, "solo"));
+}

@@ -1388,3 +1388,166 @@ test "a completed rollback survives a malformed MALT_CACHE" {
     try testing.expectEqualStrings("1.20", ver);
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "rolled back to 1.20") != null);
 }
+
+// --- a name installed as both a formula and a cask ------------------------
+
+/// `box` as a keg at 1.22 with 1.20 retained in the store, and as a cask at
+/// 3.0 with 2.0 in its history, so each side's listing is recognisable.
+fn seedSharedName(prefix: [:0]const u8) !void {
+    try insertCurrentKeg(prefix, "box", "1.22");
+    try seedStoreEntry(prefix, sha_older, "box", "1.20", 0);
+    try seedCask(prefix, "box", "3.0");
+    try seedCaskVersion(prefix, "box", "2.0", "2026-01-01T00:00:00");
+    try seedCaskVersion(prefix, "box", "3.0", "2026-02-01T00:00:00");
+}
+
+const SharedRun = struct {
+    stdout: std.ArrayList(u8) = .empty,
+    stderr: std.ArrayList(u8) = .empty,
+
+    fn deinit(self: *SharedRun) void {
+        self.stdout.deinit(testing.allocator);
+        self.stderr.deinit(testing.allocator);
+    }
+
+    fn run(self: *SharedRun, args: []const []const u8) !void {
+        const prior_quiet = output.isQuiet();
+        defer output.setQuiet(prior_quiet);
+        output.setQuiet(false);
+        output.beginStdoutCapture(testing.allocator, &self.stdout);
+        defer output.endStdoutCapture();
+        output.beginStderrCapture(testing.allocator, &self.stderr);
+        defer output.endStderrCapture();
+        const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
+        return rollback.execute(&ctx, testing.allocator, args);
+    }
+
+    fn saw(self: *const SharedRun, comptime stream: enum { stdout, stderr }, needle: []const u8) bool {
+        const hay = if (stream == .stdout) self.stdout.items else self.stderr.items;
+        return std.mem.indexOf(u8, hay, needle) != null;
+    }
+};
+
+const notice = "Treating box as a formula";
+
+test "rollback --cask on a name shared with a formula reaches the cask's history" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "shared_cask_list");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try seedSharedName(prefix);
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var r: SharedRun = .{};
+    defer r.deinit();
+    try r.run(&.{ "--cask", "--list", "box" });
+
+    try testing.expect(r.saw(.stdout, "2.0"));
+    try testing.expect(!r.saw(.stdout, "1.20"));
+    try testing.expect(!r.saw(.stderr, notice));
+}
+
+test "rollback --casks --list --json on a shared name emits the cask listing as JSON" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "shared_cask_json");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try seedSharedName(prefix);
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    const prior = output.isJson();
+    defer output.setMode(if (prior) .json else .human);
+    output.setMode(.json);
+
+    var r: SharedRun = .{};
+    defer r.deinit();
+    try r.run(&.{ "box", "--list", "--casks" });
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, r.stdout.items, .{});
+    defer parsed.deinit();
+    try testing.expect(r.saw(.stdout, "\"2.0\""));
+    try testing.expect(!r.saw(.stdout, "1.20"));
+}
+
+test "a bare rollback on a shared name lists the formula and says so" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "shared_bare");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try seedSharedName(prefix);
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var r: SharedRun = .{};
+    defer r.deinit();
+    try r.run(&.{ "--list", "box" });
+
+    try testing.expect(r.saw(.stdout, "1.20"));
+    try testing.expect(!r.saw(.stdout, "2.0"));
+    try testing.expect(r.saw(.stderr, notice));
+}
+
+test "rollback --formulae on a shared name lists the formula without the notice" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "shared_formula");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try seedSharedName(prefix);
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var r: SharedRun = .{};
+    defer r.deinit();
+    try r.run(&.{ "--formulae", "--list", "box" });
+
+    try testing.expect(r.saw(.stdout, "1.20"));
+    try testing.expect(!r.saw(.stderr, notice));
+}
+
+test "rollback --formula on a cask-only name is not installed instead of rolling back the cask" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "formula_on_cask");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try seedCask(prefix, "box", "3.0");
+    try seedCaskVersion(prefix, "box", "2.0", "2026-01-01T00:00:00");
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var r: SharedRun = .{};
+    defer r.deinit();
+    try testing.expectError(error.Aborted, r.run(&.{ "--formula", "--list", "box" }));
+
+    try testing.expect(r.saw(.stderr, "box is not installed"));
+    try testing.expect(!r.saw(.stdout, "2.0"));
+}
+
+test "rollback --cask on a formula-only name is not installed instead of rolling back the formula" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "cask_on_formula");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try insertCurrentKeg(prefix, "box", "1.22");
+    try seedStoreEntry(prefix, sha_older, "box", "1.20", 0);
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var r: SharedRun = .{};
+    defer r.deinit();
+    try testing.expectError(error.Aborted, r.run(&.{ "--cask", "--list", "box" }));
+
+    try testing.expect(r.saw(.stderr, "box is not installed"));
+    try testing.expect(!r.saw(.stdout, "1.20"));
+}
+
+test "rollback refuses --cask with --formula ahead of the usage check, as brew does" {
+    var r: SharedRun = .{};
+    defer r.deinit();
+    try testing.expectError(error.Aborted, r.run(&.{ "--cask", "--formula", "box" }));
+    try testing.expectError(error.Aborted, r.run(&.{ "--formula", "--cask" }));
+
+    try testing.expect(r.saw(.stderr, "Options --formula and --cask are mutually exclusive"));
+    try testing.expect(!r.saw(.stderr, "Usage"));
+}

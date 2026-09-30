@@ -435,3 +435,17 @@ fn fishHasLong(verb: []const u8, long: []const u8) bool {
     }
     return false;
 }
+
+test "pin, unpin and rollback completions expose brew's kind flags in every shell" {
+    // A name shared by a formula and a cask is only reachable on the cask side
+    // through --cask, so no shell may drop a spelling.
+    inline for (.{ "--formula", "--formulae", "--cask", "--casks" }) |flag| {
+        try testing.expect(hasFlagToken(try bashFlagsFor("pin|unpin)"), flag));
+        try testing.expect(hasFlagToken(try bashFlagsFor("rollback)"), flag));
+        try expectContains(try zshCaseFor("                pin|unpin)"), "'" ++ flag ++ "[");
+        try expectContains(try zshCaseFor("                rollback)"), "'" ++ flag ++ "[");
+        inline for (.{ "pin", "unpin", "rollback" }) |verb| {
+            try testing.expect(fishHasLong(verb, flag[2..]));
+        }
+    }
+}

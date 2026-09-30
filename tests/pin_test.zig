@@ -155,9 +155,9 @@ test "isPinned reflects DB column" {
     try insertKeg(&db, "uno", false);
     try insertKeg(&db, "due", true);
 
-    try testing.expect(!cli_pin.isPinned(&db, "uno"));
-    try testing.expect(cli_pin.isPinned(&db, "due"));
-    try testing.expect(!cli_pin.isPinned(&db, "missing"));
+    try testing.expect(!cli_pin.isPinned(&db, .formula, "uno"));
+    try testing.expect(cli_pin.isPinned(&db, .formula, "due"));
+    try testing.expect(!cli_pin.isPinned(&db, .formula, "missing"));
 }
 
 fn insertCask(db: *sqlite.Database, token: []const u8, pinned: bool) !void {
@@ -236,7 +236,7 @@ test "mt pin <cask> is idempotent — re-pinning a cask still succeeds" {
     try testing.expectEqual(true, try readCaskPinned(&db, "obsidian"));
 }
 
-test "isPinned reflects casks.pinned via fall-through" {
+test "isPinned(.cask) reflects casks.pinned" {
     const path = try setupPrefix("ispinned_cask");
     defer testing.allocator.free(path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
@@ -247,8 +247,8 @@ test "isPinned reflects casks.pinned via fall-through" {
     try insertCask(&db, "loose-cask", false);
     try insertCask(&db, "held-cask", true);
 
-    try testing.expect(!cli_pin.isPinned(&db, "loose-cask"));
-    try testing.expect(cli_pin.isPinned(&db, "held-cask"));
+    try testing.expect(!cli_pin.isPinned(&db, .cask, "loose-cask"));
+    try testing.expect(cli_pin.isPinned(&db, .cask, "held-cask"));
 }
 
 test "mt pin is idempotent — re-pinning is a no-op success" {
@@ -268,4 +268,224 @@ test "mt pin is idempotent — re-pinning is a no-op success" {
     var db = try openDb(path);
     defer db.close();
     try testing.expectEqual(true, try readPinned(&db, "tre"));
+}
+
+// --- a name installed as both a formula and a cask ----------------------
+
+fn seedSharedName(prefix: [:0]const u8, keg_pinned: bool, cask_pinned: bool) !void {
+    var db = try openDb(prefix);
+    defer db.close();
+    try insertKeg(&db, "box", keg_pinned);
+    try insertCask(&db, "box", cask_pinned);
+}
+
+/// Runs pin/unpin with stderr captured into `buf`. Returns the command's
+/// error so callers can assert refusals alongside the message.
+fn runCaptured(
+    comptime unpin: bool,
+    args: []const []const u8,
+    buf: *std.ArrayList(u8),
+) !void {
+    const prior_quiet = malt.output.isQuiet();
+    defer malt.output.setQuiet(prior_quiet);
+    malt.output.setQuiet(false);
+    malt.output.beginStderrCapture(testing.allocator, buf);
+    defer malt.output.endStderrCapture();
+    const run = if (unpin) cli_pin.executeUnpin else cli_pin.execute;
+    return run(&malt.app_ctx.debug_ctx, testing.allocator, args);
+}
+
+fn expectPins(prefix: [:0]const u8, keg: bool, cask: bool) !void {
+    var db = try openDb(prefix);
+    defer db.close();
+    try testing.expectEqual(keg, try readPinned(&db, "box"));
+    try testing.expectEqual(cask, try readCaskPinned(&db, "box"));
+}
+
+const notice = "Treating box as a formula";
+
+test "mt pin --cask on a name shared with a formula pins only the cask" {
+    const path = try setupPrefix("pin_shared_cask");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedSharedName(path, false, false);
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    try runCaptured(false, &.{ "--cask", "box" }, &err_buf);
+
+    try expectPins(path, false, true);
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
+}
+
+test "mt unpin --casks on a name shared with a formula clears only the cask" {
+    const path = try setupPrefix("unpin_shared_cask");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedSharedName(path, true, true);
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    try runCaptured(true, &.{ "box", "--casks" }, &err_buf);
+
+    try expectPins(path, true, false);
+}
+
+test "a bare mt pin on a shared name pins the formula and says so" {
+    const path = try setupPrefix("pin_shared_bare");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedSharedName(path, false, false);
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    try runCaptured(false, &.{"box"}, &err_buf);
+
+    try expectPins(path, true, false);
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) != null);
+}
+
+test "a bare mt unpin on a shared name leaves a pinned cask held and says so" {
+    const path = try setupPrefix("unpin_shared_bare");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedSharedName(path, true, true);
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    try runCaptured(true, &.{"box"}, &err_buf);
+
+    // The user is told the formula was chosen, so the cask's hold is not a surprise.
+    try expectPins(path, false, true);
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) != null);
+}
+
+test "mt pin --formula and -q on a shared name pin the formula without the notice" {
+    const path = try setupPrefix("pin_shared_silenced");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedSharedName(path, false, false);
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    try runCaptured(false, &.{ "--formulae", "box" }, &err_buf);
+    try expectPins(path, true, false);
+    try runCaptured(true, &.{ "-q", "box" }, &err_buf);
+    try expectPins(path, false, false);
+
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
+}
+
+test "a bare mt pin on a cask-only name still pins the cask, without a notice" {
+    const path = try setupPrefix("pin_cask_only_bare");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    {
+        var db = try openDb(path);
+        defer db.close();
+        try insertCask(&db, "box", false);
+    }
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    try runCaptured(false, &.{"box"}, &err_buf);
+
+    var db = try openDb(path);
+    defer db.close();
+    try testing.expect(try readCaskPinned(&db, "box"));
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
+}
+
+test "mt pin --formula on a cask-only name is not installed and touches nothing" {
+    const path = try setupPrefix("pin_formula_on_cask");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    {
+        var db = try openDb(path);
+        defer db.close();
+        try insertCask(&db, "box", false);
+    }
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    try testing.expectError(error.Aborted, runCaptured(false, &.{ "--formula", "box" }, &err_buf));
+
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "box is not installed") != null);
+    var db = try openDb(path);
+    defer db.close();
+    try testing.expect(!try readCaskPinned(&db, "box"));
+}
+
+test "mt pin --cask on a formula-only name is not installed and touches nothing" {
+    const path = try setupPrefix("pin_cask_on_formula");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    {
+        var db = try openDb(path);
+        defer db.close();
+        try insertKeg(&db, "box", false);
+    }
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    try testing.expectError(error.Aborted, runCaptured(false, &.{ "--cask", "box" }, &err_buf));
+
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "box is not installed") != null);
+    var db = try openDb(path);
+    defer db.close();
+    try testing.expect(!try readPinned(&db, "box"));
+}
+
+test "mt pin refuses --cask with --formula ahead of the usage check, as brew does" {
+    const path = try setupPrefix("pin_both_kinds");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedSharedName(path, false, false);
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    try testing.expectError(error.Aborted, runCaptured(false, &.{ "--cask", "--formula", "box" }, &err_buf));
+    // No name at all: the conflict still wins over the usage line.
+    try testing.expectError(error.Aborted, runCaptured(true, &.{ "--formula", "--cask" }, &err_buf));
+
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "Options --formula and --cask are mutually exclusive") != null);
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "Usage") == null);
+    try expectPins(path, false, false);
+}
+
+test "mt pin refuses an unknown flag instead of reading it as the name" {
+    const path = try setupPrefix("pin_unknown_flag");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedSharedName(path, false, false);
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    try testing.expectError(error.Aborted, runCaptured(false, &.{ "--bogus", "box" }, &err_buf));
+
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "Unknown flag: --bogus") != null);
+    try expectPins(path, false, false);
+}
+
+test "mt pin with only a kind flag prints the usage line" {
+    const path = try setupPrefix("pin_flag_no_name");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    try testing.expectError(error.Aborted, runCaptured(false, &.{"--cask"}, &err_buf));
+
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "Usage: mt pin <name>") != null);
 }
