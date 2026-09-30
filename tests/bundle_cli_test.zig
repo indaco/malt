@@ -41,6 +41,20 @@ const Scratch = struct {
     }
 };
 
+/// A refusal exits 1 quietly through `error.Aborted`, so the reason has to
+/// be on stderr in words; a raw error name reads as a malt crash.
+fn expectRefused(ctx: *const malt.app_ctx.AppCtx, args: []const []const u8, needle: []const u8) !void {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(error.Aborted, bundle.execute(ctx, testing.allocator, args));
+    if (std.mem.indexOf(u8, captured.items, needle) == null) {
+        std.debug.print("stderr lacks \"{s}\":\n{s}\n", .{ needle, captured.items });
+        return error.TestExpectedEqual;
+    }
+}
+
 fn quiet() void {
     output.setQuiet(true);
 }
@@ -82,15 +96,10 @@ test "execute -h is the short alias for --help" {
     try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"-h"});
 }
 
-test "execute on an unknown subcommand returns InvalidArgs" {
+test "execute on an unknown subcommand refuses it by name" {
     var s = try Scratch.init(testing.allocator, "unknown");
     defer s.deinit(testing.allocator);
-    quiet();
-    defer unquiet();
-    try testing.expectError(
-        bundle.BundleError.InvalidArgs,
-        bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"frobnicate"}),
-    );
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{"frobnicate"}, "Unknown bundle subcommand: frobnicate");
 }
 
 // --- list ---------------------------------------------------------------
@@ -129,17 +138,11 @@ test "list emits a row per registered bundle" {
 
 // --- remove -------------------------------------------------------------
 
-test "remove with no name returns InvalidArgs" {
+test "remove with no name says what it expected" {
     var s = try Scratch.init(testing.allocator, "remove_noargs");
     defer s.deinit(testing.allocator);
     try initDb(s.path);
-
-    quiet();
-    defer unquiet();
-    try testing.expectError(
-        bundle.BundleError.InvalidArgs,
-        bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"remove"}),
-    );
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{"remove"}, "expected <name>");
 }
 
 test "remove deletes the matching row, idempotent on second call" {
@@ -168,17 +171,11 @@ test "remove deletes the matching row, idempotent on second call" {
 
 // --- import ------------------------------------------------------------
 
-test "import with no path returns InvalidArgs" {
+test "import with no path says what it expected" {
     var s = try Scratch.init(testing.allocator, "import_noargs");
     defer s.deinit(testing.allocator);
     try initDb(s.path);
-
-    quiet();
-    defer unquiet();
-    try testing.expectError(
-        bundle.BundleError.InvalidArgs,
-        bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"import"}),
-    );
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{"import"}, "expected <file>");
 }
 
 test "import on a missing path names the file it could not read" {
@@ -503,12 +500,7 @@ test "remove --purge refuses a legacy relative manifest_path and keeps the row" 
         _ = try stmt.step();
     }
 
-    quiet();
-    defer unquiet();
-    try testing.expectError(
-        bundle.BundleError.BundlefileNotFound,
-        bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "--purge", "--dry-run", "legacy" }),
-    );
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "remove", "--purge", "--dry-run", "legacy" }, "relative manifest path");
 
     // Refusal happens before unregister, so the user can re-import by name.
     const stored = try storedManifestPath(testing.allocator, s.path, "legacy");
@@ -1069,9 +1061,64 @@ test "bundle export rejects a --format with no value instead of defaulting to a 
         .stdout = test_io.testSink(),
         .stderr = test_io.testSink(),
     };
-    quiet();
-    defer unquiet();
-    try testing.expectError(error.InvalidArgs, bundle.execute(&ctx, testing.allocator, &.{ "export", "--format" }));
+    try expectRefused(&ctx, &.{ "export", "--format" }, "--format expects brewfile or json");
+}
+
+test "bundle create refuses an unknown --format in words" {
+    var s = try Scratch.init(testing.allocator, "create_bad_format");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "create", "--format", "yaml" }, "--format expects brewfile or json");
+}
+
+test "bundle create names the path it could not write" {
+    var s = try Scratch.init(testing.allocator, "create_unwritable");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    // A regular file where the parent directory should be.
+    const blocker = try std.fmt.allocPrint(testing.allocator, "{s}/blocker", .{s.path});
+    defer testing.allocator.free(blocker);
+    (try test_io.createFileAbsolute(std.Options.debug_io, blocker, .{})).close(std.Options.debug_io);
+    const out = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{blocker});
+    defer testing.allocator.free(out);
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "create", out }, "Cannot write");
+}
+
+test "bundle list, remove and cleanup refuse a table they cannot read in words" {
+    // Each reads the database on its own path; none may end in a raw error.
+    const cases = .{
+        .{ "bundles", &[_][]const u8{"list"} },
+        .{ "bundles", &[_][]const u8{ "remove", "x" } },
+        .{ "kegs", &[_][]const u8{ "cleanup", "--dry-run" } },
+    };
+    inline for (cases, 0..) |case, i| {
+        var s = try Scratch.init(testing.allocator, "read_corrupt_" ++ std.fmt.comptimePrint("{d}", .{i}));
+        defer s.deinit(testing.allocator);
+        {
+            var db_path_buf: [512]u8 = undefined;
+            const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+            var db = try sqlite.Database.open(db_path);
+            defer db.close();
+            try schema.initSchema(&db);
+            try db.exec("INSERT INTO bundles (name, manifest_path, created_at, version) VALUES ('x', NULL, 0, 1);");
+        }
+        var db_path_buf: [512]u8 = undefined;
+        try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0), case[0]);
+
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(testing.allocator);
+        try args.appendSlice(testing.allocator, case[1]);
+        // cleanup needs a manifest to diff the installed set against.
+        const brewfile = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+        defer testing.allocator.free(brewfile);
+        if (std.mem.eql(u8, case[1][0], "cleanup")) {
+            const f = try test_io.createFileAbsolute(std.Options.debug_io, brewfile, .{ .truncate = true });
+            defer f.close(std.Options.debug_io);
+            try f.writeStreamingAll(std.Options.debug_io, "brew \"wget\"\n");
+            try args.append(testing.allocator, brewfile);
+        }
+        try expectRefused(&malt.app_ctx.debug_ctx, args.items, "package database");
+    }
 }
 
 test "bundle export names an unknown flag as ignored, like the other bundle subcommands" {
