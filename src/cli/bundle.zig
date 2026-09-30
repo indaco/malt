@@ -128,13 +128,7 @@ fn cleanupDispatcher(ctx: *const AppCtx) cleanup_mod.Dispatcher {
     };
 }
 
-pub const BundleError = error{
-    InvalidArgs,
-    BundlefileNotFound,
-    DatabaseError,
-    RunnerFailed,
-    WriteFailed,
-};
+pub const BundleError = error{DatabaseError};
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
@@ -155,7 +149,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (std.mem.eql(u8, sub, "import")) return cmdImport(ctx, allocator, rest);
 
     output.err("Unknown bundle subcommand: {s}", .{sub});
-    return BundleError.InvalidArgs;
+    return error.Aborted;
 }
 
 fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
@@ -195,7 +189,7 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
         .dispatcher = &dispatcher,
     }) catch |e| {
         output.err("bundle install failed: {s}", .{runner_mod.describeError(e)});
-        return BundleError.RunnerFailed;
+        return error.Aborted;
     };
     defer report.deinit();
 
@@ -216,7 +210,7 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
         output.warn("Interrupted — remaining bundle members were not installed.", .{});
         return error.UserInterrupted;
     }
-    if (any_hard) return BundleError.RunnerFailed;
+    if (any_hard) return error.Aborted;
     output.success("bundle install complete", .{});
 }
 
@@ -279,21 +273,21 @@ fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
         var db = try openDb(ctx);
         defer db.close();
         var installed = cleanup_mod.collectInstalled(allocator, &db) catch
-            return BundleError.DatabaseError;
+            return unreadableDb(&db);
         defer installed.deinit();
         var p = cleanup_mod.diff(
             allocator,
             manifest,
             installed.formulas,
             installed.casks,
-        ) catch return BundleError.RunnerFailed;
+        ) catch |e| return planFailed(e);
         errdefer p.deinit();
         const spared = cleanup_mod.dropKeptDependencies(allocator, &db, &p) catch
-            return BundleError.DatabaseError;
+            return unreadableDb(&db);
         defer cleanup_mod.freeNames(p.allocator, spared);
         for (spared) |n| output.info("keeping {s}: an installed package depends on it", .{n});
         cleanup_mod.orderForRemoval(allocator, &db, &p) catch
-            return BundleError.DatabaseError;
+            return unreadableDb(&db);
         break :blk p;
     };
     defer plan.deinit();
@@ -323,7 +317,7 @@ fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
         .dispatcher = &dispatcher,
     }) catch |e| {
         output.err("bundle cleanup failed: {s}", .{@errorName(e)});
-        return BundleError.RunnerFailed;
+        return error.Aborted;
     };
     defer report.deinit();
 
@@ -335,7 +329,7 @@ fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     }
     if (report.hasFailure()) {
         output.err("bundle cleanup completed with {d} failure(s)", .{report.failures.len});
-        return BundleError.RunnerFailed;
+        return error.Aborted;
     }
     output.success("bundle cleanup complete", .{});
 }
@@ -345,11 +339,11 @@ fn cmdList(ctx: *const AppCtx) !void {
     defer db.close();
 
     var stmt = db.prepare("SELECT name, created_at FROM bundles ORDER BY name;") catch
-        return BundleError.DatabaseError;
+        return unreadableDb(&db);
     defer stmt.finalize();
 
     var any = false;
-    while (stmt.step() catch return BundleError.DatabaseError) {
+    while (stmt.step() catch return unreadableDb(&db)) {
         const n = stmt.columnText(0) orelse continue;
         const ts = stmt.columnInt(1);
         output.plain("{s}\t{d}", .{ std.mem.sliceTo(n, 0), ts });
@@ -393,7 +387,7 @@ fn resolveRemoveArgs(rest: []const []const u8, global_dry_run: bool) ?RemoveArgs
 fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     const args = resolveRemoveArgs(rest, output.isDryRun()) orelse {
         output.err("bundle remove: expected <name>", .{});
-        return BundleError.InvalidArgs;
+        return error.Aborted;
     };
 
     if (args.purge) try purgeMembers(ctx, allocator, args);
@@ -408,10 +402,10 @@ fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     defer db.close();
 
     var stmt = db.prepare("DELETE FROM bundles WHERE name = ?;") catch
-        return BundleError.DatabaseError;
+        return unwritableDb(&db);
     defer stmt.finalize();
-    stmt.bindText(1, args.name) catch return BundleError.DatabaseError;
-    _ = stmt.step() catch return BundleError.DatabaseError;
+    stmt.bindText(1, args.name) catch return unwritableDb(&db);
+    _ = stmt.step() catch return unwritableDb(&db);
     output.success("bundle removed: {s}", .{args.name});
 }
 
@@ -434,17 +428,17 @@ fn purgeMembers(ctx: *const AppCtx, allocator: std.mem.Allocator, args: RemoveAr
         var db = try openDb(ctx);
         defer db.close();
         var installed = cleanup_mod.collectInstalled(allocator, &db) catch
-            return BundleError.DatabaseError;
+            return unreadableDb(&db);
         defer installed.deinit();
         var p = cleanup_mod.selectMembers(
             allocator,
             manifest,
             installed.formulas,
             installed.casks,
-        ) catch return BundleError.RunnerFailed;
+        ) catch |e| return planFailed(e);
         errdefer p.deinit();
         cleanup_mod.orderForRemoval(allocator, &db, &p) catch
-            return BundleError.DatabaseError;
+            return unreadableDb(&db);
         break :blk p;
     };
     defer plan.deinit();
@@ -465,7 +459,7 @@ fn purgeMembers(ctx: *const AppCtx, allocator: std.mem.Allocator, args: RemoveAr
 
     if (!args.yes and !output.confirmTyped("yes", "Type 'yes' to remove these packages: ")) {
         output.warn("aborted", .{});
-        return BundleError.InvalidArgs;
+        return error.Aborted;
     }
 
     const dispatcher = cleanupDispatcher(ctx);
@@ -474,13 +468,13 @@ fn purgeMembers(ctx: *const AppCtx, allocator: std.mem.Allocator, args: RemoveAr
         .dispatcher = &dispatcher,
     }) catch |e| {
         output.err("bundle purge failed: {s}", .{@errorName(e)});
-        return BundleError.RunnerFailed;
+        return error.Aborted;
     };
     defer report.deinit();
 
     if (report.hasFailure()) {
         output.err("bundle purge completed with {d} failure(s)", .{report.failures.len});
-        return BundleError.RunnerFailed;
+        return error.Aborted;
     }
 }
 
@@ -495,25 +489,25 @@ fn lookupManifestPath(
     defer db.close();
 
     var stmt = db.prepare("SELECT manifest_path FROM bundles WHERE name = ?;") catch
-        return BundleError.DatabaseError;
+        return unreadableDb(&db);
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return BundleError.DatabaseError;
+    stmt.bindText(1, name) catch return unreadableDb(&db);
 
-    if (!(stmt.step() catch return BundleError.DatabaseError)) {
+    if (!(stmt.step() catch return unreadableDb(&db))) {
         output.err("bundle not registered: {s}", .{name});
-        return BundleError.BundlefileNotFound;
+        return error.Aborted;
     }
     const raw = std.mem.sliceTo(stmt.columnText(0) orelse {
         output.err("bundle {s} has no recorded manifest path", .{name});
-        return BundleError.BundlefileNotFound;
+        return error.Aborted;
     }, 0);
     // Rows written before import canonicalised the path: resolving them
     // against this process's cwd could purge from an unrelated file.
     if (!std.fs.path.isAbsolute(raw)) {
         output.err("bundle {s} was registered with a relative manifest path ({s}); re-import it", .{ name, raw });
-        return BundleError.BundlefileNotFound;
+        return error.Aborted;
     }
-    return allocator.dupe(u8, raw) catch return BundleError.DatabaseError;
+    return allocator.dupe(u8, raw);
 }
 
 const CreateArgs = struct { format: Format, out_path: []const u8, include_services: bool };
@@ -550,18 +544,15 @@ fn resolveCreateArgs(rest: []const []const u8) ?CreateArgs {
 }
 
 fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
-    const args = resolveCreateArgs(rest) orelse return BundleError.InvalidArgs;
+    const args = resolveCreateArgs(rest) orelse return badFormat();
 
     var db = try openDb(ctx);
     defer db.close();
 
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
-    populateFromInstalled(&manifest, &db, .{ .include_services = args.include_services }) catch |e| {
-        if (e != BundleError.DatabaseError) return e;
-        output.err("Could not read the package database: {s}", .{db.errMsg()});
-        return error.Aborted;
-    };
+    populateFromInstalled(&manifest, &db, .{ .include_services = args.include_services }) catch
+        return unreadableDb(&db);
     try writeManifest(ctx, manifest, args.out_path, args.format);
     output.success("wrote {s}", .{args.out_path});
 }
@@ -575,7 +566,7 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
         const a = rest[i];
         if (std.mem.eql(u8, a, "--format")) {
             i += 1;
-            format = parseFormat(if (i < rest.len) rest[i] else "") orelse return BundleError.InvalidArgs;
+            format = parseFormat(if (i < rest.len) rest[i] else "") orelse return badFormat();
         } else if (std.mem.eql(u8, a, "--services")) {
             include_services = true;
         } else if (std.mem.startsWith(u8, a, "-")) {
@@ -595,28 +586,24 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     else
         populateFromInstalled(&manifest, &db, .{ .include_services = include_services });
     populated catch |e| switch (e) {
-        BundleError.DatabaseError => {
-            output.err("Could not read the package database: {s}", .{db.errMsg()});
-            return error.Aborted;
-        },
-        BundleError.BundlefileNotFound => return error.Aborted,
+        BundleError.DatabaseError => return unreadableDb(&db),
         else => return e,
     };
 
     var write_buf: [4096]u8 = undefined;
     var stdout_writer = ctx.stdout.writer(ctx.io, &write_buf);
     const w = &stdout_writer.interface;
-    switch (format) {
-        .brewfile => try brewfile_emit.emit(manifest, w),
-        .json => try manifest_mod.emitJson(manifest, w),
-    }
-    try w.flush();
+    (switch (format) {
+        .brewfile => brewfile_emit.emit(manifest, w),
+        .json => manifest_mod.emitJson(manifest, w),
+    }) catch |e| return unwritable("stdout", e);
+    w.flush() catch |e| return unwritable("stdout", e);
 }
 
 fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     if (rest.len != 1) {
         output.err("bundle import: expected <file>", .{});
-        return BundleError.InvalidArgs;
+        return error.Aborted;
     }
     const path = rest[0];
     var diag = brewfile_mod.Diagnostics.init(allocator);
@@ -627,8 +614,8 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 
     // The row outlives this process, so a cwd-relative path would be
     // re-resolved against whatever cwd `remove --purge` later runs from.
-    const canonical = std.Io.Dir.cwd().realPathFileAlloc(ctx.io, path, allocator) catch
-        return BundleError.BundlefileNotFound;
+    const canonical = std.Io.Dir.cwd().realPathFileAlloc(ctx.io, path, allocator) catch |e|
+        return unreadable(path, e);
     defer allocator.free(canonical);
 
     var db = try openDb(ctx);
@@ -638,14 +625,14 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     var stmt = db.prepare(
         \\INSERT OR REPLACE INTO bundles(name, manifest_path, created_at, version)
         \\VALUES (?, ?, ?, ?);
-    ) catch return BundleError.DatabaseError;
+    ) catch return unwritableDb(&db);
     defer stmt.finalize();
     const name = if (manifest.name.len > 0) manifest.name else path;
-    stmt.bindText(1, name) catch return BundleError.DatabaseError;
-    stmt.bindText(2, canonical) catch return BundleError.DatabaseError;
-    stmt.bindInt(3, std.Io.Clock.real.now(ctx.io).toSeconds()) catch return BundleError.DatabaseError;
-    stmt.bindInt(4, @intCast(manifest.version)) catch return BundleError.DatabaseError;
-    _ = stmt.step() catch return BundleError.DatabaseError;
+    stmt.bindText(1, name) catch return unwritableDb(&db);
+    stmt.bindText(2, canonical) catch return unwritableDb(&db);
+    stmt.bindInt(3, std.Io.Clock.real.now(ctx.io).toSeconds()) catch return unwritableDb(&db);
+    stmt.bindInt(4, @intCast(manifest.version)) catch return unwritableDb(&db);
+    _ = stmt.step() catch return unwritableDb(&db);
     output.success("bundle registered: {s}", .{name});
 }
 
@@ -660,7 +647,7 @@ fn parseFormat(s: []const u8) ?Format {
 }
 
 fn resolveBundlefile(ctx: *const AppCtx, allocator: std.mem.Allocator, explicit: ?[]const u8) ![]const u8 {
-    if (explicit) |p| return allocator.dupe(u8, p) catch return BundleError.BundlefileNotFound;
+    if (explicit) |p| return allocator.dupe(u8, p);
 
     const candidates = [_][]const u8{
         "Brewfile",
@@ -668,14 +655,13 @@ fn resolveBundlefile(ctx: *const AppCtx, allocator: std.mem.Allocator, explicit:
     };
     for (candidates) |c| {
         std.Io.Dir.cwd().access(ctx.io, c, .{}) catch continue;
-        return allocator.dupe(u8, c) catch return BundleError.BundlefileNotFound;
+        return allocator.dupe(u8, c);
     }
 
     // ~/.config/malt
     if (std.process.Environ.getPosix(ctx.environ, "HOME")) |home| {
         for ([_][]const u8{ "Brewfile", "Maltfile.json" }) |name| {
-            const p = std.fmt.allocPrint(allocator, "{s}/.config/malt/{s}", .{ home, name }) catch
-                return BundleError.BundlefileNotFound;
+            const p = try std.fmt.allocPrint(allocator, "{s}/.config/malt/{s}", .{ home, name });
             std.Io.Dir.accessAbsolute(ctx.io, p, .{}) catch {
                 allocator.free(p);
                 continue;
@@ -729,6 +715,31 @@ fn unreadable(path: []const u8, e: anyerror) error{Aborted} {
     return error.Aborted;
 }
 
+fn unwritable(path: []const u8, e: anyerror) error{Aborted} {
+    output.err("Cannot write {s}: {s}", .{ path, @errorName(e) });
+    return error.Aborted;
+}
+
+fn unreadableDb(db: *sqlite.Database) error{Aborted} {
+    output.err("Could not read the package database: {s}", .{db.errMsg()});
+    return error.Aborted;
+}
+
+fn unwritableDb(db: *sqlite.Database) error{Aborted} {
+    output.err("Could not update the package database: {s}", .{db.errMsg()});
+    return error.Aborted;
+}
+
+fn planFailed(e: anyerror) error{Aborted} {
+    output.err("Could not plan which packages to remove: {s}", .{@errorName(e)});
+    return error.Aborted;
+}
+
+fn badFormat() error{Aborted} {
+    output.err("--format expects brewfile or json", .{});
+    return error.Aborted;
+}
+
 fn writeManifest(
     ctx: *const AppCtx,
     manifest: manifest_mod.Manifest,
@@ -737,17 +748,17 @@ fn writeManifest(
 ) !void {
     // Create parents for a nested out_path; streams into the file below, so
     // only the parent step is shared with backup/purge's path_write.writeFile.
-    path_write.ensureParentDir(ctx.io, path) catch return BundleError.WriteFailed;
-    const file = std.Io.Dir.cwd().createFile(ctx.io, path, .{ .truncate = true }) catch return BundleError.WriteFailed;
+    path_write.ensureParentDir(ctx.io, path) catch |e| return unwritable(path, e);
+    const file = std.Io.Dir.cwd().createFile(ctx.io, path, .{ .truncate = true }) catch |e| return unwritable(path, e);
     defer file.close(ctx.io);
     var write_buf: [4096]u8 = undefined;
     var fw = file.writer(ctx.io, &write_buf);
     const w = &fw.interface;
-    switch (format) {
-        .brewfile => brewfile_emit.emit(manifest, w) catch return BundleError.WriteFailed,
-        .json => manifest_mod.emitJson(manifest, w) catch return BundleError.WriteFailed,
-    }
-    w.flush() catch return BundleError.WriteFailed;
+    (switch (format) {
+        .brewfile => brewfile_emit.emit(manifest, w),
+        .json => manifest_mod.emitJson(manifest, w),
+    }) catch |e| return unwritable(path, e);
+    w.flush() catch |e| return unwritable(path, e);
 }
 
 /// Options for `populateFromInstalled`. Taps round-trip unconditionally
@@ -857,7 +868,7 @@ fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, na
     known.bindText(1, name) catch return BundleError.DatabaseError;
     if (!(known.step() catch return BundleError.DatabaseError)) {
         output.err("bundle not registered: {s}", .{name});
-        return BundleError.BundlefileNotFound;
+        return error.Aborted;
     }
 
     var stmt = db.prepare("SELECT kind, ref FROM bundle_members WHERE bundle_name = ? ORDER BY kind, ref;") catch
@@ -889,19 +900,24 @@ fn openDb(ctx: *const AppCtx) !sqlite.Database {
     const prefix = atomic.maltPrefixOrAbort();
     var db_dir_buf: [512]u8 = undefined;
     const db_dir = std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix}) catch
-        return BundleError.DatabaseError;
+        return openFailed();
     // makePath is the idempotent "ensure" variant; a real permission/ENOSPC
     // failure surfaces at sqlite.Database.open below with a narrower error.
     std.Io.Dir.cwd().createDirPath(ctx.io, db_dir) catch {};
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
-        return BundleError.DatabaseError;
-    var db = try sqlite.Database.open(path);
+        return openFailed();
+    var db = sqlite.Database.open(path) catch return openFailed();
     errdefer db.close();
     // Schema init is idempotent; a newer-than-us DB is the one failure to
     // stop on, anything else surfaces at the caller's next prepare/step.
     schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(&db, e, prefix);
     return db;
+}
+
+fn openFailed() error{Aborted} {
+    output.err("Failed to open database", .{});
+    return error.Aborted;
 }
 
 /// Bare `malt bundle` is a usage error, so the text goes to stderr. An explicit
