@@ -773,7 +773,7 @@ const bundle_help =
     \\Usage: malt bundle <subcommand> [args]
     \\
     \\Subcommands:
-    \\  install [--isolate-deps] [file]
+    \\  install [--isolate-deps] [--dry-run] [file]
     \\                              Install formulae/casks/taps/services from a Brewfile or Maltfile.json.
     \\                              --isolate-deps keeps transitive runtime deps out of <prefix>/bin
     \\                              and <prefix>/sbin (per-keg state, replays on upgrade).
