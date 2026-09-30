@@ -56,6 +56,9 @@ pub const State = struct {
     /// The open info pane for the active hit, if Enter requested one. Borrows
     /// from shell-owned parse storage; cleared on Esc or a fresh query.
     detail: ?info_json.Info = null,
+    /// The kind the pane was requested for: a formula and a cask may share a name,
+    /// and info's own `type` can't tell them apart for an uninstalled hit.
+    detail_kind: ?Kind = null,
     /// Where the tab is in the read lifecycle; drives the render's status line.
     phase: Phase = .idle,
     /// Cross-query basket size, mirrored from the shell-owned selection (no
@@ -303,7 +306,10 @@ pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storag
         // is already open for that row (a second Enter / a right-click dismisses it).
         // Committing the query is driven by the shell on filter-commit, so they never collide.
         .enter => if (selectedMatch(s)) |m| {
-            if (resultsDetailOpen(s, m)) s.detail = null else return openSearchInfoCmd(allocator, mt_path, s);
+            if (resultsDetailOpen(s, m)) s.detail = null else {
+                s.detail_kind = m.kind;
+                return openSearchInfoCmd(allocator, mt_path, s);
+            }
         },
         // `space` selects in the results view and removes in the basket view; `d`
         // is the basket-view remove alias and is inert in the results view.
@@ -573,11 +579,11 @@ pub fn searchCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *State) c
 /// The `mt info <pkg> --json` read for the active hit, or `Cmd.none` when nothing is
 /// selected. `mt info` resolves uninstalled hits too, so a result is inspectable
 /// before any install.
-/// True when the info pane is open for the selected result — matched by name, since
-/// the pane is opened for the selection.
+/// True when the info pane is open for the selected result — matched by name and
+/// kind, since the pane is opened for the selection.
 fn resultsDetailOpen(s: *const State, sel: Match) bool {
     const d = s.detail orelse return false;
-    return std.mem.eql(u8, d.name, sel.name);
+    return s.detail_kind == sel.kind and std.mem.eql(u8, d.name, sel.name);
 }
 
 fn openSearchInfoCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State) cmd.Cmd {
