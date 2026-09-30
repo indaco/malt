@@ -1071,6 +1071,36 @@ test "bundle create refuses an unknown --format in words" {
     try expectRefused(&malt.app_ctx.debug_ctx, &.{ "create", "--format", "yaml" }, "--format expects brewfile or json");
 }
 
+test "bundle export says it could not write stdout instead of a raw write error" {
+    // A closed or broken stdout is the everyday failure of a piped export.
+    var s = try Scratch.init(testing.allocator, "export_stdout_unwritable");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const ro_path = try std.fmt.allocPrint(testing.allocator, "{s}/ro", .{s.path});
+    defer testing.allocator.free(ro_path);
+    (try test_io.createFileAbsolute(std.Options.debug_io, ro_path, .{})).close(std.Options.debug_io);
+    const ro = try test_io.openFileAbsolute(std.Options.debug_io, ro_path, .{});
+    defer ro.close(std.Options.debug_io);
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .stdout = ro,
+        .stderr = test_io.testSink(),
+    };
+    // JSON always has a body; an empty Brewfile would never reach the writer.
+    try expectRefused(&ctx, &.{ "export", "--format", "json" }, "Cannot write stdout");
+}
+
+test "bundle says it could not open the database instead of a raw open error" {
+    var s = try Scratch.init(testing.allocator, "db_unopenable");
+    defer s.deinit(testing.allocator);
+    // A directory where the database file belongs.
+    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{s.path});
+    defer testing.allocator.free(db_path);
+    try test_io.makeDirAbsolute(std.Options.debug_io, db_path);
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{"list"}, "Failed to open database");
+}
+
 test "bundle create names the path it could not write" {
     var s = try Scratch.init(testing.allocator, "create_unwritable");
     defer s.deinit(testing.allocator);
@@ -1084,11 +1114,13 @@ test "bundle create names the path it could not write" {
     try expectRefused(&malt.app_ctx.debug_ctx, &.{ "create", out }, "Cannot write");
 }
 
-test "bundle list, remove and cleanup refuse a table they cannot read in words" {
+test "bundle list, remove, cleanup and export refuse a table they cannot read in words" {
     // Each reads the database on its own path; none may end in a raw error.
     const cases = .{
         .{ "bundles", &[_][]const u8{"list"} },
         .{ "bundles", &[_][]const u8{ "remove", "x" } },
+        // Must not read as "bundle not registered".
+        .{ "bundles", &[_][]const u8{ "export", "x" } },
         .{ "kegs", &[_][]const u8{ "cleanup", "--dry-run" } },
     };
     inline for (cases, 0..) |case, i| {
