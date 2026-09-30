@@ -1452,3 +1452,76 @@ test "bundle reads a --help after `--` as an operand, not a help request" {
     try testing.expect(std.mem.indexOf(u8, body, "Usage: malt bundle") == null);
     try testing.expectEqual(@as(i64, 0), try countBundles(s.path, "--help"));
 }
+
+// --- install / cleanup: one bundle file, by position or brew's --file ---
+
+test "bundle install and cleanup refuse a second bundle file instead of using only the last" {
+    // `cleanup --yes A B` used to plan against B alone and uninstall A's packages.
+    var s = try Scratch.init(testing.allocator, "two_bundle_files");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const brewfile = try writeEmptyBrewfile(testing.allocator, s.path);
+    defer testing.allocator.free(brewfile);
+
+    const cases = [_][]const []const u8{
+        &.{ "install", "-n", "nonexist", brewfile },
+        &.{ "cleanup", "-n", "nonexist", brewfile },
+        &.{ "install", "-n", "--file", "nonexist", brewfile },
+        &.{ "cleanup", "-n", brewfile, "--file=nonexist" },
+    };
+    for (cases) |args| try expectRefused(&malt.app_ctx.debug_ctx, args, "expected at most one [file]");
+}
+
+test "bundle install and cleanup take brew's --file as the bundle file" {
+    var s = try Scratch.init(testing.allocator, "file_flag");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const brewfile = try writeEmptyBrewfile(testing.allocator, s.path);
+    defer testing.allocator.free(brewfile);
+    const eq = try std.fmt.allocPrint(testing.allocator, "--file={s}", .{brewfile});
+    defer testing.allocator.free(eq);
+
+    {
+        quiet();
+        defer unquiet();
+        try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "install", "-n", "--file", brewfile });
+        try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "cleanup", "-n", "--yes", eq });
+    }
+    // The value is the file read, not a flag or a lookup fallback.
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "install", "--file", "missing-bundle" }, "Cannot read bundle file missing-bundle");
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "cleanup", "--file" }, "--file expects a path");
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "install", "--file=" }, "--file expects a path");
+}
+
+test "an unknown bundle flag points at the help that lists the real ones" {
+    var s = try Scratch.init(testing.allocator, "unknown_flag_hint");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "install", "--no-upgrade" }, "malt bundle --help");
+}
+
+// --- import / list: the same flag rules as their siblings ---------------
+
+test "bundle import honours `--` and refuses an unknown flag" {
+    var s = try Scratch.init(testing.allocator, "import_flags");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const manifest = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(manifest);
+    try writeFile(manifest, "{\"name\": \"-dev\", \"version\": 1, \"formulas\": []}\n");
+
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "import", "--bogus", manifest }, "Unknown flag: --bogus");
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "import", manifest, manifest }, "expected <file>");
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", "--", manifest });
+    try testing.expectEqual(@as(i64, 1), try countBundles(s.path, "-dev"));
+}
+
+test "bundle list refuses any argument instead of ignoring it" {
+    var s = try Scratch.init(testing.allocator, "list_args");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "list", "--bogus" }, "Unknown flag: --bogus");
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "list", "dev" }, "bundle list: expected no arguments");
+}
