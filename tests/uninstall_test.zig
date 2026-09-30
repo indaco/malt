@@ -1252,6 +1252,46 @@ test "execute refuses an unreadable casks table instead of removing a same-named
     try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
 }
 
+test "execute on a cask over an unreadable kegs table points at --cask and keeps the cask" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "corrupt_kegs_cask");
+    defer prefix.deinit(testing.allocator);
+    try seedCask(prefix.path, "box");
+    var db_path_buf: [512]u8 = undefined;
+    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0), "kegs");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{"box"});
+    try testing.expect(std.mem.indexOf(u8, captured.items, "package database for formula box") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "If box is a cask, pass --cask.") != null);
+    try testing.expect(try caskInstalled(prefix.path, "box"));
+}
+
+test "execute --formula over an unreadable kegs table does not point at --cask" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "corrupt_kegs_formula_flag");
+    defer prefix.deinit(testing.allocator);
+    try seedCask(prefix.path, "box");
+    var db_path_buf: [512]u8 = undefined;
+    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0), "kegs");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{ "--formula", "box" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "package database for formula box") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--cask") == null);
+}
+
+test "execute --cask removes a cask while the kegs table cannot be read" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "corrupt_kegs_cask_flag");
+    defer prefix.deinit(testing.allocator);
+    try seedCask(prefix.path, "box");
+    var db_path_buf: [512]u8 = undefined;
+    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0), "kegs");
+
+    try runQuiet(&.{ "--cask", "box" });
+    try testing.expect(!try caskInstalled(prefix.path, "box"));
+}
+
 test "execute --cask reports an unreadable casks table instead of not installed" {
     var prefix = try ScratchPrefix.init(testing.allocator, "corrupt_casks_flag");
     defer prefix.deinit(testing.allocator);
