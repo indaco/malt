@@ -1268,18 +1268,94 @@ test "execute --cask reports an unreadable casks table instead of not installed"
     try testing.expect(std.mem.indexOf(u8, captured.items, "--formula") == null);
 }
 
-test "execute --dry-run on a long-versioned cask previews the cask, not a same-named formula" {
+const treated_as_formula = "Treating box as a formula";
+
+test "execute --dry-run on a name that is both kinds previews the formula and warns, as brew does" {
     var prefix = try ScratchPrefix.init(testing.allocator, "long_cask_version");
     defer prefix.deinit(testing.allocator);
     try seedKeg(testing.allocator, prefix.path, "box", "1.0");
+    // A long version still has to read back, or the collision would abort.
     try sabotage(prefix.path, "INSERT INTO casks (token, name, version, url) VALUES ('box', 'box', '" ++ "9" ** 200 ++ "', 'https://example.invalid/c.zip');");
 
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try dryRunCaptured(&captured, &.{"box"});
 
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall cask box") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall box 1.0") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "cask box") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, treated_as_formula) != null);
     try expectKegIntact(prefix.path, "box", "1.0");
+    try testing.expect(try caskInstalled(prefix.path, "box"));
+}
+
+test "execute on a name that is both kinds removes the formula and keeps the cask" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "collision_removes_formula");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "box", "1.0");
+    try seedCask(prefix.path, "box");
+
+    quiet();
+    defer unquiet();
+    try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"box"});
+    try expectKegGone(prefix.path, "box");
+    try testing.expect(try caskInstalled(prefix.path, "box"));
+}
+
+test "execute on a name that is both kinds refuses when the formula is still needed, never falling back to the cask" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "collision_needed_formula");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "box", "1.0");
+    try seedKeg(testing.allocator, prefix.path, "app", "1.0");
+    try seedDependent(prefix.path, "app", "box");
+    try seedCask(prefix.path, "box");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{"box"});
+
+    try expectKegIntact(prefix.path, "box", "1.0");
+    try testing.expect(try caskInstalled(prefix.path, "box"));
+}
+
+test "execute --cask on a name that is both kinds previews the cask without the warning" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "collision_cask_flag");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "box", "1.0");
+    try seedCask(prefix.path, "box");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCaptured(&captured, &.{ "--cask", "box" });
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall cask box 1.0") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, treated_as_formula) == null);
+}
+
+test "execute --formula on a name that is both kinds previews the formula without the warning" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "collision_formula_flag");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "box", "1.0");
+    try seedCask(prefix.path, "box");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCaptured(&captured, &.{ "--formula", "box" });
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall box 1.0") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, treated_as_formula) == null);
+}
+
+test "execute on a cask-only name still removes the cask, with no collision warning" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "cask_only_no_warning");
+    defer prefix.deinit(testing.allocator);
+    try seedCask(prefix.path, "box");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCaptured(&captured, &.{"box"});
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall cask box 1.0") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, treated_as_formula) == null);
 }
 
 test "execute --formula removes a formula while the casks table cannot be read" {
