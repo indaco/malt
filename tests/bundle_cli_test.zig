@@ -969,6 +969,7 @@ test "bundle create refuses a table it cannot read instead of writing a Brewfile
         try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, out_path, .{}));
         // Said in words, not as a raw error name and trace.
         try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "malformed") != null);
     }
 }
 
@@ -1008,6 +1009,7 @@ test "bundle export refuses a bundle whose members it cannot read instead of exp
     defer output.endStderrCapture();
     try testing.expectError(error.Aborted, bundle.execute(&ctx, testing.allocator, &.{ "export", "x" }));
     try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "malformed") != null);
 }
 
 test "bundle export refuses a bundle that was never registered instead of exporting it empty" {
@@ -1157,7 +1159,8 @@ test "bundle list, remove, cleanup and export refuse a table they cannot read in
             try f.writeStreamingAll(std.Options.debug_io, "brew \"wget\"\n");
             try args.append(testing.allocator, brewfile);
         }
-        try expectRefused(&malt.app_ctx.debug_ctx, args.items, "package database");
+        // SQLite's own reason, not a status a later finalize reset to OK.
+        try expectRefused(&malt.app_ctx.debug_ctx, args.items, "package database: database disk image is malformed");
     }
 }
 
@@ -1201,6 +1204,7 @@ test "bundle export refuses a table it cannot read in words, not a raw error" {
         defer output.endStderrCapture();
         try testing.expectError(error.Aborted, bundle.execute(&ctx, testing.allocator, &.{ "export", "--services" }));
         try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "malformed") != null);
     }
 }
 

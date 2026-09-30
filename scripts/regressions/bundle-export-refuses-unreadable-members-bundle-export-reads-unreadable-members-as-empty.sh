@@ -60,6 +60,8 @@ out=$("$BIN" bundle export x 2>"$tmp/err") || rc=$?
 [ "$rc" -ne 0 ] || fail "export of an unreadable bundle_members table exited 0: $out"
 [ -z "$out" ] || fail "partial manifest on stdout: $out"
 grep -q "package database" "$tmp/err" || fail "no worded refusal: $(cat "$tmp/err")"
+# SQLite's own reason, not a status a later finalize reset to "not an error".
+grep -q "malformed" "$tmp/err" || fail "refusal lost the reason: $(cat "$tmp/err")"
 
 # Unnamed export reads the installed tables instead.
 fresh_prefix
@@ -69,6 +71,8 @@ out=$("$BIN" bundle export 2>"$tmp/err") || rc=$?
 [ "$rc" -eq 1 ] || fail "unnamed export over an unreadable kegs table exited $rc: $(cat "$tmp/err")"
 [ -z "$out" ] || fail "partial manifest on stdout: $out"
 grep -q "package database" "$tmp/err" || fail "no worded refusal: $(cat "$tmp/err")"
+# SQLite's own reason, not a status a later finalize reset to "not an error".
+grep -q "malformed" "$tmp/err" || fail "refusal lost the reason: $(cat "$tmp/err")"
 if grep -q "DatabaseError" "$tmp/err"; then
   fail "raw error name instead of words: $(cat "$tmp/err")"
 fi
