@@ -1551,3 +1551,11 @@ test "rollback refuses --cask with --formula ahead of the usage check, as brew d
     try testing.expect(r.saw(.stderr, "Options --formula and --cask are mutually exclusive"));
     try testing.expect(!r.saw(.stderr, "Usage"));
 }
+
+test "rollback's usage line names the kind flags, not just --help" {
+    var r: SharedRun = .{};
+    defer r.deinit();
+    try testing.expectError(error.Aborted, r.run(&.{"--cask"}));
+
+    try testing.expect(r.saw(.stderr, "Usage: mt rollback <package> [--cask | --formula]"));
+}
