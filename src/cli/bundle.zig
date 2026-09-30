@@ -538,12 +538,14 @@ fn resolveCreateArgs(rest: []const []const u8) ?CreateArgs {
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         const a = rest[i];
-        if (std.mem.eql(u8, a, "--format") and i + 1 < rest.len) {
+        if (std.mem.eql(u8, a, "--format")) {
             i += 1;
-            format = parseFormat(rest[i]) orelse return null;
+            format = parseFormat(if (i < rest.len) rest[i] else "") orelse return null;
         } else if (std.mem.eql(u8, a, "--services")) {
             include_services = true;
-        } else if (!std.mem.startsWith(u8, a, "-")) {
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            output.warn("ignored flag: {s}", .{a});
+        } else {
             out_path = a;
         }
     }
@@ -581,12 +583,14 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         const a = rest[i];
-        if (std.mem.eql(u8, a, "--format") and i + 1 < rest.len) {
+        if (std.mem.eql(u8, a, "--format")) {
             i += 1;
-            format = parseFormat(rest[i]) orelse return BundleError.InvalidArgs;
+            format = parseFormat(if (i < rest.len) rest[i] else "") orelse return BundleError.InvalidArgs;
         } else if (std.mem.eql(u8, a, "--services")) {
             include_services = true;
-        } else if (!std.mem.startsWith(u8, a, "-")) {
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            output.warn("ignored flag: {s}", .{a});
+        } else {
             bundle_name = a;
         }
     }
