@@ -1051,6 +1051,14 @@ test "bundle export of a registered bundle with no members still succeeds" {
     try bundle.execute(&ctx, testing.allocator, &.{ "export", "empty" });
 }
 
+test "bundle export refuses a second bundle name instead of exporting only the last" {
+    // Silently dropping one name exports a different bundle than asked for.
+    var s = try Scratch.init(testing.allocator, "export_two_names");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "export", "a", "b" }, "expected at most one <name>");
+}
+
 test "bundle export rejects a --format with no value instead of defaulting to a Brewfile" {
     var s = try Scratch.init(testing.allocator, "export_dangling_format");
     defer s.deinit(testing.allocator);
