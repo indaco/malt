@@ -336,7 +336,7 @@ test "corrupt database surfaces a real error, not the soft no-db skip" {
     defer output.endStderrCapture();
 
     const ctx = makeCtx();
-    try purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"});
+    try testing.expectError(error.Aborted, purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"}));
 
     // Must NOT take the soft skip path.
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "no database — nothing to inspect") == null);
@@ -476,7 +476,7 @@ test "ndjson scope_completed reports status:error and error_kind on corrupt DB" 
     defer output.endStdoutCapture();
 
     const ctx = makeCtx();
-    try purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"});
+    try testing.expectError(error.Aborted, purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"}));
 
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, stdout_buf.items, "\n"), '\n');
     var saw_error_completion = false;
@@ -521,7 +521,7 @@ test "ndjson purge_complete carries status:error when any scope errored" {
     defer output.endStdoutCapture();
 
     const ctx = makeCtx();
-    try purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"});
+    try testing.expectError(error.Aborted, purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"}));
 
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, stdout_buf.items, "\n"), '\n');
     var saw_purge_complete_error = false;
@@ -560,7 +560,7 @@ test "--json summary marks errored scopes with status:error and bumps schema ver
     defer output.endStdoutCapture();
 
     const ctx = makeCtx();
-    try purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"});
+    try testing.expectError(error.Aborted, purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"}));
 
     const trimmed = std.mem.trim(u8, stdout_buf.items, " \r\n\t");
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{});

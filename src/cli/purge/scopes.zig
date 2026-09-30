@@ -24,6 +24,7 @@ const supervisor_mod = @import("../../core/services/supervisor.zig");
 const symlink = @import("../../fs/symlink.zig");
 const store_path = @import("../../fs/store_path.zig");
 const util = @import("util.zig");
+const schema_report = @import("../schema_report.zig");
 const report = @import("report.zig");
 
 const TierResult = util.TierResult;
@@ -51,6 +52,7 @@ pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix:
     };
     defer db.close();
     schema.initSchema(&db) catch |e| {
+        if (reportSchemaTooNew("store-orphans", &db, e, prefix, &result)) return result;
         output.err("store-orphans: cannot init schema ({s})", .{@errorName(e)});
         result.status = .err;
         result.error_kind = "schema_init";
@@ -117,6 +119,7 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     };
     defer db.close();
     schema.initSchema(&db) catch |e| {
+        if (reportSchemaTooNew("unused-deps", &db, e, prefix, &result)) return result;
         output.err("unused-deps: cannot init schema ({s})", .{@errorName(e)});
         result.status = .err;
         result.error_kind = "schema_init";
@@ -472,6 +475,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     };
     defer db.close();
     schema.initSchema(&db) catch |e| {
+        if (reportSchemaTooNew("stale-casks", &db, e, prefix, &result)) return result;
         output.err("stale-casks: cannot init schema ({s})", .{@errorName(e)});
         result.status = .err;
         result.error_kind = "schema_init";
@@ -652,7 +656,8 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
     collectCaskOldVersions(io, allocator, prefix, cache_dir, &candidates, &result);
 
     if (candidates.items.len == 0) {
-        rep.empty("nothing to remove");
+        // A refusal already printed its reason; "nothing" would contradict it.
+        if (result.status == .ok) rep.empty("nothing to remove");
         return result;
     }
 
@@ -867,7 +872,7 @@ fn collectCaskOldVersions(
     var db = switch (util.openDbTri(io, prefix)) {
         .absent => return,
         .unreadable => |e| {
-            output.warn("old-versions: cannot open database for cask history ({s})", .{@errorName(e)});
+            output.err("old-versions: cannot open database for cask history ({s})", .{@errorName(e)});
             result.status = .err;
             result.error_kind = "db_unreadable";
             return;
@@ -876,7 +881,8 @@ fn collectCaskOldVersions(
     };
     defer db.close();
     schema.initSchema(&db) catch |e| {
-        output.warn("old-versions: cannot init schema for cask history ({s})", .{@errorName(e)});
+        if (reportSchemaTooNew("old-versions", &db, e, prefix, result)) return;
+        output.err("old-versions: cannot init schema for cask history ({s})", .{@errorName(e)});
         result.status = .err;
         result.error_kind = "schema_init";
         return;
@@ -891,7 +897,7 @@ fn collectCaskOldVersions(
         \\JOIN casks c ON c.token = cv.token
         \\WHERE cv.version != c.version;
     ) catch |e| {
-        output.warn("old-versions: cannot prepare cask history query ({s})", .{@errorName(e)});
+        output.err("old-versions: cannot prepare cask history query ({s})", .{@errorName(e)});
         result.status = .err;
         result.error_kind = "db_prepare";
         return;
@@ -922,11 +928,22 @@ fn collectCaskOldVersions(
     }
 }
 
+/// Gives a DB from a newer malt the upgrade hint instead of a generic
+/// schema failure. Returns false for every other error.
+fn reportSchemaTooNew(label: []const u8, db: *sqlite.Database, e: schema.MigrateError, prefix: []const u8, result: *TierResult) bool {
+    if (e != error.SchemaTooNew) return false;
+    var buf: [512]u8 = undefined;
+    output.err("{s}: {s}", .{ label, schema_report.initFailureMessage(&buf, e, schema.currentVersion(db) catch 0, prefix) });
+    result.status = .err;
+    result.error_kind = util.schema_too_new_kind;
+    return true;
+}
+
 fn reopenDbForRowDeletes(io: std.Io, prefix: []const u8, result: *TierResult) ?sqlite.Database {
     return switch (util.openDbTri(io, prefix)) {
         .absent => null,
         .unreadable => |e| blk: {
-            output.warn("old-versions: cannot reopen database for history rows ({s})", .{@errorName(e)});
+            output.err("old-versions: cannot reopen database for history rows ({s})", .{@errorName(e)});
             result.status = .err;
             result.error_kind = "db_unreadable";
             break :blk null;

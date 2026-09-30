@@ -604,7 +604,7 @@ const purge_help =
     \\
     \\Structured output (stdout; stderr stays the human surface):
     \\  --json                  Single summary object: version, dry_run, scopes,
-    \\                          totals, time_ms.
+    \\                          totals, status, time_ms.
     \\  --output-format=ndjson  One {"event":...} line per state transition
     \\                          (scope_started, scope_completed, purge_complete).
     \\
@@ -619,6 +619,8 @@ const purge_help =
     \\  malt purge --old-versions --yes
     \\  malt purge --wipe --backup ~/malt-snapshot.txt --remove-binary --yes
     \\
+    \\Exits 1 when any scope could not run (e.g. an unreadable database),
+    \\4 when the database was written by a newer malt.
     \\For per-package removal use `mt uninstall <name>`.
     \\
 ;
@@ -629,7 +631,8 @@ const cleanup_help =
     \\Shorthand for `malt purge --housekeeping` — the safe daily-driver
     \\scope (store-orphans + unused-deps + cache + stale-casks +
     \\broken-symlinks). For the full menu (downloads scrub, old-versions,
-    \\wipe) use `mt purge`.
+    \\wipe) use `mt purge`. Exits 1 when any scope could not run (e.g. an
+    \\unreadable database), 4 when the database was written by a newer malt.
     \\
     \\Flags pass through to `purge`; the common ones:
     \\  --dry-run, -n        Preview only

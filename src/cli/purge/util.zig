@@ -11,10 +11,9 @@ const args_mod = @import("args.zig");
 pub const Error = args_mod.Error;
 
 /// Outcome discriminator for a scope run. `.ok` is the silent default;
-/// `.err` signals an internal failure that the orchestrator surfaced
-/// via stderr but did not propagate as a Zig error — the wire format
-/// needs a positive marker so consumers can distinguish a clean no-op
-/// from a swallowed fault.
+/// `.err` marks a scope that could not run: it is data, not a Zig error,
+/// so the remaining scopes still run before the command fails, and the
+/// wire format can tell a clean no-op from a refusal.
 pub const ScopeStatus = enum { ok, err };
 
 pub const TierResult = struct {
@@ -23,6 +22,10 @@ pub const TierResult = struct {
     status: ScopeStatus = .ok,
     error_kind: ?[]const u8 = null,
 };
+
+/// `error_kind` of a scope that met a DB written by a newer malt; `purge`
+/// turns it into the same exit status every other command uses.
+pub const schema_too_new_kind = "schema_too_new";
 
 /// Canonical CLI name, preserved as a one-line delegator onto the shared
 /// ui/ humanizer; the `purge.zig` re-export stays valid.

@@ -52,8 +52,10 @@ for pg in $(sqlite3 "$DB" "SELECT rootpage FROM sqlite_master WHERE tbl_name='ca
     dd of="$DB" bs="$ps" seek=$((pg - 1)) conv=notrunc 2>/dev/null
 done
 
-# A failed scope still exits 0 (purge's contract); what matters is what survives.
-out=$("$BIN" --offline purge --stale-casks --yes 2>&1) || true
+# The scope cannot read the table, so purge fails and must keep the cask's files.
+rc=0
+out=$("$BIN" --offline purge --stale-casks --yes 2>&1) || rc=$?
+[ "$rc" -ne 0 ] || fail "purge --stale-casks exited 0 over an unreadable casks table: $out"
 [ -d "$MALT_PREFIX/Caskroom/box/1.0" ] || fail "purge --stale-casks removed an installed cask's Caskroom: $out"
 [ -f "$MALT_CACHE/Cask/box-1.0.dmg" ] || fail "purge --stale-casks removed an installed cask's download: $out"
 grep -q "casks table" <<<"$out" || fail "purge --stale-casks did not report the table: $out"

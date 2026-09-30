@@ -179,6 +179,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var summary = report.Summary{};
     defer summary.deinit(allocator);
     var grand_total: TierResult = .{};
+    var schema_too_new = false;
 
     // Strict ndjson bracketing: scope_started lines always pair with a
     // scope_completed (handled per scope below) and purge_complete /
@@ -243,6 +244,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             grand_total.bytes += r.bytes;
             // First failure wins as the surfaced error_kind; subsequent
             // scope errors still flip status and stay in their own row.
+            if (r.error_kind) |kind| schema_too_new = schema_too_new or std.mem.eql(u8, kind, util.schema_too_new_kind);
             if (r.status == .err and grand_total.status == .ok) {
                 grand_total.status = .err;
                 grand_total.error_kind = r.error_kind;
@@ -259,9 +261,14 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const sz = formatBytes(grand_total.bytes, &sz_buf);
     if (dry_run) {
         output.info("dry run: would remove {d} {s}, ~{s}", .{ grand_total.removed, item_noun, sz });
+    } else if (grand_total.status == .err) {
+        output.warn("removed {d} {s}, freed ~{s}", .{ grand_total.removed, item_noun, sz });
     } else {
         output.success("removed {d} {s}, freed ~{s}", .{ grand_total.removed, item_noun, sz });
     }
+    // Each failed scope already printed its own line; the exit status is
+    // what lets scripts tell a refusal from "nothing to remove".
+    if (grand_total.status == .err) return if (schema_too_new) error.SchemaTooNew else error.Aborted;
 }
 
 /// `mt cleanup` shim — Homebrew-shaped verb that forwards to the safe

@@ -15,6 +15,7 @@ const pin = malt.cli_pin;
 const install = malt.install;
 const install_record = malt.install_record;
 const doctor = malt.doctor;
+const purge = malt.purge;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const output = malt.output;
@@ -218,4 +219,53 @@ test "doctor's schema row has nothing to compare without a database and stays ok
         .io = std.Options.debug_io,
         .environ = .empty,
     }, ck.name));
+}
+
+test "every purge scope that reads the DB refuses a too-new one with exit 4, not a generic failure" {
+    // Upgrading malt, not repairing the DB, is the fix; exit 4 says so to
+    // scripts the same way every other command does.
+    var s = try Scratch.init(testing.allocator, "purge");
+    defer s.deinit(testing.allocator);
+    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar", .{s.path});
+    defer testing.allocator.free(cellar);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar);
+
+    const runs = [_][]const []const u8{
+        &.{ "--store-orphans", "--yes" },
+        &.{ "--unused-deps", "--yes" },
+        &.{ "--stale-casks", "--yes" },
+        &.{ "--old-versions", "--yes" },
+        &.{ "--housekeeping", "--yes" },
+    };
+    const ctx = malt.app_ctx.debug_ctx;
+    for (runs) |args| {
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+
+        try testing.expectError(error.SchemaTooNew, purge.execute(&ctx, testing.allocator, args));
+        try expectNamesBothVersions(captured.items);
+    }
+}
+
+test "purge --json names a too-new DB in error_kind so scripts need not parse stderr" {
+    var s = try Scratch.init(testing.allocator, "purge_json");
+    defer s.deinit(testing.allocator);
+
+    const prior_json = output.isJson();
+    output.setMode(.json);
+    defer output.setMode(if (prior_json) .json else .human);
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try testing.expectError(error.SchemaTooNew, purge.execute(&ctx, testing.allocator, &.{ "--store-orphans", "--yes" }));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, std.mem.trim(u8, stdout_buf.items, " \r\n\t"), .{});
+    defer parsed.deinit();
+    const row = parsed.value.object.get("scopes").?.array.items[0].object;
+    try testing.expectEqualStrings("schema_too_new", row.get("error_kind").?.string);
 }
