@@ -1164,10 +1164,23 @@ test "bundle list, remove, cleanup and export refuse a table they cannot read in
     }
 }
 
-test "bundle export names an unknown flag as ignored, like the other bundle subcommands" {
+test "bundle export refuses an unknown flag instead of exporting without it" {
     var s = try Scratch.init(testing.allocator, "export_unknown_flag");
     defer s.deinit(testing.allocator);
     try initDb(s.path);
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "export", "--bogus" }, "Unknown flag: --bogus");
+}
+
+test "bundle export reads a name after `--` as the bundle, not as a flag" {
+    var s = try Scratch.init(testing.allocator, "export_double_dash");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec("INSERT INTO bundles (name, manifest_path, created_at, version) VALUES ('-dev', NULL, 0, 1);");
+    }
     const ctx: malt.app_ctx.AppCtx = .{
         .io = std.Options.debug_io,
         .environ = .empty,
@@ -1178,8 +1191,8 @@ test "bundle export names an unknown flag as ignored, like the other bundle subc
     defer captured.deinit(testing.allocator);
     output.beginStderrCapture(testing.allocator, &captured);
     defer output.endStderrCapture();
-    try bundle.execute(&ctx, testing.allocator, &.{ "export", "--bogus" });
-    try testing.expect(std.mem.indexOf(u8, captured.items, "ignored flag: --bogus") != null);
+    try bundle.execute(&ctx, testing.allocator, &.{ "export", "--", "-dev" });
+    try testing.expectEqualStrings("", captured.items);
 }
 
 test "bundle export refuses a table it cannot read in words, not a raw error" {

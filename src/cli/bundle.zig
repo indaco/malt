@@ -1008,39 +1008,45 @@ test "remove: a missing or duplicated name is rejected" {
 test "create: explicit out_path wins regardless of --format position" {
     // Path before the flag was the broken order: a late --format json used to
     // clobber the explicit path with the JSON default.
-    const a = resolveCreateArgs(&.{ "myfile", "--format", "json" }).?;
+    const a = try resolveCreateArgs(&.{ "myfile", "--format", "json" });
     try std.testing.expectEqualStrings("myfile", a.out_path);
     try std.testing.expectEqual(Format.json, a.format);
 
-    const b = resolveCreateArgs(&.{ "--format", "json", "myfile" }).?;
+    const b = try resolveCreateArgs(&.{ "--format", "json", "myfile" });
     try std.testing.expectEqualStrings("myfile", b.out_path);
 
     // No explicit path falls back to the format default.
-    try std.testing.expectEqualStrings("Maltfile.json", resolveCreateArgs(&.{ "--format", "json" }).?.out_path);
-    try std.testing.expectEqualStrings("Brewfile", resolveCreateArgs(&.{}).?.out_path);
+    try std.testing.expectEqualStrings("Maltfile.json", (try resolveCreateArgs(&.{ "--format", "json" })).out_path);
+    try std.testing.expectEqualStrings("Brewfile", (try resolveCreateArgs(&.{})).out_path);
 
     // Repeated --format must not strand the JSON default on a brewfile result.
-    try std.testing.expectEqualStrings("Brewfile", resolveCreateArgs(&.{ "--format", "json", "--format", "brewfile" }).?.out_path);
+    try std.testing.expectEqualStrings("Brewfile", (try resolveCreateArgs(&.{ "--format", "json", "--format", "brewfile" })).out_path);
 
     // An invalid format is rejected; --services rides through to the result.
-    try std.testing.expect(resolveCreateArgs(&.{ "--format", "yaml" }) == null);
-    try std.testing.expect(resolveCreateArgs(&.{"--services"}).?.include_services);
+    try std.testing.expectError(error.Aborted, resolveCreateArgs(&.{ "--format", "yaml" }));
+    try std.testing.expect((try resolveCreateArgs(&.{"--services"})).include_services);
 }
 
 test "create: a --format with no value is rejected, not silently dropped" {
     // Dropping it would write a Brewfile where the user asked for another format.
-    try std.testing.expect(resolveCreateArgs(&.{"--format"}) == null);
-    try std.testing.expect(resolveCreateArgs(&.{ "myfile", "--format" }) == null);
+    try std.testing.expectError(error.Aborted, resolveCreateArgs(&.{"--format"}));
+    try std.testing.expectError(error.Aborted, resolveCreateArgs(&.{ "myfile", "--format" }));
 }
 
-test "create: an unknown flag is named as ignored, not dropped in silence" {
+test "create: an unknown flag stops the command before it writes a file" {
+    // `--file=elsewhere` carried on would overwrite ./Brewfile instead.
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     output.beginStderrCapture(std.testing.allocator, &buf);
     defer output.endStderrCapture();
-    const a = resolveCreateArgs(&.{ "--bogus", "myfile" }).?;
-    try std.testing.expectEqualStrings("myfile", a.out_path);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ignored flag: --bogus") != null);
+    try std.testing.expectError(error.Aborted, resolveCreateArgs(&.{"--file=elsewhere"}));
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Unknown flag: --file=elsewhere") != null);
+}
+
+test "create: `--` ends the options, so a dash-led path is the output path" {
+    const a = try resolveCreateArgs(&.{ "--", "-odd", "--format" });
+    try std.testing.expectEqualStrings("--format", a.out_path);
+    try std.testing.expectEqual(Format.brewfile, a.format);
 }
 
 test "writeManifest creates parent directories for a nested output path" {
