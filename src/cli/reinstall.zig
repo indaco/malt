@@ -171,6 +171,15 @@ fn mixOf(allocator: std.mem.Allocator, db: *sqlite.Database, args: []const []con
     return .none;
 }
 
+/// A bare name that resolved to a keg but also names an installed cask.
+/// Best-effort: it only decides a warning, never the target.
+fn shadowsCask(allocator: std.mem.Allocator, db: *sqlite.Database, typed: []const u8, only: Only, t: Target) bool {
+    if (only != .any or t.presence != .keg) return false;
+    const cask = classify(allocator, db, typed, .cask) catch return false;
+    defer cask.deinit(allocator);
+    return cask.presence == .cask;
+}
+
 fn onlyFromArgs(args: []const []const u8) Only {
     for (args) |a| if (std.mem.eql(u8, a, "--cask")) return .cask;
     for (args) |a| if (std.mem.eql(u8, a, "--formula")) return .keg;
@@ -246,6 +255,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
         const t = classify(allocator, &db, name, only) catch |e| return dbFailed(&db, e);
         errdefer t.deinit(allocator);
+        if (shadowsCask(allocator, &db, name, only, t)) help.warnTreatedAsFormula(name);
         break :blk .{ t, mixOf(allocator, &db, args, only) catch |e| return dbFailed(&db, e) };
     };
     defer target.deinit(allocator);
@@ -422,6 +432,23 @@ test "classify prefers the keg row, unless the user asked for the cask" {
     try expectTarget(&db, "dual", .cask, .cask, "dual", .any);
     try expectTarget(&db, "dual", .keg, .keg, "acme/tools/dual", .formula);
     try expectMissing(&db, "nope");
+}
+
+fn expectShadows(db: *sqlite.Database, typed: []const u8, only: Only, want: bool) !void {
+    const t = try classify(testing.allocator, db, typed, only);
+    defer t.deinit(testing.allocator);
+    try testing.expectEqual(want, shadowsCask(testing.allocator, db, typed, only, t));
+}
+
+test "shadowsCask flags a bare name that is both kinds, never one the user already narrowed" {
+    var db = try seedDb();
+    defer db.close();
+    try expectShadows(&db, "dual", .any, true);
+    // --formula is brew's way to silence it; --cask never resolves to the keg.
+    try expectShadows(&db, "dual", .keg, false);
+    try expectShadows(&db, "dual", .cask, false);
+    try expectShadows(&db, "wget", .any, false);
+    try expectShadows(&db, "firefox", .any, false);
 }
 
 test "onlyFromArgs maps the user's kind flag onto the table it restricts" {

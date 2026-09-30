@@ -117,8 +117,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
 
     // Resolve every name before removing any, so an unknown one or a running
-    // app aborts the batch with nothing touched. A cask wins over a formula
-    // of the same name.
+    // app aborts the batch with nothing touched. A formula wins over a cask
+    // of the same name, as in brew.
     var targets: std.ArrayList(Target) = .empty;
     defer {
         for (targets.items) |t| if (t.keg) |k| allocator.free(k.version);
@@ -127,14 +127,19 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     try targets.ensureTotalCapacityPrecise(allocator, names.items.len);
     var refused = false;
     for (names.items) |name| {
-        // An unreadable table aborts here: falling through would pick a
-        // same-named formula, unless `--formula` asked for exactly that.
+        const keg = if (force_cask) null else try lookupKeg(&db, allocator, name);
+        // An unreadable table aborts even over a keg: the name may be the
+        // cask the user meant, unless `--formula` asked for exactly that.
         const cask_row = if (force_formula) null else cask_mod.lookupInstalledChecked(&db, name) catch |e| {
+            if (keg) |k| allocator.free(k.version);
             if (force_cask) return caskReadFailed(&db, e, name);
             output.err("Could not read the package database for cask {s}: {s}. If {s} is a formula, pass --formula.", .{ name, cask_mod.lookupDetail(e, &db), name });
             return error.Aborted;
         };
-        if (cask_row) |info| {
+        if (keg) |k| {
+            if (cask_row != null) help.warnTreatedAsFormula(name);
+            targets.appendAssumeCapacity(.{ .name = name, .keg = k });
+        } else if (cask_row) |info| {
             refuseIfRunning(ctx.io, name, &info) catch {
                 refused = true;
                 continue;
@@ -143,8 +148,6 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         } else if (force_cask) {
             output.err("{s} is not installed as a cask", .{name});
             refused = true;
-        } else if (try lookupKeg(&db, allocator, name)) |keg| {
-            targets.appendAssumeCapacity(.{ .name = name, .keg = keg });
         } else if (force_formula) {
             output.err("{s} is not installed as a formula", .{name});
             refused = true;

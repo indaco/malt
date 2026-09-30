@@ -471,6 +471,7 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
         // there is no footer; the outcome itself is nothing to fold here.
         for (names.items) |name| {
             if (!cask_only and isFormulaInstalled(&db, name)) {
+                if (shadowsCask(&db, name, formula_only)) help.warnTreatedAsFormula(name);
                 const outcome = upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, false, null) catch {
                     any_failed = true;
                     other_failed = true;
@@ -1587,6 +1588,12 @@ fn isFormulaInstalled(db: *sqlite.Database, name: []const u8) bool {
     return stmt.step() catch false;
 }
 
+/// A named formula upgrade whose name also belongs to an installed cask.
+/// Best-effort: it only decides a warning, never the target.
+fn shadowsCask(db: *sqlite.Database, name: []const u8, formula_only: bool) bool {
+    return !formula_only and (cask_mod.isInstalled(db, name) catch false);
+}
+
 /// Upgrade all outdated formulas. Returns error.Aborted if any individual
 /// upgrade failed so the caller can propagate a non-zero exit.
 fn upgradeAllFormulas(
@@ -2377,6 +2384,20 @@ test "readOldKeg releases the WAL read snapshot before a second connection advan
     try a.beginTransaction();
     try a.exec("UPDATE kegs SET pinned = 1 WHERE name = 'foo';");
     try a.commit();
+}
+
+test "shadowsCask flags a formula a cask shares its name with, unless --formula narrowed it" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES
+        \\  ('box', 'box', '1.0', 'a', '/c/box/1.0'), ('jq', 'jq', '1.7', 'b', '/c/jq/1.7');
+        \\INSERT INTO casks (token, name, version, url) VALUES ('box', 'Box', '2.0', 'https://x.invalid/b.dmg');
+    );
+    try std.testing.expect(shadowsCask(&db, "box", false));
+    try std.testing.expect(!shadowsCask(&db, "box", true));
+    try std.testing.expect(!shadowsCask(&db, "jq", false));
 }
 
 test "readOldKeg returns null when the formula is not installed" {

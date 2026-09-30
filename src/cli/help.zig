@@ -4,6 +4,7 @@
 const std = @import("std");
 
 const AppCtx = @import("../app_ctx.zig").AppCtx;
+const output = @import("../ui/output.zig");
 
 /// Check if args contain -h or --help. If so, print help to stdout (so the
 /// output is pipeable — `malt install --help | less`) and return true.
@@ -15,6 +16,11 @@ pub fn showIfRequested(ctx: *const AppCtx, args: []const []const u8, command: []
         }
     }
     return false;
+}
+
+/// brew's collision notice, minus the tap qualifier malt has no use for.
+pub fn warnTreatedAsFormula(name: []const u8) void {
+    output.warn("Treating {s} as a formula. For the cask, specify the `--cask` flag. To silence this message, use the `--formula` flag.", .{name});
 }
 
 /// Return the help text for a given command, or a generic fallback. Exposed
@@ -920,3 +926,22 @@ const version_help =
     \\  malt version update --cleanup
     \\
 ;
+
+test "warnTreatedAsFormula names both ways out and stays silent under --quiet" {
+    const prior_quiet = output.isQuiet();
+    defer output.setQuiet(prior_quiet);
+    output.setQuiet(false);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    warnTreatedAsFormula("box");
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Treating box as a formula. For the cask, specify the `--cask` flag. To silence this message, use the `--formula` flag.") != null);
+
+    // brew skips it under --quiet.
+    buf.clearRetainingCapacity();
+    output.setQuiet(true);
+    warnTreatedAsFormula("box");
+    try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+}
