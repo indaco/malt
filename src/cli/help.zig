@@ -166,6 +166,8 @@ const uninstall_help =
     \\
     \\Remove installed packages. Every name is checked first: if one is not
     \\installed, or is still needed by a package left behind, nothing is removed.
+    \\A name installed as both a formula and a cask is removed as the formula,
+    \\with a warning, as in brew; pass --cask for the cask.
     \\
     \\Flags:
     \\  --formula, --formulae  Treat all named arguments as formulae
