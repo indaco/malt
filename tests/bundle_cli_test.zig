@@ -1018,6 +1018,80 @@ test "bundle export refuses a bundle whose members it cannot read instead of exp
     try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
 }
 
+test "bundle export refuses a bundle that was never registered instead of exporting it empty" {
+    // A typo'd name must not read as a real bundle with nothing in it.
+    var s = try Scratch.init(testing.allocator, "export_unknown_bundle");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .stdout = test_io.testSink(),
+        .stderr = test_io.testSink(),
+    };
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(error.Aborted, bundle.execute(&ctx, testing.allocator, &.{ "export", "nope" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "bundle not registered: nope") != null);
+}
+
+test "bundle export of a registered bundle with no members still succeeds" {
+    // Edge of the unknown-name refusal: empty is a real state, not an error.
+    var s = try Scratch.init(testing.allocator, "export_empty_bundle");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec("INSERT INTO bundles (name, manifest_path, created_at, version) VALUES ('empty', NULL, 0, 1);");
+    }
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .stdout = test_io.testSink(),
+        .stderr = test_io.testSink(),
+    };
+    quiet();
+    defer unquiet();
+    try bundle.execute(&ctx, testing.allocator, &.{ "export", "empty" });
+}
+
+test "bundle export rejects a --format with no value instead of defaulting to a Brewfile" {
+    var s = try Scratch.init(testing.allocator, "export_dangling_format");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .stdout = test_io.testSink(),
+        .stderr = test_io.testSink(),
+    };
+    quiet();
+    defer unquiet();
+    try testing.expectError(error.InvalidArgs, bundle.execute(&ctx, testing.allocator, &.{ "export", "--format" }));
+}
+
+test "bundle export names an unknown flag as ignored, like the other bundle subcommands" {
+    var s = try Scratch.init(testing.allocator, "export_unknown_flag");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .stdout = test_io.testSink(),
+        .stderr = test_io.testSink(),
+    };
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try bundle.execute(&ctx, testing.allocator, &.{ "export", "--bogus" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "ignored flag: --bogus") != null);
+}
+
 test "bundle export refuses a table it cannot read in words, not a raw error" {
     // Same refusal as `bundle create`; a bare error name and trace reads as a
     // malt crash, not as a damaged database.

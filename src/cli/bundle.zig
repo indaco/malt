@@ -1009,6 +1009,22 @@ test "create: explicit out_path wins regardless of --format position" {
     try std.testing.expect(resolveCreateArgs(&.{"--services"}).?.include_services);
 }
 
+test "create: a --format with no value is rejected, not silently dropped" {
+    // Dropping it would write a Brewfile where the user asked for another format.
+    try std.testing.expect(resolveCreateArgs(&.{"--format"}) == null);
+    try std.testing.expect(resolveCreateArgs(&.{ "myfile", "--format" }) == null);
+}
+
+test "create: an unknown flag is named as ignored, not dropped in silence" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+    const a = resolveCreateArgs(&.{ "--bogus", "myfile" }).?;
+    try std.testing.expectEqualStrings("myfile", a.out_path);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ignored flag: --bogus") != null);
+}
+
 test "writeManifest creates parent directories for a nested output path" {
     // A nested out_path whose parent is missing must be created, not fail with
     // no file — parity with `backup -o` / `purge --backup`.
