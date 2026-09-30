@@ -571,6 +571,11 @@ fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
     try populateFromInstalled(&manifest, &db, .{ .include_services = args.include_services });
+    // After the read, so a database the real run would refuse fails the preview too.
+    if (output.isDryRun()) {
+        output.info("dry-run: would write {s}", .{args.out_path});
+        return;
+    }
     try writeManifest(ctx, manifest, args.out_path, args.format);
     output.success("wrote {s}", .{args.out_path});
 }
@@ -644,6 +649,12 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
         return unreadable(path, e);
     defer allocator.free(canonical);
 
+    const name = if (manifest.name.len > 0) manifest.name else path;
+    if (output.isDryRun()) {
+        output.info("dry-run: would register {s} from {s}", .{ name, canonical });
+        return;
+    }
+
     var db = try openDb(ctx);
     defer db.close();
 
@@ -653,7 +664,6 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
         \\VALUES (?, ?, ?, ?);
     ) catch return unwritableDb(&db);
     defer stmt.finalize();
-    const name = if (manifest.name.len > 0) manifest.name else path;
     stmt.bindText(1, name) catch return unwritableDb(&db);
     stmt.bindText(2, canonical) catch return unwritableDb(&db);
     stmt.bindInt(3, std.Io.Clock.real.now(ctx.io).toSeconds()) catch return unwritableDb(&db);
