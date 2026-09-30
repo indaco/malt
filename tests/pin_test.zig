@@ -487,5 +487,24 @@ test "mt pin with only a kind flag prints the usage line" {
     defer err_buf.deinit(testing.allocator);
     try testing.expectError(error.Aborted, runCaptured(false, &.{"--cask"}, &err_buf));
 
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "Usage: mt pin <name>") != null);
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "Usage: mt pin <name> [--cask | --formula]") != null);
+}
+
+test "a bare mt pin still pins the formula when the casks table cannot be read" {
+    const path = try setupPrefix("pin_casks_unreadable");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedSharedName(path, false, false);
+    var db_path_buf: [512]u8 = undefined;
+    try test_io.corruptTable(try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{path}), "casks");
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    // The notice is advisory; a broken casks table must not cost the formula its pin.
+    try runCaptured(false, &.{"box"}, &err_buf);
+
+    var db = try openDb(path);
+    defer db.close();
+    try testing.expect(try readPinned(&db, "box"));
 }

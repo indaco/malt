@@ -1559,3 +1559,22 @@ test "rollback's usage line names the kind flags, not just --help" {
 
     try testing.expect(r.saw(.stderr, "Usage: mt rollback <package> [--cask | --formula]"));
 }
+
+test "a bare rollback still reaches the formula when the casks table cannot be read" {
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "shared_casks_unreadable");
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try seedSharedName(prefix);
+    var db_path_buf: [512]u8 = undefined;
+    try test_io.corruptTable(try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix}), "casks");
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var r: SharedRun = .{};
+    defer r.deinit();
+    try r.run(&.{ "--list", "box" });
+
+    try testing.expect(r.saw(.stdout, "1.20"));
+    try testing.expect(!r.saw(.stderr, notice));
+}

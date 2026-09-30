@@ -883,3 +883,20 @@ test "a bare info on a formula-only name prints no notice" {
 
     try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
 }
+
+test "a bare info still shows the formula when the casks table cannot be read" {
+    var s = try Scratch.init(testing.allocator, "casks_unreadable");
+    defer s.deinit(testing.allocator);
+    try seedFormulaKeg(testing.allocator, s.path);
+    try seedCaskNamedWget(s.path);
+    var db_path_buf: [512]u8 = undefined;
+    try test_io.corruptTable(try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{s.path}), "casks");
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    const out = try captureBoth(&.{"wget"}, "casks_unreadable", &err_buf);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "1.21") != null);
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, notice) == null);
+}
