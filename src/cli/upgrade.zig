@@ -339,6 +339,12 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
         }
     }
 
+    // Brew's check and wording; either flag alone would silently win.
+    if (cask_only and formula_only) {
+        output.err("Options --formula and --cask are mutually exclusive", .{});
+        return error.Aborted;
+    }
+
     if (use_system_ruby_bare) {
         output.err("a bare --use-system-ruby would apply to every outdated keg — name them: --use-system-ruby=<name>,...", .{});
         return error.Aborted;
@@ -471,7 +477,11 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
         // there is no footer; the outcome itself is nothing to fold here.
         for (names.items) |name| {
             const is_formula = !cask_only and (isFormulaInstalled(&db, name) catch {
-                output.err("Could not read the package database for formula {s}: {s}", .{ name, db.errMsg() });
+                // Under --formula the user already ruled the cask out.
+                if (formula_only)
+                    output.err("Could not read the package database for formula {s}: {s}", .{ name, db.errMsg() })
+                else
+                    output.err("Could not read the package database for formula {s}: {s}. If {s} is a cask, pass --cask.", .{ name, db.errMsg(), name });
                 any_failed = true;
                 other_failed = true;
                 continue;
