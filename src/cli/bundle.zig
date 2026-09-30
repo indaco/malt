@@ -145,7 +145,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (std.mem.eql(u8, sub, "install")) return cmdInstall(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "cleanup")) return cmdCleanup(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "create")) return cmdCreate(ctx, allocator, rest);
-    if (std.mem.eql(u8, sub, "list")) return cmdList(ctx);
+    if (std.mem.eql(u8, sub, "list")) return cmdList(ctx, rest);
     if (std.mem.eql(u8, sub, "remove")) return cmdRemove(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "export")) return cmdExport(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "import")) return cmdImport(ctx, allocator, rest);
@@ -163,11 +163,15 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     var explicit_path: ?[]const u8 = null;
     var isolate_deps = false;
     var opts_done = false;
-    for (rest) |a| {
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
         if (opts_done or !std.mem.startsWith(u8, a, "-")) {
-            explicit_path = a;
+            try setBundlefile(&explicit_path, a, "install");
         } else if (std.mem.eql(u8, a, "--")) {
             opts_done = true;
+        } else if (std.mem.eql(u8, a, "--file") or std.mem.startsWith(u8, a, "--file=")) {
+            try setBundlefile(&explicit_path, try fileValue(rest, &i), "install");
         } else if (std.mem.eql(u8, a, "--isolate-deps") or std.mem.eql(u8, a, "--isolate-dependencies")) {
             isolate_deps = true;
         } else if (std.mem.eql(u8, a, "--dry-run") or std.mem.eql(u8, a, "-n")) {
@@ -251,11 +255,15 @@ fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     var yes = false;
     var explicit_path: ?[]const u8 = null;
     var opts_done = false;
-    for (rest) |a| {
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
         if (opts_done or !std.mem.startsWith(u8, a, "-")) {
-            explicit_path = a;
+            try setBundlefile(&explicit_path, a, "cleanup");
         } else if (std.mem.eql(u8, a, "--")) {
             opts_done = true;
+        } else if (std.mem.eql(u8, a, "--file") or std.mem.startsWith(u8, a, "--file=")) {
+            try setBundlefile(&explicit_path, try fileValue(rest, &i), "cleanup");
         } else if (std.mem.eql(u8, a, "--dry-run") or std.mem.eql(u8, a, "-n")) {
             dry_run = true;
         } else if (std.mem.eql(u8, a, "--yes") or std.mem.eql(u8, a, "-y")) {
@@ -341,7 +349,12 @@ fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     output.success("bundle cleanup complete", .{});
 }
 
-fn cmdList(ctx: *const AppCtx) !void {
+fn cmdList(ctx: *const AppCtx, rest: []const []const u8) !void {
+    for (rest) |a| {
+        if (std.mem.eql(u8, a, "--")) continue;
+        if (std.mem.startsWith(u8, a, "-")) return unknownFlag(a);
+        return expected("list", "no arguments");
+    }
     var db = try openDb(ctx);
     defer db.close();
 
@@ -372,7 +385,7 @@ fn resolveRemoveArgs(rest: []const []const u8, global_dry_run: bool) error{Abort
     var opts_done = false;
     for (rest) |a| {
         if (opts_done or !std.mem.startsWith(u8, a, "-")) {
-            if (name != null) return expectedName();
+            if (name != null) return expected("remove", "<name>");
             name = a;
         } else if (std.mem.eql(u8, a, "--")) {
             opts_done = true;
@@ -385,7 +398,7 @@ fn resolveRemoveArgs(rest: []const []const u8, global_dry_run: bool) error{Abort
         } else return unknownFlag(a);
     }
     return .{
-        .name = name orelse return expectedName(),
+        .name = name orelse return expected("remove", "<name>"),
         .purge = purge,
         .yes = yes,
         .dry_run = dry_run,
@@ -608,11 +621,17 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 }
 
 fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
-    if (rest.len != 1) {
-        output.err("bundle import: expected <file>", .{});
-        return error.Aborted;
+    var file: ?[]const u8 = null;
+    var opts_done = false;
+    for (rest) |a| {
+        if (opts_done or !std.mem.startsWith(u8, a, "-")) {
+            if (file != null) return expected("import", "<file>");
+            file = a;
+        } else if (std.mem.eql(u8, a, "--")) {
+            opts_done = true;
+        } else return unknownFlag(a);
     }
-    const path = rest[0];
+    const path = file orelse return expected("import", "<file>");
     var diag = brewfile_mod.Diagnostics.init(allocator);
     defer diag.deinit();
     var manifest = try readManifest(ctx, allocator, path, &diag);
@@ -745,12 +764,35 @@ fn planFailed(e: anyerror) error{Aborted} {
 // A flag a subcommand cannot honour would silently change what it does.
 fn unknownFlag(flag: []const u8) error{Aborted} {
     output.err("Unknown flag: {s}", .{flag});
+    output.notice("`malt bundle --help` lists each subcommand's flags", .{});
     return error.Aborted;
 }
 
-fn expectedName() error{Aborted} {
-    output.err("bundle remove: expected <name>", .{});
+fn expected(comptime sub: []const u8, comptime what: []const u8) error{Aborted} {
+    output.err("bundle " ++ sub ++ ": expected " ++ what, .{});
     return error.Aborted;
+}
+
+// A second bundle file would silently replace the first, so cleanup would
+// plan against one file and uninstall what the other lists.
+fn setBundlefile(slot: *?[]const u8, path: []const u8, comptime sub: []const u8) error{Aborted}!void {
+    if (slot.* != null) return expected(sub, "at most one [file]");
+    slot.* = path;
+}
+
+/// Value of brew bundle's `--file <path>` or `--file=<path>`; advances `i`
+/// past a separate value.
+fn fileValue(rest: []const []const u8, i: *usize) error{Aborted}![]const u8 {
+    const a = rest[i.*];
+    const value = if (std.mem.startsWith(u8, a, "--file=")) a["--file=".len..] else blk: {
+        i.* += 1;
+        break :blk if (i.* < rest.len) rest[i.*] else "";
+    };
+    if (value.len == 0) {
+        output.err("--file expects a path", .{});
+        return error.Aborted;
+    }
+    return value;
 }
 
 fn badFormat() error{Aborted} {

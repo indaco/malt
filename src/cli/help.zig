@@ -794,6 +794,7 @@ const bundle_help =
     \\
     \\Lookup order for install/cleanup without an explicit path:
     \\  ./Brewfile, ./Maltfile.json, ~/.config/malt/Brewfile, ~/.config/malt/Maltfile.json
+    \\install and cleanup also take brew bundle's `--file <path>` for [file].
     \\
     \\A tap recipe that declares `sha256 :no_check` is never installed: a bundle
     \\file cannot opt in to `--allow-unpinned`.
