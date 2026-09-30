@@ -1243,6 +1243,26 @@ test "bundle install, cleanup and remove refuse an unknown flag instead of runni
     try testing.expectEqual(@as(i64, 1), try countBundles(s.path, "dev"));
 }
 
+test "bundle install and cleanup still accept every flag they document" {
+    // Refusing unknown flags must not start refusing a real one.
+    var s = try Scratch.init(testing.allocator, "mutating_known_flags");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const brewfile = try writeEmptyBrewfile(testing.allocator, s.path);
+    defer testing.allocator.free(brewfile);
+
+    quiet();
+    defer unquiet();
+    const cases = [_][]const []const u8{
+        &.{ "install", "--isolate-deps", "-n", brewfile },
+        &.{ "install", "--isolate-dependencies", "--dry-run", brewfile },
+        &.{ "cleanup", "-n", "-y", brewfile },
+        &.{ "cleanup", "--dry-run", "--yes", brewfile },
+    };
+    for (cases) |args| try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, args);
+    try testing.expectEqual(@as(i64, 0), try countBundles(s.path, null));
+}
+
 test "bundle install -n previews like --dry-run instead of installing" {
     var s = try Scratch.init(testing.allocator, "install_short_dry");
     defer s.deinit(testing.allocator);
