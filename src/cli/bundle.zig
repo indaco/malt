@@ -128,8 +128,6 @@ fn cleanupDispatcher(ctx: *const AppCtx) cleanup_mod.Dispatcher {
     };
 }
 
-pub const BundleError = error{DatabaseError};
-
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
         printHelp(ctx);
@@ -551,8 +549,7 @@ fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
-    populateFromInstalled(&manifest, &db, .{ .include_services = args.include_services }) catch
-        return unreadableDb(&db);
+    try populateFromInstalled(&manifest, &db, .{ .include_services = args.include_services });
     try writeManifest(ctx, manifest, args.out_path, args.format);
     output.success("wrote {s}", .{args.out_path});
 }
@@ -584,14 +581,11 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
-    const populated = if (bundle_name) |n|
-        populateFromBundle(&manifest, &db, n)
-    else
-        populateFromInstalled(&manifest, &db, .{ .include_services = include_services });
-    populated catch |e| switch (e) {
-        BundleError.DatabaseError => return unreadableDb(&db),
-        else => return e,
-    };
+    if (bundle_name) |n| {
+        try populateFromBundle(&manifest, &db, n);
+    } else {
+        try populateFromInstalled(&manifest, &db, .{ .include_services = include_services });
+    }
 
     var write_buf: [4096]u8 = undefined;
     var stdout_writer = ctx.stdout.writer(ctx.io, &write_buf);
@@ -783,20 +777,20 @@ fn populateFromInstalled(
     var services: std.ArrayList(manifest_mod.ServiceEntry) = .empty;
 
     var t = db.prepare("SELECT name FROM taps ORDER BY name;") catch
-        return BundleError.DatabaseError;
+        return unreadableDb(db);
     defer t.finalize();
     // A failed step would drop the table from a manifest that looks whole.
-    while (t.step() catch return BundleError.DatabaseError) {
+    while (t.step() catch return unreadableDb(db)) {
         const n = t.columnText(0) orelse continue;
-        const name = a.dupe(u8, std.mem.sliceTo(n, 0)) catch return BundleError.DatabaseError;
-        taps.append(a, name) catch return BundleError.DatabaseError;
+        const name = try a.dupe(u8, std.mem.sliceTo(n, 0));
+        try taps.append(a, name);
     }
 
     // A keg built from a tap's Casks/ only rebuilds through `cask`.
     var f = db.prepare("SELECT name, tap, tap_rb_subtree = 'cask', full_name FROM kegs WHERE install_reason='direct' ORDER BY name;") catch
-        return BundleError.DatabaseError;
+        return unreadableDb(db);
     defer f.finalize();
-    while (f.step() catch return BundleError.DatabaseError) {
+    while (f.step() catch return unreadableDb(db)) {
         const n = f.columnText(0) orelse continue;
         // A bare name would install core's package of that name elsewhere;
         // a `--local` recipe only rebuilds from its file on this machine.
@@ -809,40 +803,39 @@ fn populateFromInstalled(
                 output.warnAlways(install_args.unprintable_local_fmt ++ "; bundle skips it", .{ std.zig.fmtString(name), std.zig.fmtString(path) });
             continue;
         }
-        const name = qualifiedName(a, f.columnText(1), n) catch return BundleError.DatabaseError;
+        const name = try qualifiedName(a, f.columnText(1), n);
         if (f.columnBool(2))
-            casks.append(a, .{ .name = name }) catch return BundleError.DatabaseError
+            try casks.append(a, .{ .name = name })
         else
-            formulas.append(a, .{ .name = name }) catch return BundleError.DatabaseError;
+            try formulas.append(a, .{ .name = name });
     }
 
     var c = db.prepare("SELECT token, tap FROM casks ORDER BY token;") catch
-        return BundleError.DatabaseError;
+        return unreadableDb(db);
     defer c.finalize();
-    while (c.step() catch return BundleError.DatabaseError) {
+    while (c.step() catch return unreadableDb(db)) {
         const n = c.columnText(0) orelse continue;
-        const name = qualifiedName(a, c.columnText(1), n) catch return BundleError.DatabaseError;
-        casks.append(a, .{ .name = name }) catch return BundleError.DatabaseError;
+        const name = try qualifiedName(a, c.columnText(1), n);
+        try casks.append(a, .{ .name = name });
     }
 
     if (opts.include_services) {
         // A local keg's service stays behind with its package.
         var s = db.prepare("SELECT name FROM services WHERE auto_start = 1 AND keg_name NOT IN " ++
             "(SELECT name FROM kegs WHERE tap = '" ++ install_args.local_tap_label ++ "') ORDER BY name;") catch
-            return BundleError.DatabaseError;
+            return unreadableDb(db);
         defer s.finalize();
-        while (s.step() catch return BundleError.DatabaseError) {
+        while (s.step() catch return unreadableDb(db)) {
             const n = s.columnText(0) orelse continue;
-            const name = a.dupe(u8, std.mem.sliceTo(n, 0)) catch return BundleError.DatabaseError;
-            services.append(a, .{ .name = name, .auto_start = true }) catch
-                return BundleError.DatabaseError;
+            const name = try a.dupe(u8, std.mem.sliceTo(n, 0));
+            try services.append(a, .{ .name = name, .auto_start = true });
         }
     }
 
-    manifest.taps = taps.toOwnedSlice(a) catch return BundleError.DatabaseError;
-    manifest.formulas = formulas.toOwnedSlice(a) catch return BundleError.DatabaseError;
-    manifest.casks = casks.toOwnedSlice(a) catch return BundleError.DatabaseError;
-    manifest.services = services.toOwnedSlice(a) catch return BundleError.DatabaseError;
+    manifest.taps = try taps.toOwnedSlice(a);
+    manifest.formulas = try formulas.toOwnedSlice(a);
+    manifest.casks = try casks.toOwnedSlice(a);
+    manifest.services = try services.toOwnedSlice(a);
     manifest.version = manifest_mod.schema_version;
 }
 
@@ -857,7 +850,7 @@ fn qualifiedName(a: std.mem.Allocator, tap_col: ?[*:0]const u8, name_col: [*:0]c
 
 fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, name: []const u8) !void {
     const a = manifest.allocator();
-    manifest.name = a.dupe(u8, name) catch return BundleError.DatabaseError;
+    manifest.name = try a.dupe(u8, name);
     manifest.version = manifest_mod.schema_version;
 
     var taps: std.ArrayList([]const u8) = .empty;
@@ -866,37 +859,37 @@ fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, na
     var services: std.ArrayList(manifest_mod.ServiceEntry) = .empty;
 
     // A bundle with no members is valid; one never registered is a typo.
-    var known = db.prepare("SELECT 1 FROM bundles WHERE name = ?;") catch return BundleError.DatabaseError;
+    var known = db.prepare("SELECT 1 FROM bundles WHERE name = ?;") catch return unreadableDb(db);
     defer known.finalize();
-    known.bindText(1, name) catch return BundleError.DatabaseError;
-    if (!(known.step() catch return BundleError.DatabaseError)) {
+    known.bindText(1, name) catch return unreadableDb(db);
+    if (!(known.step() catch return unreadableDb(db))) {
         output.err("bundle not registered: {s}", .{name});
         return error.Aborted;
     }
 
     var stmt = db.prepare("SELECT kind, ref FROM bundle_members WHERE bundle_name = ? ORDER BY kind, ref;") catch
-        return BundleError.DatabaseError;
+        return unreadableDb(db);
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return BundleError.DatabaseError;
-    while (stmt.step() catch return BundleError.DatabaseError) {
+    stmt.bindText(1, name) catch return unreadableDb(db);
+    while (stmt.step() catch return unreadableDb(db)) {
         const kind_p = stmt.columnText(0) orelse continue;
         const ref_p = stmt.columnText(1) orelse continue;
         const kind = std.mem.sliceTo(kind_p, 0);
-        const ref = a.dupe(u8, std.mem.sliceTo(ref_p, 0)) catch return BundleError.DatabaseError;
+        const ref = try a.dupe(u8, std.mem.sliceTo(ref_p, 0));
         if (std.mem.eql(u8, kind, "tap")) {
-            taps.append(a, ref) catch return BundleError.DatabaseError;
+            try taps.append(a, ref);
         } else if (std.mem.eql(u8, kind, "formula")) {
-            formulas.append(a, .{ .name = ref }) catch return BundleError.DatabaseError;
+            try formulas.append(a, .{ .name = ref });
         } else if (std.mem.eql(u8, kind, "cask")) {
-            casks.append(a, .{ .name = ref }) catch return BundleError.DatabaseError;
+            try casks.append(a, .{ .name = ref });
         } else if (std.mem.eql(u8, kind, "service")) {
-            services.append(a, .{ .name = ref }) catch return BundleError.DatabaseError;
+            try services.append(a, .{ .name = ref });
         }
     }
-    manifest.taps = taps.toOwnedSlice(a) catch return BundleError.DatabaseError;
-    manifest.formulas = formulas.toOwnedSlice(a) catch return BundleError.DatabaseError;
-    manifest.casks = casks.toOwnedSlice(a) catch return BundleError.DatabaseError;
-    manifest.services = services.toOwnedSlice(a) catch return BundleError.DatabaseError;
+    manifest.taps = try taps.toOwnedSlice(a);
+    manifest.formulas = try formulas.toOwnedSlice(a);
+    manifest.casks = try casks.toOwnedSlice(a);
+    manifest.services = try services.toOwnedSlice(a);
 }
 
 fn openDb(ctx: *const AppCtx) !sqlite.Database {
