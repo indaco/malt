@@ -512,7 +512,7 @@ const CreateArgs = struct { format: Format, out_path: []const u8, include_servic
 
 /// Parse `bundle create` args. The default filename is resolved once after the
 /// loop so an explicit positional path wins no matter where `--format` sits.
-/// Null signals an invalid format value.
+/// An invalid format or unknown flag is reported here and aborts.
 fn resolveCreateArgs(rest: []const []const u8) error{Aborted}!CreateArgs {
     var format: Format = .brewfile;
     var out_path: ?[]const u8 = null;
@@ -735,7 +735,7 @@ fn planFailed(e: anyerror) error{Aborted} {
     return error.Aborted;
 }
 
-// create writes a file, so a flag it cannot honour must stop it.
+// A flag create/export cannot honour would silently change what they write.
 fn unknownFlag(flag: []const u8) error{Aborted} {
     output.err("Unknown flag: {s}", .{flag});
     return error.Aborted;
