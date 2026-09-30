@@ -3,7 +3,7 @@
 # don't know instead of warning and running the unmodified mutation. A mistyped
 # safety flag (`--prge`, `--dryrun`) used to run the real operation, and
 # `install -n` (offered by completions, honoured by cleanup and remove)
-# installed for real.
+# installed for real. `--help` prints help, neither refused nor run.
 #
 # Exits 0 when the bug is absent, non-zero (with a clear message) when present.
 # No network; all state lives under a throwaway prefix removed on EXIT.
@@ -47,6 +47,14 @@ out=$("$BIN" bundle install -n "$tmp/Brewfile" 2>&1) || rc=$?
 [ "$rc" -eq 0 ] || fail "install -n exited $rc: $out"
 [ "$(sqlite3 "$DB" "SELECT count(*) FROM bundles;")" = 0 ] ||
   fail "install -n ran a real install and recorded the bundle: $out"
+
+# Help is a request, not an unknown flag, and must not install either.
+rc=0
+out=$("$BIN" bundle install --help "$tmp/Brewfile" 2>&1) || rc=$?
+[ "$rc" -eq 0 ] || fail "install --help exited $rc: $out"
+grep -q "Usage: malt bundle" <<<"$out" || fail "install --help printed no help: $out"
+[ "$(sqlite3 "$DB" "SELECT count(*) FROM bundles;")" = 0 ] ||
+  fail "install --help ran a real install and recorded the bundle"
 
 rc=0
 out=$("$BIN" bundle install --bogus "$tmp/Brewfile" 2>&1) || rc=$?
