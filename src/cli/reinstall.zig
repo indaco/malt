@@ -368,9 +368,9 @@ test "classify resolves core packages to their bare name, typed bare or core-qua
     // form would send a core package down the tap path.
     var db = try seedDb();
     defer db.close();
-    try expectTarget(&db, "wget", .any, .keg, "wget", .any);
-    try expectTarget(&db, "homebrew/core/wget", .any, .keg, "wget", .any);
-    try expectTarget(&db, "homebrew/core/jq", .any, .keg, "jq", .any);
+    try expectTarget(&db, "wget", .any, .keg, "wget", .formula);
+    try expectTarget(&db, "homebrew/core/wget", .any, .keg, "wget", .formula);
+    try expectTarget(&db, "homebrew/core/jq", .any, .keg, "jq", .formula);
     try expectTarget(&db, "firefox", .any, .cask, "firefox", .any);
     try expectTarget(&db, "homebrew/cask/firefox", .any, .cask, "firefox", .any);
 }
@@ -453,6 +453,10 @@ test "shadowsCask flags a bare name that is both kinds, never one the user alrea
     try expectShadows(&db, "dual", .cask, false);
     try expectShadows(&db, "wget", .any, false);
     try expectShadows(&db, "firefox", .any, false);
+    // A legacy tap keg may still install from its tap's Casks/, so "treating
+    // it as a formula" would not be true.
+    var legacy = "acme/tools/dual".*;
+    try testing.expect(!shadowsCask(testing.allocator, &db, "dual", .any, .{ .presence = .keg, .name = &legacy, .pinned = true }));
 }
 
 test "onlyFromArgs maps the user's kind flag onto the table it restricts" {
@@ -501,6 +505,14 @@ fn expectArgv(expected: []const []const u8, target: Target, args: []const []cons
     defer testing.allocator.free(argv);
     try testing.expectEqual(expected.len, argv.len);
     for (expected, argv) |e, a| try testing.expectEqualStrings(e, a);
+}
+
+test "a core keg reinstalls from the formula side only, never falling back to a same-named cask" {
+    var db = try seedDb();
+    defer db.close();
+    const t = try classify(testing.allocator, &db, "wget", .any);
+    defer t.deinit(testing.allocator);
+    try expectArgv(&.{ "--force", "--formula", "wget" }, t, &.{"wget"});
 }
 
 test "forwardArgv keeps a core keg's argv exactly" {
