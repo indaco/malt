@@ -136,16 +136,6 @@ pub const BundleError = error{
     WriteFailed,
 };
 
-pub fn describeError(err: BundleError) []const u8 {
-    return switch (err) {
-        BundleError.InvalidArgs => "invalid argument to `bundle`",
-        BundleError.BundlefileNotFound => "no Brewfile/Maltfile.json found in search path",
-        BundleError.DatabaseError => "database error",
-        BundleError.RunnerFailed => "one or more bundle members failed to install",
-        BundleError.WriteFailed => "could not write bundle output",
-    };
-}
-
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
         printHelp(ctx);
