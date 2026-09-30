@@ -356,7 +356,7 @@ Without `--allow-unpinned`, a tap package whose recipe declares `sha256 :no_chec
 
 `mt pin <name>` / `mt unpin <name>` hold a package at its current version. Pinned packages are skipped by `mt upgrade` with a "pinned, skipped" line; `mt list --pinned` inspects. A formula and a cask sharing a name hold separate pins: `--cask` or `--formula` (mutually exclusive) picks the side, and a bare name means the formula, with a warning, as in `brew`.
 
-`mt rollback <package>` reverts a formula or cask to its previous version; a name installed as both is rolled back as the formula, with a warning, unless `--cask` is given. The store retains every previously installed bottle, so rollback unlinks → re-clones → updates the DB without re-downloading. `--list` shows the retained versions; `--to <version>` reverts to a specific one instead of the newest prior; `--dry-run` previews.
+`mt rollback <package>` reverts a formula or cask to its previous version; a name installed as both is rolled back as the formula, with a warning, unless `--cask` or `--formula` picks the side. For a formula, the store retains every previously installed bottle, so rollback unlinks → re-clones → updates the DB without re-downloading; a cask re-downloads when its cached artefact is gone. `--list` shows the retained versions; `--to <version>` reverts to a specific one instead of the newest prior; `--dry-run` previews.
 
 ### Inspect what's installed
 
