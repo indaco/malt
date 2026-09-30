@@ -145,7 +145,8 @@ const reinstall_help =
     \\Flags pass through to `install`; the common ones:
     \\  --cask               Pick the cask when a formula shares its name
     \\                       (otherwise auto-detected from the DB row)
-    \\  --formula            Pick the formula when a cask shares its name
+    \\  --formula            Treat the name as a formula, the default when a
+    \\                       cask shares it, without the shared-name warning
     \\  --dry-run            Show what would be reinstalled
     \\  --quiet, -q          Suppress non-error output
     \\  --json               JSON output (mirrors `mt install --json`)
@@ -196,8 +197,8 @@ const upgrade_help =
     \\the version rule above.
     \\
     \\Flags:
-    \\  --cask         Upgrade casks only
-    \\  --formula      Upgrade formulas only
+    \\  --cask         Upgrade casks only; a named formula is refused
+    \\  --formula      Upgrade formulas only; a named cask is refused
     \\  --dry-run      Show what would be upgraded
     \\  --pinned       Audit pinned formulas + casks (requires --dry-run or --force)
     \\  --force, -f    Bypass pin protection (dangerous; user-initiated)

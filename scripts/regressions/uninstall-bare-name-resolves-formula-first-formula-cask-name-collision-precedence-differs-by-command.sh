@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Regression: a bare name installed as both a formula and a cask must resolve
-# to the formula in every verb, as brew does, and say so. `uninstall` used to
-# pick the cask silently while `reinstall` and `upgrade` picked the formula,
-# so two commands on one name acted on two different packages.
+# to the formula, as brew does, and `uninstall`, `reinstall` and `upgrade` must
+# say so. `uninstall` used to pick the cask silently while `reinstall` and
+# `upgrade` picked the formula, so two commands on one name acted on two
+# different packages.
 #
 # Exits 0 when the bug is absent, non-zero (with a clear message) when present.
 # No network; all state lives under a throwaway prefix removed on EXIT.
