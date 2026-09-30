@@ -98,7 +98,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // Schema is idempotent; a newer-than-us DB must not be read as
         // "not installed".
         schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(db, e, prefix);
-        if (sel.formula and try emitInstalledFormula(ctx, allocator, db, name, prefix, stdout, json_mode, colorize)) return;
+        if (sel.formula and try emitInstalledFormula(ctx, allocator, db, name, prefix, stdout, json_mode, colorize)) {
+            // Advisory only: an unreadable casks table must not fail a read.
+            if (!force_cask and !force_formula and (cask_mod.isInstalled(db, name) catch false)) help.warnTreatedAsFormula(name);
+            return;
+        }
         if (sel.cask and try emitInstalledCask(allocator, db, name, stdout, json_mode, colorize)) return;
     }
 

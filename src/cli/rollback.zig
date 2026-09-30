@@ -34,10 +34,13 @@ const ParsedArgs = struct {
     dry_run: bool = false,
     list_mode: bool = false,
     to_version: ?[]const u8 = null,
+    force_cask: bool = false,
+    force_formula: bool = false,
 };
 
 /// Parse rollback argv. The first non-flag positional is the package name;
-/// flags (`--list`, `--dry-run`, `--to <ver>` / `--to=<ver>`) can appear in
+/// flags (`--list`, `--dry-run`, `--to <ver>` / `--to=<ver>`, and the kind
+/// selectors `--cask`/`--casks`, `--formula`/`--formulae`) can appear in
 /// any order. Returns `error.Aborted` for unknown flags or a missing value
 /// after `--to` so the dispatcher surfaces the same exit code as other
 /// usage errors.
@@ -59,6 +62,10 @@ fn parseArgs(args: []const []const u8) error{Aborted}!ParsedArgs {
             p.to_version = args[i];
         } else if (std.mem.startsWith(u8, a, "--to=")) {
             p.to_version = a["--to=".len..];
+        } else if (std.mem.eql(u8, a, "--cask") or std.mem.eql(u8, a, "--casks")) {
+            p.force_cask = true;
+        } else if (std.mem.eql(u8, a, "--formula") or std.mem.eql(u8, a, "--formulae")) {
+            p.force_formula = true;
         } else if (a.len > 0 and a[0] == '-') {
             output.err("Unknown flag: {s}", .{a});
             return error.Aborted;
@@ -73,8 +80,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (help.showIfRequested(ctx, args, "rollback")) return;
 
     const parsed = try parseArgs(args);
+    // Brew's check and wording, ahead of the usage check like its parser.
+    if (parsed.force_cask and parsed.force_formula) {
+        output.err("Options --formula and --cask are mutually exclusive", .{});
+        return error.Aborted;
+    }
     const name = parsed.name orelse {
-        output.err("Usage: mt rollback <package> [--list] [--to <version>]", .{});
+        output.err("Usage: mt rollback <package> [--cask | --formula] [--list] [--to <version>]", .{});
         return error.Aborted;
     };
     const dry_run = parsed.dry_run;
@@ -95,21 +107,27 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // lock wait, so the re-check below could never see a concurrent commit.
     var current_ver_buf: [128]u8 = undefined;
     var current_cellar_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const current = (readCurrentKeg(&db, name, &current_ver_buf, &current_cellar_buf) catch |e| return abortRowRead(&db, name, e)) orelse {
+    const current_row = if (parsed.force_cask) null else readCurrentKeg(&db, name, &current_ver_buf, &current_cellar_buf) catch |e| return abortRowRead(&db, name, e);
+    const current = current_row orelse {
         // Cask path: not a keg, but the same token may name an
         // installed cask. The cask listing and reinstall flow live
         // alongside the keg flow so the user-facing `--list` / `--to`
         // / default behaviours are consistent across package types.
-        const is_cask = cask_mod.isInstalled(&db, name) catch |e| {
-            output.err("Could not read the package database for cask {s}: {s}", .{ name, cask_mod.lookupDetail(e, &db) });
-            return error.Aborted;
-        };
-        if (is_cask) {
-            return dispatchCask(ctx, allocator, &db, name, parsed);
+        if (!parsed.force_formula) {
+            const is_cask = cask_mod.isInstalled(&db, name) catch |e| {
+                output.err("Could not read the package database for cask {s}: {s}", .{ name, cask_mod.lookupDetail(e, &db) });
+                return error.Aborted;
+            };
+            if (is_cask) {
+                return dispatchCask(ctx, allocator, &db, name, parsed);
+            }
         }
-        output.err("{s} is not installed", .{name});
+        const as_kind: []const u8 = if (parsed.force_cask) " as a cask" else if (parsed.force_formula) " as a formula" else "";
+        output.err("{s} is not installed{s}", .{ name, as_kind });
         return error.Aborted;
     };
+    // Advisory only: an unreadable casks table must not block the formula.
+    if (!parsed.force_formula and (cask_mod.isInstalled(&db, name) catch false)) help.warnTreatedAsFormula(name);
 
     // pkg_version is what the on-disk Cellar / store dir is named after,
     // so the store-scan below must compare against this — not the bare
@@ -973,6 +991,21 @@ test "parseArgs picks the first non-flag arg as the package name" {
 test "parseArgs picks up --dry-run regardless of position" {
     const p = try parseArgs(&.{ "--dry-run", "wget" });
     try testing.expect(p.dry_run);
+}
+
+test "parseArgs reads both spellings of each kind flag" {
+    const bare = try parseArgs(&.{"wget"});
+    try testing.expect(!bare.force_cask and !bare.force_formula);
+
+    inline for (.{ "--cask", "--casks" }) |flag| {
+        const p = try parseArgs(&.{ "wget", flag });
+        try testing.expect(p.force_cask and !p.force_formula);
+        try testing.expectEqualStrings("wget", p.name.?);
+    }
+    inline for (.{ "--formula", "--formulae" }) |flag| {
+        const p = try parseArgs(&.{ flag, "wget" });
+        try testing.expect(p.force_formula and !p.force_cask);
+    }
 }
 
 // --- formatIso8601 -------------------------------------------------------

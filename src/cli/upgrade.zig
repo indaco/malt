@@ -69,9 +69,20 @@ const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
 /// `audit_mode` lets `--pinned --dry-run` walk pinned kegs end-to-end so
 /// the user can see the drift; without that escape, every row would
 /// short-circuit before the API check.
-pub fn pinSkip(db: *sqlite.Database, name: []const u8, force: bool, audit_mode: bool) bool {
+pub fn pinSkip(db: *sqlite.Database, kind: pin_mod.Kind, name: []const u8, force: bool, audit_mode: bool) bool {
     if (force or audit_mode) return false;
-    return pin_mod.isPinned(db, name);
+    return pin_mod.isPinned(db, kind, name);
+}
+
+/// A cask upgrade deletes and re-inserts its row, so its pin is carried across
+/// by hand. Cask-only on purpose: a same-named formula holds a separate pin.
+fn caskPinSnapshot(db: *sqlite.Database, token: []const u8) bool {
+    return pin_mod.isPinned(db, .cask, token);
+}
+
+/// Best-effort: a lost pin is a UX regression, not data loss.
+fn restoreCaskPin(db: *sqlite.Database, token: []const u8, was_pinned: bool) void {
+    if (was_pinned) _ = pin_mod.setPinned(db, .cask, token, true) catch {};
 }
 
 /// True when phase 1 may fold a row itself instead of handing it to phase 2.
@@ -652,7 +663,7 @@ fn upgradeFormula(
     // point is that a pinned keg never gets touched. Audit mode
     // (`--pinned --dry-run`) walks pinned kegs end-to-end so the user
     // sees the drift, but the dry-run gate still blocks any mutation.
-    if (pinSkip(db, name, force, audit_mode)) {
+    if (pinSkip(db, .formula, name, force, audit_mode)) {
         // `skip` (not `dim`) so the held-back pin shares the `·` glyph of
         // the up-to-date family instead of the `▸` upgrade glyph.
         output.skip("{s} is pinned, skipped", .{name});
@@ -1074,7 +1085,7 @@ fn upgradeTapFormula(
     bulk: bool,
     sink: ?*EntrySink,
 ) !Outcome {
-    if (pinSkip(db, name, force, audit_mode)) {
+    if (pinSkip(db, .formula, name, force, audit_mode)) {
         output.skip("{s} is pinned, skipped", .{name});
         output.emitNdjsonEvent(.pinned, name, null);
         return .pinned;
@@ -1358,7 +1369,7 @@ fn upgradeRoutedTapCask(
     output.info("Upgrading {s} {s} -> {s}...", .{ token, installed_version, rb_info.version });
 
     // Snapshot the pin so a force-upgrade preserves the user's hold.
-    const was_pinned = pin_mod.isPinned(db, token);
+    const was_pinned = caskPinSnapshot(db, token);
 
     const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap_label, token }) catch return error.Aborted;
     defer allocator.free(full_name);
@@ -1460,7 +1471,7 @@ fn upgradeRoutedTapCask(
         return error.Aborted;
     };
 
-    if (was_pinned) _ = pin_mod.setPinned(db, token, true) catch {};
+    restoreCaskPin(db, token, was_pinned);
     return .upgraded;
 }
 
@@ -1699,7 +1710,7 @@ fn caskArtifactType(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []c
 }
 
 fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, audit_mode: bool, bulk: bool, sink: ?*EntrySink) !Outcome {
-    if (pinSkip(db, token, force, audit_mode)) {
+    if (pinSkip(db, .cask, token, force, audit_mode)) {
         output.skip("{s} is pinned, skipped", .{token});
         output.emitNdjsonEvent(.pinned, token, null);
         return .pinned;
@@ -1797,7 +1808,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
 
     // Snapshot the pin BEFORE uninstall removes the cask row; re-apply
     // after recordInstall so a `--force` upgrade preserves the user's hold.
-    const was_pinned = pin_mod.isPinned(db, token);
+    const was_pinned = caskPinSnapshot(db, token);
 
     // Atomic DB section (uninstall's DELETE + recordInstall's INSERT OR
     // REPLACE) so a partial failure can't leave the casks row missing
@@ -1930,11 +1941,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return error.Aborted;
     };
 
-    if (was_pinned) {
-        // Best-effort: a missing pin restore is a UX regression, not data
-        // loss — the cask itself is upgraded and recorded.
-        _ = pin_mod.setPinned(db, token, true) catch {};
-    }
+    restoreCaskPin(db, token, was_pinned);
 
     // After the commit, as on install: the new version is recorded either way.
     if (!flight.runPhase(&installer, token, parsed_cask.version, parsed_cask.flight_steps.get(.postflight), .postflight, install_sink_mod.terminal)) {
@@ -3431,4 +3438,36 @@ test "a routed tap cask with an unpinned sha256 is refused before its progress-o
     ;
     try std.testing.expectError(error.Aborted, parseRoutedCaskRb(rb, "pkg", "user/tap"));
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "not a pinned sha256") != null);
+}
+
+/// Seeds `box` as both kinds with independent pins, then replays what a cask
+/// upgrade does to its row: snapshot, delete, re-insert unpinned, restore.
+fn replayCaskUpgradePin(keg_pinned: bool, cask_pinned: bool) !struct { keg: bool, cask: bool } {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var buf: [512]u8 = undefined;
+    try db.exec(try std.fmt.bufPrintZ(&buf,
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('box', 'box', '1.0', 'sha', '/cellar/box/1.0', {d});
+        \\INSERT INTO casks (token, name, version, url, pinned) VALUES ('box', 'Box', '2.0', 'https://example.invalid/box.zip', {d});
+    , .{ @intFromBool(keg_pinned), @intFromBool(cask_pinned) }));
+
+    const was_pinned = caskPinSnapshot(&db, "box");
+    try cask_mod.removeRecord(&db, "box");
+    try db.exec("INSERT INTO casks (token, name, version, url) VALUES ('box', 'Box', '3.0', 'https://example.invalid/box.zip');");
+    restoreCaskPin(&db, "box", was_pinned);
+
+    return .{ .keg = pin_mod.isPinned(&db, .formula, "box"), .cask = pin_mod.isPinned(&db, .cask, "box") };
+}
+
+test "a cask upgrade keeps the cask's own pin when a same-named formula is not pinned" {
+    const after = try replayCaskUpgradePin(false, true);
+    try std.testing.expect(after.cask);
+    try std.testing.expect(!after.keg);
+}
+
+test "a cask upgrade never takes a same-named formula's pin as its own" {
+    const after = try replayCaskUpgradePin(true, false);
+    try std.testing.expect(!after.cask);
+    try std.testing.expect(after.keg);
 }

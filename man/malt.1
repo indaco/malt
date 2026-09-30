@@ -280,6 +280,8 @@ formulas, cask_versions history for casks), they are listed under
 an "Available rollback versions" section so `mt rollback <pkg>`
 and `mt info <pkg>` agree on what's retrievable. The same listing
 is exposed in `--json` as the `available_rollback_versions` array.
+A bare name installed as both a formula and a cask shows the formula,
+with a warning on stderr, as in brew.
 
 Flags:
   --formula      Show formula info only
@@ -528,8 +530,13 @@ reuse the per-version cache when present and re-download from
 the recorded URL otherwise; SHA256 is verified either way.
 
 Without --to, lands on the most recent previous entry.
+A name installed as both a formula and a cask is rolled back as the
+formula, with a warning, as in brew; pass --cask for the cask.
 
 Flags:
+  --formula, --formulae
+                     Treat <package> as a formula
+  --cask, --casks    Treat <package> as a cask
   --list             Print every retained version for <package>
                      and exit without changes
   --to <version>     Roll back to the exact version if present;
@@ -572,19 +579,32 @@ The keg remains installed in the Cellar.
 .fi
 .SS pin
 .nf
-Usage: malt pin <name>
+Usage: malt pin <name> [flags]
 
 Mark an installed formula or cask as pinned so `malt upgrade` skips
 it. The pin survives across upgrades and is visible in
 `mt list --pinned`. Use `mt unpin <name>` to lift it, or
 `mt upgrade --force <name>` to override the pin once.
+A formula and a cask sharing a name hold separate pins; a bare name
+pins the formula, with a warning, as in brew.
+
+Flags:
+  --formula, --formulae  Pin the formula
+  --cask, --casks        Pin the cask
+  --quiet, -q            Suppress non-error output
 .fi
 .SS unpin
 .nf
-Usage: malt unpin <name>
+Usage: malt unpin <name> [flags]
 
 Lift the pin on an installed formula or cask so subsequent
-`malt upgrade` runs touch it again.
+`malt upgrade` runs touch it again. A bare name that is both a
+formula and a cask unpins the formula, with a warning, as in brew.
+
+Flags:
+  --formula, --formulae  Unpin the formula
+  --cask, --casks        Unpin the cask
+  --quiet, -q            Suppress non-error output
 .fi
 .SS run
 .nf
