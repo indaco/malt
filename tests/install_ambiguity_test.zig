@@ -5,6 +5,8 @@
 //!      locally, the "exists as both …" warning is emitted on stderr.
 //!   2. When only the formula is cached, no warning is emitted —
 //!      the probe must not invent a cask out of thin air.
+//!   3. `reinstall` of a name installed as both says so once, not in
+//!      both its own words and install's.
 
 const std = @import("std");
 const malt = @import("malt");
@@ -32,6 +34,15 @@ const formula_wget_json =
     \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"1212121212121212121212121212121212121212121212121212121212121212"}
     \\   }}}}
 ;
+
+// The wget fixture under another name, for a formula-only neighbour.
+const formula_jq_json = blk: {
+    @setEvalBranchQuota(100_000);
+    var buf: [std.mem.replacementSize(u8, formula_wget_json, "wget", "jq")]u8 = undefined;
+    _ = std.mem.replace(u8, formula_wget_json, "wget", "jq", &buf);
+    const out = buf;
+    break :blk out;
+};
 
 /// `setenv` needs a sentinel-terminated prefix; the shared helper hands back a
 /// plain slice. Unique per process and call so overlapping runs can't share a
@@ -117,5 +128,75 @@ test "ambiguity warning is silent when no cask cache is present" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "wget" });
 
+    try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) == null);
+}
+
+// Seeds `wget` installed as both kinds plus a formula-only `jq`, all cached,
+// then runs `reinstall --dry-run` with `names`.
+fn reinstallCaptured(captured: *std.ArrayList(u8), tag: []const u8, names: []const []const u8) !void {
+    const prefix_z = try uniquePrefixZ(tag);
+    defer testing.allocator.free(prefix_z);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
+    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    try seedCacheFile(prefix_z, "formula_wget.json", formula_wget_json);
+    try seedCacheFile(prefix_z, "formula_jq.json", &formula_jq_json);
+    try seedCacheFile(
+        prefix_z,
+        "cask_wget.json",
+        "{\"token\":\"wget\",\"url\":\"https://example.com/x.dmg\",\"version\":\"1\"}",
+    );
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix_z});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    defer testing.allocator.free(db_path);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES
+            \\  ('wget', 'wget', '1.0', 'a', '/c/wget/1.0'), ('jq', 'jq', '1.0', 'b', '/c/jq/1.0');
+            \\INSERT INTO casks (token, name, version, url) VALUES ('wget', 'wget', '1', 'https://example.com/x.dmg');
+        );
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    malt.output.beginStderrCapture(testing.allocator, captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(testing.allocator);
+    try argv.append(testing.allocator, "--dry-run");
+    try argv.appendSlice(testing.allocator, names);
+    try malt.cli_reinstall.execute(&ctx, arena.allocator(), argv.items);
+}
+
+test "reinstall of a name installed as both warns once, not again from install" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try reinstallCaptured(&captured, "reinstall", &.{"wget"});
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "Treating wget as a formula"));
+    try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) == null);
+}
+
+test "reinstall warns for every name installed as both, not just the first" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try reinstallCaptured(&captured, "reinstall_multi", &.{ "jq", "wget" });
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "Treating wget as a formula"));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Treating jq") == null);
     try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) == null);
 }

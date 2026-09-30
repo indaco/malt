@@ -35,8 +35,10 @@ fn isPositional(a: []const u8) bool {
 
 const Presence = enum { keg, cask, local, missing };
 
-/// Which subtree a tap keg's `.rb` came from. `.any` lets install probe
-/// both, as upgrade does for rows recorded before malt tracked it.
+/// Which side install must take. A core keg is always a formula, so a
+/// missing formula can never fall back to a same-named cask; `.any` lets
+/// install probe both, as upgrade does for tap rows recorded before malt
+/// tracked their subtree.
 const Side = enum { any, formula, cask };
 
 /// Table the user's `--formula` / `--cask` restricts the lookup to.
@@ -96,7 +98,7 @@ pub fn classify(allocator: std.mem.Allocator, db: *sqlite.Database, typed: []con
                 .name = try allocator.dupe(u8, columnSlice(&stmt, 2)),
                 .pinned = true,
             };
-            if (install_args.isCoreTap(tap)) return .{ .presence = .keg, .name = try allocator.dupe(u8, name) };
+            if (install_args.isCoreTap(tap)) return .{ .presence = .keg, .name = try allocator.dupe(u8, name), .side = .formula };
             return .{
                 .presence = .keg,
                 .name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap, name }),
@@ -169,6 +171,24 @@ fn mixOf(allocator: std.mem.Allocator, db: *sqlite.Database, args: []const []con
         }
     }
     return .none;
+}
+
+/// A bare name that resolved to a formula but also names an installed cask.
+/// Best-effort: it only decides a warning, never the target.
+fn shadowsCask(allocator: std.mem.Allocator, db: *sqlite.Database, typed: []const u8, only: Only, t: Target) bool {
+    if (only != .any or t.presence != .keg or t.side != .formula) return false;
+    const cask = classify(allocator, db, typed, .cask) catch return false;
+    defer cask.deinit(allocator);
+    return cask.presence == .cask;
+}
+
+fn warnShadowed(allocator: std.mem.Allocator, db: *sqlite.Database, args: []const []const u8, only: Only) error{ OutOfMemory, Unreadable }!void {
+    for (args) |a| {
+        if (!isPositional(a)) continue;
+        const t = try classify(allocator, db, a, only);
+        defer t.deinit(allocator);
+        if (shadowsCask(allocator, db, a, only, t)) help.warnTreatedAsFormula(a);
+    }
 }
 
 fn onlyFromArgs(args: []const []const u8) Only {
@@ -246,7 +266,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
         const t = classify(allocator, &db, name, only) catch |e| return dbFailed(&db, e);
         errdefer t.deinit(allocator);
-        break :blk .{ t, mixOf(allocator, &db, args, only) catch |e| return dbFailed(&db, e) };
+        const mix = mixOf(allocator, &db, args, only) catch |e| return dbFailed(&db, e);
+        // Only a run that goes on to install owes the notice.
+        if (t.presence == .keg and mix == .none) warnShadowed(allocator, &db, args, only) catch |e| return dbFailed(&db, e);
+        break :blk .{ t, mix };
     };
     defer target.deinit(allocator);
 
@@ -354,9 +377,9 @@ test "classify resolves core packages to their bare name, typed bare or core-qua
     // form would send a core package down the tap path.
     var db = try seedDb();
     defer db.close();
-    try expectTarget(&db, "wget", .any, .keg, "wget", .any);
-    try expectTarget(&db, "homebrew/core/wget", .any, .keg, "wget", .any);
-    try expectTarget(&db, "homebrew/core/jq", .any, .keg, "jq", .any);
+    try expectTarget(&db, "wget", .any, .keg, "wget", .formula);
+    try expectTarget(&db, "homebrew/core/wget", .any, .keg, "wget", .formula);
+    try expectTarget(&db, "homebrew/core/jq", .any, .keg, "jq", .formula);
     try expectTarget(&db, "firefox", .any, .cask, "firefox", .any);
     try expectTarget(&db, "homebrew/cask/firefox", .any, .cask, "firefox", .any);
 }
@@ -424,6 +447,27 @@ test "classify prefers the keg row, unless the user asked for the cask" {
     try expectMissing(&db, "nope");
 }
 
+fn expectShadows(db: *sqlite.Database, typed: []const u8, only: Only, want: bool) !void {
+    const t = try classify(testing.allocator, db, typed, only);
+    defer t.deinit(testing.allocator);
+    try testing.expectEqual(want, shadowsCask(testing.allocator, db, typed, only, t));
+}
+
+test "shadowsCask flags a bare name that is both kinds, never one the user already narrowed" {
+    var db = try seedDb();
+    defer db.close();
+    try expectShadows(&db, "dual", .any, true);
+    // --formula is brew's way to silence it; --cask never resolves to the keg.
+    try expectShadows(&db, "dual", .keg, false);
+    try expectShadows(&db, "dual", .cask, false);
+    try expectShadows(&db, "wget", .any, false);
+    try expectShadows(&db, "firefox", .any, false);
+    // A legacy tap keg may still install from its tap's Casks/, so "treating
+    // it as a formula" would not be true.
+    var legacy = "acme/tools/dual".*;
+    try testing.expect(!shadowsCask(testing.allocator, &db, "dual", .any, .{ .presence = .keg, .name = &legacy, .pinned = true }));
+}
+
 test "onlyFromArgs maps the user's kind flag onto the table it restricts" {
     try testing.expectEqual(Only.cask, onlyFromArgs(&.{ "--cask", "x" }));
     try testing.expectEqual(Only.keg, onlyFromArgs(&.{ "x", "--formula" }));
@@ -470,6 +514,14 @@ fn expectArgv(expected: []const []const u8, target: Target, args: []const []cons
     defer testing.allocator.free(argv);
     try testing.expectEqual(expected.len, argv.len);
     for (expected, argv) |e, a| try testing.expectEqualStrings(e, a);
+}
+
+test "a core keg reinstalls from the formula side only, never falling back to a same-named cask" {
+    var db = try seedDb();
+    defer db.close();
+    const t = try classify(testing.allocator, &db, "wget", .any);
+    defer t.deinit(testing.allocator);
+    try expectArgv(&.{ "--force", "--formula", "wget" }, t, &.{"wget"});
 }
 
 test "forwardArgv keeps a core keg's argv exactly" {

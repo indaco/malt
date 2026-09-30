@@ -581,7 +581,7 @@ test "n and Esc cancel the guard with no effect" {
 }
 
 test "confirming uninstalls the row as its own kind, never a same-named other" {
-    // A bare name resolves cask-first, so a formula row would remove a cask.
+    // Explicit kind flags, so a row never removes a same-named other kind.
     inline for (.{ .{ 0, "--formula", "brotli" }, .{ 3, "--cask", "flux" } }) |case| {
         var s: State = .{ .items = &sample };
         s.chrome.view.selected = case[0];

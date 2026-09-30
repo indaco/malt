@@ -4,6 +4,7 @@
 const std = @import("std");
 
 const AppCtx = @import("../app_ctx.zig").AppCtx;
+const output = @import("../ui/output.zig");
 
 /// Check if args contain -h or --help. If so, print help to stdout (so the
 /// output is pipeable — `malt install --help | less`) and return true.
@@ -15,6 +16,11 @@ pub fn showIfRequested(ctx: *const AppCtx, args: []const []const u8, command: []
         }
     }
     return false;
+}
+
+/// brew's collision notice, minus the tap qualifier malt has no use for.
+pub fn warnTreatedAsFormula(name: []const u8) void {
+    output.warn("Treating {s} as a formula. For the cask, specify the `--cask` flag. To silence this message, use the `--formula` flag.", .{name});
 }
 
 /// Return the help text for a given command, or a generic fallback. Exposed
@@ -139,7 +145,8 @@ const reinstall_help =
     \\Flags pass through to `install`; the common ones:
     \\  --cask               Pick the cask when a formula shares its name
     \\                       (otherwise auto-detected from the DB row)
-    \\  --formula            Pick the formula when a cask shares its name
+    \\  --formula            Treat the name as a formula, the default when a
+    \\                       cask shares it, without the shared-name warning
     \\  --dry-run            Show what would be reinstalled
     \\  --quiet, -q          Suppress non-error output
     \\  --json               JSON output (mirrors `mt install --json`)
@@ -160,6 +167,8 @@ const uninstall_help =
     \\
     \\Remove installed packages. Every name is checked first: if one is not
     \\installed, or is still needed by a package left behind, nothing is removed.
+    \\A name installed as both a formula and a cask is removed as the formula,
+    \\with a warning, as in brew; pass --cask for the cask.
     \\
     \\Flags:
     \\  --formula, --formulae  Treat all named arguments as formulae
@@ -188,8 +197,8 @@ const upgrade_help =
     \\the version rule above.
     \\
     \\Flags:
-    \\  --cask         Upgrade casks only
-    \\  --formula      Upgrade formulas only
+    \\  --cask         Upgrade casks only; a named formula is refused
+    \\  --formula      Upgrade formulas only; a named cask is refused
     \\  --dry-run      Show what would be upgraded
     \\  --pinned       Audit pinned formulas + casks (requires --dry-run or --force)
     \\  --force, -f    Bypass pin protection (dangerous; user-initiated)
@@ -920,3 +929,22 @@ const version_help =
     \\  malt version update --cleanup
     \\
 ;
+
+test "warnTreatedAsFormula names both ways out and stays silent under --quiet" {
+    const prior_quiet = output.isQuiet();
+    defer output.setQuiet(prior_quiet);
+    output.setQuiet(false);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    warnTreatedAsFormula("box");
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Treating box as a formula. For the cask, specify the `--cask` flag. To silence this message, use the `--formula` flag.") != null);
+
+    // brew skips it under --quiet.
+    buf.clearRetainingCapacity();
+    output.setQuiet(true);
+    warnTreatedAsFormula("box");
+    try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+}

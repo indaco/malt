@@ -37,9 +37,9 @@ sqlite3 "$DB" "INSERT INTO casks(token,name,version,url) VALUES('box','Box','1.0
   INSERT INTO casks(token,name,version,url) VALUES('solo','Solo','1.0','https://e/s.dmg');
   INSERT INTO kegs(name,full_name,version,store_sha256,cellar_path) VALUES('box','box','1.0','abc','$MALT_PREFIX/Cellar/box/1.0');"
 
-# Control: a healthy table resolves the cask, not the formula.
-out=$("$BIN" --offline uninstall --dry-run box 2>&1) || fail "control: uninstall --dry-run failed: $out"
-grep -q "cask box" <<<"$out" || fail "control: expected the cask to win: $out"
+# Control: a healthy table resolves the cask when asked for it.
+out=$("$BIN" --offline uninstall --cask --dry-run box 2>&1) || fail "control: uninstall --cask --dry-run failed: $out"
+grep -q "cask box" <<<"$out" || fail "control: expected the cask: $out"
 
 # Installed-cask artefacts `purge --stale-casks` must never read as orphans.
 mkdir -p "$MALT_PREFIX/Caskroom/box/1.0" "$MALT_CACHE/Cask"

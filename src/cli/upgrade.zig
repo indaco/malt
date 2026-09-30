@@ -339,6 +339,12 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
         }
     }
 
+    // Brew's check and wording; either flag alone would silently win.
+    if (cask_only and formula_only) {
+        output.err("Options --formula and --cask are mutually exclusive", .{});
+        return error.Aborted;
+    }
+
     if (use_system_ruby_bare) {
         output.err("a bare --use-system-ruby would apply to every outdated keg — name them: --use-system-ruby=<name>,...", .{});
         return error.Aborted;
@@ -470,7 +476,19 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
         // bulk run, so each named package keeps its per-package line and
         // there is no footer; the outcome itself is nothing to fold here.
         for (names.items) |name| {
-            if (!cask_only and isFormulaInstalled(&db, name)) {
+            const is_formula = !cask_only and (isFormulaInstalled(&db, name) catch {
+                // Under --formula the user already ruled the cask out.
+                if (formula_only)
+                    output.err("Could not read the package database for formula {s}: {s}", .{ name, db.errMsg() })
+                else
+                    output.err("Could not read the package database for formula {s}: {s}. If {s} is a cask, pass --cask.", .{ name, db.errMsg(), name });
+                any_failed = true;
+                other_failed = true;
+                continue;
+            });
+            // `--formula` takes this arm even on a miss, which refuses the name.
+            if (is_formula or formula_only) {
+                if (shadowsCask(&db, name, formula_only)) help.warnTreatedAsFormula(name);
                 const outcome = upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, false, null) catch {
                     any_failed = true;
                     other_failed = true;
@@ -1579,12 +1597,19 @@ fn restoreOldLinks(
     };
 }
 
-/// Check if a formula is installed.
-fn isFormulaInstalled(db: *sqlite.Database, name: []const u8) bool {
-    var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return false;
+/// A table it cannot read is `Unreadable`, never a miss that hands the
+/// name to a same-named cask.
+fn isFormulaInstalled(db: *sqlite.Database, name: []const u8) error{Unreadable}!bool {
+    var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return error.Unreadable;
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return false;
-    return stmt.step() catch false;
+    stmt.bindText(1, name) catch return error.Unreadable;
+    return stmt.step() catch error.Unreadable;
+}
+
+/// A named formula upgrade whose name also belongs to an installed cask.
+/// Best-effort: it only decides a warning, never the target.
+fn shadowsCask(db: *sqlite.Database, name: []const u8, formula_only: bool) bool {
+    return !formula_only and (cask_mod.isInstalled(db, name) catch false);
 }
 
 /// Upgrade all outdated formulas. Returns error.Aborted if any individual
@@ -2377,6 +2402,28 @@ test "readOldKeg releases the WAL read snapshot before a second connection advan
     try a.beginTransaction();
     try a.exec("UPDATE kegs SET pinned = 1 WHERE name = 'foo';");
     try a.commit();
+}
+
+test "isFormulaInstalled reports a kegs table it cannot read, never a miss" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try std.testing.expectError(error.Unreadable, isFormulaInstalled(&db, "box"));
+    try schema.initSchema(&db);
+    try std.testing.expect(!try isFormulaInstalled(&db, "box"));
+}
+
+test "shadowsCask flags a formula a cask shares its name with, unless --formula narrowed it" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES
+        \\  ('box', 'box', '1.0', 'a', '/c/box/1.0'), ('jq', 'jq', '1.7', 'b', '/c/jq/1.7');
+        \\INSERT INTO casks (token, name, version, url) VALUES ('box', 'Box', '2.0', 'https://x.invalid/b.dmg');
+    );
+    try std.testing.expect(shadowsCask(&db, "box", false));
+    try std.testing.expect(!shadowsCask(&db, "box", true));
+    try std.testing.expect(!shadowsCask(&db, "jq", false));
 }
 
 test "readOldKeg returns null when the formula is not installed" {

@@ -139,7 +139,8 @@ reinstalled with `mt uninstall --cask <cask>` then `mt install --cask <cask>`.
 Flags pass through to `install`; the common ones:
   --cask               Pick the cask when a formula shares its name
                        (otherwise auto-detected from the DB row)
-  --formula            Pick the formula when a cask shares its name
+  --formula            Treat the name as a formula, the default when a
+                       cask shares it, without the shared-name warning
   --dry-run            Show what would be reinstalled
   --quiet, -q          Suppress non-error output
   --json               JSON output (mirrors `mt install --json`)
@@ -159,6 +160,8 @@ Usage: malt uninstall <package>... [flags]
 
 Remove installed packages. Every name is checked first: if one is not
 installed, or is still needed by a package left behind, nothing is removed.
+A name installed as both a formula and a cask is removed as the formula,
+with a warning, as in brew; pass --cask for the cask.
 
 Flags:
   --formula, --formulae  Treat all named arguments as formulae
@@ -186,8 +189,8 @@ with no version movement is expected. Core formulas and casks follow
 the version rule above.
 
 Flags:
-  --cask         Upgrade casks only
-  --formula      Upgrade formulas only
+  --cask         Upgrade casks only; a named formula is refused
+  --formula      Upgrade formulas only; a named cask is refused
   --dry-run      Show what would be upgraded
   --pinned       Audit pinned formulas + casks (requires --dry-run or --force)
   --force, -f    Bypass pin protection (dangerous; user-initiated)

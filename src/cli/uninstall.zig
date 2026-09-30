@@ -117,8 +117,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
 
     // Resolve every name before removing any, so an unknown one or a running
-    // app aborts the batch with nothing touched. A cask wins over a formula
-    // of the same name.
+    // app aborts the batch with nothing touched. A formula wins over a cask
+    // of the same name, as in brew.
     var targets: std.ArrayList(Target) = .empty;
     defer {
         for (targets.items) |t| if (t.keg) |k| allocator.free(k.version);
@@ -127,14 +127,24 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     try targets.ensureTotalCapacityPrecise(allocator, names.items.len);
     var refused = false;
     for (names.items) |name| {
-        // An unreadable table aborts here: falling through would pick a
-        // same-named formula, unless `--formula` asked for exactly that.
+        // An unreadable table aborts: the name may be the formula the user
+        // meant, unless `--cask` asked for the cask.
+        const keg = if (force_cask) null else lookupKeg(&db, allocator, name) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Unreadable => return kegReadFailed(&db, name, force_formula),
+        };
+        // Aborts even over a keg: malt could not warn before removing a
+        // formula the user may have mistaken for the cask. `--formula` confirms it.
         const cask_row = if (force_formula) null else cask_mod.lookupInstalledChecked(&db, name) catch |e| {
+            if (keg) |k| allocator.free(k.version);
             if (force_cask) return caskReadFailed(&db, e, name);
             output.err("Could not read the package database for cask {s}: {s}. If {s} is a formula, pass --formula.", .{ name, cask_mod.lookupDetail(e, &db), name });
             return error.Aborted;
         };
-        if (cask_row) |info| {
+        if (keg) |k| {
+            if (cask_row != null) help.warnTreatedAsFormula(name);
+            targets.appendAssumeCapacity(.{ .name = name, .keg = k });
+        } else if (cask_row) |info| {
             refuseIfRunning(ctx.io, name, &info) catch {
                 refused = true;
                 continue;
@@ -143,8 +153,6 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         } else if (force_cask) {
             output.err("{s} is not installed as a cask", .{name});
             refused = true;
-        } else if (try lookupKeg(&db, allocator, name)) |keg| {
-            targets.appendAssumeCapacity(.{ .name = name, .keg = keg });
         } else if (force_formula) {
             output.err("{s} is not installed as a formula", .{name});
             refused = true;
@@ -200,13 +208,13 @@ fn containsName(names: []const []const u8, name: []const u8) bool {
     return false;
 }
 
-fn lookupKeg(db: *sqlite.Database, allocator: std.mem.Allocator, name: []const u8) error{ Aborted, OutOfMemory }!?Keg {
+fn lookupKeg(db: *sqlite.Database, allocator: std.mem.Allocator, name: []const u8) error{ Unreadable, OutOfMemory }!?Keg {
     var stmt = db.prepare(
         "SELECT id, version, revision FROM kegs WHERE name = ?1 LIMIT 1;",
-    ) catch return readFailed(db);
+    ) catch return error.Unreadable;
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return readFailed(db);
-    if (!(stmt.step() catch return readFailed(db))) return null;
+    stmt.bindText(1, name) catch return error.Unreadable;
+    if (!(stmt.step() catch return error.Unreadable)) return null;
 
     const version = if (stmt.columnText(1)) |v| std.mem.sliceTo(v, 0) else "unknown";
     return .{
@@ -365,8 +373,12 @@ fn removeFormula(
     output.success("{s} uninstalled", .{name});
 }
 
-fn readFailed(db: *sqlite.Database) error{Aborted} {
-    output.err("Could not read the package database: {s}", .{db.errMsg()});
+fn kegReadFailed(db: *sqlite.Database, name: []const u8, force_formula: bool) error{Aborted} {
+    // Under --formula the user already ruled the cask out.
+    if (force_formula)
+        output.err("Could not read the package database for formula {s}: {s}", .{ name, db.errMsg() })
+    else
+        output.err("Could not read the package database for formula {s}: {s}. If {s} is a cask, pass --cask.", .{ name, db.errMsg(), name });
     return error.Aborted;
 }
 

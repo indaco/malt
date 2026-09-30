@@ -981,8 +981,8 @@ test "bundle create refuses a table it cannot read instead of writing a Brewfile
 }
 
 test "bundle cleanup removes the dropped formula, not the kept cask of the same name" {
-    // A bare name resolves cask-first in `uninstall`, so dropping the formula
-    // used to remove the cask the Brewfile keeps.
+    // Cleanup names the kind, so dropping the formula never removes the cask
+    // the Brewfile keeps, whichever kind a bare name resolves to.
     var s = try Scratch.init(testing.allocator, "cleanup_same_name");
     defer s.deinit(testing.allocator);
     {
