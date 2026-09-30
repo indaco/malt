@@ -980,6 +980,69 @@ test "bundle create refuses a table it cannot read instead of writing a Brewfile
     }
 }
 
+test "bundle export refuses a bundle whose members it cannot read instead of exporting it empty" {
+    // An empty export piped into a Brewfile or `bundle install` silently drops
+    // the whole bundle.
+    var s = try Scratch.init(testing.allocator, "export_corrupt_members");
+    defer s.deinit(testing.allocator);
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO bundles (name, manifest_path, created_at, version) VALUES ('x', NULL, 0, 1);
+            \\INSERT INTO bundle_members (bundle_name, kind, ref) VALUES ('x', 'formula', 'wget');
+        );
+    }
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .stdout = test_io.testSink(),
+        .stderr = test_io.testSink(),
+    };
+    // Control: the same bundle exports while the table is readable.
+    {
+        quiet();
+        defer unquiet();
+        try bundle.execute(&ctx, testing.allocator, &.{ "export", "x" });
+    }
+
+    try test_io.corruptTable(db_path, "bundle_members");
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(error.Aborted, bundle.execute(&ctx, testing.allocator, &.{ "export", "x" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+}
+
+test "bundle export refuses a table it cannot read in words, not a raw error" {
+    // Same refusal as `bundle create`; a bare error name and trace reads as a
+    // malt crash, not as a damaged database.
+    inline for (.{ "taps", "kegs", "casks", "services" }) |table| {
+        var s = try Scratch.init(testing.allocator, "export_corrupt_" ++ table);
+        defer s.deinit(testing.allocator);
+        try initDb(s.path);
+        var db_path_buf: [512]u8 = undefined;
+        try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0), table);
+
+        const ctx: malt.app_ctx.AppCtx = .{
+            .io = std.Options.debug_io,
+            .environ = .empty,
+            .stdout = test_io.testSink(),
+            .stderr = test_io.testSink(),
+        };
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try testing.expectError(error.Aborted, bundle.execute(&ctx, testing.allocator, &.{ "export", "--services" }));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+    }
+}
+
 test "bundle cleanup removes the dropped formula, not the kept cask of the same name" {
     // Cleanup names the kind, so dropping the formula never removes the cask
     // the Brewfile keeps, whichever kind a bare name resolves to.
