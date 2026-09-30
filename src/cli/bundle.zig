@@ -513,23 +513,24 @@ const CreateArgs = struct { format: Format, out_path: []const u8, include_servic
 /// Parse `bundle create` args. The default filename is resolved once after the
 /// loop so an explicit positional path wins no matter where `--format` sits.
 /// Null signals an invalid format value.
-fn resolveCreateArgs(rest: []const []const u8) ?CreateArgs {
+fn resolveCreateArgs(rest: []const []const u8) error{Aborted}!CreateArgs {
     var format: Format = .brewfile;
     var out_path: ?[]const u8 = null;
     var include_services = false;
+    var opts_done = false;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         const a = rest[i];
-        if (std.mem.eql(u8, a, "--format")) {
+        if (opts_done or !std.mem.startsWith(u8, a, "-")) {
+            out_path = a;
+        } else if (std.mem.eql(u8, a, "--")) {
+            opts_done = true;
+        } else if (std.mem.eql(u8, a, "--format")) {
             i += 1;
-            format = parseFormat(if (i < rest.len) rest[i] else "") orelse return null;
+            format = parseFormat(if (i < rest.len) rest[i] else "") orelse return badFormat();
         } else if (std.mem.eql(u8, a, "--services")) {
             include_services = true;
-        } else if (std.mem.startsWith(u8, a, "-")) {
-            output.warn("ignored flag: {s}", .{a});
-        } else {
-            out_path = a;
-        }
+        } else return unknownFlag(a);
     }
     return .{
         .format = format,
@@ -542,7 +543,7 @@ fn resolveCreateArgs(rest: []const []const u8) ?CreateArgs {
 }
 
 fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
-    const args = resolveCreateArgs(rest) orelse return badFormat();
+    const args = try resolveCreateArgs(rest);
 
     var db = try openDb(ctx);
     defer db.close();
@@ -558,22 +559,24 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     var format: Format = .brewfile;
     var bundle_name: ?[]const u8 = null;
     var include_services = false;
+    var opts_done = false;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         const a = rest[i];
-        if (std.mem.eql(u8, a, "--format")) {
+        if (opts_done or !std.mem.startsWith(u8, a, "-")) {
+            if (bundle_name != null) {
+                output.err("bundle export: expected at most one <name>", .{});
+                return error.Aborted;
+            }
+            bundle_name = a;
+        } else if (std.mem.eql(u8, a, "--")) {
+            opts_done = true;
+        } else if (std.mem.eql(u8, a, "--format")) {
             i += 1;
             format = parseFormat(if (i < rest.len) rest[i] else "") orelse return badFormat();
         } else if (std.mem.eql(u8, a, "--services")) {
             include_services = true;
-        } else if (std.mem.startsWith(u8, a, "-")) {
-            output.warn("ignored flag: {s}", .{a});
-        } else if (bundle_name != null) {
-            output.err("bundle export: expected at most one <name>", .{});
-            return error.Aborted;
-        } else {
-            bundle_name = a;
-        }
+        } else return unknownFlag(a);
     }
 
     var db = try openDb(ctx);
@@ -729,6 +732,12 @@ fn unwritableDb(db: *sqlite.Database) error{Aborted} {
 
 fn planFailed(e: anyerror) error{Aborted} {
     output.err("Could not plan which packages to remove: {s}", .{@errorName(e)});
+    return error.Aborted;
+}
+
+// create writes a file, so a flag it cannot honour must stop it.
+fn unknownFlag(flag: []const u8) error{Aborted} {
+    output.err("Unknown flag: {s}", .{flag});
     return error.Aborted;
 }
 
