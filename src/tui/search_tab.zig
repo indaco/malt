@@ -2082,9 +2082,29 @@ test "a second Enter on the hit whose pane is open closes it, whichever kind it 
     const eff = stepKey(&s, &storage, .enter);
     defer if (eff == .read) testing.allocator.free(eff.read.argv);
     try testing.expect(eff == .read);
-    s.detail = .{ .name = "docker" }; // the read landed
+    setInfoDetail(&s, &storage, try info_json.parse(testing.allocator, "{\"name\":\"docker\"}")); // the read landed
     try testing.expect(stepKey(&s, &storage, .enter) == .none);
     try testing.expect(s.detail == null);
+}
+
+test "a failed read for the other kind leaves the open pane its own, so Enter retries" {
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var s: State = .{ .items = &shared_hits, .phase = .loaded };
+    // The formula's pane is open.
+    const first = stepKey(&s, &storage, .enter);
+    defer if (first == .read) testing.allocator.free(first.read.argv);
+    setInfoDetail(&s, &storage, try info_json.parse(testing.allocator, "{\"name\":\"docker\"}"));
+    // The cask's read is requested and never lands.
+    s.chrome.view.selected = 1;
+    const failed = stepKey(&s, &storage, .enter);
+    defer if (failed == .read) testing.allocator.free(failed.read.argv);
+    try testing.expect(failed == .read);
+    // Enter again on the cask must retry, not close the formula's pane.
+    const retry = stepKey(&s, &storage, .enter);
+    defer if (retry == .read) testing.allocator.free(retry.read.argv);
+    try testing.expect(retry == .read);
+    try testing.expect(s.detail != null);
 }
 
 test "Enter switches the results pane to a newly selected row instead of closing it" {
