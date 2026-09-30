@@ -470,7 +470,14 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
         // bulk run, so each named package keeps its per-package line and
         // there is no footer; the outcome itself is nothing to fold here.
         for (names.items) |name| {
-            if (!cask_only and isFormulaInstalled(&db, name)) {
+            const is_formula = !cask_only and (isFormulaInstalled(&db, name) catch {
+                output.err("Could not read the package database for formula {s}: {s}", .{ name, db.errMsg() });
+                any_failed = true;
+                other_failed = true;
+                continue;
+            });
+            // `--formula` takes this arm even on a miss, which refuses the name.
+            if (is_formula or formula_only) {
                 if (shadowsCask(&db, name, formula_only)) help.warnTreatedAsFormula(name);
                 const outcome = upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, false, null) catch {
                     any_failed = true;
@@ -1580,12 +1587,13 @@ fn restoreOldLinks(
     };
 }
 
-/// Check if a formula is installed.
-fn isFormulaInstalled(db: *sqlite.Database, name: []const u8) bool {
-    var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return false;
+/// A table it cannot read is `Unreadable`, never a miss that hands the
+/// name to a same-named cask.
+fn isFormulaInstalled(db: *sqlite.Database, name: []const u8) error{Unreadable}!bool {
+    var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return error.Unreadable;
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return false;
-    return stmt.step() catch false;
+    stmt.bindText(1, name) catch return error.Unreadable;
+    return stmt.step() catch error.Unreadable;
 }
 
 /// A named formula upgrade whose name also belongs to an installed cask.
@@ -2384,6 +2392,14 @@ test "readOldKeg releases the WAL read snapshot before a second connection advan
     try a.beginTransaction();
     try a.exec("UPDATE kegs SET pinned = 1 WHERE name = 'foo';");
     try a.commit();
+}
+
+test "isFormulaInstalled reports a kegs table it cannot read, never a miss" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try std.testing.expectError(error.Unreadable, isFormulaInstalled(&db, "box"));
+    try schema.initSchema(&db);
+    try std.testing.expect(!try isFormulaInstalled(&db, "box"));
 }
 
 test "shadowsCask flags a formula a cask shares its name with, unless --formula narrowed it" {
