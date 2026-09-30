@@ -925,6 +925,7 @@ test "enter is inert in the basket view" {
     try testing.expect(stepKey(&s, &storage, .enter) == .none);
     try testing.expect(s.detail == null);
     s.detail = .{ .name = "wget" }; // a pane left open from the results view
+    s.detail_kind = .formula;
     try testing.expect(stepKey(&s, &storage, .enter) == .none);
     try testing.expect(s.detail != null); // not toggled closed behind the basket
     s.view = .results; // back on the results list, Enter closes it as before
@@ -2045,9 +2046,38 @@ test "a failed install retains the basket behind a recoverable banner and does n
 test "Enter toggles an open results pane closed for the selected row" {
     var storage: Storage = .{};
     defer storage.deinit(testing.allocator);
-    var s: State = .{ .items = &sample, .phase = .loaded, .detail = .{ .name = "ripgrep" } };
+    var s: State = .{ .items = &sample, .phase = .loaded, .detail = .{ .name = "ripgrep" }, .detail_kind = .formula };
     s.chrome.view.selected = 2; // ripgrep, the row the pane is open for
     try testing.expect(stepKey(&s, &storage, .enter) == .none); // toggled closed
+    try testing.expect(s.detail == null);
+}
+
+const shared_hits = [_]Match{
+    .{ .name = "docker", .kind = .formula, .installed = false },
+    .{ .name = "docker", .kind = .cask, .installed = false },
+};
+
+test "Enter on a same-named hit of the other kind opens its pane instead of closing" {
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var s: State = .{ .items = &shared_hits, .phase = .loaded, .detail = .{ .name = "docker" }, .detail_kind = .formula };
+    s.chrome.view.selected = 1; // the cask, while the pane belongs to the formula
+    const eff = stepKey(&s, &storage, .enter);
+    defer if (eff == .read) testing.allocator.free(eff.read.argv);
+    try testing.expect(eff == .read);
+    try testing.expectEqualStrings("--cask", eff.read.argv[2]);
+}
+
+test "a second Enter on the hit whose pane is open closes it, whichever kind it is" {
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var s: State = .{ .items = &shared_hits, .phase = .loaded };
+    s.chrome.view.selected = 1; // the cask
+    const eff = stepKey(&s, &storage, .enter);
+    defer if (eff == .read) testing.allocator.free(eff.read.argv);
+    try testing.expect(eff == .read);
+    s.detail = .{ .name = "docker" }; // the read landed
+    try testing.expect(stepKey(&s, &storage, .enter) == .none);
     try testing.expect(s.detail == null);
 }
 
