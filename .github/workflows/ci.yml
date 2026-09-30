@@ -104,6 +104,9 @@ jobs:
       - name: Regression guard - uses, info and deps report an install database they cannot open
         run: ./scripts/regressions/uses-info-refuse-unreadable-db-uses-and-info-read-an-unreadable-db-as-empty.sh
 
+      - name: Regression guard - cask commands refuse a casks table they cannot read
+        run: ./scripts/regressions/cask-commands-refuse-unreadable-casks-table-cask-lookupinstalled-reads-unreadable-db-as-not-installed.sh
+
       - name: Regression guard - purge --wipe refuses a database it cannot read before wiping
         run: ./scripts/regressions/wipe-backup-empty-manifest-wipe-backup-writes-empty-manifest-on-unreadable-db.sh
 

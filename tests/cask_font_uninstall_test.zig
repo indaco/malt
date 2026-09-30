@@ -89,7 +89,7 @@ test "uninstall unlinks every font listed in the manifest, then drops Caskroom a
     defer db.close();
     try schema.initSchema(&db);
     try cask.recordInstall(&db, &c, manifest_path, null);
-    try testing.expect(cask.isInstalled(&db, "font-x"));
+    try testing.expect(try cask.isInstalled(&db, "font-x"));
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
@@ -102,7 +102,7 @@ test "uninstall unlinks every font listed in the manifest, then drops Caskroom a
     try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, font_a, .{}));
     try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, font_b, .{}));
     try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(io, fx.p("Caskroom/font-x"), .{}));
-    try testing.expect(!cask.isInstalled(&db, "font-x"));
+    try testing.expect(!try cask.isInstalled(&db, "font-x"));
 }
 
 test "uninstall removes only manifested fonts and tolerates a stale entry" {
@@ -138,7 +138,7 @@ test "uninstall removes only manifested fonts and tolerates a stale entry" {
 
     try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, font_a, .{}));
     try expectKept(io, fx.p("Fonts/Keep.ttf"), "KEEP");
-    try testing.expect(!cask.isInstalled(&db, "font-x"));
+    try testing.expect(!try cask.isInstalled(&db, "font-x"));
 }
 
 fn expectKept(io: std.Io, path: []const u8, body: []const u8) !void {
@@ -169,5 +169,5 @@ test "uninstall survives a missing manifest and still clears the DB row" {
     var installer = newInstaller(&threaded, &db, &fx);
 
     try installer.uninstall("font-x");
-    try testing.expect(!cask.isInstalled(&db, "font-x"));
+    try testing.expect(!try cask.isInstalled(&db, "font-x"));
 }

@@ -119,7 +119,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     try targets.ensureTotalCapacityPrecise(allocator, names.items.len);
     var refused = false;
     for (names.items) |name| {
-        if (cask_mod.lookupInstalled(&db, name)) |info| {
+        // An unreadable table aborts here: falling through would pick a
+        // same-named formula the user never meant.
+        if (cask_mod.lookupInstalledChecked(&db, name) catch |e| return caskReadFailed(&db, e, name)) |info| {
             refuseIfRunning(ctx.io, name, &info) catch {
                 refused = true;
                 continue;
@@ -352,6 +354,11 @@ fn readFailed(db: *sqlite.Database) error{Aborted} {
     return error.Aborted;
 }
 
+fn caskReadFailed(db: *sqlite.Database, e: cask_mod.InstalledLookupError, token: []const u8) error{Aborted} {
+    output.err("Could not read the package database for cask {s}: {s}", .{ token, cask_mod.lookupDetail(e, db) });
+    return error.Aborted;
+}
+
 fn dependentsUnreadable(db: *sqlite.Database, name: []const u8) error{Aborted} {
     output.err("Could not check what depends on {s}: {s}. Use --force to remove anyway.", .{ name, db.errMsg() });
     return error.Aborted;
@@ -541,7 +548,7 @@ fn refuseIfRunning(io: std.Io, token: []const u8, info: *const cask_mod.Installe
 
 /// Uninstall a cask by token.
 fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, cache_dir: []const u8, force: bool, dry_run: bool) !void {
-    const info = cask_mod.lookupInstalled(db, token) orelse {
+    const info = (cask_mod.lookupInstalledChecked(db, token) catch |e| return caskReadFailed(db, e, token)) orelse {
         output.err("{s} is not installed as a cask", .{token});
         return error.Aborted;
     };
@@ -595,6 +602,21 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
     output.success("{s} uninstalled", .{token});
 }
 
+test "uninstallCask reports a casks table it cannot query instead of not installed" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    // No schema: the lookup fails the way a damaged table would.
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
+    try testing.expectError(error.Aborted, uninstallCask(&ctx, testing.allocator, "box", &db, "/nonexistent/malt-uninstall-unreadable/prefix", "/nonexistent/malt-uninstall-unreadable/cache", false, true));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+}
+
 test "uninstallCask refuses an app started after the batch checked it, before any stored step runs" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -639,5 +661,5 @@ test "uninstallCask refuses an app started after the batch checked it, before an
     // after the stored uninstall steps have run.
     try testing.expectError(error.Aborted, uninstallCask(&ctx, testing.allocator, "recheck", &db, "/nonexistent/malt-uninstall-recheck/prefix", "/nonexistent/malt-uninstall-recheck/cache", false, false));
     try testing.expect(std.mem.indexOf(u8, captured.items, "recheck appears to be running") != null);
-    try testing.expect(cask_mod.isInstalled(&db, "recheck"));
+    try testing.expect(try cask_mod.isInstalled(&db, "recheck"));
 }

@@ -281,3 +281,52 @@ test "execute names a control-byte local keg without echoing the byte" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "mt install --local --force '") == null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "lx (/w/x\\xc2\\x9b2Jy/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
 }
+
+test "execute reports a table it cannot read instead of retargeting or calling the package missing" {
+    // Read as a miss, a damaged kegs table sent a bare name to the same-named
+    // cask, and a damaged casks table called an installed cask missing.
+    const cases = .{
+        .{ "kegs", &[_][]const u8{"box"} },
+        .{ "kegs", &[_][]const u8{ "--formula", "box" } },
+        .{ "casks", &[_][]const u8{ "--cask", "box" } },
+    };
+    inline for (cases, 0..) |case, i| {
+        const prefix = try setupPrefix("corrupt_" ++ case[0] ++ std.fmt.comptimePrint("{d}", .{i}));
+        defer {
+            test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+            testing.allocator.free(prefix);
+            _ = c.unsetenv("MALT_PREFIX");
+        }
+        const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+        defer testing.allocator.free(db_dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+        const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+        defer testing.allocator.free(db_path);
+        {
+            var db = try malt.sqlite.Database.open(db_path);
+            defer db.close();
+            try malt.schema.initSchema(&db);
+            try db.exec(
+                \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('box', 'box', '1.0', 'a', '/c/box');
+                \\INSERT INTO casks (token, name, version, url) VALUES ('box', 'Box', '1.0', 'https://x.invalid/b.dmg');
+            );
+        }
+        try test_io.corruptTable(db_path, case[0]);
+
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const prior_quiet = malt.output.isQuiet();
+        malt.output.setQuiet(false);
+        defer malt.output.setQuiet(prior_quiet);
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        malt.output.beginStderrCapture(testing.allocator, &captured);
+        defer malt.output.endStderrCapture();
+
+        const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+        try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), case[1]));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "is a cask") == null);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+    }
+}

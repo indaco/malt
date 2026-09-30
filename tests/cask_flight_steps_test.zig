@@ -199,7 +199,7 @@ test "uninstall postflight runs from the stored row and its effect is visible" {
     installer.flight = .{ .log = &flog, .allocator = arena.allocator() };
 
     try installer.uninstall("box");
-    try testing.expect(!cask.isInstalled(&db, "box"));
+    try testing.expect(!try cask.isInstalled(&db, "box"));
     try testing.expect(installer.runFlight("box", "6.0", stored.get(.uninstall_postflight).?, null));
     const gone = try test_io.readFileAbsoluteAlloc(io, testing.allocator, fx.h("Library/box.gone"), 64);
     defer testing.allocator.free(gone);
@@ -238,7 +238,7 @@ test "a preflight that escapes its confinement aborts before the app is placed" 
     try testing.expect(!exists(io, fx.h(".ssh/config")));
     try testing.expect(!exists(io, fx.p("Applications/Evil.app")));
     try testing.expect(!exists(io, fx.p("Caskroom/evil")));
-    try testing.expect(!cask.isInstalled(&db, "evil"));
+    try testing.expect(!try cask.isInstalled(&db, "evil"));
 }
 
 /// Point the CLI at the fixture prefix; the DB, lock and cache live there.
@@ -286,7 +286,7 @@ test "uninstall aborts before removing anything when the stored preflight fails"
     try testing.expect(!exists(io, fx.h(".ssh/config")));
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
-    try testing.expect(cask.isInstalled(&db, "evil"));
+    try testing.expect(try cask.isInstalled(&db, "evil"));
 }
 
 test "uninstall --force removes the cask past a stored preflight that cannot pass" {
@@ -331,7 +331,7 @@ test "uninstall --force removes the cask past a stored preflight that cannot pas
     try testing.expect(!exists(io, app_path));
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
-    try testing.expect(!cask.isInstalled(&db, "stuck"));
+    try testing.expect(!try cask.isInstalled(&db, "stuck"));
 }
 
 /// A digest-pinned zip of `Box.app` at `<cache>/Cask/box-<ver>.zip`; the
@@ -399,7 +399,7 @@ test "an upgrade whose incoming preflight fails puts the old version back" {
     try testing.expect(!exists(io, fx.h(".ssh/config")));
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
-    const info = cask.lookupInstalled(&db, "box") orelse return error.TestUnexpectedResult;
+    const info = (try cask.lookupInstalledChecked(&db, "box")) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("1.0", info.version());
 }
 
@@ -492,7 +492,7 @@ test "a tarball preflight that fails leaves no Caskroom dir behind" {
     try testing.expectError(cask.CaskError.PreflightFailed, installer.install(&c));
     try testing.expect(!exists(io, fx.p("Caskroom/tarcask")));
     try testing.expect(!exists(io, fx.p("bin/tool")));
-    try testing.expect(!cask.isInstalled(&db, "tarcask"));
+    try testing.expect(!try cask.isInstalled(&db, "tarcask"));
 }
 
 test "a tarball that yields neither a binary nor an app leaves no Caskroom dir behind" {
@@ -687,7 +687,7 @@ test "a rollback keeps the stored flight steps across its row swap" {
     installer.flight = null;
     try installer.reinstallFromHistory("box", "6.0");
 
-    const info = cask.lookupInstalled(&db, "box") orelse return error.TestUnexpectedResult;
+    const info = (try cask.lookupInstalledChecked(&db, "box")) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("6.0", info.version());
     var stored = (try cask.readFlightSteps(&db, testing.allocator, "box")) orelse return error.TestUnexpectedResult;
     defer stored.deinit();
@@ -1023,7 +1023,7 @@ test "upgrade refuses a running app before any stored step can act" {
     try testing.expect(!exists(io, fx.h("Library/live.pre")));
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
-    try testing.expectEqualStrings("1.0", cask.lookupInstalled(&db, "live").?.version());
+    try testing.expectEqualStrings("1.0", (try cask.lookupInstalledChecked(&db, "live")).?.version());
 }
 
 test "uninstall --dry-run runs no stored step; the real run drops the declared symlink" {
@@ -1247,7 +1247,7 @@ test "a tap-routed upgrade runs the outgoing version's stored steps around the s
     try testing.expectEqualStrings("2.0", placed);
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
-    const row = cask.lookupInstalled(&db, "plain").?;
+    const row = (try cask.lookupInstalledChecked(&db, "plain")).?;
     try testing.expectEqualStrings("2.0", row.version());
     try testing.expectEqualStrings("grp/tap", row.tap().?);
 }
@@ -1303,7 +1303,7 @@ test "a tap-routed upgrade whose install fails puts the old version back" {
     try testing.expectEqualStrings("1.0", bin);
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
-    const row = cask.lookupInstalled(&db, "plain").?;
+    const row = (try cask.lookupInstalledChecked(&db, "plain")).?;
     try testing.expectEqualStrings("1.0", row.version());
     try testing.expectEqualStrings("grp/tap", row.tap().?);
 }
@@ -1358,7 +1358,7 @@ test "uninstall --force or --dry-run still refuses a running app before any stor
     try testing.expect(exists(io, exe));
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
-    try testing.expect(cask.isInstalled(&db, "live"));
+    try testing.expect(try cask.isInstalled(&db, "live"));
 }
 
 test "rollback runs the outgoing version's uninstall steps and drops its declared symlink" {
@@ -1420,5 +1420,5 @@ test "rollback runs the outgoing version's uninstall steps and drops its declare
     try testing.expectEqualStrings("1.0", bin);
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
-    try testing.expectEqualStrings("1.0", cask.lookupInstalled(&db, "plain").?.version());
+    try testing.expectEqualStrings("1.0", (try cask.lookupInstalledChecked(&db, "plain")).?.version());
 }

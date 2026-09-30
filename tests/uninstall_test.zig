@@ -897,7 +897,7 @@ test "execute --dry-run previews a cask and keeps its row, files and snapshot" {
         const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
-        try testing.expect(cask.isInstalled(&db, token));
+        try testing.expect(try cask.isInstalled(&db, token));
     }
     const after = try readSnapshotRaw(prefix.path);
     defer testing.allocator.free(after);
@@ -1228,4 +1228,54 @@ test "execute --dry-run previews every named package and removes none" {
     try expectKegIntact(prefix.path, "foo", "1.0");
     try expectKegIntact(prefix.path, "bar", "2.0");
     try testing.expect(try caskInstalled(prefix.path, "c1"));
+}
+
+// A cask and a formula sharing a name, with the `casks` pages overwritten.
+fn seedCorruptCaskOverKeg(prefix: []const u8, name: []const u8) !void {
+    try seedKeg(testing.allocator, prefix, name, "1.0");
+    try seedCask(prefix, name);
+    var db_path_buf: [512]u8 = undefined;
+    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0), "casks");
+}
+
+test "execute refuses an unreadable casks table instead of removing a same-named formula" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "corrupt_casks_keg");
+    defer prefix.deinit(testing.allocator);
+    try seedCorruptCaskOverKeg(prefix.path, "box");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{"box"});
+
+    // The cask may be the real target: the formula must survive untouched.
+    try expectKegIntact(prefix.path, "box", "1.0");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+}
+
+test "execute --cask reports an unreadable casks table instead of not installed" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "corrupt_casks_flag");
+    defer prefix.deinit(testing.allocator);
+    try seedCorruptCaskOverKeg(prefix.path, "box");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try expectAbortCaptured(&captured, &.{ "--cask", "box" });
+
+    try expectKegIntact(prefix.path, "box", "1.0");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "package database") != null);
+}
+
+test "execute --dry-run on a long-versioned cask previews the cask, not a same-named formula" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "long_cask_version");
+    defer prefix.deinit(testing.allocator);
+    try seedKeg(testing.allocator, prefix.path, "box", "1.0");
+    try sabotage(prefix.path, "INSERT INTO casks (token, name, version, url) VALUES ('box', 'box', '" ++ "9" ** 200 ++ "', 'https://example.invalid/c.zip');");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try dryRunCaptured(&captured, &.{"box"});
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall cask box") != null);
+    try expectKegIntact(prefix.path, "box", "1.0");
 }

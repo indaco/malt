@@ -9,6 +9,7 @@ const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
 const archive_mod = @import("../fs/archive.zig");
 const path_component = @import("../fs/path_component.zig");
+const tap_slug = @import("../tap_slug.zig");
 const confined_source = @import("../fs/confined_source.zig");
 const prefix_path = @import("../fs/prefix_path.zig");
 const hash_mod = @import("hash.zig");
@@ -159,6 +160,9 @@ pub fn parseCaskWithMajor(allocator: std.mem.Allocator, json_bytes: []const u8, 
     // a line-framed identity (progress, `list`, sidecars): no control bytes.
     if (!path_component.isPathComponent(token) or !path_component.isPathComponent(version)) return CaskError.ParseFailed;
     if (path_component.hasControlByte(token) or path_component.hasControlByte(version)) return CaskError.ParseFailed;
+    // Caskroom/<token>/<version> is best-effort on install, so a longer
+    // version would be recorded yet never read back.
+    if (version.len > std.Io.Dir.max_name_bytes) return CaskError.ParseFailed;
     // Artifact strings are the *other* half of the tap-controlled path surface:
     // `app` lands in `<app_dir>/<name>` ahead of a `deleteTree`, and `binary`
     // resolves under the keg and symlinks into `<prefix>/bin`. Screen them at
@@ -1106,7 +1110,7 @@ pub const CaskInstaller = struct {
             (try collectBinaryArtifacts(self.allocator, obj)) orelse return;
         defer self.allocator.free(entries);
         // Stays set for the link pass that follows; `install` clears it.
-        self.recorded_bundle = lookupInstalled(self.db, cask.token);
+        self.recorded_bundle = lookupInstalledChecked(self.db, cask.token) catch return error.InstallFailed;
         // The bundle this install will place, when the cask names it; the
         // one on record covers a rollback's synthetic cask.
         var app_dir_buf: [512]u8 = undefined;
@@ -1336,6 +1340,8 @@ pub const CaskInstaller = struct {
             return CaskError.InstallFailed;
         var row = row_opt orelse return CaskError.InstallFailed;
         defer row.deinit(self.allocator);
+        // The synthetic cask below skips parseCask and its version cap.
+        if (row.version.len > std.Io.Dir.max_name_bytes) return CaskError.InstallFailed;
 
         // Refuse if the recorded artifact type isn't one this binary can
         // install — silently picking `.unknown` would land an empty
@@ -1411,7 +1417,7 @@ pub const CaskInstaller = struct {
         // survive, pointing at a helper the older bundle no longer ships.
         // Only after the install: a failed one must leave the outgoing
         // version whole.
-        if (lookupInstalled(self.db, token)) |*cur| {
+        if (lookupInstalledChecked(self.db, token) catch return error.InstallFailed) |*cur| {
             var new_buf: [512]u8 = undefined;
             const new_manifest = std.fmt.bufPrint(&new_buf, "{s}/Caskroom/{s}/{s}/{s}", .{ self.prefix, token, row.version, LINKS_MANIFEST_NAME }) catch "";
             const keep = if (new_manifest.len == 0) null else cask_font.readManifest(self.io, self.allocator, new_manifest) catch null;
@@ -1621,7 +1627,7 @@ pub const CaskInstaller = struct {
         const stanzas = try self.binaryStanzas(cask);
         defer if (stanzas) |e| self.allocator.free(e);
         var app_name_buf: [256]u8 = undefined;
-        const bundle_name = self.placedBundleName(cask, extract_dir, &app_name_buf);
+        const bundle_name = try self.placedBundleName(cask, extract_dir, &app_name_buf);
         if (bundle_name == null) if (stanzas) |entries| if (hasCaskroomBinary(entries)) {
             var caskroom_buf: [512]u8 = undefined;
             const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch
@@ -1645,10 +1651,10 @@ pub const CaskInstaller = struct {
     /// declares nothing) the one the stage holds - but only when the row
     /// says the outgoing version placed a bundle. A binary-only cask's
     /// archive may carry a `.app` that was never meant to be installed.
-    fn placedBundleName(self: *CaskInstaller, cask: *const Cask, stage: []const u8, buf: []u8) ?[]const u8 {
+    fn placedBundleName(self: *CaskInstaller, cask: *const Cask, stage: []const u8, buf: []u8) CaskError!?[]const u8 {
         if (parseAppName(cask.parsed.value.object)) |name| return name;
         if (!self.restoring) return null;
-        if (lookupInstalled(self.db, cask.token)) |*cur| {
+        if (lookupInstalledChecked(self.db, cask.token) catch return error.InstallFailed) |*cur| {
             var bin_buf: [512]u8 = undefined;
             const bin_dir = std.fmt.bufPrint(&bin_buf, "{s}/bin/", .{self.prefix}) catch return null;
             if (std.mem.startsWith(u8, cur.appPath() orelse "", bin_dir)) return null;
@@ -1937,7 +1943,7 @@ pub const CaskInstaller = struct {
         const stanzas = try self.binaryStanzas(cask);
         defer if (stanzas) |e| self.allocator.free(e);
         var app_name_buf: [256]u8 = undefined;
-        const bundle_name = self.placedBundleName(cask, caskroom_ver, &app_name_buf);
+        const bundle_name = try self.placedBundleName(cask, caskroom_ver, &app_name_buf);
         if (bundle_name == null) if (stanzas) |entries| if (hasCaskroomBinary(entries))
             return (try self.linkStanzas(cask, null, caskroom_ver, entries)) orelse error.InstallFailed;
 
@@ -2370,12 +2376,13 @@ fn applicationsDir(io: std.Io, environ: std.process.Environ, prefix: []const u8,
 
 /// Installed cask info with owned copies of strings.
 pub const InstalledCask = struct {
-    version_buf: [128]u8 = undefined,
+    // parseCask caps a version at a filename, so this fits any recorded one.
+    version_buf: [std.Io.Dir.max_name_bytes]u8 = undefined,
     version_len: usize = 0,
-    app_path_buf: [512]u8 = undefined,
+    app_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined,
     app_path_len: usize = 0,
     has_app_path: bool = false,
-    tap_buf: [128]u8 = undefined,
+    tap_buf: [tap_slug.max_slug_len]u8 = undefined,
     tap_len: usize = 0,
     has_tap: bool = false,
 
@@ -2398,13 +2405,21 @@ pub const InstalledCask = struct {
 };
 
 /// Look up installed cask info from DB. Copies data to avoid dangling pointers.
-/// Reads a failed query as "not installed"; readers that must tell the two
-/// apart use `lookupInstalledChecked`.
-pub fn lookupInstalled(db: *sqlite.Database, token: []const u8) ?InstalledCask {
-    return lookupInstalledChecked(db, token) catch null;
+/// Neither is a miss: a miss sends callers to a same-named formula or a fresh
+/// install. A too-long field is no value malt records, so the row is damaged.
+pub const InstalledLookupError = error{ Unreadable, FieldTooLong };
+
+/// Why a `lookupInstalledChecked` failed, for the caller's error line. A
+/// too-long field follows a successful step, so SQLite's message says nothing.
+pub fn lookupDetail(e: InstalledLookupError, db: *sqlite.Database) []const u8 {
+    return switch (e) {
+        error.Unreadable => db.errMsg(),
+        // One error for every field: a name per field grows the binary a page.
+        error.FieldTooLong => "a recorded field is longer than malt accepts",
+    };
 }
 
-pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unreadable}!?InstalledCask {
+pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) InstalledLookupError!?InstalledCask {
     var stmt = db.prepare(
         "SELECT version, app_path, tap FROM casks WHERE token = ?1 LIMIT 1;",
     ) catch return error.Unreadable;
@@ -2418,34 +2433,32 @@ pub fn lookupInstalledChecked(db: *sqlite.Database, token: []const u8) error{Unr
 
     const ver_ptr = stmt.columnText(0) orelse return null;
     const ver_slice = std.mem.sliceTo(ver_ptr, 0);
-    if (ver_slice.len > result.version_buf.len) return null;
+    if (ver_slice.len > result.version_buf.len) return error.FieldTooLong;
     @memcpy(result.version_buf[0..ver_slice.len], ver_slice);
     result.version_len = ver_slice.len;
 
     if (stmt.columnText(1)) |path_ptr| {
         const path_slice = std.mem.sliceTo(path_ptr, 0);
-        if (path_slice.len <= result.app_path_buf.len) {
-            @memcpy(result.app_path_buf[0..path_slice.len], path_slice);
-            result.app_path_len = path_slice.len;
-            result.has_app_path = true;
-        }
+        if (path_slice.len > result.app_path_buf.len) return error.FieldTooLong;
+        @memcpy(result.app_path_buf[0..path_slice.len], path_slice);
+        result.app_path_len = path_slice.len;
+        result.has_app_path = true;
     }
 
     if (stmt.columnText(2)) |tap_ptr| {
         const tap_slice = std.mem.sliceTo(tap_ptr, 0);
-        if (tap_slice.len <= result.tap_buf.len) {
-            @memcpy(result.tap_buf[0..tap_slice.len], tap_slice);
-            result.tap_len = tap_slice.len;
-            result.has_tap = true;
-        }
+        if (tap_slice.len > result.tap_buf.len) return error.FieldTooLong;
+        @memcpy(result.tap_buf[0..tap_slice.len], tap_slice);
+        result.tap_len = tap_slice.len;
+        result.has_tap = true;
     }
 
     return result;
 }
 
 /// Check if a cask is installed (by token).
-pub fn isInstalled(db: *sqlite.Database, token: []const u8) bool {
-    return lookupInstalled(db, token) != null;
+pub fn isInstalled(db: *sqlite.Database, token: []const u8) InstalledLookupError!bool {
+    return try lookupInstalledChecked(db, token) != null;
 }
 
 // --- JSON helpers ---
@@ -3114,9 +3127,8 @@ test "installZip bounds what an unpinned zip inflates to, and only an unpinned o
 
 test "parseCask does not length-cap a clean version" {
     const a = std.testing.allocator;
-    // Versions have no length convention, so the guard must stay length-
-    // agnostic — this locks out a future regression that grows an
-    // over-eager cap and rejects a long but otherwise-clean version.
+    // Versions have no length convention: the only cap is the filename
+    // limit they have to fit, and a long clean version stays under it.
     var ver: [200]u8 = undefined;
     @memset(&ver, '9');
     const json = try std.fmt.allocPrint(
@@ -3128,6 +3140,21 @@ test "parseCask does not length-cap a clean version" {
     defer a.free(json);
     var cask = try parseCask(a, json);
     cask.deinit();
+}
+
+test "parseCask caps a version at the filename limit it has to fit" {
+    const a = std.testing.allocator;
+    // The version names Caskroom/<token>/<version>; a longer one could be
+    // recorded but never read back or removed.
+    inline for (.{ std.Io.Dir.max_name_bytes, std.Io.Dir.max_name_bytes + 1 }) |len| {
+        const json = "{\"token\":\"box\",\"version\":\"" ++ "9" ** len ++ "\",\"url\":\"https://e/x.dmg\"}";
+        if (len <= std.Io.Dir.max_name_bytes) {
+            var cask = try parseCask(a, json);
+            cask.deinit();
+        } else {
+            try std.testing.expectError(CaskError.ParseFailed, parseCask(a, json));
+        }
+    }
 }
 
 test "installDmg does not adopt a predictable pre-existing mount point" {
@@ -3602,5 +3629,72 @@ test "lookupInstalledChecked reports a casks table it cannot query instead of a 
     defer db.close();
     // No schema: prepare fails, the way a damaged table would.
     try std.testing.expectError(error.Unreadable, lookupInstalledChecked(&db, "firefox"));
-    try std.testing.expect(lookupInstalled(&db, "firefox") == null);
+    try std.testing.expectError(error.Unreadable, isInstalled(&db, "firefox"));
+}
+
+test "placedBundleName on a restore refuses a casks table it cannot query" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    // No `app` stanza, so a restore consults the row; no schema, so it fails.
+    var c = try parseCask(std.testing.allocator,
+        \\{"token":"box","version":"1.0","url":"https://example.invalid/box.zip"}
+    );
+    defer c.deinit();
+    var installer = CaskInstaller.init(std.Options.debug_io, .empty, std.testing.allocator, &db, "/nonexistent/malt-placed", "/nonexistent/malt-placed/cache");
+    installer.restoring = true;
+    var buf: [256]u8 = undefined;
+    try std.testing.expectError(error.InstallFailed, installer.placedBundleName(&c, "/nonexistent/malt-placed/stage", &buf));
+}
+
+test "lookupInstalledChecked keeps a long version any install could have recorded" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
+    // parseCask caps a version at a filename; the longest must read back.
+    const ver = "9" ** std.Io.Dir.max_name_bytes;
+    try db.exec("INSERT INTO casks(token,version) VALUES('box','" ++ ver ++ "');");
+    const row = (try lookupInstalledChecked(&db, "box")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(ver, row.version());
+}
+
+test "lookupInstalledChecked reports a version no install could record, not a miss" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
+    const ver = "9" ** (std.Io.Dir.max_name_bytes + 1);
+    try db.exec("INSERT INTO casks(token,version) VALUES('box','" ++ ver ++ "');");
+    try std.testing.expectError(error.FieldTooLong, lookupInstalledChecked(&db, "box"));
+}
+
+test "lookupInstalledChecked keeps the longest tap slug and app path malt can record" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
+    // Dropping either would route an upgrade off its tap or skip the
+    // running-app check, so both must survive at their real limits.
+    const tap = "a" ** tap_slug.max_slug_len;
+    const app = "/" ++ "b" ** (std.Io.Dir.max_path_bytes - 1);
+    try db.exec("INSERT INTO casks(token,version,app_path,tap) VALUES('box','1.0','" ++ app ++ "','" ++ tap ++ "');");
+    const row = (try lookupInstalledChecked(&db, "box")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(tap, row.tap().?);
+    try std.testing.expectEqualStrings(app, row.appPath().?);
+}
+
+test "lookupInstalledChecked reports a tap or app path past its limit, not a row without one" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE casks (token TEXT, version TEXT, app_path TEXT, tap TEXT);");
+    try db.exec("INSERT INTO casks(token,version,tap) VALUES('t','1.0','" ++ "a" ** (tap_slug.max_slug_len + 1) ++ "');");
+    try db.exec("INSERT INTO casks(token,version,app_path) VALUES('p','1.0','/" ++ "b" ** std.Io.Dir.max_path_bytes ++ "');");
+    try std.testing.expectError(error.FieldTooLong, lookupInstalledChecked(&db, "t"));
+    try std.testing.expectError(error.FieldTooLong, lookupInstalledChecked(&db, "p"));
+}
+
+test "lookupDetail explains a too-long field instead of SQLite's message" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    // A too-long field follows a successful step, so SQLite has no error to report.
+    const detail = lookupDetail(error.FieldTooLong, &db);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "longer than malt accepts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "not an error") == null);
 }

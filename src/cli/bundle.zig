@@ -564,7 +564,11 @@ fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
-    try populateFromInstalled(&manifest, &db, .{ .include_services = args.include_services });
+    populateFromInstalled(&manifest, &db, .{ .include_services = args.include_services }) catch |e| {
+        if (e != BundleError.DatabaseError) return e;
+        output.err("Could not read the package database: {s}", .{db.errMsg()});
+        return error.Aborted;
+    };
     try writeManifest(ctx, manifest, args.out_path, args.format);
     output.success("wrote {s}", .{args.out_path});
 }
@@ -765,7 +769,8 @@ fn populateFromInstalled(
     var t = db.prepare("SELECT name FROM taps ORDER BY name;") catch
         return BundleError.DatabaseError;
     defer t.finalize();
-    while (t.step() catch false) {
+    // A failed step would drop the table from a manifest that looks whole.
+    while (t.step() catch return BundleError.DatabaseError) {
         const n = t.columnText(0) orelse continue;
         const name = a.dupe(u8, std.mem.sliceTo(n, 0)) catch return BundleError.DatabaseError;
         taps.append(a, name) catch return BundleError.DatabaseError;
@@ -775,7 +780,7 @@ fn populateFromInstalled(
     var f = db.prepare("SELECT name, tap, tap_rb_subtree = 'cask', full_name FROM kegs WHERE install_reason='direct' ORDER BY name;") catch
         return BundleError.DatabaseError;
     defer f.finalize();
-    while (f.step() catch false) {
+    while (f.step() catch return BundleError.DatabaseError) {
         const n = f.columnText(0) orelse continue;
         // A bare name would install core's package of that name elsewhere;
         // a `--local` recipe only rebuilds from its file on this machine.
@@ -798,7 +803,7 @@ fn populateFromInstalled(
     var c = db.prepare("SELECT token, tap FROM casks ORDER BY token;") catch
         return BundleError.DatabaseError;
     defer c.finalize();
-    while (c.step() catch false) {
+    while (c.step() catch return BundleError.DatabaseError) {
         const n = c.columnText(0) orelse continue;
         const name = qualifiedName(a, c.columnText(1), n) catch return BundleError.DatabaseError;
         casks.append(a, .{ .name = name }) catch return BundleError.DatabaseError;
@@ -810,7 +815,7 @@ fn populateFromInstalled(
             "(SELECT name FROM kegs WHERE tap = '" ++ install_args.local_tap_label ++ "') ORDER BY name;") catch
             return BundleError.DatabaseError;
         defer s.finalize();
-        while (s.step() catch false) {
+        while (s.step() catch return BundleError.DatabaseError) {
             const n = s.columnText(0) orelse continue;
             const name = a.dupe(u8, std.mem.sliceTo(n, 0)) catch return BundleError.DatabaseError;
             services.append(a, .{ .name = name, .auto_start = true }) catch

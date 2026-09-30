@@ -393,7 +393,7 @@ fn openTestDb() !sqlite.Database {
     return sqlite.Database.open(":memory:");
 }
 
-test "recordInstall and lookupInstalled round-trip" {
+test "recordInstall and lookupInstalledChecked round-trip" {
     var db = try openTestDb();
     defer db.close();
     try schema.initSchema(&db);
@@ -403,7 +403,7 @@ test "recordInstall and lookupInstalled round-trip" {
 
     try cask.recordInstall(&db, &c, "/Applications/Firefox.app", null);
 
-    const info = cask.lookupInstalled(&db, "firefox");
+    const info = try cask.lookupInstalledChecked(&db, "firefox");
     try std.testing.expect(info != null);
     try std.testing.expectEqualStrings("123.0", info.?.version());
     try std.testing.expectEqualStrings("/Applications/Firefox.app", info.?.appPath().?);
@@ -420,7 +420,7 @@ test "recordInstall stores the owning tap for third-party-tap casks" {
 
     try cask.recordInstall(&db, &c, "/Applications/Firefox.app", "xykong/tap");
 
-    const info = cask.lookupInstalled(&db, "firefox").?;
+    const info = (try cask.lookupInstalledChecked(&db, "firefox")).?;
     try std.testing.expectEqualStrings("xykong/tap", info.tap().?);
 }
 
@@ -432,9 +432,9 @@ test "isInstalled returns true after recordInstall" {
     var c = try cask.parseCask(std.testing.allocator, test_cask_json);
     defer c.deinit();
 
-    try std.testing.expect(!cask.isInstalled(&db, "firefox"));
+    try std.testing.expect(!try cask.isInstalled(&db, "firefox"));
     try cask.recordInstall(&db, &c, "/Applications/Firefox.app", null);
-    try std.testing.expect(cask.isInstalled(&db, "firefox"));
+    try std.testing.expect(try cask.isInstalled(&db, "firefox"));
 }
 
 test "removeRecord removes cask from DB" {
@@ -446,10 +446,10 @@ test "removeRecord removes cask from DB" {
     defer c.deinit();
 
     try cask.recordInstall(&db, &c, "/Applications/Firefox.app", null);
-    try std.testing.expect(cask.isInstalled(&db, "firefox"));
+    try std.testing.expect(try cask.isInstalled(&db, "firefox"));
 
     try cask.removeRecord(&db, "firefox");
-    try std.testing.expect(!cask.isInstalled(&db, "firefox"));
+    try std.testing.expect(!try cask.isInstalled(&db, "firefox"));
 }
 
 // A schema-less DB makes `prepare` fail. Bubbling the SqliteError lets
@@ -1785,7 +1785,7 @@ test "upgrade refuses a suffix-less cask neither walk can classify before touchi
     try testing.expect(std.mem.indexOf(u8, captured.items, "Failed to download") == null);
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
-    try testing.expect(malt.cask.isInstalled(&db, "bare"));
+    try testing.expect(try malt.cask.isInstalled(&db, "bare"));
 }
 
 test "upgrade hands a walk-resolved pkg to the sudo gate before touching the installed version" {
@@ -1826,7 +1826,7 @@ test "upgrade hands a walk-resolved pkg to the sudo gate before touching the ins
     try testing.expectEqual(@as(usize, 3), origin.requests);
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
-    try testing.expect(malt.cask.isInstalled(&db, "bare"));
+    try testing.expect(try malt.cask.isInstalled(&db, "bare"));
 }
 
 test "upgrade prefetches a walk-resolved dmg instead of refusing it as unsupported" {
@@ -1856,7 +1856,7 @@ test "upgrade prefetches a walk-resolved dmg instead of refusing it as unsupport
     try testing.expectEqual(@as(usize, 5), origin.requests);
     var db = try sqlite.Database.open(fx.p("db/malt.db"));
     defer db.close();
-    try testing.expect(malt.cask.isInstalled(&db, "bare"));
+    try testing.expect(try malt.cask.isInstalled(&db, "bare"));
 }
 
 test "install --dry-run names the resolved download for a cask" {

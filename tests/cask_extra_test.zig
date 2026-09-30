@@ -287,7 +287,7 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
     try test_io.makeDirAbsolute(std.Options.debug_io, app_path_z);
 
     try cask.recordInstall(&db, &c, app_path_z, null);
-    try testing.expect(cask.isInstalled(&db, "firefox"));
+    try testing.expect(try cask.isInstalled(&db, "firefox"));
 
     var fx = try Fixture.init("uninstall_prefix");
     defer fx.deinit();
@@ -297,7 +297,7 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
     try installer.uninstall("firefox");
 
     // DB row is gone and the staged "app bundle" has been removed.
-    try testing.expect(!cask.isInstalled(&db, "firefox"));
+    try testing.expect(!try cask.isInstalled(&db, "firefox"));
     try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(std.Options.debug_io, app_path_z, .{}));
 }
 
@@ -427,7 +427,7 @@ test "a failed cask prefetch leaves the installed app and its row intact" {
     try testing.expectError(cask.CaskError.DownloadFailed, installer.downloadOnly(&c));
 
     try std.Io.Dir.accessAbsolute(io, app_path_z, .{});
-    try testing.expect(cask.isInstalled(&db, "prefetch-guard"));
+    try testing.expect(try cask.isInstalled(&db, "prefetch-guard"));
 }
 
 test "an unpinned artefact fetched once survives uninstall and installs from the prefetch" {
@@ -515,7 +515,7 @@ test "a PKG cask's cached artefact survives uninstall when the prefetch named it
 
     try installer.uninstall("pkgroll");
     try std.Io.Dir.accessAbsolute(io, prefetched, .{});
-    try testing.expect(!cask.isInstalled(&db, "pkgroll"));
+    try testing.expect(!try cask.isInstalled(&db, "pkgroll"));
 }
 
 test "uninstall still removes an app_path the prefetch does not name" {

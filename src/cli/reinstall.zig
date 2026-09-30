@@ -67,8 +67,10 @@ pub const Target = struct {
 /// reinstall dispatch arm aligned with the install pipeline's keg /
 /// cask split. A `<user>/<repo>/<name>` form matches by leaf and canonical
 /// tap, the way install recognises a recorded tap package. Empty `name`
-/// short-circuits to `.missing` so SQLite never sees an empty bind.
-pub fn classify(allocator: std.mem.Allocator, db: *sqlite.Database, typed: []const u8, only: Only) error{OutOfMemory}!Target {
+/// short-circuits to `.missing` so SQLite never sees an empty bind. A table
+/// it cannot read is `Unreadable`, never a miss that hands the name to the
+/// other kind.
+pub fn classify(allocator: std.mem.Allocator, db: *sqlite.Database, typed: []const u8, only: Only) error{ OutOfMemory, Unreadable }!Target {
     const missing: Target = .{ .presence = .missing };
     if (typed.len == 0) return missing;
 
@@ -82,10 +84,10 @@ pub fn classify(allocator: std.mem.Allocator, db: *sqlite.Database, typed: []con
     }
 
     if (only != .cask) {
-        var stmt = db.prepare("SELECT name, ifnull(tap, ''), full_name, tap_rb_subtree FROM kegs WHERE name = ?1;") catch return missing;
+        var stmt = db.prepare("SELECT name, ifnull(tap, ''), full_name, tap_rb_subtree FROM kegs WHERE name = ?1;") catch return error.Unreadable;
         defer stmt.finalize();
-        stmt.bindText(1, leaf) catch return missing;
-        while (stmt.step() catch false) {
+        stmt.bindText(1, leaf) catch return error.Unreadable;
+        while (stmt.step() catch return error.Unreadable) {
             const tap = columnSlice(&stmt, 1);
             if (!tapMatches(want_tap, "homebrew/core", tap)) continue;
             const name = columnSlice(&stmt, 0);
@@ -104,10 +106,10 @@ pub fn classify(allocator: std.mem.Allocator, db: *sqlite.Database, typed: []con
         }
     }
     if (only != .keg) {
-        var stmt = db.prepare("SELECT token, ifnull(tap, '') FROM casks WHERE token = ?1;") catch return missing;
+        var stmt = db.prepare("SELECT token, ifnull(tap, '') FROM casks WHERE token = ?1;") catch return error.Unreadable;
         defer stmt.finalize();
-        stmt.bindText(1, leaf) catch return missing;
-        while (stmt.step() catch false) {
+        stmt.bindText(1, leaf) catch return error.Unreadable;
+        while (stmt.step() catch return error.Unreadable) {
             const tap = columnSlice(&stmt, 1);
             if (!tapMatches(want_tap, "homebrew/cask", tap)) continue;
             const token = columnSlice(&stmt, 0);
@@ -146,7 +148,7 @@ const Mix = enum { none, rewritten, kinds };
 
 /// One install run pins a single tap and side, so a package that needs
 /// rewriting, or formulas beside casks, would mis-route some of the names.
-fn mixOf(allocator: std.mem.Allocator, db: *sqlite.Database, args: []const []const u8, only: Only) error{OutOfMemory}!Mix {
+fn mixOf(allocator: std.mem.Allocator, db: *sqlite.Database, args: []const []const u8, only: Only) error{ OutOfMemory, Unreadable }!Mix {
     var positionals: usize = 0;
     for (args) |a| {
         if (isPositional(a)) positionals += 1;
@@ -202,6 +204,16 @@ pub fn forwardArgv(allocator: std.mem.Allocator, target: Target, args: []const [
     return argv.toOwnedSlice(allocator);
 }
 
+fn dbFailed(db: *sqlite.Database, e: error{ OutOfMemory, Unreadable }) error{ OutOfMemory, Aborted } {
+    switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Unreadable => {
+            output.err("Could not read the package database: {s}", .{db.errMsg()});
+            return error.Aborted;
+        },
+    }
+}
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "reinstall")) return;
 
@@ -232,9 +244,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         };
         defer db.close();
         schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
-        const t = try classify(allocator, &db, name, only);
+        const t = classify(allocator, &db, name, only) catch |e| return dbFailed(&db, e);
         errdefer t.deinit(allocator);
-        break :blk .{ t, try mixOf(allocator, &db, args, only) };
+        break :blk .{ t, mixOf(allocator, &db, args, only) catch |e| return dbFailed(&db, e) };
     };
     defer target.deinit(allocator);
 

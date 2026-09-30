@@ -89,6 +89,23 @@ test "a binary-only zip cask links its executable from a persisted Caskroom copy
     try testing.expect(@intFromEnum(st.permissions) & 0o111 != 0);
 }
 
+test "the link conflict check refuses a casks table it cannot read" {
+    var fx = try Fixture.init("conflict_unreadable");
+    defer fx.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    // No schema: the recorded-bundle lookup fails the way a damaged table
+    // would. Read as a miss, the bundle on record would screen as foreign.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var c = try cask.parseCask(testing.allocator, rabbit_json);
+    defer c.deinit();
+
+    var installer = cask.CaskInstaller.init(threaded.io(), .empty, testing.allocator, &db, fx.base, fx.p("cache"));
+    try testing.expectError(error.InstallFailed, installer.checkLinkConflicts(&c));
+}
+
 test "a binary target outside the prefix bin dir is refused at parse time" {
     for ([_][]const u8{
         \\{"token":"x","version":"1","url":"https://e/x.zip","artifacts":[{"binary":["x"],"target":"$HOMEBREW_PREFIX/etc/x"}]}
@@ -322,7 +339,7 @@ test "a binary-only cask rolls back to a version that still links its executable
     installer.prefetched_artifact = null;
     try installer.reinstallFromHistory("rabbit", "0.7.8");
 
-    const info = cask.lookupInstalled(&db, "rabbit") orelse return error.TestUnexpectedResult;
+    const info = (try cask.lookupInstalledChecked(&db, "rabbit")) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("0.7.8", info.version());
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -442,7 +459,7 @@ test "uninstall removes every placed link" {
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/editor-tunnel"), &buf));
     try testing.expect(!exists(io, fx.p("Applications/Editor.app")));
     try testing.expect(!exists(io, fx.p("Caskroom/editor")));
-    try testing.expect(!cask.isInstalled(&db, "editor"));
+    try testing.expect(!try cask.isInstalled(&db, "editor"));
 }
 
 test "an app cask installs and rolls back with its APPDIR binaries linked" {
@@ -511,7 +528,7 @@ test "an app cask installs and rolls back with its APPDIR binaries linked" {
     installer.prefetched_artifact = null;
     try installer.reinstallFromHistory("editor", "1.0");
 
-    const info = cask.lookupInstalled(&db, "editor") orelse return error.TestUnexpectedResult;
+    const info = (try cask.lookupInstalledChecked(&db, "editor")) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("1.0", info.version());
     try expectLinkInto(io, fx.p("bin/editor"), fx.p("Applications/Editor.app/Contents/MacOS/editor"));
     try expectLinkInto(io, fx.p("bin/editor-tunnel"), fx.p("Applications/Editor.app/Contents/MacOS/editor-tunnel"));
@@ -612,7 +629,7 @@ test "an app cask with a staged-path binary rolls back with its bundle and its l
     // and the helper comes back with the bundle.
     installer.prefetched_artifact = null;
     try installer.reinstallFromHistory("pad", "1.0");
-    const info = cask.lookupInstalled(&db, "pad") orelse return error.TestUnexpectedResult;
+    const info = (try cask.lookupInstalledChecked(&db, "pad")) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings(fx.p("Applications/Pad.app"), info.appPath().?);
     try testing.expect(exists(io, fx.p("Applications/Pad.app/Contents/MacOS/pad")));
     try expectLinkInto(io, fx.p("bin/pad"), fx.p("Caskroom/pad/1.0/pad-cli"));
@@ -756,7 +773,7 @@ test "uninstall removes the relative link, the bundle and the Caskroom copy" {
     try testing.expectError(error.FileNotFound, std.Io.Dir.readLinkAbsolute(io, fx.p("bin/pad"), &buf));
     try testing.expect(!exists(io, fx.p("Applications/Pad.app")));
     try testing.expect(!exists(io, fx.p("Caskroom/pad")));
-    try testing.expect(!cask.isInstalled(&db, "pad"));
+    try testing.expect(!try cask.isInstalled(&db, "pad"));
 }
 
 test "a tarball cask with an app and a relative binary promotes the bundle and links the binary" {
@@ -897,7 +914,7 @@ test "uninstall refuses a version too long to name the links manifest" {
     try db.exec("INSERT INTO casks(token,name,version,url,sha256,app_path) VALUES('x','x','" ++ long ++ "','https://e/x.zip','aa','/nowhere/X.app');");
 
     // A truncated version would silently miss the manifest and leave the
-    // links dangling; refusing is the same choice `lookupInstalled` makes.
+    // links dangling; refusing is the same choice `lookupInstalledChecked` makes.
     var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, fx.base, fx.p("cache"));
     try testing.expectError(error.UninstallFailed, installer.uninstall("x"));
 }
@@ -1247,7 +1264,7 @@ test "a restore keeps the bundle when a declared helper cannot be linked" {
     // them the bundle, only be named.
     try testing.expectError(error.LinksIncomplete, installer.reinstallFromHistory("editor", "1.0"));
     try testing.expect(exists(io, fx.p("Applications/Editor.app/Contents/MacOS/editor")));
-    const info = cask.lookupInstalled(&db, "editor") orelse return error.TestUnexpectedResult;
+    const info = (try cask.lookupInstalledChecked(&db, "editor")) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("1.0", info.version());
     try testing.expect((try installer.readBinarySpec("editor", "1.0")) == null);
 }
@@ -1545,7 +1562,7 @@ test "a binary-only cask whose archive holds an app rolls back to its links, not
     try installer.reinstallFromHistory("tool", "1.0");
     try expectLinkInto(io, fx.p("bin/tool"), fx.p("Caskroom/tool/1.0/Tool.app/Contents/MacOS/tool"));
     try testing.expect(!exists(io, fx.p("Applications/Tool.app")));
-    const info = cask.lookupInstalled(&db, "tool") orelse return error.TestUnexpectedResult;
+    const info = (try cask.lookupInstalledChecked(&db, "tool")) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings(fx.p("bin/tool"), info.appPath().?);
 }
 

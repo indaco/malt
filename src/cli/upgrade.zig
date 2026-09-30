@@ -1392,7 +1392,11 @@ fn upgradeRoutedTapCask(
     };
 
     // Same ordering as the core-API path: refuse before a stored step acts.
-    const row = cask_mod.lookupInstalled(db, token);
+    const row = cask_mod.lookupInstalledChecked(db, token) catch |e| {
+        db.rollback();
+        output.err("Could not read the package database for cask {s}: {s}", .{ token, cask_mod.lookupDetail(e, db) });
+        return error.Aborted;
+    };
     if (caskAppRunning(ctx, if (row) |*r| r.appPath() else null)) {
         db.rollback();
         output.err("Cannot upgrade {s}: the app is running. Quit it and try again.", .{token});
@@ -1676,7 +1680,10 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return .pinned;
     }
 
-    const installed = cask_mod.lookupInstalled(db, token) orelse {
+    const installed = (cask_mod.lookupInstalledChecked(db, token) catch |e| {
+        output.err("Could not read the package database for cask {s}: {s}", .{ token, cask_mod.lookupDetail(e, db) });
+        return error.Aborted;
+    }) orelse {
         output.err("{s} is not installed as a cask", .{token});
         return error.Aborted;
     };
