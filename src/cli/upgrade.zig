@@ -74,6 +74,17 @@ pub fn pinSkip(db: *sqlite.Database, kind: pin_mod.Kind, name: []const u8, force
     return pin_mod.isPinned(db, kind, name);
 }
 
+/// A cask upgrade deletes and re-inserts its row, so its pin is carried across
+/// by hand. Cask-only on purpose: a same-named formula holds a separate pin.
+fn caskPinSnapshot(db: *sqlite.Database, token: []const u8) bool {
+    return pin_mod.isPinned(db, .cask, token);
+}
+
+/// Best-effort: a lost pin is a UX regression, not data loss.
+fn restoreCaskPin(db: *sqlite.Database, token: []const u8, was_pinned: bool) void {
+    if (was_pinned) _ = pin_mod.setPinned(db, .cask, token, true) catch {};
+}
+
 /// True when phase 1 may fold a row itself instead of handing it to phase 2.
 /// Only rows phase 2 would have called `.up_to_date` qualify: a held row
 /// reports `.pinned` and belongs in that footer column, so it falls through.
@@ -1358,7 +1369,7 @@ fn upgradeRoutedTapCask(
     output.info("Upgrading {s} {s} -> {s}...", .{ token, installed_version, rb_info.version });
 
     // Snapshot the pin so a force-upgrade preserves the user's hold.
-    const was_pinned = pin_mod.isPinned(db, .cask, token);
+    const was_pinned = caskPinSnapshot(db, token);
 
     const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap_label, token }) catch return error.Aborted;
     defer allocator.free(full_name);
@@ -1460,7 +1471,7 @@ fn upgradeRoutedTapCask(
         return error.Aborted;
     };
 
-    if (was_pinned) _ = pin_mod.setPinned(db, .cask, token, true) catch {};
+    restoreCaskPin(db, token, was_pinned);
     return .upgraded;
 }
 
@@ -1797,7 +1808,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
 
     // Snapshot the pin BEFORE uninstall removes the cask row; re-apply
     // after recordInstall so a `--force` upgrade preserves the user's hold.
-    const was_pinned = pin_mod.isPinned(db, .cask, token);
+    const was_pinned = caskPinSnapshot(db, token);
 
     // Atomic DB section (uninstall's DELETE + recordInstall's INSERT OR
     // REPLACE) so a partial failure can't leave the casks row missing
@@ -1930,11 +1941,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return error.Aborted;
     };
 
-    if (was_pinned) {
-        // Best-effort: a missing pin restore is a UX regression, not data
-        // loss — the cask itself is upgraded and recorded.
-        _ = pin_mod.setPinned(db, .cask, token, true) catch {};
-    }
+    restoreCaskPin(db, token, was_pinned);
 
     // After the commit, as on install: the new version is recorded either way.
     if (!flight.runPhase(&installer, token, parsed_cask.version, parsed_cask.flight_steps.get(.postflight), .postflight, install_sink_mod.terminal)) {
