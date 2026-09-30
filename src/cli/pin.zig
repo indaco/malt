@@ -1,7 +1,7 @@
 //! malt — pin / unpin commands
-//! Toggle the `pinned` column on an installed keg. `mt upgrade` reads
-//! the column to skip protected versions; the schema and `list --pinned`
-//! already surface it.
+//! Toggle the `pinned` column on an installed keg or cask. `mt upgrade`
+//! reads the column to skip protected versions; the schema and
+//! `list --pinned` already surface it.
 
 const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
@@ -43,11 +43,33 @@ const Action = enum {
 fn run(ctx: *const AppCtx, args: []const []const u8, action: Action) !void {
     if (help.showIfRequested(ctx, args, action.cmdName())) return;
 
-    if (args.len == 0) {
-        output.err("Usage: mt {s} <name>", .{action.cmdName()});
+    var force_cask = false;
+    var force_formula = false;
+    var name: ?[]const u8 = null;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--cask") or std.mem.eql(u8, arg, "--casks")) {
+            force_cask = true;
+        } else if (std.mem.eql(u8, arg, "--formula") or std.mem.eql(u8, arg, "--formulae")) {
+            force_formula = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            output.setQuiet(true);
+        } else if (arg.len > 0 and arg[0] == '-') {
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
+        } else if (name == null and arg.len > 0) {
+            name = arg;
+        }
+    }
+
+    // Brew's check and wording, ahead of the usage check like its parser.
+    if (force_cask and force_formula) {
+        output.err("Options --formula and --cask are mutually exclusive", .{});
         return error.Aborted;
     }
-    const name = args[0];
+    const pkg = name orelse {
+        output.err("Usage: mt {s} <name>", .{action.cmdName()});
+        return error.Aborted;
+    };
 
     const prefix = atomic.maltPrefixOrAbort();
     var db_path_buf: [512]u8 = undefined;
@@ -59,34 +81,43 @@ fn run(ctx: *const AppCtx, args: []const []const u8, action: Action) !void {
     defer db.close();
     schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(&db, e, prefix);
 
-    const updated = setPinned(&db, name, action.flag()) catch {
-        output.err("Database update failed for {s}", .{name});
-        return error.Aborted;
+    // A bare name means the formula when both exist, as brew resolves it.
+    const updated = blk: {
+        if (!force_cask) {
+            if (try setOrAbort(&db, .formula, pkg, action)) {
+                if (!force_formula and lookupPinned(&db, .cask, pkg) != null) help.warnTreatedAsFormula(pkg);
+                break :blk true;
+            }
+            if (force_formula) break :blk false;
+        }
+        break :blk try setOrAbort(&db, .cask, pkg, action);
     };
     if (!updated) {
-        output.err("{s} is not installed", .{name});
+        output.err("{s} is not installed", .{pkg});
         return error.Aborted;
     }
 
-    output.success("{s} {s}", .{ name, action.doneVerb() });
+    output.success("{s} {s}", .{ pkg, action.doneVerb() });
 }
 
-/// Set the `pinned` column on `name`. Returns true when a row was matched
-/// (idempotent re-pins still report true). False means no installed keg
-/// or cask of that name exists, which the caller surfaces as a usage error.
-pub fn setPinned(db: *sqlite.Database, name: []const u8, value: bool) sqlite.SqliteError!bool {
-    if (try setPinnedOn(db, "UPDATE kegs SET pinned = ?1 WHERE name = ?2;", name, value)) return true;
-    // Fall through to casks so `mt pin firefox` works on an installed cask.
-    return setPinnedOn(db, "UPDATE casks SET pinned = ?1 WHERE token = ?2;", name, value);
+fn setOrAbort(db: *sqlite.Database, kind: Kind, name: []const u8, action: Action) error{Aborted}!bool {
+    return setPinned(db, kind, name, action.flag()) catch {
+        output.err("Database update failed for {s}", .{name});
+        return error.Aborted;
+    };
 }
 
-fn setPinnedOn(
-    db: *sqlite.Database,
-    sql: [:0]const u8,
-    name: []const u8,
-    value: bool,
-) sqlite.SqliteError!bool {
-    var stmt = try db.prepare(sql);
+/// Which table a pin lives in. Local so this leaf needs no API import.
+pub const Kind = enum { formula, cask };
+
+/// Set the `pinned` column on `name` in `kind`'s table only. Returns true
+/// when a row was matched (idempotent re-pins still report true). False
+/// means no installed package of that kind has this name.
+pub fn setPinned(db: *sqlite.Database, kind: Kind, name: []const u8, value: bool) sqlite.SqliteError!bool {
+    var stmt = try db.prepare(switch (kind) {
+        .formula => "UPDATE kegs SET pinned = ?1 WHERE name = ?2;",
+        .cask => "UPDATE casks SET pinned = ?1 WHERE token = ?2;",
+    });
     defer stmt.finalize();
     try stmt.bindInt(1, @intFromBool(value));
     try stmt.bindText(2, name);
@@ -94,16 +125,19 @@ fn setPinnedOn(
     return changes(db) > 0;
 }
 
-/// Returns true iff an installed keg or cask named `name` has `pinned=1`.
-/// Missing rows are reported as not pinned — callers treat the absence
-/// of a row as "nothing to skip".
-pub fn isPinned(db: *sqlite.Database, name: []const u8) bool {
-    if (lookupPinned(db, "SELECT pinned FROM kegs WHERE name = ?1 LIMIT 1;", name)) |p| return p;
-    return lookupPinned(db, "SELECT pinned FROM casks WHERE token = ?1 LIMIT 1;", name) orelse false;
+/// Returns true iff `kind`'s row for `name` has `pinned=1`. Never consults
+/// the other kind: a formula and a cask sharing a name hold separate pins.
+/// A missing row reads as not pinned — nothing to skip.
+pub fn isPinned(db: *sqlite.Database, kind: Kind, name: []const u8) bool {
+    return lookupPinned(db, kind, name) orelse false;
 }
 
-fn lookupPinned(db: *sqlite.Database, sql: [:0]const u8, name: []const u8) ?bool {
-    var stmt = db.prepare(sql) catch return null;
+/// Null when `kind` has no row for `name`, which doubles as an existence check.
+fn lookupPinned(db: *sqlite.Database, kind: Kind, name: []const u8) ?bool {
+    var stmt = db.prepare(switch (kind) {
+        .formula => "SELECT pinned FROM kegs WHERE name = ?1 LIMIT 1;",
+        .cask => "SELECT pinned FROM casks WHERE token = ?1 LIMIT 1;",
+    }) catch return null;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return null;
     const has = stmt.step() catch return null;

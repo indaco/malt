@@ -168,7 +168,8 @@ pub const bash_script =
     \\        which)            cmd_flags="--json" ;;
     \\        vulns)            cmd_flags="--severity --json" ;;
     \\        migrate)          cmd_flags="--dry-run --parallel --use-system-ruby=" ;;
-    \\        rollback)         cmd_flags="--dry-run --list --to --json" ;;
+    \\        rollback)         cmd_flags="--cask --casks --formula --formulae --dry-run --list --to --json" ;;
+    \\        pin|unpin)        cmd_flags="--cask --casks --formula --formulae --quiet -q" ;;
     \\        link)             cmd_flags="--overwrite --force -f --isolate --all" ;;
     \\        services)         cmd_flags="--tail --stderr --follow -f --json" ;;
     \\        bundle)           cmd_flags="--dry-run -n --format --services --purge --yes -y --isolate-deps --isolate-dependencies" ;;
@@ -321,7 +322,13 @@ pub const zsh_script =
     \\                        '*::package:'
     \\                    ;;
     \\                pin|unpin)
-    \\                    _arguments '*::keg:'
+    \\                    _arguments \
+    \\                        '--cask[Target the cask of that name]' \
+    \\                        '--casks[Alias of --cask]' \
+    \\                        '--formula[Target the formula of that name]' \
+    \\                        '--formulae[Alias of --formula]' \
+    \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
+    \\                        '*::keg:'
     \\                    ;;
     \\                run)
     \\                    _arguments \
@@ -414,6 +421,10 @@ pub const zsh_script =
     \\                    ;;
     \\                rollback)
     \\                    _arguments \
+    \\                        '--cask[Roll back the cask of that name]' \
+    \\                        '--casks[Alias of --cask]' \
+    \\                        '--formula[Roll back the formula of that name]' \
+    \\                        '--formulae[Alias of --formula]' \
     \\                        '--dry-run[Preview without executing]' \
     \\                        '--list[List every reachable store entry for <package>]' \
     \\                        '--to[Roll back to a specific store entry]:version:' \
@@ -750,6 +761,22 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l list    -d 'List every reachable store entry'
     \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l to    -x -d 'Roll back to a specific store entry (pass <version>)'
     \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l json    -d 'Emit --list output as JSON'
+    \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l cask    -d 'Roll back the cask of that name'
+    \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l casks   -d 'Alias of --cask'
+    \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l formula -d 'Roll back the formula of that name'
+    \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l formulae -d 'Alias of --formula'
+    \\
+    \\    # pin / unpin
+    \\    complete -c $__malt_bin -n '__malt_using_command pin'   -l cask     -d 'Target the cask of that name'
+    \\    complete -c $__malt_bin -n '__malt_using_command pin'   -l casks    -d 'Alias of --cask'
+    \\    complete -c $__malt_bin -n '__malt_using_command pin'   -l formula  -d 'Target the formula of that name'
+    \\    complete -c $__malt_bin -n '__malt_using_command pin'   -l formulae -d 'Alias of --formula'
+    \\    complete -c $__malt_bin -n '__malt_using_command pin'   -s q -l quiet -d 'Suppress non-error output'
+    \\    complete -c $__malt_bin -n '__malt_using_command unpin' -l cask     -d 'Target the cask of that name'
+    \\    complete -c $__malt_bin -n '__malt_using_command unpin' -l casks    -d 'Alias of --cask'
+    \\    complete -c $__malt_bin -n '__malt_using_command unpin' -l formula  -d 'Target the formula of that name'
+    \\    complete -c $__malt_bin -n '__malt_using_command unpin' -l formulae -d 'Alias of --formula'
+    \\    complete -c $__malt_bin -n '__malt_using_command unpin' -s q -l quiet -d 'Suppress non-error output'
     \\
     \\    # link
     \\    complete -c $__malt_bin -n '__malt_using_command link' -l overwrite -d 'Replace existing symlinks'

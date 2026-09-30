@@ -69,9 +69,9 @@ const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
 /// `audit_mode` lets `--pinned --dry-run` walk pinned kegs end-to-end so
 /// the user can see the drift; without that escape, every row would
 /// short-circuit before the API check.
-pub fn pinSkip(db: *sqlite.Database, name: []const u8, force: bool, audit_mode: bool) bool {
+pub fn pinSkip(db: *sqlite.Database, kind: pin_mod.Kind, name: []const u8, force: bool, audit_mode: bool) bool {
     if (force or audit_mode) return false;
-    return pin_mod.isPinned(db, name);
+    return pin_mod.isPinned(db, kind, name);
 }
 
 /// True when phase 1 may fold a row itself instead of handing it to phase 2.
@@ -652,7 +652,7 @@ fn upgradeFormula(
     // point is that a pinned keg never gets touched. Audit mode
     // (`--pinned --dry-run`) walks pinned kegs end-to-end so the user
     // sees the drift, but the dry-run gate still blocks any mutation.
-    if (pinSkip(db, name, force, audit_mode)) {
+    if (pinSkip(db, .formula, name, force, audit_mode)) {
         // `skip` (not `dim`) so the held-back pin shares the `·` glyph of
         // the up-to-date family instead of the `▸` upgrade glyph.
         output.skip("{s} is pinned, skipped", .{name});
@@ -1074,7 +1074,7 @@ fn upgradeTapFormula(
     bulk: bool,
     sink: ?*EntrySink,
 ) !Outcome {
-    if (pinSkip(db, name, force, audit_mode)) {
+    if (pinSkip(db, .formula, name, force, audit_mode)) {
         output.skip("{s} is pinned, skipped", .{name});
         output.emitNdjsonEvent(.pinned, name, null);
         return .pinned;
@@ -1358,7 +1358,7 @@ fn upgradeRoutedTapCask(
     output.info("Upgrading {s} {s} -> {s}...", .{ token, installed_version, rb_info.version });
 
     // Snapshot the pin so a force-upgrade preserves the user's hold.
-    const was_pinned = pin_mod.isPinned(db, token);
+    const was_pinned = pin_mod.isPinned(db, .cask, token);
 
     const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap_label, token }) catch return error.Aborted;
     defer allocator.free(full_name);
@@ -1460,7 +1460,7 @@ fn upgradeRoutedTapCask(
         return error.Aborted;
     };
 
-    if (was_pinned) _ = pin_mod.setPinned(db, token, true) catch {};
+    if (was_pinned) _ = pin_mod.setPinned(db, .cask, token, true) catch {};
     return .upgraded;
 }
 
@@ -1699,7 +1699,7 @@ fn caskArtifactType(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []c
 }
 
 fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, audit_mode: bool, bulk: bool, sink: ?*EntrySink) !Outcome {
-    if (pinSkip(db, token, force, audit_mode)) {
+    if (pinSkip(db, .cask, token, force, audit_mode)) {
         output.skip("{s} is pinned, skipped", .{token});
         output.emitNdjsonEvent(.pinned, token, null);
         return .pinned;
@@ -1797,7 +1797,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
 
     // Snapshot the pin BEFORE uninstall removes the cask row; re-apply
     // after recordInstall so a `--force` upgrade preserves the user's hold.
-    const was_pinned = pin_mod.isPinned(db, token);
+    const was_pinned = pin_mod.isPinned(db, .cask, token);
 
     // Atomic DB section (uninstall's DELETE + recordInstall's INSERT OR
     // REPLACE) so a partial failure can't leave the casks row missing
@@ -1933,7 +1933,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     if (was_pinned) {
         // Best-effort: a missing pin restore is a UX regression, not data
         // loss — the cask itself is upgraded and recorded.
-        _ = pin_mod.setPinned(db, token, true) catch {};
+        _ = pin_mod.setPinned(db, .cask, token, true) catch {};
     }
 
     // After the commit, as on install: the new version is recorded either way.
