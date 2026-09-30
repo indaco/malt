@@ -600,10 +600,13 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
         populateFromBundle(&manifest, &db, n)
     else
         populateFromInstalled(&manifest, &db, .{ .include_services = include_services });
-    populated catch |e| {
-        if (e != BundleError.DatabaseError) return e;
-        output.err("Could not read the package database: {s}", .{db.errMsg()});
-        return error.Aborted;
+    populated catch |e| switch (e) {
+        BundleError.DatabaseError => {
+            output.err("Could not read the package database: {s}", .{db.errMsg()});
+            return error.Aborted;
+        },
+        BundleError.BundlefileNotFound => return error.Aborted,
+        else => return e,
     };
 
     var write_buf: [4096]u8 = undefined;
@@ -853,6 +856,15 @@ fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, na
     var formulas: std.ArrayList(manifest_mod.FormulaEntry) = .empty;
     var casks: std.ArrayList(manifest_mod.CaskEntry) = .empty;
     var services: std.ArrayList(manifest_mod.ServiceEntry) = .empty;
+
+    // A bundle with no members is valid; one never registered is a typo.
+    var known = db.prepare("SELECT 1 FROM bundles WHERE name = ?;") catch return BundleError.DatabaseError;
+    defer known.finalize();
+    known.bindText(1, name) catch return BundleError.DatabaseError;
+    if (!(known.step() catch return BundleError.DatabaseError)) {
+        output.err("bundle not registered: {s}", .{name});
+        return BundleError.BundlefileNotFound;
+    }
 
     var stmt = db.prepare("SELECT kind, ref FROM bundle_members WHERE bundle_name = ? ORDER BY kind, ref;") catch
         return BundleError.DatabaseError;
