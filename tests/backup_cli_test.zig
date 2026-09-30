@@ -956,3 +956,118 @@ test "execute --services fails when the services table cannot be read" {
         backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--services", "--output", "/tmp/discard.txt" }),
     );
 }
+
+// --- --dry-run -------------------------------------------------------
+
+fn setDryRun() bool {
+    const prior = output.isDryRun();
+    output.setDryRun(true);
+    return prior;
+}
+
+test "execute --dry-run --output <path> writes no file and says what it would write" {
+    // A preview that overwrites the path loses the user's previous backup.
+    var s = try Scratch.init(testing.allocator, "dry_to_path");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/nested/snap.txt", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    const prior_dry = setDryRun();
+    defer output.setDryRun(prior_dry);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", out_path });
+
+    const parent = std.fs.path.dirname(out_path).?;
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, parent, .{}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would write") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "(3 packages)") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Backup written") == null);
+}
+
+test "execute --dry-run --json --output <path> writes no file" {
+    var s = try Scratch.init(testing.allocator, "dry_json_to_path");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.json", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    const prior = withJson();
+    defer restoreJson(prior);
+    const prior_dry = setDryRun();
+    defer output.setDryRun(prior_dry);
+    quiet();
+    defer unquiet();
+
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", out_path });
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, out_path, .{}));
+}
+
+test "execute --dry-run --output - still prints the backup" {
+    // Regression guard: this already held before the fix. Writing to stdout
+    // mutates nothing, so the preview keeps it.
+    var s = try Scratch.init(testing.allocator, "dry_stdout");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    const prior_dry = setDryRun();
+    defer output.setDryRun(prior_dry);
+    quiet();
+    defer unquiet();
+
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", "-" });
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "formula wget") != null);
+}
+
+test "execute --dry-run reports the same package count for plain-text and --json" {
+    // One database, one number: a preview must not change with the format.
+    var s = try Scratch.init(testing.allocator, "dry_count_parity");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, install_reason) VALUES
+            \\  ('wget', 'wget', '1.24', 'a', '/c/wget', 'homebrew/core', 'direct'),
+            \\  ('lx', '/src/lx.rb', '1.0', 'b', '/c/lx', 'local', 'direct');
+            \\INSERT INTO services (name, keg_name, plist_path, auto_start) VALUES
+            \\  ('wget', 'wget', '/w.plist', 1),
+            \\  ('redis', 'redis', '/r.plist', 1);
+        );
+    }
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    const prior_dry = setDryRun();
+    defer output.setDryRun(prior_dry);
+    const prior_json = output.isJson();
+    defer restoreJson(prior_json);
+
+    // wget and both services; the local keg is a comment restore skips.
+    for ([_]bool{ false, true }) |json| {
+        output.setMode(if (json) .json else .human);
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--services", "--output", out_path });
+        if (std.mem.indexOf(u8, captured.items, "(3 packages)") == null) {
+            std.debug.print("json={} stderr:\n{s}\n", .{ json, captured.items });
+            return error.TestExpectedEqual;
+        }
+    }
+}
