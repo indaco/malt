@@ -547,11 +547,27 @@ test "execute reports an unreadable kegs table instead of upgrading a same-named
     defer captured.deinit(testing.allocator);
     try upgradeCaptured(&captured, "corrupt_kegs", seed_box_both, "kegs", &.{"box"});
     try testing.expect(std.mem.indexOf(u8, captured.items, "Could not read the package database for formula box") != null);
-    // The formula may be the real target: never fall through to the cask.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "cask") == null);
+    // The formula may be the real target: point at --cask, never fall through to it.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "If box is a cask, pass --cask.") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "cask box") == null);
 }
 
-test "execute --cask never reads the kegs table, so an unreadable one does not block it" {
+test "execute --formula over an unreadable kegs table does not point at --cask" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try upgradeCaptured(&captured, "corrupt_kegs_formula_flag", seed_box_both, "kegs", &.{ "--formula", "box" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "package database for formula box") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--cask") == null);
+}
+
+test "execute refuses --cask with --formula, as brew does, before touching anything" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try upgradeCaptured(&captured, "cask_formula_conflict", seed_box_cask, null, &.{ "--cask", "--formula", "box" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Options --formula and --cask are mutually exclusive") != null);
+}
+
+test "execute --cask does not report an unreadable kegs table as a formula read failure" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try upgradeCaptured(&captured, "corrupt_kegs_cask_flag", seed_box_both, "kegs", &.{ "--cask", "box" });
