@@ -56,9 +56,12 @@ pub const State = struct {
     /// The open info pane for the active hit, if Enter requested one. Borrows
     /// from shell-owned parse storage; cleared on Esc or a fresh query.
     detail: ?info_json.Info = null,
-    /// The kind the pane was requested for: a formula and a cask may share a name,
-    /// and info's own `type` can't tell them apart for an uninstalled hit.
+    /// The kind the open pane shows: a formula and a cask may share a name, and
+    /// info's own `type` can't tell them apart for an uninstalled hit.
     detail_kind: ?Kind = null,
+    /// The kind of the info read in flight. It becomes `detail_kind` only when the
+    /// read lands, so a failed read never retags the pane that is still showing.
+    pending_detail_kind: ?Kind = null,
     /// Where the tab is in the read lifecycle; drives the render's status line.
     phase: Phase = .idle,
     /// Cross-query basket size, mirrored from the shell-owned selection (no
@@ -307,7 +310,7 @@ pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storag
         // Committing the query is driven by the shell on filter-commit, so they never collide.
         .enter => if (selectedMatch(s)) |m| {
             if (resultsDetailOpen(s, m)) s.detail = null else {
-                s.detail_kind = m.kind;
+                s.pending_detail_kind = m.kind;
                 return openSearchInfoCmd(allocator, mt_path, s);
             }
         },
@@ -709,6 +712,7 @@ fn setInfoDetail(s: *State, storage: *Storage, parsed: info_json.Parsed) void {
     if (storage.detail) |old| old.deinit();
     storage.detail = parsed;
     s.detail = parsed.info;
+    s.detail_kind = s.pending_detail_kind;
 }
 
 /// Fold one finished install pass: a clean exit consumed that kind's picks (drop
