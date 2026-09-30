@@ -122,7 +122,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 return dispatchCask(ctx, allocator, &db, name, parsed);
             }
         }
-        output.err("{s} is not installed", .{name});
+        const as_kind: []const u8 = if (parsed.force_cask) " as a cask" else if (parsed.force_formula) " as a formula" else "";
+        output.err("{s} is not installed{s}", .{ name, as_kind });
         return error.Aborted;
     };
     // Advisory only: an unreadable casks table must not block the formula.

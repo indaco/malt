@@ -46,6 +46,7 @@ fn run(ctx: *const AppCtx, args: []const []const u8, action: Action) !void {
     var force_cask = false;
     var force_formula = false;
     var name: ?[]const u8 = null;
+    var extra_name = false;
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--cask") or std.mem.eql(u8, arg, "--casks")) {
             force_cask = true;
@@ -56,8 +57,9 @@ fn run(ctx: *const AppCtx, args: []const []const u8, action: Action) !void {
         } else if (arg.len > 0 and arg[0] == '-') {
             output.err("Unknown flag: {s}", .{arg});
             return error.Aborted;
-        } else if (name == null and arg.len > 0) {
-            name = arg;
+        } else if (arg.len > 0) {
+            // One name only: a silently dropped second one reads as pinned.
+            if (name != null) extra_name = true else name = arg;
         }
     }
 
@@ -66,7 +68,7 @@ fn run(ctx: *const AppCtx, args: []const []const u8, action: Action) !void {
         output.err("Options --formula and --cask are mutually exclusive", .{});
         return error.Aborted;
     }
-    const pkg = name orelse {
+    const pkg = (if (extra_name) null else name) orelse {
         output.err("Usage: mt {s} <name> [--cask | --formula]", .{action.cmdName()});
         return error.Aborted;
     };
@@ -93,7 +95,8 @@ fn run(ctx: *const AppCtx, args: []const []const u8, action: Action) !void {
         break :blk try setOrAbort(&db, .cask, pkg, action);
     };
     if (!updated) {
-        output.err("{s} is not installed", .{pkg});
+        const as_kind: []const u8 = if (force_cask) " as a cask" else if (force_formula) " as a formula" else "";
+        output.err("{s} is not installed{s}", .{ pkg, as_kind });
         return error.Aborted;
     }
 
