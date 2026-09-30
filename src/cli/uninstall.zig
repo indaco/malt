@@ -46,6 +46,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const dry_run = output.isDryRun();
     var force = false;
     var force_cask = false;
+    var force_formula = false;
     // Tokens borrow from `args`, which outlives this call, so no dup is needed.
     var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(allocator);
@@ -53,8 +54,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
             force = true;
-        } else if (std.mem.eql(u8, arg, "--cask")) {
+        } else if (std.mem.eql(u8, arg, "--cask") or std.mem.eql(u8, arg, "--casks")) {
             force_cask = true;
+        } else if (std.mem.eql(u8, arg, "--formula") or std.mem.eql(u8, arg, "--formulae")) {
+            force_formula = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             output.setQuiet(true);
         } else if (arg.len > 0 and arg[0] == '-') {
@@ -67,6 +70,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         }
     }
 
+    // Brew's check and wording, ahead of the usage check like its parser.
+    if (force_cask and force_formula) {
+        output.err("Options --formula and --cask are mutually exclusive", .{});
+        return error.Aborted;
+    }
     if (names.items.len == 0) {
         output.err("Usage: mt uninstall <package>...", .{});
         return error.Aborted;
@@ -120,8 +128,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var refused = false;
     for (names.items) |name| {
         // An unreadable table aborts here: falling through would pick a
-        // same-named formula the user never meant.
-        if (cask_mod.lookupInstalledChecked(&db, name) catch |e| return caskReadFailed(&db, e, name)) |info| {
+        // same-named formula, unless `--formula` asked for exactly that.
+        const cask_row = if (force_formula) null else cask_mod.lookupInstalledChecked(&db, name) catch |e| {
+            if (force_cask) return caskReadFailed(&db, e, name);
+            output.err("Could not read the package database for cask {s}: {s}. If {s} is a formula, pass --formula.", .{ name, cask_mod.lookupDetail(e, &db), name });
+            return error.Aborted;
+        };
+        if (cask_row) |info| {
             refuseIfRunning(ctx.io, name, &info) catch {
                 refused = true;
                 continue;
@@ -132,6 +145,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             refused = true;
         } else if (try lookupKeg(&db, allocator, name)) |keg| {
             targets.appendAssumeCapacity(.{ .name = name, .keg = keg });
+        } else if (force_formula) {
+            output.err("{s} is not installed as a formula", .{name});
+            refused = true;
         } else {
             output.err("{s} is not installed", .{name});
             refused = true;

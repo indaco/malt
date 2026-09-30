@@ -155,7 +155,7 @@ pub const bash_script =
     \\        backup)           cmd_flags="--output -o --versions --services --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --broken-symlinks --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
-    \\        uninstall|remove) cmd_flags="--cask --force -f --dry-run --quiet -q" ;;
+    \\        uninstall|remove) cmd_flags="--cask --casks --formula --formulae --force -f --dry-run --quiet -q" ;;
     \\        upgrade)          cmd_flags="--cask --formula --dry-run --pinned --force -f --isolate-deps --isolate-dependencies --use-system-ruby= --allow-unpinned" ;;
     \\        outdated)         cmd_flags="--json --formula --formulae --cask --casks --pinned-only --tap --refresh --quiet -q" ;;
     \\        update)           cmd_flags="--check --quiet -q" ;;
@@ -298,7 +298,10 @@ pub const zsh_script =
     \\                    ;;
     \\                uninstall|remove)
     \\                    _arguments \
-    \\                        '--cask[Treat the name as a cask]' \
+    \\                        '--cask[Treat all named arguments as casks]' \
+    \\                        '--casks[Alias of --cask]' \
+    \\                        '--formula[Treat all named arguments as formulae]' \
+    \\                        '--formulae[Alias of --formula]' \
     \\                        '(--force -f)'{--force,-f}'[Remove even if depended on]' \
     \\                        '--dry-run[Show what would be removed]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
@@ -641,10 +644,16 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l json    -d 'JSON output'
     \\
     \\    # uninstall / remove
-    \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l cask    -d 'Treat the name as a cask'
+    \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l cask    -d 'Treat all named arguments as casks'
+    \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l casks   -d 'Alias of --cask'
+    \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l formula -d 'Treat all named arguments as formulae'
+    \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l formulae -d 'Alias of --formula'
     \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -s f -l force -d 'Remove even if depended on'
     \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l dry-run -d 'Preview'
-    \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l cask    -d 'Treat the name as a cask'
+    \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l cask    -d 'Treat all named arguments as casks'
+    \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l casks   -d 'Alias of --cask'
+    \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l formula -d 'Treat all named arguments as formulae'
+    \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l formulae -d 'Alias of --formula'
     \\    complete -c $__malt_bin -n '__malt_using_command remove'    -s f -l force -d 'Remove even if depended on'
     \\    complete -c $__malt_bin -n '__malt_using_command remove'    -l dry-run -d 'Preview'
     \\

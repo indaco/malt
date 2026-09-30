@@ -38,9 +38,11 @@ const row_buf_len = 256;
 pub const ConfirmTarget = struct {
     buf: [row_buf_len]u8 = undefined,
     len: usize = 0,
+    // A formula and a cask can share a name; the argv must say which one.
+    kind: list_json.Kind = .formula,
 
-    pub fn init(pkg_name: []const u8) ConfirmTarget {
-        var t: ConfirmTarget = .{};
+    pub fn init(pkg_name: []const u8, kind: list_json.Kind) ConfirmTarget {
+        var t: ConfirmTarget = .{ .kind = kind };
         t.len = @min(pkg_name.len, t.buf.len);
         @memcpy(t.buf[0..t.len], pkg_name[0..t.len]);
         return t;
@@ -146,7 +148,7 @@ pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storag
         .char => |c| if (c.len == 1 and c.bytes[0] == 'x') {
             // Fat-finger guard before delegating uninstall. Latch the target at
             // arm time; an empty or filtered-out list has nothing to guard.
-            if (selectedPkg(s)) |p| s.confirm_uninstall = ConfirmTarget.init(p.name);
+            if (selectedPkg(s)) |p| s.confirm_uninstall = ConfirmTarget.init(p.name, p.kind);
         },
         else => {},
     }
@@ -367,10 +369,15 @@ fn openDetailCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const St
     return .{ .read = .{ .argv = argv, .mode = .blocking, .parse = cmd.parserFor(.info, info_json.parse), .tag = .installed, .fail_op = "info read failed" } };
 }
 
-/// Build the `mt uninstall <name>` mutation for the guard's latched target. The
-/// name borrows `pending_uninstall`, which outlives the guard and the re-enter.
+/// Build the `mt uninstall --formula|--cask <name>` mutation for the guard's
+/// latched target. The name borrows `pending_uninstall`, which outlives the
+/// guard and the re-enter.
 fn uninstallCmd(allocator: std.mem.Allocator, mt_path: []const u8, target: *const ConfirmTarget) cmd.Cmd {
-    const argv = cmd.inlineArgv(allocator, mt_path, &.{ "uninstall", target.name() }) catch return .none;
+    const kind_flag = switch (target.kind) {
+        .formula => "--formula",
+        .cask => "--cask",
+    };
+    const argv = cmd.inlineArgv(allocator, mt_path, &.{ "uninstall", kind_flag, target.name() }) catch return .none;
     return .{ .run_mutation = .{ .argv = argv, .tag = .installed, .fail_op = "uninstall failed" } };
 }
 
@@ -557,7 +564,7 @@ test "y confirms the guard: returns the uninstall of the latched name and lowers
     defer testing.allocator.free(eff.run_mutation.argv);
     try testing.expect(eff == .run_mutation);
     try testing.expectEqualStrings("uninstall", eff.run_mutation.argv[1]);
-    try testing.expectEqualStrings("brotli", eff.run_mutation.argv[2]);
+    try testing.expectEqualStrings("brotli", eff.run_mutation.argv[3]);
     try testing.expect(s.confirm_uninstall == null); // guard lowered
     try testing.expectEqualStrings("brotli", s.pending_uninstall.?.name()); // latched for the argv
 }
@@ -573,13 +580,26 @@ test "n and Esc cancel the guard with no effect" {
     try testing.expect(s.confirm_uninstall == null);
 }
 
+test "confirming uninstalls the row as its own kind, never a same-named other" {
+    // A bare name resolves cask-first, so a formula row would remove a cask.
+    inline for (.{ .{ 0, "--formula", "brotli" }, .{ 3, "--cask", "flux" } }) |case| {
+        var s: State = .{ .items = &sample };
+        s.chrome.view.selected = case[0];
+        _ = stepKey(&s, ch('x'));
+        const eff = stepKey(&s, ch('y'));
+        defer testing.allocator.free(eff.run_mutation.argv);
+        try testing.expectEqualStrings(case[1], eff.run_mutation.argv[2]);
+        try testing.expectEqualStrings(case[2], eff.run_mutation.argv[3]);
+    }
+}
+
 test "arming latches the target: moving the selection cannot retarget the confirm" {
     var s: State = .{ .items = &sample };
     _ = stepKey(&s, ch('x')); // arm on brotli (row 0)
     s.chrome.view.selected = 2; // the shell moved the selection to ffmpeg
     const eff = stepKey(&s, ch('y'));
     defer testing.allocator.free(eff.run_mutation.argv);
-    try testing.expectEqualStrings("brotli", eff.run_mutation.argv[2]); // still brotli
+    try testing.expectEqualStrings("brotli", eff.run_mutation.argv[3]); // still brotli
 }
 
 test "a list reloaded while the guard is up cannot retarget the latched confirm" {
@@ -590,7 +610,7 @@ test "a list reloaded while the guard is up cannot retarget the latched confirm"
     s.items = &reloaded;
     const eff = stepKey(&s, ch('y'));
     defer testing.allocator.free(eff.run_mutation.argv);
-    try testing.expectEqualStrings("brotli", eff.run_mutation.argv[2]);
+    try testing.expectEqualStrings("brotli", eff.run_mutation.argv[3]);
 }
 
 test "uppercase Y confirms the guard like y" {
@@ -604,7 +624,7 @@ test "uppercase Y confirms the guard like y" {
 
 test "the latch truncates an oversized name instead of overflowing" {
     const long = "n" ** (row_buf_len + 44);
-    const t = ConfirmTarget.init(long);
+    const t = ConfirmTarget.init(long, .formula);
     try testing.expectEqual(@as(usize, row_buf_len), t.name().len);
     try testing.expectEqualStrings(long[0..row_buf_len], t.name());
 }
@@ -953,7 +973,7 @@ test "update on a cleared read empties the Cellar to a known zero" {
 }
 
 test "a successful uninstall clears the pending target, marks siblings stale, refetches" {
-    var st: State = .{ .pending_uninstall = ConfirmTarget.init("brotli") };
+    var st: State = .{ .pending_uninstall = ConfirmTarget.init("brotli", .formula) };
     var storage: Storage = .{};
     var shared: ctx.SharedModel = .{};
     defer storage.deinit(testing.allocator);
@@ -966,7 +986,7 @@ test "a successful uninstall clears the pending target, marks siblings stale, re
 }
 
 test "a failed uninstall banners and does not refetch" {
-    var st: State = .{ .pending_uninstall = ConfirmTarget.init("brotli") };
+    var st: State = .{ .pending_uninstall = ConfirmTarget.init("brotli", .formula) };
     var storage: Storage = .{};
     var shared: ctx.SharedModel = .{};
     defer storage.deinit(testing.allocator);
