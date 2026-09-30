@@ -596,11 +596,15 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
-    if (bundle_name) |n| {
-        try populateFromBundle(&manifest, &db, n);
-    } else {
-        try populateFromInstalled(&manifest, &db, .{ .include_services = include_services });
-    }
+    const populated = if (bundle_name) |n|
+        populateFromBundle(&manifest, &db, n)
+    else
+        populateFromInstalled(&manifest, &db, .{ .include_services = include_services });
+    populated catch |e| {
+        if (e != BundleError.DatabaseError) return e;
+        output.err("Could not read the package database: {s}", .{db.errMsg()});
+        return error.Aborted;
+    };
 
     var write_buf: [4096]u8 = undefined;
     var stdout_writer = ctx.stdout.writer(ctx.io, &write_buf);
@@ -854,7 +858,7 @@ fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, na
         return BundleError.DatabaseError;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return BundleError.DatabaseError;
-    while (stmt.step() catch false) {
+    while (stmt.step() catch return BundleError.DatabaseError) {
         const kind_p = stmt.columnText(0) orelse continue;
         const ref_p = stmt.columnText(1) orelse continue;
         const kind = std.mem.sliceTo(kind_p, 0);
