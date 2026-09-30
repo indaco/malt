@@ -5,6 +5,8 @@
 //!      locally, the "exists as both …" warning is emitted on stderr.
 //!   2. When only the formula is cached, no warning is emitted —
 //!      the probe must not invent a cask out of thin air.
+//!   3. `reinstall` of a name installed as both says so once, not in
+//!      both its own words and install's.
 
 const std = @import("std");
 const malt = @import("malt");
@@ -117,5 +119,56 @@ test "ambiguity warning is silent when no cask cache is present" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "wget" });
 
+    try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) == null);
+}
+
+test "reinstall of a name installed as both warns once, not again from install" {
+    const prefix_z = try uniquePrefixZ("reinstall");
+    defer testing.allocator.free(prefix_z);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
+    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    try seedCacheFile(prefix_z, "formula_wget.json", formula_wget_json);
+    try seedCacheFile(
+        prefix_z,
+        "cask_wget.json",
+        "{\"token\":\"wget\",\"url\":\"https://example.com/x.dmg\",\"version\":\"1\"}",
+    );
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix_z});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    defer testing.allocator.free(db_path);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('wget', 'wget', '1.0', 'a', '/c/wget/1.0');
+            \\INSERT INTO casks (token, name, version, url) VALUES ('wget', 'wget', '1', 'https://example.com/x.dmg');
+        );
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try malt.cli_reinstall.execute(&ctx, arena.allocator(), &.{ "--dry-run", "wget" });
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "Treating wget as a formula"));
     try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) == null);
 }
