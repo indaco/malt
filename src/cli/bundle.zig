@@ -317,7 +317,7 @@ fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     for (plan.casks) |n| output.plain("  - {s} (cask)", .{n});
 
     if (dry_run) {
-        output.info("dry-run: skipping uninstall", .{});
+        output.info("would uninstall the packages above", .{});
         return;
     }
 
@@ -413,7 +413,7 @@ fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     // Unregister last: on a failed purge we return above, leaving the row in
     // place so the command stays retryable rather than orphaning the members.
     if (args.dry_run) {
-        output.info("dry-run: keeping bundle registration for {s}", .{args.name});
+        output.info("would unregister bundle {s}", .{args.name});
         return;
     }
     var db = try openDb(ctx);
@@ -471,7 +471,7 @@ fn purgeMembers(ctx: *const AppCtx, allocator: std.mem.Allocator, args: RemoveAr
     for (plan.casks) |n| output.plain("  - {s} (cask)", .{n});
 
     if (args.dry_run) {
-        output.info("dry-run: skipping uninstall", .{});
+        output.info("would uninstall the packages above", .{});
         return;
     }
 
@@ -573,7 +573,7 @@ fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     try populateFromInstalled(&manifest, &db, .{ .include_services = args.include_services });
     // After the read, so a database the real run would refuse fails the preview too.
     if (output.isDryRun()) {
-        output.info("dry-run: would write {s}", .{args.out_path});
+        output.info("would write {s}", .{args.out_path});
         return;
     }
     try writeManifest(ctx, manifest, args.out_path, args.format);
@@ -651,7 +651,7 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 
     const name = if (manifest.name.len > 0) manifest.name else path;
     if (output.isDryRun()) {
-        output.info("dry-run: would register {s} from {s}", .{ name, canonical });
+        output.info("would register {s} from {s}", .{ name, canonical });
         return;
     }
 

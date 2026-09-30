@@ -372,7 +372,7 @@ fn executeJson(
 /// False under `--dry-run`, which only says where it would write.
 fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8, count: usize) Error!bool {
     if (output.isDryRun()) {
-        output.info("dry-run: would write {s} ({d} packages)", .{ path, count });
+        output.info("would write backup to {s} ({d} packages)", .{ path, count });
         return false;
     }
     path_write.writeFile(ctx.io, path, bytes) catch |e| switch (e) {

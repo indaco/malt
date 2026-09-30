@@ -1083,6 +1083,9 @@ test "remove --purge never takes a local keg for a same-named core line" {
 
     try testing.expect(std.mem.indexOf(u8, captured.items, "- wget") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "- lx") == null);
+    // The preview names both steps the real run would take.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall the packages above") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would unregister bundle") != null);
 }
 
 test "bundle create refuses a table it cannot read instead of writing a Brewfile without it" {
