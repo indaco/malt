@@ -52,6 +52,7 @@ grep -q "Treating box as a formula" <<<"$out" || fail "bare pin: no collision wa
 # Offline, an unheld cask stops at its fetch, so only the skip line matters.
 out=$("$BIN" --offline upgrade --cask --dry-run box 2>&1 || true)
 if grep -q "is pinned, skipped" <<<"$out"; then fail "the formula's pin held the cask: $out"; fi
+grep -q "Could not fetch cask info for box" <<<"$out" || fail "the unheld cask did not reach its fetch: $out"
 
 q "UPDATE kegs SET pinned=0; UPDATE casks SET pinned=1;"
 out=$("$BIN" --offline upgrade --cask --dry-run box 2>&1 || true)
