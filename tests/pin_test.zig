@@ -417,7 +417,7 @@ test "mt pin --formula on a cask-only name is not installed and touches nothing"
     defer err_buf.deinit(testing.allocator);
     try testing.expectError(error.Aborted, runCaptured(false, &.{ "--formula", "box" }, &err_buf));
 
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "box is not installed") != null);
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "box is not installed as a formula") != null);
     var db = try openDb(path);
     defer db.close();
     try testing.expect(!try readCaskPinned(&db, "box"));
@@ -438,7 +438,7 @@ test "mt pin --cask on a formula-only name is not installed and touches nothing"
     defer err_buf.deinit(testing.allocator);
     try testing.expectError(error.Aborted, runCaptured(false, &.{ "--cask", "box" }, &err_buf));
 
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "box is not installed") != null);
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "box is not installed as a cask") != null);
     var db = try openDb(path);
     defer db.close();
     try testing.expect(!try readPinned(&db, "box"));
@@ -507,4 +507,26 @@ test "a bare mt pin still pins the formula when the casks table cannot be read" 
     var db = try openDb(path);
     defer db.close();
     try testing.expect(try readPinned(&db, "box"));
+}
+
+test "mt pin refuses a second name instead of silently pinning only the first" {
+    const path = try setupPrefix("pin_two_names");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    {
+        var db = try openDb(path);
+        defer db.close();
+        try insertKeg(&db, "wget", false);
+        try insertKeg(&db, "curl", false);
+    }
+
+    var err_buf: std.ArrayList(u8) = .empty;
+    defer err_buf.deinit(testing.allocator);
+    try testing.expectError(error.Aborted, runCaptured(false, &.{ "wget", "curl" }, &err_buf));
+
+    try testing.expect(std.mem.indexOf(u8, err_buf.items, "Usage: mt pin <name>") != null);
+    var db = try openDb(path);
+    defer db.close();
+    try testing.expect(!try readPinned(&db, "wget"));
 }

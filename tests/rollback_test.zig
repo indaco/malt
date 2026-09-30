@@ -1520,7 +1520,7 @@ test "rollback --formula on a cask-only name is not installed instead of rolling
     defer r.deinit();
     try testing.expectError(error.Aborted, r.run(&.{ "--formula", "--list", "box" }));
 
-    try testing.expect(r.saw(.stderr, "box is not installed"));
+    try testing.expect(r.saw(.stderr, "box is not installed as a formula"));
     try testing.expect(!r.saw(.stdout, "2.0"));
 }
 
@@ -1538,7 +1538,7 @@ test "rollback --cask on a formula-only name is not installed instead of rolling
     defer r.deinit();
     try testing.expectError(error.Aborted, r.run(&.{ "--cask", "--list", "box" }));
 
-    try testing.expect(r.saw(.stderr, "box is not installed"));
+    try testing.expect(r.saw(.stderr, "box is not installed as a cask"));
     try testing.expect(!r.saw(.stdout, "1.20"));
 }
 
