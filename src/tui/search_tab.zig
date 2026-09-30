@@ -56,6 +56,12 @@ pub const State = struct {
     /// The open info pane for the active hit, if Enter requested one. Borrows
     /// from shell-owned parse storage; cleared on Esc or a fresh query.
     detail: ?info_json.Info = null,
+    /// The kind the open pane shows: a formula and a cask may share a name, and
+    /// info's own `type` can't tell them apart for an uninstalled hit.
+    detail_kind: ?Kind = null,
+    /// The kind of the info read in flight. It becomes `detail_kind` only when the
+    /// read lands, so a failed read never retags the pane that is still showing.
+    pending_detail_kind: ?Kind = null,
     /// Where the tab is in the read lifecycle; drives the render's status line.
     phase: Phase = .idle,
     /// Cross-query basket size, mirrored from the shell-owned selection (no
@@ -303,7 +309,10 @@ pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storag
         // is already open for that row (a second Enter / a right-click dismisses it).
         // Committing the query is driven by the shell on filter-commit, so they never collide.
         .enter => if (selectedMatch(s)) |m| {
-            if (resultsDetailOpen(s, m)) s.detail = null else return openSearchInfoCmd(allocator, mt_path, s);
+            if (resultsDetailOpen(s, m)) s.detail = null else {
+                s.pending_detail_kind = m.kind;
+                return openSearchInfoCmd(allocator, mt_path, s);
+            }
         },
         // `space` selects in the results view and removes in the basket view; `d`
         // is the basket-view remove alias and is inert in the results view.
@@ -573,11 +582,11 @@ pub fn searchCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *State) c
 /// The `mt info <pkg> --json` read for the active hit, or `Cmd.none` when nothing is
 /// selected. `mt info` resolves uninstalled hits too, so a result is inspectable
 /// before any install.
-/// True when the info pane is open for the selected result — matched by name, since
-/// the pane is opened for the selection.
+/// True when the info pane is open for the selected result — matched by name and
+/// kind, since the pane is opened for the selection.
 fn resultsDetailOpen(s: *const State, sel: Match) bool {
     const d = s.detail orelse return false;
-    return std.mem.eql(u8, d.name, sel.name);
+    return s.detail_kind == sel.kind and std.mem.eql(u8, d.name, sel.name);
 }
 
 fn openSearchInfoCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State) cmd.Cmd {
@@ -703,6 +712,7 @@ fn setInfoDetail(s: *State, storage: *Storage, parsed: info_json.Parsed) void {
     if (storage.detail) |old| old.deinit();
     storage.detail = parsed;
     s.detail = parsed.info;
+    s.detail_kind = s.pending_detail_kind;
 }
 
 /// Fold one finished install pass: a clean exit consumed that kind's picks (drop
@@ -925,6 +935,7 @@ test "enter is inert in the basket view" {
     try testing.expect(stepKey(&s, &storage, .enter) == .none);
     try testing.expect(s.detail == null);
     s.detail = .{ .name = "wget" }; // a pane left open from the results view
+    s.detail_kind = .formula;
     try testing.expect(stepKey(&s, &storage, .enter) == .none);
     try testing.expect(s.detail != null); // not toggled closed behind the basket
     s.view = .results; // back on the results list, Enter closes it as before
@@ -2045,10 +2056,59 @@ test "a failed install retains the basket behind a recoverable banner and does n
 test "Enter toggles an open results pane closed for the selected row" {
     var storage: Storage = .{};
     defer storage.deinit(testing.allocator);
-    var s: State = .{ .items = &sample, .phase = .loaded, .detail = .{ .name = "ripgrep" } };
+    var s: State = .{ .items = &sample, .phase = .loaded, .detail = .{ .name = "ripgrep" }, .detail_kind = .formula };
     s.chrome.view.selected = 2; // ripgrep, the row the pane is open for
     try testing.expect(stepKey(&s, &storage, .enter) == .none); // toggled closed
     try testing.expect(s.detail == null);
+}
+
+const shared_hits = [_]Match{
+    .{ .name = "docker", .kind = .formula, .installed = false },
+    .{ .name = "docker", .kind = .cask, .installed = false },
+};
+
+test "Enter on a same-named hit of the other kind opens its pane instead of closing" {
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var s: State = .{ .items = &shared_hits, .phase = .loaded, .detail = .{ .name = "docker" }, .detail_kind = .formula };
+    s.chrome.view.selected = 1; // the cask, while the pane belongs to the formula
+    const eff = stepKey(&s, &storage, .enter);
+    defer if (eff == .read) testing.allocator.free(eff.read.argv);
+    try testing.expect(eff == .read);
+    try testing.expectEqualStrings("--cask", eff.read.argv[2]);
+}
+
+test "a second Enter on the hit whose pane is open closes it, whichever kind it is" {
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var s: State = .{ .items = &shared_hits, .phase = .loaded };
+    s.chrome.view.selected = 1; // the cask
+    const eff = stepKey(&s, &storage, .enter);
+    defer if (eff == .read) testing.allocator.free(eff.read.argv);
+    try testing.expect(eff == .read);
+    setInfoDetail(&s, &storage, try info_json.parse(testing.allocator, "{\"name\":\"docker\"}")); // the read landed
+    try testing.expect(stepKey(&s, &storage, .enter) == .none);
+    try testing.expect(s.detail == null);
+}
+
+test "a failed read for the other kind leaves the open pane its own, so Enter retries" {
+    var storage: Storage = .{};
+    defer storage.deinit(testing.allocator);
+    var s: State = .{ .items = &shared_hits, .phase = .loaded };
+    // The formula's pane is open.
+    const first = stepKey(&s, &storage, .enter);
+    defer if (first == .read) testing.allocator.free(first.read.argv);
+    setInfoDetail(&s, &storage, try info_json.parse(testing.allocator, "{\"name\":\"docker\"}"));
+    // The cask's read is requested and never lands.
+    s.chrome.view.selected = 1;
+    const failed = stepKey(&s, &storage, .enter);
+    defer if (failed == .read) testing.allocator.free(failed.read.argv);
+    try testing.expect(failed == .read);
+    // Enter again on the cask must retry, not close the formula's pane.
+    const retry = stepKey(&s, &storage, .enter);
+    defer if (retry == .read) testing.allocator.free(retry.read.argv);
+    try testing.expect(retry == .read);
+    try testing.expect(s.detail != null);
 }
 
 test "Enter switches the results pane to a newly selected row instead of closing it" {

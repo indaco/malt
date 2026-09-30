@@ -353,19 +353,25 @@ pub fn countFromJson(allocator: std.mem.Allocator, json: []const u8) list_json.E
 }
 
 /// True when the detail pane is open for the currently selected row. The pane is
-/// opened for the selection, so a name match means it belongs to that row.
+/// opened for the selection, so a name and kind match means it belongs to that
+/// row; a formula and a cask may share the name.
 fn detailOpenForSelected(s: *const State) bool {
     const d = s.detail orelse return false;
     const sel = selectedPkg(s) orelse return false;
-    return std.mem.eql(u8, d.pkg.name, sel.name);
+    return d.pkg.kind == sel.kind and std.mem.eql(u8, d.pkg.name, sel.name);
 }
 
-/// Build the `mt info <pkg> --json` read for the selected row (a blocking read, no
-/// alt-screen drop), or `Cmd.none` when nothing is selected. `update` folds the
-/// info into the detail pane.
+/// Build the `mt info --formula|--cask <pkg> --json` read for the selected row (a
+/// blocking read, no alt-screen drop), or `Cmd.none` when nothing is selected.
+/// `update` folds the info into the detail pane.
 fn openDetailCmd(allocator: std.mem.Allocator, mt_path: []const u8, s: *const State) cmd.Cmd {
     const sel = selectedPkg(s) orelse return .none; // nothing selected
-    const argv = cmd.jsonArgv(allocator, mt_path, &.{ "info", sel.name }) catch return .none;
+    // A bare name shows the formula when a cask shares it, so pass the row's kind.
+    const kind_flag = switch (sel.kind) {
+        .formula => "--formula",
+        .cask => "--cask",
+    };
+    const argv = cmd.jsonArgv(allocator, mt_path, &.{ "info", kind_flag, sel.name }) catch return .none;
     return .{ .read = .{ .argv = argv, .mode = .blocking, .parse = cmd.parserFor(.info, info_json.parse), .tag = .installed, .fail_op = "info read failed" } };
 }
 
@@ -521,11 +527,38 @@ test "End jumps to the last filtered row; an empty list stays at zero" {
 test "Enter returns the `mt info` read for the selected row" {
     var s: State = .{ .items = &sample };
     const eff = stepKey(&s, .enter);
-    defer testing.allocator.free(eff.read.argv);
+    // Guarded so a wrong tag fails the expect below instead of panicking.
+    defer if (eff == .read) testing.allocator.free(eff.read.argv);
     try testing.expect(eff == .read);
     try testing.expectEqual(cmd.MsgTag.installed, eff.read.tag);
     try testing.expectEqualStrings("info", eff.read.argv[1]);
-    try testing.expectEqualStrings("brotli", eff.read.argv[2]); // the selected row
+    try testing.expectEqualStrings("--formula", eff.read.argv[2]);
+    try testing.expectEqualStrings("brotli", eff.read.argv[3]); // the selected row
+}
+
+test "Enter reads the row's own kind, so a cask row never shows a same-named formula" {
+    inline for (.{ .{ 0, "--formula", "brotli" }, .{ 3, "--cask", "flux" } }) |case| {
+        var s: State = .{ .items = &sample };
+        s.chrome.view.selected = case[0];
+        const eff = stepKey(&s, .enter);
+        defer if (eff == .read) testing.allocator.free(eff.read.argv);
+        try testing.expect(eff == .read);
+        try testing.expectEqualStrings(case[1], eff.read.argv[2]);
+        try testing.expectEqualStrings(case[2], eff.read.argv[3]);
+    }
+}
+
+test "Enter on a same-named row of the other kind opens its pane instead of closing" {
+    const shared = [_]Pkg{
+        .{ .name = "box", .version = "1.0", .kind = .formula, .pinned = false, .size_bytes = 1, .linked = true },
+        .{ .name = "box", .version = "2.0", .kind = .cask, .pinned = false, .size_bytes = 1, .linked = null },
+    };
+    var s: State = .{ .items = &shared, .detail = .{ .pkg = shared[0], .info = .{ .name = "box" } } };
+    s.chrome.view.selected = 1; // the cask, while the pane belongs to the formula
+    const eff = stepKey(&s, .enter);
+    defer if (eff == .read) testing.allocator.free(eff.read.argv);
+    try testing.expect(eff == .read);
+    try testing.expectEqualStrings("--cask", eff.read.argv[2]);
 }
 
 test "Esc closes an open detail pane" {
@@ -545,9 +578,9 @@ test "Enter switches the pane to a newly selected row instead of closing it" {
     var s: State = .{ .items = &sample, .detail = .{ .pkg = sample[0], .info = .{ .name = "brotli" } } };
     s.chrome.view.selected = 1; // curl, while the pane belongs to brotli
     const eff = stepKey(&s, .enter);
-    defer testing.allocator.free(eff.read.argv);
+    defer if (eff == .read) testing.allocator.free(eff.read.argv);
     try testing.expect(eff == .read); // opens curl's info, not a close
-    try testing.expectEqualStrings("curl", eff.read.argv[2]);
+    try testing.expectEqualStrings("curl", eff.read.argv[3]);
 }
 
 test "x raises the uninstall guard, producing no effect yet" {

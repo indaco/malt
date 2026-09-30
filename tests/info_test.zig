@@ -525,3 +525,24 @@ test "info --cask --formula on an absent token still reaches not-found" {
 
     try testing.expect(std.mem.indexOf(u8, out, "not installed") != null);
 }
+
+test "info --cask and --formula each return their own side of a name installed as both" {
+    // The TUI detail pane passes the row's kind; this is the contract it relies on.
+    var p = try Prefix.init(testing.allocator, "shared_name_kinds");
+    defer p.deinit(testing.allocator);
+    try p.seedFormula("box");
+    try p.seedCask("box");
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setQuiet(true);
+    output.setMode(.json);
+
+    const cask_out = try captureInfo(testing.allocator, &.{ "--cask", "box" }, "shared_name_cask");
+    defer testing.allocator.free(cask_out);
+    try testing.expect(std.mem.indexOf(u8, cask_out, "\"type\":\"cask\",\"installed\":true,\"version\":\"120.0\"") != null);
+
+    const formula_out = try captureInfo(testing.allocator, &.{ "--formula", "box" }, "shared_name_formula");
+    defer testing.allocator.free(formula_out);
+    try testing.expect(std.mem.indexOf(u8, formula_out, "\"type\":\"formula\",\"installed\":true,\"version\":\"1.24.5\"") != null);
+}
