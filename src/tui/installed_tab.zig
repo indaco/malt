@@ -547,7 +547,7 @@ test "Enter switches the pane to a newly selected row instead of closing it" {
     const eff = stepKey(&s, .enter);
     defer testing.allocator.free(eff.read.argv);
     try testing.expect(eff == .read); // opens curl's info, not a close
-    try testing.expectEqualStrings("curl", eff.read.argv[2]);
+    try testing.expectEqualStrings("curl", eff.read.argv[3]);
 }
 
 test "x raises the uninstall guard, producing no effect yet" {
