@@ -506,3 +506,54 @@ test "execute --cask names the cask of an over-long casks row instead of a meani
     try testing.expect(std.mem.indexOf(u8, captured.items, "cask box") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "not an error") == null);
 }
+
+// Stderr of an offline `upgrade` over a scratch prefix seeded by `seed`.
+fn upgradeCaptured(captured: *std.ArrayList(u8), name: []const u8, seed: [:0]const u8, corrupt: ?[]const u8, argv: []const []const u8) !void {
+    var s = try Scratch.init(testing.allocator, name);
+    defer s.deinit(testing.allocator);
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(seed);
+    }
+    if (corrupt) |table| try test_io.corruptTable(db_path, table);
+
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(false);
+    defer output.setQuiet(prior_quiet);
+    output.beginStderrCapture(testing.allocator, captured);
+    defer output.endStderrCapture();
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    try testing.expectError(error.Aborted, upgrade.execute(&ctx, testing.allocator, argv));
+}
+
+const seed_box_cask = "INSERT INTO casks (token, name, version, url) VALUES ('box', 'Box', '2.0', 'https://e/x.dmg');";
+const seed_box_both = seed_box_cask ++
+    "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('box', 'box', '1.0', 'a', '/c/box/1.0');";
+
+test "execute --formula on a cask-only name refuses instead of upgrading the cask" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try upgradeCaptured(&captured, "formula_flag_cask_only", seed_box_cask, null, &.{ "--formula", "box" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "box is not installed as a formula") != null);
+}
+
+test "execute reports an unreadable kegs table instead of upgrading a same-named cask" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try upgradeCaptured(&captured, "corrupt_kegs", seed_box_both, "kegs", &.{"box"});
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not read the package database for formula box") != null);
+    // The formula may be the real target: never fall through to the cask.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "cask") == null);
+}
+
+test "execute --cask never reads the kegs table, so an unreadable one does not block it" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try upgradeCaptured(&captured, "corrupt_kegs_cask_flag", seed_box_both, "kegs", &.{ "--cask", "box" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "package database for formula") == null);
+}
