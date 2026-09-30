@@ -133,7 +133,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         printHelp(ctx);
         return;
     }
-    if (help_mod.showIfRequested(ctx, args[0..1], "bundle")) return;
+    // Help anywhere before `--` wins, so `bundle install --help` never installs.
+    const opts = for (args, 0..) |a, i| {
+        if (std.mem.eql(u8, a, "--")) break args[0..i];
+    } else args;
+    if (help_mod.showIfRequested(ctx, opts, "bundle")) return;
 
     const sub = args[0];
     const rest = args[1..];
