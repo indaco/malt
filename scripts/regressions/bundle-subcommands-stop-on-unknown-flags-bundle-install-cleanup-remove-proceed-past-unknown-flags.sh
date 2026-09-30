@@ -3,7 +3,9 @@
 # don't know instead of warning and running the unmodified mutation. A mistyped
 # safety flag (`--prge`, `--dryrun`) used to run the real operation, and
 # `install -n` (offered by completions, honoured by cleanup and remove)
-# installed for real. `--help` prints help, neither refused nor run.
+# installed for real. `--help` prints help, neither refused nor run. A second
+# bundle file is refused rather than silently winning, brew's `--file` names the
+# file, and import and list refuse unknown flags too.
 #
 # Exits 0 when the bug is absent, non-zero (with a clear message) when present.
 # No network; all state lives under a throwaway prefix removed on EXIT.
@@ -77,4 +79,22 @@ if grep -q "using bundle file" <<<"$out"; then
   fail "cleanup read the bundle file before refusing: $out"
 fi
 
-echo "  ✓ bundle install, cleanup and remove stop on an unknown flag"
+# A second bundle file used to silently replace the first.
+rc=0
+out=$("$BIN" bundle cleanup -n --yes nonexist "$tmp/Brewfile" 2>&1 </dev/null) || rc=$?
+[ "$rc" -ne 0 ] || fail "cleanup planned against the last of two bundle files: $out"
+grep -q "expected at most one \[file\]" <<<"$out" || fail "cleanup did not say why: $out"
+
+# brew bundle's --file names the bundle file.
+rc=0
+out=$("$BIN" bundle install -n --file "$tmp/Brewfile" 2>&1) || rc=$?
+[ "$rc" -eq 0 ] || fail "install --file exited $rc: $out"
+
+rc=0
+out=$("$BIN" bundle list --bogus 2>&1) || rc=$?
+refused list "$rc" "$out" --bogus
+rc=0
+out=$("$BIN" bundle import --bogus "$tmp/Brewfile" 2>&1) || rc=$?
+refused import "$rc" "$out" --bogus
+
+echo "  ✓ bundle subcommands stop on an unknown flag or a second bundle file"
