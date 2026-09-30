@@ -86,7 +86,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return error.Aborted;
     }
     const name = parsed.name orelse {
-        output.err("Usage: mt rollback <package> [--list] [--to <version>]", .{});
+        output.err("Usage: mt rollback <package> [--cask | --formula] [--list] [--to <version>]", .{});
         return error.Aborted;
     };
     const dry_run = parsed.dry_run;
