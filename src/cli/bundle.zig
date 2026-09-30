@@ -92,7 +92,7 @@ fn cliServiceStart(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const
 
 fn cliUninstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) cleanup_mod.DispatchError!void {
     const app_ctx = appCtxFromOpaque(ctx);
-    // A bare name resolves cask-first and would remove a same-named cask.
+    // Explicit so a cleanup never depends on which kind a bare name resolves to.
     uninstall_cmd.execute(app_ctx, allocator, &.{ "--formula", name }) catch |e| return narrowDispatch(e);
 }
 
