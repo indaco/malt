@@ -107,6 +107,9 @@ jobs:
       - name: Regression guard - cask commands refuse a casks table they cannot read
         run: ./scripts/regressions/cask-commands-refuse-unreadable-casks-table-cask-lookupinstalled-reads-unreadable-db-as-not-installed.sh
 
+      - name: Regression guard - bundle export refuses a database it cannot read
+        run: ./scripts/regressions/bundle-export-refuses-unreadable-members-bundle-export-reads-unreadable-members-as-empty.sh
+
       - name: Regression guard - a name that is both a formula and a cask resolves to the formula and warns
         run: ./scripts/regressions/uninstall-bare-name-resolves-formula-first-formula-cask-name-collision-precedence-differs-by-command.sh
 
