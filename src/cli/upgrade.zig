@@ -3432,3 +3432,35 @@ test "a routed tap cask with an unpinned sha256 is refused before its progress-o
     try std.testing.expectError(error.Aborted, parseRoutedCaskRb(rb, "pkg", "user/tap"));
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "not a pinned sha256") != null);
 }
+
+/// Seeds `box` as both kinds with independent pins, then replays what a cask
+/// upgrade does to its row: snapshot, delete, re-insert unpinned, restore.
+fn replayCaskUpgradePin(keg_pinned: bool, cask_pinned: bool) !struct { keg: bool, cask: bool } {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var buf: [512]u8 = undefined;
+    try db.exec(try std.fmt.bufPrintZ(&buf,
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('box', 'box', '1.0', 'sha', '/cellar/box/1.0', {d});
+        \\INSERT INTO casks (token, name, version, url, pinned) VALUES ('box', 'Box', '2.0', 'https://example.invalid/box.zip', {d});
+    , .{ @intFromBool(keg_pinned), @intFromBool(cask_pinned) }));
+
+    const was_pinned = caskPinSnapshot(&db, "box");
+    try cask_mod.removeRecord(&db, "box");
+    try db.exec("INSERT INTO casks (token, name, version, url) VALUES ('box', 'Box', '3.0', 'https://example.invalid/box.zip');");
+    restoreCaskPin(&db, "box", was_pinned);
+
+    return .{ .keg = pin_mod.isPinned(&db, .formula, "box"), .cask = pin_mod.isPinned(&db, .cask, "box") };
+}
+
+test "a cask upgrade keeps the cask's own pin when a same-named formula is not pinned" {
+    const after = try replayCaskUpgradePin(false, true);
+    try std.testing.expect(after.cask);
+    try std.testing.expect(!after.keg);
+}
+
+test "a cask upgrade never takes a same-named formula's pin as its own" {
+    const after = try replayCaskUpgradePin(true, false);
+    try std.testing.expect(!after.cask);
+    try std.testing.expect(after.keg);
+}
