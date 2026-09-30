@@ -527,7 +527,8 @@ test "End jumps to the last filtered row; an empty list stays at zero" {
 test "Enter returns the `mt info` read for the selected row" {
     var s: State = .{ .items = &sample };
     const eff = stepKey(&s, .enter);
-    defer testing.allocator.free(eff.read.argv);
+    // Guarded so a wrong tag fails the expect below instead of panicking.
+    defer if (eff == .read) testing.allocator.free(eff.read.argv);
     try testing.expect(eff == .read);
     try testing.expectEqual(cmd.MsgTag.installed, eff.read.tag);
     try testing.expectEqualStrings("info", eff.read.argv[1]);
@@ -540,7 +541,8 @@ test "Enter reads the row's own kind, so a cask row never shows a same-named for
         var s: State = .{ .items = &sample };
         s.chrome.view.selected = case[0];
         const eff = stepKey(&s, .enter);
-        defer testing.allocator.free(eff.read.argv);
+        defer if (eff == .read) testing.allocator.free(eff.read.argv);
+        try testing.expect(eff == .read);
         try testing.expectEqualStrings(case[1], eff.read.argv[2]);
         try testing.expectEqualStrings(case[2], eff.read.argv[3]);
     }
@@ -554,7 +556,7 @@ test "Enter on a same-named row of the other kind opens its pane instead of clos
     var s: State = .{ .items = &shared, .detail = .{ .pkg = shared[0], .info = .{ .name = "box" } } };
     s.chrome.view.selected = 1; // the cask, while the pane belongs to the formula
     const eff = stepKey(&s, .enter);
-    defer testing.allocator.free(eff.read.argv);
+    defer if (eff == .read) testing.allocator.free(eff.read.argv);
     try testing.expect(eff == .read);
     try testing.expectEqualStrings("--cask", eff.read.argv[2]);
 }
@@ -576,7 +578,7 @@ test "Enter switches the pane to a newly selected row instead of closing it" {
     var s: State = .{ .items = &sample, .detail = .{ .pkg = sample[0], .info = .{ .name = "brotli" } } };
     s.chrome.view.selected = 1; // curl, while the pane belongs to brotli
     const eff = stepKey(&s, .enter);
-    defer testing.allocator.free(eff.read.argv);
+    defer if (eff == .read) testing.allocator.free(eff.read.argv);
     try testing.expect(eff == .read); // opens curl's info, not a close
     try testing.expectEqualStrings("curl", eff.read.argv[3]);
 }
