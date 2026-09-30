@@ -571,6 +571,9 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
             include_services = true;
         } else if (std.mem.startsWith(u8, a, "-")) {
             output.warn("ignored flag: {s}", .{a});
+        } else if (bundle_name != null) {
+            output.err("bundle export: expected at most one <name>", .{});
+            return error.Aborted;
         } else {
             bundle_name = a;
         }
