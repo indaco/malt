@@ -35,8 +35,10 @@ fn isPositional(a: []const u8) bool {
 
 const Presence = enum { keg, cask, local, missing };
 
-/// Which subtree a tap keg's `.rb` came from. `.any` lets install probe
-/// both, as upgrade does for rows recorded before malt tracked it.
+/// Which side install must take. A core keg is always a formula, so a
+/// missing formula can never fall back to a same-named cask; `.any` lets
+/// install probe both, as upgrade does for tap rows recorded before malt
+/// tracked their subtree.
 const Side = enum { any, formula, cask };
 
 /// Table the user's `--formula` / `--cask` restricts the lookup to.
@@ -96,7 +98,7 @@ pub fn classify(allocator: std.mem.Allocator, db: *sqlite.Database, typed: []con
                 .name = try allocator.dupe(u8, columnSlice(&stmt, 2)),
                 .pinned = true,
             };
-            if (install_args.isCoreTap(tap)) return .{ .presence = .keg, .name = try allocator.dupe(u8, name) };
+            if (install_args.isCoreTap(tap)) return .{ .presence = .keg, .name = try allocator.dupe(u8, name), .side = .formula };
             return .{
                 .presence = .keg,
                 .name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap, name }),
@@ -171,13 +173,22 @@ fn mixOf(allocator: std.mem.Allocator, db: *sqlite.Database, args: []const []con
     return .none;
 }
 
-/// A bare name that resolved to a keg but also names an installed cask.
+/// A bare name that resolved to a formula but also names an installed cask.
 /// Best-effort: it only decides a warning, never the target.
 fn shadowsCask(allocator: std.mem.Allocator, db: *sqlite.Database, typed: []const u8, only: Only, t: Target) bool {
-    if (only != .any or t.presence != .keg) return false;
+    if (only != .any or t.presence != .keg or t.side != .formula) return false;
     const cask = classify(allocator, db, typed, .cask) catch return false;
     defer cask.deinit(allocator);
     return cask.presence == .cask;
+}
+
+fn warnShadowed(allocator: std.mem.Allocator, db: *sqlite.Database, args: []const []const u8, only: Only) error{ OutOfMemory, Unreadable }!void {
+    for (args) |a| {
+        if (!isPositional(a)) continue;
+        const t = try classify(allocator, db, a, only);
+        defer t.deinit(allocator);
+        if (shadowsCask(allocator, db, a, only, t)) help.warnTreatedAsFormula(a);
+    }
 }
 
 fn onlyFromArgs(args: []const []const u8) Only {
@@ -253,14 +264,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         };
         defer db.close();
         schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
-        var t = classify(allocator, &db, name, only) catch |e| return dbFailed(&db, e);
+        const t = classify(allocator, &db, name, only) catch |e| return dbFailed(&db, e);
         errdefer t.deinit(allocator);
-        if (shadowsCask(allocator, &db, name, only, t)) {
-            help.warnTreatedAsFormula(name);
-            // Pinned so install neither repeats the notice nor probes the cask.
-            if (t.side == .any) t.side = .formula;
-        }
-        break :blk .{ t, mixOf(allocator, &db, args, only) catch |e| return dbFailed(&db, e) };
+        const mix = mixOf(allocator, &db, args, only) catch |e| return dbFailed(&db, e);
+        // Only a run that goes on to install owes the notice.
+        if (t.presence == .keg and mix == .none) warnShadowed(allocator, &db, args, only) catch |e| return dbFailed(&db, e);
+        break :blk .{ t, mix };
     };
     defer target.deinit(allocator);
 
