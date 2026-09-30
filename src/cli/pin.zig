@@ -67,7 +67,7 @@ fn run(ctx: *const AppCtx, args: []const []const u8, action: Action) !void {
         return error.Aborted;
     }
     const pkg = name orelse {
-        output.err("Usage: mt {s} <name>", .{action.cmdName()});
+        output.err("Usage: mt {s} <name> [--cask | --formula]", .{action.cmdName()});
         return error.Aborted;
     };
 
