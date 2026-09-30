@@ -309,16 +309,16 @@ test "bundle completions advertise only flags bundle.zig parses" {
     try testing.expect(std.mem.indexOf(u8, completions.fish_script, "from-installed") == null);
 }
 
-test "all bundle completions expose --services" {
-    try expectContains(try bashFlagsFor("bundle)"), "--services");
+test "all bundle completions expose --services for create and export" {
+    try expectContains(try bashFlagsFor("bundle-create|bundle-export)"), "--services");
     try expectContains(try zshCaseFor("                bundle)"), "'--services[");
-    try expectContains(completions.fish_script, "__malt_using_command bundle' -l services");
+    try expectContains(completions.fish_script, "__fish_seen_subcommand_from create export' -l services");
 }
 
-test "all bundle completions expose --purge" {
-    try expectContains(try bashFlagsFor("bundle)"), "--purge");
+test "all bundle completions expose --purge for remove" {
+    try expectContains(try bashFlagsFor("bundle-remove)"), "--purge");
     try expectContains(try zshCaseFor("                bundle)"), "'--purge[");
-    try expectContains(completions.fish_script, "__malt_using_command bundle' -l purge");
+    try expectContains(completions.fish_script, "__fish_seen_subcommand_from remove' -l purge");
 }
 
 test "all migrate completions expose --parallel" {

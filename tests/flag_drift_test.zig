@@ -243,10 +243,12 @@ fn bashFlags(allocator: std.mem.Allocator, command: []const u8) !FlagSet {
     while (it.next()) |line| {
         const label_at = std.mem.indexOf(u8, line, command) orelse continue;
         // The label must be a whole word ending the case pattern, or `install`
-        // matches inside `uninstall|remove)` and inherits its flag list.
+        // matches inside `uninstall|remove)` and inherits its flag list. A
+        // `<cmd>-<sub>)` row holds one subcommand's share of the flags.
         const after_label = line[label_at + command.len ..];
         if (!std.mem.startsWith(u8, after_label, ")") and
-            !std.mem.startsWith(u8, after_label, "|")) continue;
+            !std.mem.startsWith(u8, after_label, "|") and
+            !std.mem.startsWith(u8, after_label, "-")) continue;
         if (label_at > 0) {
             const before = line[label_at - 1];
             if (std.ascii.isAlphanumeric(before) or before == '-') continue;
@@ -304,14 +306,17 @@ fn fishFlags(allocator: std.mem.Allocator, command: []const u8) !FlagSet {
     var set = FlagSet.init(allocator);
     errdefer set.deinit();
 
+    // `<cmd>'` or, for a per-subcommand row, `<cmd>; and ...'`.
     var marker_buf: [64]u8 = undefined;
-    const marker = try std.fmt.bufPrint(&marker_buf, "__malt_using_command {s}'", .{command});
+    const marker = try std.fmt.bufPrint(&marker_buf, "__malt_using_command {s}", .{command});
 
     var it = std.mem.splitScalar(u8, completions.fish_script, '\n');
     while (it.next()) |line| {
-        if (std.mem.indexOf(u8, line, marker) == null) continue;
-        const at = std.mem.indexOf(u8, line, " -l ") orelse continue;
-        var tok = std.mem.tokenizeAny(u8, line[at + 4 ..], " ");
+        const at = std.mem.indexOf(u8, line, marker) orelse continue;
+        const after = line[at + marker.len ..];
+        if (!std.mem.startsWith(u8, after, "'") and !std.mem.startsWith(u8, after, ";")) continue;
+        const l_at = std.mem.indexOf(u8, line, " -l ") orelse continue;
+        var tok = std.mem.tokenizeAny(u8, line[l_at + 4 ..], " ");
         const flag = tok.next() orelse continue;
         var buf: [64]u8 = undefined;
         const long = try std.fmt.bufPrint(&buf, "--{s}", .{flag});
@@ -464,4 +469,124 @@ test "readsDryRun ignores a mention inside a comment or an inline test" {
     try testing.expect(!readsDryRun("test \"x\" {\n    output.setDryRun(output.isDryRun());\n}\n"));
     // Code after the test block counts again.
     try testing.expect(readsDryRun("test \"x\" {\n}\nconst d = output.isDryRun();\n"));
+}
+
+/// `bundle` subcommands refuse each other's flags, so a shell must offer each
+/// one only its own. Each is checked against the function that parses it.
+const bundle_subcommands = [_]struct { name: []const u8, parser: []const u8 }{
+    .{ .name = "install", .parser = "fn cmdInstall(" },
+    .{ .name = "cleanup", .parser = "fn cmdCleanup(" },
+    .{ .name = "create", .parser = "fn resolveCreateArgs(" },
+    .{ .name = "export", .parser = "fn cmdExport(" },
+    .{ .name = "remove", .parser = "fn resolveRemoveArgs(" },
+    .{ .name = "import", .parser = "fn cmdImport(" },
+    .{ .name = "list", .parser = "fn cmdList(" },
+};
+
+/// A top-level zig fn from its header to the `}` that zig fmt puts at column 0.
+fn functionBody(src: []const u8, header: []const u8) ![]const u8 {
+    const start = std.mem.indexOf(u8, src, header) orelse return error.MissingParser;
+    const end = std.mem.indexOfPos(u8, src, start, "\n}\n") orelse return error.MissingParser;
+    return src[start..end];
+}
+
+/// True when `list` (space, `(`, `|` or `)` separated) names `sub`.
+fn namesSub(list: []const u8, sub: []const u8) bool {
+    var tok = std.mem.tokenizeAny(u8, list, " ()|'");
+    while (tok.next()) |t| if (std.mem.eql(u8, t, sub)) return true;
+    return false;
+}
+
+/// Flags in the zsh bundle case's `[[ $words[2] == <sub> ]]` branch.
+fn zshBundleFlags(allocator: std.mem.Allocator, sub: []const u8) !FlagSet {
+    var set = FlagSet.init(allocator);
+    errdefer set.deinit();
+    const script = completions.zsh_script;
+    const start = zshCaseStart(script, "bundle") orelse return error.MissingZshBundleCase;
+    const body = script[start..];
+    const end = std.mem.indexOf(u8, body, ";;") orelse return error.MissingZshCaseEnd;
+
+    var in_branch = false;
+    var it = std.mem.splitScalar(u8, body[0..end], '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, "$words[2] ==")) |at| {
+            in_branch = namesSub(line[at + "$words[2] ==".len ..], sub);
+            continue;
+        }
+        if (std.mem.indexOf(u8, line, "fi") != null and std.mem.trim(u8, line, " ").len == 2) in_branch = false;
+        if (!in_branch) continue;
+        var rest = line;
+        while (std.mem.indexOf(u8, rest, "--")) |i| {
+            const after = rest[i..];
+            var j: usize = 0;
+            while (j < after.len and (std.ascii.isAlphanumeric(after[j]) or after[j] == '-')) : (j += 1) {}
+            try set.add(after[0..j]);
+            rest = after[j..];
+        }
+    }
+    return set;
+}
+
+/// Flags on fish rows gated by `__fish_seen_subcommand_from <subs>` under bundle.
+fn fishBundleFlags(allocator: std.mem.Allocator, sub: []const u8) !FlagSet {
+    var set = FlagSet.init(allocator);
+    errdefer set.deinit();
+    const marker = "__malt_using_command bundle; and __fish_seen_subcommand_from ";
+    var it = std.mem.splitScalar(u8, completions.fish_script, '\n');
+    while (it.next()) |line| {
+        const at = std.mem.indexOf(u8, line, marker) orelse continue;
+        const subs = line[at + marker.len ..];
+        const close = std.mem.indexOfScalar(u8, subs, '\'') orelse continue;
+        if (!namesSub(subs[0..close], sub)) continue;
+        const l_at = std.mem.indexOf(u8, line, " -l ") orelse continue;
+        var tok = std.mem.tokenizeAny(u8, line[l_at + 4 ..], " ");
+        const flag = tok.next() orelse continue;
+        var buf: [64]u8 = undefined;
+        try set.add(try std.fmt.bufPrint(&buf, "--{s}", .{flag}));
+    }
+    return set;
+}
+
+fn reportDiff(alloc: std.mem.Allocator, report: *std.ArrayList(u8), sub: []const u8, shell: []const u8, have: FlagSet, want: FlagSet) !void {
+    for (want.items.items) |flag| if (!have.has(flag)) {
+        try report.print(alloc, "  bundle {s}: {s} parsed but not offered by {s}\n", .{ sub, flag, shell });
+    };
+    for (have.items.items) |flag| if (!want.has(flag)) {
+        try report.print(alloc, "  bundle {s}: {s} offered by {s} but refused by its parser\n", .{ sub, flag, shell });
+    };
+}
+
+test "each bundle subcommand's completions offer exactly the flags it parses" {
+    const alloc = testing.allocator;
+    const src = try readSources(alloc, .{ .name = "bundle", .sources = &.{"bundle.zig"} });
+    defer alloc.free(src);
+    var report: std.ArrayList(u8) = .empty;
+    defer report.deinit(alloc);
+
+    var offered: usize = 0;
+    for (bundle_subcommands) |sub| {
+        var parsed = FlagSet.init(alloc);
+        defer parsed.deinit();
+        try collectParserFlags(&parsed, try functionBody(src, sub.parser));
+
+        var label_buf: [64]u8 = undefined;
+        var bash = try bashFlags(alloc, try std.fmt.bufPrint(&label_buf, "bundle-{s}", .{sub.name}));
+        defer bash.deinit();
+        var zsh = try zshBundleFlags(alloc, sub.name);
+        defer zsh.deinit();
+        var fish = try fishBundleFlags(alloc, sub.name);
+        defer fish.deinit();
+        offered += bash.items.items.len;
+
+        try reportDiff(alloc, &report, sub.name, "bash", bash, parsed);
+        try reportDiff(alloc, &report, sub.name, "zsh", zsh, parsed);
+        try reportDiff(alloc, &report, sub.name, "fish", fish, parsed);
+    }
+    // Guards the extractors: finding no rows at all would pass vacuously.
+    try testing.expect(offered > 0);
+
+    if (report.items.len > 0) {
+        std.debug.print("bundle subcommand completions drift:\n{s}", .{report.items});
+        return error.BundleSubcommandDrift;
+    }
 }
