@@ -253,9 +253,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         };
         defer db.close();
         schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
-        const t = classify(allocator, &db, name, only) catch |e| return dbFailed(&db, e);
+        var t = classify(allocator, &db, name, only) catch |e| return dbFailed(&db, e);
         errdefer t.deinit(allocator);
-        if (shadowsCask(allocator, &db, name, only, t)) help.warnTreatedAsFormula(name);
+        if (shadowsCask(allocator, &db, name, only, t)) {
+            help.warnTreatedAsFormula(name);
+            // Pinned so install neither repeats the notice nor probes the cask.
+            if (t.side == .any) t.side = .formula;
+        }
         break :blk .{ t, mixOf(allocator, &db, args, only) catch |e| return dbFailed(&db, e) };
     };
     defer target.deinit(allocator);
