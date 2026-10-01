@@ -545,8 +545,21 @@ fn isRegistered(db: *sqlite.Database, name: []const u8) error{Aborted}!bool {
 fn canonicalPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) error{OutOfMemory}!?[:0]u8 {
     const cwd = std.Io.Dir.cwd();
     if (cwd.realPathFileAlloc(io, path, allocator)) |real| return real else |_| {}
-    // A deleted file still names its bundle through its directory.
-    const dir = cwd.realPathFileAlloc(io, std.fs.path.dirname(path) orelse ".", allocator) catch return null;
+    // A dangling link (a stow-managed Brewfile whose target is gone) names
+    // the bundle its target was registered as.
+    // ponytail: one hop; a chain of dangling links stays unresolved.
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = cwd.readLink(io, path, &link_buf) catch return parentResolved(io, allocator, path);
+    const target = link_buf[0..n];
+    if (std.fs.path.isAbsolute(target)) return parentResolved(io, allocator, target);
+    const joined = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(path) orelse ".", target });
+    defer allocator.free(joined);
+    return parentResolved(io, allocator, joined);
+}
+
+/// A deleted file still names its bundle through its directory.
+fn parentResolved(io: std.Io, allocator: std.mem.Allocator, path: []const u8) error{OutOfMemory}!?[:0]u8 {
+    const dir = std.Io.Dir.cwd().realPathFileAlloc(io, std.fs.path.dirname(path) orelse ".", allocator) catch return null;
     defer allocator.free(dir);
     return try std.fs.path.joinZ(allocator, &.{ dir, std.fs.path.basename(path) });
 }

@@ -1238,6 +1238,29 @@ test "list scrubs control bytes from a stored name" {
     try testing.expect(std.mem.indexOfScalar(u8, captured.items, 0x1b) == null);
 }
 
+test "remove finds a bundle registered through a symlink after its target is deleted" {
+    // A stow-managed ~/.config/malt/Brewfile is registered by its target.
+    var s = try Scratch.init(testing.allocator, "remove_dangling_link");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const target = try std.fmt.allocPrint(testing.allocator, "{s}/target.Brewfile", .{s.path});
+    defer testing.allocator.free(target);
+    try writeFile(target, "# empty bundle\n");
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(link);
+    try test_io.cwd().symLink(std.Options.debug_io, "target.Brewfile", link, .{});
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", link });
+    try test_io.cwd().deleteFile(std.Options.debug_io, target);
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", link });
+
+    const names = try bundleNames(testing.allocator, s.path);
+    defer testing.allocator.free(names);
+    try testing.expectEqualStrings("", names);
+}
+
 // --- export -----------------------------------------------------------
 
 test "export with no installed packages emits an empty Brewfile body to stdout" {
