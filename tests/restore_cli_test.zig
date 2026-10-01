@@ -71,25 +71,37 @@ test "execute --help short-circuits before opening the file" {
     try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--help"});
 }
 
-test "execute with no positional path returns MissingFileArgument" {
+test "execute with no positional path aborts with a usage line" {
     var s = try Scratch.init(testing.allocator, "noargs");
     defer s.deinit(testing.allocator);
     output.setQuiet(true);
     defer output.setQuiet(false);
     try testing.expectError(
-        restore.Error.MissingFileArgument,
+        error.Aborted,
         restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{}),
     );
 }
 
-test "execute on a missing file returns FileNotFound" {
+test "execute on a missing file aborts" {
     var s = try Scratch.init(testing.allocator, "missing");
     defer s.deinit(testing.allocator);
     output.setQuiet(true);
     defer output.setQuiet(false);
     try testing.expectError(
-        restore.Error.FileNotFound,
+        error.Aborted,
         restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"/tmp/malt_restore_does_not_exist_xyz"}),
+    );
+}
+
+test "execute on an unreadable path aborts" {
+    var s = try Scratch.init(testing.allocator, "unreadable");
+    defer s.deinit(testing.allocator);
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+    // A directory opens but cannot be read as a file.
+    try testing.expectError(
+        error.Aborted,
+        restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{s.path}),
     );
 }
 
@@ -99,7 +111,7 @@ test "execute rejects extra positional args" {
     output.setQuiet(true);
     defer output.setQuiet(false);
     try testing.expectError(
-        restore.Error.InvalidArgs,
+        error.Aborted,
         restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "/tmp/a", "/tmp/b" }),
     );
 }
@@ -110,7 +122,7 @@ test "execute rejects unknown flags" {
     output.setQuiet(true);
     defer output.setQuiet(false);
     try testing.expectError(
-        restore.Error.InvalidArgs,
+        error.Aborted,
         restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--nope"}),
     );
 }

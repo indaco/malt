@@ -24,13 +24,8 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     return path;
 }
 
-test "describeError returns a distinct message for every ServicesError tag" {
-    const a = services_cli.describeError(error.InvalidArgs);
-    const b = services_cli.describeError(error.DatabaseError);
-    const d = services_cli.describeError(error.SupervisorError);
-    try testing.expect(a.len > 0 and b.len > 0 and d.len > 0);
-    try testing.expect(!std.mem.eql(u8, a, b));
-    try testing.expect(!std.mem.eql(u8, b, d));
+test "describeError names the one surviving ServicesError tag" {
+    try testing.expect(services_cli.describeError(error.DatabaseError).len > 0);
 }
 
 test "execute with no args prints help" {
@@ -61,7 +56,7 @@ test "execute list on an empty prefix reports no services" {
     try services_cli.execute(&ctx, testing.allocator, &.{"status"});
 }
 
-test "execute with an unknown subcommand returns InvalidArgs" {
+test "execute with an unknown subcommand aborts" {
     const prefix = try setupPrefix("unknown");
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -71,12 +66,12 @@ test "execute with an unknown subcommand returns InvalidArgs" {
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(
-        error.InvalidArgs,
+        error.Aborted,
         services_cli.execute(&ctx, testing.allocator, &.{"flarble"}),
     );
 }
 
-test "execute status with a non-existent service returns SupervisorError" {
+test "execute status with a non-existent service aborts" {
     const prefix = try setupPrefix("status_missing");
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -86,12 +81,12 @@ test "execute status with a non-existent service returns SupervisorError" {
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(
-        error.SupervisorError,
+        error.Aborted,
         services_cli.execute(&ctx, testing.allocator, &.{ "status", "nope" }),
     );
 }
 
-test "execute start/stop/restart with wrong arity returns InvalidArgs" {
+test "execute start/stop/restart with wrong arity aborts" {
     const prefix = try setupPrefix("lifecycle_argv");
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -102,7 +97,7 @@ test "execute start/stop/restart with wrong arity returns InvalidArgs" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     for ([_][]const u8{ "start", "stop", "restart" }) |op| {
         try testing.expectError(
-            error.InvalidArgs,
+            error.Aborted,
             services_cli.execute(&ctx, testing.allocator, &.{op}),
         );
     }
@@ -349,7 +344,7 @@ test "execute status <name> --json emits a single-element array" {
     try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "}]}\n"));
 }
 
-test "execute status <missing> --json still surfaces SupervisorError" {
+test "execute status <missing> --json still aborts" {
     const prefix = try setupPrefix("status_missing_json");
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -363,12 +358,12 @@ test "execute status <missing> --json still surfaces SupervisorError" {
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(
-        error.SupervisorError,
+        error.Aborted,
         services_cli.execute(&ctx, testing.allocator, &.{ "status", "nope" }),
     );
 }
 
-test "execute logs with no args returns InvalidArgs" {
+test "execute logs with no args aborts" {
     const prefix = try setupPrefix("logs_noargs");
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -378,7 +373,7 @@ test "execute logs with no args returns InvalidArgs" {
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(
-        error.InvalidArgs,
+        error.Aborted,
         services_cli.execute(&ctx, testing.allocator, &.{"logs"}),
     );
 }

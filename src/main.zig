@@ -764,8 +764,8 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         // Message already printed; `Aborted` exits 1 without a stack trace.
         .backup => backup.execute(ctx, allocator, cmd_args) catch |e| return if (e == backup.Error.DatabaseError) error.Aborted else e,
         .restore => try restore.execute(ctx, allocator, cmd_args),
-        .purge => try purge.execute(ctx, allocator, cmd_args),
-        .cleanup => try purge.executeCleanup(ctx, allocator, cmd_args),
+        .purge => purge.execute(ctx, allocator, cmd_args) catch |e| return if (e == purge.Error.UserAborted) error.Aborted else e,
+        .cleanup => purge.executeCleanup(ctx, allocator, cmd_args) catch |e| return if (e == purge.Error.UserAborted) error.Aborted else e,
         .services => try services.execute(ctx, allocator, cmd_args),
         // Lazy: the TUI leaf is referenced only here, so non-`tui` commands pay
         // no cold-start cost. `--help` is handled in the bridge because the leaf

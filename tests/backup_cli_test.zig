@@ -102,7 +102,7 @@ test "execute rejects unknown flags" {
     quiet();
     defer unquiet();
     try testing.expectError(
-        backup.Error.InvalidArgs,
+        error.Aborted,
         backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--nope"}),
     );
 }
@@ -113,7 +113,7 @@ test "execute --output without a value is rejected" {
     quiet();
     defer unquiet();
     try testing.expectError(
-        backup.Error.InvalidArgs,
+        error.Aborted,
         backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--output"}),
     );
 }

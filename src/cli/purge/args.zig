@@ -16,7 +16,7 @@ pub const Error = error{
 pub const default_cache_days: i64 = 30;
 
 /// Bitfield of selected scopes.  At least one must be set or `execute`
-/// errors with `NoScope`.  `wipe` is mutually exclusive with the others.
+/// refuses to run.  `wipe` is mutually exclusive with the others.
 pub const Scope = struct {
     store_orphans: bool = false,
     unused_deps: bool = false,
