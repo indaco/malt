@@ -659,7 +659,7 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     }
 
     var write_buf: [4096]u8 = undefined;
-    var stdout_writer = ctx.stdout.writer(ctx.io, &write_buf);
+    var stdout_writer = ctx.stdout.writerStreaming(ctx.io, &write_buf);
     const w = &stdout_writer.interface;
     (switch (format) {
         .brewfile => brewfile_emit.emit(manifest, w),

@@ -1219,7 +1219,7 @@ fn resolveOneHead(
 
 fn emitRefreshAll(ctx: *const AppCtx, rows: []const RefreshRow) !void {
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);
+    var stdout_fw = ctx.stdout.writerStreaming(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     defer stdout.flush() catch {};
 

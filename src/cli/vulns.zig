@@ -207,7 +207,7 @@ pub fn executeWith(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
 
 fn report(ctx: *const AppCtx, r: Report) !void {
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);
+    var stdout_fw = ctx.stdout.writerStreaming(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     // Flush before the exit-code error so the rows reach a pipe reader.
     defer stdout.flush() catch {};

@@ -1057,7 +1057,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer allocator.free(cache_dir);
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);
+    var stdout_fw = ctx.stdout.writerStreaming(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};
