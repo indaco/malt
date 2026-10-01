@@ -543,6 +543,7 @@ fn resolveCreateArgs(rest: []const []const u8) error{Aborted}!CreateArgs {
     while (i < rest.len) : (i += 1) {
         const a = rest[i];
         if (opts_done or !std.mem.startsWith(u8, a, "-")) {
+            if (out_path != null) return expected("create", "at most one [path]");
             out_path = a;
         } else if (std.mem.eql(u8, a, "--")) {
             opts_done = true;
