@@ -1360,12 +1360,7 @@ pub fn materializeRubyFormula(
     linker.link(cellar_path, resolved.name, keg_id, false) catch {
         sink.warn("Some links for {s} could not be created", .{resolved.name});
     };
-    try commitAndSweep(ctx, allocator, db, prefix, resolved.name, cellar_path, pkg_version, aside, force);
-
-    // After the commit: a failed one must leave opt pointing at the prior keg.
-    linker.linkOpt(resolved.name, pkg_version) catch {
-        sink.warn("Could not create opt link for {s}", .{resolved.name});
-    };
+    try commitAndSweep(ctx, allocator, db, linker, sink, prefix, resolved.name, cellar_path, pkg_version, aside, force);
 
     // After the commit, like the API path: a refused service warns and
     // can never roll back the keg.
@@ -1374,13 +1369,16 @@ pub fn materializeRubyFormula(
     sink.success("{s} {s} installed", .{ resolved.name, resolved.version });
 }
 
-/// Commit the keg record, then clean up what it replaced. Dirs are deleted
-/// only after the commit: a failed commit rolls the stale rows back, and
-/// they must still have a keg to point at.
+/// Commit the keg record, repoint opt, then clean up what it replaced. Opt
+/// moves before the sweep so a crash mid-sweep never leaves it dangling, and
+/// only after the commit so a failed one keeps it on the prior keg. Dirs go
+/// last: a failed commit rolls the stale rows back and they need a keg.
 pub fn commitAndSweep(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    sink: OutputSink,
     prefix: []const u8,
     name: []const u8,
     cellar_path: []const u8,
@@ -1389,6 +1387,9 @@ pub fn commitAndSweep(
     force: bool,
 ) InstallError!void {
     db.commit() catch return InstallError.RecordFailed;
+    linker.linkOpt(name, pkg_version) catch {
+        sink.warn("Could not create opt link for {s}", .{name});
+    };
     if (aside) |a| std.Io.Dir.cwd().deleteTree(ctx.io, a) catch {};
 
     if (force) {

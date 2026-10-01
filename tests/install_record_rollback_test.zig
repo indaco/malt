@@ -151,15 +151,13 @@ fn forceReinstall(prefix: []const u8, new_keg: []const u8, db: *sqlite.Database,
         try db.exec("PRAGMA defer_foreign_keys=ON;");
         try db.exec("INSERT INTO dependencies(keg_id, dep_name) VALUES(999999, 'ghost');");
     }
-    local.commitAndSweep(&malt.app_ctx.debug_ctx, testing.allocator, db, prefix, "tool", new_keg, "1.1", null, true) catch |e| {
+    local.commitAndSweep(&malt.app_ctx.debug_ctx, testing.allocator, db, linker, malt.install_sink.silent, prefix, "tool", new_keg, "1.1", null, true) catch |e| {
         // The errdefer unwind in reverse registration order.
         db.rollback();
         install.dropUnrecordedKeg(io, db, prefix, "tool", "1.1", new_keg);
         install.relinkKegs(db, linker, "tool");
         return e;
     };
-    // Production order: opt moves only once the commit is durable.
-    try linker.linkOpt("tool", "1.1");
 }
 
 test "failed commit keeps the other-version keg a tap --force reinstall was replacing" {
@@ -234,9 +232,10 @@ test "a committed install without --force keeps other versions and drops the par
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(io, testing.allocator, &db, prefix);
     try db.beginTransaction();
 
-    try local.commitAndSweep(&malt.app_ctx.debug_ctx, testing.allocator, &db, prefix, "tool", new_keg, "1.1", aside, false);
+    try local.commitAndSweep(&malt.app_ctx.debug_ctx, testing.allocator, &db, &linker, malt.install_sink.silent, prefix, "tool", new_keg, "1.1", aside, false);
 
     try testing.expect(exists(old_keg));
     try testing.expect(!exists(aside));
@@ -255,11 +254,12 @@ test "a failed commit keeps the parked keg so it can be put back" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(io, testing.allocator, &db, prefix);
     try db.beginTransaction();
     try db.exec("PRAGMA defer_foreign_keys=ON;");
     try db.exec("INSERT INTO dependencies(keg_id, dep_name) VALUES(999999, 'ghost');");
 
-    try testing.expectError(error.RecordFailed, local.commitAndSweep(&malt.app_ctx.debug_ctx, testing.allocator, &db, prefix, "tool", new_keg, "1.1", aside, true));
+    try testing.expectError(error.RecordFailed, local.commitAndSweep(&malt.app_ctx.debug_ctx, testing.allocator, &db, &linker, malt.install_sink.silent, prefix, "tool", new_keg, "1.1", aside, true));
     db.rollback();
 
     try testing.expect(exists(aside));
