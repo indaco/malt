@@ -1102,6 +1102,40 @@ test "import refuses a path-shaped or control-byte name instead of taking over a
     try testing.expectEqualStrings(victim, stored);
 }
 
+test "export --format json of a Brewfile bundle writes a file install accepts" {
+    // The registered name is a path, which install refuses as a bundle name.
+    var s = try Scratch.init(testing.allocator, "export_json_roundtrip");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const brewfile = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(brewfile);
+    try writeFile(brewfile, "# empty bundle\n");
+    const out = try std.fmt.allocPrint(testing.allocator, "{s}/out.json", .{s.path});
+    defer testing.allocator.free(out);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", brewfile });
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, out, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        const ctx: malt.app_ctx.AppCtx = .{
+            .io = std.Options.debug_io,
+            .environ = .empty,
+            .stdout = f,
+            .stderr = test_io.testSink(),
+        };
+        try bundle.execute(&ctx, testing.allocator, &.{ "export", brewfile, "--format", "json" });
+    }
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "install", out });
+
+    const want = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, out, testing.allocator);
+    defer testing.allocator.free(want);
+    const stored = try storedManifestPath(testing.allocator, s.path, want);
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(want, stored);
+}
+
 // --- export -----------------------------------------------------------
 
 test "export with no installed packages emits an empty Brewfile body to stdout" {

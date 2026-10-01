@@ -15,6 +15,7 @@ const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const path_write = @import("../fs/path_write.zig");
 const output = @import("../ui/output.zig");
+const path_component = @import("../fs/path_component.zig");
 const signals = @import("../core/signals.zig");
 const install_args = @import("install/args.zig");
 const install_sink_mod = @import("install/sink.zig");
@@ -997,7 +998,9 @@ fn qualifiedName(a: std.mem.Allocator, tap_col: ?[*:0]const u8, name_col: [*:0]c
 
 fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, name: []const u8) !void {
     const a = manifest.allocator();
-    manifest.name = try a.dupe(u8, name);
+    // A Brewfile's bundle is named by its path, which install refuses as a
+    // name; without one, the exported file names its own bundle.
+    manifest.name = if (path_component.isPathComponent(name)) try a.dupe(u8, name) else "";
     manifest.version = manifest_mod.schema_version;
 
     var taps: std.ArrayList([]const u8) = .empty;
