@@ -69,7 +69,8 @@ The CI pipeline runs the full slate (including `local-bench.sh` and the smoke su
 
 ## Pointers before you start
 
-- **`README.md`** - the public face of the project. Read `## Why malt exists` and `## Architecture` so your design proposals don't contradict choices that are already load-bearing.
+- **`README.md`** - the public face of the project. Read [Why this, and what's different](README.md#why-this-and-whats-different) so your design proposals don't contradict choices that are already load-bearing.
+- **`ARCHITECTURE.md`** - the design choices behind the install protocol, store, Mach-O patching and the `post_install` interpreter, plus the safety and supply-chain model.
 
 ## Tap forges
 
@@ -112,6 +113,7 @@ Releases are signed keyless via cosign in the goreleaser workflow; `scripts/inst
 ```bash
 zig build                                        # Debug binary
 zig build -Doptimize=ReleaseSafe                 # release-equivalent binary
+zig build universal                              # universal binary (arm64 + x86_64 via lipo)
 zig build test                                   # unit tests
 ./scripts/lint-spawn-invariants.sh               # argv-only lint
 ./scripts/test/install_sh_test.sh                # install.sh regression

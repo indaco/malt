@@ -242,7 +242,9 @@ jobs:
           # Strip leading whitespace from heredoc indentation
           sed -i '' 's/^          //' /tmp/meta_table.md /tmp/size_table.md /tmp/cold_table.md /tmp/warm_table.md
 
-          # Replace sections between markers
+          # Replace sections between markers. The README carries the META,
+          # COLD and WARM blocks and BENCHMARKS.md carries all four; a marker
+          # absent from a file leaves that file untouched.
           for marker in META SIZE COLD WARM; do
             file="/tmp/$(echo "$marker" | tr '[:upper:]' '[:lower:]')_table.md"
             sed -i '' "/<!-- BENCH:${marker}:START -->/,/<!-- BENCH:${marker}:END -->/{
@@ -252,12 +254,12 @@ jobs:
               }
               /<!-- BENCH:${marker}:END -->/d
               d
-            }" README.md
+            }" README.md BENCHMARKS.md
           done
 
-          # Update date. The anchor pins to the README's actual
-          # blockquote line.
-          sed -i '' "s|^> Apple Silicon (GitHub Actions macos-14), .*|> Apple Silicon (GitHub Actions macos-14), $DATE. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).|" README.md
+          # Update date. The anchor pins to the date blockquote line that
+          # both files carry.
+          sed -i '' "s|^> Apple Silicon (GitHub Actions macos-14), .*|> Apple Silicon (GitHub Actions macos-14), $DATE. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).|" README.md BENCHMARKS.md
         env:
           STEPS_TREE_OUTPUTS_MT_SIZE: ${{ steps.tree.outputs.mt_size }}
           STEPS_TREE_OUTPUTS_NB_SIZE: ${{ steps.tree.outputs.nb_size }}
@@ -307,13 +309,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet README.md; then
-            echo "No README changes to publish."
+          if git diff --quiet README.md BENCHMARKS.md; then
+            echo "No benchmark changes to publish."
             exit 0
           fi
 
           git checkout -B "$BRANCH"
-          git add README.md
+          git add README.md BENCHMARKS.md
           git commit -m "docs(benchmark): update results ${DATE}"
           git push --force -u origin "$BRANCH"
 
@@ -321,7 +323,7 @@ jobs:
           ## Description
 
           Weekly benchmark refresh produced by the [benchmark workflow](.github/workflows/benchmark.yml).
-          Updates the binary size, cold install, and warm install tables in the README with fresh numbers from a true cold install on macos-14 (BENCH_TRUE_COLD=1, BENCH_FAIL_FAST=1).
+          Updates the binary size, cold install, and warm install tables in BENCHMARKS.md (and the cold and warm tables in the README) with fresh numbers from a true cold install on macos-14 (BENCH_TRUE_COLD=1, BENCH_FAIL_FAST=1).
 
           ## Related Issue
 
