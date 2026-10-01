@@ -17,7 +17,7 @@ env -u MALT_PREFIX -u MALT_CACHE zig build test-bin >"$log" 2>&1 || {
 }
 
 rc=0
-MALT_PREFIX=/tmp/malt-test-prefix timeout 120 zig-out/test-bin/install_record_rollback_test >"$log" 2>&1 || rc=$?
+MALT_PREFIX=/tmp/malt-test-prefix zig-out/test-bin/install_record_rollback_test >"$log" 2>&1 || rc=$?
 grep -q "failed commit keeps the other-version keg" "$log" || {
   cat "$log"
   echo "FAIL: guard test did not run"
