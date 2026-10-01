@@ -1298,6 +1298,20 @@ test "bundle create names the path it could not write" {
     try expectRefused(&malt.app_ctx.debug_ctx, &.{ "create", out }, "Cannot write");
 }
 
+test "bundle create refuses a second path and writes neither" {
+    // Writing only the last path left the first one missing with exit 0.
+    var s = try Scratch.init(testing.allocator, "create_two_paths");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const a = try std.fmt.allocPrint(testing.allocator, "{s}/a", .{s.path});
+    defer testing.allocator.free(a);
+    const b = try std.fmt.allocPrint(testing.allocator, "{s}/b", .{s.path});
+    defer testing.allocator.free(b);
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "create", a, b }, "expected at most one [path]");
+    for ([_][]const u8{ a, b }) |p|
+        try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, p, .{}));
+}
+
 test "bundle list, remove, cleanup and export refuse a table they cannot read in words" {
     // Each reads the database on its own path; none may end in a raw error.
     const cases = .{
