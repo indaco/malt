@@ -765,43 +765,9 @@ For installing malt from a local checkout (the end-user path), see [From source]
 
 <!-- BENCH:WARM:END -->
 
-<!-- BENCH:SIZE:START -->
-
-### Binary Size
-
-| Tool     | Size   |
-| -------- | ------ |
-| **malt** | 4.3 MB |
-| nanobrew | 3.4 MB |
-| zerobrew | 8.7 MB |
-
-<!-- BENCH:SIZE:END -->
-
 > Apple Silicon (GitHub Actions macos-14), 2026-09-28. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
 
-### Methodology
-
-Each cell is the **median of 5 rounds** (`BENCH_ROUNDS=5`, the default in [`scripts/bench.sh`](scripts/bench.sh)) - more robust to single-run jitter than a mean. Override with `BENCH_ROUNDS=N`. Every run also emits per-tool `_min` and `_stddev` keys to `$GITHUB_OUTPUT` and prints them in the local terminal summary.
-
-A cold sample here starts from a wiped install prefix for every tool, so the first round exercises the full download → extract → link → db-write path. Some benchmark scripts define "cold" as an uninstall/reinstall, which keeps the download cache warm; the two definitions can produce different absolute cold numbers for the same tool on the same hardware.
-
-`BENCH_TRUE_COLD=1` wipes each tool's install prefix **and** bottle download cache before every cold sample, so "cold" means no bottle anywhere on disk.
-
-- malt, nanobrew, zerobrew: one prefix wipe covers both (the cache lives inside the prefix).
-- Homebrew: the cache lives outside the prefix (`~/Library/Caches/Homebrew/downloads`), so it's wiped explicitly per formula and its transitive deps via `brew --cache`.
-- Without that extra Homebrew wipe, local brew numbers come out 5–25× faster than CI's - brew is reusing bottles cached by earlier rounds.
-
-Each package bench opens with a discarded warmup round: every tool runs one install/uninstall pair whose timings are thrown away, so DNS, TLS session cache, TCP congestion window, and disk caches are all populated before timing starts.
-
-The measured rounds then rotate tool order (round _r_ starts with `tools[r mod N]`), so no single tool reliably eats the "cold network" slot or benefits from the warmest one.
-
-`scripts/bench.sh` resolves nanobrew's and zerobrew's latest release tag before each build, so a peer is never benched as a weeks-old snapshot nor as a mid-development commit. Set `BENCH_SKIP_UPDATE=1` to pin whatever is already checked out. CI additionally sets `BENCH_MALT_RELEASE=1` so the published table is release-vs-release; a local run benches your working tree.
-
-A peer tool whose cold install fails, or exceeds `BENCH_MAX_COLD` (50 s), has that cell withheld as ⚠️ - a regression in their tool is not a comparable number. malt is never withheld: its own numbers stay in the table however bad they get, and a failed malt install aborts the run instead of publishing anything.
-
-Each tool is built using the release flags its upstream ships with: malt `ReleaseSafe` (matches [`.goreleaser.yaml`](.goreleaser.yaml)), nanobrew `ReleaseFast`, zerobrew `cargo build --release`. Binary sizes may differ from the numbers shown on each tool's own repo - the gap is almost always version drift, not a flag difference.
-
-To reproduce locally, `./scripts/local-bench.sh` runs the four CI phases (tree, wget, ffmpeg, stress-test) in order. Add `--clean` to wipe `/tmp` bench state afterwards. For iterative work, `scripts/bench.sh <pkg>` directly - `SKIP_BUILD=1` reuses existing binaries; `SKIP_OTHERS=1` / `SKIP_BREW=1` skip peer comparisons.
+Binary sizes and the methodology are in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Contributing
 
