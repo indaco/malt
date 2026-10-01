@@ -245,7 +245,7 @@ fn cmdLogs(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []con
     defer allocator.free(path);
     const stdout = ctx.stdout;
     var write_buf: [4096]u8 = undefined;
-    var stdout_writer = stdout.writer(ctx.io, &write_buf);
+    var stdout_writer = stdout.writerStreaming(ctx.io, &write_buf);
     const w = &stdout_writer.interface;
     if (follow) {
         try supervisor.followLog(ctx.io, allocator, path, tail_n, w, signals.isInterrupted);

@@ -143,6 +143,7 @@ comptime {
     _ = @import("services_validate_test.zig");
     _ = @import("shellenv_test.zig");
     _ = @import("spawn_invariant_test.zig");
+    _ = @import("stdout_writer_invariant_test.zig");
     _ = @import("store_test.zig");
     _ = @import("supervisor_pure_test.zig");
     _ = @import("swap_test.zig");

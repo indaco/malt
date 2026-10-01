@@ -411,7 +411,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (db_opt) |*db| schema.initSchema(db) catch |e| if (e == error.SchemaTooNew) return schema_report.abortInitFailure(db, e, prefix);
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);
+    var stdout_fw = ctx.stdout.writerStreaming(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     defer stdout.flush() catch {};
 

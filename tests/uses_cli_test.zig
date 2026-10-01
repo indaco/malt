@@ -264,3 +264,31 @@ test "execute on a db/ directory with no malt.db yet is still an empty prefix" {
     defer unquiet();
     try uses.execute(&ctx, testing.allocator, &.{"openssl"});
 }
+
+// --- shared stdout file -----------------------------------------------
+
+test "execute appends to a stdout file whose offset an earlier writer advanced" {
+    var s = try Scratch.init(testing.allocator, "shared_stdout");
+    defer s.deinit(testing.allocator);
+    try seedDeps(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/stdout.txt", .{s.path});
+    defer testing.allocator.free(out_path);
+    const file = try test_io.cwd().createFile(std.Options.debug_io, out_path, .{ .read = true });
+    defer file.close(std.Options.debug_io);
+
+    // A prior command in the same redirect leaves the shared offset past this.
+    const prefix = "EARLIER-OUTPUT\n";
+    try file.writeStreamingAll(std.Options.debug_io, prefix);
+
+    var ctx = ctxWithSink();
+    ctx.stdout = file;
+    quiet();
+    defer unquiet();
+    try uses.execute(&ctx, testing.allocator, &.{ "openssl", "--json" });
+
+    const got = try test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, out_path, 1 << 16);
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.startsWith(u8, got, prefix));
+    try testing.expect(got.len > prefix.len);
+}
