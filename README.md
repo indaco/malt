@@ -105,7 +105,7 @@ cd malt
 ./scripts/install.sh
 ```
 
-Building requires [Zig 0.16.x](https://ziglang.org/download/) and produces `malt` in `zig-out/bin/` with `mt` next to it as a symlink to `malt`. For development builds (debug, tests, universal binary), see [Development builds](#development-builds).
+Building requires [Zig 0.16.x](https://ziglang.org/download/) and produces `malt` in `zig-out/bin/` with `mt` next to it as a symlink to `malt`. For development builds (debug, tests, universal binary), see [CONTRIBUTING](CONTRIBUTING.md#build--test).
 
 ## First commands
 
@@ -709,20 +709,6 @@ A flat `url` / `sha256` at the top level works for single-arch archives. See `sc
 - Single package: the bare flag works (`mt install jq --use-system-ruby`).
 - Multi-package: scope it explicitly (`mt install jq wget --use-system-ruby=jq`).
 - `mt migrate` rejects the bare form entirely.
-
-## Development builds
-
-For hacking on malt itself - debug builds, the test suite, and a universal binary.
-
-```bash
-# Requires Zig 0.16.x
-zig build                                # debug build
-zig build -Doptimize=ReleaseSafe         # release build (~4 MB)
-zig build test                           # run tests
-zig build universal                      # universal binary (arm64 + x86_64 via lipo)
-```
-
-For installing malt from a local checkout (the end-user path), see [From source](#from-source) under Install.
 
 ## Benchmarks
 

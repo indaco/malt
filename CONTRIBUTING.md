@@ -113,6 +113,7 @@ Releases are signed keyless via cosign in the goreleaser workflow; `scripts/inst
 ```bash
 zig build                                        # Debug binary
 zig build -Doptimize=ReleaseSafe                 # release-equivalent binary
+zig build universal                              # universal binary (arm64 + x86_64 via lipo)
 zig build test                                   # unit tests
 ./scripts/lint-spawn-invariants.sh               # argv-only lint
 ./scripts/test/install_sh_test.sh                # install.sh regression
