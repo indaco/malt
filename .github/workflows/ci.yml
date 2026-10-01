@@ -82,6 +82,9 @@ jobs:
       - name: Regression guard - failed tap --force commit keeps the prior keg
         run: ./scripts/regressions/tap-force-failed-commit-keeps-prior-keg-tap-force-reinstall-prunes-other-versions-before-commit.sh
 
+      - name: Regression guard - commands append to a shared redirected stdout
+        run: ./scripts/regressions/cli-stdout-shared-redirect-cli-stdout-writer-overwrites-shared-redirect.sh
+
       # Security smoke: flag-scope enforcement, argv-only lint,
       # pins-manifest shape, install.sh fail-closed regression suite.
       # Subsumes the individual install.sh step that used to live in
