@@ -649,14 +649,15 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
         return unreadable(path, e);
     defer allocator.free(canonical);
 
+    var db = try openDb(ctx);
+    defer db.close();
+
     const name = if (manifest.name.len > 0) manifest.name else path;
+    // After the open, so a database the real run would refuse fails the preview too.
     if (output.isDryRun()) {
         output.info("would register {s} from {s}", .{ name, canonical });
         return;
     }
-
-    var db = try openDb(ctx);
-    defer db.close();
 
     // Record metadata only; no install.
     var stmt = db.prepare(

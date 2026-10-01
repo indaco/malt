@@ -16,6 +16,7 @@ const install = malt.install;
 const install_record = malt.install_record;
 const doctor = malt.doctor;
 const purge = malt.purge;
+const bundle = malt.cli_bundle;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const output = malt.output;
@@ -268,4 +269,31 @@ test "purge --json names a too-new DB in error_kind so scripts need not parse st
     defer parsed.deinit();
     const row = parsed.value.object.get("scopes").?.array.items[0].object;
     try testing.expectEqualStrings("schema_too_new", row.get("error_kind").?.string);
+}
+
+test "bundle import --dry-run refuses a too-new DB like the real import" {
+    // A preview that passes where the real run fails misleads `--dry-run && run`.
+    var s = try Scratch.init(testing.allocator, "bundle_import_dry");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\{"name": "dev", "version": 1, "formulas": []}
+        );
+    }
+
+    const prior_dry = output.isDryRun();
+    output.setDryRun(true);
+    defer output.setDryRun(prior_dry);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    const ctx = ctxWithSink();
+    try testing.expectError(error.SchemaTooNew, bundle.execute(&ctx, testing.allocator, &.{ "import", path }));
+    try expectNamesBothVersions(captured.items);
 }
