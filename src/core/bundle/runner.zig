@@ -408,8 +408,9 @@ fn replaceMembers(db: *sqlite.Database, name: []const u8, manifest: manifest_mod
         _ = try del.step();
     }
 
+    // OR IGNORE: a line listed twice is one member, as brew installs it once.
     var memb = try db.prepare(
-        \\INSERT INTO bundle_members(bundle_name, kind, ref, spec)
+        \\INSERT OR IGNORE INTO bundle_members(bundle_name, kind, ref, spec)
         \\VALUES (?, ?, ?, NULL);
     );
     defer memb.finalize();
