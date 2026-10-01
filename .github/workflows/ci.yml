@@ -110,6 +110,9 @@ jobs:
       - name: Regression guard - bundle export refuses a database it cannot read
         run: ./scripts/regressions/bundle-export-refuses-unreadable-members-bundle-export-reads-unreadable-members-as-empty.sh
 
+      - name: Regression guard - bundle import keeps the members a bundle exports
+        run: ./scripts/regressions/bundle-import-keeps-members-bundle-import-wipes-recorded-members.sh
+
       - name: Regression guard - bundle install, cleanup and remove stop on an unknown flag
         run: ./scripts/regressions/bundle-subcommands-stop-on-unknown-flags-bundle-install-cleanup-remove-proceed-past-unknown-flags.sh
 
