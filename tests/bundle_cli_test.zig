@@ -145,7 +145,7 @@ test "remove with no name says what it expected" {
     try expectRefused(&malt.app_ctx.debug_ctx, &.{"remove"}, "expected <name>");
 }
 
-test "remove deletes the matching row, idempotent on second call" {
+test "remove deletes the matching row, then refuses the name it no longer knows" {
     var s = try Scratch.init(testing.allocator, "remove_ok");
     defer s.deinit(testing.allocator);
     try initDb(s.path);
@@ -162,11 +162,34 @@ test "remove deletes the matching row, idempotent on second call" {
         _ = try stmt.step();
     }
 
-    quiet();
-    defer unquiet();
-    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "devtools" });
-    // DELETE is no-op against a now-empty row → still success on rerun.
-    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "devtools" });
+    {
+        quiet();
+        defer unquiet();
+        try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "devtools" });
+    }
+    // A rerun reporting success would hide a typo just the same.
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "remove", "devtools" }, "bundle not registered: devtools");
+}
+
+test "remove refuses an unregistered name, in a dry run too, and leaves the registered one" {
+    // A typo printed "bundle removed" and exited 0; the meant bundle stayed.
+    var s = try Scratch.init(testing.allocator, "remove_typo");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try db.exec("INSERT INTO bundles (name, manifest_path, created_at, version) VALUES ('devtools', NULL, 0, 1);");
+    }
+
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "remove", "devtool" }, "bundle not registered: devtool");
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "remove", "--dry-run", "devtool" }, "bundle not registered: devtool");
+
+    const names = try bundleNames(testing.allocator, s.path);
+    defer testing.allocator.free(names);
+    try testing.expectEqualStrings("devtools", names);
 }
 
 // --- import ------------------------------------------------------------
