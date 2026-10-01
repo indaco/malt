@@ -1049,7 +1049,7 @@ pub fn materializeRubyFormula(
     // Prefer the persistent cache; fall back to a network fetch that
     // publishes via atomic rename. Either branch yields `cache_path`
     // as the on-disk source the extractor reads from below.
-    var cache_path_buf: [512]u8 = undefined;
+    var cache_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // The only digest an opted-out recipe has; it never takes the warm branch.
     var fetched_hex: [64]u8 = undefined;
     const cache_path = blk: {
