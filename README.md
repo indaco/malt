@@ -528,6 +528,7 @@ mt bundle import path/to/Brewfile        # register without installing
 - **Lookup order** for `install`/`cleanup` (no path given): `./Brewfile` → `./Maltfile.json` → `~/.config/malt/Brewfile` → `~/.config/malt/Maltfile.json`.
 - **Unknown flags are refused** with exit 1, never ignored: a typo like `--dryrun` must not run the real cleanup.
 - **Brewfile syntax.** `tap`, `brew`, `cask`, `mas` and `vscode` lines, hash options (`version:`, `restart_service:`, `link:`) and Ruby symbols. Conditionals and `do … end` blocks are refused with a pointer to `Maltfile.json`.
+- **Bundle names.** `install` and `import` register a bundle by its Maltfile.json `name`, or, without one (every Brewfile), by the file's absolute path, which `list` shows. `remove` and `export` take any path to that file, and `remove --purge` uninstalls the members recorded at the last `install` or `import`, not whatever the file lists now; a bundle with no recorded members (one an older malt only imported) refuses `--purge` until its file is imported again. An unknown name exits 1. A bundle an older malt registered as `unnamed` or by a relative path keeps that name: `mt bundle remove <name>`, then import the file again.
 - **Local recipes** have no Brewfile line: `create`/`export` skip them with a rebuild hint, and `cleanup`/`remove --purge` leave them installed. `cleanup` also keeps anything a remaining package depends on.
 
 `mt backup` and `mt restore` cover the simpler case - a plain-text manifest of directly-installed packages, easy to hand-edit or check into dotfiles:
