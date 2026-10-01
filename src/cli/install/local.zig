@@ -1360,27 +1360,41 @@ pub fn materializeRubyFormula(
     linker.link(cellar_path, resolved.name, keg_id, false) catch {
         sink.warn("Some links for {s} could not be created", .{resolved.name});
     };
+    try commitAndSweep(ctx, allocator, db, prefix, resolved.name, cellar_path, pkg_version, aside, force);
+
+    // After the commit: a failed one must leave opt pointing at the prior keg.
     linker.linkOpt(resolved.name, pkg_version) catch {
         sink.warn("Could not create opt link for {s}", .{resolved.name});
     };
-
-    // `--force` post-link: the new row is recorded and the pin (if
-    // any) is inherited; safe to drop the prior other-version rows
-    // and their dirs. Disk safety net catches any cellar dir without
-    // a row.
-    if (force) {
-        install_mod.dropStaleKegRows(ctx, allocator, db, resolved.name, cellar_path);
-        install_mod.pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, resolved.name, pkg_version);
-    }
-
-    db.commit() catch return InstallError.RecordFailed;
-    if (aside) |a| std.Io.Dir.cwd().deleteTree(ctx.io, a) catch {};
 
     // After the commit, like the API path: a refused service warns and
     // can never roll back the keg.
     service_mod.registerRuby(ctx.io, ctx.environ, allocator, db, resolved.service, resolved.service_declared, resolved.shipped_label, resolved.name, pkg_version, prefix, sink);
 
     sink.success("{s} {s} installed", .{ resolved.name, resolved.version });
+}
+
+/// Commit the keg record, then clean up what it replaced. Dirs are deleted
+/// only after the commit: a failed commit rolls the stale rows back, and
+/// they must still have a keg to point at.
+pub fn commitAndSweep(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    prefix: []const u8,
+    name: []const u8,
+    cellar_path: []const u8,
+    pkg_version: []const u8,
+    aside: ?[]const u8,
+    force: bool,
+) InstallError!void {
+    db.commit() catch return InstallError.RecordFailed;
+    if (aside) |a| std.Io.Dir.cwd().deleteTree(ctx.io, a) catch {};
+
+    if (force) {
+        install_mod.dropStaleKegRows(ctx, allocator, db, name, cellar_path);
+        install_mod.pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, name, pkg_version);
+    }
 }
 
 /// Move an installed keg out of the Cellar - pruning there would take it -
