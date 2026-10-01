@@ -133,7 +133,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         printHelp(ctx);
         return;
     }
-    if (help_mod.showIfRequested(ctx, args[0..1], "bundle")) return;
+    // Help anywhere before `--` wins, so `bundle install --help` never installs.
+    const opts = for (args, 0..) |a, i| {
+        if (std.mem.eql(u8, a, "--")) break args[0..i];
+    } else args;
+    if (help_mod.showIfRequested(ctx, opts, "bundle")) return;
 
     const sub = args[0];
     const rest = args[1..];
@@ -141,7 +145,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (std.mem.eql(u8, sub, "install")) return cmdInstall(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "cleanup")) return cmdCleanup(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "create")) return cmdCreate(ctx, allocator, rest);
-    if (std.mem.eql(u8, sub, "list")) return cmdList(ctx);
+    if (std.mem.eql(u8, sub, "list")) return cmdList(ctx, rest);
     if (std.mem.eql(u8, sub, "remove")) return cmdRemove(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "export")) return cmdExport(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "import")) return cmdImport(ctx, allocator, rest);
@@ -154,17 +158,25 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     // main.zig strips the global `--dry-run` from argv; reading the
     // module-global here keeps bundle install aligned with every other
     // subcommand (install, upgrade, purge, …) and with its envelope.
-    const dry_run = output.isDryRun();
+    // The short `-n` survives that strip, so it is honoured here.
+    var dry_run = output.isDryRun();
     var explicit_path: ?[]const u8 = null;
     var isolate_deps = false;
-    for (rest) |a| {
-        if (std.mem.eql(u8, a, "--isolate-deps") or std.mem.eql(u8, a, "--isolate-dependencies")) {
+    var opts_done = false;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (opts_done or !std.mem.startsWith(u8, a, "-")) {
+            try setBundlefile(&explicit_path, a, "install");
+        } else if (std.mem.eql(u8, a, "--")) {
+            opts_done = true;
+        } else if (std.mem.eql(u8, a, "--file") or std.mem.startsWith(u8, a, "--file=")) {
+            try setBundlefile(&explicit_path, try fileValue(rest, &i), "install");
+        } else if (std.mem.eql(u8, a, "--isolate-deps") or std.mem.eql(u8, a, "--isolate-dependencies")) {
             isolate_deps = true;
-        } else if (std.mem.startsWith(u8, a, "-")) {
-            output.warn("ignored flag: {s}", .{a});
-        } else {
-            explicit_path = a;
-        }
+        } else if (std.mem.eql(u8, a, "--dry-run") or std.mem.eql(u8, a, "-n")) {
+            dry_run = true;
+        } else return unknownFlag(a);
     }
 
     const path = try resolveBundlefile(ctx, allocator, explicit_path);
@@ -242,16 +254,21 @@ fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     var dry_run = output.isDryRun();
     var yes = false;
     var explicit_path: ?[]const u8 = null;
-    for (rest) |a| {
-        if (std.mem.eql(u8, a, "--dry-run") or std.mem.eql(u8, a, "-n")) {
+    var opts_done = false;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (opts_done or !std.mem.startsWith(u8, a, "-")) {
+            try setBundlefile(&explicit_path, a, "cleanup");
+        } else if (std.mem.eql(u8, a, "--")) {
+            opts_done = true;
+        } else if (std.mem.eql(u8, a, "--file") or std.mem.startsWith(u8, a, "--file=")) {
+            try setBundlefile(&explicit_path, try fileValue(rest, &i), "cleanup");
+        } else if (std.mem.eql(u8, a, "--dry-run") or std.mem.eql(u8, a, "-n")) {
             dry_run = true;
         } else if (std.mem.eql(u8, a, "--yes") or std.mem.eql(u8, a, "-y")) {
             yes = true;
-        } else if (std.mem.startsWith(u8, a, "-")) {
-            output.warn("ignored flag: {s}", .{a});
-        } else {
-            explicit_path = a;
-        }
+        } else return unknownFlag(a);
     }
 
     const path = try resolveBundlefile(ctx, allocator, explicit_path);
@@ -332,7 +349,12 @@ fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     output.success("bundle cleanup complete", .{});
 }
 
-fn cmdList(ctx: *const AppCtx) !void {
+fn cmdList(ctx: *const AppCtx, rest: []const []const u8) !void {
+    for (rest) |a| {
+        if (std.mem.eql(u8, a, "--")) continue;
+        if (std.mem.startsWith(u8, a, "-")) return unknownFlag(a);
+        return expected("list", "no arguments");
+    }
     var db = try openDb(ctx);
     defer db.close();
 
@@ -352,30 +374,31 @@ fn cmdList(ctx: *const AppCtx) !void {
 
 const RemoveArgs = struct { name: []const u8, purge: bool, yes: bool, dry_run: bool };
 
-/// Parse `bundle remove` args. Null signals a missing or duplicated <name>,
-/// which the caller reports as InvalidArgs. `--dry-run` seeds from the global
-/// so `malt --dry-run bundle remove --purge` previews, matching cleanup.
-fn resolveRemoveArgs(rest: []const []const u8, global_dry_run: bool) ?RemoveArgs {
+/// Parse `bundle remove` args. A missing or duplicated <name> or an unknown
+/// flag is reported here and aborts. `--dry-run` seeds from the global so
+/// `malt --dry-run bundle remove --purge` previews, matching cleanup.
+fn resolveRemoveArgs(rest: []const []const u8, global_dry_run: bool) error{Aborted}!RemoveArgs {
     var name: ?[]const u8 = null;
     var purge = false;
     var yes = false;
     var dry_run = global_dry_run;
+    var opts_done = false;
     for (rest) |a| {
-        if (std.mem.eql(u8, a, "--purge")) {
+        if (opts_done or !std.mem.startsWith(u8, a, "-")) {
+            if (name != null) return expected("remove", "<name>");
+            name = a;
+        } else if (std.mem.eql(u8, a, "--")) {
+            opts_done = true;
+        } else if (std.mem.eql(u8, a, "--purge")) {
             purge = true;
         } else if (std.mem.eql(u8, a, "--yes") or std.mem.eql(u8, a, "-y")) {
             yes = true;
         } else if (std.mem.eql(u8, a, "--dry-run") or std.mem.eql(u8, a, "-n")) {
             dry_run = true;
-        } else if (std.mem.startsWith(u8, a, "-")) {
-            output.warn("ignored flag: {s}", .{a});
-        } else {
-            if (name != null) return null;
-            name = a;
-        }
+        } else return unknownFlag(a);
     }
     return .{
-        .name = name orelse return null,
+        .name = name orelse return expected("remove", "<name>"),
         .purge = purge,
         .yes = yes,
         .dry_run = dry_run,
@@ -383,10 +406,7 @@ fn resolveRemoveArgs(rest: []const []const u8, global_dry_run: bool) ?RemoveArgs
 }
 
 fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
-    const args = resolveRemoveArgs(rest, output.isDryRun()) orelse {
-        output.err("bundle remove: expected <name>", .{});
-        return error.Aborted;
-    };
+    const args = try resolveRemoveArgs(rest, output.isDryRun());
 
     if (args.purge) try purgeMembers(ctx, allocator, args);
 
@@ -601,11 +621,17 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 }
 
 fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
-    if (rest.len != 1) {
-        output.err("bundle import: expected <file>", .{});
-        return error.Aborted;
+    var file: ?[]const u8 = null;
+    var opts_done = false;
+    for (rest) |a| {
+        if (opts_done or !std.mem.startsWith(u8, a, "-")) {
+            if (file != null) return expected("import", "<file>");
+            file = a;
+        } else if (std.mem.eql(u8, a, "--")) {
+            opts_done = true;
+        } else return unknownFlag(a);
     }
-    const path = rest[0];
+    const path = file orelse return expected("import", "<file>");
     var diag = brewfile_mod.Diagnostics.init(allocator);
     defer diag.deinit();
     var manifest = try readManifest(ctx, allocator, path, &diag);
@@ -735,10 +761,38 @@ fn planFailed(e: anyerror) error{Aborted} {
     return error.Aborted;
 }
 
-// A flag create/export cannot honour would silently change what they write.
+// A flag a subcommand cannot honour would silently change what it does.
 fn unknownFlag(flag: []const u8) error{Aborted} {
     output.err("Unknown flag: {s}", .{flag});
+    output.notice("`malt bundle --help` lists each subcommand's flags", .{});
     return error.Aborted;
+}
+
+fn expected(comptime sub: []const u8, comptime what: []const u8) error{Aborted} {
+    output.err("bundle " ++ sub ++ ": expected " ++ what, .{});
+    return error.Aborted;
+}
+
+// A second bundle file would silently replace the first, so cleanup would
+// plan against one file and uninstall what the other lists.
+fn setBundlefile(slot: *?[]const u8, path: []const u8, comptime sub: []const u8) error{Aborted}!void {
+    if (slot.* != null) return expected(sub, "at most one [file]");
+    slot.* = path;
+}
+
+/// Value of brew bundle's `--file <path>` or `--file=<path>`; advances `i`
+/// past a separate value.
+fn fileValue(rest: []const []const u8, i: *usize) error{Aborted}![]const u8 {
+    const a = rest[i.*];
+    const value = if (std.mem.startsWith(u8, a, "--file=")) a["--file=".len..] else blk: {
+        i.* += 1;
+        break :blk if (i.* < rest.len) rest[i.*] else "";
+    };
+    if (value.len == 0) {
+        output.err("--file expects a path", .{});
+        return error.Aborted;
+    }
+    return value;
 }
 
 fn badFormat() error{Aborted} {
@@ -977,7 +1031,7 @@ const Scratch = struct {
 };
 
 test "remove: bare name defaults to unregister-only" {
-    const a = resolveRemoveArgs(&.{"work"}, false).?;
+    const a = try resolveRemoveArgs(&.{"work"}, false);
     try std.testing.expectEqualStrings("work", a.name);
     // The default must stay non-destructive: `bundle remove` predates --purge
     // and callers rely on it leaving packages installed.
@@ -987,31 +1041,52 @@ test "remove: bare name defaults to unregister-only" {
 }
 
 test "remove: flags parse in any position relative to the name" {
-    const before = resolveRemoveArgs(&.{ "--purge", "--yes", "work" }, false).?;
+    const before = try resolveRemoveArgs(&.{ "--purge", "--yes", "work" }, false);
     try std.testing.expectEqualStrings("work", before.name);
     try std.testing.expect(before.purge);
     try std.testing.expect(before.yes);
 
-    const after = resolveRemoveArgs(&.{ "work", "--purge", "-y" }, false).?;
+    const after = try resolveRemoveArgs(&.{ "work", "--purge", "-y" }, false);
     try std.testing.expectEqualStrings("work", after.name);
     try std.testing.expect(after.purge);
     try std.testing.expect(after.yes);
 }
 
 test "remove: --dry-run is set by the flag or inherited from the global" {
-    try std.testing.expect(resolveRemoveArgs(&.{ "work", "--dry-run" }, false).?.dry_run);
-    try std.testing.expect(resolveRemoveArgs(&.{ "work", "-n" }, false).?.dry_run);
+    try std.testing.expect((try resolveRemoveArgs(&.{ "work", "--dry-run" }, false)).dry_run);
+    try std.testing.expect((try resolveRemoveArgs(&.{ "work", "-n" }, false)).dry_run);
     // `malt --dry-run bundle remove --purge` must preview, not uninstall:
     // main.zig strips the global, so the flag can only arrive this way.
-    try std.testing.expect(resolveRemoveArgs(&.{"work"}, true).?.dry_run);
+    try std.testing.expect((try resolveRemoveArgs(&.{"work"}, true)).dry_run);
 }
 
 test "remove: a missing or duplicated name is rejected" {
-    try std.testing.expect(resolveRemoveArgs(&.{}, false) == null);
-    try std.testing.expect(resolveRemoveArgs(&.{"--purge"}, false) == null);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+    try std.testing.expectError(error.Aborted, resolveRemoveArgs(&.{}, false));
+    try std.testing.expectError(error.Aborted, resolveRemoveArgs(&.{"--purge"}, false));
     // Two positionals are ambiguous; silently purging the second would be
     // destructive, so refuse rather than guess.
-    try std.testing.expect(resolveRemoveArgs(&.{ "work", "home" }, false) == null);
+    try std.testing.expectError(error.Aborted, resolveRemoveArgs(&.{ "work", "home" }, false));
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "expected <name>") != null);
+}
+
+test "remove: an unknown flag stops the command before it unregisters" {
+    // `--prge` carried on would unregister and leave every member installed.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+    try std.testing.expectError(error.Aborted, resolveRemoveArgs(&.{ "--prge", "work" }, false));
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Unknown flag: --prge") != null);
+}
+
+test "remove: `--` ends the options, so a dash-led name is the bundle" {
+    const a = try resolveRemoveArgs(&.{ "--", "--purge" }, false);
+    try std.testing.expectEqualStrings("--purge", a.name);
+    try std.testing.expect(!a.purge);
 }
 
 test "create: explicit out_path wins regardless of --format position" {

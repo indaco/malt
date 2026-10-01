@@ -1195,6 +1195,119 @@ test "bundle export reads a name after `--` as the bundle, not as a flag" {
     try testing.expectEqualStrings("", captured.items);
 }
 
+// --- install / cleanup / remove: an unknown flag stops the mutation ----
+
+fn countBundles(prefix: []const u8, name: ?[]const u8) !i64 {
+    var db_path_buf: [512]u8 = undefined;
+    var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0));
+    defer db.close();
+    var stmt = try db.prepare(if (name == null)
+        "SELECT count(*) FROM bundles;"
+    else
+        "SELECT count(*) FROM bundles WHERE name = ?1;");
+    defer stmt.finalize();
+    if (name) |n| try stmt.bindText(1, n);
+    _ = try stmt.step();
+    return stmt.columnInt(0);
+}
+
+fn writeEmptyBrewfile(allocator: std.mem.Allocator, dir: []const u8) ![]u8 {
+    const path = try std.fmt.allocPrint(allocator, "{s}/Brewfile", .{dir});
+    errdefer allocator.free(path);
+    try writeFile(path, "# empty bundle\n");
+    return path;
+}
+
+test "bundle install, cleanup and remove refuse an unknown flag instead of running without it" {
+    var s = try Scratch.init(testing.allocator, "mutating_unknown_flag");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const brewfile = try writeEmptyBrewfile(testing.allocator, s.path);
+    defer testing.allocator.free(brewfile);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+        defer db.close();
+        try db.exec("INSERT INTO bundles (name, manifest_path, created_at, version) VALUES ('dev', NULL, 0, 1);");
+    }
+
+    // A mistyped safety flag must not turn into the real operation.
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "install", "--bogus", brewfile }, "Unknown flag: --bogus");
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "cleanup", "--dryrun", "--yes", brewfile }, "Unknown flag: --dryrun");
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "remove", "--prge", "dev" }, "Unknown flag: --prge");
+    // Unknown flag wins over a missing name: the flag is the likelier typo.
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "remove", "--bogus" }, "Unknown flag: --bogus");
+
+    // Nothing ran: no install was recorded and `dev` is still registered.
+    try testing.expectEqual(@as(i64, 1), try countBundles(s.path, null));
+    try testing.expectEqual(@as(i64, 1), try countBundles(s.path, "dev"));
+}
+
+test "bundle install and cleanup still accept every flag they document" {
+    // Refusing unknown flags must not start refusing a real one.
+    var s = try Scratch.init(testing.allocator, "mutating_known_flags");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const brewfile = try writeEmptyBrewfile(testing.allocator, s.path);
+    defer testing.allocator.free(brewfile);
+
+    quiet();
+    defer unquiet();
+    const cases = [_][]const []const u8{
+        &.{ "install", "--isolate-deps", "-n", brewfile },
+        &.{ "install", "--isolate-dependencies", "--dry-run", brewfile },
+        &.{ "cleanup", "-n", "-y", brewfile },
+        &.{ "cleanup", "--dry-run", "--yes", brewfile },
+    };
+    for (cases) |args| try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, args);
+    try testing.expectEqual(@as(i64, 0), try countBundles(s.path, null));
+}
+
+test "bundle install -n previews like --dry-run instead of installing" {
+    var s = try Scratch.init(testing.allocator, "install_short_dry");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const brewfile = try writeEmptyBrewfile(testing.allocator, s.path);
+    defer testing.allocator.free(brewfile);
+
+    const prior_dry = output.isDryRun();
+    output.setDryRun(false);
+    quiet();
+    defer {
+        output.setDryRun(prior_dry);
+        unquiet();
+    }
+
+    // Completions offer `-n`, and cleanup and remove honour it.
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "install", "-n", brewfile });
+    try testing.expectEqual(@as(i64, 0), try countBundles(s.path, null));
+
+    // Control: a real install records the bundle, so the check above can fail.
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "install", brewfile });
+    try testing.expectEqual(@as(i64, 1), try countBundles(s.path, null));
+}
+
+test "bundle install, cleanup and remove read an argument after `--` as an operand" {
+    var s = try Scratch.init(testing.allocator, "mutating_double_dash");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+        defer db.close();
+        try db.exec("INSERT INTO bundles (name, manifest_path, created_at, version) VALUES ('-dev', NULL, 0, 1);");
+    }
+
+    // A dash-led path is a file to read, not a flag to refuse.
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "install", "--", "--bogus" }, "Cannot read bundle file --bogus");
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "cleanup", "--", "--bogus" }, "Cannot read bundle file --bogus");
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "--", "-dev" });
+    try testing.expectEqual(@as(i64, 0), try countBundles(s.path, "-dev"));
+}
+
 test "bundle export refuses a table it cannot read in words, not a raw error" {
     // Same refusal as `bundle create`; a bare error name and trace reads as a
     // malt crash, not as a damaged database.
@@ -1260,4 +1373,155 @@ test "bundle cleanup removes the dropped formula, not the kept cask of the same 
     var keg = try db.prepare("SELECT 1 FROM kegs WHERE name = 'box';");
     defer keg.finalize();
     try testing.expect(!try keg.step());
+}
+
+// --- subcommand help: `bundle <sub> --help` prints help, runs nothing --
+
+fn bundleStdout(allocator: std.mem.Allocator, dir: []const u8, args: []const []const u8) ![]u8 {
+    const io = std.Options.debug_io;
+    const out_path = try std.fmt.allocPrint(allocator, "{s}/stdout", .{dir});
+    defer allocator.free(out_path);
+    const out = try test_io.createFileAbsolute(io, out_path, .{ .truncate = true, .read = true });
+    defer out.close(io);
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = io,
+        .environ = .empty,
+        .stdout = out,
+        .stderr = test_io.testSink(),
+    };
+    try bundle.execute(&ctx, allocator, args);
+    const body = try allocator.alloc(u8, (try out.stat(io)).size);
+    errdefer allocator.free(body);
+    _ = try out.readPositionalAll(io, body, 0);
+    return body;
+}
+
+test "bundle <subcommand> --help prints the bundle help instead of running the subcommand" {
+    var s = try Scratch.init(testing.allocator, "sub_help");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const brewfile = try writeEmptyBrewfile(testing.allocator, s.path);
+    defer testing.allocator.free(brewfile);
+    const created = try std.fmt.allocPrint(testing.allocator, "{s}/created", .{s.path});
+    defer testing.allocator.free(created);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+        defer db.close();
+        try db.exec("INSERT INTO bundles (name, manifest_path, created_at, version) VALUES ('dev', NULL, 0, 1);");
+    }
+
+    const cases = [_][]const []const u8{
+        &.{ "install", "--help", brewfile },
+        &.{ "cleanup", "--yes", "-h", brewfile },
+        &.{ "remove", "--purge", "dev", "--help" },
+        &.{ "create", "--help", created },
+        &.{ "export", "-h" },
+        &.{ "import", "--help" },
+        &.{ "list", "--help" },
+    };
+    for (cases) |args| {
+        const body = try bundleStdout(testing.allocator, s.path, args);
+        defer testing.allocator.free(body);
+        if (std.mem.indexOf(u8, body, "Usage: malt bundle") == null) {
+            std.debug.print("no help for {s}:\n{s}\n", .{ args[0], body });
+            return error.TestExpectedEqual;
+        }
+    }
+
+    // Asking for help must not install, unregister or write anything.
+    try testing.expectEqual(@as(i64, 1), try countBundles(s.path, null));
+    try testing.expectEqual(@as(i64, 1), try countBundles(s.path, "dev"));
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, created, .{}));
+}
+
+test "bundle reads a --help after `--` as an operand, not a help request" {
+    var s = try Scratch.init(testing.allocator, "help_after_double_dash");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+        defer db.close();
+        try db.exec("INSERT INTO bundles (name, manifest_path, created_at, version) VALUES ('--help', NULL, 0, 1);");
+    }
+    quiet();
+    defer unquiet();
+    const body = try bundleStdout(testing.allocator, s.path, &.{ "remove", "--", "--help" });
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "Usage: malt bundle") == null);
+    try testing.expectEqual(@as(i64, 0), try countBundles(s.path, "--help"));
+}
+
+// --- install / cleanup: one bundle file, by position or brew's --file ---
+
+test "bundle install and cleanup refuse a second bundle file instead of using only the last" {
+    // `cleanup --yes A B` used to plan against B alone and uninstall A's packages.
+    var s = try Scratch.init(testing.allocator, "two_bundle_files");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const brewfile = try writeEmptyBrewfile(testing.allocator, s.path);
+    defer testing.allocator.free(brewfile);
+
+    const cases = [_][]const []const u8{
+        &.{ "install", "-n", "nonexist", brewfile },
+        &.{ "cleanup", "-n", "nonexist", brewfile },
+        &.{ "install", "-n", "--file", "nonexist", brewfile },
+        &.{ "cleanup", "-n", brewfile, "--file=nonexist" },
+    };
+    for (cases) |args| try expectRefused(&malt.app_ctx.debug_ctx, args, "expected at most one [file]");
+}
+
+test "bundle install and cleanup take brew's --file as the bundle file" {
+    var s = try Scratch.init(testing.allocator, "file_flag");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const brewfile = try writeEmptyBrewfile(testing.allocator, s.path);
+    defer testing.allocator.free(brewfile);
+    const eq = try std.fmt.allocPrint(testing.allocator, "--file={s}", .{brewfile});
+    defer testing.allocator.free(eq);
+
+    {
+        quiet();
+        defer unquiet();
+        try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "install", "-n", "--file", brewfile });
+        try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "cleanup", "-n", "--yes", eq });
+    }
+    // The value is the file read, not a flag or a lookup fallback.
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "install", "--file", "missing-bundle" }, "Cannot read bundle file missing-bundle");
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "cleanup", "--file" }, "--file expects a path");
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "install", "--file=" }, "--file expects a path");
+}
+
+test "an unknown bundle flag points at the help that lists the real ones" {
+    var s = try Scratch.init(testing.allocator, "unknown_flag_hint");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "install", "--no-upgrade" }, "malt bundle --help");
+}
+
+// --- import / list: the same flag rules as their siblings ---------------
+
+test "bundle import honours `--` and refuses an unknown flag" {
+    var s = try Scratch.init(testing.allocator, "import_flags");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const manifest = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(manifest);
+    try writeFile(manifest, "{\"name\": \"-dev\", \"version\": 1, \"formulas\": []}\n");
+
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "import", "--bogus", manifest }, "Unknown flag: --bogus");
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "import", manifest, manifest }, "expected <file>");
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", "--", manifest });
+    try testing.expectEqual(@as(i64, 1), try countBundles(s.path, "-dev"));
+}
+
+test "bundle list refuses any argument instead of ignoring it" {
+    var s = try Scratch.init(testing.allocator, "list_args");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "list", "--bogus" }, "Unknown flag: --bogus");
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "list", "dev" }, "bundle list: expected no arguments");
 }

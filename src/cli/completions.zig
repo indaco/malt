@@ -134,7 +134,16 @@ pub const bash_script =
     \\            fi
     \\            ;;
     \\        bundle)
-    \\            if [[ "$cur" != -* ]]; then
+    \\            # Each subcommand refuses the others' flags, so its own
+    \\            # `bundle-<sub>` row below answers once it is typed.
+    \\            local j
+    \\            for (( j=i+1; j<cword; j++ )); do
+    \\                if [[ "${words[j]}" != -* ]]; then
+    \\                    cmd="bundle-${words[j]}"
+    \\                    break
+    \\                fi
+    \\            done
+    \\            if [[ "$cmd" == bundle && "$cur" != -* ]]; then
     \\                COMPREPLY=( $(compgen -W "install cleanup create list remove export import" -- "$cur") )
     \\                return 0
     \\            fi
@@ -172,7 +181,10 @@ pub const bash_script =
     \\        pin|unpin)        cmd_flags="--cask --casks --formula --formulae --quiet -q" ;;
     \\        link)             cmd_flags="--overwrite --force -f --isolate --all" ;;
     \\        services)         cmd_flags="--tail --stderr --follow -f --json" ;;
-    \\        bundle)           cmd_flags="--dry-run -n --format --services --purge --yes -y --isolate-deps --isolate-dependencies" ;;
+    \\        bundle-install)   cmd_flags="--dry-run -n --isolate-deps --isolate-dependencies --file" ;;
+    \\        bundle-cleanup)   cmd_flags="--dry-run -n --yes -y --file" ;;
+    \\        bundle-remove)    cmd_flags="--purge --yes -y --dry-run -n" ;;
+    \\        bundle-create|bundle-export) cmd_flags="--format --services" ;;
     \\        run)              cmd_flags="--keep" ;;
     \\        doctor)           cmd_flags="--fix --dry-run --post-install-status" ;;
     \\        tap)              cmd_flags="--refresh --all --pin --repo --host --forge --url --force --yes -y --json" ;;
@@ -497,14 +509,34 @@ pub const zsh_script =
     \\                        '1:subcommand:(list start stop restart status logs)'
     \\                    ;;
     \\                bundle)
-    \\                    _arguments \
-    \\                        '(--dry-run -n)'{--dry-run,-n}'[Preview without installing/uninstalling]' \
-    \\                        '--format[Output format]:format:(brewfile json)' \
-    \\                        '--services[Include auto-start services (JSON only)]' \
-    \\                        '--purge[With remove: also uninstall the members]' \
-    \\                        '(--yes -y)'{--yes,-y}'[Skip the confirmation prompt]' \
-    \\                        '--isolate-deps[Apply isolation to transitive deps of every member]' \
-    \\                        '--isolate-dependencies[Alias of --isolate-deps]' \
+    \\                    # Each subcommand refuses the others' flags, so offer only its own.
+    \\                    local -a sub_flags
+    \\                    if [[ $words[2] == install ]]; then
+    \\                        sub_flags=(
+    \\                            '(--dry-run -n)'{--dry-run,-n}'[Preview without installing]'
+    \\                            '--isolate-deps[Apply isolation to transitive deps of every member]'
+    \\                            '--isolate-dependencies[Alias of --isolate-deps]'
+    \\                            '--file[Bundle file to read]:file:_files'
+    \\                        )
+    \\                    elif [[ $words[2] == cleanup ]]; then
+    \\                        sub_flags=(
+    \\                            '(--dry-run -n)'{--dry-run,-n}'[Preview without uninstalling]'
+    \\                            '(--yes -y)'{--yes,-y}'[Skip the confirmation prompt]'
+    \\                            '--file[Bundle file to read]:file:_files'
+    \\                        )
+    \\                    elif [[ $words[2] == remove ]]; then
+    \\                        sub_flags=(
+    \\                            '--purge[Also uninstall the members]'
+    \\                            '(--yes -y)'{--yes,-y}'[Skip the confirmation prompt]'
+    \\                            '(--dry-run -n)'{--dry-run,-n}'[Preview without uninstalling]'
+    \\                        )
+    \\                    elif [[ $words[2] == (create|export) ]]; then
+    \\                        sub_flags=(
+    \\                            '--format[Output format]:format:(brewfile json)'
+    \\                            '--services[Include auto-start services (JSON only)]'
+    \\                        )
+    \\                    fi
+    \\                    _arguments $sub_flags \
     \\                        '1:subcommand:(install cleanup create list remove export import)'
     \\                    ;;
     \\                tap)
@@ -853,21 +885,23 @@ pub const fish_script =
     \\    # help — command topic
     \\    complete -c $__malt_bin -n '__malt_using_command help' -f -a 'install reinstall uninstall remove upgrade update outdated list ls info search uses deps which vulns doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services tui bundle' -d 'Help topic'
     \\
-    \\    # bundle — sub-subcommands
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'install' -d 'Install Brewfile/Maltfile.json members'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'cleanup' -d 'Uninstall packages absent from the Brewfile'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'create'  -d 'Write installed set to a bundle file'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'list'    -d 'List registered bundles'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'remove'  -d 'Unregister a bundle'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'export'  -d 'Print bundle to stdout'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'import'  -d 'Register a bundle without installing'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l dry-run -s n  -d 'Preview without installing/uninstalling'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l yes     -s y  -d 'Skip the cleanup confirmation prompt'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l format -r -a 'brewfile json' -d 'Output format'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l services       -d 'Include auto-start services (JSON only)'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l purge          -d 'With remove: also uninstall the members'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l isolate-deps         -d 'Apply isolation to transitive deps of every member'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l isolate-dependencies -d 'Alias of --isolate-deps'
+    \\    # bundle — sub-subcommands; each refuses the others' flags, so offer only its own
+    \\    set -l __malt_bundle_subs install cleanup create list remove export import
+    \\    complete -c $__malt_bin -n "__malt_using_command bundle; and not __fish_seen_subcommand_from $__malt_bundle_subs" -f -a 'install' -d 'Install Brewfile/Maltfile.json members'
+    \\    complete -c $__malt_bin -n "__malt_using_command bundle; and not __fish_seen_subcommand_from $__malt_bundle_subs" -f -a 'cleanup' -d 'Uninstall packages absent from the Brewfile'
+    \\    complete -c $__malt_bin -n "__malt_using_command bundle; and not __fish_seen_subcommand_from $__malt_bundle_subs" -f -a 'create'  -d 'Write installed set to a bundle file'
+    \\    complete -c $__malt_bin -n "__malt_using_command bundle; and not __fish_seen_subcommand_from $__malt_bundle_subs" -f -a 'list'    -d 'List registered bundles'
+    \\    complete -c $__malt_bin -n "__malt_using_command bundle; and not __fish_seen_subcommand_from $__malt_bundle_subs" -f -a 'remove'  -d 'Unregister a bundle'
+    \\    complete -c $__malt_bin -n "__malt_using_command bundle; and not __fish_seen_subcommand_from $__malt_bundle_subs" -f -a 'export'  -d 'Print bundle to stdout'
+    \\    complete -c $__malt_bin -n "__malt_using_command bundle; and not __fish_seen_subcommand_from $__malt_bundle_subs" -f -a 'import'  -d 'Register a bundle without installing'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from install cleanup remove' -l dry-run -s n -d 'Preview without installing/uninstalling'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from install' -l isolate-deps         -d 'Apply isolation to transitive deps of every member'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from install' -l isolate-dependencies -d 'Alias of --isolate-deps'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from install cleanup' -l file -r -F -d 'Bundle file to read'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from cleanup remove' -l yes -s y -d 'Skip the confirmation prompt'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from remove' -l purge -d 'Also uninstall the members'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from create export' -l format -r -a 'brewfile json' -d 'Output format'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from create export' -l services -d 'Include auto-start services (JSON only)'
     \\end
     \\
     \\set -e __malt_bin
