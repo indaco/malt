@@ -15,6 +15,7 @@ const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const path_write = @import("../fs/path_write.zig");
 const output = @import("../ui/output.zig");
+const term_sanitize = @import("../ui/term_sanitize.zig");
 const path_component = @import("../fs/path_component.zig");
 const signals = @import("../core/signals.zig");
 const install_args = @import("install/args.zig");
@@ -371,9 +372,13 @@ fn cmdList(ctx: *const AppCtx, rest: []const []const u8) !void {
 
     var any = false;
     while (stmt.step() catch return unreadableDb(&db)) {
-        const n = stmt.columnText(0) orelse continue;
+        const n = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
         const ts = stmt.columnInt(1);
-        output.plain("{s}\t{d}", .{ std.mem.sliceTo(n, 0), ts });
+        // `plain` writes raw, and a name is now a path, which may hold escapes.
+        var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const shown = name_buf[0..@min(n.len, name_buf.len)];
+        @memcpy(shown, n[0..shown.len]);
+        output.plain("{s}\t{d}", .{ term_sanitize.scrubInPlace(shown), ts });
         any = true;
     }
     if (!any) output.info("no bundles registered", .{});

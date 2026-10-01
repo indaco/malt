@@ -1218,6 +1218,26 @@ test "remove --purge uninstalls the recorded members, not what the file lists no
     try testing.expect(std.mem.indexOf(u8, captured.items, "firefox") == null);
 }
 
+test "list scrubs control bytes from a stored name" {
+    // Rows written before names were checked can still hold an escape.
+    var s = try Scratch.init(testing.allocator, "list_scrub");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+        defer db.close();
+        try db.exec("INSERT INTO bundles (name, manifest_path, created_at, version) VALUES ('x' || char(27) || ']0;t' || char(7), NULL, 0, 1);");
+    }
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"list"});
+    try testing.expect(std.mem.indexOf(u8, captured.items, "]0;t") != null);
+    try testing.expect(std.mem.indexOfScalar(u8, captured.items, 0x1b) == null);
+}
+
 // --- export -----------------------------------------------------------
 
 test "export with no installed packages emits an empty Brewfile body to stdout" {
