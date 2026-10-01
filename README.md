@@ -251,7 +251,7 @@ At a glance - `malt -h`:
 
 ```text
 malt - Homebrew's whole ecosystem, none of its weight.
-Reuses every formula, bottle, and Brewfile; runs post_install natively.
+Reuses every formula, bottle, and Brewfile; runs post-install steps and Ruby post_install natively.
 Themeable TUI and CLI.
 
 Usage: malt <command> [options] [arguments]
