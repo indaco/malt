@@ -74,6 +74,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             include_services = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             output.setQuiet(true);
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--dry-run")) {
+            output.setDryRun(true);
         } else {
             output.err("Unknown argument for backup: {s}", .{arg});
             return Error.InvalidArgs;

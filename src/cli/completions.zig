@@ -161,7 +161,7 @@ pub const bash_script =
     \\    case "$cmd" in
     \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-deps --only-dependencies --isolate-deps --isolate-dependencies --use-system-ruby= --allow-unpinned --quiet -q --json" ;;
     \\        reinstall)        cmd_flags="--cask --formula --dry-run --isolate-deps --isolate-dependencies --quiet -q --json" ;;
-    \\        backup)           cmd_flags="--output -o --versions --services --quiet -q" ;;
+    \\        backup)           cmd_flags="--output -o --versions --services --dry-run -n --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --broken-symlinks --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
     \\        uninstall|remove) cmd_flags="--cask --casks --formula --formulae --force -f --dry-run --quiet -q" ;;
@@ -184,7 +184,9 @@ pub const bash_script =
     \\        bundle-install)   cmd_flags="--dry-run -n --isolate-deps --isolate-dependencies --file" ;;
     \\        bundle-cleanup)   cmd_flags="--dry-run -n --yes -y --file" ;;
     \\        bundle-remove)    cmd_flags="--purge --yes -y --dry-run -n" ;;
-    \\        bundle-create|bundle-export) cmd_flags="--format --services" ;;
+    \\        bundle-create)    cmd_flags="--format --services --dry-run -n" ;;
+    \\        bundle-export)    cmd_flags="--format --services" ;;
+    \\        bundle-import)    cmd_flags="--dry-run -n" ;;
     \\        run)              cmd_flags="--keep" ;;
     \\        doctor)           cmd_flags="--fix --dry-run --post-install-status" ;;
     \\        tap)              cmd_flags="--refresh --all --pin --repo --host --forge --url --force --yes -y --json" ;;
@@ -462,6 +464,7 @@ pub const zsh_script =
     \\                        '(--output -o)'{--output,-o}'[Write to a specific file]:path:_files' \
     \\                        '--versions[Pin each entry to its current version]' \
     \\                        '--services[Include auto-start services so restore re-bootstraps launchd]' \
+    \\                        '(--dry-run -n)'{--dry-run,-n}'[Show where the backup would go without writing it]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]'
     \\                    ;;
     \\                restore)
@@ -530,10 +533,20 @@ pub const zsh_script =
     \\                            '(--yes -y)'{--yes,-y}'[Skip the confirmation prompt]'
     \\                            '(--dry-run -n)'{--dry-run,-n}'[Preview without uninstalling]'
     \\                        )
-    \\                    elif [[ $words[2] == (create|export) ]]; then
+    \\                    elif [[ $words[2] == create ]]; then
     \\                        sub_flags=(
     \\                            '--format[Output format]:format:(brewfile json)'
     \\                            '--services[Include auto-start services (JSON only)]'
+    \\                            '(--dry-run -n)'{--dry-run,-n}'[Preview without writing the file]'
+    \\                        )
+    \\                    elif [[ $words[2] == export ]]; then
+    \\                        sub_flags=(
+    \\                            '--format[Output format]:format:(brewfile json)'
+    \\                            '--services[Include auto-start services (JSON only)]'
+    \\                        )
+    \\                    elif [[ $words[2] == import ]]; then
+    \\                        sub_flags=(
+    \\                            '(--dry-run -n)'{--dry-run,-n}'[Preview without registering the bundle]'
     \\                        )
     \\                    fi
     \\                    _arguments $sub_flags \
@@ -841,6 +854,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command backup' -s o -l output   -r -d 'Output file (use - for stdout)'
     \\    complete -c $__malt_bin -n '__malt_using_command backup'      -l versions    -d 'Pin each entry to its current version'
     \\    complete -c $__malt_bin -n '__malt_using_command backup'      -l services    -d 'Include auto-start services for restore'
+    \\    complete -c $__malt_bin -n '__malt_using_command backup' -s n -l dry-run     -d 'Show where the backup would go without writing it'
     \\
     \\    # restore — positional backup file
     \\    complete -c $__malt_bin -n '__malt_using_command restore' -l dry-run -d 'Preview without installing'
@@ -894,7 +908,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n "__malt_using_command bundle; and not __fish_seen_subcommand_from $__malt_bundle_subs" -f -a 'remove'  -d 'Unregister a bundle'
     \\    complete -c $__malt_bin -n "__malt_using_command bundle; and not __fish_seen_subcommand_from $__malt_bundle_subs" -f -a 'export'  -d 'Print bundle to stdout'
     \\    complete -c $__malt_bin -n "__malt_using_command bundle; and not __fish_seen_subcommand_from $__malt_bundle_subs" -f -a 'import'  -d 'Register a bundle without installing'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from install cleanup remove' -l dry-run -s n -d 'Preview without installing/uninstalling'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from install cleanup remove create import' -l dry-run -s n -d 'Preview without changing anything'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from install' -l isolate-deps         -d 'Apply isolation to transitive deps of every member'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from install' -l isolate-dependencies -d 'Alias of --isolate-deps'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle; and __fish_seen_subcommand_from install cleanup' -l file -r -F -d 'Bundle file to read'

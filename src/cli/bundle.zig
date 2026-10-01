@@ -528,7 +528,7 @@ fn lookupManifestPath(
     return allocator.dupe(u8, raw);
 }
 
-const CreateArgs = struct { format: Format, out_path: []const u8, include_services: bool };
+const CreateArgs = struct { format: Format, out_path: []const u8, include_services: bool, dry_run: bool };
 
 /// Parse `bundle create` args. The default filename is resolved once after the
 /// loop so an explicit positional path wins no matter where `--format` sits.
@@ -537,6 +537,7 @@ fn resolveCreateArgs(rest: []const []const u8) error{Aborted}!CreateArgs {
     var format: Format = .brewfile;
     var out_path: ?[]const u8 = null;
     var include_services = false;
+    var dry_run = false;
     var opts_done = false;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
@@ -550,6 +551,8 @@ fn resolveCreateArgs(rest: []const []const u8) error{Aborted}!CreateArgs {
             format = parseFormat(if (i < rest.len) rest[i] else "") orelse return badFormat();
         } else if (std.mem.eql(u8, a, "--services")) {
             include_services = true;
+        } else if (std.mem.eql(u8, a, "--dry-run") or std.mem.eql(u8, a, "-n")) {
+            dry_run = true;
         } else return unknownFlag(a);
     }
     return .{
@@ -559,6 +562,7 @@ fn resolveCreateArgs(rest: []const []const u8) error{Aborted}!CreateArgs {
             .json => "Maltfile.json",
         },
         .include_services = include_services,
+        .dry_run = dry_run,
     };
 }
 
@@ -572,7 +576,7 @@ fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     defer manifest.deinit();
     try populateFromInstalled(&manifest, &db, .{ .include_services = args.include_services });
     // After the read, so a database the real run would refuse fails the preview too.
-    if (output.isDryRun()) {
+    if (args.dry_run or output.isDryRun()) {
         output.info("would write {s}", .{args.out_path});
         return;
     }
@@ -627,6 +631,7 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 
 fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     var file: ?[]const u8 = null;
+    var dry_run = output.isDryRun();
     var opts_done = false;
     for (rest) |a| {
         if (opts_done or !std.mem.startsWith(u8, a, "-")) {
@@ -634,6 +639,8 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
             file = a;
         } else if (std.mem.eql(u8, a, "--")) {
             opts_done = true;
+        } else if (std.mem.eql(u8, a, "--dry-run") or std.mem.eql(u8, a, "-n")) {
+            dry_run = true;
         } else return unknownFlag(a);
     }
     const path = file orelse return expected("import", "<file>");
@@ -654,7 +661,7 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 
     const name = if (manifest.name.len > 0) manifest.name else path;
     // After the open, so a database the real run would refuse fails the preview too.
-    if (output.isDryRun()) {
+    if (dry_run) {
         output.info("would register {s} from {s}", .{ name, canonical });
         return;
     }
@@ -1136,6 +1143,16 @@ test "create: an unknown flag stops the command before it writes a file" {
     defer output.endStderrCapture();
     try std.testing.expectError(error.Aborted, resolveCreateArgs(&.{"--file=elsewhere"}));
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "Unknown flag: --file=elsewhere") != null);
+}
+
+test "create: --dry-run and -n request a preview, as on the other bundle subcommands" {
+    try std.testing.expect((try resolveCreateArgs(&.{ "--dry-run", "x" })).dry_run);
+    try std.testing.expect((try resolveCreateArgs(&.{ "x", "-n" })).dry_run);
+    try std.testing.expect(!(try resolveCreateArgs(&.{"x"})).dry_run);
+    // Past `--` it is the output path, not a flag.
+    const a = try resolveCreateArgs(&.{ "--", "-n" });
+    try std.testing.expect(!a.dry_run);
+    try std.testing.expectEqualStrings("-n", a.out_path);
 }
 
 test "create: `--` ends the options, so a dash-led path is the output path" {

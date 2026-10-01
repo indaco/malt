@@ -313,6 +313,41 @@ test "create --dry-run leaves an existing Brewfile untouched and names it" {
     try testing.expect(std.mem.indexOf(u8, captured.items, out_path) != null);
 }
 
+test "create and import take -n and --dry-run themselves, like install, cleanup and remove" {
+    // `bundle install -n` previews, so `bundle create -n` must not write.
+    var s = try Scratch.init(testing.allocator, "sub_dry_flags");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+
+    const manifest = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(manifest);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, manifest, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\{"name": "dev", "version": 1, "formulas": []}
+        );
+    }
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    for ([_][]const u8{ "-n", "--dry-run" }) |flag| {
+        try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", flag, out_path });
+        try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", flag, manifest });
+    }
+    try testing.expect(!output.isDryRun());
+
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, out_path, .{}));
+    var db_path_buf: [512]u8 = undefined;
+    var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+    defer db.close();
+    var stmt = try db.prepare("SELECT 1 FROM bundles;");
+    defer stmt.finalize();
+    try testing.expect(!(try stmt.step()));
+}
+
 test "create --dry-run to a new path creates neither the file nor its parents" {
     var s = try Scratch.init(testing.allocator, "create_dry_nested");
     defer s.deinit(testing.allocator);

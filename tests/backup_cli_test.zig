@@ -990,6 +990,25 @@ test "execute --dry-run --output <path> writes no file and says what it would wr
     try testing.expect(std.mem.indexOf(u8, captured.items, "Backup written") == null);
 }
 
+test "execute -n and --dry-run preview without writing, like purge's backup" {
+    var s = try Scratch.init(testing.allocator, "dry_own_flag");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    const prior_dry = output.isDryRun();
+    defer output.setDryRun(prior_dry);
+    quiet();
+    defer unquiet();
+    for ([_][]const u8{ "-n", "--dry-run" }) |flag| {
+        output.setDryRun(false);
+        try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ flag, "--output", out_path });
+        try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, out_path, .{}));
+    }
+}
+
 test "execute --dry-run --json --output <path> writes no file" {
     var s = try Scratch.init(testing.allocator, "dry_json_to_path");
     defer s.deinit(testing.allocator);
