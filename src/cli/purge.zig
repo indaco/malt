@@ -80,20 +80,20 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     const opts = parseArgs(args) catch {
         output.err("invalid arguments — run `mt purge --help` for usage", .{});
-        return Error.InvalidArgs;
+        return error.Aborted;
     };
 
     if (opts.scope.isEmpty()) {
         output.err("purge requires a scope flag — see `mt purge --help`", .{});
         output.dim("examples: mt purge --housekeeping  |  mt purge --store-orphans  |  mt purge --wipe", .{});
-        return Error.NoScope;
+        return error.Aborted;
     }
 
     const dry_run = output.isDryRun();
     const prefix = atomic.maltPrefixOrAbort();
     const cache_dir = atomic.maltCacheDir(allocator) catch {
         output.err("failed to determine cache directory", .{});
-        return Error.OpenFileFailed;
+        return error.Aborted;
     };
     defer allocator.free(cache_dir);
     artefact_cache.adoptLegacy(ctx.io, prefix, cache_dir);

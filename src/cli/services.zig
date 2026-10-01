@@ -15,9 +15,7 @@ const install_service = @import("install/service.zig");
 const install_sink = @import("install/sink.zig");
 
 pub const ServicesError = error{
-    InvalidArgs,
     DatabaseError,
-    SupervisorError,
 };
 
 /// One row in the `--json` listing; mirrors what the human path already
@@ -57,9 +55,7 @@ pub fn writeServicesJson(w: *std.Io.Writer, rows: []const JsonRow) !void {
 
 pub fn describeError(err: ServicesError) []const u8 {
     return switch (err) {
-        ServicesError.InvalidArgs => "invalid argument to `services`",
         ServicesError.DatabaseError => "database error",
-        ServicesError.SupervisorError => "service supervisor error",
     };
 }
 
@@ -98,7 +94,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 
     output.err("Unknown services subcommand: {s}", .{sub});
-    return ServicesError.InvalidArgs;
+    return error.Aborted;
 }
 
 const Lifecycle = enum { start, stop, restart };
@@ -106,7 +102,7 @@ const Lifecycle = enum { start, stop, restart };
 fn cmdOne(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const []const u8, op: Lifecycle) !void {
     if (rest.len != 1) {
         output.err("services {s}: expected a single service name", .{@tagName(op)});
-        return ServicesError.InvalidArgs;
+        return error.Aborted;
     }
     const name = rest[0];
     const ctx: supervisor.SupervisorCtx = .{ .allocator = allocator, .io = io, .db = db };
@@ -172,7 +168,7 @@ fn cmdStatus(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, res
     const name = rest[0];
     if (!supervisor.hasService(db, name)) {
         output.err("no such service: {s}", .{name});
-        return ServicesError.SupervisorError;
+        return error.Aborted;
     }
     // Rows and launchd are both keyed by the label; the user may have typed the
     // keg name, which every other verb accepts.
@@ -218,7 +214,7 @@ fn emitJson(io: std.Io, allocator: std.mem.Allocator, items: []const supervisor.
 fn cmdLogs(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     if (rest.len < 1) {
         output.err("services logs: expected service name", .{});
-        return ServicesError.InvalidArgs;
+        return error.Aborted;
     }
     const name = rest[0];
     var tail_n: usize = 50;

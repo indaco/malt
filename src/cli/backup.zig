@@ -41,9 +41,7 @@ pub const Entry = struct {
 };
 
 pub const Error = error{
-    InvalidArgs,
     DatabaseError,
-    OpenFileFailed,
     WriteFailed,
 };
 
@@ -60,7 +58,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "-o")) {
             if (i + 1 >= args.len) {
                 output.err("--output requires a path argument", .{});
-                return Error.InvalidArgs;
+                return error.Aborted;
             }
             i += 1;
             output_path = args[i];
@@ -78,7 +76,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.setDryRun(true);
         } else {
             output.err("Unknown argument for backup: {s}", .{arg});
-            return Error.InvalidArgs;
+            return error.Aborted;
         }
     }
 
@@ -273,7 +271,7 @@ fn executeJson(
     db: *sqlite.Database,
     output_path: ?[]const u8,
     include_services: bool,
-) Error!void {
+) !void {
     // Arena owns every per-row dupe — one `deinit` reclaims them all and
     // keeps the gather loop free of per-field errdefer plumbing.
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -372,7 +370,7 @@ fn executeJson(
 }
 
 /// False under `--dry-run`, which only says where it would write.
-fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8, count: usize) Error!bool {
+fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8, count: usize) !bool {
     if (output.isDryRun()) {
         output.info("would write backup to {s} ({d} packages)", .{ path, count });
         return false;
@@ -381,11 +379,11 @@ fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8, count: u
         // On a parent-dir failure the offending path is its dirname.
         error.MakeParentDirFailed => {
             output.err("Failed to create {s}", .{std.fs.path.dirname(path) orelse path});
-            return Error.OpenFileFailed;
+            return error.Aborted;
         },
         error.OpenFileFailed => {
             output.err("Failed to create {s}", .{path});
-            return Error.OpenFileFailed;
+            return error.Aborted;
         },
         error.WriteFailed => return Error.WriteFailed,
     };
@@ -797,9 +795,9 @@ test "writeToPath under --dry-run reports false and creates nothing, not even pa
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, s.p("/a"), .{}));
 }
 
-test "writeToPath propagates a real parent-dir failure as OpenFileFailed" {
+test "writeToPath propagates a real parent-dir failure as Aborted" {
     // Pins the other mapping arm: a parent-dir failure (a parent component is
-    // a regular file → MakeParentDirFailed) must surface as OpenFileFailed.
+    // a regular file → MakeParentDirFailed) must abort after its message.
     const io = std.Options.debug_io;
     var s = try Scratch.init("backup_parentfile");
     defer s.deinit();
@@ -811,13 +809,13 @@ test "writeToPath propagates a real parent-dir failure as OpenFileFailed" {
     const dest = s.p("/afile/sub/backup.txt");
 
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
-    try std.testing.expectError(Error.OpenFileFailed, writeToPath(&ctx, dest, "formula git\n", 1));
+    try std.testing.expectError(error.Aborted, writeToPath(&ctx, dest, "formula git\n", 1));
 }
 
-test "writeToPath maps a failing leaf createFile to OpenFileFailed" {
+test "writeToPath maps a failing leaf createFile to Aborted" {
     // Exhaustive path_write edge cases live in `fs/path_write.zig`; here we
     // only pin the caller's error mapping. Destination is a directory, so the
-    // leaf createFile fails and the catch must surface OpenFileFailed.
+    // leaf createFile fails and the catch must abort after its message.
     const io = std.Options.debug_io;
     var s = try Scratch.init("backup_leafdir");
     defer s.deinit();
@@ -826,7 +824,7 @@ test "writeToPath maps a failing leaf createFile to OpenFileFailed" {
     try std.Io.Dir.cwd().createDirPath(io, dest); // dest is a dir
 
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
-    try std.testing.expectError(Error.OpenFileFailed, writeToPath(&ctx, dest, "formula git\n", 1));
+    try std.testing.expectError(error.Aborted, writeToPath(&ctx, dest, "formula git\n", 1));
 }
 
 test "parseBackup silently drops any future unknown kind (forward-compat)" {

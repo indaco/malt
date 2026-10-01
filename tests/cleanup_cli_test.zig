@@ -185,7 +185,7 @@ test "cleanup rejects --wipe (mutually exclusive scopes)" {
 
     const ctx = malt.app_ctx.debug_ctx;
     try testing.expectError(
-        purge.Error.InvalidArgs,
+        error.Aborted,
         purge.executeCleanup(&ctx, allocator, &.{"--wipe"}),
     );
 }

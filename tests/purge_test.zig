@@ -451,3 +451,24 @@ test "--broken-symlinks removes dangling prefix links and keeps live ones" {
     const again = try malt.purge.runBrokenSymlinks(&ctx, prefix, false);
     try testing.expectEqual(@as(u32, 0), again.removed);
 }
+
+// ── execute: argument refusals end on error.Aborted ─────────────────────
+// Both refusals return before the prefix, stdin or database are touched.
+
+test "execute aborts on an unknown flag after printing its own error" {
+    malt.output.setQuiet(true);
+    defer malt.output.setQuiet(false);
+    try testing.expectError(
+        error.Aborted,
+        purge.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--nope"}),
+    );
+}
+
+test "execute aborts when no scope flag is given" {
+    malt.output.setQuiet(true);
+    defer malt.output.setQuiet(false);
+    try testing.expectError(
+        error.Aborted,
+        purge.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{}),
+    );
+}

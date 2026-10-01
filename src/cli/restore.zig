@@ -14,14 +14,6 @@ const help = @import("help.zig");
 const install_mod = @import("install.zig");
 const services_mod = @import("services.zig");
 
-pub const Error = error{
-    MissingFileArgument,
-    FileNotFound,
-    ReadFailed,
-    Empty,
-    InvalidArgs,
-};
-
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "restore")) return;
 
@@ -38,36 +30,36 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.setQuiet(true);
         } else if (std.mem.startsWith(u8, arg, "-")) {
             output.err("Unknown argument for restore: {s}", .{arg});
-            return Error.InvalidArgs;
+            return error.Aborted;
         } else if (file_path == null) {
             file_path = arg;
         } else {
             output.err("restore accepts a single file argument (got extra: {s})", .{arg});
-            return Error.InvalidArgs;
+            return error.Aborted;
         }
     }
 
     const path = file_path orelse {
         output.err("Usage: malt restore <file>", .{});
-        return Error.MissingFileArgument;
+        return error.Aborted;
     };
 
     // ── Read the file ────────────────────────────────────────────────────
     const text = readFile(ctx, allocator, path) catch |e| switch (e) {
         error.FileNotFound => {
             output.err("Backup file not found: {s}", .{path});
-            return Error.FileNotFound;
+            return error.Aborted;
         },
         else => {
             output.err("Failed to read {s}", .{path});
-            return Error.ReadFailed;
+            return error.Aborted;
         },
     };
     defer allocator.free(text);
 
     const parsed = backup_mod.parseBackup(allocator, text) catch {
         output.err("Failed to parse backup file: {s}", .{path});
-        return Error.ReadFailed;
+        return error.Aborted;
     };
     defer allocator.free(parsed.entries);
     const entries = parsed.entries;
