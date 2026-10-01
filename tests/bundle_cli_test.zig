@@ -982,6 +982,28 @@ test "import collapses a member listed twice instead of refusing the manifest" {
     try testing.expectEqualStrings("formula:wget", members);
 }
 
+test "remove finds an unnamed bundle by its path after the file is gone" {
+    // Unregistering a deleted Brewfile is the common case for removing one.
+    var s = try Scratch.init(testing.allocator, "remove_deleted_file");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "# empty bundle\n");
+    const rel = try relativeToCwd(testing.allocator, path);
+    defer testing.allocator.free(rel);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path });
+    try test_io.cwd().deleteFile(std.Options.debug_io, path);
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", rel });
+
+    const names = try bundleNames(testing.allocator, s.path);
+    defer testing.allocator.free(names);
+    try testing.expectEqualStrings("", names);
+}
+
 test "remove takes a registered name as typed before resolving it as a file" {
     // A name that also resolves to a file must not reach a different bundle.
     var s = try Scratch.init(testing.allocator, "exact_name_wins");
