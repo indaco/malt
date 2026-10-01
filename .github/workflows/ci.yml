@@ -200,6 +200,9 @@ jobs:
       - name: Regression guard - tap kegs back up and reinstall from their tap
         run: ./scripts/regressions/tap-kegs-restore-reinstall-by-full-name-tap-kegs-not-restorable-or-reinstallable-by-full-name.sh
 
+      - name: Regression guard - reinstall help only shows cask examples reinstall accepts
+        run: ./scripts/regressions/reinstall-help-cask-example-is-tap-owned-reinstall-help-example-is-refused.sh
+
       - name: Regression guard - offline mode covers tap HEAD lookups
         run: ./scripts/regressions/offline-mode-blocks-tap-head-lookup.sh
 
