@@ -509,21 +509,37 @@ fn purgeMembers(ctx: *const AppCtx, allocator: std.mem.Allocator, args: RemoveAr
     }
 }
 
-/// An unnamed manifest is registered by its canonical path, so a bundle typed
-/// as any spelling of that path finds it. An exact name wins: bundle `dev`
-/// never resolves to a file `./dev`. Caller owns the returned slice.
+/// Exact name first, then the canonical path of the file it names (how an
+/// unnamed manifest is registered); unmatched input comes back as typed so
+/// errors echo it. Caller owns the returned slice.
 fn resolveBundleName(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     typed: []const u8,
 ) ![:0]const u8 {
+    if (try isRegistered(db, typed)) return allocator.dupeZ(u8, typed);
+    const real = try canonicalPath(ctx.io, allocator, typed) orelse return allocator.dupeZ(u8, typed);
+    if (try isRegistered(db, real)) return real;
+    allocator.free(real);
+    return allocator.dupeZ(u8, typed);
+}
+
+fn isRegistered(db: *sqlite.Database, name: []const u8) error{Aborted}!bool {
     var stmt = db.prepare("SELECT 1 FROM bundles WHERE name = ?;") catch return unreadableDb(db);
     defer stmt.finalize();
-    stmt.bindText(1, typed) catch return unreadableDb(db);
-    if (stmt.step() catch return unreadableDb(db)) return allocator.dupeZ(u8, typed);
-    // Not a file either: the caller's lookup reports it as unregistered.
-    return std.Io.Dir.cwd().realPathFileAlloc(ctx.io, typed, allocator) catch allocator.dupeZ(u8, typed);
+    stmt.bindText(1, name) catch return unreadableDb(db);
+    return stmt.step() catch return unreadableDb(db);
+}
+
+/// Null when not even the directory resolves.
+fn canonicalPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) error{OutOfMemory}!?[:0]u8 {
+    const cwd = std.Io.Dir.cwd();
+    if (cwd.realPathFileAlloc(io, path, allocator)) |real| return real else |_| {}
+    // A deleted file still names its bundle through its directory.
+    const dir = cwd.realPathFileAlloc(io, std.fs.path.dirname(path) orelse ".", allocator) catch return null;
+    defer allocator.free(dir);
+    return try std.fs.path.joinZ(allocator, &.{ dir, std.fs.path.basename(path) });
 }
 
 /// Resolve a registered bundle name to its manifest path. Caller owns the
