@@ -38,7 +38,7 @@ jobs:
           use-cache: false
 
       - name: Install just
-        uses: taiki-e/install-action@v2.87.1
+        uses: taiki-e/install-action@v2.87.21
         with:
           tool: just
 
@@ -349,7 +349,7 @@ jobs:
         run: zig fmt --check src/ tests/
 
       - name: Install just
-        uses: taiki-e/install-action@v2.87.1
+        uses: taiki-e/install-action@v2.87.21
         with:
           tool: just
 
@@ -390,7 +390,7 @@ jobs:
           use-cache: false
 
       - name: Install just
-        uses: taiki-e/install-action@v2.87.1
+        uses: taiki-e/install-action@v2.87.21
         with:
           tool: just
 
@@ -420,7 +420,7 @@ jobs:
           use-cache: false
 
       - name: Install just
-        uses: taiki-e/install-action@v2.87.1
+        uses: taiki-e/install-action@v2.87.21
         with:
           tool: just
 
