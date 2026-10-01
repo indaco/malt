@@ -158,8 +158,8 @@ shoot() {
   tmux send-keys -t shot "PS1='> '; export MALT_THEME=$theme; clear" Enter
   sleep 0.3
   tmux send-keys -t shot "$CLI_CMD" Enter
-  wait_for "$INSTALL_PKG [0-9][0-9.]* installed" ||
-    echo "    WARNING: $label CLI install never completed — inspect manually" >&2
+  wait_for "$INSTALL_PKG [0-9][0-9._]* installed" ||
+    echo "    WARNING: $label CLI install never completed - inspect manually" >&2
   tmux capture-pane -e -p -t shot >"$cli_ansi"
   tmux kill-server 2>/dev/null || true
 
