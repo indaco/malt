@@ -63,7 +63,7 @@ pub fn describeError(err: RunnerError) []const u8 {
         RunnerError.IoFailed => "filesystem error during bundle install",
         RunnerError.OutOfMemory => "out of memory during bundle install",
         RunnerError.NoDispatcher => "bundle runner called without a dispatcher and without malt_bin",
-        RunnerError.UnsafeName => "bundle name is not a valid path component",
+        RunnerError.UnsafeName => "bundle name is not a valid path component, or holds a control character",
     };
 }
 
@@ -172,6 +172,9 @@ pub const Options = struct {
     /// for `dry_run` and subprocess (`malt_bin`) paths; otherwise the
     /// runner records `NoDispatcher` as each member's failure.
     dispatcher: ?*const Dispatcher = null,
+    /// Canonical path of the manifest being installed, recorded so
+    /// `bundle remove --purge` can find it again.
+    manifest_path: ?[]const u8 = null,
 };
 
 pub fn run(
@@ -181,10 +184,12 @@ pub fn run(
     manifest: manifest_mod.Manifest,
     opts: Options,
 ) RunnerError!Report {
-    const bundle_name = if (manifest.name.len > 0) manifest.name else "unnamed";
-    // Manifest-supplied, and it lands in the lock path below; refuse outright
+    // Manifest-supplied, and it names the lock and the row; refuse outright
     // rather than sanitise, before createDirPath grants it any side effect.
-    if (!path_component.isPathComponent(bundle_name)) return RunnerError.UnsafeName;
+    const db_name = bundleName(manifest, opts.manifest_path) catch return RunnerError.UnsafeName;
+    // Not db_name: a path cannot be a lock file name.
+    // ponytail: unnamed installs share one lock, so they serialise; harmless.
+    const lock_name = if (manifest.name.len > 0) manifest.name else "unnamed";
 
     // Bundles directory + advisory lock for idempotency.
     const prefix: []const u8 = opts.prefix orelse atomic.maltPrefixOrAbort();
@@ -194,7 +199,7 @@ pub fn run(
     // bundles/ may already exist; the lock file create below surfaces real errors.
     std.Io.Dir.cwd().createDirPath(io, bundles_dir) catch {};
 
-    const lock_path = std.fmt.allocPrint(allocator, "{s}/{s}.lock", .{ bundles_dir, bundle_name }) catch
+    const lock_path = std.fmt.allocPrint(allocator, "{s}/{s}.lock", .{ bundles_dir, lock_name }) catch
         return RunnerError.OutOfMemory;
     defer allocator.free(lock_path);
 
@@ -235,7 +240,7 @@ pub fn run(
     //    in dry-run so the preview path stays read-only.
     // An interrupted run installed only part of the manifest; recording it
     // would claim members that never landed.
-    if (!opts.dry_run and !signals.isInterrupted()) recordBundle(io, db, manifest) catch |e| {
+    if (!opts.dry_run and !signals.isInterrupted()) recordBundle(io, db, db_name, manifest, opts.manifest_path) catch |e| {
         // recordBundle's inferred set spans sqlite + clock; keep @errorName.
         db_record_error = @errorName(e);
     };
@@ -346,32 +351,74 @@ fn buildSubprocessArgv(allocator: std.mem.Allocator, bin: []const u8, call: Memb
 fn recordBundle(
     io: std.Io,
     db: *sqlite.Database,
+    name: []const u8,
     manifest: manifest_mod.Manifest,
+    manifest_path: ?[]const u8,
 ) !void {
     try schema.migrate(db);
 
     try db.beginTransaction();
     errdefer db.rollback();
 
-    const name = if (manifest.name.len > 0) manifest.name else "unnamed";
-    var ins = try db.prepare(
-        \\INSERT OR REPLACE INTO bundles(name, manifest_path, created_at, version)
-        \\VALUES (?, NULL, ?, ?);
-    );
-    defer ins.finalize();
-    try ins.bindText(1, name);
-    try ins.bindInt(2, std.Io.Clock.real.now(io).toSeconds());
-    try ins.bindInt(3, @intCast(manifest.version));
-    _ = try ins.step();
+    try writeBundle(io, db, name, manifest_path, manifest);
+    try db.commit();
+}
 
-    // Clean previous members of this bundle to keep it idempotent.
-    var del = try db.prepare("DELETE FROM bundle_members WHERE bundle_name = ?;");
-    defer del.finalize();
-    try del.bindText(1, name);
-    _ = try del.step();
+/// A manifest without a name (every Brewfile) is identified by its file, as
+/// brew does, so `install` and `import` of it land on one bundle. A chosen
+/// name must be one path component, or a Maltfile.json could take over a
+/// Brewfile's bundle by naming itself after that file; and no name may hold
+/// a control byte, which `list` would print.
+pub fn bundleName(manifest: manifest_mod.Manifest, manifest_path: ?[]const u8) error{UnsafeName}![]const u8 {
+    const name = if (manifest.name.len > 0) blk: {
+        if (!path_component.isPathComponent(manifest.name)) return error.UnsafeName;
+        break :blk manifest.name;
+    } else manifest_path orelse "unnamed";
+    if (path_component.hasControlByte(name)) return error.UnsafeName;
+    return name;
+}
 
+/// Records `manifest` as bundle `name`, row and members: the one write path
+/// for `install` and `import`. The caller owns the transaction.
+pub fn writeBundle(
+    io: std.Io,
+    db: *sqlite.Database,
+    name: []const u8,
+    manifest_path: ?[]const u8,
+    manifest: manifest_mod.Manifest,
+) sqlite.SqliteError!void {
+    {
+        // An upsert, not REPLACE: the delete half of REPLACE cascades
+        // through the members, and the row should change in place.
+        var stmt = try db.prepare(
+            \\INSERT INTO bundles(name, manifest_path, created_at, version)
+            \\VALUES (?, ?, ?, ?)
+            \\ON CONFLICT(name) DO UPDATE SET manifest_path = excluded.manifest_path,
+            \\  created_at = excluded.created_at, version = excluded.version;
+        );
+        defer stmt.finalize();
+        try stmt.bindText(1, name);
+        if (manifest_path) |p| try stmt.bindText(2, p) else try stmt.bindNull(2);
+        try stmt.bindInt(3, std.Io.Clock.real.now(io).toSeconds());
+        try stmt.bindInt(4, @intCast(manifest.version));
+        _ = try stmt.step();
+    }
+    try replaceMembers(db, name, manifest);
+}
+
+fn replaceMembers(db: *sqlite.Database, name: []const u8, manifest: manifest_mod.Manifest) sqlite.SqliteError!void {
+    // Clean previous members of this bundle to keep it idempotent. Scoped so
+    // its finalize can't reset the error of a later failing insert.
+    {
+        var del = try db.prepare("DELETE FROM bundle_members WHERE bundle_name = ?;");
+        defer del.finalize();
+        try del.bindText(1, name);
+        _ = try del.step();
+    }
+
+    // OR IGNORE: a line listed twice is one member, as brew installs it once.
     var memb = try db.prepare(
-        \\INSERT INTO bundle_members(bundle_name, kind, ref, spec)
+        \\INSERT OR IGNORE INTO bundle_members(bundle_name, kind, ref, spec)
         \\VALUES (?, ?, ?, NULL);
     );
     defer memb.finalize();
@@ -404,8 +451,62 @@ fn recordBundle(
         try memb.bindText(3, s.name);
         _ = try memb.step();
     }
+}
 
-    try db.commit();
+test "bundleName prefers the manifest's name, then its file, then a fixed fallback" {
+    var m = manifest_mod.Manifest.init(std.testing.allocator);
+    defer m.deinit();
+    try std.testing.expectEqualStrings("unnamed", try bundleName(m, null));
+    try std.testing.expectEqualStrings("/w/Brewfile", try bundleName(m, "/w/Brewfile"));
+    m.name = "dev";
+    try std.testing.expectEqualStrings("dev", try bundleName(m, "/w/Brewfile"));
+}
+
+test "bundleName refuses a chosen name that is a path, and any name with a control byte" {
+    var m = manifest_mod.Manifest.init(std.testing.allocator);
+    defer m.deinit();
+    // A path-shaped name would land on a Brewfile's bundle.
+    for ([_][]const u8{ "/w/Brewfile", "a/b", "..", "x\x1b]0;t\x07" }) |n| {
+        m.name = n;
+        try std.testing.expectError(error.UnsafeName, bundleName(m, "/w/ok"));
+    }
+    m.name = "";
+    try std.testing.expectError(error.UnsafeName, bundleName(m, "/w/x\x1b/Brewfile"));
+}
+
+test "replaceMembers swaps one bundle's members for the manifest's and leaves other bundles alone" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO bundles(name, manifest_path, created_at, version) VALUES ('a', NULL, 0, 1), ('b', NULL, 0, 1);
+        \\INSERT INTO bundle_members(bundle_name, kind, ref) VALUES ('a', 'formula', 'stale'), ('b', 'formula', 'kept');
+    );
+    var formulas = [_]manifest_mod.FormulaEntry{.{ .name = "wget" }};
+    var casks = [_]manifest_mod.CaskEntry{.{ .name = "firefox" }};
+    var services = [_]manifest_mod.ServiceEntry{.{ .name = "redis" }};
+    var taps = [_][]const u8{"user/repo"};
+    var m = manifest_mod.Manifest.init(std.testing.allocator);
+    defer m.deinit();
+    m.taps = &taps;
+    m.formulas = &formulas;
+    m.casks = &casks;
+    m.services = &services;
+
+    try replaceMembers(&db, "a", m);
+
+    const want = [_][2][]const u8{
+        .{ "a", "cask:firefox" },  .{ "a", "formula:wget" }, .{ "a", "service:redis" },
+        .{ "a", "tap:user/repo" }, .{ "b", "formula:kept" },
+    };
+    var stmt = try db.prepare("SELECT bundle_name, kind || ':' || ref FROM bundle_members ORDER BY 1, 2;");
+    defer stmt.finalize();
+    for (want) |w| {
+        try std.testing.expect(try stmt.step());
+        try std.testing.expectEqualStrings(w[0], std.mem.sliceTo(stmt.columnText(0).?, 0));
+        try std.testing.expectEqualStrings(w[1], std.mem.sliceTo(stmt.columnText(1).?, 0));
+    }
+    try std.testing.expect(!try stmt.step());
 }
 
 test "describeError gives every tag a distinct, non-empty message" {

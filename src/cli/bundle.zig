@@ -15,6 +15,8 @@ const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const path_write = @import("../fs/path_write.zig");
 const output = @import("../ui/output.zig");
+const term_sanitize = @import("../ui/term_sanitize.zig");
+const path_component = @import("../fs/path_component.zig");
 const signals = @import("../core/signals.zig");
 const install_args = @import("install/args.zig");
 const install_sink_mod = @import("install/sink.zig");
@@ -189,6 +191,11 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     defer manifest.deinit();
     for (diag.warnings.items) |w| output.warn("{s}", .{w});
 
+    // Recorded with the bundle, so it must not depend on this cwd.
+    const canonical = std.Io.Dir.cwd().realPathFileAlloc(ctx.io, path, allocator) catch |e|
+        return unreadable(path, e);
+    defer allocator.free(canonical);
+
     var db = try openDb(ctx);
     defer db.close();
 
@@ -197,6 +204,7 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     var report = runner_mod.run(ctx.io, allocator, &db, manifest, .{
         .dry_run = dry_run,
         .dispatcher = &dispatcher,
+        .manifest_path = canonical,
     }) catch |e| {
         output.err("bundle install failed: {s}", .{runner_mod.describeError(e)});
         return error.Aborted;
@@ -364,9 +372,13 @@ fn cmdList(ctx: *const AppCtx, rest: []const []const u8) !void {
 
     var any = false;
     while (stmt.step() catch return unreadableDb(&db)) {
-        const n = stmt.columnText(0) orelse continue;
+        const n = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
         const ts = stmt.columnInt(1);
-        output.plain("{s}\t{d}", .{ std.mem.sliceTo(n, 0), ts });
+        // `plain` writes raw, and a name is now a path, which may hold escapes.
+        var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const shown = name_buf[0..@min(n.len, name_buf.len)];
+        @memcpy(shown, n[0..shown.len]);
+        output.plain("{s}\t{d}", .{ term_sanitize.scrubInPlace(shown), ts });
         any = true;
     }
     if (!any) output.info("no bundles registered", .{});
@@ -406,7 +418,14 @@ fn resolveRemoveArgs(rest: []const []const u8, global_dry_run: bool) error{Abort
 }
 
 fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
-    const args = try resolveRemoveArgs(rest, output.isDryRun());
+    var args = try resolveRemoveArgs(rest, output.isDryRun());
+    const name = blk: {
+        var db = try openDb(ctx);
+        defer db.close();
+        break :blk try resolveBundleName(ctx, allocator, &db, args.name);
+    };
+    defer allocator.free(name);
+    args.name = name;
 
     if (args.purge) try purgeMembers(ctx, allocator, args);
 
@@ -427,24 +446,24 @@ fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     output.success("bundle removed: {s}", .{args.name});
 }
 
-/// Uninstall the members of a registered bundle. The `bundles` row stores a
-/// manifest path, not a member list, so the file has to be re-read; a missing
-/// or unparsable manifest is a hard error rather than a silent unregister,
-/// since the caller asked to remove packages and we cannot know which.
+/// Uninstall the members `export <name>` shows, recorded at the last import
+/// or install: the file may since list packages the user installed on their
+/// own, and an older row's relative path would resolve against this cwd.
 fn purgeMembers(ctx: *const AppCtx, allocator: std.mem.Allocator, args: RemoveArgs) !void {
-    const path = try lookupManifestPath(ctx, allocator, args.name);
-    defer allocator.free(path);
-    output.info("using bundle file: {s}", .{path});
-
-    var diag = brewfile_mod.Diagnostics.init(allocator);
-    defer diag.deinit();
-    var manifest = try readManifest(ctx, allocator, path, &diag);
+    var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
-    for (diag.warnings.items) |w| output.warn("{s}", .{w});
 
     var plan: cleanup_mod.Plan = blk: {
         var db = try openDb(ctx);
         defer db.close();
+        try populateFromBundle(&manifest, &db, args.name);
+        // Asked to remove packages but nothing says which: a silent
+        // unregister would read as a finished purge. An older malt's import
+        // recorded no members.
+        if (manifest.taps.len + manifest.formulas.len + manifest.casks.len + manifest.services.len == 0) {
+            output.err("bundle {s} has no recorded members; import its file again to purge it, or remove it without --purge", .{args.name});
+            return error.Aborted;
+        }
         var installed = cleanup_mod.collectInstalled(allocator, &db) catch
             return unreadableDb(&db);
         defer installed.deinit();
@@ -496,36 +515,53 @@ fn purgeMembers(ctx: *const AppCtx, allocator: std.mem.Allocator, args: RemoveAr
     }
 }
 
-/// Resolve a registered bundle name to its manifest path. Caller owns the
-/// returned slice.
-fn lookupManifestPath(
+/// Exact name first, then the canonical path of the file it names (how an
+/// unnamed manifest is registered). Refuses anything else in the user's own
+/// words: a typo must not read as success. Caller owns the returned slice.
+fn resolveBundleName(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
-    name: []const u8,
-) ![]const u8 {
-    var db = try openDb(ctx);
-    defer db.close();
+    db: *sqlite.Database,
+    typed: []const u8,
+) ![:0]const u8 {
+    if (try isRegistered(db, typed)) return allocator.dupeZ(u8, typed);
+    if (try canonicalPath(ctx.io, allocator, typed)) |real| {
+        errdefer allocator.free(real);
+        if (try isRegistered(db, real)) return real;
+        allocator.free(real);
+    }
+    output.err("bundle not registered: {s}", .{typed});
+    return error.Aborted;
+}
 
-    var stmt = db.prepare("SELECT manifest_path FROM bundles WHERE name = ?;") catch
-        return unreadableDb(&db);
+fn isRegistered(db: *sqlite.Database, name: []const u8) error{Aborted}!bool {
+    var stmt = db.prepare("SELECT 1 FROM bundles WHERE name = ?;") catch return unreadableDb(db);
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return unreadableDb(&db);
+    stmt.bindText(1, name) catch return unreadableDb(db);
+    return stmt.step() catch return unreadableDb(db);
+}
 
-    if (!(stmt.step() catch return unreadableDb(&db))) {
-        output.err("bundle not registered: {s}", .{name});
-        return error.Aborted;
-    }
-    const raw = std.mem.sliceTo(stmt.columnText(0) orelse {
-        output.err("bundle {s} has no recorded manifest path", .{name});
-        return error.Aborted;
-    }, 0);
-    // Rows written before import canonicalised the path: resolving them
-    // against this process's cwd could purge from an unrelated file.
-    if (!std.fs.path.isAbsolute(raw)) {
-        output.err("bundle {s} was registered with a relative manifest path ({s}); re-import it", .{ name, raw });
-        return error.Aborted;
-    }
-    return allocator.dupe(u8, raw);
+/// Null when not even the directory resolves.
+fn canonicalPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) error{OutOfMemory}!?[:0]u8 {
+    const cwd = std.Io.Dir.cwd();
+    if (cwd.realPathFileAlloc(io, path, allocator)) |real| return real else |_| {}
+    // A dangling link (a stow-managed Brewfile whose target is gone) names
+    // the bundle its target was registered as.
+    // ponytail: one hop; a chain of dangling links stays unresolved.
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = cwd.readLink(io, path, &link_buf) catch return parentResolved(io, allocator, path);
+    const target = link_buf[0..n];
+    if (std.fs.path.isAbsolute(target)) return parentResolved(io, allocator, target);
+    const joined = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(path) orelse ".", target });
+    defer allocator.free(joined);
+    return parentResolved(io, allocator, joined);
+}
+
+/// A deleted file still names its bundle through its directory.
+fn parentResolved(io: std.Io, allocator: std.mem.Allocator, path: []const u8) error{OutOfMemory}!?[:0]u8 {
+    const dir = std.Io.Dir.cwd().realPathFileAlloc(io, std.fs.path.dirname(path) orelse ".", allocator) catch return null;
+    defer allocator.free(dir);
+    return try std.fs.path.joinZ(allocator, &.{ dir, std.fs.path.basename(path) });
 }
 
 const CreateArgs = struct { format: Format, out_path: []const u8, include_services: bool, dry_run: bool };
@@ -614,7 +650,9 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
-    if (bundle_name) |n| {
+    if (bundle_name) |typed| {
+        const n = try resolveBundleName(ctx, allocator, &db, typed);
+        defer allocator.free(n);
         try populateFromBundle(&manifest, &db, n);
     } else {
         try populateFromInstalled(&manifest, &db, .{ .include_services = include_services });
@@ -660,25 +698,39 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     var db = try openDb(ctx);
     defer db.close();
 
-    const name = if (manifest.name.len > 0) manifest.name else path;
+    const name = runner_mod.bundleName(manifest, canonical) catch {
+        output.err("{s}: {s}", .{
+            runner_mod.describeError(error.UnsafeName),
+            if (manifest.name.len > 0) manifest.name else canonical,
+        });
+        return error.Aborted;
+    };
     // After the open, so a database the real run would refuse fails the preview too.
     if (dry_run) {
         output.info("would register {s} from {s}", .{ name, canonical });
         return;
     }
 
-    // Record metadata only; no install.
-    var stmt = db.prepare(
-        \\INSERT OR REPLACE INTO bundles(name, manifest_path, created_at, version)
-        \\VALUES (?, ?, ?, ?);
-    ) catch return unwritableDb(&db);
-    defer stmt.finalize();
-    stmt.bindText(1, name) catch return unwritableDb(&db);
-    stmt.bindText(2, canonical) catch return unwritableDb(&db);
-    stmt.bindInt(3, std.Io.Clock.real.now(ctx.io).toSeconds()) catch return unwritableDb(&db);
-    stmt.bindInt(4, @intCast(manifest.version)) catch return unwritableDb(&db);
-    _ = stmt.step() catch return unwritableDb(&db);
+    recordImport(ctx.io, &db, name, canonical, manifest) catch {
+        // Worded first: the rollback resets SQLite's message.
+        const err = unwritableDb(&db);
+        db.rollback();
+        return err;
+    };
     output.success("bundle registered: {s}", .{name});
+}
+
+/// The manifest becomes the bundle, as with `install`, minus the install.
+fn recordImport(
+    io: std.Io,
+    db: *sqlite.Database,
+    name: []const u8,
+    manifest_path: []const u8,
+    manifest: manifest_mod.Manifest,
+) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    try runner_mod.writeBundle(io, db, name, manifest_path, manifest);
+    try db.commit();
 }
 
 // ---------- helpers ----------
@@ -932,7 +984,9 @@ fn qualifiedName(a: std.mem.Allocator, tap_col: ?[*:0]const u8, name_col: [*:0]c
 
 fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, name: []const u8) !void {
     const a = manifest.allocator();
-    manifest.name = try a.dupe(u8, name);
+    // A Brewfile's bundle is named by its path, which install refuses as a
+    // name; without one, the exported file names its own bundle.
+    manifest.name = if (path_component.isPathComponent(name)) try a.dupe(u8, name) else "";
     manifest.version = manifest_mod.schema_version;
 
     var taps: std.ArrayList([]const u8) = .empty;
