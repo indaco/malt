@@ -29,14 +29,18 @@ if [ "$rc" -ne 0 ]; then
   exit 1
 fi
 # The test drives the seam, not the caller: guard that the caller still
-# routes the sweep and the opt link through it, after the commit.
+# routes the sweep and the opt link through it, and that inside it the opt
+# link follows the commit and precedes the sweep.
 src=src/cli/install/local.zig
-seam=$(grep -n '^pub fn commitAndSweep' "$src" | cut -d: -f1)
-call=$(grep -n 'try commitAndSweep(' "$src" | cut -d: -f1)
-opt=$(grep -n 'linker.linkOpt(resolved.name' "$src" | cut -d: -f1)
-early=$(grep -nE 'dropStaleKegRows\(|pruneOtherCellarVersionsForReinstall\(' "$src" | cut -d: -f1 | awk -v s="$seam" '$1 < s')
-if [ -z "$call" ] || [ -z "$opt" ] || [ "$opt" -lt "$call" ] || [ -n "$early" ]; then
-  echo "FAIL: $src must sweep and repoint opt only after commitAndSweep"
+seam=$(grep -n '^pub fn commitAndSweep' "$src" | cut -d: -f1 || true)
+call=$(grep -n 'try commitAndSweep(' "$src" | cut -d: -f1 || true)
+commit=$(grep -n 'db.commit() catch' "$src" | cut -d: -f1 | awk -v s="$seam" '$1 > s' | head -1 || true)
+opt=$(grep -n 'linker.linkOpt(name' "$src" | cut -d: -f1 | awk -v s="$seam" '$1 > s' | head -1 || true)
+sweep=$(grep -n 'dropStaleKegRows(' "$src" | cut -d: -f1 | awk -v s="$seam" '$1 > s' | head -1 || true)
+early=$(grep -nE 'dropStaleKegRows\(|pruneOtherCellarVersionsForReinstall\(|linkOpt\(' "$src" | cut -d: -f1 | awk -v s="$seam" '$1 < s' || true)
+if [ -z "$seam" ] || [ -z "$call" ] || [ -z "$commit" ] || [ -z "$opt" ] || [ -z "$sweep" ] ||
+  [ "$opt" -lt "$commit" ] || [ "$sweep" -lt "$opt" ] || [ -n "$early" ]; then
+  echo "FAIL: $src must commit, then repoint opt, then sweep, all inside commitAndSweep"
   exit 1
 fi
 
