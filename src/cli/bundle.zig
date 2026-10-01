@@ -543,6 +543,7 @@ fn resolveCreateArgs(rest: []const []const u8) error{Aborted}!CreateArgs {
     while (i < rest.len) : (i += 1) {
         const a = rest[i];
         if (opts_done or !std.mem.startsWith(u8, a, "-")) {
+            if (out_path != null) return expected("create", "at most one [path]");
             out_path = a;
         } else if (std.mem.eql(u8, a, "--")) {
             opts_done = true;
@@ -1156,9 +1157,33 @@ test "create: --dry-run and -n request a preview, as on the other bundle subcomm
 }
 
 test "create: `--` ends the options, so a dash-led path is the output path" {
-    const a = try resolveCreateArgs(&.{ "--", "-odd", "--format" });
+    const a = try resolveCreateArgs(&.{ "--", "--format" });
     try std.testing.expectEqualStrings("--format", a.out_path);
     try std.testing.expectEqual(Format.brewfile, a.format);
+    // A flag before `--` still applies.
+    const b = try resolveCreateArgs(&.{ "--format", "json", "--", "-odd" });
+    try std.testing.expectEqualStrings("-odd", b.out_path);
+    try std.testing.expectEqual(Format.json, b.format);
+}
+
+test "create: a second path is refused instead of replacing the first" {
+    // `create a b` used to write b alone; a flag or `--` between them changes nothing.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+    const cases = [_][]const []const u8{
+        &.{ "a", "b" },
+        &.{ "a", "--format", "json", "b" },
+        &.{ "a", "--", "b" },
+        &.{ "--", "a", "-b" },
+    };
+    for (cases) |args| {
+        // Per case, so an abort for another reason cannot pass.
+        buf.clearRetainingCapacity();
+        try std.testing.expectError(error.Aborted, resolveCreateArgs(args));
+        try std.testing.expect(std.mem.indexOf(u8, buf.items, "bundle create: expected at most one [path]") != null);
+    }
 }
 
 test "writeManifest creates parent directories for a nested output path" {

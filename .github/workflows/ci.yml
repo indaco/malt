@@ -113,6 +113,9 @@ jobs:
       - name: Regression guard - bundle install, cleanup and remove stop on an unknown flag
         run: ./scripts/regressions/bundle-subcommands-stop-on-unknown-flags-bundle-install-cleanup-remove-proceed-past-unknown-flags.sh
 
+      - name: Regression guard - bundle create, install and cleanup refuse a second path
+        run: ./scripts/regressions/bundle-refuses-a-second-path-bundle-subcommands-take-the-last-of-several-paths.sh
+
       - name: Regression guard - a name that is both a formula and a cask resolves to the formula and warns
         run: ./scripts/regressions/uninstall-bare-name-resolves-formula-first-formula-cask-name-collision-precedence-differs-by-command.sh
 
