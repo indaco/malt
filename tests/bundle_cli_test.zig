@@ -540,7 +540,9 @@ fn storedManifestPath(allocator: std.mem.Allocator, prefix: []const u8, name: []
     defer stmt.finalize();
     try stmt.bindText(1, name);
     try testing.expect(try stmt.step());
-    return allocator.dupe(u8, std.mem.sliceTo(stmt.columnText(0).?, 0));
+    // A NULL path is the failure under test, not a crash.
+    const raw = stmt.columnText(0) orelse return error.TestUnexpectedNullManifestPath;
+    return allocator.dupe(u8, std.mem.sliceTo(raw, 0));
 }
 
 test "import stores the canonical absolute path for a relative manifest argument" {
@@ -836,6 +838,54 @@ test "import that cannot write the members leaves the bundle as it was and says 
     try testing.expect(try stmt.step());
     try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
     try testing.expectEqual(@as(i64, 0), stmt.columnInt(1));
+}
+
+test "install of an imported bundle keeps the manifest path import recorded" {
+    // A NULL path makes `remove --purge` refuse the bundle.
+    var s = try Scratch.init(testing.allocator, "install_keeps_path");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/dev.json", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\{"name": "dev", "version": 1}
+    );
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path });
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "install", path });
+
+    const want = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, path, testing.allocator);
+    defer testing.allocator.free(want);
+    const stored = try storedManifestPath(testing.allocator, s.path, "dev");
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(want, stored);
+}
+
+test "install records the canonical manifest path so remove --purge can find the bundle" {
+    // Installed only, by a cwd-relative spelling: the row outlives this cwd.
+    var s = try Scratch.init(testing.allocator, "install_records_path");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/solo.json", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\{"name": "solo", "version": 1}
+    );
+    const rel = try relativeToCwd(testing.allocator, path);
+    defer testing.allocator.free(rel);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "install", rel });
+
+    const want = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, path, testing.allocator);
+    defer testing.allocator.free(want);
+    const stored = try storedManifestPath(testing.allocator, s.path, "solo");
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(want, stored);
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "--purge", "solo" });
 }
 
 // --- export -----------------------------------------------------------
