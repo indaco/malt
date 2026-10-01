@@ -310,9 +310,23 @@ test "bundle completions advertise only flags bundle.zig parses" {
 }
 
 test "all bundle completions expose --services for create and export" {
-    try expectContains(try bashFlagsFor("bundle-create|bundle-export)"), "--services");
+    try expectContains(try bashFlagsFor("bundle-create)"), "--services");
+    try expectContains(try bashFlagsFor("bundle-export)"), "--services");
     try expectContains(try zshCaseFor("                bundle)"), "'--services[");
     try expectContains(completions.fish_script, "__fish_seen_subcommand_from create export' -l services");
+}
+
+test "every shell offers --dry-run for bundle create, bundle import and backup" {
+    // Each command takes the flag itself, so completion must not hide it.
+    try expectContains(try bashFlagsFor("bundle-create)"), "--dry-run -n");
+    try expectContains(try bashFlagsFor("bundle-import)"), "--dry-run -n");
+    try expectContains(try bashFlagsFor("backup)"), "--dry-run -n");
+    try expectContains(try zshCaseFor("                backup)"), "'(--dry-run -n)'{--dry-run,-n}");
+    const zsh_bundle = try zshCaseFor("                bundle)");
+    try expectContains(zsh_bundle, "[Preview without writing the file]");
+    try expectContains(zsh_bundle, "[Preview without registering the bundle]");
+    try expectContains(completions.fish_script, "__fish_seen_subcommand_from install cleanup remove create import' -l dry-run -s n");
+    try expectContains(completions.fish_script, "__malt_using_command backup' -s n -l dry-run");
 }
 
 test "all bundle completions expose --purge for remove" {

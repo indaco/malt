@@ -74,6 +74,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             include_services = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             output.setQuiet(true);
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--dry-run")) {
+            output.setDryRun(true);
         } else {
             output.err("Unknown argument for backup: {s}", .{arg});
             return Error.InvalidArgs;
@@ -116,15 +118,15 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.writeStdoutAll(bytes);
             return;
         }
-        try writeToPath(ctx, p, bytes);
-        output.success("Backup written to {s} ({d} packages)", .{ p, count });
+        if (try writeToPath(ctx, p, bytes, count))
+            output.success("Backup written to {s} ({d} packages)", .{ p, count });
         return;
     }
 
     const default_path = try defaultBackupPath(ctx, allocator);
     defer allocator.free(default_path);
-    try writeToPath(ctx, default_path, bytes);
-    output.success("Backup written to {s} ({d} packages)", .{ default_path, count });
+    if (try writeToPath(ctx, default_path, bytes, count))
+        output.success("Backup written to {s} ({d} packages)", .{ default_path, count });
 }
 
 pub const RowsError = error{ DatabaseError, WriteFailed };
@@ -362,13 +364,19 @@ fn executeJson(
             output.writeStdoutAll(bytes);
             return;
         }
-        try writeToPath(ctx, p, bytes);
+        // Counted like the text writer: a local keg is a note restore skips.
+        _ = try writeToPath(ctx, p, bytes, formulas.items.len + casks.items.len + services.items.len);
         return;
     }
     output.writeStdoutAll(bytes);
 }
 
-fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8) Error!void {
+/// False under `--dry-run`, which only says where it would write.
+fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8, count: usize) Error!bool {
+    if (output.isDryRun()) {
+        output.info("would write backup to {s} ({d} packages)", .{ path, count });
+        return false;
+    }
     path_write.writeFile(ctx.io, path, bytes) catch |e| switch (e) {
         // On a parent-dir failure the offending path is its dirname.
         error.MakeParentDirFailed => {
@@ -381,6 +389,7 @@ fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8) Error!vo
         },
         error.WriteFailed => return Error.WriteFailed,
     };
+    return true;
 }
 
 /// Plain-data view of one formula row for the `--json` writer. `tap` is
@@ -764,12 +773,28 @@ test "writeToPath creates a full absolute parent chain with a missing grandparen
     const dest = s.p("/a/b/backup.txt");
 
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
-    try writeToPath(&ctx, dest, "formula git\n");
+    try std.testing.expect(try writeToPath(&ctx, dest, "formula git\n", 1));
 
     const f = try std.Io.Dir.cwd().openFile(io, dest, .{});
     defer f.close(io);
     const stat = try f.stat(io);
     try std.testing.expect(stat.size > 0);
+}
+
+test "writeToPath under --dry-run reports false and creates nothing, not even parents" {
+    const io = std.Options.debug_io;
+    var s = try Scratch.init("backup_dryrun");
+    defer s.deinit();
+
+    const prior = output.isDryRun();
+    output.setDryRun(true);
+    defer output.setDryRun(prior);
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+    try std.testing.expect(!try writeToPath(&ctx, s.p("/a/backup.txt"), "formula git\n", 1));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, s.p("/a"), .{}));
 }
 
 test "writeToPath propagates a real parent-dir failure as OpenFileFailed" {
@@ -786,7 +811,7 @@ test "writeToPath propagates a real parent-dir failure as OpenFileFailed" {
     const dest = s.p("/afile/sub/backup.txt");
 
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
-    try std.testing.expectError(Error.OpenFileFailed, writeToPath(&ctx, dest, "formula git\n"));
+    try std.testing.expectError(Error.OpenFileFailed, writeToPath(&ctx, dest, "formula git\n", 1));
 }
 
 test "writeToPath maps a failing leaf createFile to OpenFileFailed" {
@@ -801,7 +826,7 @@ test "writeToPath maps a failing leaf createFile to OpenFileFailed" {
     try std.Io.Dir.cwd().createDirPath(io, dest); // dest is a dir
 
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
-    try std.testing.expectError(Error.OpenFileFailed, writeToPath(&ctx, dest, "formula git\n"));
+    try std.testing.expectError(Error.OpenFileFailed, writeToPath(&ctx, dest, "formula git\n", 1));
 }
 
 test "parseBackup silently drops any future unknown kind (forward-compat)" {

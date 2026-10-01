@@ -273,6 +273,177 @@ test "cleanup --dry-run on a Brewfile that matches no installed packages prints 
     try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "cleanup", "--dry-run", "--yes", brewfile });
 }
 
+// --- create / import --dry-run ----------------------------------------
+
+fn setDryRun() bool {
+    const prior = output.isDryRun();
+    output.setDryRun(true);
+    return prior;
+}
+
+test "create --dry-run leaves an existing Brewfile untouched and names it" {
+    // A preview that rewrites the file loses the user's hand edits.
+    var s = try Scratch.init(testing.allocator, "create_dry");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(out_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, out_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "# hand-edited\n");
+    }
+
+    const prior_dry = setDryRun();
+    defer output.setDryRun(prior_dry);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", out_path });
+
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, out_path, .{});
+    defer f.close(std.Options.debug_io);
+    var buf: [64]u8 = undefined;
+    const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
+    try testing.expectEqualStrings("# hand-edited\n", buf[0..n]);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would write") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, out_path) != null);
+}
+
+test "create and import take -n and --dry-run themselves, like install, cleanup and remove" {
+    // `bundle install -n` previews, so `bundle create -n` must not write.
+    var s = try Scratch.init(testing.allocator, "sub_dry_flags");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+
+    const manifest = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(manifest);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, manifest, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\{"name": "dev", "version": 1, "formulas": []}
+        );
+    }
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    for ([_][]const u8{ "-n", "--dry-run" }) |flag| {
+        try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", flag, out_path });
+        try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", flag, manifest });
+    }
+    try testing.expect(!output.isDryRun());
+
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, out_path, .{}));
+    var db_path_buf: [512]u8 = undefined;
+    var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+    defer db.close();
+    var stmt = try db.prepare("SELECT 1 FROM bundles;");
+    defer stmt.finalize();
+    try testing.expect(!(try stmt.step()));
+}
+
+test "create --dry-run to a new path creates neither the file nor its parents" {
+    var s = try Scratch.init(testing.allocator, "create_dry_nested");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+
+    const parent = try std.fmt.allocPrint(testing.allocator, "{s}/nested", .{s.path});
+    defer testing.allocator.free(parent);
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/sub/Brewfile", .{parent});
+    defer testing.allocator.free(out_path);
+
+    const prior_dry = setDryRun();
+    defer output.setDryRun(prior_dry);
+    quiet();
+    defer unquiet();
+
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", out_path });
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, parent, .{}));
+}
+
+test "create --dry-run still refuses a table it cannot read" {
+    // Regression guard: this already held before the fix. The preview must
+    // fail where the real run would, not report success.
+    var s = try Scratch.init(testing.allocator, "create_dry_corrupt");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    var db_path_buf: [512]u8 = undefined;
+    try test_io.corruptTable(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0), "kegs");
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    const prior_dry = setDryRun();
+    defer output.setDryRun(prior_dry);
+    quiet();
+    defer unquiet();
+
+    try testing.expectError(error.Aborted, bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", out_path }));
+}
+
+test "import --dry-run registers nothing and names the bundle it would register" {
+    var s = try Scratch.init(testing.allocator, "import_dry");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\{"name": "dev", "version": 1, "formulas": []}
+        );
+    }
+
+    const prior_dry = setDryRun();
+    defer output.setDryRun(prior_dry);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path });
+
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT 1 FROM bundles;");
+    defer stmt.finalize();
+    try testing.expect(!(try stmt.step()));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would register dev") != null);
+}
+
+test "import --dry-run still refuses a malformed manifest" {
+    // Regression guard: this already held before the fix. A preview must
+    // reject a file the real import would reject.
+    var s = try Scratch.init(testing.allocator, "import_dry_bad");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "this is not json");
+    }
+
+    const prior_dry = setDryRun();
+    defer output.setDryRun(prior_dry);
+    quiet();
+    defer unquiet();
+
+    try testing.expectError(error.Aborted, bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path }));
+}
+
 test "import on a malformed Maltfile.json says why it could not parse it" {
     var s = try Scratch.init(testing.allocator, "import_bad");
     defer s.deinit(testing.allocator);
@@ -947,6 +1118,9 @@ test "remove --purge never takes a local keg for a same-named core line" {
 
     try testing.expect(std.mem.indexOf(u8, captured.items, "- wget") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "- lx") == null);
+    // The preview names both steps the real run would take.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall the packages above") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would unregister bundle") != null);
 }
 
 test "bundle create refuses a table it cannot read instead of writing a Brewfile without it" {

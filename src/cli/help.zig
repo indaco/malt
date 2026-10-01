@@ -583,6 +583,7 @@ const backup_help =
     \\                       restore installs the current release)
     \\  --services           Include auto-start services so `malt restore`
     \\                       re-bootstraps launchd state on the destination
+    \\  --dry-run, -n        Show where the backup would go without writing it
     \\  --quiet, -q          Suppress non-error output
     \\
     \\Examples:
@@ -779,7 +780,7 @@ const bundle_help =
     \\                              and <prefix>/sbin (per-keg state, replays on upgrade).
     \\  cleanup [--yes] [--dry-run] [file]
     \\                              Uninstall packages present on disk but absent from the Brewfile.
-    \\  create  [--format brewfile|json] [--services] [path]
+    \\  create  [--format brewfile|json] [--services] [--dry-run] [path]
     \\                              Write currently-installed set to a bundle file.
     \\                              --services also emits auto-start services (JSON only).
     \\  list                        List bundles registered in the database.
@@ -790,7 +791,7 @@ const bundle_help =
     \\  export  [--format brewfile|json] [--services] [name]
     \\                              Print bundle (or current install) to stdout.
     \\                              --services also emits auto-start services (JSON only).
-    \\  import  <file>              Register a bundle definition without installing.
+    \\  import  [--dry-run] <file>  Register a bundle definition without installing.
     \\
     \\Lookup order for install/cleanup without an explicit path:
     \\  ./Brewfile, ./Maltfile.json, ~/.config/malt/Brewfile, ~/.config/malt/Maltfile.json

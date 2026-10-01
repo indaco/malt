@@ -71,7 +71,13 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
     try malt.cli_bundle.execute(&ctx, testing.allocator, &.{ "cleanup", "--dry-run", bf_path });
+    // Says what the real run would do, like every other preview.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall the packages above") != null);
 
     var db = try sqlite.Database.open(db_path);
     defer db.close();
