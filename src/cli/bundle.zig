@@ -510,8 +510,8 @@ fn purgeMembers(ctx: *const AppCtx, allocator: std.mem.Allocator, args: RemoveAr
 }
 
 /// Exact name first, then the canonical path of the file it names (how an
-/// unnamed manifest is registered); unmatched input comes back as typed so
-/// errors echo it. Caller owns the returned slice.
+/// unnamed manifest is registered). Refuses anything else in the user's own
+/// words: a typo must not read as success. Caller owns the returned slice.
 fn resolveBundleName(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -519,10 +519,13 @@ fn resolveBundleName(
     typed: []const u8,
 ) ![:0]const u8 {
     if (try isRegistered(db, typed)) return allocator.dupeZ(u8, typed);
-    const real = try canonicalPath(ctx.io, allocator, typed) orelse return allocator.dupeZ(u8, typed);
-    if (try isRegistered(db, real)) return real;
-    allocator.free(real);
-    return allocator.dupeZ(u8, typed);
+    if (try canonicalPath(ctx.io, allocator, typed)) |real| {
+        errdefer allocator.free(real);
+        if (try isRegistered(db, real)) return real;
+        allocator.free(real);
+    }
+    output.err("bundle not registered: {s}", .{typed});
+    return error.Aborted;
 }
 
 fn isRegistered(db: *sqlite.Database, name: []const u8) error{Aborted}!bool {
