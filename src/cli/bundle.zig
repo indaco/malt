@@ -441,24 +441,24 @@ fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     output.success("bundle removed: {s}", .{args.name});
 }
 
-/// Uninstall the members of a registered bundle. The `bundles` row stores a
-/// manifest path, not a member list, so the file has to be re-read; a missing
-/// or unparsable manifest is a hard error rather than a silent unregister,
-/// since the caller asked to remove packages and we cannot know which.
+/// Uninstall the members `export <name>` shows, recorded at the last import
+/// or install: the file may since list packages the user installed on their
+/// own, and an older row's relative path would resolve against this cwd.
 fn purgeMembers(ctx: *const AppCtx, allocator: std.mem.Allocator, args: RemoveArgs) !void {
-    const path = try lookupManifestPath(ctx, allocator, args.name);
-    defer allocator.free(path);
-    output.info("using bundle file: {s}", .{path});
-
-    var diag = brewfile_mod.Diagnostics.init(allocator);
-    defer diag.deinit();
-    var manifest = try readManifest(ctx, allocator, path, &diag);
+    var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
-    for (diag.warnings.items) |w| output.warn("{s}", .{w});
 
     var plan: cleanup_mod.Plan = blk: {
         var db = try openDb(ctx);
         defer db.close();
+        try populateFromBundle(&manifest, &db, args.name);
+        // Asked to remove packages but nothing says which: a silent
+        // unregister would read as a finished purge. An older malt's import
+        // recorded no members.
+        if (manifest.taps.len + manifest.formulas.len + manifest.casks.len + manifest.services.len == 0) {
+            output.err("bundle {s} has no recorded members; import its file again to purge it, or remove it without --purge", .{args.name});
+            return error.Aborted;
+        }
         var installed = cleanup_mod.collectInstalled(allocator, &db) catch
             return unreadableDb(&db);
         defer installed.deinit();
@@ -544,38 +544,6 @@ fn canonicalPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) err
     const dir = cwd.realPathFileAlloc(io, std.fs.path.dirname(path) orelse ".", allocator) catch return null;
     defer allocator.free(dir);
     return try std.fs.path.joinZ(allocator, &.{ dir, std.fs.path.basename(path) });
-}
-
-/// Resolve a registered bundle name to its manifest path. Caller owns the
-/// returned slice.
-fn lookupManifestPath(
-    ctx: *const AppCtx,
-    allocator: std.mem.Allocator,
-    name: []const u8,
-) ![]const u8 {
-    var db = try openDb(ctx);
-    defer db.close();
-
-    var stmt = db.prepare("SELECT manifest_path FROM bundles WHERE name = ?;") catch
-        return unreadableDb(&db);
-    defer stmt.finalize();
-    stmt.bindText(1, name) catch return unreadableDb(&db);
-
-    if (!(stmt.step() catch return unreadableDb(&db))) {
-        output.err("bundle not registered: {s}", .{name});
-        return error.Aborted;
-    }
-    const raw = std.mem.sliceTo(stmt.columnText(0) orelse {
-        output.err("bundle {s} has no recorded manifest path", .{name});
-        return error.Aborted;
-    }, 0);
-    // Rows written before import canonicalised the path: resolving them
-    // against this process's cwd could purge from an unrelated file.
-    if (!std.fs.path.isAbsolute(raw)) {
-        output.err("bundle {s} was registered with a relative manifest path ({s}); re-import it", .{ name, raw });
-        return error.Aborted;
-    }
-    return allocator.dupe(u8, raw);
 }
 
 const CreateArgs = struct { format: Format, out_path: []const u8, include_services: bool, dry_run: bool };

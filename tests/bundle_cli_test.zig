@@ -701,13 +701,13 @@ test "import and install of one unnamed manifest record a single bundle" {
     try testing.expect(!try stmt.step());
 }
 
-test "remove --purge refuses a legacy relative manifest_path and keeps the row" {
-    var s = try Scratch.init(testing.allocator, "purge_legacy_rel");
+test "remove --purge refuses a bundle with no recorded members and keeps it" {
+    // An older malt's import recorded none; unregistering it would read as a
+    // finished purge while every package stays installed. A relative path in
+    // the row must not make it plan from a file in this cwd either.
+    var s = try Scratch.init(testing.allocator, "purge_no_members");
     defer s.deinit(testing.allocator);
-    try initDb(s.path);
-
-    // A relative path that *does* resolve from the runner's cwd: a purge that
-    // opens it instead of refusing is exactly the cwd-dependent read.
+    try seedTapPackages(s.path);
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
     defer testing.allocator.free(path);
     try writeFile(path, "brew \"wget\"\n");
@@ -715,24 +715,82 @@ test "remove --purge refuses a legacy relative manifest_path and keeps the row" 
     defer testing.allocator.free(rel);
     {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
-        var db = try sqlite.Database.open(db_path);
+        var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
         defer db.close();
-        var stmt = try db.prepare(
-            \\INSERT INTO bundles (name, manifest_path, created_at, version)
-            \\VALUES ('legacy', ?, 1700000000, 1);
-        );
+        var stmt = try db.prepare("INSERT INTO bundles (name, manifest_path, created_at, version) VALUES ('legacy', ?, 1700000000, 1);");
         defer stmt.finalize();
         try stmt.bindText(1, rel);
         _ = try stmt.step();
     }
 
-    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "remove", "--purge", "--dry-run", "legacy" }, "relative manifest path");
+    for ([_][]const []const u8{
+        &.{ "remove", "--purge", "--dry-run", "legacy" },
+        &.{ "remove", "--purge", "--yes", "legacy" },
+    }) |args| {
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try testing.expectError(error.Aborted, bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, args));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "no recorded members") != null);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "- wget") == null);
+    }
+    const names = try bundleNames(testing.allocator, s.path);
+    defer testing.allocator.free(names);
+    try testing.expectEqualStrings("legacy", names);
+}
 
-    // Refusal happens before unregister, so the user can re-import by name.
-    const stored = try storedManifestPath(testing.allocator, s.path, "legacy");
-    defer testing.allocator.free(stored);
-    try testing.expectEqualStrings(rel, stored);
+test "remove --purge of a bundle whose members are not installed still unregisters it" {
+    // Members recorded but none installed is a finished purge, not a refusal.
+    var s = try Scratch.init(testing.allocator, "purge_none_installed");
+    defer s.deinit(testing.allocator);
+    try seedTapPackages(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "brew \"jq\"\n");
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path });
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "--purge", "--yes", path });
+
+    const names = try bundleNames(testing.allocator, s.path);
+    defer testing.allocator.free(names);
+    try testing.expectEqualStrings("", names);
+}
+test "a legacy row goes by its old name, and the file re-imports under its path" {
+    // The documented upgrade remedy: older rows cannot be migrated, since a
+    // relative path depends on a cwd that is gone.
+    var s = try Scratch.init(testing.allocator, "legacy_remedy");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "# empty bundle\n");
+    const rel = try relativeToCwd(testing.allocator, path);
+    defer testing.allocator.free(rel);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+        defer db.close();
+        var stmt = try db.prepare("INSERT INTO bundles (name, manifest_path, created_at, version) VALUES (?, ?, 0, 1), ('unnamed', NULL, 0, 1);");
+        defer stmt.finalize();
+        try stmt.bindText(1, rel);
+        try stmt.bindText(2, rel);
+        _ = try stmt.step();
+    }
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", rel });
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "unnamed" });
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", rel });
+
+    const want = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, path, testing.allocator);
+    defer testing.allocator.free(want);
+    const names = try bundleNames(testing.allocator, s.path);
+    defer testing.allocator.free(names);
+    try testing.expectEqualStrings(want, names);
 }
 
 test "re-import replaces a legacy relative row with the canonical path" {
@@ -895,7 +953,7 @@ test "import that cannot write the members leaves the bundle as it was and says 
 }
 
 test "install of an imported bundle keeps the manifest path import recorded" {
-    // A NULL path makes `remove --purge` refuse the bundle.
+    // A NULL path loses which file the bundle came from.
     var s = try Scratch.init(testing.allocator, "install_keeps_path");
     defer s.deinit(testing.allocator);
     try initDb(s.path);
@@ -917,7 +975,7 @@ test "install of an imported bundle keeps the manifest path import recorded" {
     try testing.expectEqualStrings(want, stored);
 }
 
-test "install records the canonical manifest path so remove --purge can find the bundle" {
+test "install records the canonical manifest path" {
     // Installed only, by a cwd-relative spelling: the row outlives this cwd.
     var s = try Scratch.init(testing.allocator, "install_records_path");
     defer s.deinit(testing.allocator);
@@ -939,7 +997,6 @@ test "install records the canonical manifest path so remove --purge can find the
     const stored = try storedManifestPath(testing.allocator, s.path, "solo");
     defer testing.allocator.free(stored);
     try testing.expectEqualStrings(want, stored);
-    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "--purge", "solo" });
 }
 
 fn bundleNames(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
@@ -1134,6 +1191,31 @@ test "export --format json of a Brewfile bundle writes a file install accepts" {
     const stored = try storedManifestPath(testing.allocator, s.path, want);
     defer testing.allocator.free(stored);
     try testing.expectEqualStrings(want, stored);
+}
+
+test "remove --purge uninstalls the recorded members, not what the file lists now" {
+    // A pulled Brewfile can list a package the user installed on their own;
+    // purge must match what `export` shows.
+    var s = try Scratch.init(testing.allocator, "purge_from_members");
+    defer s.deinit(testing.allocator);
+    try seedTapPackages(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "brew \"wget\"\n");
+    {
+        quiet();
+        defer unquiet();
+        try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path });
+    }
+    try writeFile(path, "brew \"wget\"\ncask \"firefox\"\n");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "--purge", "--dry-run", path });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "- wget") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "firefox") == null);
 }
 
 // --- export -----------------------------------------------------------

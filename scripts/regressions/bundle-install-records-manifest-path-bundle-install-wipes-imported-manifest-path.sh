@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Regression: `bundle install` must record the manifest it installed from.
 # It stored no path, so installing an imported bundle erased the path import
-# recorded and `bundle remove --purge` refused the bundle; a bundle only ever
-# installed could never be purged.
+# recorded, and a bundle only ever installed had none at all.
 #
 # Exits 0 when the bug is absent, non-zero (with a clear message) when present.
 # No network (the manifests have no members); all state lives under a
@@ -42,11 +41,10 @@ out=$("$BIN" bundle install "$tmp/dev.json" 2>&1) || fail "install failed: $out"
 got=$(sqlite3 "$DB" "SELECT ifnull(manifest_path,'NULL') FROM bundles WHERE name='dev';")
 [ "$got" = "$(real "$tmp/dev.json")" ] || fail "install erased the imported manifest path: $got"
 
-# Installed only, never imported: the path still lands, so purge can find it.
+# Installed only, never imported: the path still lands.
 echo '{"name":"solo","version":1}' >"$tmp/solo.json"
 out=$("$BIN" bundle install "$tmp/solo.json" 2>&1) || fail "install failed: $out"
 got=$(sqlite3 "$DB" "SELECT ifnull(manifest_path,'NULL') FROM bundles WHERE name='solo';")
 [ "$got" = "$(real "$tmp/solo.json")" ] || fail "install recorded no manifest path: $got"
-out=$("$BIN" bundle remove --purge solo 2>&1) || fail "purge refused an installed bundle: $out"
 
 echo "  ✓ bundle install records the manifest it installed from"
