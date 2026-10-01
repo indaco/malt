@@ -625,7 +625,7 @@ test "import records a symlinked manifest by its target" {
     try testing.expectEqualStrings(want, stored);
 }
 
-test "import keeps the typed path as the registered name when the manifest has none" {
+test "import names a manifest without a name by its canonical path" {
     var s = try Scratch.init(testing.allocator, "import_name_fallback");
     defer s.deinit(testing.allocator);
     try initDb(s.path);
@@ -641,10 +641,41 @@ test "import keeps the typed path as the registered name when the manifest has n
     defer unquiet();
     try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", rel });
 
-    // The name stays what the user typed; only the path column is canonical.
-    const stored = try storedManifestPath(testing.allocator, s.path, rel);
+    // A typed `Brewfile` would make every directory's Brewfile one bundle.
+    const want = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, path, testing.allocator);
+    defer testing.allocator.free(want);
+    const stored = try storedManifestPath(testing.allocator, s.path, want);
     defer testing.allocator.free(stored);
-    try testing.expect(std.fs.path.isAbsolute(stored));
+    try testing.expectEqualStrings(want, stored);
+}
+
+test "import and install of one unnamed manifest record a single bundle" {
+    // Install named it "unnamed" and import by path: two bundles for one
+    // file, and every unnamed install overwrote the other's.
+    var s = try Scratch.init(testing.allocator, "unnamed_one_bundle");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "# empty bundle\n");
+    const rel = try relativeToCwd(testing.allocator, path);
+    defer testing.allocator.free(rel);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", rel });
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "install", path });
+
+    const want = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, path, testing.allocator);
+    defer testing.allocator.free(want);
+    var db_path_buf: [512]u8 = undefined;
+    var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+    defer db.close();
+    var stmt = try db.prepare("SELECT name FROM bundles;");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqualStrings(want, std.mem.sliceTo(stmt.columnText(0).?, 0));
+    try testing.expect(!try stmt.step());
 }
 
 test "remove --purge refuses a legacy relative manifest_path and keeps the row" {
@@ -886,6 +917,90 @@ test "install records the canonical manifest path so remove --purge can find the
     defer testing.allocator.free(stored);
     try testing.expectEqualStrings(want, stored);
     try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", "--purge", "solo" });
+}
+
+fn bundleNames(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
+    var db_path_buf: [512]u8 = undefined;
+    var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0));
+    defer db.close();
+    var stmt = try db.prepare("SELECT name FROM bundles ORDER BY name;");
+    defer stmt.finalize();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    while (try stmt.step()) {
+        if (out.items.len > 0) try out.append(allocator, ',');
+        try out.appendSlice(allocator, std.mem.sliceTo(stmt.columnText(0).?, 0));
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "remove and export find an unnamed bundle by any spelling of its file" {
+    // It is registered by its canonical path; users type the path they know.
+    var s = try Scratch.init(testing.allocator, "unnamed_by_spelling");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "brew \"wget\"\n");
+    const rel = try relativeToCwd(testing.allocator, path);
+    defer testing.allocator.free(rel);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path });
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .stdout = test_io.testSink(),
+        .stderr = test_io.testSink(),
+    };
+    try bundle.execute(&ctx, testing.allocator, &.{ "export", rel });
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", rel });
+
+    const names = try bundleNames(testing.allocator, s.path);
+    defer testing.allocator.free(names);
+    try testing.expectEqualStrings("", names);
+}
+
+test "remove takes a registered name as typed before resolving it as a file" {
+    // A name that also resolves to a file must not reach a different bundle.
+    var s = try Scratch.init(testing.allocator, "exact_name_wins");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "# empty bundle\n");
+    const rel = try relativeToCwd(testing.allocator, path);
+    defer testing.allocator.free(rel);
+    const canonical = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, path, testing.allocator);
+    defer testing.allocator.free(canonical);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+        defer db.close();
+        var stmt = try db.prepare("INSERT INTO bundles (name, manifest_path, created_at, version) VALUES (?, NULL, 0, 1), (?, NULL, 0, 1);");
+        defer stmt.finalize();
+        try stmt.bindText(1, rel);
+        try stmt.bindText(2, canonical);
+        _ = try stmt.step();
+    }
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "remove", rel });
+
+    const names = try bundleNames(testing.allocator, s.path);
+    defer testing.allocator.free(names);
+    try testing.expectEqualStrings(canonical, names);
+}
+
+test "export of a name that is neither registered nor a file still says it is not registered" {
+    var s = try Scratch.init(testing.allocator, "export_neither");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const missing = try std.fmt.allocPrint(testing.allocator, "{s}/no/such/Brewfile", .{s.path});
+    defer testing.allocator.free(missing);
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "export", missing }, "bundle not registered");
 }
 
 // --- export -----------------------------------------------------------
