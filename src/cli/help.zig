@@ -157,7 +157,7 @@ const reinstall_help =
     \\
     \\Examples:
     \\  malt reinstall wget
-    \\  malt reinstall --cask firefox
+    \\  malt reinstall --cask user/repo/app
     \\  malt reinstall user/repo/tool
     \\
 ;

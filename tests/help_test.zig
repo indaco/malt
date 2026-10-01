@@ -291,3 +291,19 @@ test "upgrade help no longer advertises the no-op --all" {
     var it = std.mem.tokenizeAny(u8, help.helpFor("upgrade"), " \t\n,[]`");
     while (it.next()) |tok| try testing.expect(!std.mem.eql(u8, tok, "--all"));
 }
+
+test "reinstall help shows only cask examples reinstall accepts" {
+    // reinstall refuses every core cask: a forced core-cask install deletes the
+    // live .app before placing the new copy. A bare-token cask example is one
+    // that always exits 1, so each one must name a tap-owned cask.
+    var lines = std.mem.splitScalar(u8, help.helpFor("reinstall"), '\n');
+    var seen: usize = 0;
+    while (lines.next()) |line| {
+        const at = std.mem.indexOf(u8, line, "malt reinstall --cask ") orelse continue;
+        const arg = line[at + "malt reinstall --cask ".len ..];
+        try testing.expectEqual(@as(usize, 2), std.mem.count(u8, arg, "/"));
+        seen += 1;
+    }
+    // Keep the tap-owned path documented, not just the core-cask detour.
+    try testing.expect(seen > 0);
+}
