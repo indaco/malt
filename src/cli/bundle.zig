@@ -711,7 +711,13 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     var db = try openDb(ctx);
     defer db.close();
 
-    const name = runner_mod.bundleName(manifest, canonical);
+    const name = runner_mod.bundleName(manifest, canonical) catch {
+        output.err("{s}: {s}", .{
+            runner_mod.describeError(error.UnsafeName),
+            if (manifest.name.len > 0) manifest.name else canonical,
+        });
+        return error.Aborted;
+    };
     // After the open, so a database the real run would refuse fails the preview too.
     if (dry_run) {
         output.info("would register {s} from {s}", .{ name, canonical });

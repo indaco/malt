@@ -63,7 +63,7 @@ pub fn describeError(err: RunnerError) []const u8 {
         RunnerError.IoFailed => "filesystem error during bundle install",
         RunnerError.OutOfMemory => "out of memory during bundle install",
         RunnerError.NoDispatcher => "bundle runner called without a dispatcher and without malt_bin",
-        RunnerError.UnsafeName => "bundle name is not a valid path component",
+        RunnerError.UnsafeName => "bundle name is not a valid path component, or holds a control character",
     };
 }
 
@@ -184,12 +184,12 @@ pub fn run(
     manifest: manifest_mod.Manifest,
     opts: Options,
 ) RunnerError!Report {
-    // Not bundleName: a path cannot be a lock file name.
-    // ponytail: unnamed installs share one lock, so they serialise; harmless.
-    const bundle_name = if (manifest.name.len > 0) manifest.name else "unnamed";
-    // Manifest-supplied, and it lands in the lock path below; refuse outright
+    // Manifest-supplied, and it names the lock and the row; refuse outright
     // rather than sanitise, before createDirPath grants it any side effect.
-    if (!path_component.isPathComponent(bundle_name)) return RunnerError.UnsafeName;
+    const db_name = bundleName(manifest, opts.manifest_path) catch return RunnerError.UnsafeName;
+    // Not db_name: a path cannot be a lock file name.
+    // ponytail: unnamed installs share one lock, so they serialise; harmless.
+    const lock_name = if (manifest.name.len > 0) manifest.name else "unnamed";
 
     // Bundles directory + advisory lock for idempotency.
     const prefix: []const u8 = opts.prefix orelse atomic.maltPrefixOrAbort();
@@ -199,7 +199,7 @@ pub fn run(
     // bundles/ may already exist; the lock file create below surfaces real errors.
     std.Io.Dir.cwd().createDirPath(io, bundles_dir) catch {};
 
-    const lock_path = std.fmt.allocPrint(allocator, "{s}/{s}.lock", .{ bundles_dir, bundle_name }) catch
+    const lock_path = std.fmt.allocPrint(allocator, "{s}/{s}.lock", .{ bundles_dir, lock_name }) catch
         return RunnerError.OutOfMemory;
     defer allocator.free(lock_path);
 
@@ -240,7 +240,7 @@ pub fn run(
     //    in dry-run so the preview path stays read-only.
     // An interrupted run installed only part of the manifest; recording it
     // would claim members that never landed.
-    if (!opts.dry_run and !signals.isInterrupted()) recordBundle(io, db, manifest, opts.manifest_path) catch |e| {
+    if (!opts.dry_run and !signals.isInterrupted()) recordBundle(io, db, db_name, manifest, opts.manifest_path) catch |e| {
         // recordBundle's inferred set spans sqlite + clock; keep @errorName.
         db_record_error = @errorName(e);
     };
@@ -351,6 +351,7 @@ fn buildSubprocessArgv(allocator: std.mem.Allocator, bin: []const u8, call: Memb
 fn recordBundle(
     io: std.Io,
     db: *sqlite.Database,
+    name: []const u8,
     manifest: manifest_mod.Manifest,
     manifest_path: ?[]const u8,
 ) !void {
@@ -359,15 +360,22 @@ fn recordBundle(
     try db.beginTransaction();
     errdefer db.rollback();
 
-    try writeBundle(io, db, bundleName(manifest, manifest_path), manifest_path, manifest);
+    try writeBundle(io, db, name, manifest_path, manifest);
     try db.commit();
 }
 
 /// A manifest without a name (every Brewfile) is identified by its file, as
-/// brew does, so `install` and `import` of it land on one bundle.
-pub fn bundleName(manifest: manifest_mod.Manifest, manifest_path: ?[]const u8) []const u8 {
-    if (manifest.name.len > 0) return manifest.name;
-    return manifest_path orelse "unnamed";
+/// brew does, so `install` and `import` of it land on one bundle. A chosen
+/// name must be one path component, or a Maltfile.json could take over a
+/// Brewfile's bundle by naming itself after that file; and no name may hold
+/// a control byte, which `list` would print.
+pub fn bundleName(manifest: manifest_mod.Manifest, manifest_path: ?[]const u8) error{UnsafeName}![]const u8 {
+    const name = if (manifest.name.len > 0) blk: {
+        if (!path_component.isPathComponent(manifest.name)) return error.UnsafeName;
+        break :blk manifest.name;
+    } else manifest_path orelse "unnamed";
+    if (path_component.hasControlByte(name)) return error.UnsafeName;
+    return name;
 }
 
 /// Records `manifest` as bundle `name`, row and members: the one write path
@@ -448,10 +456,22 @@ fn replaceMembers(db: *sqlite.Database, name: []const u8, manifest: manifest_mod
 test "bundleName prefers the manifest's name, then its file, then a fixed fallback" {
     var m = manifest_mod.Manifest.init(std.testing.allocator);
     defer m.deinit();
-    try std.testing.expectEqualStrings("unnamed", bundleName(m, null));
-    try std.testing.expectEqualStrings("/w/Brewfile", bundleName(m, "/w/Brewfile"));
+    try std.testing.expectEqualStrings("unnamed", try bundleName(m, null));
+    try std.testing.expectEqualStrings("/w/Brewfile", try bundleName(m, "/w/Brewfile"));
     m.name = "dev";
-    try std.testing.expectEqualStrings("dev", bundleName(m, "/w/Brewfile"));
+    try std.testing.expectEqualStrings("dev", try bundleName(m, "/w/Brewfile"));
+}
+
+test "bundleName refuses a chosen name that is a path, and any name with a control byte" {
+    var m = manifest_mod.Manifest.init(std.testing.allocator);
+    defer m.deinit();
+    // A path-shaped name would land on a Brewfile's bundle.
+    for ([_][]const u8{ "/w/Brewfile", "a/b", "..", "x\x1b]0;t\x07" }) |n| {
+        m.name = n;
+        try std.testing.expectError(error.UnsafeName, bundleName(m, "/w/ok"));
+    }
+    m.name = "";
+    try std.testing.expectError(error.UnsafeName, bundleName(m, "/w/x\x1b/Brewfile"));
 }
 
 test "replaceMembers swaps one bundle's members for the manifest's and leaves other bundles alone" {

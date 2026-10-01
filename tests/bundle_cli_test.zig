@@ -1068,6 +1068,40 @@ test "export of a name that is neither registered nor a file still says it is no
     try expectRefused(&malt.app_ctx.debug_ctx, &.{ "export", missing }, "bundle not registered");
 }
 
+test "import refuses a path-shaped or control-byte name instead of taking over a bundle" {
+    // A Maltfile.json naming itself after a Brewfile's path would re-point
+    // that bundle and pick what `remove --purge` uninstalls.
+    var s = try Scratch.init(testing.allocator, "import_name_takeover");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const brewfile = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(brewfile);
+    try writeFile(brewfile, "brew \"wget\"\n");
+    {
+        quiet();
+        defer unquiet();
+        try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", brewfile });
+    }
+    const victim = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, brewfile, testing.allocator);
+    defer testing.allocator.free(victim);
+
+    const evil = try std.fmt.allocPrint(testing.allocator, "{s}/evil.json", .{s.path});
+    defer testing.allocator.free(evil);
+    for ([_][]const u8{ victim, "../x", "x\x1b]0;t\x07" }) |name| {
+        const body = try std.fmt.allocPrint(testing.allocator, "{{\"name\": {f}, \"version\": 1, \"formulas\": [{{\"name\": \"jq\"}}]}}", .{std.json.fmt(name, .{})});
+        defer testing.allocator.free(body);
+        try writeFile(evil, body);
+        try expectRefused(&malt.app_ctx.debug_ctx, &.{ "import", evil }, "not a valid path component");
+    }
+
+    const members = try memberList(testing.allocator, s.path, victim);
+    defer testing.allocator.free(members);
+    try testing.expectEqualStrings("formula:wget", members);
+    const stored = try storedManifestPath(testing.allocator, s.path, victim);
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(victim, stored);
+}
+
 // --- export -----------------------------------------------------------
 
 test "export with no installed packages emits an empty Brewfile body to stdout" {
