@@ -116,6 +116,9 @@ jobs:
       - name: Regression guard - bundle install records the manifest it installed from
         run: ./scripts/regressions/bundle-install-records-manifest-path-bundle-install-wipes-imported-manifest-path.sh
 
+      - name: Regression guard - an unnamed manifest is one bundle, named by its file
+        run: ./scripts/regressions/bundle-unnamed-manifest-named-by-file-bundle-install-and-import-name-unnamed-manifests-differently.sh
+
       - name: Regression guard - bundle install, cleanup and remove stop on an unknown flag
         run: ./scripts/regressions/bundle-subcommands-stop-on-unknown-flags-bundle-install-cleanup-remove-proceed-past-unknown-flags.sh
 

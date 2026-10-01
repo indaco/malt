@@ -38,19 +38,29 @@ printf 'not a brewfile ((\n' >"$TMP/b/Brewfile"
 fail=0
 
 (cd "$TMP/a" && "$MT" bundle import Brewfile >/dev/null 2>&1)
-stored=$(sqlite3 "$DB" "select manifest_path from bundles where name='Brewfile';")
-# `pwd -P` resolves symlinks the same way the store does.
+# `pwd -P` resolves symlinks the same way the store does. An unnamed
+# manifest is registered by that same canonical path.
 want="$(cd "$TMP/a" && pwd -P)/Brewfile"
+stored=$(sqlite3 "$DB" "select manifest_path from bundles where name='$want';")
 if [[ "$stored" != "$want" ]]; then
   echo "FAIL: import stored '$stored', want '$want'" >&2
   fail=1
 fi
 
-if ! out=$(cd "$TMP/b" && "$MT" bundle remove --purge --dry-run Brewfile 2>&1); then
+# Named by a non-canonical spelling, from another cwd: still a's manifest.
+if ! out=$(cd "$TMP/b" && "$MT" bundle remove --purge --dry-run "$TMP/a/Brewfile" 2>&1); then
   echo "FAIL: purge from another cwd failed: $out" >&2
   fail=1
 elif grep -q "parse error" <<<"$out"; then
   echo "FAIL: purge read b/Brewfile instead of the imported file" >&2
+  fail=1
+fi
+# A bare `Brewfile` there names b's file, which is not registered.
+if out=$(cd "$TMP/b" && "$MT" bundle remove --purge --dry-run Brewfile 2>&1); then
+  echo "FAIL: purge of an unregistered Brewfile succeeded: $out" >&2
+  fail=1
+elif grep -q "parse error" <<<"$out"; then
+  echo "FAIL: purge read b/Brewfile" >&2
   fail=1
 fi
 
