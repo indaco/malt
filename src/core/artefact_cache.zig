@@ -9,7 +9,7 @@ const std = @import("std");
 /// idempotent: a no-op when `cache_dir` is the legacy directory itself
 /// (override unset), and a file already at the destination wins.
 pub fn adoptLegacy(io: std.Io, prefix: []const u8, cache_dir: []const u8) void {
-    var legacy_buf: [512]u8 = undefined;
+    var legacy_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // The pre-override layout, spelled out on purpose: this is its one reader.
     const legacy_root = std.fmt.bufPrint(&legacy_buf, "{s}/cache", .{prefix}) catch return;
     if (sameDir(io, legacy_root, cache_dir)) return;
@@ -17,9 +17,9 @@ pub fn adoptLegacy(io: std.Io, prefix: []const u8, cache_dir: []const u8) void {
 }
 
 fn adoptTier(io: std.Io, legacy_root: []const u8, cache_dir: []const u8, tier: []const u8) void {
-    var legacy_buf: [512]u8 = undefined;
+    var legacy_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const legacy = std.fmt.bufPrint(&legacy_buf, "{s}/{s}", .{ legacy_root, tier }) catch return;
-    var dest_buf: [512]u8 = undefined;
+    var dest_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dest = std.fmt.bufPrint(&dest_buf, "{s}/{s}", .{ cache_dir, tier }) catch return;
 
     var src_dir = std.Io.Dir.openDirAbsolute(io, legacy, .{ .iterate = true }) catch return;
@@ -186,4 +186,21 @@ test "adoptLegacy with no legacy tree touches nothing" {
     defer s.deinit();
     adoptLegacy(dbg_io, s.base, s.p("/alt"));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(dbg_io, s.p("/alt"), .{}));
+}
+
+test "adoptLegacy moves a Tap archive onto a destination path past 512 bytes" {
+    var s = try Scratch.init("artefact_adopt_long");
+    defer s.deinit();
+    const seg = "c" ** 200;
+    const cache_dir = s.p("/" ++ seg ++ "/" ++ seg ++ "/" ++ seg);
+    try std.testing.expect(cache_dir.len + "/Tap".len > 512);
+    try std.Io.Dir.cwd().createDirPath(dbg_io, s.p("/cache/Tap"));
+    try putFile(s.p("/cache/Tap/x"), "tgz");
+
+    adoptLegacy(dbg_io, s.base, cache_dir);
+
+    var dest_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dest = try std.fmt.bufPrint(&dest_buf, "{s}/Tap/x", .{cache_dir});
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("tgz", try readSmall(dest, &buf));
 }

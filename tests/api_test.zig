@@ -1236,3 +1236,32 @@ test "readNotFoundCache returns false for stale marker" {
     var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
     try testing.expect(!api.readNotFoundCache("old", "formula_"));
 }
+
+test "BrewApi cache round-trips under a cache dir past 512 bytes" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var base = try TempCacheDir.init("long_cache_dir");
+    defer base.deinit();
+
+    const seg = "c" ** 200;
+    const long = try std.fmt.allocPrint(testing.allocator, "{s}/{s}/{s}/{s}", .{ base.path, seg, seg, seg });
+    defer testing.allocator.free(long);
+    try testing.expect(long.len > 512);
+    try test_io.cwd().createDirPath(std.Options.debug_io, long);
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, long);
+    const json = "{\"name\":\"fake\"}";
+    api.writeCache("fake", "formula_", json);
+
+    try testing.expect(api.cachedExists("fake", .formula));
+    const hit = api.readCache("fake", "formula_") orelse return error.TestExpectedCacheHit;
+    defer testing.allocator.free(hit);
+    try testing.expectEqualStrings(json, hit);
+    try testing.expect(api.cacheSize() > 0);
+
+    api.writeNotFoundCache("ghost", "cask_");
+    try testing.expect(api.readNotFoundCache("ghost", "cask_"));
+
+    api.invalidateCache();
+    try testing.expect(!api.cachedExists("fake", .formula));
+}

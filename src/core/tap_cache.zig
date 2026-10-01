@@ -20,7 +20,7 @@ pub fn cachePath(buf: []u8, cache_dir: []const u8, sha256: []const u8, ext: []co
 /// Idempotent `mkdir -p` for `<cache>/Tap`. Recursive because nothing
 /// creates `$MALT_CACHE` itself; safe across concurrent installs.
 pub fn ensureCacheDir(io: std.Io, cache_dir: []const u8) !void {
-    var buf: [512]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = try std.fmt.bufPrint(&buf, "{s}/Tap", .{cache_dir});
     try std.Io.Dir.cwd().createDirPath(io, dir);
 }
@@ -30,7 +30,7 @@ pub fn ensureCacheDir(io: std.Io, cache_dir: []const u8) !void {
 /// caller skip both the HTTP archive fetch and the SHA recomputation
 /// (the filename IS the SHA).
 pub fn exists(io: std.Io, cache_dir: []const u8, sha256: []const u8, ext: []const u8) bool {
-    var buf: [512]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = cachePath(&buf, cache_dir, sha256, ext) catch return false;
     std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
     return true;
@@ -78,7 +78,7 @@ pub fn olderThan(now_secs: i64, mtime_secs: i64, max_age_days: i64) bool {
 /// contributes zero so doctor's read stays infallible. `now_secs` is a
 /// parameter so tests can move the clock instead of back-dating files.
 pub fn usageUnder(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, now_secs: i64, max_age_days: i64) Usage {
-    var buf: [512]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir_path = std.fmt.bufPrint(&buf, "{s}/Tap", .{cache_dir}) catch return .{};
     var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return .{};
     defer dir.close(io);
@@ -334,4 +334,30 @@ test "usageUnder: total is stable while reclaimable swings with the window" {
     const all = usageUnder(io, std.testing.allocator, cache_dir, now + 1, 0);
     try std.testing.expectEqual(@as(u64, 400), all.total);
     try std.testing.expectEqual(@as(u64, 400), all.reclaimable);
+}
+
+test "tap tier works when the cache dir pushes the archive path past 512 bytes" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var s = try Scratch.init("tap_cache_long");
+    defer s.deinit();
+
+    const seg = "c" ** 200;
+    const cache_dir = s.p("/" ++ seg ++ "/" ++ seg ++ "/" ++ seg);
+    const sha = "ab" ** 32;
+    try std.testing.expect(cache_dir.len + "/Tap/".len + sha.len + ".tar.gz".len > 512);
+
+    try std.Io.Dir.cwd().createDirPath(io, cache_dir);
+    try ensureCacheDir(io, cache_dir);
+
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const entry = try cachePath(&path_buf, cache_dir, sha, ".tar.gz");
+    const f = try std.Io.Dir.createFileAbsolute(io, entry, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, "x" ** 128);
+
+    try std.testing.expect(exists(io, cache_dir, sha, ".tar.gz"));
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    try std.testing.expectEqual(@as(u64, 128), usageUnder(io, std.testing.allocator, cache_dir, now, 30).total);
 }

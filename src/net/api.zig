@@ -270,7 +270,7 @@ pub fn findNameMatches(
 /// TTL-gated read of `{cache_dir}/api/<prefix><key>.json` without a client:
 /// verbs that only consult the cache never need HTTP. Caller owns the bytes.
 pub fn readFreshCache(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, key: []const u8, prefix: []const u8) ?[]const u8 {
-    var path_buf: [512]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ cache_dir, prefix, key }) catch return null;
 
     const stat = std.Io.Dir.cwd().statFile(io, cache_path, .{}) catch return null;
@@ -402,7 +402,7 @@ pub const BrewApi = struct {
     /// ambiguity warning when no cask of that name has ever been cached.
     pub fn cachedExists(self: *BrewApi, name: []const u8, kind: Kind) bool {
         const prefix = prefixForKind(kind);
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, name }) catch return false;
         _ = std.Io.Dir.cwd().statFile(self.io, cache_path, .{}) catch return false;
         return true;
@@ -411,7 +411,7 @@ pub const BrewApi = struct {
     /// Return true iff a fresh 200 cache entry exists for `key` — same
     /// TTL rule as `readCache`, but without reading the body.
     fn cachedFresh(self: *BrewApi, key: []const u8, prefix: []const u8) bool {
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return false;
         const stat = std.Io.Dir.cwd().statFile(self.io, cache_path, .{}) catch return false;
         const now = std.Io.Clock.real.now(self.io).toSeconds();
@@ -547,7 +547,7 @@ pub const BrewApi = struct {
     }
 
     fn indexFileExists(self: *const BrewApi, infix: []const u8, key: []const u8) bool {
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return false;
         _ = std.Io.Dir.cwd().statFile(self.io, p, .{}) catch return false;
         return true;
@@ -558,7 +558,7 @@ pub const BrewApi = struct {
     /// stale-but-present file. Returns caller-owned bytes, or null on any
     /// miss / read error.
     fn readIndexFile(self: *BrewApi, infix: []const u8, key: []const u8, ttl: ?i64) ?[]const u8 {
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return null;
 
         if (ttl) |limit| {
@@ -584,14 +584,14 @@ pub const BrewApi = struct {
     }
 
     fn writeIndexFile(self: *const BrewApi, infix: []const u8, key: []const u8, data: []const u8) void {
-        var dir_buf: [512]u8 = undefined;
+        var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const dir = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.Io.Dir.createDirAbsolute(self.io, dir, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
 
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return;
 
         const f = std.Io.Dir.cwd().createFile(self.io, p, .{}) catch return;
@@ -607,7 +607,7 @@ pub const BrewApi = struct {
     /// Read the stored bulk-dump ETag for `key` (`api/<key>.etag`), or null
     /// if absent / unreadable / implausibly large. Caller owns the bytes.
     fn readIndexEtag(self: *BrewApi, key: []const u8) ?[]const u8 {
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}.etag", .{ self.cache_dir, key }) catch return null;
         const file = std.Io.Dir.cwd().openFile(self.io, p, .{}) catch return null;
         defer file.close(self.io);
@@ -631,13 +631,13 @@ pub const BrewApi = struct {
     /// the next fetch is unconditional rather than replaying a stale token.
     fn writeIndexEtag(self: *const BrewApi, key: []const u8, etag: ?[]const u8) void {
         const e = etag orelse return self.deleteIndexEtag(key);
-        var dir_buf: [512]u8 = undefined;
+        var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const dir = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.Io.Dir.createDirAbsolute(self.io, dir, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return,
         };
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}.etag", .{ self.cache_dir, key }) catch return;
         // Best-effort: a failed write just means the next fetch is
         // unconditional, never wrong — the side-cars are already on disk.
@@ -646,7 +646,7 @@ pub const BrewApi = struct {
 
     /// Remove the stored ETag for `key`; best-effort.
     fn deleteIndexEtag(self: *const BrewApi, key: []const u8) void {
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}.etag", .{ self.cache_dir, key }) catch return;
         // A leftover ETag at worst triggers one needless conditional GET;
         // a delete failure is harmless, so swallow it.
@@ -656,7 +656,7 @@ pub const BrewApi = struct {
     /// Reset a side-car's mtime to now so a 304 restarts its TTL window
     /// without rewriting the bytes already on disk.
     fn touchIndex(self: *const BrewApi, infix: []const u8, key: []const u8) void {
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return;
         const file = std.Io.Dir.cwd().openFile(self.io, p, .{ .mode = .write_only }) catch return;
         defer file.close(self.io);
@@ -667,7 +667,7 @@ pub const BrewApi = struct {
 
     /// Invalidate all cached API responses.
     pub fn invalidateCache(self: *BrewApi) void {
-        var api_path_buf: [512]u8 = undefined;
+        var api_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const api_path = std.fmt.bufPrint(&api_path_buf, "{s}/api", .{self.cache_dir}) catch return;
         // Cache dir absent on first-ever run; wipe is purely opportunistic.
         std.Io.Dir.cwd().deleteTree(self.io, api_path) catch {};
@@ -721,20 +721,20 @@ pub const BrewApi = struct {
     /// path so a stale snapshot still serves bytes; the regular
     /// `readCache` adds the freshness gate on top.
     pub fn readCacheBytes(self: *BrewApi, key: []const u8, prefix: []const u8) ?[]const u8 {
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return null;
         return readCacheFile(self.io, self.allocator, cache_path);
     }
 
     pub fn writeCache(self: *const BrewApi, key: []const u8, prefix: []const u8, data: []const u8) void {
-        var dir_buf: [512]u8 = undefined;
+        var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.Io.Dir.createDirAbsolute(self.io, dir_path, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
 
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return;
 
         // Atomic write so a crash mid-`writeAll` can't leave a
@@ -752,7 +752,7 @@ pub const BrewApi = struct {
     /// so the cache auto-refreshes if the upstream ever starts
     /// returning 200.
     pub fn readNotFoundCache(self: *BrewApi, key: []const u8, prefix: []const u8) bool {
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return false;
 
         const stat = std.Io.Dir.cwd().statFile(self.io, cache_path, .{}) catch return false;
@@ -767,14 +767,14 @@ pub const BrewApi = struct {
     /// against `cache_ttl_secs`. Best-effort; failures are silent so a
     /// missing cache dir never breaks an install.
     pub fn writeNotFoundCache(self: *const BrewApi, key: []const u8, prefix: []const u8) void {
-        var dir_buf: [512]u8 = undefined;
+        var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.Io.Dir.createDirAbsolute(self.io, dir_path, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
 
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return;
 
         const file = std.Io.Dir.cwd().createFile(self.io, cache_path, .{}) catch return;
@@ -787,7 +787,7 @@ pub const BrewApi = struct {
     /// Evict oldest cache entries until total size is under max_cache_bytes.
     /// Called by `malt cleanup` and `malt doctor`.
     pub fn evictCache(self: *BrewApi) u32 {
-        var dir_buf: [512]u8 = undefined;
+        var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const api_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return 0;
 
         var dir = std.Io.Dir.openDirAbsolute(self.io, api_path, .{ .iterate = true }) catch return 0;
@@ -832,7 +832,7 @@ pub const BrewApi = struct {
 
     /// Return total cache size in bytes. Used by `malt doctor` for warnings.
     pub fn cacheSize(self: *BrewApi) u64 {
-        var dir_buf: [512]u8 = undefined;
+        var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const api_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return 0;
 
         var dir = std.Io.Dir.openDirAbsolute(self.io, api_path, .{ .iterate = true }) catch return 0;

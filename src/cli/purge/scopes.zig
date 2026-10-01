@@ -332,7 +332,7 @@ fn pruneCacheRecursive(io: std.Io, cache_dir: []const u8, max_age_days: i64, dry
     var iter = dir.iterate();
     while (iter.next(io) catch null) |entry| {
         if (entry.kind == .directory) {
-            var sub_buf: [512]u8 = undefined;
+            var sub_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ cache_dir, entry.name }) catch continue;
             pruneCacheRecursive(io, sub_path, max_age_days, dry_run, result, rep);
             continue;
@@ -343,7 +343,7 @@ fn pruneCacheRecursive(io: std.Io, cache_dir: []const u8, max_age_days: i64, dry
             if (!dry_run) dir.deleteFile(io, entry.name) catch continue;
             // Full path so users (and the smoke tests) can see WHERE the
             // file lived; the leaf alone hides path-of-cleanup hot spots.
-            var label_buf: [768]u8 = undefined;
+            var label_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const label = std.fmt.bufPrint(&label_buf, "{s}/{s}", .{ cache_dir, entry.name }) catch entry.name;
             rep.item(label);
             result.bytes += stat.size;
@@ -407,7 +407,7 @@ pub fn runDownloads(ctx: *const AppCtx, cache_dir: []const u8, dry_run: bool) !T
 
     var rep = report.Reporter.init("downloads", dry_run);
 
-    var path_buf: [512]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const downloads_path = std.fmt.bufPrint(&path_buf, "{s}/downloads", .{cache_dir}) catch return result;
 
     var dir = std.Io.Dir.openDirAbsolute(io, downloads_path, .{ .iterate = true }) catch {
@@ -2192,4 +2192,38 @@ test "caskVersionFootprint counts a cached artefact whose path exceeds 512 bytes
 
     const cache = cask_dir[0 .. cask_dir.len - "/Cask".len];
     try std.testing.expectEqual(@as(u64, 5), caskVersionFootprint(io, a, root, cache, "tok", "1.0"));
+}
+
+test "cache prune and downloads sweep reach files under a cache dir past 512 bytes" {
+    const io = fs_test_io;
+    const a = std.testing.allocator;
+    const root = try std.fmt.allocPrint(a, "/tmp/malt_sweep_long_{d}", .{std.c.getpid()});
+    defer a.free(root);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const seg = "d" ** 200;
+    const cache = try std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}", .{ root, seg, seg, seg });
+    defer a.free(cache);
+    try std.testing.expect(cache.len + "/downloads/stale.bin".len > 512);
+    const nested = try std.fmt.allocPrint(a, "{s}/sub", .{cache});
+    defer a.free(nested);
+    const downloads = try std.fmt.allocPrint(a, "{s}/downloads", .{cache});
+    defer a.free(downloads);
+    try std.Io.Dir.cwd().createDirPath(io, nested);
+    try std.Io.Dir.cwd().createDirPath(io, downloads);
+    const old = try std.fmt.allocPrint(a, "{s}/old.tmp", .{nested});
+    defer a.free(old);
+    const stale = try std.fmt.allocPrint(a, "{s}/stale.bin", .{downloads});
+    defer a.free(stale);
+    for ([_][]const u8{ old, stale }) |p| (try std.Io.Dir.createFileAbsolute(io, p, .{})).close(io);
+
+    const ctx = AppCtx{ .io = io, .environ = .empty };
+    const swept = try runDownloads(&ctx, cache, false);
+    try std.testing.expectEqual(@as(u32, 1), swept.removed);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, stale, .{}));
+
+    var result: TierResult = .{};
+    var rep = report.Reporter.init("cache", false);
+    // A negative window ages every file, so no back-dating is needed.
+    pruneCacheRecursive(io, cache, -1, false, &result, &rep);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, old, .{}));
 }

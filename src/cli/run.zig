@@ -164,7 +164,7 @@ fn ephemeralRun(
     errdefer releaseKeepLock(ctx.io, &keep_lock);
 
     if (keep) {
-        var run_root_buf: [512]u8 = undefined;
+        var run_root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const run_root = std.fmt.bufPrint(&run_root_buf, "{s}/run", .{cache_dir}) catch {
             output.err("Cache root path too long for {s}", .{pkg_name});
             return error.Aborted;
@@ -175,7 +175,7 @@ fn ephemeralRun(
             return error.Aborted;
         };
 
-        var lock_buf: [512]u8 = undefined;
+        var lock_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const lock_path = buildKeepLockPath(&lock_buf, cache_dir, bottle.sha256) catch {
             output.err("Cache lock path too long for {s}", .{pkg_name});
             return error.Aborted;
@@ -194,7 +194,7 @@ fn ephemeralRun(
         };
 
         // Probe under the lock — a peer that just released may have populated the slot.
-        var hit_buf: [512]u8 = undefined;
+        var hit_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         if (findCachedBinary(ctx, &hit_buf, cache_dir, bottle.sha256, pkg_name, formula.version) catch null) |cached_bin| {
             // Drop the lock before exec so peers can run the cached binary unblocked.
             releaseKeepLock(ctx.io, &keep_lock);
@@ -208,7 +208,7 @@ fn ephemeralRun(
     defer ghcr.deinit();
 
     // Cache slot under {cache} so `mt purge --cache` wipes it; a tmp dir otherwise.
-    var keep_dest_buf: [512]u8 = undefined;
+    var keep_dest_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var dest_dir: []const u8 = undefined;
     var owned_tmp: ?[]const u8 = null;
     defer if (owned_tmp) |p| {
@@ -274,7 +274,7 @@ fn ephemeralRun(
         return error.Aborted;
     };
 
-    var bin_path_buf: [512]u8 = undefined;
+    var bin_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const bin_path = std.fmt.bufPrint(&bin_path_buf, "{s}/{s}/{s}/bin/{s}", .{
         dest_dir,
         pkg_name,
@@ -447,4 +447,11 @@ test "buildKeepLockPath surfaces PathTooLong on overflow" {
         error.PathTooLong,
         buildKeepLockPath(&buf, "/opt/malt/cache", "deadbeef"),
     );
+}
+
+test "keep-cache path builders fit a cache dir past 512 bytes" {
+    const cache = "/" ++ "c" ** 200 ++ "/" ++ "c" ** 200 ++ "/" ++ "c" ** 200;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.testing.expect((try buildKeepCachePath(&buf, cache, "deadbeef")).len > 512);
+    try std.testing.expect((try buildKeepLockPath(&buf, cache, "deadbeef")).len > 512);
 }

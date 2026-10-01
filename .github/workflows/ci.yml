@@ -116,6 +116,9 @@ jobs:
       - name: Regression guard - cask uninstall sweeps a cached download on a long cache path
         run: ./scripts/regressions/cask-uninstall-sweeps-long-cache-path-cask-installer-512-byte-path-buffers.sh
 
+      - name: Regression guard - cache sweeps and doctor handle a cache dir at the length limit
+        run: ./scripts/regressions/tap-install-and-purge-handle-long-cache-path-cache-tier-512-byte-path-buffers.sh
+
       - name: Regression guard - bundle export refuses a database it cannot read
         run: ./scripts/regressions/bundle-export-refuses-unreadable-members-bundle-export-reads-unreadable-members-as-empty.sh
 

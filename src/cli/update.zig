@@ -55,7 +55,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Stays sub-100ms: wipe API cache + invalidate snapshot; the next
     // `mt outdated` recomputes against the new world.
-    var api_buf: [512]u8 = undefined;
+    var api_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (std.fmt.bufPrint(&api_buf, "{s}/api", .{cache_dir})) |api_path| {
         std.Io.Dir.cwd().deleteTree(ctx.io, api_path) catch {};
     } else |_| {}
