@@ -667,18 +667,42 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
         return;
     }
 
-    // Record metadata only; no install.
-    var stmt = db.prepare(
-        \\INSERT OR REPLACE INTO bundles(name, manifest_path, created_at, version)
-        \\VALUES (?, ?, ?, ?);
-    ) catch return unwritableDb(&db);
-    defer stmt.finalize();
-    stmt.bindText(1, name) catch return unwritableDb(&db);
-    stmt.bindText(2, canonical) catch return unwritableDb(&db);
-    stmt.bindInt(3, std.Io.Clock.real.now(ctx.io).toSeconds()) catch return unwritableDb(&db);
-    stmt.bindInt(4, @intCast(manifest.version)) catch return unwritableDb(&db);
-    _ = stmt.step() catch return unwritableDb(&db);
+    recordImport(ctx.io, &db, name, canonical, manifest) catch {
+        // Worded first: the rollback resets SQLite's message.
+        const err = unwritableDb(&db);
+        db.rollback();
+        return err;
+    };
     output.success("bundle registered: {s}", .{name});
+}
+
+/// The manifest becomes the bundle, as with `install`, minus the install.
+fn recordImport(
+    io: std.Io,
+    db: *sqlite.Database,
+    name: []const u8,
+    manifest_path: []const u8,
+    manifest: manifest_mod.Manifest,
+) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    {
+        // An upsert, not REPLACE: the delete half of REPLACE cascades
+        // through the members, and the row should change in place.
+        var stmt = try db.prepare(
+            \\INSERT INTO bundles(name, manifest_path, created_at, version)
+            \\VALUES (?, ?, ?, ?)
+            \\ON CONFLICT(name) DO UPDATE SET manifest_path = excluded.manifest_path,
+            \\  created_at = excluded.created_at, version = excluded.version;
+        );
+        defer stmt.finalize();
+        try stmt.bindText(1, name);
+        try stmt.bindText(2, manifest_path);
+        try stmt.bindInt(3, std.Io.Clock.real.now(io).toSeconds());
+        try stmt.bindInt(4, @intCast(manifest.version));
+        _ = try stmt.step();
+    }
+    try runner_mod.replaceMembers(db, name, manifest);
+    try db.commit();
 }
 
 // ---------- helpers ----------

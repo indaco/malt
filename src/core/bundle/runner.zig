@@ -364,11 +364,22 @@ fn recordBundle(
     try ins.bindInt(3, @intCast(manifest.version));
     _ = try ins.step();
 
-    // Clean previous members of this bundle to keep it idempotent.
-    var del = try db.prepare("DELETE FROM bundle_members WHERE bundle_name = ?;");
-    defer del.finalize();
-    try del.bindText(1, name);
-    _ = try del.step();
+    try replaceMembers(db, name, manifest);
+    try db.commit();
+}
+
+/// Rewrites `name`'s members from `manifest`. The caller owns the
+/// transaction, so a failure leaves the previous members intact.
+pub fn replaceMembers(db: *sqlite.Database, name: []const u8, manifest: manifest_mod.Manifest) sqlite.SqliteError!void {
+    // Clean previous members of this bundle to keep it idempotent. Scoped:
+    // finalizing a stepped statement after a later failure resets the
+    // connection's error message the caller reports.
+    {
+        var del = try db.prepare("DELETE FROM bundle_members WHERE bundle_name = ?;");
+        defer del.finalize();
+        try del.bindText(1, name);
+        _ = try del.step();
+    }
 
     var memb = try db.prepare(
         \\INSERT INTO bundle_members(bundle_name, kind, ref, spec)
@@ -404,8 +415,41 @@ fn recordBundle(
         try memb.bindText(3, s.name);
         _ = try memb.step();
     }
+}
 
-    try db.commit();
+test "replaceMembers swaps one bundle's members for the manifest's and leaves other bundles alone" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO bundles(name, manifest_path, created_at, version) VALUES ('a', NULL, 0, 1), ('b', NULL, 0, 1);
+        \\INSERT INTO bundle_members(bundle_name, kind, ref) VALUES ('a', 'formula', 'stale'), ('b', 'formula', 'kept');
+    );
+    var formulas = [_]manifest_mod.FormulaEntry{.{ .name = "wget" }};
+    var casks = [_]manifest_mod.CaskEntry{.{ .name = "firefox" }};
+    var services = [_]manifest_mod.ServiceEntry{.{ .name = "redis" }};
+    var taps = [_][]const u8{"user/repo"};
+    var m = manifest_mod.Manifest.init(std.testing.allocator);
+    defer m.deinit();
+    m.taps = &taps;
+    m.formulas = &formulas;
+    m.casks = &casks;
+    m.services = &services;
+
+    try replaceMembers(&db, "a", m);
+
+    const want = [_][2][]const u8{
+        .{ "a", "cask:firefox" },  .{ "a", "formula:wget" }, .{ "a", "service:redis" },
+        .{ "a", "tap:user/repo" }, .{ "b", "formula:kept" },
+    };
+    var stmt = try db.prepare("SELECT bundle_name, kind || ':' || ref FROM bundle_members ORDER BY 1, 2;");
+    defer stmt.finalize();
+    for (want) |w| {
+        try std.testing.expect(try stmt.step());
+        try std.testing.expectEqualStrings(w[0], std.mem.sliceTo(stmt.columnText(0).?, 0));
+        try std.testing.expectEqualStrings(w[1], std.mem.sliceTo(stmt.columnText(1).?, 0));
+    }
+    try std.testing.expect(!try stmt.step());
 }
 
 test "describeError gives every tag a distinct, non-empty message" {
