@@ -412,7 +412,14 @@ fn resolveRemoveArgs(rest: []const []const u8, global_dry_run: bool) error{Abort
 }
 
 fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
-    const args = try resolveRemoveArgs(rest, output.isDryRun());
+    var args = try resolveRemoveArgs(rest, output.isDryRun());
+    const name = blk: {
+        var db = try openDb(ctx);
+        defer db.close();
+        break :blk try resolveBundleName(ctx, allocator, &db, args.name);
+    };
+    defer allocator.free(name);
+    args.name = name;
 
     if (args.purge) try purgeMembers(ctx, allocator, args);
 
@@ -500,6 +507,23 @@ fn purgeMembers(ctx: *const AppCtx, allocator: std.mem.Allocator, args: RemoveAr
         output.err("bundle purge completed with {d} failure(s)", .{report.failures.len});
         return error.Aborted;
     }
+}
+
+/// An unnamed manifest is registered by its canonical path, so a bundle typed
+/// as any spelling of that path finds it. An exact name wins: bundle `dev`
+/// never resolves to a file `./dev`. Caller owns the returned slice.
+fn resolveBundleName(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    typed: []const u8,
+) ![:0]const u8 {
+    var stmt = db.prepare("SELECT 1 FROM bundles WHERE name = ?;") catch return unreadableDb(db);
+    defer stmt.finalize();
+    stmt.bindText(1, typed) catch return unreadableDb(db);
+    if (stmt.step() catch return unreadableDb(db)) return allocator.dupeZ(u8, typed);
+    // Not a file either: the caller's lookup reports it as unregistered.
+    return std.Io.Dir.cwd().realPathFileAlloc(ctx.io, typed, allocator) catch allocator.dupeZ(u8, typed);
 }
 
 /// Resolve a registered bundle name to its manifest path. Caller owns the
@@ -620,7 +644,9 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
-    if (bundle_name) |n| {
+    if (bundle_name) |typed| {
+        const n = try resolveBundleName(ctx, allocator, &db, typed);
+        defer allocator.free(n);
         try populateFromBundle(&manifest, &db, n);
     } else {
         try populateFromInstalled(&manifest, &db, .{ .include_services = include_services });
@@ -666,7 +692,7 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     var db = try openDb(ctx);
     defer db.close();
 
-    const name = if (manifest.name.len > 0) manifest.name else path;
+    const name = runner_mod.bundleName(manifest, canonical);
     // After the open, so a database the real run would refuse fails the preview too.
     if (dry_run) {
         output.info("would register {s} from {s}", .{ name, canonical });

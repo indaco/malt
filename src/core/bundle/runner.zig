@@ -184,6 +184,8 @@ pub fn run(
     manifest: manifest_mod.Manifest,
     opts: Options,
 ) RunnerError!Report {
+    // Not bundleName: a path cannot be a lock file name.
+    // ponytail: unnamed installs share one lock, so they serialise; harmless.
     const bundle_name = if (manifest.name.len > 0) manifest.name else "unnamed";
     // Manifest-supplied, and it lands in the lock path below; refuse outright
     // rather than sanitise, before createDirPath grants it any side effect.
@@ -357,13 +359,19 @@ fn recordBundle(
     try db.beginTransaction();
     errdefer db.rollback();
 
-    try writeBundle(io, db, if (manifest.name.len > 0) manifest.name else "unnamed", manifest_path, manifest);
+    try writeBundle(io, db, bundleName(manifest, manifest_path), manifest_path, manifest);
     try db.commit();
 }
 
-/// Records `manifest` as bundle `name`: the row and every member. The one
-/// write path for `install` and `import`; the caller owns the transaction,
-/// so a failure leaves the previous bundle intact.
+/// A manifest without a name (every Brewfile) is identified by its file, as
+/// brew does, so `install` and `import` of it land on one bundle.
+pub fn bundleName(manifest: manifest_mod.Manifest, manifest_path: ?[]const u8) []const u8 {
+    if (manifest.name.len > 0) return manifest.name;
+    return manifest_path orelse "unnamed";
+}
+
+/// Records `manifest` as bundle `name`, row and members: the one write path
+/// for `install` and `import`. The caller owns the transaction.
 pub fn writeBundle(
     io: std.Io,
     db: *sqlite.Database,
@@ -434,6 +442,15 @@ fn replaceMembers(db: *sqlite.Database, name: []const u8, manifest: manifest_mod
         try memb.bindText(3, s.name);
         _ = try memb.step();
     }
+}
+
+test "bundleName prefers the manifest's name, then its file, then a fixed fallback" {
+    var m = manifest_mod.Manifest.init(std.testing.allocator);
+    defer m.deinit();
+    try std.testing.expectEqualStrings("unnamed", bundleName(m, null));
+    try std.testing.expectEqualStrings("/w/Brewfile", bundleName(m, "/w/Brewfile"));
+    m.name = "dev";
+    try std.testing.expectEqualStrings("dev", bundleName(m, "/w/Brewfile"));
 }
 
 test "replaceMembers swaps one bundle's members for the manifest's and leaves other bundles alone" {
