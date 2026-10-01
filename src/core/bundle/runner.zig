@@ -172,6 +172,9 @@ pub const Options = struct {
     /// for `dry_run` and subprocess (`malt_bin`) paths; otherwise the
     /// runner records `NoDispatcher` as each member's failure.
     dispatcher: ?*const Dispatcher = null,
+    /// Canonical path of the manifest being installed, recorded so
+    /// `bundle remove --purge` can find it again.
+    manifest_path: ?[]const u8 = null,
 };
 
 pub fn run(
@@ -235,7 +238,7 @@ pub fn run(
     //    in dry-run so the preview path stays read-only.
     // An interrupted run installed only part of the manifest; recording it
     // would claim members that never landed.
-    if (!opts.dry_run and !signals.isInterrupted()) recordBundle(io, db, manifest) catch |e| {
+    if (!opts.dry_run and !signals.isInterrupted()) recordBundle(io, db, manifest, opts.manifest_path) catch |e| {
         // recordBundle's inferred set spans sqlite + clock; keep @errorName.
         db_record_error = @errorName(e);
     };
@@ -347,33 +350,49 @@ fn recordBundle(
     io: std.Io,
     db: *sqlite.Database,
     manifest: manifest_mod.Manifest,
+    manifest_path: ?[]const u8,
 ) !void {
     try schema.migrate(db);
 
     try db.beginTransaction();
     errdefer db.rollback();
 
-    const name = if (manifest.name.len > 0) manifest.name else "unnamed";
-    var ins = try db.prepare(
-        \\INSERT OR REPLACE INTO bundles(name, manifest_path, created_at, version)
-        \\VALUES (?, NULL, ?, ?);
-    );
-    defer ins.finalize();
-    try ins.bindText(1, name);
-    try ins.bindInt(2, std.Io.Clock.real.now(io).toSeconds());
-    try ins.bindInt(3, @intCast(manifest.version));
-    _ = try ins.step();
-
-    try replaceMembers(db, name, manifest);
+    try writeBundle(io, db, if (manifest.name.len > 0) manifest.name else "unnamed", manifest_path, manifest);
     try db.commit();
 }
 
-/// Rewrites `name`'s members from `manifest`. The caller owns the
-/// transaction, so a failure leaves the previous members intact.
-pub fn replaceMembers(db: *sqlite.Database, name: []const u8, manifest: manifest_mod.Manifest) sqlite.SqliteError!void {
-    // Clean previous members of this bundle to keep it idempotent. Scoped:
-    // finalizing a stepped statement after a later failure resets the
-    // connection's error message the caller reports.
+/// Records `manifest` as bundle `name`: the row and every member. The one
+/// write path for `install` and `import`; the caller owns the transaction,
+/// so a failure leaves the previous bundle intact.
+pub fn writeBundle(
+    io: std.Io,
+    db: *sqlite.Database,
+    name: []const u8,
+    manifest_path: ?[]const u8,
+    manifest: manifest_mod.Manifest,
+) sqlite.SqliteError!void {
+    {
+        // An upsert, not REPLACE: the delete half of REPLACE cascades
+        // through the members, and the row should change in place.
+        var stmt = try db.prepare(
+            \\INSERT INTO bundles(name, manifest_path, created_at, version)
+            \\VALUES (?, ?, ?, ?)
+            \\ON CONFLICT(name) DO UPDATE SET manifest_path = excluded.manifest_path,
+            \\  created_at = excluded.created_at, version = excluded.version;
+        );
+        defer stmt.finalize();
+        try stmt.bindText(1, name);
+        if (manifest_path) |p| try stmt.bindText(2, p) else try stmt.bindNull(2);
+        try stmt.bindInt(3, std.Io.Clock.real.now(io).toSeconds());
+        try stmt.bindInt(4, @intCast(manifest.version));
+        _ = try stmt.step();
+    }
+    try replaceMembers(db, name, manifest);
+}
+
+fn replaceMembers(db: *sqlite.Database, name: []const u8, manifest: manifest_mod.Manifest) sqlite.SqliteError!void {
+    // Clean previous members of this bundle to keep it idempotent. Scoped so
+    // its finalize can't reset the error of a later failing insert.
     {
         var del = try db.prepare("DELETE FROM bundle_members WHERE bundle_name = ?;");
         defer del.finalize();

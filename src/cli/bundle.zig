@@ -189,6 +189,11 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     defer manifest.deinit();
     for (diag.warnings.items) |w| output.warn("{s}", .{w});
 
+    // Recorded with the bundle, so it must not depend on this cwd.
+    const canonical = std.Io.Dir.cwd().realPathFileAlloc(ctx.io, path, allocator) catch |e|
+        return unreadable(path, e);
+    defer allocator.free(canonical);
+
     var db = try openDb(ctx);
     defer db.close();
 
@@ -197,6 +202,7 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     var report = runner_mod.run(ctx.io, allocator, &db, manifest, .{
         .dry_run = dry_run,
         .dispatcher = &dispatcher,
+        .manifest_path = canonical,
     }) catch |e| {
         output.err("bundle install failed: {s}", .{runner_mod.describeError(e)});
         return error.Aborted;
@@ -685,23 +691,7 @@ fn recordImport(
     manifest: manifest_mod.Manifest,
 ) sqlite.SqliteError!void {
     try db.beginTransaction();
-    {
-        // An upsert, not REPLACE: the delete half of REPLACE cascades
-        // through the members, and the row should change in place.
-        var stmt = try db.prepare(
-            \\INSERT INTO bundles(name, manifest_path, created_at, version)
-            \\VALUES (?, ?, ?, ?)
-            \\ON CONFLICT(name) DO UPDATE SET manifest_path = excluded.manifest_path,
-            \\  created_at = excluded.created_at, version = excluded.version;
-        );
-        defer stmt.finalize();
-        try stmt.bindText(1, name);
-        try stmt.bindText(2, manifest_path);
-        try stmt.bindInt(3, std.Io.Clock.real.now(io).toSeconds());
-        try stmt.bindInt(4, @intCast(manifest.version));
-        _ = try stmt.step();
-    }
-    try runner_mod.replaceMembers(db, name, manifest);
+    try runner_mod.writeBundle(io, db, name, manifest_path, manifest);
     try db.commit();
 }
 
