@@ -962,6 +962,26 @@ test "remove and export find an unnamed bundle by any spelling of its file" {
     try testing.expectEqualStrings("", names);
 }
 
+test "import collapses a member listed twice instead of refusing the manifest" {
+    // brew installs a duplicated line once; the members table keys on it.
+    var s = try Scratch.init(testing.allocator, "import_dup_member");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path, "brew \"wget\"\nbrew \"wget\"\n");
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path });
+
+    const canonical = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, path, testing.allocator);
+    defer testing.allocator.free(canonical);
+    const members = try memberList(testing.allocator, s.path, canonical);
+    defer testing.allocator.free(members);
+    try testing.expectEqualStrings("formula:wget", members);
+}
+
 test "remove takes a registered name as typed before resolving it as a file" {
     // A name that also resolves to a file must not reach a different bundle.
     var s = try Scratch.init(testing.allocator, "exact_name_wins");
