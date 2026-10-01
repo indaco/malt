@@ -1,6 +1,6 @@
 # malt
 
-**Homebrew's whole ecosystem, none of its weight.** A ~4 MB Zig binary that reuses every bottle and formula - and runs `post_install` natively, so packages actually work - all from a themeable CLI and TUI.
+**Homebrew's whole ecosystem, none of its weight.** A ~4 MB Zig binary that reuses every bottle and formula - and runs post-install natively, both Homebrew's install steps and the Ruby `post_install` taps still ship, so packages actually work - all from a themeable CLI and TUI.
 
 Installs to its own `/opt/malt` prefix; ~3 ms cold start. Designed by a human and implemented by AI.
 
@@ -42,7 +42,7 @@ Installs to its own `/opt/malt` prefix; ~3 ms cold start. Designed by a human an
 
 malt is a **client** for the Homebrew registry, not a fork. It reuses every formula, bottle, cask, tap, and `Brewfile` in the ecosystem, installs to its own `/opt/malt` prefix, never touches Homebrew's files, and delegates anything it doesn't implement to `brew` when it's installed. What sets it apart:
 
-- **It actually finishes the install.** Most alternative clients give up at `post_install` and leave packages half-broken. malt runs it natively - a Zig interpreter for the Ruby subset those blocks use, plus Homebrew v6's declarative `post_install_steps` - so `node`, `openssl` and `fontconfig` work when the install returns. → [Native `post_install`](ARCHITECTURE.md#the-post_install-interpreter)
+- **It actually finishes the install.** Most alternative clients stop at post-install and leave packages half-broken. malt runs both kinds natively: Homebrew's declarative steps - `post_install_steps` for formulae (v6) and flight steps for casks (v7) - which homebrew-core now uses throughout, and the Ruby `post_install` blocks that third-party taps still ship, through a built-in Zig interpreter. → [Post-install](ARCHITECTURE.md#post-install-and-flight-steps)
 - **Reused work costs nothing.** Bottles are stored by SHA256 and kegs are APFS `clonefile()` copies, so the same bottle is never downloaded or extracted twice. Reinstalls and rollbacks cost no network and no bytes; an `ffmpeg` install against an existing store finishes in **tens of milliseconds**. → [Benchmarks](#benchmarks)
 - **Safety without the startup tax.** Streaming SHA256, atomic 9-step installs that leave the old version untouched until the new one verifies, a 30 s lock against concurrent mutations, sandboxed subprocesses - in a ~4 MB binary that starts in ~3 ms. → [Safety and security](ARCHITECTURE.md#safety-and-security)
 - **One theme, everywhere.** A single `MALT_THEME` palette colours both the CLI and the `mt tui` dashboard. → [Theming](#theming)
@@ -426,7 +426,7 @@ mt vulns --json
 mt doctor
 mt doctor --fix                          # repair safe-class warnings
 mt doctor --fix --dry-run                # preview the repair plan
-mt doctor --post-install-status          # check DSL support per installed formula
+mt doctor --post-install-status          # which post-install work runs natively, per keg
 ```
 
 <details>

@@ -54,9 +54,19 @@ Homebrew bottles contain hardcoded `/opt/homebrew/Cellar/...` paths in Mach-O lo
 
 Text files (`.pc` configs, shell scripts) containing `@@HOMEBREW_PREFIX@@` or `@@HOMEBREW_CELLAR@@` placeholders are patched the same way. Patching always happens on the Cellar copy, never the store original - if it fails, the Cellar copy is deleted and the store entry stays pristine for retry.
 
-## The post_install interpreter
+## Post-install and flight steps
 
-When a formula defines `post_install`, malt tries its native interpreter first. It parses and evaluates the Ruby subset those blocks actually use:
+Most alternative clients stop once the files are in place. malt also runs the configuration a package declares, in both forms Homebrew supports.
+
+### Declarative steps
+
+Homebrew v6 introduced a declarative `post_install_steps` array for formulae, and homebrew-core now uses it throughout. malt runs those steps natively - across install, upgrade, and migrate. A formula that declares steps is configured by its steps alone; its Ruby `post_install`, if any, is not run.
+
+Casks declare the same step schema as `preflight_steps` / `postflight_steps` / `uninstall_preflight_steps` / `uninstall_postflight_steps` (Homebrew v7). `mt install --cask` runs the preflight over the staged artefact before anything is placed and the postflight once the cask is recorded; `mt uninstall`, `mt upgrade` and `mt rollback` run the steps stored at install time, so they match the version on disk, and drop the symlinks a cask declared for removal. Cask steps are confined to the Caskroom, the malt prefix, `$HOME/Library` and the applications directory, and may never remove or relocate those roots, their top-level directories, or anything under `Keychains`, `Mail`, `Messages`, `Safari`, `Accounts`, `Mobile Documents` and `CloudStorage`; steps that need `sudo` are reported and skipped, never escalated. `terminate_process` and `delete_keychain_certificate` act on the user session as upstream defines them and are not confined. A failed uninstall preflight keeps the cask on disk; `mt uninstall --force` continues past it. `mt install --dry-run` lists the steps a cask would run and which ones malt refuses; `mt upgrade --dry-run` does not, and `mt uninstall --dry-run` stops before them.
+
+### Ruby `post_install`
+
+Homebrew 7 deprecates the Ruby `post_install` hook in favour of `post_install_steps`, but still runs it. homebrew-core has migrated; many third-party taps have not. For those formulae malt tries its native interpreter first. It parses and evaluates the Ruby subset those blocks actually use:
 
 - `Pathname` operations, `FileUtils`, `inreplace`, `Dir.glob`
 - string interpolation, `%w[]` arrays, the boolean operators
@@ -64,10 +74,6 @@ When a formula defines `post_install`, malt tries its native interpreter first. 
 - `Formula["name"]` cross-lookup, `ENV` access
 
 Source for `homebrew-core` formulas is fetched on demand from GitHub if the tap isn't cloned locally.
-
-Homebrew v6 is migrating formulae from these Ruby blocks to a declarative `post_install_steps` array. malt runs those steps natively as well - across install, upgrade, and migrate - so packages keep configuring themselves as upstream converts.
-
-Casks declare the same step schema as `preflight_steps` / `postflight_steps` / `uninstall_preflight_steps` / `uninstall_postflight_steps` (Homebrew v7). `mt install --cask` runs the preflight over the staged artefact before anything is placed and the postflight once the cask is recorded; `mt uninstall`, `mt upgrade` and `mt rollback` run the steps stored at install time, so they match the version on disk, and drop the symlinks a cask declared for removal. Cask steps are confined to the Caskroom, the malt prefix, `$HOME/Library` and the applications directory, and may never remove or relocate those roots, their top-level directories, or anything under `Keychains`, `Mail`, `Messages`, `Safari`, `Accounts`, `Mobile Documents` and `CloudStorage`; steps that need `sudo` are reported and skipped, never escalated. `terminate_process` and `delete_keychain_certificate` act on the user session as upstream defines them and are not confined. A failed uninstall preflight keeps the cask on disk; `mt uninstall --force` continues past it. `mt install --dry-run` lists the steps a cask would run and which ones malt refuses; `mt upgrade --dry-run` does not, and `mt uninstall --dry-run` stops before them.
 
 Every mutating filesystem operation - write, rm, chmod, symlink - is validated against the formula's Cellar prefix and the malt prefix; paths containing `..` or resolving outside the sandbox via symlinks are rejected immediately.
 
@@ -78,18 +84,22 @@ When the interpreter hits an unsupported construct, the user is directed to `--u
 - terminal escape sequences filtered from child output
 
 ```text
-Formula has post_install?
+Formula declares post_install_steps?
   │
-  ├── yes → Try native DSL interpreter
-  │           │
-  │           ├── success → done (package fully configured)
-  │           │
-  │           └── unsupported construct → --use-system-ruby set?
-  │                                         │
-  │                                         ├── yes → delegate to sandboxed Ruby subprocess
-  │                                         └── no  → skip with clear message
+  ├── yes → run the declarative steps natively → done
   │
-  └── no  → done (no post_install needed)
+  └── no  → Formula has a Ruby post_install?
+              │
+              ├── yes → Try native DSL interpreter
+              │           │
+              │           ├── success → done (package fully configured)
+              │           │
+              │           └── unsupported construct → --use-system-ruby set?
+              │                                         │
+              │                                         ├── yes → delegate to sandboxed Ruby subprocess
+              │                                         └── no  → skip with clear message
+              │
+              └── no  → done (no post-install needed)
 ```
 
 ## Atomic install protocol
@@ -137,7 +147,7 @@ The supply-chain story:
 malt's binary is small because it ships only five subsystems and the glue between them:
 
 - **SQLite.** ACID writes, reverse-dependency queries, linker-conflict detection, atomic rollback after a failed upgrade. Survives `kill -9` mid-write.
-- **Native `post_install` interpreter.** A Ruby-subset interpreter in Zig - only activates for the formulas (`node`, `openssl`, …) that won't configure without it.
+- **Native post-install.** A steps executor for Homebrew's declarative steps, plus a Ruby-subset interpreter in Zig for the taps that still ship `post_install` blocks.
 - **Mach-O patching with arm64 ad-hoc codesign.** Rewrites `/opt/homebrew` → `MALT_PREFIX` and re-signs so `dyld` loads the result on modern macOS.
 - **Install lock.** `flock` on `db/malt.lock` plus a symlink-tree walk, acquired by every mutating command, so two invocations - or a Ctrl-C'd install - can't corrupt state.
 - **`sandbox-exec` profile.** The opt-in `--use-system-ruby` path runs formula scripts in a deny-default sandbox (caps and escape-filtering as above).
