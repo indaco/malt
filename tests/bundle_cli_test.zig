@@ -714,6 +714,130 @@ test "re-import replaces a legacy relative row with the canonical path" {
     try testing.expectEqualStrings(want, stored);
 }
 
+/// `kind:ref` per member of `name`, sorted and comma-joined: the list
+/// `bundle export <name>` emits.
+fn memberList(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) ![]u8 {
+    var db_path_buf: [512]u8 = undefined;
+    var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0));
+    defer db.close();
+    var stmt = try db.prepare("SELECT kind || ':' || ref FROM bundle_members WHERE bundle_name = ? ORDER BY 1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    while (try stmt.step()) {
+        if (out.items.len > 0) try out.append(allocator, ',');
+        try out.appendSlice(allocator, std.mem.sliceTo(stmt.columnText(0).?, 0));
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn seedInstalledDev(prefix: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0));
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO bundles (name, manifest_path, created_at, version) VALUES ('dev', NULL, 0, 0);
+        \\INSERT INTO bundle_members (bundle_name, kind, ref) VALUES ('dev', 'formula', 'wget');
+        \\INSERT INTO bundle_members (bundle_name, kind, ref) VALUES ('dev', 'cask', 'firefox');
+    );
+}
+
+test "re-import of an installed bundle takes its members from the manifest, like install" {
+    // The manifest is the bundle, as in brew: an edited file re-imported
+    // must not keep exporting what it no longer lists, nor export empty.
+    var s = try Scratch.init(testing.allocator, "reimport_members");
+    defer s.deinit(testing.allocator);
+    try seedInstalledDev(s.path);
+
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\{"name": "dev", "version": 1, "taps": ["user/repo"], "formulas": [{"name": "wget"}]}
+    );
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path });
+
+    const members = try memberList(testing.allocator, s.path, "dev");
+    defer testing.allocator.free(members);
+    try testing.expectEqualStrings("formula:wget,tap:user/repo", members);
+
+    // Still an update: the import's own fields land on the one row.
+    var db_path_buf: [512]u8 = undefined;
+    var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+    defer db.close();
+    var stmt = try db.prepare("SELECT count(*), max(version), min(created_at) > 0 FROM bundles WHERE name = 'dev';");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+    try testing.expectEqual(@as(i64, 1), stmt.columnInt(1));
+    try testing.expectEqual(@as(i64, 1), stmt.columnInt(2));
+    const want = try test_io.cwd().realPathFileAlloc(std.Options.debug_io, path, testing.allocator);
+    defer testing.allocator.free(want);
+    const stored = try storedManifestPath(testing.allocator, s.path, "dev");
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(want, stored);
+}
+
+test "import of a never-installed bundle records every member kind for export" {
+    var s = try Scratch.init(testing.allocator, "import_fresh_members");
+    defer s.deinit(testing.allocator);
+    try initDb(s.path);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\{"name": "fresh", "version": 1, "taps": ["user/repo"], "formulas": [{"name": "wget"}],
+        \\ "casks": [{"name": "firefox"}], "services": [{"name": "redis"}]}
+    );
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "import", path });
+
+    const members = try memberList(testing.allocator, s.path, "fresh");
+    defer testing.allocator.free(members);
+    try testing.expectEqualStrings("cask:firefox,formula:wget,service:redis,tap:user/repo", members);
+}
+
+test "import that cannot write the members leaves the bundle as it was and says why" {
+    // Half an import would point the row at the new file while the members
+    // still describe the old one.
+    var s = try Scratch.init(testing.allocator, "import_members_fail");
+    defer s.deinit(testing.allocator);
+    try seedInstalledDev(s.path);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+        defer db.close();
+        try db.exec(
+            \\CREATE TRIGGER refuse_members BEFORE INSERT ON bundle_members
+            \\BEGIN SELECT RAISE(ABORT, 'members refused'); END;
+        );
+    }
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\{"name": "dev", "version": 1, "formulas": [{"name": "curl"}]}
+    );
+
+    try expectRefused(&malt.app_ctx.debug_ctx, &.{ "import", path }, "members refused");
+
+    const members = try memberList(testing.allocator, s.path, "dev");
+    defer testing.allocator.free(members);
+    try testing.expectEqualStrings("cask:firefox,formula:wget", members);
+    var db_path_buf: [512]u8 = undefined;
+    var db = try sqlite.Database.open(try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0));
+    defer db.close();
+    var stmt = try db.prepare("SELECT manifest_path IS NULL, version FROM bundles WHERE name = 'dev';");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+    try testing.expectEqual(@as(i64, 0), stmt.columnInt(1));
+}
+
 // --- export -----------------------------------------------------------
 
 test "export with no installed packages emits an empty Brewfile body to stdout" {
