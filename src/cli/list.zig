@@ -648,7 +648,7 @@ fn writeCaskRows(
 fn writeCaskSizeField(w: *std.Io.Writer, extras: Extras, token: []const u8, app_path: []const u8) !void {
     if (!extras.size) return;
     var total: u64 = 0;
-    var buf: [512]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (std.fmt.bufPrint(&buf, "{s}/Caskroom/{s}", .{ extras.prefix, token })) |caskroom| {
         total +|= dirsize.dirSizeBytes(extras.io, caskroom);
     } else |_| {}

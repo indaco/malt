@@ -452,7 +452,7 @@ pub fn artifactTypeTag(t: ArtifactType) []const u8 {
 /// cannot wipe the bytes it is about to install.
 pub fn deletePerVersionCacheFile(io: std.Io, cache_dir: []const u8, token: []const u8, version: []const u8, keep: ?[]const u8) bool {
     for (cache_extensions ++ sidecar_extensions) |ext| {
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/Cask/{s}-{s}{s}", .{ cache_dir, token, version, ext }) catch continue;
         if (keep) |k| if (std.mem.eql(u8, path, k)) continue;
         std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
@@ -919,7 +919,7 @@ pub const CaskInstaller = struct {
 
     fn flightCtxWith(self: *CaskInstaller, sink: FlightSink, token: []const u8, version: []const u8, staged_path: ?[]const u8) error{OutOfMemory}!steps_mod.StepsCtx {
         const a = sink.allocator;
-        var app_dir_buf: [512]u8 = undefined;
+        var app_dir_buf: AppDirBuf = undefined;
         const caskroom_path = try std.fmt.allocPrint(a, "{s}/Caskroom/{s}", .{ self.prefix, token });
         return .{
             .io = self.io,
@@ -953,7 +953,7 @@ pub const CaskInstaller = struct {
         const artifact_type = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
         if (artifact_type == .unknown) return CaskError.InstallFailed;
 
-        var cache_buf: [512]u8 = undefined;
+        var cache_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/Cask", .{self.cache_dir}) catch
             return CaskError.OutOfMemory;
         // Recursive: nothing creates `$MALT_CACHE` itself.
@@ -989,7 +989,7 @@ pub const CaskInstaller = struct {
         if (artifact_type == .unknown) return CaskError.InstallFailed;
 
         // Determine target: prefix-aware sandbox / /Applications / ~/Applications.
-        var app_dir_buf: [512]u8 = undefined;
+        var app_dir_buf: AppDirBuf = undefined;
         const app_dir = applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf);
 
         // A bin entry this cask cannot take over is refused now, while the
@@ -1030,7 +1030,7 @@ pub const CaskInstaller = struct {
         // An app cask's helpers are linked once its bundle is in place,
         // whatever container it came in. A pkg, a font cask and a binary-only
         // cask (which returns its first link) have nothing left to link.
-        var bin_dir_buf: [512]u8 = undefined;
+        var bin_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const bin_dir = std.fmt.bufPrint(&bin_dir_buf, "{s}/bin/", .{self.prefix}) catch return CaskError.InstallFailed;
         const placed_bundle = artifact_type != .pkg and
             !std.mem.eql(u8, std.fs.path.basename(app_path), cask_font.MANIFEST_NAME) and
@@ -1113,15 +1113,15 @@ pub const CaskInstaller = struct {
         self.recorded_bundle = lookupInstalledChecked(self.db, cask.token) catch return error.InstallFailed;
         // The bundle this install will place, when the cask names it; the
         // one on record covers a rollback's synthetic cask.
-        var app_dir_buf: [512]u8 = undefined;
-        var root_buf: [512]u8 = undefined;
+        var app_dir_buf: AppDirBuf = undefined;
+        var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const root: ?[]const u8 = if (parseAppName(cask.parsed.value.object)) |name|
             std.fmt.bufPrint(&root_buf, "{s}/{s}", .{ applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf), name }) catch null
         else
             null;
         for (entries) |e| {
             const name = e.target orelse std.fs.path.basename(e.source);
-            var link_buf: [512]u8 = undefined;
+            var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const link_path = std.fmt.bufPrint(&link_buf, "{s}/bin/{s}", .{ self.prefix, name }) catch return CaskError.InstallFailed;
             if (self.binEntryOwner(cask.token, root, link_path) == .foreign) return self.linkConflict(link_path);
         }
@@ -1146,7 +1146,7 @@ pub const CaskInstaller = struct {
             target_buf[0..n]
         else |e|
             return if (e == error.FileNotFound) .absent else .foreign;
-        var caskroom_buf: [512]u8 = undefined;
+        var caskroom_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const caskroom = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch return .foreign;
         const recorded: ?[]const u8 = if (self.recorded_bundle) |*r| r.appPath() else null;
         for ([_]?[]const u8{ caskroom, root, recorded }) |candidate| {
@@ -1166,7 +1166,7 @@ pub const CaskInstaller = struct {
     /// Remove `Caskroom/<token>/<version>` and the token dir when that was
     /// its only version.
     fn wipeCaskroomVersion(self: *CaskInstaller, cask: *const Cask) void {
-        var buf: [512]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const caskroom_ver = std.fmt.bufPrint(&buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch return;
         std.Io.Dir.cwd().deleteTree(self.io, caskroom_ver) catch {};
         if (std.fs.path.dirname(caskroom_ver)) |token_dir| std.Io.Dir.deleteDirAbsolute(self.io, token_dir) catch {};
@@ -1242,7 +1242,7 @@ pub const CaskInstaller = struct {
         }
 
         // Caskroom bookkeeping; continue so later removals still run.
-        var caskroom_buf: [512]u8 = undefined;
+        var caskroom_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const caskroom_path = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch "";
         if (caskroom_path.len > 0) std.Io.Dir.cwd().deleteTree(self.io, caskroom_path) catch {};
 
@@ -1251,7 +1251,7 @@ pub const CaskInstaller = struct {
             // `<token>.<ext>` and the per-version `<token>-<version>.<ext>`
             // shape that retains rollback targets. Wipe both for `uninstall`,
             // since after uninstall there is no version left to roll back to.
-            var cache_buf: [512]u8 = undefined;
+            var cache_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             for (cache_extensions) |ext| {
                 const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/Cask/{s}{s}", .{ self.cache_dir, token, ext }) catch continue;
                 if (self.prefetched_artifact) |k| if (std.mem.eql(u8, k, cache_file)) continue;
@@ -1304,12 +1304,12 @@ pub const CaskInstaller = struct {
     /// name over since. `keep` are lines to leave alone. Best-effort, like
     /// the font manifest.
     fn removeOwnedLinks(self: *CaskInstaller, token: []const u8, version: []const u8, bundle: ?[]const u8, keep: ?[]const u8) void {
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}/{s}", .{ self.prefix, token, version, LINKS_MANIFEST_NAME }) catch return;
         const bytes = cask_font.readManifest(self.io, self.allocator, path) catch return;
         defer self.allocator.free(bytes);
 
-        var bin_buf: [512]u8 = undefined;
+        var bin_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const bin_dir = std.fmt.bufPrint(&bin_buf, "{s}/bin/", .{self.prefix}) catch return;
         var it = std.mem.splitScalar(u8, bytes, '\n');
         while (it.next()) |line| {
@@ -1418,7 +1418,7 @@ pub const CaskInstaller = struct {
         // Only after the install: a failed one must leave the outgoing
         // version whole.
         if (lookupInstalledChecked(self.db, token) catch return error.InstallFailed) |*cur| {
-            var new_buf: [512]u8 = undefined;
+            var new_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const new_manifest = std.fmt.bufPrint(&new_buf, "{s}/Caskroom/{s}/{s}/{s}", .{ self.prefix, token, row.version, LINKS_MANIFEST_NAME }) catch "";
             const keep = if (new_manifest.len == 0) null else cask_font.readManifest(self.io, self.allocator, new_manifest) catch null;
             defer if (keep) |k| self.allocator.free(k);
@@ -1426,7 +1426,7 @@ pub const CaskInstaller = struct {
             // A roll-forward re-installs from the cached artefact, so the
             // outgoing version's Caskroom dir has nothing left to serve.
             if (!std.mem.eql(u8, cur.version(), row.version)) {
-                var out_buf: [512]u8 = undefined;
+                var out_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
                 if (std.fmt.bufPrint(&out_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, token, cur.version() })) |outgoing| {
                     std.Io.Dir.cwd().deleteTree(self.io, outgoing) catch {};
                 } else |_| {}
@@ -1533,7 +1533,7 @@ pub const CaskInstaller = struct {
     fn installDmg(self: *CaskInstaller, dmg_path: []const u8, app_dir: []const u8, cask: *const Cask) ![]const u8 {
         // A token-derived path is guessable, so it can be planted and then
         // adopted - mounted over, and removed on teardown.
-        var mount_buf: [512]u8 = undefined;
+        var mount_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const mount_point = try self.freshTempDir(&mount_buf, "mount", cask.token);
 
         // Mount DMG (hdiutil attach -nobrowse -readonly -mountpoint {path} {dmg})
@@ -1573,7 +1573,7 @@ pub const CaskInstaller = struct {
     fn installZip(self: *CaskInstaller, zip_path: []const u8, app_dir: []const u8, cask: *const Cask) ![]const u8 {
         // A token-derived path is guessable, so it can be planted and then
         // extracted through.
-        var tmp_buf: [512]u8 = undefined;
+        var tmp_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const extract_dir = try self.freshTempDir(&tmp_buf, "extract", cask.token);
         // temp extract dir; leftover tolerated if teardown races.
         defer std.Io.Dir.cwd().deleteTree(self.io, extract_dir) catch {};
@@ -1629,7 +1629,7 @@ pub const CaskInstaller = struct {
         var app_name_buf: [256]u8 = undefined;
         const bundle_name = try self.placedBundleName(cask, extract_dir, &app_name_buf);
         if (bundle_name == null) if (stanzas) |entries| if (hasCaskroomBinary(entries)) {
-            var caskroom_buf: [512]u8 = undefined;
+            var caskroom_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch
                 return error.InstallFailed;
             std.Io.Dir.cwd().createDirPath(self.io, caskroom_ver) catch return error.InstallFailed;
@@ -1655,7 +1655,7 @@ pub const CaskInstaller = struct {
         if (parseAppName(cask.parsed.value.object)) |name| return name;
         if (!self.restoring) return null;
         if (lookupInstalledChecked(self.db, cask.token) catch return error.InstallFailed) |*cur| {
-            var bin_buf: [512]u8 = undefined;
+            var bin_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const bin_dir = std.fmt.bufPrint(&bin_buf, "{s}/bin/", .{self.prefix}) catch return null;
             if (std.mem.startsWith(u8, cur.appPath() orelse "", bin_dir)) return null;
         }
@@ -1677,7 +1677,7 @@ pub const CaskInstaller = struct {
         const kept_copy = try self.keepStageCopy(cask, stage, app_name, stanzas orelse &.{});
         errdefer if (kept_copy) self.wipeCaskroomVersion(cask);
 
-        var src_buf: [512]u8 = undefined;
+        var src_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const src_app = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ stage, app_name }) catch
             return error.InstallFailed;
 
@@ -1702,7 +1702,7 @@ pub const CaskInstaller = struct {
     /// is deleted inside the copy, so a planted symlink cannot redirect a
     /// removal. Returns whether a copy was made.
     fn keepStageCopy(self: *CaskInstaller, cask: *const Cask, stage: []const u8, app_name: []const u8, entries: []const BinaryEntry) !bool {
-        var caskroom_buf: [512]u8 = undefined;
+        var caskroom_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch
             return error.InstallFailed;
         const bundle_top = firstComponent(app_name);
@@ -1713,10 +1713,10 @@ pub const CaskInstaller = struct {
             var top_buf: [256]u8 = undefined;
             const top = try self.stageEntryOf(stage, e.source, &top_buf);
             if (std.mem.eql(u8, top, bundle_top)) continue;
-            var dst_buf: [512]u8 = undefined;
+            var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const dst = std.fmt.bufPrint(&dst_buf, "{s}/{s}", .{ caskroom_ver, top }) catch return error.InstallFailed;
             if (std.Io.Dir.accessAbsolute(self.io, dst, .{})) |_| continue else |_| {}
-            var src_buf: [512]u8 = undefined;
+            var src_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const src = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ stage, top }) catch return error.InstallFailed;
             const st = std.Io.Dir.cwd().statFile(self.io, src, .{ .follow_symlinks = false }) catch return error.InstallFailed;
             if (st.kind == .sym_link) return error.InstallFailed;
@@ -1758,7 +1758,7 @@ pub const CaskInstaller = struct {
         cask: *const Cask,
         entries: []const cask_font.FontEntry,
     ) ![]const u8 {
-        var fonts_buf: [512]u8 = undefined;
+        var fonts_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const env_home = std.process.Environ.getPosix(self.environ, "HOME");
         const fonts_dir = cask_font.resolveFontsDir(self.prefix, env_home, &fonts_buf);
 
@@ -1767,7 +1767,7 @@ pub const CaskInstaller = struct {
 
         // Create Caskroom/<token>/<version>/ before the manifest write,
         // mirroring recordCaskroom's ordering.
-        var caskroom_buf: [512]u8 = undefined;
+        var caskroom_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{
             self.prefix, cask.token, cask.version,
         }) catch return error.InstallFailed;
@@ -1818,7 +1818,7 @@ pub const CaskInstaller = struct {
     }
 
     fn writeSpec(self: *CaskInstaller, token: []const u8, version: []const u8, ext: []const u8, entries: anytype) !void {
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try self.specPath(token, version, ext, &path_buf);
 
         var bytes: std.ArrayList(u8) = .empty;
@@ -1850,7 +1850,7 @@ pub const CaskInstaller = struct {
     }
 
     fn readSpec(self: *CaskInstaller, comptime Entry: type, token: []const u8, version: []const u8, ext: []const u8) !?Spec(Entry) {
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try self.specPath(token, version, ext, &path_buf);
 
         const file = std.Io.Dir.openFileAbsolute(self.io, path, .{}) catch |e| switch (e) {
@@ -1910,7 +1910,7 @@ pub const CaskInstaller = struct {
         // Caskroom/<token>/<version>/ doubles as the extraction root so
         // the extracted payload is already at its final home — binaries
         // then just need a stable symlink off `<prefix>/bin/`.
-        var caskroom_buf: [512]u8 = undefined;
+        var caskroom_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{
             self.prefix, cask.token, cask.version,
         }) catch return error.InstallFailed;
@@ -1955,7 +1955,7 @@ pub const CaskInstaller = struct {
             findAppInDir(self.io, caskroom_ver, &app_name_buf) orelse
             return error.InstallFailed;
 
-        var src_buf: [512]u8 = undefined;
+        var src_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const src_app = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ caskroom_ver, app_name }) catch
             return error.InstallFailed;
 
@@ -1987,7 +1987,7 @@ pub const CaskInstaller = struct {
     pub fn linkPlacedBinaries(self: *CaskInstaller, cask: *const Cask, app_path: []const u8) !void {
         const entries = (try self.binaryStanzas(cask)) orelse return;
         defer self.allocator.free(entries);
-        var caskroom_buf: [512]u8 = undefined;
+        var caskroom_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{ self.prefix, cask.token, cask.version }) catch
             return error.InstallFailed;
         if (try self.linkStanzas(cask, app_path, caskroom_ver, entries)) |first| self.allocator.free(first);
@@ -2025,7 +2025,7 @@ pub const CaskInstaller = struct {
         }
         if (first == null) return null;
 
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}/{s}", .{
             self.prefix, cask.token, cask.version, LINKS_MANIFEST_NAME,
         }) catch return error.InstallFailed;
@@ -2114,7 +2114,7 @@ pub const CaskInstaller = struct {
         // separator would delete and re-create somewhere else entirely.
         if (!path_component.isPathComponent(link_name)) return error.InstallFailed;
 
-        var bin_parent_buf: [512]u8 = undefined;
+        var bin_parent_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const bin_parent = std.fmt.bufPrint(&bin_parent_buf, "{s}/bin", .{self.prefix}) catch
             return error.InstallFailed;
         std.Io.Dir.cwd().createDirPath(self.io, bin_parent) catch return error.InstallFailed;
@@ -2148,7 +2148,7 @@ pub const CaskInstaller = struct {
 
     fn recordCaskroom(self: *CaskInstaller, cask: *const Cask) !void {
         // Create Caskroom/{token}/{version}/ to match Homebrew layout
-        var buf: [512]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const caskroom_ver = std.fmt.bufPrint(&buf, "{s}/Caskroom/{s}/{s}", .{
             self.prefix, cask.token, cask.version,
         }) catch return;
@@ -2343,11 +2343,15 @@ pub fn resolveAppDir(
     return "/Applications";
 }
 
+/// Full-size so a valid prefix never overflows into the `/Applications`
+/// fallback; `applicationsDir` takes a pointer so a smaller buffer won't compile.
+const AppDirBuf = [std.Io.Dir.max_path_bytes]u8;
+
 /// Determine the applications directory honouring `MALT_PREFIX`. Wraps
 /// `resolveAppDir` with the env probes and an mkdir on the chosen path
 /// so `ditto`/`unzip` can write there immediately. The caller owns `out`;
 /// the returned slice is either a compile-time literal or a slice of `out`.
-fn applicationsDir(io: std.Io, environ: std.process.Environ, prefix: []const u8, out: []u8) []const u8 {
+fn applicationsDir(io: std.Io, environ: std.process.Environ, prefix: []const u8, out: *AppDirBuf) []const u8 {
     const env_appdir = std.process.Environ.getPosix(environ, "MALT_APPDIR");
     const env_home = std.process.Environ.getPosix(environ, "HOME");
 
@@ -3410,6 +3414,100 @@ test "specPath composes the sidecar under the resolved cache dir, not the prefix
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings("/alt/Cask/font-x-1.0.fonts", try installer.specPath("font-x", "1.0", ".fonts", &buf));
     try std.testing.expectEqualStrings("/alt/Cask/tool-1.0.binaries", try installer.specPath("tool", "1.0", ".binaries", &buf));
+}
+
+/// A cache dir nested past 512 bytes but under `max_path_bytes`, with its
+/// `Cask` subdir created. The caller frees it and removes `root`.
+fn longCacheDir(a: std.mem.Allocator, io: std.Io, root: []const u8) ![]u8 {
+    const seg = "d" ** 200;
+    const dir = try std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}", .{ root, seg, seg, seg });
+    errdefer a.free(dir);
+    const cask_dir = try std.fmt.allocPrint(a, "{s}/Cask", .{dir});
+    defer a.free(cask_dir);
+    try std.Io.Dir.cwd().createDirPath(io, cask_dir);
+    return dir;
+}
+
+test "deletePerVersionCacheFile removes an artefact whose path exceeds 512 bytes" {
+    // The writer is unbounded, so the sweep must reach whatever it created.
+    const io = std.Options.debug_io;
+    const a = std.testing.allocator;
+    const root = try std.fmt.allocPrint(a, "/tmp/malt_longcache_{d}", .{std.c.getpid()});
+    defer a.free(root);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const cache = try longCacheDir(a, io, root);
+    defer a.free(cache);
+
+    const art = try std.fmt.allocPrint(a, "{s}/Cask/tok-1.0.dmg", .{cache});
+    defer a.free(art);
+    const side = try std.fmt.allocPrint(a, "{s}/Cask/tok-1.0.binaries", .{cache});
+    defer a.free(side);
+    const kept = try std.fmt.allocPrint(a, "{s}/Cask/tok-1.0.zip", .{cache});
+    defer a.free(kept);
+    try std.testing.expect(art.len > 512);
+    for ([_][]const u8{ art, side, kept }) |p| {
+        const f = try std.Io.Dir.createFileAbsolute(io, p, .{});
+        f.close(io);
+    }
+
+    try std.testing.expect(deletePerVersionCacheFile(io, cache, "tok", "1.0", kept));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, art, .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, side, .{}));
+    try std.Io.Dir.accessAbsolute(io, kept, .{});
+}
+
+test "deletePerVersionCacheFile skips a path no filesystem could hold" {
+    // Past max_path_bytes nothing can exist, so skipping is correct, not a leak.
+    const cache = "/tmp/" ++ "x" ** std.Io.Dir.max_path_bytes;
+    try std.testing.expect(deletePerVersionCacheFile(std.Options.debug_io, cache, "tok", "1.0", null));
+}
+
+test "binary sidecar round-trips when its path exceeds 512 bytes" {
+    // Best-effort write used to be skipped on overflow, so rollback lost the
+    // recorded links.
+    const io = std.Options.debug_io;
+    const a = std.testing.allocator;
+    const root = try std.fmt.allocPrint(a, "/tmp/malt_longspec_{d}", .{std.c.getpid()});
+    defer a.free(root);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const cache = try longCacheDir(a, io, root);
+    defer a.free(cache);
+
+    var installer: CaskInstaller = .{
+        .allocator = a,
+        .io = io,
+        .environ = .empty,
+        .prefix = "/opt/h",
+        .cache_dir = cache,
+        .db = undefined,
+        .progress = null,
+    };
+    const entries = [_]BinaryEntry{.{ .source = "bin/tool", .target = null }};
+    try installer.writeSpec("tok", "1.0", ".binaries", &entries);
+
+    var spec = (try installer.readBinarySpec("tok", "1.0")) orelse return error.TestUnexpectedResult;
+    defer spec.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), spec.entries.len);
+    try std.testing.expectEqualStrings("bin/tool", spec.entries[0].source);
+}
+
+test "applicationsDir keeps a near-limit sandbox prefix out of /Applications" {
+    // A short buffer made the join fall back to the system dir.
+    const io = std.Options.debug_io;
+    const a = std.testing.allocator;
+    const root = try std.fmt.allocPrint(a, "/tmp/malt_appdir_{d}", .{std.c.getpid()});
+    defer a.free(root);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const prefix = try std.fmt.allocPrint(a, "{s}/{s}/{s}", .{ root, "p" ** 240, "p" ** 240 });
+    defer a.free(prefix);
+    try std.testing.expect(prefix.len + "/Applications".len > 512);
+    try std.Io.Dir.cwd().createDirPath(io, prefix);
+
+    var out: AppDirBuf = undefined;
+    const got = applicationsDir(io, .empty, prefix, &out);
+    const want = try std.fmt.allocPrint(a, "{s}/Applications", .{prefix});
+    defer a.free(want);
+    try std.testing.expectEqualStrings(want, got);
 }
 
 // --- variations / depends_on ---

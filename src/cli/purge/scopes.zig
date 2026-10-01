@@ -520,7 +520,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     }
 
     // Cask download cache
-    var cask_cache_buf: [512]u8 = undefined;
+    var cask_cache_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cask_cache_path = std.fmt.bufPrint(&cask_cache_buf, "{s}/Cask", .{cache_dir}) catch return result;
     if (std.Io.Dir.openDirAbsolute(io, cask_cache_path, .{ .iterate = true })) |dir_const| {
         var dir = dir_const;
@@ -560,7 +560,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     } else |_| {}
 
     // Caskroom orphans
-    var caskroom_buf: [512]u8 = undefined;
+    var caskroom_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const caskroom_path = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom", .{prefix}) catch return result;
     if (std.Io.Dir.openDirAbsolute(io, caskroom_path, .{ .iterate = true })) |dir_const| {
         var caskroom = dir_const;
@@ -580,7 +580,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             };
             if (lookup.step() catch |e| return lookupFailed(&result, e)) continue;
 
-            var path_buf: [512]u8 = undefined;
+            var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const full = std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}", .{ prefix, entry.name }) catch continue;
             const sz = util.pathSize(io, allocator, full);
             const dup = allocator.dupe(u8, entry.name) catch continue;
@@ -610,7 +610,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             },
             .caskroom_dir => {
                 if (!dry_run) {
-                    var path_buf: [512]u8 = undefined;
+                    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
                     const full = std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}", .{ prefix, c.name }) catch continue;
                     std.Io.Dir.cwd().deleteTree(io, full) catch continue;
                 }
@@ -954,7 +954,7 @@ fn reopenDbForRowDeletes(io: std.Io, prefix: []const u8, result: *TierResult) ?s
 
 fn caskVersionFootprint(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, cache_dir: []const u8, token: []const u8, version: []const u8) u64 {
     var total: u64 = 0;
-    var path_buf: [512]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
         total += util.pathSize(io, allocator, caskroom_path);
     } else |_| {}
@@ -974,7 +974,7 @@ fn caskVersionFootprint(io: std.Io, allocator: std.mem.Allocator, prefix: []cons
 // removed here or already absent). A live file we cannot remove (e.g.
 // read-only mount) gates the row so a future writable run can finish.
 fn sweepCaskOldVersion(io: std.Io, prefix: []const u8, cache_dir: []const u8, token: []const u8, version: []const u8) bool {
-    var path_buf: [512]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
         if (std.Io.Dir.accessAbsolute(io, caskroom_path, .{})) |_| {
             std.Io.Dir.cwd().deleteTree(io, caskroom_path) catch return false;
@@ -2171,4 +2171,25 @@ test "runUnusedDeps removes a revisioned orphan's Cellar dir named with the _<re
     const ver_dir = try joinZ(allocator, prefix, "/Cellar/gettext/0.22_1");
     defer allocator.free(ver_dir);
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, ver_dir, .{}));
+}
+
+test "caskVersionFootprint counts a cached artefact whose path exceeds 512 bytes" {
+    const io = std.Options.debug_io;
+    const a = std.testing.allocator;
+    const root = try std.fmt.allocPrint(a, "/tmp/malt_footprint_long_{d}", .{std.c.getpid()});
+    defer a.free(root);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const seg = "d" ** 200;
+    const cask_dir = try std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}/Cask", .{ root, seg, seg, seg });
+    defer a.free(cask_dir);
+    try std.Io.Dir.cwd().createDirPath(io, cask_dir);
+    const art = try std.fmt.allocPrint(a, "{s}/tok-1.0.dmg", .{cask_dir});
+    defer a.free(art);
+    try std.testing.expect(art.len > 512);
+    const f = try std.Io.Dir.createFileAbsolute(io, art, .{});
+    try f.writeStreamingAll(io, "12345");
+    f.close(io);
+
+    const cache = cask_dir[0 .. cask_dir.len - "/Cask".len];
+    try std.testing.expectEqual(@as(u64, 5), caskVersionFootprint(io, a, root, cache, "tok", "1.0"));
 }

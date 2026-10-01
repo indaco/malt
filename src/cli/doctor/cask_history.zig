@@ -109,7 +109,7 @@ fn perVersionFootprint(
     version: []const u8,
 ) u64 {
     var total: u64 = 0;
-    var path_buf: [512]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
     if (std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
         total += pathSize(io, allocator, caskroom_path);
@@ -473,4 +473,26 @@ test "collectCensus on a fresh prefix returns an empty census" {
 
     try testing.expectEqual(@as(usize, 0), census.entries.len);
     try testing.expectEqual(@as(u64, 0), census.total_bytes);
+}
+
+test "perVersionFootprint counts a cached artefact whose path exceeds 512 bytes" {
+    const io = std.Options.debug_io;
+    const a = std.testing.allocator;
+    const root = try std.fmt.allocPrint(a, "/tmp/malt_doctor_long_{d}", .{std.c.getpid()});
+    defer a.free(root);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const seg = "d" ** 200;
+    const cache = try std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}", .{ root, seg, seg, seg });
+    defer a.free(cache);
+    const cask_dir = try std.fmt.allocPrint(a, "{s}/Cask", .{cache});
+    defer a.free(cask_dir);
+    try std.Io.Dir.cwd().createDirPath(io, cask_dir);
+    const art = try std.fmt.allocPrint(a, "{s}/tok-1.0.dmg", .{cask_dir});
+    defer a.free(art);
+    try std.testing.expect(art.len > 512);
+    const f = try std.Io.Dir.createFileAbsolute(io, art, .{});
+    try f.writeStreamingAll(io, "12345");
+    f.close(io);
+
+    try std.testing.expectEqual(@as(u64, 5), perVersionFootprint(io, a, root, cache, "tok", "1.0"));
 }
