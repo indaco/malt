@@ -4,6 +4,150 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.25.0 - 2026-10-01
+
+### Highlights
+
+v0.25.0 closes more gaps with Homebrew 7: `mt vulns` checks installed formulae for open advisories, installs relocate faster, casks run their declared flight steps, and formula-declared launchd services work as they do under `brew`.
+
+- **Know what is vulnerable.** `mt vulns` reports open advisories for your installed formulae, tap-installed tools included, and tells you what it is checking so a cold first run is not silent.
+- **Services that behave.** A formula's launchd service, its environment variables and its `stop_timeout` are honoured, and your per-service overrides survive upgrades.
+- **Casks that finish the job.** Casks run the steps they declare on install and uninstall, and link the command-line helpers they ship beside the app.
+- **Faster installs.** Only the files a bottle declares are relocated, so large packages finish sooner, and fetches work behind `HTTP_PROXY` and `HTTPS_PROXY`.
+
+#### Upgrading
+
+```bash
+mt version update             # standalone install
+brew upgrade --cask malt      # Homebrew install
+```
+
+New to malt? Use the installer or Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🚀 Enhancements
+
+- **uninstall:** add brew's --formula so a formula can be removed while casks cannot be read ([c3c6b4022](https://github.com/indaco/malt/commit/c3c6b4022)) ([#1135](https://github.com/indaco/malt/pull/1135))
+- **list:** show installed formulae and casks as compact columns by default ([2d09e42a5](https://github.com/indaco/malt/commit/2d09e42a5)) ([#1128](https://github.com/indaco/malt/pull/1128))
+- **install:** let tap and local packages that opt out of checksums install behind an explicit flag ([f23ff1ffc](https://github.com/indaco/malt/commit/f23ff1ffc)) ([#1102](https://github.com/indaco/malt/pull/1102))
+- **services:** keep per-service environment overrides across upgrades ([6c7a5e1ae](https://github.com/indaco/malt/commit/6c7a5e1ae)) ([#1097](https://github.com/indaco/malt/pull/1097))
+- **services:** pass a formula's service environment variables to launchd ([38b89f17b](https://github.com/indaco/malt/commit/38b89f17b)) ([#1095](https://github.com/indaco/malt/pull/1095))
+- **services:** register the launchd service a formula ships as its own plist ([b3be04808](https://github.com/indaco/malt/commit/b3be04808)) ([#1092](https://github.com/indaco/malt/pull/1092))
+- **services:** honour a formula's stop_timeout so launchd waits before SIGKILL ([d31469817](https://github.com/indaco/malt/commit/d31469817)) ([#1080](https://github.com/indaco/malt/pull/1080))
+- **cask:** run the flight steps casks declare on install and uninstall ([8aae24e74](https://github.com/indaco/malt/commit/8aae24e74)) ([#1069](https://github.com/indaco/malt/pull/1069))
+- **net:** honour HTTP_PROXY/HTTPS_PROXY so fetches work behind an egress proxy ([3a99d7e3a](https://github.com/indaco/malt/commit/3a99d7e3a)) ([#1066](https://github.com/indaco/malt/pull/1066))
+- **vulns:** say what is being checked so a cold first run is not silent ([5a70e2a59](https://github.com/indaco/malt/commit/5a70e2a59)) ([#1063](https://github.com/indaco/malt/pull/1063))
+- **vulns:** scan tap formulae against OSV so advisories on tap-installed tools surface ([60da89928](https://github.com/indaco/malt/commit/60da89928)) ([#1059](https://github.com/indaco/malt/pull/1059))
+- **cli:** report open advisories for installed formulae ([f07547867](https://github.com/indaco/malt/commit/f07547867)) ([#1058](https://github.com/indaco/malt/pull/1058))
+
+### 🩹 Fixes
+
+- **cache:** install from a tap and sweep the cache however long MALT_CACHE is ([30ef45071](https://github.com/indaco/malt/commit/30ef45071)) ([#1158](https://github.com/indaco/malt/pull/1158))
+- **cask:** remove a cask's cached download on uninstall however long its cache path is ([17b6fc652](https://github.com/indaco/malt/commit/17b6fc652)) ([#1157](https://github.com/indaco/malt/pull/1157))
+- **cli:** end restore, backup, services and purge failures on their own error line ([93401729a](https://github.com/indaco/malt/commit/93401729a)) ([#1156](https://github.com/indaco/malt/pull/1156))
+- **cli:** keep earlier output intact when commands share a redirected stdout file ([196d20c59](https://github.com/indaco/malt/commit/196d20c59)) ([#1149](https://github.com/indaco/malt/pull/1149))
+- **install:** keep opt pointing at a live keg while a tap --force reinstall sweeps the old one ([496d1c10f](https://github.com/indaco/malt/commit/496d1c10f)) ([#1152](https://github.com/indaco/malt/pull/1152))
+- **install:** keep the prior version installed when a tap --force reinstall fails to commit ([e150e93b5](https://github.com/indaco/malt/commit/e150e93b5)) ([#1148](https://github.com/indaco/malt/pull/1148))
+- **bundle:** make bundle import and install agree on what a bundle is ([93095226b](https://github.com/indaco/malt/commit/93095226b)) ([#1147](https://github.com/indaco/malt/pull/1147))
+- **help:** show a reinstall cask example that reinstall actually accepts ([772719234](https://github.com/indaco/malt/commit/772719234)) ([#1146](https://github.com/indaco/malt/pull/1146))
+- **bundle:** refuse a second path in bundle create instead of writing only the last ([0995ae631](https://github.com/indaco/malt/commit/0995ae631)) ([#1145](https://github.com/indaco/malt/pull/1145))
+- **bundle,backup:** make --dry-run preview bundle create, bundle import and backup instead of writing ([069d9d920](https://github.com/indaco/malt/commit/069d9d920)) ([#1143](https://github.com/indaco/malt/pull/1143))
+- **bundle:** stop bundle install, cleanup and remove on a flag they don't know instead of running without it ([c6f0a9e2d](https://github.com/indaco/malt/commit/c6f0a9e2d)) ([#1142](https://github.com/indaco/malt/pull/1142))
+- **bundle:** refuse to export a bundle whose members the database could not read ([bcdfeabee](https://github.com/indaco/malt/commit/bcdfeabee)) ([#1141](https://github.com/indaco/malt/pull/1141))
+- **tui:** show a formula or cask's own details in the TUI when both share a name ([a17edf522](https://github.com/indaco/malt/commit/a17edf522)) ([#1140](https://github.com/indaco/malt/pull/1140))
+- **pin:** honour a cask's own pin when a formula shares its name, and let pin, unpin and rollback target it with --cask ([18a5b3161](https://github.com/indaco/malt/commit/18a5b3161)) ([#1139](https://github.com/indaco/malt/pull/1139))
+- **uninstall:** treat a name that is both a formula and a cask as the formula, as brew does, and say so ([308643358](https://github.com/indaco/malt/commit/308643358)) ([#1138](https://github.com/indaco/malt/pull/1138))
+- **purge:** report a scope that could not run as a failure, with a non-zero exit and no success footer ([6be2810db](https://github.com/indaco/malt/commit/6be2810db)) ([#1137](https://github.com/indaco/malt/pull/1137))
+- **cask:** refuse an unreadable casks table instead of uninstalling a same-named formula or reinstalling over the app ([a945a20f5](https://github.com/indaco/malt/commit/a945a20f5)) ([#1134](https://github.com/indaco/malt/pull/1134))
+- **cli:** report an unreadable install database in uses and info instead of reading it as empty ([837772cf9](https://github.com/indaco/malt/commit/837772cf9)) ([#1133](https://github.com/indaco/malt/pull/1133))
+- **restore:** exit non-zero when backup lines were skipped so scripted restores notice ([a145dc1b1](https://github.com/indaco/malt/commit/a145dc1b1)) ([#1131](https://github.com/indaco/malt/pull/1131))
+- **restore:** restore every other package when a backup line names malt itself ([67492a071](https://github.com/indaco/malt/commit/67492a071)) ([#1130](https://github.com/indaco/malt/pull/1130))
+- never record a keg without its dependencies ([06456c6d9](https://github.com/indaco/malt/commit/06456c6d9)) ([#1129](https://github.com/indaco/malt/pull/1129))
+- **deps:** report an unreadable or uncached API record instead of calling the formula not found ([c1be81be0](https://github.com/indaco/malt/commit/c1be81be0)) ([#1127](https://github.com/indaco/malt/pull/1127))
+- **bundle:** say why a Brewfile member failed to install instead of only naming it ([0d20db6dd](https://github.com/indaco/malt/commit/0d20db6dd)) ([#1125](https://github.com/indaco/malt/pull/1125))
+- **migrate:** let parallel migrate install from a stale API cache when offline, like the serial path ([6cd8a4cec](https://github.com/indaco/malt/commit/6cd8a4cec)) ([#1124](https://github.com/indaco/malt/pull/1124))
+- **backup:** skip backup entries that do not name a package instead of listing them for restore ([77f1dbba7](https://github.com/indaco/malt/commit/77f1dbba7)) ([#1123](https://github.com/indaco/malt/pull/1123))
+- **migrate:** refuse a Homebrew receipt whose version, tap or dependency carries a control character ([b63b1cb03](https://github.com/indaco/malt/commit/b63b1cb03)) ([#1122](https://github.com/indaco/malt/pull/1122))
+- **info:** report a refused API record instead of calling it not installed ([463ae4fb6](https://github.com/indaco/malt/commit/463ae4fb6)) ([#1121](https://github.com/indaco/malt/pull/1121))
+- **install:** refuse a package whose dependency record is refused instead of installing it without that dependency ([9dad4b52f](https://github.com/indaco/malt/commit/9dad4b52f)) ([#1120](https://github.com/indaco/malt/pull/1120))
+- **cli:** keep terminal control bytes from local recipes and backup files off the screen ([f69b96fe5](https://github.com/indaco/malt/commit/f69b96fe5)) ([#1119](https://github.com/indaco/malt/pull/1119))
+- **api:** refuse a formula or cask record that carries a control character ([09d730d6a](https://github.com/indaco/malt/commit/09d730d6a)) ([#1118](https://github.com/indaco/malt/pull/1118))
+- **install:** refuse a local or tap recipe whose name, version or path holds a control character ([d767dfc40](https://github.com/indaco/malt/commit/d767dfc40)) ([#1117](https://github.com/indaco/malt/pull/1117))
+- **backup:** keep a local recipe's note from smuggling entries into restore ([1a2411905](https://github.com/indaco/malt/commit/1a2411905)) ([#1116](https://github.com/indaco/malt/pull/1116))
+- **uninstall:** remove every named package instead of silently dropping all but the first ([cad427276](https://github.com/indaco/malt/commit/cad427276)) ([#1115](https://github.com/indaco/malt/pull/1115))
+- **uninstall:** make --dry-run preview the removal instead of performing it ([1eaf400de](https://github.com/indaco/malt/commit/1eaf400de)) ([#1114](https://github.com/indaco/malt/pull/1114))
+- **uninstall:** stop reporting success when the package database fails, and keep the package on disk ([671776730](https://github.com/indaco/malt/commit/671776730)) ([#1113](https://github.com/indaco/malt/pull/1113))
+- **post-install:** bump a touched file's timestamps as upstream does ([fc94a1c33](https://github.com/indaco/malt/commit/fc94a1c33)) ([#1111](https://github.com/indaco/malt/pull/1111))
+- **post-install:** report a failed file step instead of counting it as done ([db6a1d919](https://github.com/indaco/malt/commit/db6a1d919)) ([#1110](https://github.com/indaco/malt/pull/1110))
+- **bundle:** stop exporting local recipes as core packages ([36b491791](https://github.com/indaco/malt/commit/36b491791)) ([#1109](https://github.com/indaco/malt/pull/1109))
+- **services:** register a tap formula's service whose paths interpolate prefix roots ([5f63ad475](https://github.com/indaco/malt/commit/5f63ad475)) ([#1108](https://github.com/indaco/malt/pull/1108))
+- **tap:** keep offline mode from reaching the forge to resolve a tap ([0b27ecc93](https://github.com/indaco/malt/commit/0b27ecc93)) ([#1104](https://github.com/indaco/malt/pull/1104))
+- **backup:** restore every package a backup or wipe manifest lists ([d08eed69a](https://github.com/indaco/malt/commit/d08eed69a)) ([#1106](https://github.com/indaco/malt/pull/1106))
+- **backup:** back up and reinstall tap packages from the tap they came from ([e710d12a6](https://github.com/indaco/malt/commit/e710d12a6)) ([#1103](https://github.com/indaco/malt/pull/1103))
+- **install:** keep a tap's bare release binary inside its keg ([643f036be](https://github.com/indaco/malt/commit/643f036be)) ([#1101](https://github.com/indaco/malt/pull/1101))
+- **install:** honour --cask and --formula when installing from a tap ([737b85172](https://github.com/indaco/malt/commit/737b85172)) ([#1099](https://github.com/indaco/malt/pull/1099))
+- **tap:** install multi-arch casks that declare arch and sha256 at the top level ([011b9b344](https://github.com/indaco/malt/commit/011b9b344)) ([#1098](https://github.com/indaco/malt/pull/1098))
+- **purge:** stop the cached audit listing a package autoremove already reaped ([c685d94f2](https://github.com/indaco/malt/commit/c685d94f2)) ([#1094](https://github.com/indaco/malt/pull/1094))
+- **purge:** stop advertising a service whose package autoremove already deleted ([d7ac98bf4](https://github.com/indaco/malt/commit/d7ac98bf4)) ([#1093](https://github.com/indaco/malt/pull/1093))
+- **services:** treat a Linux-only service block as no macOS service instead of an unsupported one ([a8732729a](https://github.com/indaco/malt/commit/a8732729a)) ([#1090](https://github.com/indaco/malt/pull/1090))
+- **cask:** classify a download URL whose redirect is only sent on GET so casks like warp install instead of being refused as unsupported ([4366260e5](https://github.com/indaco/malt/commit/4366260e5)) ([#1089](https://github.com/indaco/malt/pull/1089))
+- **services:** say why a core formula that ships its own launchd plist gets no malt service ([9f52ff46b](https://github.com/indaco/malt/commit/9f52ff46b)) ([#1088](https://github.com/indaco/malt/pull/1088))
+- **services:** say why a formula that ships its own launchd plist gets no malt service ([3b36fdf01](https://github.com/indaco/malt/commit/3b36fdf01)) ([#1086](https://github.com/indaco/malt/pull/1086))
+- **upgrade:** retire a service registration the new version no longer declares ([014cdf7ff](https://github.com/indaco/malt/commit/014cdf7ff)) ([#1083](https://github.com/indaco/malt/pull/1083))
+- **tap:** register the launchd service a tap or local formula declares so services list and start see it ([708d93ddb](https://github.com/indaco/malt/commit/708d93ddb)) ([#1082](https://github.com/indaco/malt/pull/1082))
+- **upgrade:** regenerate a formula's service plist on upgrade without resetting the user's auto-start ([ad28dc0dd](https://github.com/indaco/malt/commit/ad28dc0dd)) ([#1081](https://github.com/indaco/malt/pull/1081))
+- **cask:** link the command-line helpers an app cask ships beside its bundle ([96c9b35cf](https://github.com/indaco/malt/commit/96c9b35cf)) ([#1079](https://github.com/indaco/malt/pull/1079))
+- **cask:** restore binary casks on rollback and link the binaries app casks declare ([357735228](https://github.com/indaco/malt/commit/357735228)) ([#1078](https://github.com/indaco/malt/pull/1078))
+- **fs:** refuse a '.' component in MALT_PREFIX, MALT_CACHE and MALT_APPDIR so every env root is spelled canonically ([229ee3497](https://github.com/indaco/malt/commit/229ee3497)) ([#1076](https://github.com/indaco/malt/pull/1076))
+- **cask:** ignore a root, relative or traversal MALT_APPDIR instead of placing the app there ([9671085fd](https://github.com/indaco/malt/commit/9671085fd)) ([#1075](https://github.com/indaco/malt/pull/1075))
+- **cask:** keep cask steps off the user's shared directories and unwedge a cask whose uninstall steps fail ([2c00b8a34](https://github.com/indaco/malt/commit/2c00b8a34)) ([#1074](https://github.com/indaco/malt/pull/1074))
+- **cask:** report a phase whose context could not be built and judge each phase on its own entries ([a9b5002eb](https://github.com/indaco/malt/commit/a9b5002eb)) ([#1073](https://github.com/indaco/malt/pull/1073))
+- **cask:** honour the live flight step shapes and run them on every removal path ([dbff14783](https://github.com/indaco/malt/commit/dbff14783)) ([#1071](https://github.com/indaco/malt/pull/1071))
+- **cask:** install a zip cask that ships a bare executable instead of an app ([f3bcf2dd5](https://github.com/indaco/malt/commit/f3bcf2dd5)) ([#1070](https://github.com/indaco/malt/pull/1070))
+- **info:** report an API that could not answer instead of claiming not installed ([b464c00c0](https://github.com/indaco/malt/commit/b464c00c0)) ([#1065](https://github.com/indaco/malt/pull/1065))
+- **net:** re-dial after a transient status so every retry attempt reaches the peer ([642506d59](https://github.com/indaco/malt/commit/642506d59)) ([#1062](https://github.com/indaco/malt/pull/1062))
+- **tap:** stop re-dialling a dead tap host for every keg in one audit ([d77e074de](https://github.com/indaco/malt/commit/d77e074de)) ([#1060](https://github.com/indaco/malt/pull/1060))
+
+### 📖 Documentation
+
+- make the README shorter and easier to scan ([cb14e86c6](https://github.com/indaco/malt/commit/cb14e86c6)) ([#1144](https://github.com/indaco/malt/pull/1144))
+- **benchmark:** update results 2026-09-28 ([3e7aadf20](https://github.com/indaco/malt/commit/3e7aadf20)) ([#1126](https://github.com/indaco/malt/pull/1126))
+- bring patch release notes to main and update CHANGELOG ([1658ee6a6](https://github.com/indaco/malt/commit/1658ee6a6)) ([#1091](https://github.com/indaco/malt/pull/1091))
+- **benchmark:** update results 2026-09-21 ([ff90ce8e8](https://github.com/indaco/malt/commit/ff90ce8e8)) ([#1084](https://github.com/indaco/malt/pull/1084))
+- benchmark releases list in summaries and README ([4020b4c4b](https://github.com/indaco/malt/commit/4020b4c4b)) ([#1067](https://github.com/indaco/malt/pull/1067))
+
+### ⚡ Performance
+
+- **install:** relocate only the files the bottle declares ([323062a7d](https://github.com/indaco/malt/commit/323062a7d)) ([#1068](https://github.com/indaco/malt/pull/1068))
+
+### ✅ Tests
+
+- **regressions:** guard that a service's working_dir is pre-created only under keg, var or etc ([308ed191f](https://github.com/indaco/malt/commit/308ed191f)) ([#1087](https://github.com/indaco/malt/pull/1087))
+- **regressions:** bound the dead-host guard by what one keg costs on the same runner ([015ac9838](https://github.com/indaco/malt/commit/015ac9838)) ([#1064](https://github.com/indaco/malt/pull/1064))
+- **regressions:** stop depending on ripgrep so the harness runs on CI ([ff6a93789](https://github.com/indaco/malt/commit/ff6a93789)) ([#1057](https://github.com/indaco/malt/pull/1057))
+
+### 🏡 Chores
+
+- update code coverage ([0869d2aa5](https://github.com/indaco/malt/commit/0869d2aa5))
+
+### 🤖 CI
+
+- bump taiki-e/install-action from 2.87.1 to 2.87.21 ([1ff0fd5bf](https://github.com/indaco/malt/commit/1ff0fd5bf)) ([#1151](https://github.com/indaco/malt/pull/1151))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@dependabot[bot]](https://github.com/dependabot[bot])
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+
 ## v0.24.4 - 2026-09-16
 
 ### Highlights

@@ -46,12 +46,21 @@ count_scratch() {
 }
 scratch_before=$(count_scratch)
 
+kcov_err=$(mktemp)
+trap 'rm -f "$kcov_err"' EXIT
+
 for bin in zig-out/test-bin/*; do
   # Skip .dSYM debug bundles and any non-regular files
   [ -f "$bin" ] || continue
   [ -x "$bin" ] || continue
   echo "→ kcov: $(basename "$bin")"
-  kcov --include-path="$src_dir" coverage "$bin" </dev/null >/dev/null
+  # stderr off the TTY: Zig's test runner emits ANSI progress there, which
+  # tests that capture stderr then see as stray escape bytes. Replay it only
+  # on failure so real failures stay visible.
+  if ! kcov --include-path="$src_dir" coverage "$bin" </dev/null >/dev/null 2>"$kcov_err"; then
+    cat "$kcov_err" >&2
+    exit 1
+  fi
 done
 
 scratch_after=$(count_scratch)
