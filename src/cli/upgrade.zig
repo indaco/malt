@@ -289,6 +289,46 @@ fn warmsSnapshot(g: WarmGate) bool {
     return g.dry_run and g.full_keg and !g.walk_failed and !g.tainted;
 }
 
+/// Only both kinds together cover the installed set: a kind narrowed out
+/// or whose audit failed leaves `Plan.empty`, which must veto the warm.
+fn coversInstalledSet(formula: audit_mod.Plan, cask: audit_mod.Plan) bool {
+    return formula.full_keg and cask.full_keg;
+}
+
+test "coversInstalledSet needs both kinds' audits, so a failed one cannot be masked" {
+    var full: audit_mod.Plan = .empty;
+    full.full_keg = true;
+    try std.testing.expect(coversInstalledSet(full, full));
+    try std.testing.expect(!coversInstalledSet(.empty, full));
+    try std.testing.expect(!coversInstalledSet(full, .empty));
+    try std.testing.expect(!coversInstalledSet(.empty, .empty));
+}
+
+/// A bulk audit that could not load its rows. A broken table points at
+/// `mt doctor`; anything else (OOM) keeps its name.
+fn reportAuditFailure(e: anyerror) void {
+    switch (e) {
+        error.PrepareFailed, error.StepFailed, error.Corrupt => output.err(outdated_mod.unreadable_rows_fmt, .{@errorName(e)}),
+        else => output.err("Could not check installed packages: {s}", .{@errorName(e)}),
+    }
+}
+
+test "reportAuditFailure points a broken table at mt doctor and names any other failure" {
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(false);
+    defer output.setQuiet(prior_quiet);
+    inline for (.{ error.PrepareFailed, error.StepFailed, error.Corrupt, error.OutOfMemory }) |e| {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(std.testing.allocator);
+        output.beginStderrCapture(std.testing.allocator, &buf);
+        reportAuditFailure(e);
+        output.endStderrCapture();
+        try std.testing.expect(std.mem.indexOf(u8, buf.items, @errorName(e)) != null);
+        const doctor = std.mem.indexOf(u8, buf.items, "mt doctor") != null;
+        try std.testing.expectEqual(e != error.OutOfMemory, doctor);
+    }
+}
+
 /// `--allow-unpinned` rides the ctx down to the tap materialise, like `offline`.
 fn upgradeCtx(parent: *const AppCtx, args: []const []const u8) AppCtx {
     var run_ctx = parent.*;
@@ -417,10 +457,13 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
-    var db = sqlite.Database.open(db_path) catch {
-        // Same degradation as `list`/`outdated` — missing DB on a fresh
-        // prefix is empty state, not an error.
-        return;
+    var db = outdated_mod.openPrefixDb(ctx.io, db_path) catch |e| switch (e) {
+        // Fresh prefix: nothing installed, nothing to upgrade.
+        error.Absent => return,
+        error.Unreadable => {
+            output.err("Failed to open database: {s}. Try `mt doctor`.", .{db_path});
+            return error.Aborted;
+        },
     };
     defer db.close();
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
@@ -466,33 +509,48 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
             .formula_only = formula_only,
             .pinned_only = pinned_only,
         };
-        // An audit that cannot even read its rows leaves nothing to upgrade —
-        // the same outcome as the SQL failure this replaced.
-        var f_plan: audit_mod.Plan = if (cask_only) .empty else audit_mod.audit(allocator, &db, &api, .formula, scope) catch .empty;
+        // A failed audit is not an empty install: fail the run and skip only
+        // that kind's pass.
+        var f_err: ?anyerror = null;
+        var f_plan: audit_mod.Plan = if (cask_only) .empty else audit_mod.audit(allocator, &db, &api, .formula, scope) catch |e| blk: {
+            f_err = e;
+            break :blk .empty;
+        };
         defer f_plan.deinit(allocator);
-        var c_plan: audit_mod.Plan = if (formula_only) .empty else audit_mod.audit(allocator, &db, &api, .cask, scope) catch .empty;
+        var c_err: ?anyerror = null;
+        var c_plan: audit_mod.Plan = if (formula_only) .empty else audit_mod.audit(allocator, &db, &api, .cask, scope) catch |e| blk: {
+            c_err = e;
+            break :blk .empty;
+        };
         defer c_plan.deinit(allocator);
+        if (f_err != null or c_err != null) {
+            any_failed = true;
+            other_failed = true;
+        }
 
         const checking = f_plan.rows.len + c_plan.rows.len;
         if (checking > 0) output.info("Checking {d} packages...", .{checking});
 
         // The warm gate reads the plan rather than the flags: a narrowed
         // audit must never persist a snapshot of the rows it did look at.
-        // Both plans carry the same verdict; `or` picks the live one when a
-        // narrowing or a failed audit left the other empty.
-        const full_keg = f_plan.full_keg or c_plan.full_keg;
+        // A failed audit is also vetoed by `walk_failed`; this keeps
+        // `Plan.empty` from licensing a warm on its own.
+        const full_keg = coversInstalledSet(f_plan, c_plan);
         const sink_ptr: ?*EntrySink = if (dry_run and full_keg) &sink else null;
-        if (!cask_only) {
+        if (!cask_only and f_err == null) {
             upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, f_plan, &tally, sink_ptr) catch {
                 any_failed = true;
             };
         }
-        if (!formula_only) {
+        if (!formula_only and c_err == null) {
             upgradeAllCasks(ctx, allocator, &db, &api, prefix, dry_run, force, pinned_only, c_plan, &tally, sink_ptr) catch {
                 any_failed = true;
             };
         }
         printSummary(tally, dry_run);
+        // After the footer, so a run that failed never ends on an all-clear.
+        if (f_err) |e| reportAuditFailure(e);
+        if (c_err) |e| reportAuditFailure(e);
         any_upgraded = tally.upgraded > 0;
 
         // Best-effort warm of the shared outdated snapshot from the dry-run's

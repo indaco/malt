@@ -248,6 +248,9 @@ jobs:
       - name: Regression guard - --dry-run update keeps the API cache
         run: ./scripts/regressions/update-dry-run-keeps-cache-dry-run-update-wipes-the-api-cache.sh
 
+      - name: Regression guard - bulk upgrade reports an unreadable package database
+        run: ./scripts/regressions/upgrade-unreadable-db-fails-loud-audit-failure-reported-as-no-formulas-installed.sh
+
       - name: Regression guard - INSTALL_RECEIPT.json mirrors the install reason
         run: ./scripts/regressions/receipt-mirrors-install-reason-install-receipt-always-claims-installed-on-request.sh
 
