@@ -57,15 +57,20 @@ const flag_map = std.StaticStringMap(Flag).initComptime(.{
 
 pub fn parseArgs(args: []const []const u8) error{Aborted}!Opts {
     var opts = Opts{};
+    var opts_done = false;
     for (args) |a| {
-        // No positionals, so `--` only ends option parsing.
-        if (std.mem.eql(u8, a, "--")) break;
-        if (flag_map.get(a)) |flag| switch (flag) {
+        if (!opts_done and std.mem.eql(u8, a, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, a, "-")) {
+            // Takes no names; skipping `check` in `version update check` would self-update.
+            output.err("Unknown argument for version update: '{s}'", .{a});
+            return error.Aborted;
+        } else if (flag_map.get(a)) |flag| switch (flag) {
             .check => opts.check = true,
             .yes => opts.yes = true,
             .no_verify => opts.no_verify = true,
             .cleanup => opts.cleanup = true,
-        } else if (std.mem.startsWith(u8, a, "-")) {
+        } else {
             // `--chck -y` would otherwise skip the check and swap the binary.
             output.err("Unknown flag: {s}", .{a});
             return error.Aborted;

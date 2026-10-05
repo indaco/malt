@@ -204,6 +204,28 @@ test "execute refuses an unknown flag before the forced install starts" {
     try testing.expect(pathExists(cellar_dir));
 }
 
+test "execute names an unknown flag before looking the package up" {
+    // `--bogus ghost` used to report "ghost is not installed", hiding the typo.
+    const prefix = try setupPrefix("unknown_flag_missing");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+        _ = c.unsetenv("MALT_PREFIX");
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), &.{ "--bogus", "ghost" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --bogus") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+}
+
 test "execute refuses a formula and a cask in one run before installing anything" {
     // One install run takes one side: `--cask` from the first name would
     // send the formula to the cask resolver.

@@ -65,10 +65,21 @@ test "parseArgs: a known flag does not excuse a later unknown one" {
     try testing.expectError(error.Aborted, updater.parseArgs(&.{"-"}));
 }
 
-test "parseArgs: `--` ends option parsing" {
-    const opts = try updater.parseArgs(&.{ "--check", "--", "--bogus" });
+test "parseArgs: a stray word is refused, so `version update check` cannot self-update" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output_mod.beginStderrCapture(testing.allocator, &captured);
+    defer output_mod.endStderrCapture();
+    try testing.expectError(error.Aborted, updater.parseArgs(&.{"check"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown argument for version update: 'check'") != null);
+}
+
+test "parseArgs: `--` ends options, and nothing may follow it" {
+    const opts = try updater.parseArgs(&.{ "--check", "--" });
     try testing.expect(opts.check);
     try testing.expect(!opts.yes);
+    // Takes no names, so a token after `--` is a stray argument.
+    try testing.expectError(error.Aborted, updater.parseArgs(&.{ "--check", "--", "--bogus" }));
 }
 
 // --- updateAvailable ------------------------------------------------------

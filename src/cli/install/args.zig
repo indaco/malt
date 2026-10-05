@@ -309,6 +309,7 @@ pub const ParseError = enum {
     self_install,
     ambiguous_system_ruby_scope,
     unknown_flag,
+    empty_name,
 };
 
 /// The validated argv: resolved flags plus the package list. `quiet` /
@@ -333,8 +334,8 @@ pub const ParseResult = union(enum) {
 };
 
 /// The install-contract checks that hold regardless of how the flags were
-/// built: a non-empty package list and no self-install. The argv path runs
-/// them inside `parse`; the struct-first path (`installAll`) runs the same
+/// built: a non-empty package list, no empty name and no self-install. The
+/// argv path runs them inside `parse`; the struct-first path (`installAll`) runs the same
 /// function in the orchestrator, so both entry points share one guarantee.
 /// Pure and allocation-free — the offending name borrows into `packages`.
 pub fn checkInstallable(packages: []const []const u8) ?Refusal {
@@ -342,6 +343,8 @@ pub fn checkInstallable(packages: []const []const u8) ?Refusal {
     // Refuse self-install in every shape the dispatcher accepts; `mt version
     // update` is the supported upgrade channel.
     for (packages) |pkg| {
+        // An unset shell variable, not a name to look up.
+        if (pkg.len == 0) return .{ .err = .empty_name };
         if (isSelfInstall(pkg)) return .{ .err = .self_install, .arg = pkg };
     }
     return null;
@@ -387,6 +390,17 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "--isolate-dependencies", .isolate_deps },
     .{ "--allow-unpinned", .allow_unpinned },
 });
+
+/// The first flag `parse` would refuse as `unknown_flag`, so a wrapper can
+/// refuse it before its own lookups report something else.
+pub fn unknownFlag(args: []const []const u8) ?[]const u8 {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--")) return null;
+        if (!std.mem.startsWith(u8, arg, "-") or std.mem.startsWith(u8, arg, "--use-system-ruby=")) continue;
+        if (install_flag_map.get(arg) == null) return arg;
+    }
+    return null;
+}
 
 /// Scan + validate the install argv in one place. Returns validated data or
 /// a tagged refusal — never a message. `arena` builds the package list and
@@ -668,6 +682,21 @@ test "parse: a bare `--` with no package after it is still an empty list" {
     try expectInvalid(try parse(arena.allocator(), &.{"--"}), .no_packages);
 }
 
+test "parse: an empty package name is refused, not looked up" {
+    // `mt install "$UNSET" wget` would query a nameless package beside wget.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectInvalid(try parse(arena.allocator(), &.{""}), .empty_name);
+    try expectInvalid(try parse(arena.allocator(), &.{ "wget", "--", "" }), .empty_name);
+}
+
+test "unknownFlag: names the first flag install would refuse" {
+    // reinstall checks this before its own lookups, so a typo isn't reported as a missing package.
+    try std.testing.expectEqualStrings("--bogus", unknownFlag(&.{ "--force", "wget", "--bogus", "-n" }).?);
+    try std.testing.expect(unknownFlag(&.{ "--cask", "-q", "--use-system-ruby=wget", "wget" }) == null);
+    try std.testing.expect(unknownFlag(&.{ "--", "--bogus" }) == null);
+}
+
 test "parse: bare --use-system-ruby with multiple packages needs a scope" {
     // A bare flag across many formulas would let one DSL parse failure
     // silently widen Ruby trust across the rest — refuse and name the
@@ -769,6 +798,7 @@ test "checkInstallable: empty list and self-install refused, real names pass" {
     const refusal = checkInstallable(&.{ "wget", "malt" }).?;
     try std.testing.expectEqual(ParseError.self_install, refusal.err);
     try std.testing.expectEqualStrings("malt", refusal.arg);
+    try std.testing.expectEqual(ParseError.empty_name, checkInstallable(&.{ "wget", "" }).?.err);
     try std.testing.expect(checkInstallable(&.{ "wget", "jq" }) == null);
 }
 

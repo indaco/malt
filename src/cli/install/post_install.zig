@@ -50,7 +50,7 @@ pub fn useSystemRubyForFormula(scope: []const []const u8, formula_name: []const 
 /// `ruby` and its versioned aliases (`ruby@3`, `ruby@3.4`, ...) carry their
 /// own `post_install` hook. Without auto-inclusion the user has to write
 /// `--use-system-ruby=ruby` to install ruby — recursive nonsense, since
-/// the trust boundary is whatever `mt migrate ruby` already implies.
+/// the trust boundary is whatever migrating ruby from Homebrew already implies.
 pub fn isSelfHostingRubyKeg(name: []const u8) bool {
     if (std.mem.eql(u8, name, "ruby")) return true;
     if (!std.mem.startsWith(u8, name, "ruby@")) return false;
@@ -149,7 +149,7 @@ pub fn routePostInstallOutcomeWithBody(
         }
         // Auto-included Ruby-interpreter kegs (`ruby`, `ruby@N`) skip the
         // re-run when the DSL handled any top-level statement: their
-        // post_install effects often already landed (e.g. `mt migrate ruby`
+        // post_install effects often already landed (e.g. `mt migrate`
         // after brew installed it), so a Ruby-side re-run would double-stamp
         // non-idempotent steps. Explicit `--use-system-ruby=NAME` honors the
         // user's opt-in unconditionally.

@@ -237,6 +237,12 @@ fn dbFailed(db: *sqlite.Database, e: error{ OutOfMemory, Unreadable }) error{ Ou
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "reinstall")) return;
 
+    // Before the lookups, so a typo isn't reported as a missing package.
+    if (install_args.unknownFlag(args)) |flag| {
+        output.err("Unknown flag: {s}", .{flag});
+        return error.Aborted;
+    }
+
     const name = firstPositional(args) orelse {
         output.err("Usage: mt reinstall <package>", .{});
         return error.Aborted;

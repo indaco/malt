@@ -251,6 +251,47 @@ test "executeUnlink on a non-installed package returns Aborted" {
     );
 }
 
+test "executeUnlink refuses a flag instead of unlinking the keg" {
+    // `unlink foo -n` (brew's dry run) used to unlink for real.
+    var s = try Scratch.init(testing.allocator, "unlink_unknown_flag");
+    defer s.deinit(testing.allocator);
+    try seedKeg(testing.allocator, s.path, "foo", "1.0", "foobin");
+    {
+        quiet();
+        defer unquiet();
+        try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    for ([_][]const []const u8{ &.{ "foo", "-n" }, &.{ "-n", "foo" } }) |argv| {
+        try testing.expectError(error.Aborted, link_mod.executeUnlink(&malt.app_ctx.debug_ctx, testing.allocator, argv));
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: -n") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "not installed") == null);
+
+    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    defer testing.allocator.free(linked);
+    try testing.expect(pathExists(linked));
+}
+
+test "executeUnlink takes the name after `--`, even a dash-led one" {
+    var s = try Scratch.init(testing.allocator, "unlink_end_of_options");
+    defer s.deinit(testing.allocator);
+    try seedKeg(testing.allocator, s.path, "-foo", "1.0", "foobin");
+    quiet();
+    defer unquiet();
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--", "-foo" });
+
+    try link_mod.executeUnlink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--", "-foo" });
+
+    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    defer testing.allocator.free(linked);
+    try testing.expect(!pathExists(linked));
+}
+
 // --- long-but-valid prefix must fail loud, not silently succeed ---------
 
 test "executeLink on a long-but-valid prefix fails loud instead of exiting 0" {
@@ -437,4 +478,27 @@ test "executeLink on an isolated dep re-links bins and clears bin_isolated" {
     defer probe.finalize();
     _ = try probe.step();
     try testing.expectEqual(@as(i64, 0), probe.columnInt(0));
+}
+
+test "link and unlink refuse a second name instead of dropping it" {
+    // `mt unlink wget curl` used to unlink wget alone and exit 0.
+    var s = try Scratch.init(testing.allocator, "extra_name");
+    defer s.deinit(testing.allocator);
+    try seedKeg(testing.allocator, s.path, "foo", "1.0", "foobin");
+    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    defer testing.allocator.free(linked);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try testing.expectError(error.Aborted, link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "foo", "bar" }));
+    try testing.expect(!pathExists(linked));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Usage: mt link") != null);
+
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
+    try testing.expectError(error.Aborted, link_mod.executeUnlink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "foo", "bar" }));
+    try testing.expect(pathExists(linked));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Usage: mt unlink") != null);
 }

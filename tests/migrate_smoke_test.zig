@@ -137,8 +137,15 @@ test "an unknown flag is refused before the Homebrew scan starts" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --bogus") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "Found Homebrew") == null);
 
-    // After `--` the same token is not a flag; the dry-run scan proceeds.
-    try migrate.execute(&ctx, arena.allocator(), &.{ "--", "--bogus" });
+    // migrate takes no names, so a stray word is refused too, `--` or not.
+    for ([_][]const []const u8{ &.{"alpha"}, &.{ "--", "--bogus" } }) |argv| {
+        try testing.expectError(error.Aborted, migrate.execute(&ctx, arena.allocator(), argv));
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown argument for migrate: 'alpha'") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Found Homebrew") == null);
+
+    // A bare `--` only ends options; the dry-run scan proceeds.
+    try migrate.execute(&ctx, arena.allocator(), &.{"--"});
     try testing.expect(std.mem.indexOf(u8, captured.items, "Found Homebrew") != null);
 }
 

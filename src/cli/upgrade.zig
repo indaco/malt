@@ -342,7 +342,12 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
         if (!opts_done and std.mem.eql(u8, arg, "--")) {
             opts_done = true;
         } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
-            if (arg.len > 0) names.append(allocator, arg) catch return error.OutOfMemory;
+            // An unset shell variable; dropping it would upgrade everything.
+            if (arg.len == 0) {
+                output.err("Empty package name", .{});
+                return error.Aborted;
+            }
+            names.append(allocator, arg) catch return error.OutOfMemory;
         } else if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
             const list = arg["--use-system-ruby=".len..];
             var it = std.mem.splitScalar(u8, list, ',');

@@ -569,6 +569,7 @@ fn reportInstallRefusal(sink: OutputSink, refusal: args_mod.Refusal) anyerror {
             .{refusal.arg},
         ),
         .unknown_flag => sink.err("Unknown flag: {s}", .{refusal.arg}),
+        .empty_name => sink.err("Empty package name", .{}),
     }
     return switch (refusal.err) {
         .no_packages => InstallError.NoPackages,
@@ -581,6 +582,7 @@ fn reportInstallRefusal(sink: OutputSink, refusal: args_mod.Refusal) anyerror {
         .download_only_with_only_deps,
         .self_install,
         .unknown_flag,
+        .empty_name,
         => error.Aborted,
     };
 }

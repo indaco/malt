@@ -132,10 +132,15 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var parallel_flag = false;
     var use_system_ruby_scope: std.ArrayList([]const u8) = .empty;
     defer use_system_ruby_scope.deinit(allocator);
+    var opts_done = false;
     for (args) |arg| {
-        // No positionals, so `--` only ends option parsing.
-        if (std.mem.eql(u8, arg, "--")) break;
-        if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            // Migrates the whole Cellar; a stray word reads like a name it would ignore.
+            output.err("Unknown argument for migrate: '{s}'", .{arg});
+            return error.Aborted;
+        } else if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
             const list = arg["--use-system-ruby=".len..];
             var it = std.mem.splitScalar(u8, list, ',');
             while (it.next()) |name| {
@@ -146,7 +151,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             .parallel => parallel_flag = true,
             .use_system_ruby => use_system_ruby_bare = true,
             .quiet => output.setQuiet(true),
-        } else if (std.mem.startsWith(u8, arg, "-")) {
+        } else {
             // Refused before the Homebrew scan, so a typo can't start a migration.
             output.err("Unknown flag: {s}", .{arg});
             return error.Aborted;

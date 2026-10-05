@@ -28,12 +28,16 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
     var all_flag = false;
     var overwrite = false;
     var name: ?[]const u8 = null;
+    var extra_name = false;
     var opts_done = false;
     for (args) |arg| {
         if (!opts_done and std.mem.eql(u8, arg, "--")) {
             opts_done = true;
         } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
-            if (name == null and arg.len > 0) name = arg;
+            // One name only: a silently dropped second one reads as linked.
+            if (arg.len > 0) {
+                if (name != null) extra_name = true else name = arg;
+            }
         } else if (link_flag_map.get(arg)) |flag| switch (flag) {
             .isolate => isolate = true,
             .all => all_flag = true,
@@ -45,6 +49,7 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
         }
     }
 
+    if (extra_name) name = null;
     if (isolate) {
         return executeLinkIsolate(ctx, allocator, name, all_flag);
     }
@@ -274,14 +279,30 @@ fn isolateOne(
 pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "unlink")) return;
 
-    if (args.len == 0) {
+    var name_arg: ?[]const u8 = null;
+    var extra_name = false;
+    var opts_done = false;
+    for (args) |arg| {
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            // One name only: a silently dropped second one reads as unlinked.
+            if (arg.len > 0) {
+                if (name_arg != null) extra_name = true else name_arg = arg;
+            }
+        } else {
+            // unlink takes no flags; brew's `-n` means dry run, not "unlink anyway".
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
+        }
+    }
+
+    const name = (if (extra_name) null else name_arg) orelse {
         output.err("Usage: mt unlink <formula>", .{});
         output.info("Remove symlinks for an installed keg from the prefix.", .{});
         output.info("The keg remains installed in the Cellar.", .{});
         return error.Aborted;
-    }
-
-    const name = args[0];
+    };
     const prefix = atomic.maltPrefixOrAbort();
 
     var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;

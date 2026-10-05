@@ -542,6 +542,17 @@ test "execute --formula on a cask-only name refuses instead of upgrading the cas
     try testing.expect(std.mem.indexOf(u8, captured.items, "box is not installed as a formula") != null);
 }
 
+test "execute refuses an empty name instead of upgrading everything" {
+    // `mt upgrade --force "$UNSET"` used to fall through to upgrade-all, pins bypassed.
+    for ([_][]const []const u8{ &.{ "--force", "" }, &.{ "--", "" } }) |argv| {
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        try upgradeCaptured(&captured, "empty_name", seed_box_cask, null, argv);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "Empty package name") != null);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "box") == null);
+    }
+}
+
 test "execute reports an unreadable kegs table instead of upgrading a same-named cask" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
