@@ -1275,6 +1275,105 @@ test "update without --check deletes a stale snapshot to force fresh recompute n
     );
 }
 
+test "update under --dry-run keeps the API cache and the snapshot" {
+    // `mt --dry-run update` used to wipe both, exactly like a real run.
+    var env = try UpdateEnv.init("dry_run_keeps_cache");
+    defer env.deinit();
+    try env.writeApiFile("formula_alpha.json", "{\"name\":\"alpha\"}");
+    try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, env.cache_path, .{
+        .generated_at_ms = test_io.milliTimestamp(std.Options.debug_io),
+        .formulas = &[_]outdated_mod.OutdatedEntry{},
+        .casks = &[_]outdated_mod.OutdatedEntry{},
+    });
+
+    malt.output.setDryRun(true);
+    defer malt.output.setDryRun(false);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    try update_mod.execute(&ctx, testing.allocator, &.{});
+
+    try testing.expect(env.apiFileExists("formula_alpha.json"));
+    try testing.expect(outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path) != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would clear the API cache") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Cache cleared") == null);
+}
+
+test "update --check under --dry-run leaves the snapshot as it was" {
+    // The --check branch returned before the dry-run gate and rewrote the snapshot.
+    var env = try UpdateEnv.init("dry_run_check");
+    defer env.deinit();
+    try env.writeApiFile(
+        "formula_alpha.json",
+        "{\"name\":\"alpha\",\"versions\":{\"stable\":\"2.0\"}}",
+    );
+    {
+        var db = try openUpdateDb(env.prefix_path);
+        defer db.close();
+        try insertKegV1(&db, "alpha");
+    }
+    const marker_ts: i64 = 12345;
+    try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, env.cache_path, .{
+        .generated_at_ms = marker_ts,
+        .formulas = &[_]outdated_mod.OutdatedEntry{},
+        .casks = &[_]outdated_mod.OutdatedEntry{},
+    });
+
+    malt.output.setDryRun(true);
+    defer malt.output.setDryRun(false);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try update_mod.execute(&ctx, testing.allocator, &.{"--check"});
+
+    const snap = outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path).?;
+    defer outdated_mod.freeSnapshot(testing.allocator, snap);
+    try testing.expectEqual(marker_ts, snap.generated_at_ms);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would refresh the outdated snapshot") != null);
+}
+
+test "update --check under --dry-run still refuses a database from a newer malt" {
+    // A preview that exits 0 where the real run aborts gives a script a false green.
+    var env = try UpdateEnv.init("dry_run_check_too_new");
+    defer env.deinit();
+    {
+        var db = try openUpdateDb(env.prefix_path);
+        defer db.close();
+        var sql_buf: [96]u8 = undefined;
+        try db.exec(try std.fmt.bufPrintZ(&sql_buf, "INSERT INTO schema_version(version) VALUES ({d});", .{schema.known_schema_version + 1}));
+    }
+
+    malt.output.setDryRun(true);
+    defer malt.output.setDryRun(false);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(error.SchemaTooNew, update_mod.execute(&ctx, testing.allocator, &.{"--check"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would refresh") == null);
+}
+
 test "outdated execute reads a fresh snapshot and never overwrites it" {
     var env = try UpdateEnv.init("outdated_uses_snapshot");
     defer env.deinit();

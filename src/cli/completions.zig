@@ -167,7 +167,7 @@ pub const bash_script =
     \\        uninstall|remove) cmd_flags="--cask --casks --formula --formulae --force -f --dry-run --quiet -q" ;;
     \\        upgrade)          cmd_flags="--cask --casks --formula --formulae --dry-run --pinned --force -f --isolate-deps --isolate-dependencies --use-system-ruby= --allow-unpinned" ;;
     \\        outdated)         cmd_flags="--json --formula --formulae --cask --casks --pinned-only --tap --refresh --quiet -q" ;;
-    \\        update)           cmd_flags="--check --quiet -q" ;;
+    \\        update)           cmd_flags="--check --dry-run --quiet -q" ;;
     \\        version)          cmd_flags="--check --yes -y --no-verify --cleanup" ;;
     \\        list|ls)          cmd_flags="--versions --formula --formulae --cask --casks --pinned --tap --json --size --linked --quiet -q" ;;
     \\        info)             cmd_flags="--formula --cask --json" ;;
@@ -394,6 +394,7 @@ pub const zsh_script =
     \\                update)
     \\                    _arguments \
     \\                        '--check[Refresh only the outdated snapshot, skip API cache wipe]' \
+    \\                        '--dry-run[Show what would be cleared or refreshed]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress status messages]'
     \\                    ;;
     \\                list|ls)
@@ -744,6 +745,7 @@ pub const fish_script =
     \\
     \\    # update
     \\    complete -c $__malt_bin -n '__malt_using_command update' -l check -d 'Refresh only the outdated snapshot, skip API cache wipe'
+    \\    complete -c $__malt_bin -n '__malt_using_command update' -l dry-run -d 'Show what would be cleared or refreshed'
     \\
     \\    # list / ls
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l versions -d 'Show version numbers'

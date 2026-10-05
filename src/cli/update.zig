@@ -66,7 +66,15 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 return error.Aborted;
             },
         };
-        output.info("Outdated snapshot refreshed.", .{});
+        if (output.isDryRun())
+            output.info("Dry run: would refresh the outdated snapshot", .{})
+        else
+            output.info("Outdated snapshot refreshed.", .{});
+        return;
+    }
+
+    if (output.isDryRun()) {
+        output.info("Dry run: would clear the API cache and the outdated snapshot", .{});
         return;
     }
 
@@ -111,6 +119,7 @@ fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: 
 
     var db = outdated_mod.openPrefixDb(ctx.io, db_path) catch |e| switch (e) {
         error.Absent => {
+            if (output.isDryRun()) return;
             // Fresh prefix: write an empty snapshot so readers get instant "all clear".
             try outdated_mod.writeSnapshotEntries(ctx, allocator, cache_dir, &.{}, &.{});
             return;
@@ -122,6 +131,8 @@ fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: 
     };
     defer db.close();
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);
+    // A preview stops only after the database answered, so it fails where a real run would.
+    if (output.isDryRun()) return;
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
