@@ -178,6 +178,44 @@ test "executeLink creates symlinks for an installed keg, executeUnlink removes t
     try testing.expect(!pathExists(linked));
 }
 
+test "--dry-run link, unlink and link --isolate preview without touching links" {
+    // The global flag was never read here, so each preview ran for real.
+    var s = try Scratch.init(testing.allocator, "dry_run");
+    defer s.deinit(testing.allocator);
+    try seedKeg(testing.allocator, s.path, "foo", "1.0", "foobin");
+    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    defer testing.allocator.free(linked);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    output.setDryRun(true);
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
+    output.setDryRun(false);
+    try testing.expect(!pathExists(linked));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would link foo") != null);
+
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try db.exec("UPDATE kegs SET install_reason = 'dependency' WHERE name = 'foo';");
+    }
+
+    output.setDryRun(true);
+    defer output.setDryRun(false);
+    try link_mod.executeUnlink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--isolate", "foo" });
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--isolate", "--all" });
+    try testing.expect(pathExists(linked));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would unlink foo") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would isolate foo") != null);
+}
+
 test "executeLink --overwrite forces relink past the conflict guard" {
     // Pre-create a non-keg symlink at the target so the conflict-check
     // path fires; --overwrite must still finish the link.

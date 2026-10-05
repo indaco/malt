@@ -125,6 +125,11 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
         }
     }
 
+    if (output.isDryRun()) {
+        output.info("Dry run: would link {s}", .{target_name});
+        return;
+    }
+
     linker.link(cellar_path, target_name, keg_id, false) catch {
         output.err("Failed to create symlinks for {s}", .{target_name});
         return error.Aborted;
@@ -211,6 +216,10 @@ fn executeLinkIsolate(ctx: *const AppCtx, allocator: std.mem.Allocator, name: ?[
         }
 
         for (names.items, ids.items) |n, id| {
+            if (output.isDryRun()) {
+                output.info("Dry run: would isolate {s}", .{n});
+                continue;
+            }
             isolateOne(ctx, &db, id) catch {
                 output.warn("could not isolate {s}", .{n});
                 continue;
@@ -238,6 +247,10 @@ fn executeLinkIsolate(ctx: *const AppCtx, allocator: std.mem.Allocator, name: ?[
         return error.Aborted;
     }
 
+    if (output.isDryRun()) {
+        output.info("Dry run: would isolate {s}", .{target});
+        return;
+    }
     try isolateOne(ctx, &db, keg_id);
     output.success("{s} isolated: bin/sbin links removed", .{target});
 }
@@ -336,6 +349,11 @@ pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []c
     }
 
     const keg_id = stmt.columnInt(0);
+
+    if (output.isDryRun()) {
+        output.info("Dry run: would unlink {s}", .{name});
+        return;
+    }
 
     var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
 

@@ -76,6 +76,15 @@ pub fn parseArgs(args: []const []const u8) error{Aborted}!Opts {
             return error.Aborted;
         }
     }
+    if (output.isDryRun()) {
+        // Cleanup deletes and has no preview; refuse rather than run it.
+        if (opts.cleanup) {
+            output.err("--dry-run is not supported by `version update --cleanup`", .{});
+            return error.Aborted;
+        }
+        // A preview reports the available release and stops before the swap.
+        opts.check = true;
+    }
     return opts;
 }
 

@@ -269,3 +269,17 @@ test "buildSudoInstallArgv: shape matches BSD install with .old backup suffix" {
     try testing.expectEqualStrings("/tmp/new-malt", argv[7]);
     try testing.expectEqualStrings("/usr/local/bin/malt", argv[8]);
 }
+
+test "parseArgs: --dry-run stops at the check, and refuses --cleanup" {
+    // The global flag was never read, so `--dry-run -y` swapped the binary.
+    output_mod.setDryRun(true);
+    defer output_mod.setDryRun(false);
+    try testing.expect((try updater.parseArgs(&.{"-y"})).check);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output_mod.beginStderrCapture(testing.allocator, &captured);
+    defer output_mod.endStderrCapture();
+    try testing.expectError(error.Aborted, updater.parseArgs(&.{"--cleanup"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--dry-run") != null);
+}
