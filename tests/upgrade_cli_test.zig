@@ -716,3 +716,28 @@ test "bulk upgrade over two unreadable tables reports each and claims neither is
     try testing.expect(std.mem.indexOf(u8, captured.items, "No formulas installed") == null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "All casks are up to date") == null);
 }
+
+test "execute reports a malt.db it cannot open instead of exiting clean" {
+    // db/ exists, so this is not a fresh prefix: a directory where the file
+    // should be fails the open the way a corrupt or unreadable file does.
+    for ([_][]const []const u8{ &.{}, &.{"--dry-run"}, &.{"box"} }) |argv| {
+        var s = try Scratch.init(testing.allocator, "db_open_fails");
+        defer s.deinit(testing.allocator);
+        const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{s.path});
+        defer testing.allocator.free(db_path);
+        try test_io.cwd().createDirPath(std.Options.debug_io, db_path);
+
+        const prior_quiet = output.isQuiet();
+        output.setQuiet(false);
+        defer output.setQuiet(prior_quiet);
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+
+        const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+        try testing.expectError(error.Aborted, upgrade.execute(&ctx, testing.allocator, argv));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "Failed to open database") != null);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "mt doctor") != null);
+    }
+}

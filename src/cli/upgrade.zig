@@ -457,10 +457,13 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
-    var db = sqlite.Database.open(db_path) catch {
-        // Same degradation as `list`/`outdated` — missing DB on a fresh
-        // prefix is empty state, not an error.
-        return;
+    var db = outdated_mod.openPrefixDb(ctx.io, db_path) catch |e| switch (e) {
+        // Fresh prefix: nothing installed, nothing to upgrade.
+        error.Absent => return,
+        error.Unreadable => {
+            output.err("Failed to open database: {s}. Try `mt doctor`.", .{db_path});
+            return error.Aborted;
+        },
     };
     defer db.close();
     schema.initSchema(&db) catch |e| return schema_report.abortInitFailure(&db, e, prefix);

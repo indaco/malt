@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Regression: a bulk `mt upgrade` over an unreadable kegs or casks table
-# reports the database failure and exits non-zero.
+# Regression: `mt upgrade` over an unreadable database - a kegs or casks
+# table it cannot read, or a malt.db it cannot open - reports the failure and
+# exits non-zero.
 #
 # Pre-fix, the audit's row-load error was mapped to an empty plan, so the run
 # printed "No formulas installed." / "All casks are up to date." (nothing at
 # all under --pinned), exited 0, and an unnarrowed --dry-run persisted an
-# outdated.json listing nothing for the failed kind.
+# outdated.json listing nothing for the failed kind. A malt.db that failed to
+# open exited 0 silently on every upgrade form.
 #
 # A renamed column makes the row SELECT fail to prepare while the table still
 # survives schema init - the same path a corrupt page or OOM takes.
@@ -80,9 +82,16 @@ expect_loud 'All casks are up to date' --cask
 expect_loud 'All casks are up to date' --dry-run
 [[ ! -e "$MALT_CACHE/outdated.json" ]] || fail "dry-run persisted a snapshot from a failed casks audit"
 
+# db/ exists but malt.db is garbage: not a fresh prefix, so not a clean no-op.
+reset
+head -c 8192 /dev/zero | tr '\0' x >"$PREFIX/db/malt.db"
+expect_loud 'No formulas installed'
+expect_loud 'No formulas installed' --dry-run
+expect_loud 'No formulas installed' wget
+[[ ! -e "$MALT_CACHE/outdated.json" ]] || fail "dry-run persisted a snapshot over an unopenable malt.db"
+
 # Control: a healthy empty prefix is still a clean no-op that warms the snapshot.
-rm -rf "$PREFIX"
-mkdir -p "$PREFIX/db" "$MALT_CACHE"
+reset
 "$BIN" list >/dev/null
 out=$("$BIN" upgrade --dry-run 2>&1) || fail "dry-run on a healthy empty prefix failed: $out"
 grep -q 'No formulas installed' <<<"$out" || fail "healthy empty prefix lost its empty-install line"
