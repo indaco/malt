@@ -289,6 +289,31 @@ fn warmsSnapshot(g: WarmGate) bool {
     return g.dry_run and g.full_keg and !g.walk_failed and !g.tainted;
 }
 
+/// A bulk audit that could not load its rows. A broken table points at
+/// `mt doctor`; anything else (OOM) keeps its name.
+fn reportAuditFailure(e: anyerror) void {
+    switch (e) {
+        error.PrepareFailed, error.StepFailed, error.Corrupt => output.err(outdated_mod.unreadable_rows_fmt, .{@errorName(e)}),
+        else => output.err("Could not check installed packages: {s}", .{@errorName(e)}),
+    }
+}
+
+test "reportAuditFailure points a broken table at mt doctor and names any other failure" {
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(false);
+    defer output.setQuiet(prior_quiet);
+    inline for (.{ error.PrepareFailed, error.StepFailed, error.Corrupt, error.OutOfMemory }) |e| {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(std.testing.allocator);
+        output.beginStderrCapture(std.testing.allocator, &buf);
+        reportAuditFailure(e);
+        output.endStderrCapture();
+        try std.testing.expect(std.mem.indexOf(u8, buf.items, @errorName(e)) != null);
+        const doctor = std.mem.indexOf(u8, buf.items, "mt doctor") != null;
+        try std.testing.expectEqual(e != error.OutOfMemory, doctor);
+    }
+}
+
 /// `--allow-unpinned` rides the ctx down to the tap materialise, like `offline`.
 fn upgradeCtx(parent: *const AppCtx, args: []const []const u8) AppCtx {
     var run_ctx = parent.*;
@@ -466,12 +491,26 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
             .formula_only = formula_only,
             .pinned_only = pinned_only,
         };
-        // An audit that cannot even read its rows leaves nothing to upgrade —
-        // the same outcome as the SQL failure this replaced.
-        var f_plan: audit_mod.Plan = if (cask_only) .empty else audit_mod.audit(allocator, &db, &api, .formula, scope) catch .empty;
+        // A failed audit is not an empty install: report it, fail the run,
+        // and skip only that kind's pass.
+        var f_failed = false;
+        var f_plan: audit_mod.Plan = if (cask_only) .empty else audit_mod.audit(allocator, &db, &api, .formula, scope) catch |e| blk: {
+            reportAuditFailure(e);
+            f_failed = true;
+            break :blk .empty;
+        };
         defer f_plan.deinit(allocator);
-        var c_plan: audit_mod.Plan = if (formula_only) .empty else audit_mod.audit(allocator, &db, &api, .cask, scope) catch .empty;
+        var c_failed = false;
+        var c_plan: audit_mod.Plan = if (formula_only) .empty else audit_mod.audit(allocator, &db, &api, .cask, scope) catch |e| blk: {
+            reportAuditFailure(e);
+            c_failed = true;
+            break :blk .empty;
+        };
         defer c_plan.deinit(allocator);
+        if (f_failed or c_failed) {
+            any_failed = true;
+            other_failed = true;
+        }
 
         const checking = f_plan.rows.len + c_plan.rows.len;
         if (checking > 0) output.info("Checking {d} packages...", .{checking});
@@ -479,15 +518,15 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
         // The warm gate reads the plan rather than the flags: a narrowed
         // audit must never persist a snapshot of the rows it did look at.
         // Both plans carry the same verdict; `or` picks the live one when a
-        // narrowing or a failed audit left the other empty.
+        // narrowing left the other empty. A failed audit vetoes via `walk_failed`.
         const full_keg = f_plan.full_keg or c_plan.full_keg;
         const sink_ptr: ?*EntrySink = if (dry_run and full_keg) &sink else null;
-        if (!cask_only) {
+        if (!cask_only and !f_failed) {
             upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, f_plan, &tally, sink_ptr) catch {
                 any_failed = true;
             };
         }
-        if (!formula_only) {
+        if (!formula_only and !c_failed) {
             upgradeAllCasks(ctx, allocator, &db, &api, prefix, dry_run, force, pinned_only, c_plan, &tally, sink_ptr) catch {
                 any_failed = true;
             };

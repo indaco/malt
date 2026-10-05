@@ -613,3 +613,103 @@ test "execute treats every token after `--` as a name, even a dash-led one" {
     // Looked up as a name; old code dropped it as a flag.
     try testing.expect(std.mem.indexOf(u8, captured.items, "-n is not installed as a formula") != null);
 }
+
+// A renamed column fails the bulk audit's row SELECT while the table still
+// survives schema init.
+const drift_kegs = "ALTER TABLE kegs RENAME COLUMN tap_rb_subtree TO tap_rb_subtree_x;";
+const drift_casks = "ALTER TABLE casks RENAME COLUMN pinned TO pinned_x;";
+
+/// Bulk upgrade over one keg and a drifted table (null: healthy); true when
+/// it wrote an outdated snapshot.
+fn bulkUpgradeOverDrift(captured: *std.ArrayList(u8), name: []const u8, drift: ?[:0]const u8, argv: []const []const u8) !bool {
+    var s = try Scratch.init(testing.allocator, name);
+    defer s.deinit(testing.allocator);
+    // A developer's exported MALT_CACHE must not receive the snapshot or hide the fixture.
+    const cache = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/cache", .{s.path}, 0);
+    defer testing.allocator.free(cache);
+    _ = c.setenv("MALT_CACHE", cache.ptr, 1);
+    defer _ = c.unsetenv("MALT_CACHE");
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('box', 'box', '1.0', 'a', '/c/box/1.0');");
+        if (drift) |sql| try db.exec(sql);
+    }
+    // Offline, a cached same-version formula lets a readable keg pass finish clean.
+    const io = std.Options.debug_io;
+    const api_dir = try std.fmt.allocPrint(testing.allocator, "{s}/api", .{cache});
+    defer testing.allocator.free(api_dir);
+    try test_io.cwd().createDirPath(io, api_dir);
+    const json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_box.json", .{api_dir});
+    defer testing.allocator.free(json);
+    {
+        const f = try test_io.createFileAbsolute(io, json, .{ .truncate = true });
+        defer f.close(io);
+        try f.writeStreamingAll(io,
+            \\{"name":"box","versions":{"stable":"1.0"},"revision":0}
+        );
+    }
+
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(false);
+    defer output.setQuiet(prior_quiet);
+    output.beginStderrCapture(testing.allocator, captured);
+    defer output.endStderrCapture();
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty, .offline = true };
+    const run = upgrade.execute(&ctx, testing.allocator, argv);
+    if (drift == null) try run else try testing.expectError(error.Aborted, run);
+
+    const snap = try std.fmt.allocPrint(testing.allocator, "{s}/outdated.json", .{cache});
+    defer testing.allocator.free(snap);
+    test_io.accessAbsolute(io, snap, .{}) catch return false;
+    return true;
+}
+
+test "bulk upgrade reports an unreadable kegs table instead of an empty install" {
+    // --pinned gates both empty-plan lines off, so the failure used to print nothing.
+    for ([_][]const []const u8{ &.{}, &.{"--formula"}, &.{ "--pinned", "--dry-run" } }) |argv| {
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        _ = try bulkUpgradeOverDrift(&captured, "bulk_drift_kegs", drift_kegs, argv);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "Could not read installed packages (PrepareFailed)") != null);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "No formulas installed") == null);
+    }
+}
+
+test "bulk upgrade over an unreadable casks table still runs the formula pass" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    _ = try bulkUpgradeOverDrift(&captured, "bulk_drift_casks", drift_casks, &.{});
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not read installed packages (PrepareFailed)") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "All casks are up to date") == null);
+    // One bad table never abandons the other kind's pass.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "1 checked") != null);
+}
+
+test "bulk dry-run over an unreadable table persists no outdated snapshot" {
+    // Control: the same fixture, healthy, does warm - so a missing file below means a veto.
+    {
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        try testing.expect(try bulkUpgradeOverDrift(&captured, "bulk_drift_control", null, &.{"--dry-run"}));
+    }
+    // The healthy kind's plan must not license a snapshot that lists nothing for the failed one.
+    for ([_][:0]const u8{ drift_kegs, drift_casks }) |drift| {
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        try testing.expect(!try bulkUpgradeOverDrift(&captured, "bulk_drift_snapshot", drift, &.{"--dry-run"}));
+    }
+}
+
+test "bulk upgrade over two unreadable tables reports each and claims neither is empty" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try testing.expect(!try bulkUpgradeOverDrift(&captured, "bulk_drift_both", drift_kegs ++ drift_casks, &.{"--dry-run"}));
+    try testing.expectEqual(2, std.mem.count(u8, captured.items, "Could not read installed packages (PrepareFailed)"));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No formulas installed") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "All casks are up to date") == null);
+}
