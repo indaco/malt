@@ -187,6 +187,14 @@ test "purge completions surface --json and --output-format=ndjson" {
     try expectContains(completions.fish_script, "output-format=ndjson");
 }
 
+test "update offers --dry-run in all three shells, as its help does" {
+    // zsh drops the global options once a subcommand is typed, so each
+    // command that honours --dry-run declares it in its own block.
+    try expectContains(completions.bash_script, "update)           cmd_flags=\"--check --dry-run");
+    try expectContains(completions.zsh_script, "'--dry-run[Show what would be cleared or refreshed]'");
+    try expectContains(completions.fish_script, "__malt_using_command update' -l dry-run");
+}
+
 test "all completions expose reinstall as a top-level verb" {
     // Substring presence isn't enough — `restore`/`reinstall` overlap
     // English-wise, so pin the per-shell token shapes used for the
