@@ -289,6 +289,21 @@ fn warmsSnapshot(g: WarmGate) bool {
     return g.dry_run and g.full_keg and !g.walk_failed and !g.tainted;
 }
 
+/// Only both kinds together cover the installed set: a kind narrowed out
+/// or whose audit failed leaves `Plan.empty`, which must veto the warm.
+fn coversInstalledSet(formula: audit_mod.Plan, cask: audit_mod.Plan) bool {
+    return formula.full_keg and cask.full_keg;
+}
+
+test "coversInstalledSet needs both kinds' audits, so a failed one cannot be masked" {
+    var full: audit_mod.Plan = .empty;
+    full.full_keg = true;
+    try std.testing.expect(coversInstalledSet(full, full));
+    try std.testing.expect(!coversInstalledSet(.empty, full));
+    try std.testing.expect(!coversInstalledSet(full, .empty));
+    try std.testing.expect(!coversInstalledSet(.empty, .empty));
+}
+
 /// A bulk audit that could not load its rows. A broken table points at
 /// `mt doctor`; anything else (OOM) keeps its name.
 fn reportAuditFailure(e: anyerror) void {
@@ -517,9 +532,9 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
 
         // The warm gate reads the plan rather than the flags: a narrowed
         // audit must never persist a snapshot of the rows it did look at.
-        // Both plans carry the same verdict; `or` picks the live one when a
-        // narrowing left the other empty. A failed audit vetoes via `walk_failed`.
-        const full_keg = f_plan.full_keg or c_plan.full_keg;
+        // A failed audit is also vetoed by `walk_failed`; this keeps
+        // `Plan.empty` from licensing a warm on its own.
+        const full_keg = coversInstalledSet(f_plan, c_plan);
         const sink_ptr: ?*EntrySink = if (dry_run and full_keg) &sink else null;
         if (!cask_only and !f_failed) {
             upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, f_plan, &tally, sink_ptr) catch {
