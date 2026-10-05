@@ -686,8 +686,11 @@ test "bulk upgrade over an unreadable casks table still runs the formula pass" {
     _ = try bulkUpgradeOverDrift(&captured, "bulk_drift_casks", drift_casks, &.{});
     try testing.expect(std.mem.indexOf(u8, captured.items, "Could not read installed packages (PrepareFailed)") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "All casks are up to date") == null);
-    // One bad table never abandons the other kind's pass.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "1 checked") != null);
+    // One bad table never abandons the other kind's pass, and the footer
+    // must not be the last word on a run that failed.
+    const footer = std.mem.indexOf(u8, captured.items, "1 checked") orelse return error.TestUnexpectedResult;
+    const diag = std.mem.lastIndexOf(u8, captured.items, "Could not read installed packages") orelse return error.TestUnexpectedResult;
+    try testing.expect(diag > footer);
 }
 
 test "bulk dry-run over an unreadable table persists no outdated snapshot" {

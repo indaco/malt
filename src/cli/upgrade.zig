@@ -506,23 +506,21 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
             .formula_only = formula_only,
             .pinned_only = pinned_only,
         };
-        // A failed audit is not an empty install: report it, fail the run,
-        // and skip only that kind's pass.
-        var f_failed = false;
+        // A failed audit is not an empty install: fail the run and skip only
+        // that kind's pass.
+        var f_err: ?anyerror = null;
         var f_plan: audit_mod.Plan = if (cask_only) .empty else audit_mod.audit(allocator, &db, &api, .formula, scope) catch |e| blk: {
-            reportAuditFailure(e);
-            f_failed = true;
+            f_err = e;
             break :blk .empty;
         };
         defer f_plan.deinit(allocator);
-        var c_failed = false;
+        var c_err: ?anyerror = null;
         var c_plan: audit_mod.Plan = if (formula_only) .empty else audit_mod.audit(allocator, &db, &api, .cask, scope) catch |e| blk: {
-            reportAuditFailure(e);
-            c_failed = true;
+            c_err = e;
             break :blk .empty;
         };
         defer c_plan.deinit(allocator);
-        if (f_failed or c_failed) {
+        if (f_err != null or c_err != null) {
             any_failed = true;
             other_failed = true;
         }
@@ -536,17 +534,20 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
         // `Plan.empty` from licensing a warm on its own.
         const full_keg = coversInstalledSet(f_plan, c_plan);
         const sink_ptr: ?*EntrySink = if (dry_run and full_keg) &sink else null;
-        if (!cask_only and !f_failed) {
+        if (!cask_only and f_err == null) {
             upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, use_system_ruby_scope.items, f_plan, &tally, sink_ptr) catch {
                 any_failed = true;
             };
         }
-        if (!formula_only and !c_failed) {
+        if (!formula_only and c_err == null) {
             upgradeAllCasks(ctx, allocator, &db, &api, prefix, dry_run, force, pinned_only, c_plan, &tally, sink_ptr) catch {
                 any_failed = true;
             };
         }
         printSummary(tally, dry_run);
+        // After the footer, so a run that failed never ends on an all-clear.
+        if (f_err) |e| reportAuditFailure(e);
+        if (c_err) |e| reportAuditFailure(e);
         any_upgraded = tally.upgraded > 0;
 
         // Best-effort warm of the shared outdated snapshot from the dry-run's
