@@ -1019,6 +1019,17 @@ test "emitEntries still warns about an incomplete audit under --quiet" {
     try std.testing.expect(std.mem.indexOf(u8, err_buf.items, "Could not verify") != null);
 }
 
+const OutdatedFlag = enum { cask, formula, pinned_only, tap, refresh };
+const outdated_flag_map = std.StaticStringMap(OutdatedFlag).initComptime(.{
+    .{ "--cask", .cask },
+    .{ "--casks", .cask },
+    .{ "--formula", .formula },
+    .{ "--formulae", .formula },
+    .{ "--pinned-only", .pinned_only },
+    .{ "--tap", .tap },
+    .{ "--refresh", .refresh },
+});
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "outdated")) return;
 
@@ -1030,21 +1041,27 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--cask") or std.mem.eql(u8, arg, "--casks")) {
-            cask_only = true;
-        } else if (std.mem.eql(u8, arg, "--formula") or std.mem.eql(u8, arg, "--formulae")) {
-            formula_only = true;
-        } else if (std.mem.eql(u8, arg, "--pinned-only")) {
-            pinned_only = true;
-        } else if (std.mem.eql(u8, arg, "--tap")) {
-            if (i + 1 >= args.len) {
-                output.err("--tap requires a label (e.g. `--tap user/repo`)", .{});
-                return error.Aborted;
-            }
-            i += 1;
-            tap_filter = args[i];
-        } else if (std.mem.startsWith(u8, arg, "--tap=")) {
+        if (std.mem.eql(u8, arg, "--")) break;
+        if (std.mem.startsWith(u8, arg, "--tap=")) {
             tap_filter = arg["--tap=".len..];
+        } else if (outdated_flag_map.get(arg)) |flag| switch (flag) {
+            .cask => cask_only = true,
+            .formula => formula_only = true,
+            .pinned_only => pinned_only = true,
+            .tap => {
+                if (i + 1 >= args.len) {
+                    output.err("--tap requires a label (e.g. `--tap user/repo`)", .{});
+                    return error.Aborted;
+                }
+                i += 1;
+                tap_filter = args[i];
+            },
+            // Read by `planEmit`.
+            .refresh => {},
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            // brew's `--greedy` would otherwise be dropped, silently leaving out what it asks for.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
         }
     }
     // `--json` and `--quiet` are stripped by the global parser in main.zig.

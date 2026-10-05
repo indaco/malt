@@ -448,3 +448,13 @@ test "dbDepLookup returns an empty slice for an installed leaf keg" {
     }
     try testing.expectEqual(@as(usize, 0), got.len);
 }
+
+test "execute refuses an unknown flag instead of answering without it" {
+    // brew's `--tree` used to print the flat list as if it were the tree.
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(error.Aborted, deps_cli.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--tree", "wget" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --tree") != null);
+}

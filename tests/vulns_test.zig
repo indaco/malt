@@ -872,3 +872,13 @@ test "an empty walk still emits the JSON envelope with its coverage count" {
     try testing.expectEqual(@as(u32, 0), h.requests());
     try testing.expectEqualStrings("{\"schema_version\":1,\"not_covered\":1,\"unchecked\":[],\"formulae\":[]}\n", r.stdout);
 }
+
+test "execute refuses an unknown flag instead of answering without it" {
+    // A misspelt `--severity=` used to list every advisory instead of the filtered set.
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(error.Aborted, vulns.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--severty=high"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --severty=high") != null);
+}

@@ -113,3 +113,13 @@ test "execute on an absolute path that is not a symlink returns Aborted" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(error.Aborted, which.execute(&ctx, testing.allocator, &.{plain}));
 }
+
+test "execute refuses an unknown flag instead of answering without it" {
+    // brew's `-a` used to be dropped, printing one match as if it were all of them.
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+    try testing.expectError(error.Aborted, which.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "-a", "wget" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: -a") != null);
+}

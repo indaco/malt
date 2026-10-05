@@ -49,6 +49,8 @@ pub fn parseScope(args: []const []const u8) Scope {
     var saw_api = false;
     var saw_all = false;
     for (args) |arg| {
+        // After `--` it is the query, not a scope.
+        if (std.mem.eql(u8, arg, "--")) break;
         if (std.mem.eql(u8, arg, "--installed")) {
             saw_installed = true;
         } else if (std.mem.eql(u8, arg, "--api")) {
@@ -354,6 +356,18 @@ const KindResults = struct {
     matches: []const []const u8 = &.{},
 };
 
+const SearchFlag = enum { formula, cask, scope, offline };
+const search_flag_map = std.StaticStringMap(SearchFlag).initComptime(.{
+    .{ "--formula", .formula },
+    .{ "--formulae", .formula },
+    .{ "--cask", .cask },
+    .{ "--casks", .cask },
+    .{ "--installed", .scope },
+    .{ "--api", .scope },
+    .{ "--all", .scope },
+    .{ "--offline", .offline },
+});
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "search")) return;
 
@@ -362,13 +376,21 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var search_cask = false;
     var query: ?[]const u8 = null;
 
+    var opts_done = false;
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--formula") or std.mem.eql(u8, arg, "--formulae")) {
-            search_formula = true;
-        } else if (std.mem.eql(u8, arg, "--cask") or std.mem.eql(u8, arg, "--casks")) {
-            search_cask = true;
-        } else if (arg.len > 0 and arg[0] != '-') {
-            if (query == null) query = arg;
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            if (query == null and arg.len > 0) query = arg;
+        } else if (search_flag_map.get(arg)) |flag| switch (flag) {
+            .formula => search_formula = true,
+            .cask => search_cask = true,
+            // Read by `parseScope` and `isOfflineRequested`.
+            .scope, .offline => {},
+        } else {
+            // Dropping it would answer a different question than the one asked.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
         }
     }
 

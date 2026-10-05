@@ -380,6 +380,13 @@ fn apiFetch(ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8) any
 
 // --- CLI dispatch -----------------------------------------------------------
 
+const DepsFlag = enum { recursive, installed };
+const deps_flag_map = std.StaticStringMap(DepsFlag).initComptime(.{
+    .{ "--recursive", .recursive },
+    .{ "-r", .recursive },
+    .{ "--installed", .installed },
+});
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "deps")) return;
 
@@ -388,13 +395,19 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var recursive = false;
     var installed_only = false;
     var target: ?[]const u8 = null;
+    var opts_done = false;
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--recursive") or std.mem.eql(u8, arg, "-r")) {
-            recursive = true;
-        } else if (std.mem.eql(u8, arg, "--installed")) {
-            installed_only = true;
-        } else if (arg.len > 0 and arg[0] != '-') {
-            if (target == null) target = arg;
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            if (target == null and arg.len > 0) target = arg;
+        } else if (deps_flag_map.get(arg)) |flag| switch (flag) {
+            .recursive => recursive = true,
+            .installed => installed_only = true,
+        } else {
+            // brew's `--tree` would otherwise print the flat list as if it were the tree.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
         }
     }
 

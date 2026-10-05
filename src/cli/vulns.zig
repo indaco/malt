@@ -62,6 +62,11 @@ pub const Sources = struct {
 /// ranked, or the unranked ones would slip out of the report.
 const max_detail_fetches: usize = 20;
 
+const VulnsFlag = enum { severity };
+const vulns_flag_map = std.StaticStringMap(VulnsFlag).initComptime(.{
+    .{ "--severity", .severity },
+});
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     return executeWith(ctx, allocator, args, .{});
 }
@@ -72,24 +77,34 @@ pub fn executeWith(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
     var min_severity: ?Severity = null;
     var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(allocator);
+    var opts_done = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         var value: ?[]const u8 = null;
-        if (std.mem.eql(u8, arg, "--severity")) {
-            if (i + 1 >= args.len) {
-                output.err("--severity requires a level (low, medium, high, critical)", .{});
-                return error.Aborted;
-            }
-            i += 1;
-            value = args[i];
-        } else if (std.mem.startsWith(u8, arg, "--severity=")) {
-            value = arg["--severity=".len..];
-        } else if (arg.len > 0 and arg[0] != '-') {
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            if (arg.len == 0) continue;
             // A repeated name would be fetched and listed twice.
             for (names.items) |seen| {
                 if (std.mem.eql(u8, seen, arg)) break;
             } else try names.append(allocator, arg);
+        } else if (vulns_flag_map.get(arg)) |flag| switch (flag) {
+            .severity => {
+                if (i + 1 >= args.len) {
+                    output.err("--severity requires a level (low, medium, high, critical)", .{});
+                    return error.Aborted;
+                }
+                i += 1;
+                value = args[i];
+            },
+        } else if (std.mem.startsWith(u8, arg, "--severity=")) {
+            value = arg["--severity=".len..];
+        } else {
+            // A misspelt `--severity=` would list every advisory instead of the filtered set.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
         }
         if (value) |v| {
             min_severity = parseSeverityFlag(v) orelse {
