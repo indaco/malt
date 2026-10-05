@@ -182,6 +182,9 @@ jobs:
       - name: Regression guard - versionless keg
         run: ./scripts/regressions/versionless-keg-empty-stable-version-installs-a-versionless-keg.sh
 
+      - name: Regression guard - outdated, deps, info, search, uses, which and vulns refuse an unknown flag
+        run: ./scripts/regressions/read-only-commands-refuse-unknown-flags-read-only-parsers-drop-unknown-flags.sh
+
       - name: Regression guard - store entries held by a live keg
         run: ./scripts/regressions/store-refcount-moment-does-not-match-a-reference.sh
 

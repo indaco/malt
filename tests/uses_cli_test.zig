@@ -285,10 +285,22 @@ test "execute appends to a stdout file whose offset an earlier writer advanced" 
     ctx.stdout = file;
     quiet();
     defer unquiet();
-    try uses.execute(&ctx, testing.allocator, &.{ "openssl", "--json" });
+    output.setMode(.json);
+    defer output.setMode(.human);
+    try uses.execute(&ctx, testing.allocator, &.{"openssl"});
 
     const got = try test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, out_path, 1 << 16);
     defer testing.allocator.free(got);
     try testing.expect(std.mem.startsWith(u8, got, prefix));
     try testing.expect(got.len > prefix.len);
+}
+
+test "execute refuses an unknown flag instead of answering without it" {
+    // A dropped flag answers a different question than the one asked.
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(error.Aborted, uses.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--bogus", "zstd" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --bogus") != null);
 }

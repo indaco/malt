@@ -481,3 +481,13 @@ test "execute --installed on a prefix with no db/ is an empty answer" {
     output.setQuiet(true);
     try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--installed", "wget" });
 }
+
+test "execute refuses an unknown flag instead of answering without it" {
+    // A dropped flag answers a different question than the one asked.
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(error.Aborted, search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--bogus", "wget" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --bogus") != null);
+}

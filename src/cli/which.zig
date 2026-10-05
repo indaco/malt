@@ -80,10 +80,16 @@ pub fn execute(ctx: *const AppCtx, _: std.mem.Allocator, args: []const []const u
     if (help.showIfRequested(ctx, args, "which")) return;
 
     var arg: ?[]const u8 = null;
+    var opts_done = false;
     for (args) |a| {
-        if (a.len > 0 and a[0] != '-') {
-            arg = a;
-            break;
+        if (!opts_done and std.mem.eql(u8, a, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, a, "-")) {
+            if (arg == null and a.len > 0) arg = a;
+        } else {
+            // which takes no flags; brew's `-a` would otherwise print one match as all of them.
+            output.err("Unknown flag: {s}", .{a});
+            return error.Aborted;
         }
     }
     const target_arg = arg orelse {

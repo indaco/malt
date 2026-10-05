@@ -44,6 +44,12 @@ test "selectKinds treats both-set and neither-set as 'both kinds'" {
     try std.testing.expectEqual(KindSelect{ .formula = true, .cask = false }, selectKinds(false, true));
 }
 
+const InfoFlag = enum { cask, formula };
+const info_flag_map = std.StaticStringMap(InfoFlag).initComptime(.{
+    .{ "--cask", .cask },
+    .{ "--formula", .formula },
+});
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "info")) return;
 
@@ -55,13 +61,19 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var force_formula = false;
     var pkg_name: ?[]const u8 = null;
 
+    var opts_done = false;
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--cask")) {
-            force_cask = true;
-        } else if (std.mem.eql(u8, arg, "--formula")) {
-            force_formula = true;
-        } else if (arg.len > 0 and arg[0] != '-') {
-            if (pkg_name == null) pkg_name = arg;
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            if (pkg_name == null and arg.len > 0) pkg_name = arg;
+        } else if (info_flag_map.get(arg)) |flag| switch (flag) {
+            .cask => force_cask = true,
+            .formula => force_formula = true,
+        } else {
+            // Dropping it would answer a different question than the one asked.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
         }
     }
 
