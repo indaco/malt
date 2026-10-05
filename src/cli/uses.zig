@@ -13,6 +13,12 @@ const color = @import("../ui/color.zig");
 const cli_info = @import("info.zig");
 const help = @import("help.zig");
 
+const UsesFlag = enum { recursive };
+const uses_flag_map = std.StaticStringMap(UsesFlag).initComptime(.{
+    .{ "--recursive", .recursive },
+    .{ "-r", .recursive },
+});
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "uses")) return;
 
@@ -20,11 +26,18 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // off the `output` module, mirroring the pattern in `info`.
     var recursive = false;
     var target: ?[]const u8 = null;
+    var opts_done = false;
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--recursive") or std.mem.eql(u8, arg, "-r")) {
-            recursive = true;
-        } else if (arg.len > 0 and arg[0] != '-') {
-            if (target == null) target = arg;
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            if (target == null and arg.len > 0) target = arg;
+        } else if (uses_flag_map.get(arg)) |flag| switch (flag) {
+            .recursive => recursive = true,
+        } else {
+            // Dropping it would answer a different question than the one asked.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
         }
     }
 

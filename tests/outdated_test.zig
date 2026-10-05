@@ -1076,7 +1076,9 @@ test "outdated execute --tap --json on a known tap succeeds and skips the snapsh
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
-    try outdated_mod.execute(&ctx, testing.allocator, &.{ "--tap", "user/repo", "--json" });
+    malt.output.setMode(.json);
+    defer malt.output.setMode(.human);
+    try outdated_mod.execute(&ctx, testing.allocator, &.{ "--tap", "user/repo" });
 }
 
 // --- Cached snapshot (write/read round-trip) ---
@@ -1574,4 +1576,14 @@ test "outdated execute --pinned-only is a quiet no-op when no kegs are pinned" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     // No pinned kegs => no API calls => quiet success even with no cache.
     try outdated_mod.execute(&ctx, testing.allocator, &.{"--pinned-only"});
+}
+
+test "execute refuses an unknown flag instead of answering without it" {
+    // brew's `--greedy` used to be dropped, so the list silently left out what it asks for.
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+    try testing.expectError(error.Aborted, outdated_mod.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--greedy"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --greedy") != null);
 }
