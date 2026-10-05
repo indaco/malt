@@ -40,7 +40,7 @@ fail() {
   exit 1
 }
 
-TARGET="${TARGET:-zig}" # zig drags in lld@21 + zstd, the original bug pair
+TARGET="${TARGET:-zig}" # zig drags in lld + zstd, the original bug pair
 
 # ── 1. Plant stale Cellar dirs at every DEP target. ────────────────────
 # These mimic leftovers from a SIGKILLed prior `mt install zig` or a
@@ -52,15 +52,28 @@ TARGET="${TARGET:-zig}" # zig drags in lld@21 + zstd, the original bug pair
 # We deliberately leave Cellar/$TARGET/ absent so the top-level fastpath
 # (which only checks `Cellar/<top>` existence) does not short-circuit.
 #
-# Versions are resolved live from the formula API: a hard-coded pin goes
-# stale on every upstream bump and then fails step 4 for the wrong reason.
+# Names and versions are both resolved live from the formula API by walking
+# $TARGET's runtime dependency tree: a hard-coded pin goes stale on every
+# upstream bump (zig moved from lld@21 to lld@22) and then fails step 4 for
+# the wrong reason.
+formula_json() {
+  curl -fsS "https://formulae.brew.sh/api/formula/$1.json" || fail "could not fetch the formula API entry for $1"
+}
 STALE_DEPS=()
-for dep in lld@21 llvm@21 zstd lz4 xz; do
-  ver=$(curl -fsS "https://formulae.brew.sh/api/formula/$dep.json" |
-    jq -r 'if .revision > 0 then "\(.versions.stable)_\(.revision)" else .versions.stable end') ||
-    fail "could not resolve current version of $dep"
+queue=()
+while read -r dep; do queue+=("$dep"); done < <(formula_json "$TARGET" | jq -r '.dependencies[]')
+seen=" "
+while [ ${#queue[@]} -gt 0 ]; do
+  dep=${queue[0]}
+  queue=("${queue[@]:1}")
+  case "$seen" in *" $dep "*) continue ;; esac
+  seen+="$dep "
+  json=$(formula_json "$dep")
+  ver=$(jq -r 'if .revision > 0 then "\(.versions.stable)_\(.revision)" else .versions.stable end' <<<"$json")
   STALE_DEPS+=("$dep:$ver")
+  while read -r next; do queue+=("$next"); done < <(jq -r '.dependencies[]' <<<"$json")
 done
+[ ${#STALE_DEPS[@]} -gt 0 ] || fail "$TARGET has no runtime dependencies to plant fixtures for"
 for entry in "${STALE_DEPS[@]}"; do
   dep="${entry%%:*}"
   ver="${entry##*:}"
