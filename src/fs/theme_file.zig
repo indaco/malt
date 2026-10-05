@@ -15,12 +15,12 @@ const default_suffix = "/etc/malt/themes.json";
 
 /// Resolve the theme file path: `MALT_THEMES_FILE` if set, else
 /// `{MALT_PREFIX}/etc/malt/themes.json`. Both env paths pass the same tight
-/// `validatePrefix` check (absolute, NUL-free, no `..`, bounded charset); a bad
-/// value resolves to null so the loader simply keeps built-ins. The default is
+/// path rules (absolute, NUL-free, no `..`, bounded charset); a bad value
+/// resolves to null so the loader simply keeps built-ins. The default is
 /// written into `buf`.
 fn resolvePath(environ: std.process.Environ, buf: []u8) ?[]const u8 {
     if (environ.getPosix("MALT_THEMES_FILE")) |f| {
-        prefix_path.validatePrefix(f) catch return null;
+        prefix_path.validateCharsetRoot(f) catch return null;
         return f;
     }
     const prefix = environ.getPosix("MALT_PREFIX") orelse "/opt/malt";
@@ -82,6 +82,28 @@ test "resolvePath rejects a non-absolute, traversal, or disallowed MALT_THEMES_F
     try testing.expectEqual(@as(?[]const u8, null), resolvePath(envSlice(&[_:null]?[*:0]const u8{"MALT_THEMES_FILE=etc/themes.json"}), &buf)); // relative
     try testing.expectEqual(@as(?[]const u8, null), resolvePath(envSlice(&[_:null]?[*:0]const u8{"MALT_THEMES_FILE=/opt/malt/../etc/themes.json"}), &buf)); // traversal
     try testing.expectEqual(@as(?[]const u8, null), resolvePath(envSlice(&[_:null]?[*:0]const u8{"MALT_THEMES_FILE=/opt/ malt/themes.json"}), &buf)); // space (disallowed byte)
+}
+
+test "resolvePath holds MALT_THEMES_FILE to the root bound, not the prefix one" {
+    // A themes file holds no database, so the SQLite-derived prefix limit
+    // must not drop a path the root bound admits.
+    const key = "MALT_THEMES_FILE=";
+    var kv: [key.len + prefix_path.max_root_len + 2]u8 = undefined;
+    @memcpy(kv[0..key.len], key);
+    kv[key.len] = '/';
+    var buf: [600]u8 = undefined;
+    for ([_]struct { len: usize, ok: bool }{
+        .{ .len = prefix_path.max_prefix_len + 1, .ok = true },
+        .{ .len = prefix_path.max_root_len, .ok = true },
+        .{ .len = prefix_path.max_root_len + 1, .ok = false },
+    }) |case| {
+        @memset(kv[key.len + 1 .. key.len + case.len], 'a');
+        kv[key.len + case.len] = 0;
+        const entry: [*:0]const u8 = @ptrCast(&kv);
+        var block = [_:null]?[*:0]const u8{entry};
+        const env: std.process.Environ = .{ .block = .{ .slice = &block } };
+        try testing.expectEqual(case.ok, resolvePath(env, &buf) != null);
+    }
 }
 
 test "resolvePath builds the default path under a valid prefix" {

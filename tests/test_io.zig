@@ -240,23 +240,26 @@ pub fn unwallDir(io: std.Io, d: std.Io.Dir) void {
     d.close(io);
 }
 
-/// A `MALT_PREFIX` of exactly `len` bytes with `db/` made. 494-512 bytes is
-/// the band `validatePrefix` admits but SQLite's 512-byte pathname cap
-/// cannot open, so commands there must fail loud rather than exit clean.
+/// A `MALT_PREFIX` of exactly `len` bytes with `db/` made. Rooted past the
+/// `/tmp` symlink: SQLite measures the resolved path, so a symlinked root
+/// would eat the very headroom a length test is probing.
 pub const LongPrefix = struct {
     path: [:0]u8,
     root: []const u8,
 
     pub fn init(allocator: std.mem.Allocator, group: []const u8, len: usize) !LongPrefix {
-        const root = try uniqueTempPath(allocator, group, "long");
+        const tmp = try uniqueTempPath(allocator, group, "long");
+        defer allocator.free(tmp);
+        const root = try std.fmt.allocPrint(allocator, "/private{s}", .{tmp});
         errdefer allocator.free(root);
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
         try buf.appendSlice(allocator, root);
         // Components stay well under NAME_MAX; the last one is never empty.
-        while (len - buf.items.len > 202) {
+        const component_len = 200;
+        while (len - buf.items.len > component_len + 2) {
             try buf.append(allocator, '/');
-            try buf.appendNTimes(allocator, 'a', 200);
+            try buf.appendNTimes(allocator, 'a', component_len);
         }
         std.debug.assert(len - buf.items.len >= 2);
         try buf.append(allocator, '/');

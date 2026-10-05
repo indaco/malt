@@ -271,13 +271,12 @@ test "executeUntap refuses an unknown flag and leaves the tap registered" {
     try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
 }
 
-test "execute adding a tap on a long-but-valid prefix fails loud instead of exiting clean" {
-    for ([_]usize{ 505, 512 }) |len| {
-        var p = try test_io.LongPrefix.init(testing.allocator, "tap_cli", len);
-        defer p.deinit(testing.allocator);
-        quiet();
-        defer unquiet();
-        const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
-        try testing.expectError(error.Aborted, tap.execute(&ctx, testing.allocator, &.{"user/repo"}));
-    }
+test "executeUntap on a max-length prefix reaches its database" {
+    var p = try test_io.LongPrefix.init(testing.allocator, "tap_cli", malt.prefix_path.max_prefix_len);
+    defer p.deinit(testing.allocator);
+    try seedTap(p.path, "user/repo", null);
+    quiet();
+    defer unquiet();
+    try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"});
+    try testing.expectEqual(@as(i64, 0), try tapRowCount(p.path, "user/repo"));
 }

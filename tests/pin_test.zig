@@ -531,10 +531,16 @@ test "mt pin refuses a second name instead of silently pinning only the first" {
     try testing.expect(!try readPinned(&db, "wget"));
 }
 
-test "mt pin on a long-but-valid prefix fails loud instead of exiting clean" {
-    for ([_]usize{ 505, 512 }) |len| {
-        var p = try test_io.LongPrefix.init(testing.allocator, "pin", len);
-        defer p.deinit(testing.allocator);
-        try testing.expectError(error.Aborted, cli_pin.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"alpha"}));
+test "mt pin on a max-length prefix reaches its database" {
+    var p = try test_io.LongPrefix.init(testing.allocator, "pin", malt.prefix_path.max_prefix_len);
+    defer p.deinit(testing.allocator);
+    {
+        var db = try openDb(p.path);
+        defer db.close();
+        try insertKeg(&db, "alpha", false);
     }
+    try cli_pin.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"alpha"});
+    var db = try openDb(p.path);
+    defer db.close();
+    try testing.expect(try readPinned(&db, "alpha"));
 }

@@ -742,25 +742,24 @@ test "execute reports a malt.db it cannot open instead of exiting clean" {
     }
 }
 
-test "execute on a long-but-valid prefix fails loud instead of exiting clean" {
-    // Up to the 512-byte cap the lock path used to overflow its buffer and
-    // return success; now SQLite's own path cap is what fails, loudly.
-    for ([_]usize{ 505, 512 }) |len| {
-        for ([_][]const []const u8{ &.{}, &.{"--dry-run"} }) |argv| {
-            var p = try test_io.LongPrefix.init(testing.allocator, "upgrade", len);
-            defer p.deinit(testing.allocator);
+test "execute on a max-length prefix reaches its database" {
+    // The longest prefix the env check admits must be one SQLite can open,
+    // or upgrade fails on a prefix it just accepted.
+    for ([_][]const []const u8{ &.{}, &.{"--dry-run"} }) |argv| {
+        var p = try test_io.LongPrefix.init(testing.allocator, "upgrade", malt.prefix_path.max_prefix_len);
+        defer p.deinit(testing.allocator);
 
-            const prior_quiet = output.isQuiet();
-            output.setQuiet(false);
-            defer output.setQuiet(prior_quiet);
-            var captured: std.ArrayList(u8) = .empty;
-            defer captured.deinit(testing.allocator);
-            output.beginStderrCapture(testing.allocator, &captured);
-            defer output.endStderrCapture();
+        const prior_quiet = output.isQuiet();
+        output.setQuiet(false);
+        defer output.setQuiet(prior_quiet);
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
 
-            const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
-            try testing.expectError(error.Aborted, upgrade.execute(&ctx, testing.allocator, argv));
-            try testing.expect(std.mem.indexOf(u8, captured.items, "Failed to open database") != null);
-        }
+        const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+        try upgrade.execute(&ctx, testing.allocator, argv);
+        // A silent return would also be clean; the audit's answer proves the read.
+        try testing.expect(std.mem.indexOf(u8, captured.items, "No formulas installed") != null);
     }
 }
