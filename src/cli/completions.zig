@@ -88,7 +88,7 @@ pub const bash_script =
     \\    cword=$COMP_CWORD
     \\
     \\    local commands="install reinstall uninstall remove upgrade update outdated list ls info search uses deps which vulns doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services tui bundle help"
-    \\    local global_flags="--verbose -v --debug --quiet -q --json --output-format=ndjson --dry-run --offline --help -h --version"
+    \\    local global_flags="--verbose -v --debug --quiet -q --json --output-format=ndjson --dry-run --offline --help -h"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
     \\    local cmd="" i
@@ -101,7 +101,7 @@ pub const bash_script =
     \\
     \\    if [[ -z "$cmd" ]]; then
     \\        if [[ "$cur" == -* ]]; then
-    \\            COMPREPLY=( $(compgen -W "$global_flags" -- "$cur") )
+    \\            COMPREPLY=( $(compgen -W "$global_flags --version" -- "$cur") )
     \\        else
     \\            COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
     \\        fi
@@ -159,13 +159,13 @@ pub const bash_script =
     \\
     \\    local cmd_flags=""
     \\    case "$cmd" in
-    \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-deps --only-dependencies --isolate-deps --isolate-dependencies --use-system-ruby= --allow-unpinned --quiet -q --json" ;;
+    \\        install)          cmd_flags="--cask --casks --formula --formulae --local --dry-run --force --download-only --only-deps --only-dependencies --isolate-deps --isolate-dependencies --use-system-ruby= --allow-unpinned --quiet -q --json" ;;
     \\        reinstall)        cmd_flags="--cask --formula --dry-run --isolate-deps --isolate-dependencies --quiet -q --json" ;;
     \\        backup)           cmd_flags="--output -o --versions --services --dry-run -n --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --broken-symlinks --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
     \\        uninstall|remove) cmd_flags="--cask --casks --formula --formulae --force -f --dry-run --quiet -q" ;;
-    \\        upgrade)          cmd_flags="--cask --formula --dry-run --pinned --force -f --isolate-deps --isolate-dependencies --use-system-ruby= --allow-unpinned" ;;
+    \\        upgrade)          cmd_flags="--cask --casks --formula --formulae --dry-run --pinned --force -f --isolate-deps --isolate-dependencies --use-system-ruby= --allow-unpinned" ;;
     \\        outdated)         cmd_flags="--json --formula --formulae --cask --casks --pinned-only --tap --refresh --quiet -q" ;;
     \\        update)           cmd_flags="--check --quiet -q" ;;
     \\        version)          cmd_flags="--check --yes -y --no-verify --cleanup" ;;
@@ -285,7 +285,9 @@ pub const zsh_script =
     \\                install)
     \\                    _arguments \
     \\                        '--cask[Force cask installation]' \
+    \\                        '--casks[Alias of --cask]' \
     \\                        '--formula[Force formula installation]' \
+    \\                        '--formulae[Alias of --formula]' \
     \\                        '--local[Install from a local .rb path]:formula:_files -g "*.rb"' \
     \\                        '--dry-run[Show what would be installed]' \
     \\                        '--force[Overwrite existing installations]' \
@@ -325,7 +327,9 @@ pub const zsh_script =
     \\                upgrade)
     \\                    _arguments \
     \\                        '--cask[Upgrade casks only]' \
+    \\                        '--casks[Alias of --cask]' \
     \\                        '--formula[Upgrade formulas only]' \
+    \\                        '--formulae[Alias of --formula]' \
     \\                        '--dry-run[Show what would be upgraded]' \
     \\                        '--pinned[Audit pinned formulas + casks (requires --dry-run or --force)]' \
     \\                        '(--force -f)'{--force,-f}'[Bypass pin protection]' \
@@ -636,7 +640,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin      -l dry-run -d 'Preview without executing'
     \\    complete -c $__malt_bin      -l offline -d 'Serve every fetch from the snapshot cache; fail fast on a miss'
     \\    complete -c $__malt_bin -s h -l help    -d 'Show help'
-    \\    complete -c $__malt_bin      -l version -d 'Show version'
+    \\    complete -c $__malt_bin -n __malt_needs_command -l version -d 'Show version'
     \\
     \\    # Subcommands
     \\    complete -c $__malt_bin -n __malt_needs_command -a install     -d 'Install formulas, casks, or tap formulas'
@@ -678,7 +682,9 @@ pub const fish_script =
     \\
     \\    # install
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l cask    -d 'Force cask'
+    \\    complete -c $__malt_bin -n '__malt_using_command install' -l casks   -d 'Alias of --cask'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l formula -d 'Force formula'
+    \\    complete -c $__malt_bin -n '__malt_using_command install' -l formulae -d 'Alias of --formula'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l local   -d 'Install from a local .rb path'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l force   -d 'Overwrite existing'
@@ -715,7 +721,9 @@ pub const fish_script =
     \\
     \\    # upgrade
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l cask    -d 'Casks only'
+    \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l casks   -d 'Alias of --cask'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l formula -d 'Formulas only'
+    \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l formulae -d 'Alias of --formula'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l pinned  -d 'Audit pinned formulas + casks (needs --dry-run or --force)'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -s f -l force -d 'Bypass pin protection'

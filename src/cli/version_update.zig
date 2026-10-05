@@ -45,13 +45,31 @@ pub fn updateAvailable(latest: []const u8, current: []const u8) bool {
     return release.order(latest, current) == .gt;
 }
 
-pub fn parseArgs(args: []const []const u8) Opts {
+const Flag = enum { check, yes, no_verify, cleanup };
+
+const flag_map = std.StaticStringMap(Flag).initComptime(.{
+    .{ "--check", .check },
+    .{ "--yes", .yes },
+    .{ "-y", .yes },
+    .{ "--no-verify", .no_verify },
+    .{ "--cleanup", .cleanup },
+});
+
+pub fn parseArgs(args: []const []const u8) error{Aborted}!Opts {
     var opts = Opts{};
     for (args) |a| {
-        if (std.mem.eql(u8, a, "--check")) opts.check = true;
-        if (std.mem.eql(u8, a, "--yes") or std.mem.eql(u8, a, "-y")) opts.yes = true;
-        if (std.mem.eql(u8, a, "--no-verify")) opts.no_verify = true;
-        if (std.mem.eql(u8, a, "--cleanup")) opts.cleanup = true;
+        // No positionals, so `--` only ends option parsing.
+        if (std.mem.eql(u8, a, "--")) break;
+        if (flag_map.get(a)) |flag| switch (flag) {
+            .check => opts.check = true,
+            .yes => opts.yes = true,
+            .no_verify => opts.no_verify = true,
+            .cleanup => opts.cleanup = true,
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            // `--chck -y` would otherwise skip the check and swap the binary.
+            output.err("Unknown flag: {s}", .{a});
+            return error.Aborted;
+        }
     }
     return opts;
 }
@@ -80,7 +98,7 @@ fn reportReplaceFailure(err: swap.SwapError, new_binary: []const u8, self_exe: [
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const opts = parseArgs(args);
+    const opts = try parseArgs(args);
 
     if (opts.cleanup) return runCleanup(ctx);
 

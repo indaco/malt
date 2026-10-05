@@ -103,6 +103,16 @@ pub fn scanCellarKegs(
     }
 }
 
+const MigrateFlag = enum { dry_run, parallel, use_system_ruby, quiet };
+
+const migrate_flag_map = std.StaticStringMap(MigrateFlag).initComptime(.{
+    .{ "--dry-run", .dry_run },
+    .{ "--parallel", .parallel },
+    .{ "--use-system-ruby", .use_system_ruby },
+    .{ "--quiet", .quiet },
+    .{ "-q", .quiet },
+});
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "migrate")) return;
 
@@ -123,17 +133,24 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var use_system_ruby_scope: std.ArrayList([]const u8) = .empty;
     defer use_system_ruby_scope.deinit(allocator);
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--dry-run")) dry_run = true;
-        if (std.mem.eql(u8, arg, "--parallel")) parallel_flag = true;
-        if (std.mem.eql(u8, arg, "--use-system-ruby")) use_system_ruby_bare = true;
+        // No positionals, so `--` only ends option parsing.
+        if (std.mem.eql(u8, arg, "--")) break;
         if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
             const list = arg["--use-system-ruby=".len..];
             var it = std.mem.splitScalar(u8, list, ',');
             while (it.next()) |name| {
                 if (name.len > 0) try use_system_ruby_scope.append(allocator, name);
             }
+        } else if (migrate_flag_map.get(arg)) |flag| switch (flag) {
+            .dry_run => dry_run = true,
+            .parallel => parallel_flag = true,
+            .use_system_ruby => use_system_ruby_bare = true,
+            .quiet => output.setQuiet(true),
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            // Refused before the Homebrew scan, so a typo can't start a migration.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
         }
-        if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) output.setQuiet(true);
     }
     if (use_system_ruby_bare) {
         output.err(

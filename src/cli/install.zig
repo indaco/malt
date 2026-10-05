@@ -568,6 +568,7 @@ fn reportInstallRefusal(sink: OutputSink, refusal: args_mod.Refusal) anyerror {
             "--use-system-ruby needs a scope when multiple packages are installed; use --use-system-ruby={s}[,<name>...]",
             .{refusal.arg},
         ),
+        .unknown_flag => sink.err("Unknown flag: {s}", .{refusal.arg}),
     }
     return switch (refusal.err) {
         .no_packages => InstallError.NoPackages,
@@ -579,6 +580,7 @@ fn reportInstallRefusal(sink: OutputSink, refusal: args_mod.Refusal) anyerror {
         .local_with_system_ruby,
         .download_only_with_only_deps,
         .self_install,
+        .unknown_flag,
         => error.Aborted,
     };
 }

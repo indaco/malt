@@ -12,6 +12,15 @@ const prefix_path = @import("../fs/prefix_path.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
+const LinkFlag = enum { isolate, all, overwrite };
+const link_flag_map = std.StaticStringMap(LinkFlag).initComptime(.{
+    .{ "--isolate", .isolate },
+    .{ "--all", .all },
+    .{ "--overwrite", .overwrite },
+    .{ "--force", .overwrite },
+    .{ "-f", .overwrite },
+});
+
 pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "link")) return;
 
@@ -19,15 +28,20 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
     var all_flag = false;
     var overwrite = false;
     var name: ?[]const u8 = null;
+    var opts_done = false;
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--isolate")) {
-            isolate = true;
-        } else if (std.mem.eql(u8, arg, "--all")) {
-            all_flag = true;
-        } else if (std.mem.eql(u8, arg, "--overwrite") or std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
-            overwrite = true;
-        } else if (arg.len > 0 and arg[0] != '-') {
-            if (name == null) name = arg;
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            if (name == null and arg.len > 0) name = arg;
+        } else if (link_flag_map.get(arg)) |flag| switch (flag) {
+            .isolate => isolate = true,
+            .all => all_flag = true,
+            .overwrite => overwrite = true,
+        } else {
+            // brew's `-n` means dry run; dropping it would link for real.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
         }
     }
 

@@ -20,10 +20,16 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     var check_only = false;
     for (args) |arg| {
+        // No positionals, so `--` only ends option parsing.
+        if (std.mem.eql(u8, arg, "--")) break;
         if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             output.setQuiet(true);
         } else if (std.mem.eql(u8, arg, "--check")) {
             check_only = true;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            // Refused before the cache wipe, so `--chck` can't clear it.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
         }
     }
 

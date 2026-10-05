@@ -123,6 +123,41 @@ test "executeLink on a non-installed package returns Aborted" {
     );
 }
 
+test "executeLink refuses an unknown flag before linking anything" {
+    // brew's `-n` (dry run) used to fall through to a real link.
+    var s = try Scratch.init(testing.allocator, "unknown_flag");
+    defer s.deinit(testing.allocator);
+    try seedKeg(testing.allocator, s.path, "foo", "1.0", "foobin");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(
+        error.Aborted,
+        link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "-n", "foo" }),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: -n") != null);
+
+    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    defer testing.allocator.free(linked);
+    try testing.expect(!pathExists(linked));
+}
+
+test "executeLink takes the name after `--`, even a dash-led one" {
+    var s = try Scratch.init(testing.allocator, "end_of_options");
+    defer s.deinit(testing.allocator);
+    try seedKeg(testing.allocator, s.path, "-foo", "1.0", "foobin");
+    quiet();
+    defer unquiet();
+
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--", "-foo" });
+
+    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foobin", .{s.path});
+    defer testing.allocator.free(linked);
+    try testing.expect(pathExists(linked));
+}
+
 // --- happy path link + unlink ------------------------------------------
 
 test "executeLink creates symlinks for an installed keg, executeUnlink removes them" {

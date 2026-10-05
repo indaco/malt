@@ -27,7 +27,7 @@ test "version value is non-empty and trimmed" {
 // prompting forever. Pin each flag's recognised forms.
 
 test "parseArgs: no flags yields all-false" {
-    const opts = updater.parseArgs(&.{});
+    const opts = try updater.parseArgs(&.{});
     try testing.expect(!opts.check);
     try testing.expect(!opts.yes);
     try testing.expect(!opts.no_verify);
@@ -35,27 +35,40 @@ test "parseArgs: no flags yields all-false" {
 }
 
 test "parseArgs: --check sets check" {
-    try testing.expect(updater.parseArgs(&.{"--check"}).check);
+    try testing.expect((try updater.parseArgs(&.{"--check"})).check);
 }
 
 test "parseArgs: both long and short forms of --yes" {
-    try testing.expect(updater.parseArgs(&.{"--yes"}).yes);
-    try testing.expect(updater.parseArgs(&.{"-y"}).yes);
+    try testing.expect((try updater.parseArgs(&.{"--yes"})).yes);
+    try testing.expect((try updater.parseArgs(&.{"-y"})).yes);
 }
 
 test "parseArgs: --no-verify and --cleanup are independent" {
-    const opts = updater.parseArgs(&.{ "--no-verify", "--cleanup" });
+    const opts = try updater.parseArgs(&.{ "--no-verify", "--cleanup" });
     try testing.expect(opts.no_verify);
     try testing.expect(opts.cleanup);
     try testing.expect(!opts.yes);
 }
 
-test "parseArgs: unrecognised flags are ignored (do not crash)" {
-    // Forward-compat: a user passing a flag from a newer version of
-    // malt to an older binary should not crash the updater.
-    const opts = updater.parseArgs(&.{ "--check", "--nonsense", "--yes" });
+test "parseArgs: an unknown flag is refused, never dropped" {
+    // `--chck -y` would otherwise skip the check and swap the binary unasked.
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output_mod.beginStderrCapture(testing.allocator, &captured);
+    defer output_mod.endStderrCapture();
+    try testing.expectError(error.Aborted, updater.parseArgs(&.{ "--chck", "-y" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --chck") != null);
+}
+
+test "parseArgs: a known flag does not excuse a later unknown one" {
+    try testing.expectError(error.Aborted, updater.parseArgs(&.{ "--check", "-n" }));
+    try testing.expectError(error.Aborted, updater.parseArgs(&.{"-"}));
+}
+
+test "parseArgs: `--` ends option parsing" {
+    const opts = try updater.parseArgs(&.{ "--check", "--", "--bogus" });
     try testing.expect(opts.check);
-    try testing.expect(opts.yes);
+    try testing.expect(!opts.yes);
 }
 
 // --- updateAvailable ------------------------------------------------------

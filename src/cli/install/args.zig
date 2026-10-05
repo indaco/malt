@@ -308,6 +308,7 @@ pub const ParseError = enum {
     no_packages,
     self_install,
     ambiguous_system_ruby_scope,
+    unknown_flag,
 };
 
 /// The validated argv: resolved flags plus the package list. `quiet` /
@@ -323,7 +324,7 @@ pub const Parsed = struct {
 
 /// A tagged refusal. `arg` borrows into the caller's argv/package slice —
 /// the offending package for `self_install`, the first package for
-/// `ambiguous_system_ruby_scope`.
+/// `ambiguous_system_ruby_scope`, the flag itself for `unknown_flag`.
 pub const Refusal = struct { err: ParseError, arg: []const u8 = "" };
 
 pub const ParseResult = union(enum) {
@@ -363,9 +364,12 @@ const InstallFlag = enum {
 
 const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "--cask", .cask },
+    .{ "--casks", .cask },
     .{ "--formula", .formula },
+    .{ "--formulae", .formula },
     .{ "--dry-run", .dry_run },
     .{ "--force", .force },
+    .{ "-f", .force },
     .{ "--local", .local },
     .{ "--use-system-ruby", .use_system_ruby },
     .{ "--quiet", .quiet },
@@ -400,7 +404,16 @@ pub fn parse(arena: std.mem.Allocator, args: []const []const u8) error{OutOfMemo
 
     // StaticStringMap + exhaustive switch: the compiler checks every flag has
     // a handler, so adding a variant without wiring it fails to build.
+    var opts_done = false;
     for (args) |arg| {
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+            continue;
+        }
+        if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            try packages.append(arena, arg);
+            continue;
+        }
         if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
             const list = arg["--use-system-ruby=".len..];
             var it = std.mem.splitScalar(u8, list, ',');
@@ -422,8 +435,9 @@ pub fn parse(arena: std.mem.Allocator, args: []const []const u8) error{OutOfMemo
             .download_only => flags.download_only = true,
             .isolate_deps => flags.isolate_deps = true,
             .allow_unpinned => flags.allow_unpinned = true,
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
-            try packages.append(arena, arg);
+        } else {
+            // Dropping it would install without the intended mode.
+            return .{ .invalid = .{ .err = .unknown_flag, .arg = arg } };
         }
     }
 
@@ -593,6 +607,65 @@ test "parse: self-install is refused and carries the offending arg" {
             try std.testing.expectEqualStrings("malt", v.arg);
         },
     }
+}
+
+test "parse: an unknown flag is refused and carries the offending arg" {
+    // Dropping it would install without the intended mode (`--forec`, brew's `-n`).
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "--forec", "-n", "-" }) |flag| {
+        const res = try parse(arena.allocator(), &.{ "wget", flag });
+        switch (res) {
+            .ok => return error.TestUnexpectedResult,
+            .invalid => |v| {
+                try std.testing.expectEqual(ParseError.unknown_flag, v.err);
+                try std.testing.expectEqualStrings(flag, v.arg);
+            },
+        }
+    }
+}
+
+test "parse: an unknown flag wins over the argv-shape refusals" {
+    // Reporting `--local requires a path` for `--local --bogus` would hide the typo.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectInvalid(try parse(arena.allocator(), &.{ "--local", "--bogus" }), .unknown_flag);
+    try expectInvalid(try parse(arena.allocator(), &.{"--bogus"}), .unknown_flag);
+}
+
+test "parse: brew's --formulae, --casks and -f are accepted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    switch (try parse(arena.allocator(), &.{ "--casks", "-f", "wget" })) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| try std.testing.expect(p.flags.force_cask and p.flags.force),
+    }
+    switch (try parse(arena.allocator(), &.{ "--formulae", "wget" })) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| try std.testing.expect(p.flags.force_formula),
+    }
+}
+
+test "parse: `--` ends options, so a dash-led token after it is a package" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = try parse(arena.allocator(), &.{ "--cask", "--", "-weird", "--force" });
+    switch (res) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| {
+            try std.testing.expectEqual(@as(usize, 2), p.packages.len);
+            try std.testing.expectEqualStrings("-weird", p.packages[0]);
+            try std.testing.expectEqualStrings("--force", p.packages[1]);
+            try std.testing.expect(p.flags.force_cask);
+            try std.testing.expect(!p.flags.force);
+        },
+    }
+}
+
+test "parse: a bare `--` with no package after it is still an empty list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectInvalid(try parse(arena.allocator(), &.{"--"}), .no_packages);
 }
 
 test "parse: bare --use-system-ruby with multiple packages needs a scope" {

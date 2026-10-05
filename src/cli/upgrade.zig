@@ -49,7 +49,9 @@ const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     .{ "-q", .quiet },
     .{ "--quiet", .quiet },
     .{ "--cask", .cask },
+    .{ "--casks", .cask },
     .{ "--formula", .formula },
+    .{ "--formulae", .formula },
     .{ "--dry-run", .dry_run },
     .{ "--force", .force },
     .{ "-f", .force },
@@ -291,6 +293,8 @@ fn warmsSnapshot(g: WarmGate) bool {
 fn upgradeCtx(parent: *const AppCtx, args: []const []const u8) AppCtx {
     var run_ctx = parent.*;
     for (args) |arg| {
+        // After `--` it is a package name, not the trust opt-in.
+        if (std.mem.eql(u8, arg, "--")) break;
         if (upgrade_flag_map.get(arg) == .allow_unpinned) run_ctx.allow_unpinned = true;
     }
     return run_ctx;
@@ -302,6 +306,11 @@ test "upgradeCtx carries --allow-unpinned and keeps the parent's run state" {
     try std.testing.expect(on.allow_unpinned);
     try std.testing.expect(on.offline);
     try std.testing.expect(!upgradeCtx(&parent, &.{"tool"}).allow_unpinned);
+}
+
+test "upgradeCtx ignores --allow-unpinned after `--`" {
+    const parent: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
+    try std.testing.expect(!upgradeCtx(&parent, &.{ "tool", "--", "--allow-unpinned" }).allow_unpinned);
 }
 
 pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -328,8 +337,13 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
     defer use_system_ruby_scope.deinit(allocator);
 
     // StaticStringMap + exhaustive switch: every flag routes to a handler.
+    var opts_done = false;
     for (args) |arg| {
-        if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            if (arg.len > 0) names.append(allocator, arg) catch return error.OutOfMemory;
+        } else if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
             const list = arg["--use-system-ruby=".len..];
             var it = std.mem.splitScalar(u8, list, ',');
             while (it.next()) |n| {
@@ -345,8 +359,10 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
             .isolate_deps => isolate_deps = true,
             .use_system_ruby => use_system_ruby_bare = true,
             .allow_unpinned => {}, // applied by `upgradeCtx`
-        } else if (arg.len > 0 and arg[0] != '-') {
-            names.append(allocator, arg) catch return error.OutOfMemory;
+        } else {
+            // Dropping it would run the upgrade without the intended mode.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
         }
     }
 

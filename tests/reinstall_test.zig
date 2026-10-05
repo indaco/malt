@@ -159,6 +159,51 @@ test "execute reaches the install pipeline when the keg row exists" {
     try testing.expect(pathExists(lock_file));
 }
 
+test "execute refuses an unknown flag before the forced install starts" {
+    // The forwarded `--force` prunes the keg, so a dropped `-n` would be destructive.
+    const prefix = try setupPrefix("unknown_flag");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+        _ = c.unsetenv("MALT_PREFIX");
+    }
+    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/RESOLVABLE_FIXTURE/1.0", .{prefix});
+    defer testing.allocator.free(cellar_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar_dir);
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    defer testing.allocator.free(db_path);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+            \\VALUES ('RESOLVABLE_FIXTURE', 'RESOLVABLE_FIXTURE', '1.0', 'sha-x',
+            \\        '/opt/malt/Cellar/RESOLVABLE_FIXTURE/1.0');
+        );
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), &.{ "-n", "RESOLVABLE_FIXTURE" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: -n") != null);
+
+    // No lock taken and the keg untouched: install never began.
+    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    defer testing.allocator.free(lock_file);
+    try testing.expect(!pathExists(lock_file));
+    try testing.expect(pathExists(cellar_dir));
+}
+
 test "execute refuses a formula and a cask in one run before installing anything" {
     // One install run takes one side: `--cask` from the first name would
     // send the formula to the cask resolver.

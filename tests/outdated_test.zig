@@ -1208,6 +1208,30 @@ test "update without --check wipes the API cache and skips the slow snapshot wri
     );
 }
 
+test "update refuses an unknown flag and leaves the API cache intact" {
+    // `--chck` used to fall through to the default cache wipe.
+    var env = try UpdateEnv.init("unknown_flag");
+    defer env.deinit();
+    try env.writeApiFile("formula_alpha.json", "{\"name\":\"alpha\"}");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    try testing.expectError(error.Aborted, update_mod.execute(&ctx, testing.allocator, &.{"--chck"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --chck") != null);
+    try testing.expect(env.apiFileExists("formula_alpha.json"));
+}
+
+test "update stops option parsing at `--`" {
+    var env = try UpdateEnv.init("end_of_options");
+    defer env.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    try update_mod.execute(&ctx, testing.allocator, &.{ "--", "--chck" });
+}
+
 test "update without --check deletes a stale snapshot to force fresh recompute next run" {
     var env = try UpdateEnv.init("default_deletes_snapshot");
     defer env.deinit();
