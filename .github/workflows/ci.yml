@@ -245,6 +245,9 @@ jobs:
       - name: Regression guard - --dry-run bundle create, bundle import and backup leave their outputs untouched
         run: ./scripts/regressions/dry-run-writes-nothing-bundle-create-import-and-backup-ignore-dry-run.sh
 
+      - name: Regression guard - --dry-run update keeps the API cache
+        run: ./scripts/regressions/update-dry-run-keeps-cache-dry-run-update-wipes-the-api-cache.sh
+
       - name: Regression guard - INSTALL_RECEIPT.json mirrors the install reason
         run: ./scripts/regressions/receipt-mirrors-install-reason-install-receipt-always-claims-installed-on-request.sh
 

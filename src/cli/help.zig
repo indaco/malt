@@ -226,6 +226,7 @@ const update_help =
     \\
     \\Flags:
     \\  --check     Refresh only the outdated snapshot (skip API cache wipe)
+    \\  --dry-run   Show what would be cleared or refreshed
     \\  --quiet, -q Suppress status messages
     \\
 ;
