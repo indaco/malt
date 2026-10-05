@@ -9,6 +9,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const schema_report = @import("schema_report.zig");
 const atomic = @import("../fs/atomic.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
@@ -74,8 +75,11 @@ fn run(ctx: *const AppCtx, args: []const []const u8, action: Action) !void {
     };
 
     const prefix = atomic.maltPrefixOrAbort();
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const db_path = prefix_path.joinZ(&db_path_buf, prefix, "/db/malt.db") catch {
+        output.err("Failed to open database", .{});
+        return error.Aborted;
+    };
     var db = sqlite.Database.open(db_path) catch {
         output.err("Failed to open database", .{});
         return error.Aborted;

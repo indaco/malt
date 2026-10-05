@@ -239,3 +239,43 @@ pub fn unwallDir(io: std.Io, d: std.Io.Dir) void {
     d.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
     d.close(io);
 }
+
+/// A `MALT_PREFIX` of exactly `len` bytes with `db/` made. 494-512 bytes is
+/// the band `validatePrefix` admits but SQLite's 512-byte pathname cap
+/// cannot open, so commands there must fail loud rather than exit clean.
+pub const LongPrefix = struct {
+    path: [:0]u8,
+    root: []const u8,
+
+    pub fn init(allocator: std.mem.Allocator, group: []const u8, len: usize) !LongPrefix {
+        const root = try uniqueTempPath(allocator, group, "long");
+        errdefer allocator.free(root);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        try buf.appendSlice(allocator, root);
+        // Components stay well under NAME_MAX; the last one is never empty.
+        while (len - buf.items.len > 202) {
+            try buf.append(allocator, '/');
+            try buf.appendNTimes(allocator, 'a', 200);
+        }
+        std.debug.assert(len - buf.items.len >= 2);
+        try buf.append(allocator, '/');
+        try buf.appendNTimes(allocator, 'b', len - buf.items.len);
+
+        const prefix = try allocator.dupeZ(u8, buf.items);
+        errdefer allocator.free(prefix);
+        deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{prefix});
+        defer allocator.free(db_dir);
+        try cwd().createDirPath(std.Options.debug_io, db_dir);
+        _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
+        return .{ .path = prefix, .root = root };
+    }
+
+    pub fn deinit(self: *LongPrefix, allocator: std.mem.Allocator) void {
+        _ = c.unsetenv("MALT_PREFIX");
+        deleteTreeAbsolute(std.Options.debug_io, self.root) catch {};
+        allocator.free(self.path);
+        allocator.free(self.root);
+    }
+};

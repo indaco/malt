@@ -10,6 +10,7 @@ const schema = @import("../db/schema.zig");
 const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
@@ -776,15 +777,21 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
 
     const is_listing = isListingIntent(positional, pin_slug, refresh_target, refresh_all);
 
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const db_path = prefix_path.joinZ(&db_path_buf, prefix, "/db/malt.db") catch {
+        output.err("Failed to open database", .{});
+        return error.Aborted;
+    };
 
     // sqlite cannot create its file inside a `db/` that does not exist, so
     // every intent with work to do has to make the directory first. Listing
     // stays read-only: it answers for the empty prefix without building one.
     if (!is_listing) {
-        var dir_buf: [512]u8 = undefined;
-        const db_dir = std.fmt.bufPrint(&dir_buf, "{s}/db", .{prefix}) catch return;
+        var dir_buf: [prefix_path.path_buf_len]u8 = undefined;
+        const db_dir = prefix_path.join(&dir_buf, prefix, "/db") catch {
+            output.err("Failed to open database", .{});
+            return error.Aborted;
+        };
         std.Io.Dir.cwd().createDirPath(ctx.io, db_dir) catch {
             output.err("Cannot create {s} - check the prefix is writable.", .{db_dir});
             return error.Aborted;
