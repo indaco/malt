@@ -463,3 +463,10 @@ test "pin, unpin and rollback completions expose brew's kind flags in every shel
         }
     }
 }
+
+test "--version is offered only before a subcommand, where main accepts it" {
+    // After a subcommand the parsers refuse it as an unknown flag.
+    try testing.expect(std.mem.indexOf(u8, completions.bash_script, "--help -h --version\"") == null);
+    try expectContains(completions.bash_script, "\"$global_flags --version\"");
+    try expectContains(completions.fish_script, "-n __malt_needs_command -l version");
+}

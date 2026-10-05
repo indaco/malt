@@ -71,7 +71,7 @@ touch "$tmp/victim/1.0/SENTINEL"
 ln -s "$tmp/victim" "$prefix/Cellar/probe"
 
 MALT_PREFIX="$prefix" HOMEBREW_PREFIX="$tmp/brew" \
-  zig-out/bin/malt migrate probe >"$tmp/out" 2>&1 || true
+  zig-out/bin/malt migrate >"$tmp/out" 2>&1 || true
 
 if [[ ! -f "$tmp/victim/1.0/SENTINEL" ]]; then
   echo "FAIL: migrate deleted outside the prefix ($tmp/victim/1.0)" >&2

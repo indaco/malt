@@ -1227,7 +1227,7 @@ test "routePostInstallOutcome: fatal entry wins over hasErrors heuristic" {
     try testing.expect(std.mem.indexOf(u8, out, "post_install completed") == null);
 }
 
-// `mt migrate ruby` shouldn't require `--use-system-ruby=ruby` — the
+// Migrating ruby from Homebrew shouldn't require `--use-system-ruby=ruby` — the
 // recursion is nonsensical. Self-hosting interpreter kegs (ruby,
 // ruby@N) are auto-included in the system-Ruby allow-list so the
 // hook routes to the same fallback path with no flag from the user.
@@ -1323,7 +1323,7 @@ test "routePostInstallOutcome: auto-included ruby keg skips re-run when DSL did 
 }
 
 // Negative pin on the same axis: when the DSL handled none of the body,
-// the auto-include must still fall back so a fresh `mt migrate ruby`
+// the auto-include must still fall back so a fresh migration of ruby
 // (or any zero-coverage scenario) still runs the hook via system Ruby.
 test "routePostInstallOutcome: auto-included ruby keg falls back when DSL did nothing" {
     try test_io.skipIfNoSubprocess();

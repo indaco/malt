@@ -60,7 +60,7 @@ printf '%s' '{"source":{"tap":"homebrew/core","versions":{"stable":"../../../can
 touch "$tmp/canary/SENTINEL"
 
 MALT_PREFIX="$prefix" HOMEBREW_PREFIX="$tmp/brew" \
-  zig-out/bin/malt migrate probe >"$tmp/out" 2>&1 || true
+  zig-out/bin/malt migrate >"$tmp/out" 2>&1 || true
 
 # `<prefix>/Cellar/probe/../../../canary` resolves to the canary dir: pre-fix
 # the migrate wrote a keg into it, so anything beyond SENTINEL is an escape.

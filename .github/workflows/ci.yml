@@ -140,6 +140,9 @@ jobs:
       - name: Regression guard - bundle install, cleanup and remove stop on an unknown flag
         run: ./scripts/regressions/bundle-subcommands-stop-on-unknown-flags-bundle-install-cleanup-remove-proceed-past-unknown-flags.sh
 
+      - name: Regression guard - upgrade, version update, install, link, migrate and update refuse an unknown flag
+        run: ./scripts/regressions/cli-refuses-unknown-flags-unknown-flags-silently-swallowed-by-parsers.sh
+
       - name: Regression guard - bundle create, install and cleanup refuse a second path
         run: ./scripts/regressions/bundle-refuses-a-second-path-bundle-subcommands-take-the-last-of-several-paths.sh
 
