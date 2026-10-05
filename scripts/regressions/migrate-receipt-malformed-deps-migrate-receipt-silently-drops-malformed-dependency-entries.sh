@@ -38,7 +38,7 @@ run_case() { # $1=label $2=runtime_dependencies json; leaves the case dir in $d
   touch "$d/prefix/cache/api/formula_probe.404"
   printf '%s%s}' "$base" "$2" >"$d/brew/Cellar/probe/1.0/INSTALL_RECEIPT.json"
   MALT_PREFIX="$d/prefix" HOMEBREW_PREFIX="$d/brew" NO_COLOR=1 \
-    zig-out/bin/malt migrate probe >"$d/out" 2>&1 || true
+    zig-out/bin/malt migrate >"$d/out" 2>&1 || true
 }
 
 for c in \

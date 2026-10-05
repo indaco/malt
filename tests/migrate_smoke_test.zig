@@ -106,6 +106,49 @@ test "bare --use-system-ruby is refused (would widen trust boundary to every keg
     );
 }
 
+test "an unknown flag is refused before the Homebrew scan starts" {
+    resetOutput();
+    // Fake brew + scratch prefix + dry-run, so a regressed parser can't migrate for real.
+    output.setDryRun(true);
+    defer output.setDryRun(false);
+    const brew = try scratchDir("unknown_flag_brew");
+    defer testing.allocator.free(brew);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+    try seedFakeBrew(brew, &.{"alpha"});
+    const prefix = try scratchDir("unknown_flag_prefix");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    try setenvZ("MALT_PREFIX", prefix);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron(), .offline = true };
+    try testing.expectError(error.Aborted, migrate.execute(&ctx, arena.allocator(), &.{"--bogus"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --bogus") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Found Homebrew") == null);
+
+    // migrate takes no names, so a stray word is refused too, `--` or not.
+    for ([_][]const []const u8{ &.{"alpha"}, &.{ "--", "--bogus" } }) |argv| {
+        try testing.expectError(error.Aborted, migrate.execute(&ctx, arena.allocator(), argv));
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown argument for migrate: 'alpha'") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Found Homebrew") == null);
+
+    // A bare `--` only ends options; the dry-run scan proceeds.
+    try migrate.execute(&ctx, arena.allocator(), &.{"--"});
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Found Homebrew") != null);
+}
+
 // ── detectBrewPrefix env override ───────────────────────────────────────
 
 test "detectBrewPrefix honors HOMEBREW_PREFIX when set" {

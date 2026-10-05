@@ -12,6 +12,15 @@ const prefix_path = @import("../fs/prefix_path.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
+const LinkFlag = enum { isolate, all, overwrite };
+const link_flag_map = std.StaticStringMap(LinkFlag).initComptime(.{
+    .{ "--isolate", .isolate },
+    .{ "--all", .all },
+    .{ "--overwrite", .overwrite },
+    .{ "--force", .overwrite },
+    .{ "-f", .overwrite },
+});
+
 pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "link")) return;
 
@@ -19,18 +28,28 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
     var all_flag = false;
     var overwrite = false;
     var name: ?[]const u8 = null;
+    var extra_name = false;
+    var opts_done = false;
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--isolate")) {
-            isolate = true;
-        } else if (std.mem.eql(u8, arg, "--all")) {
-            all_flag = true;
-        } else if (std.mem.eql(u8, arg, "--overwrite") or std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
-            overwrite = true;
-        } else if (arg.len > 0 and arg[0] != '-') {
-            if (name == null) name = arg;
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            // One name only: a silently dropped second one reads as linked.
+            if (arg.len > 0) {
+                if (name != null) extra_name = true else name = arg;
+            }
+        } else if (link_flag_map.get(arg)) |flag| switch (flag) {
+            .isolate => isolate = true,
+            .all => all_flag = true,
+            .overwrite => overwrite = true,
+        } else {
+            // brew's `-n` means dry run; dropping it would link for real.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
         }
     }
 
+    if (extra_name) name = null;
     if (isolate) {
         return executeLinkIsolate(ctx, allocator, name, all_flag);
     }
@@ -104,6 +123,11 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
             output.info("Use --overwrite to replace existing links.", .{});
             return error.Aborted;
         }
+    }
+
+    if (output.isDryRun()) {
+        output.info("Dry run: would link {s}", .{target_name});
+        return;
     }
 
     linker.link(cellar_path, target_name, keg_id, false) catch {
@@ -192,6 +216,10 @@ fn executeLinkIsolate(ctx: *const AppCtx, allocator: std.mem.Allocator, name: ?[
         }
 
         for (names.items, ids.items) |n, id| {
+            if (output.isDryRun()) {
+                output.info("Dry run: would isolate {s}", .{n});
+                continue;
+            }
             isolateOne(ctx, &db, id) catch {
                 output.warn("could not isolate {s}", .{n});
                 continue;
@@ -219,6 +247,10 @@ fn executeLinkIsolate(ctx: *const AppCtx, allocator: std.mem.Allocator, name: ?[
         return error.Aborted;
     }
 
+    if (output.isDryRun()) {
+        output.info("Dry run: would isolate {s}", .{target});
+        return;
+    }
     try isolateOne(ctx, &db, keg_id);
     output.success("{s} isolated: bin/sbin links removed", .{target});
 }
@@ -260,14 +292,30 @@ fn isolateOne(
 pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "unlink")) return;
 
-    if (args.len == 0) {
+    var name_arg: ?[]const u8 = null;
+    var extra_name = false;
+    var opts_done = false;
+    for (args) |arg| {
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            // One name only: a silently dropped second one reads as unlinked.
+            if (arg.len > 0) {
+                if (name_arg != null) extra_name = true else name_arg = arg;
+            }
+        } else {
+            // unlink takes no flags; brew's `-n` means dry run, not "unlink anyway".
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
+        }
+    }
+
+    const name = (if (extra_name) null else name_arg) orelse {
         output.err("Usage: mt unlink <formula>", .{});
         output.info("Remove symlinks for an installed keg from the prefix.", .{});
         output.info("The keg remains installed in the Cellar.", .{});
         return error.Aborted;
-    }
-
-    const name = args[0];
+    };
     const prefix = atomic.maltPrefixOrAbort();
 
     var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
@@ -301,6 +349,11 @@ pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []c
     }
 
     const keg_id = stmt.columnInt(0);
+
+    if (output.isDryRun()) {
+        output.info("Dry run: would unlink {s}", .{name});
+        return;
+    }
 
     var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
 

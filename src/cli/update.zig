@@ -15,15 +15,32 @@ const help = @import("help.zig");
 
 pub const UpdateError = error{ Aborted, SchemaTooNew } || std.mem.Allocator.Error;
 
+const UpdateFlag = enum { quiet, check };
+const update_flag_map = std.StaticStringMap(UpdateFlag).initComptime(.{
+    .{ "--quiet", .quiet },
+    .{ "-q", .quiet },
+    .{ "--check", .check },
+});
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) UpdateError!void {
     if (help.showIfRequested(ctx, args, "update")) return;
 
     var check_only = false;
+    var opts_done = false;
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
-            output.setQuiet(true);
-        } else if (std.mem.eql(u8, arg, "--check")) {
-            check_only = true;
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+        } else if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            // Takes no names; skipping a stray word would still wipe the cache.
+            output.err("Unknown argument for update: '{s}'", .{arg});
+            return error.Aborted;
+        } else if (update_flag_map.get(arg)) |flag| switch (flag) {
+            .quiet => output.setQuiet(true),
+            .check => check_only = true,
+        } else {
+            // Refused before the cache wipe, so `--chck` can't clear it.
+            output.err("Unknown flag: {s}", .{arg});
+            return error.Aborted;
         }
     }
 

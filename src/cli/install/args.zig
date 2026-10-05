@@ -308,6 +308,8 @@ pub const ParseError = enum {
     no_packages,
     self_install,
     ambiguous_system_ruby_scope,
+    unknown_flag,
+    empty_name,
 };
 
 /// The validated argv: resolved flags plus the package list. `quiet` /
@@ -323,7 +325,7 @@ pub const Parsed = struct {
 
 /// A tagged refusal. `arg` borrows into the caller's argv/package slice —
 /// the offending package for `self_install`, the first package for
-/// `ambiguous_system_ruby_scope`.
+/// `ambiguous_system_ruby_scope`, the flag itself for `unknown_flag`.
 pub const Refusal = struct { err: ParseError, arg: []const u8 = "" };
 
 pub const ParseResult = union(enum) {
@@ -332,8 +334,8 @@ pub const ParseResult = union(enum) {
 };
 
 /// The install-contract checks that hold regardless of how the flags were
-/// built: a non-empty package list and no self-install. The argv path runs
-/// them inside `parse`; the struct-first path (`installAll`) runs the same
+/// built: a non-empty package list, no empty name and no self-install. The
+/// argv path runs them inside `parse`; the struct-first path (`installAll`) runs the same
 /// function in the orchestrator, so both entry points share one guarantee.
 /// Pure and allocation-free — the offending name borrows into `packages`.
 pub fn checkInstallable(packages: []const []const u8) ?Refusal {
@@ -341,6 +343,8 @@ pub fn checkInstallable(packages: []const []const u8) ?Refusal {
     // Refuse self-install in every shape the dispatcher accepts; `mt version
     // update` is the supported upgrade channel.
     for (packages) |pkg| {
+        // An unset shell variable, not a name to look up.
+        if (pkg.len == 0) return .{ .err = .empty_name };
         if (isSelfInstall(pkg)) return .{ .err = .self_install, .arg = pkg };
     }
     return null;
@@ -363,9 +367,12 @@ const InstallFlag = enum {
 
 const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "--cask", .cask },
+    .{ "--casks", .cask },
     .{ "--formula", .formula },
+    .{ "--formulae", .formula },
     .{ "--dry-run", .dry_run },
     .{ "--force", .force },
+    .{ "-f", .force },
     .{ "--local", .local },
     .{ "--use-system-ruby", .use_system_ruby },
     .{ "--quiet", .quiet },
@@ -384,6 +391,17 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "--allow-unpinned", .allow_unpinned },
 });
 
+/// The first flag `parse` would refuse as `unknown_flag`, so a wrapper can
+/// refuse it before its own lookups report something else.
+pub fn unknownFlag(args: []const []const u8) ?[]const u8 {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--")) return null;
+        if (!std.mem.startsWith(u8, arg, "-") or std.mem.startsWith(u8, arg, "--use-system-ruby=")) continue;
+        if (install_flag_map.get(arg) == null) return arg;
+    }
+    return null;
+}
+
 /// Scan + validate the install argv in one place. Returns validated data or
 /// a tagged refusal — never a message. `arena` builds the package list and
 /// the split `--use-system-ruby=` scope; the caller owns it (the `installAll`
@@ -400,7 +418,16 @@ pub fn parse(arena: std.mem.Allocator, args: []const []const u8) error{OutOfMemo
 
     // StaticStringMap + exhaustive switch: the compiler checks every flag has
     // a handler, so adding a variant without wiring it fails to build.
+    var opts_done = false;
     for (args) |arg| {
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+            continue;
+        }
+        if (opts_done or !std.mem.startsWith(u8, arg, "-")) {
+            try packages.append(arena, arg);
+            continue;
+        }
         if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
             const list = arg["--use-system-ruby=".len..];
             var it = std.mem.splitScalar(u8, list, ',');
@@ -422,8 +449,9 @@ pub fn parse(arena: std.mem.Allocator, args: []const []const u8) error{OutOfMemo
             .download_only => flags.download_only = true,
             .isolate_deps => flags.isolate_deps = true,
             .allow_unpinned => flags.allow_unpinned = true,
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
-            try packages.append(arena, arg);
+        } else {
+            // Dropping it would install without the intended mode.
+            return .{ .invalid = .{ .err = .unknown_flag, .arg = arg } };
         }
     }
 
@@ -595,6 +623,80 @@ test "parse: self-install is refused and carries the offending arg" {
     }
 }
 
+test "parse: an unknown flag is refused and carries the offending arg" {
+    // Dropping it would install without the intended mode (`--forec`, brew's `-n`).
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "--forec", "-n", "-" }) |flag| {
+        const res = try parse(arena.allocator(), &.{ "wget", flag });
+        switch (res) {
+            .ok => return error.TestUnexpectedResult,
+            .invalid => |v| {
+                try std.testing.expectEqual(ParseError.unknown_flag, v.err);
+                try std.testing.expectEqualStrings(flag, v.arg);
+            },
+        }
+    }
+}
+
+test "parse: an unknown flag wins over the argv-shape refusals" {
+    // Reporting `--local requires a path` for `--local --bogus` would hide the typo.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectInvalid(try parse(arena.allocator(), &.{ "--local", "--bogus" }), .unknown_flag);
+    try expectInvalid(try parse(arena.allocator(), &.{"--bogus"}), .unknown_flag);
+}
+
+test "parse: brew's --formulae, --casks and -f are accepted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    switch (try parse(arena.allocator(), &.{ "--casks", "-f", "wget" })) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| try std.testing.expect(p.flags.force_cask and p.flags.force),
+    }
+    switch (try parse(arena.allocator(), &.{ "--formulae", "wget" })) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| try std.testing.expect(p.flags.force_formula),
+    }
+}
+
+test "parse: `--` ends options, so a dash-led token after it is a package" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = try parse(arena.allocator(), &.{ "--cask", "--", "-weird", "--force" });
+    switch (res) {
+        .invalid => return error.TestUnexpectedResult,
+        .ok => |p| {
+            try std.testing.expectEqual(@as(usize, 2), p.packages.len);
+            try std.testing.expectEqualStrings("-weird", p.packages[0]);
+            try std.testing.expectEqualStrings("--force", p.packages[1]);
+            try std.testing.expect(p.flags.force_cask);
+            try std.testing.expect(!p.flags.force);
+        },
+    }
+}
+
+test "parse: a bare `--` with no package after it is still an empty list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectInvalid(try parse(arena.allocator(), &.{"--"}), .no_packages);
+}
+
+test "parse: an empty package name is refused, not looked up" {
+    // `mt install "$UNSET" wget` would query a nameless package beside wget.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectInvalid(try parse(arena.allocator(), &.{""}), .empty_name);
+    try expectInvalid(try parse(arena.allocator(), &.{ "wget", "--", "" }), .empty_name);
+}
+
+test "unknownFlag: names the first flag install would refuse" {
+    // reinstall checks this before its own lookups, so a typo isn't reported as a missing package.
+    try std.testing.expectEqualStrings("--bogus", unknownFlag(&.{ "--force", "wget", "--bogus", "-n" }).?);
+    try std.testing.expect(unknownFlag(&.{ "--cask", "-q", "--use-system-ruby=wget", "wget" }) == null);
+    try std.testing.expect(unknownFlag(&.{ "--", "--bogus" }) == null);
+}
+
 test "parse: bare --use-system-ruby with multiple packages needs a scope" {
     // A bare flag across many formulas would let one DSL parse failure
     // silently widen Ruby trust across the rest — refuse and name the
@@ -696,6 +798,7 @@ test "checkInstallable: empty list and self-install refused, real names pass" {
     const refusal = checkInstallable(&.{ "wget", "malt" }).?;
     try std.testing.expectEqual(ParseError.self_install, refusal.err);
     try std.testing.expectEqualStrings("malt", refusal.arg);
+    try std.testing.expectEqual(ParseError.empty_name, checkInstallable(&.{ "wget", "" }).?.err);
     try std.testing.expect(checkInstallable(&.{ "wget", "jq" }) == null);
 }
 

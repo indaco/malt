@@ -542,6 +542,17 @@ test "execute --formula on a cask-only name refuses instead of upgrading the cas
     try testing.expect(std.mem.indexOf(u8, captured.items, "box is not installed as a formula") != null);
 }
 
+test "execute refuses an empty name instead of upgrading everything" {
+    // `mt upgrade --force "$UNSET"` used to fall through to upgrade-all, pins bypassed.
+    for ([_][]const []const u8{ &.{ "--force", "" }, &.{ "--", "" } }) |argv| {
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        try upgradeCaptured(&captured, "empty_name", seed_box_cask, null, argv);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "Empty package name") != null);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "box") == null);
+    }
+}
+
 test "execute reports an unreadable kegs table instead of upgrading a same-named cask" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
@@ -567,9 +578,38 @@ test "execute refuses --cask with --formula, as brew does, before touching anyth
     try testing.expect(std.mem.indexOf(u8, captured.items, "Options --formula and --cask are mutually exclusive") != null);
 }
 
+test "execute accepts brew's plural --formulae and --casks" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try upgradeCaptured(&captured, "plural_aliases", seed_box_cask, null, &.{ "--casks", "--formulae", "box" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Options --formula and --cask are mutually exclusive") != null);
+}
+
 test "execute --cask does not report an unreadable kegs table as a formula read failure" {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     try upgradeCaptured(&captured, "corrupt_kegs_cask_flag", seed_box_both, "kegs", &.{ "--cask", "box" });
     try testing.expect(std.mem.indexOf(u8, captured.items, "package database for formula") == null);
+}
+
+test "execute refuses an unknown flag instead of upgrading everything without it" {
+    // brew's `-n` and a typo alike used to fall through to a real upgrade-all.
+    for ([_][]const u8{ "--formulla", "-n" }) |flag| {
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        try upgradeCaptured(&captured, "unknown_flag", seed_box_cask, null, &.{flag});
+        const want = try std.fmt.allocPrint(testing.allocator, "Unknown flag: {s}", .{flag});
+        defer testing.allocator.free(want);
+        try testing.expect(std.mem.indexOf(u8, captured.items, want) != null);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "box") == null);
+    }
+}
+
+test "execute treats every token after `--` as a name, even a dash-led one" {
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try upgradeCaptured(&captured, "end_of_options", seed_box_cask, null, &.{ "--formula", "--", "box", "-n" });
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag") == null);
+    // Looked up as a name; old code dropped it as a flag.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "-n is not installed as a formula") != null);
 }

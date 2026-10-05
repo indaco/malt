@@ -42,6 +42,53 @@ test "execute with no positional args reports NoPackages" {
     );
 }
 
+test "execute refuses an unknown flag before resolving any package" {
+    const prefix = try setupPrefix("unknown_flag");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    try testing.expectError(error.Aborted, install.execute(&ctx, arena.allocator(), &.{ "--forec", "nosuchpkg" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unknown flag: --forec") != null);
+    // Refused at parse, so resolution never ran.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "nosuchpkg") == null);
+}
+
+test "execute refuses an empty package name before resolving the others" {
+    // An unset shell variable used to surface as `Cask '' not found` after
+    // the real names had already been resolved.
+    const prefix = try setupPrefix("empty_name");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    try testing.expectError(error.Aborted, install.execute(&ctx, arena.allocator(), &.{ "nosuchpkg", "" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Empty package name") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "nosuchpkg") == null);
+}
+
 fn seedFormulaCache(prefix: []const u8, name: []const u8, json: []const u8) !void {
     const cache_root = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{prefix});
     defer testing.allocator.free(cache_root);
