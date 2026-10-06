@@ -250,26 +250,15 @@ pub fn dependencyPlaceholder(
 const perl_token = "@@HOMEBREW_PERL@@";
 const perl_dep = "perl";
 
-/// Sentinel for "could not read the macOS version"; `systemPerlPath` maps it
-/// to the newest interpreter, since a stale versioned path is guaranteed
-/// absent while the newest one is right for every macOS malt runs on.
-const unknown_macos_major: u32 = std.math.maxInt(u32);
-
 /// Interpreter each macOS release ships. Upstream pins the same versions, so
-/// a relocated keg lands byte-identical to a brew-poured one.
-fn systemPerlPath(macos_major: u32) []const u8 {
-    if (macos_major >= 14) return "/usr/bin/perl5.34"; // Sonoma and later
-    if (macos_major >= 11) return "/usr/bin/perl5.30"; // Big Sur and later
+/// a relocated keg lands byte-identical to a brew-poured one. An unreadable
+/// version takes the newest: a stale versioned path is guaranteed absent,
+/// while the newest one is right for every macOS malt runs on.
+fn systemPerlPath(macos_major: ?u32) []const u8 {
+    const major = macos_major orelse return "/usr/bin/perl5.34";
+    if (major >= 14) return "/usr/bin/perl5.34"; // Sonoma and later
+    if (major >= 11) return "/usr/bin/perl5.30"; // Big Sur and later
     return "/usr/bin/perl5.18";
-}
-
-fn macosMajorVersion() u32 {
-    var buf: [32]u8 = undefined;
-    var len: usize = buf.len;
-    if (std.c.sysctlbyname("kern.osproductversion", &buf, &len, null, 0) != 0) return unknown_macos_major;
-    const text = std.mem.sliceTo(buf[0..len], 0);
-    const major = text[0 .. std.mem.indexOfScalar(u8, text, '.') orelse text.len];
-    return std.fmt.parseInt(u32, major, 10) catch unknown_macos_major;
 }
 
 /// Resolve `@@HOMEBREW_PERL@@`, which bottles carry in the shebang of every
@@ -298,7 +287,7 @@ pub fn perlPlaceholder(
         const value = std.fmt.bufPrint(buf, "{s}/opt/{s}/bin/perl", .{ prefix, dep }) catch break :brewed_keg;
         return .{ .token = perl_token, .value = value };
     }
-    return .{ .token = perl_token, .value = systemPerlPath(macosMajorVersion()) };
+    return .{ .token = perl_token, .value = systemPerlPath(cask_variation.runningMacosMajor()) };
 }
 
 /// `perl` or a pinned `perl@5.xx`, which installs under its own `opt/` name.
@@ -1589,7 +1578,7 @@ test "systemPerlPath tracks the interpreter each macOS release ships" {
     // An unreadable version reads as "current": a stale path is guaranteed
     // absent on a modern system, the newest one is right for every macOS
     // malt runs on.
-    try testing.expectEqualStrings("/usr/bin/perl5.34", systemPerlPath(unknown_macos_major));
+    try testing.expectEqualStrings("/usr/bin/perl5.34", systemPerlPath(null));
 }
 
 test "perlPlaceholder falls back to the system interpreter when the buffer is too small" {
