@@ -32,7 +32,8 @@ command -v sqlite3 >/dev/null 2>&1 || {
   exit 2
 }
 
-T=$(mktemp -d)
+# Resolved: SQLite measures the real path, and the temp root is a symlink.
+T=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$T"' EXIT
 export NO_COLOR=1
 export MALT_NO_EMOJI=1
@@ -80,14 +81,14 @@ grep -q 'mt link jq' "$T/out" || fail "finalize: recovery not named"
 run_case links "ALTER TABLE links RENAME COLUMN link_path TO lp;"
 [[ -L "$MALT_PREFIX/bin/jq" ]] || fail "links: tracked symlink removed"
 
-# A legal prefix (limit 512) that overflowed the old 512-byte path buffers.
-# No keg can be seeded there: SQLite's own pathname cap rejects the db first,
-# so the fixed binary must say so rather than exit 0.
+# A prefix at the 493-byte cap, whose lock path once overflowed a 512-byte
+# buffer. Nothing is installed there, so the fixed binary must say so rather
+# than exit 0.
 # Full 99-byte segments, then one of 1..100 bytes so no count goes <= 0.
 long="$T"
-for ((i = 0; i < (505 - ${#T} - 2) / 100; i++)); do long+="/$(printf '%099d' 0)"; done
-long+="/$(printf "%0$((505 - ${#long} - 1))d" 0)"
-((${#long} == 505)) || {
+for ((i = 0; i < (493 - ${#T} - 2) / 100; i++)); do long+="/$(printf '%099d' 0)"; done
+long+="/$(printf "%0$((493 - ${#long} - 1))d" 0)"
+((${#long} == 493)) || {
   echo "bad long prefix length ${#long}" >&2
   exit 2
 }

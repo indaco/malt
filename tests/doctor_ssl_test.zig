@@ -125,3 +125,18 @@ test "ca-certificates installed + cert.pem missing: warns about the unlinked bun
     try testing.expectEqual(doctor.CheckResult.warn_status, result);
     try testing.expect(std.mem.indexOf(u8, buf.items, "isn't linked") != null);
 }
+
+test "a max-length prefix still verifies the bundle instead of reporting ok" {
+    // Every bundle path must fit any prefix the env check admits; one that
+    // does not would skip the check and read as a clean row.
+    var p = try test_io.LongPrefix.init(testing.allocator, "doctor_ssl", malt.prefix_path.max_prefix_len);
+    defer p.deinit(testing.allocator);
+    const opt = try std.fmt.allocPrint(testing.allocator, "{s}/opt/ca-certificates", .{p.path});
+    defer testing.allocator.free(opt);
+    try test_io.cwd().createDirPath(std.Options.debug_io, opt);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(p.path), &buf));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "isn't linked") != null);
+}

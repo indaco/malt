@@ -402,3 +402,22 @@ test "atomicRename moves a directory tree within the same filesystem" {
     const n = try inner.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expectEqualStrings("payload", buf[0..n]);
 }
+
+test "max_prefix_len is the longest prefix whose install database SQLite can open" {
+    // SQLite's own pathname cap is the real limit; one byte past the bound
+    // must be the first prefix it cannot serve, journal included.
+    const max = malt.prefix_path.max_prefix_len;
+    for ([_]struct { len: usize, opens: bool }{ .{ .len = max, .opens = true }, .{ .len = max + 1, .opens = false } }) |case| {
+        var p = try test_io.LongPrefix.init(testing.allocator, "atomic", case.len);
+        defer p.deinit(testing.allocator);
+        const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{p.path}, 0);
+        defer testing.allocator.free(db_path);
+        var db = malt.sqlite.Database.open(db_path) catch {
+            try testing.expect(!case.opens);
+            continue;
+        };
+        defer db.close();
+        try testing.expect(case.opens);
+        try db.exec("CREATE TABLE t(x); INSERT INTO t VALUES (1);");
+    }
+}

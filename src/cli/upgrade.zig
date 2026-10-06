@@ -19,6 +19,7 @@ const schema = @import("../db/schema.zig");
 const schema_report = @import("schema_report.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
@@ -434,8 +435,11 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
     // Open DB + API
     const prefix = atomic.maltPrefixOrAbort();
 
-    var lock_path_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
+    var lock_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const lock_path = prefix_path.join(&lock_path_buf, prefix, "/db/malt.lock") catch {
+        output.err("Failed to acquire lock", .{});
+        return error.Aborted;
+    };
     var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 5000) catch |e| switch (e) {
         // Fresh prefix: no `db/` yet = nothing installed, nothing to
         // upgrade. Exit 0 silently rather than treating the missing
@@ -455,8 +459,11 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
     defer if (output.isNdjson()) output.emitNdjsonEvent(.install_complete, "", null);
     output.emitNdjsonEvent(.lock_acquired, "", null);
 
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const db_path = prefix_path.joinZ(&db_path_buf, prefix, "/db/malt.db") catch {
+        output.err("Failed to open database", .{});
+        return error.Aborted;
+    };
     var db = outdated_mod.openPrefixDb(ctx.io, db_path) catch |e| switch (e) {
         // Fresh prefix: nothing installed, nothing to upgrade.
         error.Absent => return,
@@ -474,7 +481,7 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
 
     // Same resolution as `mt outdated`: with MALT_CACHE set, a bare
     // `{prefix}/cache` would warm and prune a snapshot nobody reads.
-    const cache_dir = atomic.maltCacheDir(allocator) catch return;
+    const cache_dir = try atomic.maltCacheDir(allocator);
     defer allocator.free(cache_dir);
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;

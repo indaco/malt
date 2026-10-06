@@ -768,16 +768,15 @@ test "execute aborts and keeps the links when their rows cannot be read" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "link_path") != null);
 }
 
-test "execute under a near-limit prefix fails loud instead of exiting 0" {
-    // 505 is a legal prefix whose `/db/malt.lock` path once overflowed a
-    // 512-byte buffer. One component caps at 255, hence nested segments.
+test "execute under a max-length prefix takes the lock and fails loud instead of exiting 0" {
+    // One component caps at 255, hence nested segments.
     const io = std.Options.debug_io;
     const base = try test_io.uniqueTempPath(testing.allocator, "uninstall", "long_prefix");
     defer testing.allocator.free(base);
     test_io.deleteTreeAbsolute(io, base) catch {};
     defer test_io.deleteTreeAbsolute(io, base) catch {};
 
-    var buf: [505]u8 = undefined;
+    var buf: [malt.prefix_path.max_prefix_len]u8 = undefined;
     @memcpy(buf[0..base.len], base);
     var i = base.len;
     while (i < buf.len) : (i += 1) buf[i] = if ((i - base.len) % 100 == 0) '/' else 'a';

@@ -246,12 +246,9 @@ test "long-but-valid MALT_PREFIX reaches the real db failure instead of exiting 
     }
     try seedFakeBrew(brew, &.{"tree"});
 
-    // A 512-byte MALT_PREFIX passes validatePrefix (≤ 512) but overflowed the
-    // old 512-byte "{s}/db/malt.db" buffer at the db-open site, so migrate hit
-    // `catch return` and exited 0 having done nothing. Grown to 576 the format
-    // fits, so it reaches db.open — which fails here because db/malt.db is a
-    // directory — and must surface Aborted.
-    const prefix = try buildLongPrefix(testing.allocator, base, 512);
+    // A max-length MALT_PREFIX must reach db.open - which fails here because
+    // db/malt.db is a directory - and surface Aborted, not exit 0.
+    const prefix = try buildLongPrefix(testing.allocator, base, malt.prefix_path.max_prefix_len);
     defer testing.allocator.free(prefix);
     try malt.prefix_path.validatePrefix(prefix); // precondition: this prefix is valid
     const db_as_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
