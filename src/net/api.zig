@@ -301,6 +301,14 @@ fn readCacheFile(io: std.Io, allocator: std.mem.Allocator, cache_path: []const u
     return content;
 }
 
+/// A cached API document of any age, without a client: for read-only
+/// callers that must never dial out. Caller owns the bytes.
+pub fn readCacheAt(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, key: []const u8, prefix: []const u8) ?[]const u8 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ cache_dir, prefix, key }) catch return null;
+    return readCacheFile(io, allocator, cache_path);
+}
+
 pub const BrewApi = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -724,9 +732,7 @@ pub const BrewApi = struct {
     /// path so a stale snapshot still serves bytes; the regular
     /// `readCache` adds the freshness gate on top.
     pub fn readCacheBytes(self: *BrewApi, key: []const u8, prefix: []const u8) ?[]const u8 {
-        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return null;
-        return readCacheFile(self.io, self.allocator, cache_path);
+        return readCacheAt(self.io, self.allocator, self.cache_dir, key, prefix);
     }
 
     pub fn writeCache(self: *const BrewApi, key: []const u8, prefix: []const u8, data: []const u8) void {

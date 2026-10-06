@@ -49,6 +49,7 @@ comptime {
     _ = @import("doctor_fix_test.zig");
     _ = @import("doctor_isolation_test.zig");
     _ = @import("doctor_json_test.zig");
+    _ = @import("doctor_bottle_host_test.zig");
     _ = @import("doctor_render_test.zig");
     _ = @import("doctor_ssl_test.zig");
     _ = @import("doctor_tap_forge_test.zig");

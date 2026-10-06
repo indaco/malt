@@ -24,11 +24,13 @@ const clonefile = @import("../fs/clonefile.zig");
 const parser = @import("../macho/parser.zig");
 const client_mod = @import("../net/client.zig");
 const mirror_mod = @import("../net/mirror.zig");
+const cask_variation = @import("../net/cask_variation.zig");
 const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
 const bytes = @import("../ui/bytes.zig");
 const purge_args = @import("purge/args.zig");
 pub const cask_history = @import("doctor/cask_history.zig");
+pub const bottle_host = @import("doctor/bottle_host.zig");
 const fix_mod = @import("doctor/fix.zig");
 pub const FixKind = fix_mod.FixKind;
 pub const ManualKind = fix_mod.ManualKind;
@@ -136,6 +138,7 @@ pub const checks = [_]Check{
     .{ .name = "Relocation placeholders", .run = checkMachOPlaceholders },
     .{ .name = "Relocated prefix paths", .run = checkUnrelocatedPrefix },
     .{ .name = "Relocation freshness", .run = checkRelocationFreshness },
+    .{ .name = "Bottles built for a newer macOS", .run = checkBottleHost },
     .{ .name = "Disk space", .run = checkDiskSpace },
     .{ .name = "Local formula sources", .run = checkLocalSources },
     .{ .name = "Dependency bin/sbin link census", .run = checkIsolationLeaks },
@@ -1350,6 +1353,28 @@ fn checkRelocationFreshness(ctx: CheckCtx, name: []const u8) CheckResult {
     printCheck(name, .warn_status, msg);
     armVerboseHint();
     if (output.isVerbose()) writeVerboseList(stale.items);
+    return .warn_status;
+}
+
+fn checkBottleHost(ctx: CheckCtx, name: []const u8) CheckResult {
+    // Checked: an unusable MALT_CACHE is not this row's finding to abort on.
+    const cache_dir = atomic.maltCacheDirChecked(ctx.allocator) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer ctx.allocator.free(cache_dir);
+    var report = bottle_host.collect(ctx.allocator, ctx.io, ctx.prefix, cache_dir, cask_variation.runningMacosMajor());
+    defer report.deinit(ctx.allocator);
+
+    if (signals.isInterrupted()) return .ok; // partial walk: nothing to report
+    if (report.count() == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    var msg_buf: [512]u8 = undefined;
+    printCheck(name, .warn_status, bottle_host.summary(&msg_buf, report));
+    armVerboseHint();
+    writeVerboseList(report.lines.items);
     return .warn_status;
 }
 

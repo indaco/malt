@@ -1,0 +1,189 @@
+//! malt — doctor probe for kegs poured from a bottle built for a newer macOS.
+//!
+//! Bottle selection once ignored the host version, so a keg on disk can hold
+//! binaries dyld refuses. The keg's recorded digest names the bottle it came
+//! from; the cached formula document maps that digest back to a tag.
+
+const std = @import("std");
+const sqlite = @import("../../db/sqlite.zig");
+const output = @import("../../ui/output.zig");
+const signals = @import("../../core/signals.zig");
+const schema_report = @import("../schema_report.zig");
+const formula_mod = @import("../../core/formula.zig");
+const api_mod = @import("../../net/api.zig");
+const cask_variation = @import("../../net/cask_variation.zig");
+const install_args = @import("../install/args.zig");
+
+pub const Remedy = enum { reinstall, uninstall };
+
+/// Whether `store_sha256` is the digest of a bottle built only for a macOS
+/// newer than the host. A digest names one bottle, so a match is conclusive
+/// whatever version the document describes; no match yields no verdict.
+pub fn pouredTooNew(
+    files: std.json.ArrayHashMap(formula_mod.BottleFile),
+    store_sha256: []const u8,
+    host_major: ?u32,
+) bool {
+    const host = host_major orelse return false; // same policy as bottleKey
+    var newer = false;
+    var it = files.map.iterator();
+    while (it.next()) |e| {
+        if (!std.mem.eql(u8, e.value_ptr.sha256, store_sha256)) continue;
+        // One loadable tag sharing the digest makes it a loadable bottle.
+        const major = cask_variation.tagMajor(e.key_ptr.*) orelse return false;
+        if (major <= host) return false;
+        newer = true;
+    }
+    return newer;
+}
+
+/// The fix for a keg poured too new, or null when it is fine. `reinstall`
+/// only works when a bottle for this macOS exists.
+pub fn remedyFor(formula: *const formula_mod.Formula, store_sha256: []const u8, host_major: ?u32) ?Remedy {
+    const files = formula.bottle_files orelse return null;
+    if (!pouredTooNew(files, store_sha256, host_major)) return null;
+    _ = formula_mod.resolveBottleFor(formula, host_major) catch return .uninstall;
+    return .reinstall;
+}
+
+pub const Report = struct {
+    reinstall: u32 = 0,
+    uninstall: u32 = 0,
+    /// One `--verbose` line per flagged keg, naming its remedy.
+    lines: std.ArrayList([]u8) = .empty,
+
+    pub fn count(self: Report) u32 {
+        return self.reinstall + self.uninstall;
+    }
+
+    pub fn deinit(self: *Report, allocator: std.mem.Allocator) void {
+        for (self.lines.items) |l| allocator.free(l);
+        self.lines.deinit(allocator);
+    }
+};
+
+/// Walk the core kegs and classify each against its cached formula document.
+/// ponytail: cache-only, so a keg whose document was never cached is skipped;
+/// reading the binaries' LC_BUILD_VERSION would cover it, at a full Mach-O walk.
+pub fn collect(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    prefix: []const u8,
+    cache_dir: []const u8,
+    host_major: ?u32,
+) Report {
+    var report: Report = .{};
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return report;
+    var db = schema_report.openPreviewable(io, db_path, output.isDryRun()) catch return report;
+    defer db.close();
+    var stmt = db.prepare("SELECT name, tap, store_sha256 FROM kegs ORDER BY name;") catch return report;
+    defer stmt.finalize();
+
+    while (stmt.step() catch false) {
+        if (signals.isInterrupted()) break;
+        const name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
+        const tap = if (stmt.columnText(1)) |t| std.mem.sliceTo(t, 0) else "";
+        const sha = std.mem.sliceTo(stmt.columnText(2) orelse continue, 0);
+        // A tap or `--local` keg's digest is not in the core document.
+        if (!install_args.isCoreTap(tap)) continue;
+        // The name builds a cache path; a hand-edited row must not escape it.
+        api_mod.validateName(name) catch continue;
+
+        const bytes = api_mod.readCacheAt(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(.formula)) orelse continue;
+        defer allocator.free(bytes);
+        var formula = formula_mod.parseFormula(allocator, bytes) catch continue;
+        defer formula.deinit();
+
+        const remedy = remedyFor(&formula, sha, host_major) orelse continue;
+        const line = switch (remedy) {
+            .reinstall => std.fmt.allocPrint(allocator, "{s}: mt reinstall {s}", .{ name, name }),
+            .uninstall => std.fmt.allocPrint(allocator, "{s}: no bottle for this macOS — mt uninstall {s}", .{ name, name }),
+        } catch continue;
+        report.lines.append(allocator, line) catch {
+            allocator.free(line);
+            continue;
+        };
+        switch (remedy) {
+            .reinstall => report.reinstall += 1,
+            .uninstall => report.uninstall += 1,
+        }
+    }
+    return report;
+}
+
+/// The single warn-row detail for a non-empty report.
+pub fn summary(buf: []u8, report: Report) []const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "{d} keg(s) were poured from a bottle built for a newer macOS and may fail to load: {d} to reinstall (mt reinstall <name>), {d} with no bottle for this macOS (mt uninstall <name>)",
+        .{ report.count(), report.reinstall, report.uninstall },
+    ) catch "Some kegs were poured from a bottle built for a newer macOS; reinstall or uninstall them.";
+}
+
+const testing = std.testing;
+const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
+const sha_a = "a" ** 64;
+const sha_b = "b" ** 64;
+
+// Comptime literal: parseFormula may borrow from its input.
+fn parseDoc(comptime files_json: []const u8) !formula_mod.Formula {
+    return formula_mod.parseFormula(testing.allocator, "{\"name\":\"x\",\"full_name\":\"x\",\"versions\":{\"stable\":\"1.0\"},\"revision\":0," ++
+        "\"bottle\":{\"stable\":{\"root_url\":\"https://x\",\"files\":{" ++ files_json ++ "}}}}");
+}
+
+fn bottle(comptime tag: []const u8, comptime sha: []const u8) []const u8 {
+    return "\"" ++ tag ++ "\":{\"cellar\":\":any\",\"url\":\"https://x/b\",\"sha256\":\"" ++ sha ++ "\"}";
+}
+
+test "a digest only a newer macOS's bottle carries is flagged" {
+    var f = try parseDoc(comptime bottle(arch ++ "golden_gate", sha_a) ++ "," ++ bottle(arch ++ "tahoe", sha_b));
+    defer f.deinit();
+    try testing.expect(pouredTooNew(f.bottle_files.?, sha_a, 26));
+}
+
+test "a digest from the host's own, an older, or the all bottle is fine" {
+    var f = try parseDoc(comptime bottle(arch ++ "tahoe", sha_a) ++ "," ++ bottle(arch ++ "sonoma", sha_b) ++ "," ++ bottle("all", "c" ** 64));
+    defer f.deinit();
+    try testing.expect(!pouredTooNew(f.bottle_files.?, sha_a, 26));
+    try testing.expect(!pouredTooNew(f.bottle_files.?, sha_b, 26));
+    try testing.expect(!pouredTooNew(f.bottle_files.?, "c" ** 64, 26));
+}
+
+test "a digest shared by a newer and a loadable tag is the same loadable bottle" {
+    // Homebrew reuses one bottle across tags when its binaries run on both.
+    var f = try parseDoc(comptime bottle(arch ++ "golden_gate", sha_a) ++ "," ++ bottle(arch ++ "tahoe", sha_a));
+    defer f.deinit();
+    try testing.expect(!pouredTooNew(f.bottle_files.?, sha_a, 26));
+}
+
+test "no verdict without a digest match, a recorded digest, or a known host" {
+    var f = try parseDoc(comptime bottle(arch ++ "golden_gate", sha_a));
+    defer f.deinit();
+    // A version bump or rebuild moved the digest on: a miss, never a false
+    // alarm. A migrated keg's empty digest can never match: the parser drops
+    // malformed ones.
+    try testing.expect(!pouredTooNew(f.bottle_files.?, sha_b, 26));
+    try testing.expect(!pouredTooNew(f.bottle_files.?, "", 26));
+    try testing.expect(!pouredTooNew(f.bottle_files.?, sha_a, null));
+}
+
+test "remedyFor points at reinstall only when this macOS has a bottle" {
+    var reinst = try parseDoc(comptime bottle(arch ++ "golden_gate", sha_a) ++ "," ++ bottle(arch ++ "tahoe", sha_b));
+    defer reinst.deinit();
+    try testing.expectEqual(@as(?Remedy, .reinstall), remedyFor(&reinst, sha_a, 26));
+    try testing.expectEqual(@as(?Remedy, null), remedyFor(&reinst, sha_b, 26));
+
+    // `mt reinstall` would fail with NoBottleAvailable here.
+    var none = try parseDoc(comptime bottle(arch ++ "golden_gate", sha_a));
+    defer none.deinit();
+    try testing.expectEqual(@as(?Remedy, .uninstall), remedyFor(&none, sha_a, 26));
+}
+
+test "summary names both remedies with their counts" {
+    var buf: [512]u8 = undefined;
+    const text = summary(&buf, .{ .reinstall = 2, .uninstall = 1 });
+    try testing.expect(std.mem.startsWith(u8, text, "3 keg(s)"));
+    try testing.expect(std.mem.indexOf(u8, text, "2 to reinstall (mt reinstall <name>)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "1 with no bottle for this macOS (mt uninstall <name>)") != null);
+}
