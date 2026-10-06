@@ -14,6 +14,7 @@ const bottle_host = doctor.bottle_host;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const output = malt.output;
+const api = malt.api;
 
 const io = std.Options.debug_io;
 const arch = if (builtin.cpu.arch == .aarch64) "arm64_" else "";
@@ -80,6 +81,13 @@ const Scratch = struct {
     }
 };
 
+/// The bulk-dump side-car `mt outdated` leaves behind.
+fn writeBottlesIndex(s: *const Scratch, body: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrint(&buf, "{s}/api/bottles_" ++ api.bottles_key ++ ".txt", .{s.cache});
+    try test_io.cwd().writeFile(io, .{ .sub_path = path, .data = body });
+}
+
 fn bottle(comptime tag: []const u8, comptime sha: []const u8) []const u8 {
     return "\"" ++ tag ++ "\":{\"cellar\":\":any\",\"url\":\"https://x/b\",\"sha256\":\"" ++ sha ++ "\"}";
 }
@@ -120,6 +128,34 @@ test "collect skips kegs the core document cannot speak for" {
     try testing.expectEqual(@as(u32, 0), report.count());
     // Only the uncached core keg is one the check failed to look at.
     try testing.expectEqual(@as(u32, 1), report.unchecked);
+    try testing.expectEqual(@as(usize, 1), report.unchecked_lines.items.len);
+    try testing.expectEqualStrings("uncached: not checked", report.unchecked_lines.items[0]);
+}
+
+test "collect checks a keg from the bulk side-car when its own document is gone" {
+    // `mt update` wipes per-formula documents; `mt outdated` rebuilds only
+    // the bulk side-car, which must be enough to check every keg.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "side_car");
+    defer s.deinit(allocator);
+    try writeBottlesIndex(&s, "regside\t" ++ newer_tag ++ "=" ++ sha_a ++ "\n" ++
+        "regreinst\t" ++ newer_tag ++ "=" ++ sha_b ++ "," ++ host_tag ++ "=" ++ sha_c ++ "\n" ++
+        "regok\t" ++ host_tag ++ "=" ++ sha_c ++ "\n" ++
+        "unbottled\t\n");
+    try s.seed("regside", null, sha_a, null);
+    try s.seed("regreinst", null, sha_b, null);
+    try s.seed("regok", null, sha_c, null);
+    try s.seed("unbottled", null, sha_a, null);
+    try s.seed("gone", null, sha_a, null); // in neither source
+
+    var report = bottle_host.collect(allocator, io, s.path, s.cache, host_major);
+    defer report.deinit(allocator);
+    try testing.expectEqual(@as(u32, 1), report.reinstall);
+    try testing.expectEqual(@as(u32, 1), report.uninstall);
+    try testing.expectEqual(@as(u32, 1), report.unchecked);
+    try testing.expectEqualStrings("regreinst: mt reinstall regreinst", report.lines.items[0]);
+    try testing.expectEqualStrings("regside: no bottle for this macOS — mt uninstall regside", report.lines.items[1]);
+    try testing.expectEqualStrings("gone: not checked", report.unchecked_lines.items[0]);
 }
 
 test "collect reads neither outside the API cache nor a corrupt document" {

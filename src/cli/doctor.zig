@@ -1369,14 +1369,12 @@ fn checkBottleHost(ctx: CheckCtx, name: []const u8) CheckResult {
     if (signals.isInterrupted()) return .ok; // partial walk: nothing to report
     var msg_buf: [512]u8 = undefined;
     const msg = bottle_host.detail(&msg_buf, report);
-    if (report.count() == 0) {
-        printCheck(name, .ok, msg);
-        return .ok;
-    }
-    printCheck(name, .warn_status, msg);
-    armVerboseHint();
+    const status: CheckResult = if (report.count() == 0) .ok else .warn_status;
+    printCheck(name, status, msg);
+    if (report.lines.items.len + report.unchecked_lines.items.len != 0) armVerboseHint();
     writeVerboseList(report.lines.items);
-    return .warn_status;
+    writeVerboseList(report.unchecked_lines.items);
+    return status;
 }
 
 /// Relocation's own verdict — see `cellar.unrelocated_marker`. Scanning the

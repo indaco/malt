@@ -2,7 +2,7 @@
 //!
 //! Bottle selection once ignored the host version, so a keg on disk can hold
 //! binaries dyld refuses. The keg's recorded digest names the bottle it came
-//! from; the cached formula document maps that digest back to a tag.
+//! from; the bulk side-car or the cached formula document maps it to a tag.
 
 const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
@@ -15,12 +15,13 @@ const cask_variation = @import("../../net/cask_variation.zig");
 const install_args = @import("../install/args.zig");
 
 pub const Remedy = enum { reinstall, uninstall };
+const Files = std.json.ArrayHashMap(formula_mod.BottleFile);
 
 /// Whether `store_sha256` is the digest of a bottle built only for a macOS
 /// newer than the host. A digest names one bottle, so a match is conclusive
 /// whatever version the document describes; no match yields no verdict.
 pub fn pouredTooNew(
-    files: std.json.ArrayHashMap(formula_mod.BottleFile),
+    files: Files,
     store_sha256: []const u8,
     host_major: ?u32,
 ) bool {
@@ -39,11 +40,10 @@ pub fn pouredTooNew(
 
 /// The fix for a keg poured too new, or null when it is fine. `reinstall`
 /// only works when a bottle for this macOS exists.
-pub fn remedyFor(formula: *const formula_mod.Formula, store_sha256: []const u8, host_major: ?u32) ?Remedy {
-    const files = formula.bottle_files orelse return null;
+pub fn remedyFor(files: Files, store_sha256: []const u8, host_major: ?u32) ?Remedy {
     if (!pouredTooNew(files, store_sha256, host_major)) return null;
-    _ = formula_mod.resolveBottleFor(formula, host_major) catch return .uninstall;
-    return .reinstall;
+    var buf: [32]u8 = undefined;
+    return if (cask_variation.bottleKey(&buf, files.map, host_major) == null) .uninstall else .reinstall;
 }
 
 pub const Report = struct {
@@ -52,21 +52,31 @@ pub const Report = struct {
     unchecked: u32 = 0,
     /// One `--verbose` line per flagged keg, naming its remedy.
     lines: std.ArrayList([]u8) = .empty,
+    /// One `--verbose` line per keg there was no data to check.
+    unchecked_lines: std.ArrayList([]u8) = .empty,
 
     pub fn count(self: Report) u32 {
         return self.reinstall + self.uninstall;
     }
 
+    fn addUnchecked(self: *Report, allocator: std.mem.Allocator, name: []const u8) void {
+        self.unchecked += 1;
+        const line = std.fmt.allocPrint(allocator, "{s}: not checked", .{name}) catch return;
+        self.unchecked_lines.append(allocator, line) catch allocator.free(line);
+    }
+
     pub fn deinit(self: *Report, allocator: std.mem.Allocator) void {
         for (self.lines.items) |l| allocator.free(l);
         self.lines.deinit(allocator);
+        for (self.unchecked_lines.items) |l| allocator.free(l);
+        self.unchecked_lines.deinit(allocator);
     }
 };
 
-/// Walk the core kegs and classify each against its cached formula document.
-/// ponytail: cache-only, so a keg with no cached document is only counted as
-/// unchecked; reading its binaries' LC_BUILD_VERSION would cover it, at a full
-/// Mach-O walk.
+/// Walk the core kegs and classify each against the bulk side-car, falling
+/// back to its own cached formula document.
+/// ponytail: cache-only, so a keg in neither is only counted as unchecked;
+/// reading its binaries' LC_BUILD_VERSION would cover it, at a full Mach-O walk.
 pub fn collect(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -82,6 +92,18 @@ pub fn collect(
     var stmt = db.prepare("SELECT name, tap, store_sha256 FROM kegs ORDER BY name;") catch return report;
     defer stmt.finalize();
 
+    const index_bytes = api_mod.readBottlesIndex(io, allocator, cache_dir);
+    defer if (index_bytes) |b| allocator.free(b);
+    var index: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer index.deinit(allocator);
+    if (index_bytes) |b| {
+        var it = std.mem.splitScalar(u8, b, '\n');
+        while (it.next()) |line| {
+            const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+            index.put(allocator, line[0..tab], line[tab + 1 ..]) catch break;
+        }
+    }
+
     while (stmt.step() catch false) {
         if (signals.isInterrupted()) break;
         const name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
@@ -92,18 +114,28 @@ pub fn collect(
         // The name builds a cache path; a hand-edited row must not escape it.
         api_mod.validateName(name) catch continue;
 
-        const bytes = api_mod.readCacheAt(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(.formula)) orelse {
-            report.unchecked += 1;
-            continue;
+        const verdict: ?Remedy = blk: {
+            if (index.get(name)) |tags| {
+                var files = parseTags(allocator, tags) catch {
+                    report.addUnchecked(allocator, name);
+                    continue;
+                };
+                defer files.deinit(allocator);
+                break :blk remedyFor(files, sha, host_major);
+            }
+            const bytes = api_mod.readCacheAt(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(.formula)) orelse {
+                report.addUnchecked(allocator, name);
+                continue;
+            };
+            defer allocator.free(bytes);
+            var formula = formula_mod.parseFormula(allocator, bytes) catch {
+                report.addUnchecked(allocator, name);
+                continue;
+            };
+            defer formula.deinit();
+            break :blk remedyFor(formula.bottle_files orelse break :blk null, sha, host_major);
         };
-        defer allocator.free(bytes);
-        var formula = formula_mod.parseFormula(allocator, bytes) catch {
-            report.unchecked += 1;
-            continue;
-        };
-        defer formula.deinit();
-
-        const remedy = remedyFor(&formula, sha, host_major) orelse continue;
+        const remedy = verdict orelse continue;
         const line = switch (remedy) {
             .reinstall => std.fmt.allocPrint(allocator, "{s}: mt reinstall {s}", .{ name, name }),
             .uninstall => std.fmt.allocPrint(allocator, "{s}: no bottle for this macOS — mt uninstall {s}", .{ name, name }),
@@ -120,7 +152,19 @@ pub fn collect(
     return report;
 }
 
-const unchecked_note = "not checked: no cached formula data (mt upgrade --dry-run <name> fetches it)";
+/// A side-car line's `<tag>=<sha256>,...` as a bottle map borrowing from it.
+fn parseTags(allocator: std.mem.Allocator, tags: []const u8) !Files {
+    var files: Files = .{};
+    errdefer files.deinit(allocator);
+    var it = std.mem.tokenizeScalar(u8, tags, ',');
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        try files.map.put(allocator, pair[0..eq], .{ .cellar = "", .url = "", .sha256 = pair[eq + 1 ..] });
+    }
+    return files;
+}
+
+const unchecked_note = "not checked: no cached formula data (mt outdated refreshes it)";
 
 /// The row's detail, or null when there is nothing to say. Unchecked kegs are
 /// named so an emptied cache never reads as an all-clear.
@@ -199,13 +243,13 @@ test "no verdict without a digest match, a recorded digest, or a known host" {
 test "remedyFor points at reinstall only when this macOS has a bottle" {
     var reinst = try parseDoc(comptime bottle(arch ++ "golden_gate", sha_a) ++ "," ++ bottle(arch ++ "tahoe", sha_b));
     defer reinst.deinit();
-    try testing.expectEqual(@as(?Remedy, .reinstall), remedyFor(&reinst, sha_a, 26));
-    try testing.expectEqual(@as(?Remedy, null), remedyFor(&reinst, sha_b, 26));
+    try testing.expectEqual(@as(?Remedy, .reinstall), remedyFor(reinst.bottle_files.?, sha_a, 26));
+    try testing.expectEqual(@as(?Remedy, null), remedyFor(reinst.bottle_files.?, sha_b, 26));
 
     // `mt reinstall` would fail with NoBottleAvailable here.
     var none = try parseDoc(comptime bottle(arch ++ "golden_gate", sha_a));
     defer none.deinit();
-    try testing.expectEqual(@as(?Remedy, .uninstall), remedyFor(&none, sha_a, 26));
+    try testing.expectEqual(@as(?Remedy, .uninstall), remedyFor(none.bottle_files.?, sha_a, 26));
 }
 
 test "detail names both remedies with their counts" {
@@ -221,15 +265,24 @@ test "detail admits kegs it could not check instead of a bare all-clear" {
     // `mt update` wipes the API cache, so right after it nothing is checkable.
     var buf: [512]u8 = undefined;
     try testing.expectEqualStrings(
-        "4 keg(s) not checked: no cached formula data (mt upgrade --dry-run <name> fetches it)",
+        "4 keg(s) not checked: no cached formula data (mt outdated refreshes it)",
         detail(&buf, .{ .unchecked = 4 }).?,
     );
     const both = detail(&buf, .{ .uninstall = 1, .unchecked = 4 }).?;
     try testing.expect(std.mem.startsWith(u8, both, "1 keg(s) were poured"));
-    try testing.expect(std.mem.endsWith(u8, both, "; 4 more not checked: no cached formula data (mt upgrade --dry-run <name> fetches it)"));
+    try testing.expect(std.mem.endsWith(u8, both, "; 4 more not checked: no cached formula data (mt outdated refreshes it)"));
 }
 
 test "detail is silent when every keg checked out" {
     var buf: [512]u8 = undefined;
     try testing.expectEqual(@as(?[]const u8, null), detail(&buf, .{}));
+}
+
+test "a damaged side-car line yields only the pairs it can read" {
+    var files = try parseTags(testing.allocator, "junk,," ++ arch ++ "tahoe=" ++ sha_a ++ ",=x");
+    defer files.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), files.map.count());
+    try testing.expectEqualStrings(sha_a, files.map.get(arch ++ "tahoe").?.sha256);
+    // An empty tag can never be placed, so it can never flag a keg.
+    try testing.expect(!pouredTooNew(files, "x", 26));
 }

@@ -3,9 +3,10 @@
 # host (what bottle selection did before it honoured the host version) went
 # unnoticed. `mt doctor` must name it, pointing at `mt reinstall` when a
 # bottle for this macOS exists and at `mt uninstall` when none does, and must
-# leave a keg poured from the host's own bottle alone. A keg it cannot check
-# (no cached formula document, as after `mt update`) must be admitted, not
-# folded into an all-clear.
+# leave a keg poured from the host's own bottle alone. After `mt update` wipes
+# the per-formula documents, the bulk side-car `mt outdated` rebuilds must be
+# enough to check a keg; one in neither must be named, not folded into an
+# all-clear.
 #
 # Hermetic: each keg's recorded digest is matched against a formula document
 # seeded under `$MALT_CACHE/api`; `MALT_OFFLINE=1` keeps doctor off the
@@ -48,8 +49,8 @@ case "$HOST" in
   exit 0
   ;;
 esac
-ARCH=""
-[[ $(uname -m) == arm64 ]] && ARCH=arm64_
+ARCH="" SIDECAR=bottles_formula.x86_64.txt
+[[ $(uname -m) == arm64 ]] && ARCH=arm64_ SIDECAR=bottles_formula.arm64.txt
 NEWER_TAG="${ARCH}golden_gate"
 HOST_TAG="${ARCH}${CODENAME}"
 
@@ -90,6 +91,9 @@ seed regreinst "$B" "$NEWER_TAG=$B" "$HOST_TAG=$C" # reinstallable
 seed regok "$D" "$HOST_TAG=$D"                     # control
 seed regnodoc "$D" "$HOST_TAG=$D"
 rm "$MALT_CACHE/api/formula_regnodoc.json" # cache wiped, as by mt update
+seed regside "$A" "$NEWER_TAG=$A"
+rm "$MALT_CACHE/api/formula_regside.json"
+printf 'regside\t%s=%s\n' "$NEWER_TAG" "$A" >"$MALT_CACHE/api/$SIDECAR"
 
 OUT=$("$BIN" doctor --verbose 2>&1 || true)
 
@@ -106,8 +110,14 @@ if grep -q regok <<<"$OUT"; then
 fi
 pass "host-tag keg left alone"
 
-grep -q '1 more not checked: no cached formula data' <<<"$OUT" ||
-  fail "keg with no cached formula document not reported as unchecked"
-pass "uncached keg reported as not checked"
+grep -q 'mt uninstall regside' <<<"$OUT" ||
+  fail "keg covered only by the bulk side-car not checked"
+pass "bulk side-car alone is enough to check a keg"
+
+grep -q '1 more not checked: no cached formula data (mt outdated refreshes it)' <<<"$OUT" ||
+  fail "keg with no formula data not reported as unchecked"
+grep -q 'regnodoc: not checked' <<<"$OUT" ||
+  fail "unchecked keg not named under --verbose"
+pass "keg with no formula data named as not checked"
 
 printf '\n\xe2\x9c\x94 doctor flags kegs poured from a too-new bottle\n'
