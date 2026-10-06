@@ -264,7 +264,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     const only = onlyFromArgs(args);
     const target, const mixed = blk: {
-        var db = schema_report.openPreviewable(db_path, output.isDryRun()) catch {
+        var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
             output.err("Failed to open database", .{});
             return error.Aborted;
         };

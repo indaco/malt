@@ -1039,7 +1039,7 @@ fn openDb(ctx: *const AppCtx, dry_run: bool) !sqlite.Database {
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return openFailed();
-    var db = schema_report.openPreviewable(path, dry_run) catch return openFailed();
+    var db = schema_report.openPreviewable(ctx.io, path, dry_run) catch return openFailed();
     errdefer db.close();
     // Schema init is idempotent; a newer-than-us DB is the one failure to
     // stop on, anything else surfaces at the caller's next prepare/step.

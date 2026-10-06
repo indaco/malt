@@ -1267,7 +1267,7 @@ fn warnAuditIncomplete() void {
 /// an all-clear. SQLite's CREATE flag alone would hide that difference.
 pub fn openPrefixDb(io: std.Io, db_path: [:0]const u8, dry_run: bool) error{ Absent, Unreadable }!sqlite.Database {
     const db_dir = std.fs.path.dirname(db_path) orelse unreachable;
-    return schema_report.openPreviewable(db_path, dry_run) catch
+    return schema_report.openPreviewable(io, db_path, dry_run) catch
         if (prefix_path.dirMissing(io, db_dir)) error.Absent else error.Unreadable;
 }
 

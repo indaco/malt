@@ -2402,7 +2402,7 @@ test "a preview must not commit a migration: the snapshot migrates, the file sta
     defer testing.allocator.free(before);
 
     {
-        var snap = try sqlite.Database.openSnapshot(path);
+        var snap = try sqlite.Database.openSnapshot(io, path);
         defer snap.close();
         try initSchema(&snap);
         try testing.expectEqual(known_schema_version, try currentVersion(&snap));

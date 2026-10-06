@@ -68,7 +68,7 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
         output.err("Failed to open database", .{});
         return error.Aborted;
     };
-    var db = schema_report.openPreviewable(db_path, output.isDryRun()) catch {
+    var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
         output.err("Failed to open database", .{});
         return error.Aborted;
     };
@@ -178,7 +178,7 @@ fn executeLinkIsolate(ctx: *const AppCtx, allocator: std.mem.Allocator, name: ?[
         output.err("Failed to open database", .{});
         return error.Aborted;
     };
-    var db = schema_report.openPreviewable(db_path, output.isDryRun()) catch {
+    var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
         output.err("Failed to open database", .{});
         return error.Aborted;
     };
@@ -323,7 +323,7 @@ pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []c
         output.err("Failed to open database", .{});
         return error.Aborted;
     };
-    var db = schema_report.openPreviewable(db_path, output.isDryRun()) catch {
+    var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
         output.err("Failed to open database", .{});
         return error.Aborted;
     };

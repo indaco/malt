@@ -72,7 +72,7 @@ pub fn openDbTri(io: std.Io, prefix: []const u8, dry_run: bool) DbOutcome {
         return .{ .unreadable = error.OpenFailed };
     // SQLite's OPEN_CREATE masks "no DB yet" vs "file is there but dead".
     const db_dir = std.fs.path.dirname(db_path) orelse unreachable;
-    if (schema_report.openPreviewable(db_path, dry_run)) |db| {
+    if (schema_report.openPreviewable(io, db_path, dry_run)) |db| {
         return .{ .opened = db };
     } else |e| {
         return if (prefix_path.dirMissing(io, db_dir)) .absent else .{ .unreadable = e };

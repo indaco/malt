@@ -87,7 +87,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return Error.DatabaseError;
 
-    var db = schema_report.openPreviewable(db_path, output.isDryRun()) catch {
+    var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
         output.err("Failed to open database at {s}", .{db_path});
         return Error.DatabaseError;
     };

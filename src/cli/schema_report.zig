@@ -44,8 +44,8 @@ pub fn abortInitFailure(db: *sqlite.Database, e: schema.MigrateError, prefix: []
 /// Open the prefix DB for a command whose effective dry-run is `dry_run`.
 /// A preview gets a private copy: `initSchema` may create or migrate it,
 /// and neither may reach the user's file.
-pub fn openPreviewable(db_path: [:0]const u8, dry_run: bool) sqlite.SqliteError!sqlite.Database {
-    return if (dry_run) sqlite.Database.openSnapshot(db_path) else sqlite.Database.open(db_path);
+pub fn openPreviewable(io: std.Io, db_path: [:0]const u8, dry_run: bool) sqlite.SqliteError!sqlite.Database {
+    return if (dry_run) sqlite.Database.openSnapshot(io, db_path) else sqlite.Database.open(db_path);
 }
 
 test "initFailureMessage names the DB version, the supported ceiling and the path on SchemaTooNew" {
@@ -93,12 +93,12 @@ test "openPreviewable creates the file for a real run and nothing for a preview"
     };
     cwd.deleteFile(io, path) catch {};
 
-    var preview = try openPreviewable(path, true);
+    var preview = try openPreviewable(io, path, true);
     try schema.initSchema(&preview);
     preview.close();
     try std.testing.expectError(error.FileNotFound, cwd.access(io, path, .{}));
 
-    var real = try openPreviewable(path, false);
+    var real = try openPreviewable(io, path, false);
     try schema.initSchema(&real);
     real.close();
     try cwd.access(io, path, .{});
