@@ -144,6 +144,47 @@ peer_rc=0
 (time_install "$(command -v false)" install uninstall tree mt) >/dev/null 2>&1 || peer_rc=$?
 check "malt install failure aborts" "1" "$peer_rc"
 
+echo "usability probe:"
+# A zero exit from `install` is not proof the package works: a tool can pour
+# a bottle built for a newer macOS and exit 0 with a binary dyld refuses to
+# load. Every sample must end with the package's own binary running.
+check "probe for tree" "tree --version" "$(probe_cmd tree)"
+check "probe for keg-only openjdk runs java" "java -version" "$(probe_cmd openjdk)"
+check "unknown package has no probe" "" "$(probe_cmd no-such-pkg)"
+# shellcheck disable=SC2034
+NB_BENCH_PREFIX=/tmp/nb-test
+check "nanobrew links under <root>/prefix" "/tmp/nb-test/prefix" "$(tool_prefix nb)"
+
+probe_root=$(mktemp -d /tmp/bench-probe.XXXXXX)
+# shellcheck disable=SC2034
+ZB_BENCH_PREFIX="$probe_root"
+mkdir -p "$probe_root/opt/tree/bin"
+printf '#!/bin/sh\nexit 0\n' >"$probe_root/opt/tree/bin/tree"
+chmod +x "$probe_root/opt/tree/bin/tree"
+check_pred "runnable binary passes" 0 probe_usable zb tree
+printf '#!/bin/sh\nexit 1\n' >"$probe_root/opt/tree/bin/tree"
+check_pred "binary that won't run fails" 1 probe_usable zb tree
+check_pred "missing binary fails" 1 probe_usable zb wget
+check_pred "unknown package is not blocked" 0 probe_usable zb no-such-pkg 2>/dev/null
+
+# The install command exits 0 but the binary is unusable: the sample must be
+# FAIL for a peer and must abort the run for malt, same as a non-zero exit.
+check "peer exit-0 install with dead binary records FAIL" \
+  "FAIL" "$(time_install "$(command -v true)" install uninstall tree zb 2>/dev/null)"
+# shellcheck disable=SC2034
+MALT_BENCH_PREFIX="$probe_root"
+mt_rc=0
+(time_install "$(command -v true)" install uninstall tree mt) >/dev/null 2>&1 || mt_rc=$?
+check "malt exit-0 install with dead binary aborts" "1" "$mt_rc"
+rm -rf "$probe_root"
+
+echo "brew full cold gate:"
+# Full cold uninstalls the package's whole dependency closure from the real
+# Homebrew prefix: right on a throwaway CI runner, destructive on a dev box.
+check "CI runner gets full cold" "yes" "$(CI=true BENCH_BREW_FULL_COLD=0 brew_full_cold && echo yes || echo no)"
+check "explicit opt-in gets full cold" "yes" "$(CI='' BENCH_BREW_FULL_COLD=1 brew_full_cold && echo yes || echo no)"
+check "dev box default keeps deps" "no" "$(CI='' BENCH_BREW_FULL_COLD=0 brew_full_cold && echo yes || echo no)"
+
 echo "finalize_results (failed peer):"
 : >"$GITHUB_OUTPUT"
 # Two rounds of a peer whose install failed outright, and a healthy malt.

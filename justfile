@@ -253,7 +253,7 @@ hooks-uninstall:
 # ---------------------------------------------------------------------------
 # Benchmarks
 # ---------------------------------------------------------------------------
-# Run local benchmarks against malt + peer tools (tree, wget, ffmpeg by default).
+# Run local benchmarks against malt + peer tools (tree, wget, ffmpeg, openjdk, tesseract by default).
 # Pass extra package names as args; set env vars on the command itself
 
 # (e.g. `BENCH_TRUE_COLD=1 just bench`, `SKIP_OTHERS=1 just bench wget`).
