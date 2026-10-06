@@ -4,10 +4,22 @@
 
 const std = @import("std");
 
-/// 512 bytes: ~4× real Homebrew prefix length, still small enough that
-/// anything past it is either a bug or overflow bait. `fs/atomic.zig`
-/// re-exports it for its env boundary.
-pub const max_prefix_len: usize = 512;
+/// Longest install prefix SQLite can serve: one byte more and its 512-byte
+/// pathname cap refuses `{prefix}/db/malt.db`. A symlinked component still
+/// spends that headroom, so such a prefix fails at the open instead.
+/// `fs/atomic.zig` re-exports it for its env boundary.
+pub const max_prefix_len: usize = 493;
+
+// Many sites still format `{prefix}/db/malt.lock` into a `[512]u8`; raising
+// the bound past this would turn them back into silent overflows.
+comptime {
+    std.debug.assert(max_prefix_len + "/db/malt.lock".len + 1 <= 512);
+}
+
+/// A root that is only ever a filesystem path, such as the cache dir, holds
+/// no database: ~4x a real Homebrew prefix, anything past it is a bug or
+/// overflow bait.
+pub const max_root_len: usize = 512;
 
 /// Longest fixed suffix any caller appends (`/cache/migrate.progress.json`
 /// = 28 B today); 64 leaves ~2× headroom for new fixed suffixes.
@@ -20,6 +32,7 @@ pub const PrefixError = error{
     DotComponent,
     EmbeddedNul,
     TooLong,
+    PrefixTooLong,
     EmptyComponent,
     DisallowedByte,
 };
@@ -38,12 +51,19 @@ pub fn isAllowedPrefixByte(b: u8) bool {
 /// Validate a candidate install prefix. Called at the env boundary so
 /// downstream code can assume absolute, NUL-free, traversal-free.
 pub fn validatePrefix(prefix: []const u8) PrefixError!void {
-    try validateHead(prefix);
+    if (prefix.len > max_prefix_len) return PrefixError.PrefixTooLong;
+    try validateCharsetRoot(prefix);
+}
+
+/// The prefix rules under the root bound, for a path that holds no database
+/// (the themes file).
+pub fn validateCharsetRoot(path: []const u8) PrefixError!void {
+    try validateHead(path);
     // Tight charset closes the BUG-007/BUG-019 injection class — quotes,
     // backslashes, control bytes, parens etc. flow into single-quoted
     // Ruby literals and sandbox-profile strings unchanged.
-    for (prefix) |b| if (!isAllowedPrefixByte(b)) return PrefixError.DisallowedByte;
-    try validateComponents(prefix);
+    for (path) |b| if (!isAllowedPrefixByte(b)) return PrefixError.DisallowedByte;
+    try validateComponents(path);
 }
 
 /// The prefix rules minus the charset: what a root needs when it is only
@@ -56,7 +76,7 @@ pub fn validateShape(path: []const u8) PrefixError!void {
 
 fn validateHead(path: []const u8) PrefixError!void {
     if (path.len == 0) return PrefixError.Empty;
-    if (path.len > max_prefix_len) return PrefixError.TooLong;
+    if (path.len > max_root_len) return PrefixError.TooLong;
     if (path[0] != '/') return PrefixError.NotAbsolute;
     if (std.mem.indexOfScalar(u8, path, 0) != null) return PrefixError.EmbeddedNul;
 }
@@ -85,7 +105,8 @@ pub fn describePrefixError(e: PrefixError) []const u8 {
         PrefixError.DotDotComponent => "contains '..' component",
         PrefixError.DotComponent => "contains '.' component",
         PrefixError.EmbeddedNul => "contains NUL byte",
-        PrefixError.TooLong => "exceeds 512 bytes",
+        PrefixError.TooLong => std.fmt.comptimePrint("exceeds {d} bytes", .{max_root_len}),
+        PrefixError.PrefixTooLong => std.fmt.comptimePrint("exceeds {d} bytes", .{max_prefix_len}),
         PrefixError.EmptyComponent => "contains empty path component ('//')",
         PrefixError.DisallowedByte => "contains a byte outside [a-zA-Z0-9._+-/]",
     };
@@ -179,8 +200,13 @@ test "joinZ exact-fit boundary returns full slice" {
 }
 
 test "bound constants are consistent" {
-    try std.testing.expectEqual(@as(usize, 512), max_prefix_len);
+    try std.testing.expectEqual(@as(usize, 493), max_prefix_len);
     try std.testing.expectEqual(max_prefix_len + max_path_suffix, path_buf_len);
+}
+
+test "describePrefixError names the bound each length check enforces" {
+    try std.testing.expectEqualStrings("exceeds 493 bytes", describePrefixError(PrefixError.PrefixTooLong));
+    try std.testing.expectEqualStrings("exceeds 512 bytes", describePrefixError(PrefixError.TooLong));
 }
 
 test "validatePrefix: default path is accepted" {
@@ -236,7 +262,15 @@ test "validatePrefix: length > max_prefix_len rejected" {
     var buf: [max_prefix_len + 1]u8 = undefined;
     @memset(&buf, 'a');
     buf[0] = '/';
-    try std.testing.expectError(error.TooLong, validatePrefix(&buf));
+    try std.testing.expectError(error.PrefixTooLong, validatePrefix(&buf));
+}
+
+test "validateShape keeps the wider root bound: a cache dir holds no database" {
+    var buf: [max_root_len + 1]u8 = undefined;
+    @memset(&buf, 'a');
+    buf[0] = '/';
+    try validateShape(buf[0..max_root_len]);
+    try std.testing.expectError(error.TooLong, validateShape(&buf));
 }
 
 test "validatePrefix: length == max_prefix_len accepted" {
@@ -339,6 +373,7 @@ test "describePrefixError: every error has a descriptive string" {
         error.DotComponent,
         error.EmbeddedNul,
         error.TooLong,
+        error.PrefixTooLong,
         error.EmptyComponent,
     };
     for (cases) |e| {

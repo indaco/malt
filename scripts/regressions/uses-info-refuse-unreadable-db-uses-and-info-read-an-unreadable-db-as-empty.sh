@@ -22,7 +22,8 @@ if ! zig build >/dev/null 2>&1; then
   exit 1
 fi
 
-SB=$(mktemp -d)
+# Resolved: SQLite measures the real path, and the temp root is a symlink.
+SB=$(cd "$(mktemp -d)" && pwd -P)
 trap 'chmod -R u+rwx "$SB"; rm -rf "$SB"' EXIT
 
 run() {
@@ -118,11 +119,11 @@ rm -rf "$SB/p"
 : >"$SB/p"
 refuses_all prefix-is-file
 
-# A valid prefix near the 512-byte cap still has to reach its database.
+# A prefix at the 493-byte cap still has to reach its database.
 reset
 P="$SB/l"
-while ((${#P} < 400)); do P="$P/$(printf 'a%.0s' {1..90})"; done
-P="$P/$(printf "%$((505 - ${#P} - 1))s" | tr ' ' b)"
+while ((${#P} < 390)); do P="$P/$(printf 'a%.0s' {1..90})"; done
+P="$P/$(printf "%$((493 - ${#P} - 1))s" | tr ' ' b)"
 mkdir -p "$P/db"
 printf 'not sqlite%.0s' {1..8} >"$P/db/malt.db"
 refuses_all long-prefix

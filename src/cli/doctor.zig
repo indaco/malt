@@ -1461,12 +1461,12 @@ pub fn formatSslCertRemedy(buf: []u8, prefix: []const u8) ?[]const u8 {
 fn checkSslCaBundle(ctx: CheckCtx, name: []const u8) CheckResult {
     // Precondition: the `ca-certificates` opt link. Absent ⇒ nothing to
     // verify, so emit no row at all (default runs stay quiet on this).
-    var opt_buf: [512]u8 = undefined;
-    const opt = std.fmt.bufPrint(&opt_buf, "{s}/opt/ca-certificates", .{ctx.prefix}) catch return .ok;
+    var opt_buf: [prefix_path.path_buf_len]u8 = undefined;
+    const opt = prefix_path.join(&opt_buf, ctx.prefix, "/opt/ca-certificates") catch return .ok;
     std.Io.Dir.cwd().access(ctx.io, opt, .{}) catch return .ok;
 
-    var buf: [512]u8 = undefined;
-    const cert = std.fmt.bufPrint(&buf, "{s}/etc/openssl@3/cert.pem", .{ctx.prefix}) catch {
+    var buf: [prefix_path.path_buf_len]u8 = undefined;
+    const cert = prefix_path.join(&buf, ctx.prefix, "/etc/openssl@3/cert.pem") catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -1480,8 +1480,8 @@ fn checkSslCaBundle(ctx: CheckCtx, name: []const u8) CheckResult {
         // Verbose-only remediation. The link source is ca-certificates' own
         // bundle: without it there is nothing to point at, and `ln` into the
         // missing openssl@3 dir would just exit 1, so create it first.
-        var src_buf: [512]u8 = undefined;
-        const src = std.fmt.bufPrint(&src_buf, "{s}/etc/ca-certificates/cert.pem", .{ctx.prefix}) catch return status;
+        var src_buf: [prefix_path.path_buf_len]u8 = undefined;
+        const src = prefix_path.join(&src_buf, ctx.prefix, "/etc/ca-certificates/cert.pem") catch return status;
         std.Io.Dir.cwd().access(ctx.io, src, .{}) catch return status;
         var manual_buf: [1024]u8 = undefined;
         writeVerboseList(&.{formatSslCertRemedy(&manual_buf, ctx.prefix) orelse return status});
