@@ -576,6 +576,11 @@ test "isListingIntent: each intent that mutates opts out on its own" {
 
 const Action = enum { add, remove };
 
+/// A preview's writes land in a private copy, so it must not say they happened.
+fn reportDone(comptime past: []const u8, comptime verb: []const u8, comptime rest: []const u8, args: anytype) void {
+    if (output.isDryRun()) output.info("Dry run: would " ++ verb ++ rest, args) else output.info(past ++ rest, args);
+}
+
 fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8, action: Action) !void {
     if (help.showIfRequested(ctx, args, if (action == .add) "tap" else "untap")) return;
 
@@ -776,6 +781,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     const prefix = atomic.maltPrefixOrAbort();
 
     const is_listing = isListingIntent(positional, pin_slug, refresh_target, refresh_all);
+    const dry_run = output.isDryRun();
 
     var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
     const db_path = prefix_path.joinZ(&db_path_buf, prefix, "/db/malt.db") catch {
@@ -785,8 +791,9 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
 
     // sqlite cannot create its file inside a `db/` that does not exist, so
     // every intent with work to do has to make the directory first. Listing
-    // stays read-only: it answers for the empty prefix without building one.
-    if (!is_listing) {
+    // stays read-only: it answers for the empty prefix without building one,
+    // and so does a preview, whose writes only reach a private copy.
+    if (!is_listing and !dry_run) {
         var dir_buf: [prefix_path.path_buf_len]u8 = undefined;
         const db_dir = prefix_path.join(&dir_buf, prefix, "/db") catch {
             output.err("Failed to open database", .{});
@@ -798,7 +805,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
         };
     }
 
-    var db = sqlite.Database.open(db_path) catch {
+    var db = schema_report.openPreviewableCreating(ctx.io, db_path, dry_run) catch {
         if (is_listing) {
             if (output.isJson()) output.writeStdoutAll("[]\n") else output.info("No taps registered", .{});
             return;
@@ -958,7 +965,11 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
                     output.err("Failed to register tap {s}", .{name});
                     return error.Aborted;
                 };
-                output.info("Registered {s} → {s}/{s} on {s} (unpinned). Run `mt tap --refresh {s}` to pin its HEAD commit.", .{ name, target_pair.owner, target_pair.repo, target_pair.host, name });
+                // A preview registers nothing, so the refresh follow-up would fail.
+                if (output.isDryRun())
+                    output.info("Dry run: would register {s} → {s}/{s} on {s} (unpinned).", .{ name, target_pair.owner, target_pair.repo, target_pair.host })
+                else
+                    output.info("Registered {s} → {s}/{s} on {s} (unpinned). Run `mt tap --refresh {s}` to pin its HEAD commit.", .{ name, target_pair.owner, target_pair.repo, target_pair.host, name });
                 return;
             }
 
@@ -969,7 +980,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
                 if (!rebinding) {
                     if (tap_mod.getCommitSha(allocator, &db, name) catch null) |pinned| {
                         defer allocator.free(pinned);
-                        output.info("Tapped {s} @ {s}", .{ name, pinned[0..@min(pinned.len, 7)] });
+                        reportDone("Tapped", "tap", " {s} @ {s}", .{ name, pinned[0..@min(pinned.len, 7)] });
                         return;
                     }
                 }
@@ -1029,14 +1040,14 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             if (!head_res.not_modified) {
                 if (head_res.etag) |et| tap_mod.updateHead(&db, name, sha, et) catch {};
             }
-            output.info("Tapped {s} @ {s}", .{ name, sha[0..@min(sha.len, 7)] });
+            reportDone("Tapped", "tap", " {s} @ {s}", .{ name, sha[0..@min(sha.len, 7)] });
         },
         .remove => {
             tap_mod.remove(&db, name) catch {
                 output.err("Failed to untap {s}", .{name});
                 return error.Aborted;
             };
-            output.info("Untapped {s}", .{name});
+            reportDone("Untapped", "untap", " {s}", .{name});
         },
     }
 }
@@ -1096,7 +1107,7 @@ fn pinTap(
         output.err("Failed to pin {s}", .{slug});
         return error.Aborted;
     };
-    output.info("Pinned {s} @ {s}", .{ slug, sha[0..@min(sha.len, 7)] });
+    reportDone("Pinned", "pin", " {s} @ {s}", .{ slug, sha[0..@min(sha.len, 7)] });
 }
 
 /// Walk every registered tap, resolve current HEAD, emit a diff, and only
@@ -1157,6 +1168,14 @@ fn refreshAll(
     }
 
     try emitRefreshAll(ctx, rows.items);
+
+    // The diff above is the whole preview; --yes only gates real writes.
+    if (output.isDryRun()) {
+        var moved: usize = 0;
+        for (rows.items) |row| moved += @intFromBool(row.status == .moved);
+        output.info("Dry run: would refresh {d} {s}", .{ moved, if (moved == 1) "tap" else "taps" });
+        return;
+    }
 
     if (anyMoved(rows.items) and !yes) {
         output.err("Taps moved. Re-run with --yes to apply.", .{});
@@ -1265,5 +1284,5 @@ fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Data
         output.err("Failed to update commit pin for {s}", .{name});
         return error.Aborted;
     };
-    output.info("Refreshed {s} to {s}", .{ name, sha[0..@min(sha.len, 7)] });
+    reportDone("Refreshed", "refresh", " {s} to {s}", .{ name, sha[0..@min(sha.len, 7)] });
 }

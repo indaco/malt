@@ -510,7 +510,7 @@ fn readInstalled(io: std.Io, arena: std.mem.Allocator) !Installed {
     const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
     // Only a missing `db/` reads as "nothing installed"; a database that is
     // there but will not open must never turn into a clean bill of health.
-    var db = outdated.openPrefixDb(io, db_path) catch |e| switch (e) {
+    var db = outdated.openPrefixDb(io, db_path, false) catch |e| switch (e) {
         error.Absent => return out,
         error.Unreadable => {
             output.err("cannot open {s}", .{db_path});

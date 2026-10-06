@@ -8,6 +8,8 @@
 
 const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
+const output = @import("../../ui/output.zig");
+const schema_report = @import("../schema_report.zig");
 const bytes = @import("../../ui/bytes.zig");
 const cask_mod = @import("../../core/cask.zig");
 
@@ -46,7 +48,7 @@ pub fn collectCensus(
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return empty;
-    var db = sqlite.Database.open(db_path) catch return empty;
+    var db = schema_report.openPreviewable(io, db_path, output.isDryRun()) catch return empty;
     defer db.close();
 
     // INNER JOIN drops tokens that have history but no current install

@@ -280,3 +280,115 @@ test "executeUntap on a max-length prefix reaches its database" {
     try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"});
     try testing.expectEqual(@as(i64, 0), try tapRowCount(p.path, "user/repo"));
 }
+
+// --- --dry-run -------------------------------------------------------
+
+fn captureDryRun(captured: *std.ArrayList(u8)) void {
+    output.setQuiet(false);
+    output.setDryRun(true);
+    output.beginStderrCapture(testing.allocator, captured);
+}
+fn endDryRun() void {
+    output.endStderrCapture();
+    output.setDryRun(false);
+}
+
+test "--dry-run untap previews the removal and keeps the tap registered" {
+    var s = try Scratch.init(testing.allocator, "untap_dry_run");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", "0123456789abcdef0123456789abcdef01234567");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    {
+        captureDryRun(&captured);
+        defer endDryRun();
+        try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"});
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would untap user/repo") != null);
+    try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
+
+    // Control: the same argv without the preview does remove it.
+    quiet();
+    defer unquiet();
+    try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"});
+    try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "user/repo"));
+}
+
+test "--dry-run tap reports the pin it would keep without claiming it tapped" {
+    var s = try Scratch.init(testing.allocator, "tap_dry_run_pinned");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", "0123456789abcdef0123456789abcdef01234567");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    {
+        captureDryRun(&captured);
+        defer endDryRun();
+        try tap.execute(&ctx, testing.allocator, &.{"user/repo"});
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would tap user/repo @ 0123456") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Tapped") == null);
+}
+
+test "--dry-run tap on a prefix without db/ creates nothing" {
+    var s = try Scratch.init(testing.allocator, "tap_dry_run_fresh");
+    defer s.deinit(testing.allocator);
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{s.path});
+    defer testing.allocator.free(db_dir);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, db_dir);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    {
+        captureDryRun(&captured);
+        defer endDryRun();
+        // Offline, the HEAD lookup fails exactly as the real run's would.
+        try testing.expectError(error.Aborted, tap.execute(&ctx, testing.allocator, &.{"user/repo"}));
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve") != null);
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, db_dir, .{}));
+}
+
+test "--dry-run register previews a non-GitHub tap without the refresh hint" {
+    // Nothing gets registered, so pointing at `tap --refresh` would fail.
+    var s = try Scratch.init(testing.allocator, "tap_dry_run_register");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "seed/only", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    {
+        captureDryRun(&captured);
+        defer endDryRun();
+        try tap.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "acme/tools", "--host", "gitlab.com", "--repo", "acme/tools" });
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would register acme/tools") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--refresh") == null);
+    try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "acme/tools"));
+}
+
+test "--dry-run refresh --all ends in a preview summary" {
+    var s = try Scratch.init(testing.allocator, "tap_dry_run_refresh_all");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "seed/only", null);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try db.exec("DELETE FROM taps;");
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    const ctx = ctxWithSink();
+    {
+        captureDryRun(&captured);
+        defer endDryRun();
+        try tap.execute(&ctx, testing.allocator, &.{ "--refresh", "--all" });
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would refresh 0 taps") != null);
+}

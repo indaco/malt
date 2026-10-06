@@ -117,7 +117,7 @@ fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: 
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return error.Aborted;
 
-    var db = outdated_mod.openPrefixDb(ctx.io, db_path) catch |e| switch (e) {
+    var db = outdated_mod.openPrefixDb(ctx.io, db_path, output.isDryRun()) catch |e| switch (e) {
         error.Absent => {
             if (output.isDryRun()) return;
             // Fresh prefix: write an empty snapshot so readers get instant "all clear".

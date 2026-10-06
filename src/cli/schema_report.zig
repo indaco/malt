@@ -4,11 +4,14 @@
 //! malt already migrated. Callers used to collapse it into a generic
 //! "failed to initialize" or swallow it, so the user never learned that
 //! upgrading malt — not repairing the DB — is the fix.
+//!
+//! Also owns which handle a command opens, so a preview never writes the DB.
 
 const std = @import("std");
 const output = @import("../ui/output.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 
 /// Build the message for an `initSchema` failure into `buf` and return the
 /// written slice. `db_version` is the DB's own marker (0 when unreadable).
@@ -37,6 +40,20 @@ pub fn abortInitFailure(db: *sqlite.Database, e: schema.MigrateError, prefix: []
     var buf: [512]u8 = undefined;
     output.err("{s}", .{initFailureMessage(&buf, e, schema.currentVersion(db) catch 0, prefix)});
     return if (e == error.SchemaTooNew) error.SchemaTooNew else error.Aborted;
+}
+
+/// `dry_run` is the command's effective flag, local or global. A preview
+/// gets a private copy, so `initSchema` can create or migrate it without
+/// touching the user's file.
+pub fn openPreviewable(io: std.Io, db_path: [:0]const u8, dry_run: bool) sqlite.SqliteError!sqlite.Database {
+    return if (dry_run) sqlite.Database.openSnapshot(io, db_path) else sqlite.Database.open(db_path);
+}
+
+/// For commands whose real run creates `db/` first: a preview of a prefix
+/// without one reads an empty database and creates nothing.
+pub fn openPreviewableCreating(io: std.Io, db_path: [:0]const u8, dry_run: bool) sqlite.SqliteError!sqlite.Database {
+    if (dry_run and prefix_path.dirMissing(io, std.fs.path.dirname(db_path).?)) return sqlite.Database.open(":memory:");
+    return openPreviewable(io, db_path, dry_run);
 }
 
 test "initFailureMessage names the DB version, the supported ceiling and the path on SchemaTooNew" {
@@ -71,4 +88,45 @@ test "initFailureMessage degrades to a generic line when buf is too small" {
     try std.testing.expect(std.mem.indexOf(u8, too_new, "upgrade malt") != null);
     const broken = initFailureMessage(&tiny, error.StepFailed, 1, "/opt/malt");
     try std.testing.expect(std.mem.indexOf(u8, broken, "schema") != null);
+}
+
+test "openPreviewable creates the file for a real run and nothing for a preview" {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-open-prefix-{d}.db", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    const cwd = std.Io.Dir.cwd();
+    defer for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
+        var buf: [80]u8 = undefined;
+        cwd.deleteFile(io, std.fmt.bufPrint(&buf, "{s}{s}", .{ path, suffix }) catch unreachable) catch {};
+    };
+    cwd.deleteFile(io, path) catch {};
+
+    var preview = try openPreviewable(io, path, true);
+    try schema.initSchema(&preview);
+    preview.close();
+    try std.testing.expectError(error.FileNotFound, cwd.access(io, path, .{}));
+
+    var real = try openPreviewable(io, path, false);
+    try schema.initSchema(&real);
+    real.close();
+    try cwd.access(io, path, .{});
+}
+
+test "openPreviewableCreating previews a prefix without db/ as empty and leaves it so" {
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt-open-creating-{d}", .{std.c.getpid()});
+    var path_buf: [80]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/db/malt.db", .{dir});
+    const io = std.Options.debug_io;
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var preview = try openPreviewableCreating(io, path, true);
+    try schema.initSchema(&preview);
+    try std.testing.expectEqual(schema.known_schema_version, try schema.currentVersion(&preview));
+    preview.close();
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, dir, .{}));
+
+    // Making db/ stays the real run's job, so it still fails without one.
+    try std.testing.expectError(error.OpenFailed, openPreviewableCreating(io, path, false));
 }

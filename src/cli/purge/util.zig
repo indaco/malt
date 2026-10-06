@@ -4,6 +4,7 @@
 const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
 const prefix_path = @import("../../fs/prefix_path.zig");
+const schema_report = @import("../schema_report.zig");
 const output = @import("../../ui/output.zig");
 const bytes = @import("../../ui/bytes.zig");
 const args_mod = @import("args.zig");
@@ -65,13 +66,13 @@ pub const DbOutcome = union(enum) {
     opened: sqlite.Database,
 };
 
-pub fn openDbTri(io: std.Io, prefix: []const u8) DbOutcome {
+pub fn openDbTri(io: std.Io, prefix: []const u8, dry_run: bool) DbOutcome {
     var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return .{ .unreadable = error.OpenFailed };
     // SQLite's OPEN_CREATE masks "no DB yet" vs "file is there but dead".
     const db_dir = std.fs.path.dirname(db_path) orelse unreachable;
-    if (sqlite.Database.open(db_path)) |db| {
+    if (schema_report.openPreviewable(io, db_path, dry_run)) |db| {
         return .{ .opened = db };
     } else |e| {
         return if (prefix_path.dirMissing(io, db_dir)) .absent else .{ .unreadable = e };
@@ -158,7 +159,7 @@ test "openDbTri returns .absent when the db dir does not exist" {
     try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
     // Deliberately do NOT create the db/ subdir.
 
-    var outcome = openDbTri(fs_test_io, prefix);
+    var outcome = openDbTri(fs_test_io, prefix, false);
     switch (outcome) {
         .absent => {},
         .opened => |*db| {
@@ -184,15 +185,7 @@ test "openDbTri returns .unreadable when malt.db is not a valid sqlite file" {
     defer f.close(fs_test_io);
     try f.writeStreamingAll(fs_test_io, "this is not a valid sqlite header");
 
-    var outcome = openDbTri(fs_test_io, prefix);
-    switch (outcome) {
-        .unreadable => {},
-        .opened => |*db| {
-            db.close();
-            return error.UnexpectedOpened;
-        },
-        .absent => return error.UnexpectedAbsent,
-    }
+    try expectUnreadable(prefix);
 }
 
 test "openDbTri opens a freshly created sqlite file" {
@@ -211,7 +204,7 @@ test "openDbTri opens a freshly created sqlite file" {
         db.close();
     }
 
-    var outcome = openDbTri(fs_test_io, prefix);
+    var outcome = openDbTri(fs_test_io, prefix, false);
     switch (outcome) {
         .opened => |*db| db.close(),
         .absent => return error.UnexpectedAbsent,
@@ -219,16 +212,33 @@ test "openDbTri opens a freshly created sqlite file" {
     }
 }
 
+// A preview must refuse exactly what the real run refuses.
 fn expectUnreadable(prefix: []const u8) !void {
-    var outcome = openDbTri(fs_test_io, prefix);
-    switch (outcome) {
-        .unreadable => {},
-        .opened => |*db| {
-            db.close();
-            return error.UnexpectedOpened;
-        },
-        .absent => return error.UnexpectedAbsent,
+    for ([_]bool{ false, true }) |dry_run| {
+        var outcome = openDbTri(fs_test_io, prefix, dry_run);
+        switch (outcome) {
+            .unreadable => {},
+            .opened => |*db| {
+                db.close();
+                return error.UnexpectedOpened;
+            },
+            .absent => return error.UnexpectedAbsent,
+        }
     }
+}
+
+test "openDbTri under a preview opens an empty copy and leaves db/ empty" {
+    var s = try Scratch.init("openDbTri_preview");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/db"));
+
+    var outcome = openDbTri(fs_test_io, s.base, true);
+    switch (outcome) {
+        .opened => |*db| db.close(),
+        .absent => return error.UnexpectedAbsent,
+        .unreadable => return error.UnexpectedUnreadable,
+    }
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(fs_test_io, s.p("/db/malt.db"), .{}));
 }
 
 test "openDbTri returns .unreadable for a db/ directory it cannot look into" {

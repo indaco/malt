@@ -2373,3 +2373,47 @@ test "migrate refuses a DB whose schema_version exceeds the known max" {
     // Untouched: refusal must not silently bump the version.
     try testing.expectEqual(@as(i64, 999), try currentVersion(&db));
 }
+
+fn refcountColumns(db: *sqlite.Database) !i64 {
+    var stmt = try db.prepare("SELECT count(*) FROM pragma_table_info('store_refs') WHERE name = 'refcount';");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    return stmt.columnInt(0);
+}
+
+test "a preview must not commit a migration: the snapshot migrates, the file stays at v15" {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-preview-v15-{d}.db", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    const cwd = std.Io.Dir.cwd();
+    defer for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
+        var buf: [80]u8 = undefined;
+        cwd.deleteFile(io, std.fmt.bufPrint(&buf, "{s}{s}", .{ path, suffix }) catch unreachable) catch {};
+    };
+    {
+        // A v15 file: v16 dropped store_refs.refcount.
+        var seed = try sqlite.Database.open(path);
+        defer seed.close();
+        try initSchema(&seed);
+        try seed.exec("ALTER TABLE store_refs ADD COLUMN refcount INTEGER NOT NULL DEFAULT 0;");
+        try seed.exec("DELETE FROM schema_version WHERE version >= 16;");
+    }
+    const before = try cwd.readFileAlloc(io, path, testing.allocator, .unlimited);
+    defer testing.allocator.free(before);
+
+    {
+        var snap = try sqlite.Database.openSnapshot(io, path);
+        defer snap.close();
+        try initSchema(&snap);
+        try testing.expectEqual(known_schema_version, try currentVersion(&snap));
+        try testing.expectEqual(@as(i64, 0), try refcountColumns(&snap));
+    }
+
+    const after = try cwd.readFileAlloc(io, path, testing.allocator, .unlimited);
+    defer testing.allocator.free(after);
+    try testing.expectEqualSlices(u8, before, after);
+    var file = try sqlite.Database.open(path);
+    defer file.close();
+    try testing.expectEqual(@as(i64, 15), try currentVersion(&file));
+    try testing.expectEqual(@as(i64, 1), try refcountColumns(&file));
+}

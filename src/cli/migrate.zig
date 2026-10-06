@@ -256,7 +256,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.err("Failed to open database", .{});
         return error.Aborted;
     };
-    var db = sqlite.Database.open(db_path) catch {
+    // Always false today (the preview returns above); kept so the guard survives a reorder.
+    var db = schema_report.openPreviewable(ctx.io, db_path, dry_run) catch {
         output.err("Failed to open database at {s}", .{db_path});
         return error.Aborted;
     };
