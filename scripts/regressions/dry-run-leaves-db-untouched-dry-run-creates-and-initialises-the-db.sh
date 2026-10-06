@@ -11,7 +11,9 @@
 #      (or its -wal/-shm sidecars)
 #   2. on an older-schema DB, a preview leaves the file bytes and
 #      max(schema_version) unchanged and creates no sidecars
-#   3. control: a real (non-preview) run still creates the DB, so the
+#   3. on a prefix that does not exist yet, install and bundle previews
+#      create nothing at all
+#   4. control: a real (non-preview) run still creates the DB, so the
 #      absences above are not vacuous
 #
 # Usage: scripts/regressions/dry-run-leaves-db-untouched-dry-run-creates-and-initialises-the-db.sh
@@ -77,6 +79,16 @@ for argv in "${previews[@]}"; do
   done
 done
 echo "ok: previews on an empty db/ create no database"
+
+for argv in "install --dry-run --offline foo" "bundle install --dry-run BF" \
+  "bundle import --dry-run BF" "bundle create --dry-run out"; do
+  d=$(mktemp -d "$T/x.XXXXXX")
+  mkdir -p "$d/c"
+  echo '# empty' >"$d/BF"
+  run_in "$d" "$argv"
+  [[ ! -e "$d/p" ]] || fail "'$argv' created the prefix: $(cd "$d" && find p | tr '\n' ' ')"
+done
+echo "ok: previews on a missing prefix create nothing"
 
 d=$(fresh)
 run_in "$d" "link foo"

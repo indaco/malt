@@ -427,10 +427,12 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try malt.cli_bundle.execute(&ctx, testing.allocator, &.{ "install", bf_path });
 
-    // Unwired, the real open would create the DB to hold that insert.
-    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{dir_z});
-    defer testing.allocator.free(db_path);
-    try testing.expectError(error.FileNotFound, test_io.cwd().access(std.Options.debug_io, db_path, .{}));
+    // Unwired, the real run would create db/ for that insert and var/ for its lock.
+    for ([_][]const u8{ "db", "var" }) |sub| {
+        const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir_z, sub });
+        defer testing.allocator.free(path);
+        try testing.expectError(error.FileNotFound, test_io.cwd().access(std.Options.debug_io, path, .{}));
+    }
 }
 
 const c = test_io.c;

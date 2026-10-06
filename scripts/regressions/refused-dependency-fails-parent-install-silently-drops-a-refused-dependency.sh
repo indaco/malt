@@ -116,7 +116,8 @@ pass "offline install plans a stale cached dependency"
 # so a refused upstream record must not block the parent.
 write_formula bar '1.2\r' '[]' "$(bottle_json bar "$SHA_BAR")"
 DB="$PREFIX/db/malt.db"
-# Previews never create the database; a read-only command does.
+# Previews never create the database; a read-only command does, given db/.
+mkdir -p "$PREFIX/db"
 "$BIN" list >/dev/null 2>&1 || true
 [[ -f "$DB" ]] || fail "no database to seed the keg into"
 mkdir -p "$PREFIX/Cellar/bar/1.2" "$PREFIX/opt"

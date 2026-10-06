@@ -1035,11 +1035,11 @@ fn openDb(ctx: *const AppCtx, dry_run: bool) !sqlite.Database {
         return openFailed();
     // makePath is the idempotent "ensure" variant; a real permission/ENOSPC
     // failure surfaces at sqlite.Database.open below with a narrower error.
-    std.Io.Dir.cwd().createDirPath(ctx.io, db_dir) catch {};
+    if (!dry_run) std.Io.Dir.cwd().createDirPath(ctx.io, db_dir) catch {};
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return openFailed();
-    var db = schema_report.openPreviewable(ctx.io, path, dry_run) catch return openFailed();
+    var db = schema_report.openPreviewableCreating(ctx.io, path, dry_run) catch return openFailed();
     errdefer db.close();
     // Schema init is idempotent; a newer-than-us DB is the one failure to
     // stop on, anything else surfaces at the caller's next prepare/step.

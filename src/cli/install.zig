@@ -685,14 +685,45 @@ fn runInstall(
         return;
     }
 
-    // Ensure required directories exist (Step 0)
-    ensureDirs(ctx, prefix) catch return error.Aborted;
+    // Ensure required directories exist (Step 0); a preview makes none.
+    if (!flags.dry_run) ensureDirs(ctx, prefix) catch return error.Aborted;
+
+    // Acquire lock (Step 1) — skipped when the caller already owns it.
+    // Taken before the open, so a preview never copies what a concurrent
+    // run is mid-way through changing.
+    // BSD `flock` is per-fd, so a re-entry from the same process (e.g.
+    // upgrade -> installAll for missing transitive deps) would
+    // EAGAIN-loop against its own hold and time out as fake contention.
+    var lk: ?lock_mod.LockFile = null;
+    if (!exec_opts.skip_lock) {
+        var lock_path_buf: [512]u8 = undefined;
+        const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch
+            return InstallError.LockError;
+        lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch |e| switch (e) {
+            // A real run made db/ above; only a preview of a fresh prefix
+            // lacks it, and there is nothing there to serialise against.
+            error.DirMissing => if (flags.dry_run) null else return InstallError.LockError,
+            // Emit via the sink so bundle mode stays quiet, with the same
+            // per-error diagnostic the other commands surface.
+            else => {
+                var msg_buf: [512]u8 = undefined;
+                sink.err("{s}", .{lock_report.acquireFailureMessage(&msg_buf, e, prefix)});
+                return InstallError.LockError;
+            },
+        };
+        // Keyed like install_complete below, so the pair never opens alone.
+        if (lk != null) output.emitNdjsonEvent(.lock_acquired, "", null);
+    }
+    defer if (lk) |*l| l.release(ctx.io);
+    // LIFO: install_complete must precede release in the deferred chain,
+    // and the outer holder owns the matching pair when we skipped here.
+    defer if (lk != null and output.isNdjson()) output.emitNdjsonEvent(.install_complete, "", null);
 
     // Open database
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return InstallError.DatabaseError;
-    var db = schema_report.openPreviewable(ctx.io, db_path, flags.dry_run) catch {
+    var db = schema_report.openPreviewableCreating(ctx.io, db_path, flags.dry_run) catch {
         sink.err("Failed to open database at {s}", .{db_path});
         return InstallError.DatabaseError;
     };
@@ -704,33 +735,6 @@ fn runInstall(
         sink.err("{s}", .{schema_report.initFailureMessage(&msg_buf, e, schema.currentVersion(&db) catch 0, prefix)});
         return InstallError.DatabaseError;
     };
-
-    // Acquire lock (Step 1) — skipped when the caller already owns it.
-    // BSD `flock` is per-fd, so a re-entry from the same process (e.g.
-    // upgrade -> installAll for missing transitive deps) would
-    // EAGAIN-loop against its own hold and time out as fake contention.
-    var lk: ?lock_mod.LockFile = null;
-    if (!exec_opts.skip_lock) {
-        var lock_path_buf: [512]u8 = undefined;
-        const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch
-            return InstallError.LockError;
-        lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch |e| switch (e) {
-            // The DB is already open here, so db/ exists — DirMissing can't occur.
-            error.DirMissing => return InstallError.LockError,
-            // Emit via the sink so bundle mode stays quiet, with the same
-            // per-error diagnostic the other commands surface.
-            else => {
-                var msg_buf: [512]u8 = undefined;
-                sink.err("{s}", .{lock_report.acquireFailureMessage(&msg_buf, e, prefix)});
-                return InstallError.LockError;
-            },
-        };
-        output.emitNdjsonEvent(.lock_acquired, "", null);
-    }
-    defer if (lk) |*l| l.release(ctx.io);
-    // LIFO: install_complete must precede release in the deferred chain,
-    // and the outer holder owns the matching pair when we skipped here.
-    defer if (lk != null and output.isNdjson()) output.emitNdjsonEvent(.install_complete, "", null);
 
     // Main-thread HTTP client; workers borrow from `http_pool` instead.
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
