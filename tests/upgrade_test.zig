@@ -577,7 +577,7 @@ test "upgrade with a missing transitive dep does not error with lock contention"
     defer testing.allocator.free(cache_json);
     const cf = try test_io.createFileAbsolute(std.Options.debug_io, cache_json, .{ .truncate = true });
     const body =
-        \\{"name":"curl","full_name":"curl","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"8.20"},"dependencies":["zzngtcp2"],"oldnames":[],"bottle":{"stable":{"root_url":"","files":{}}}}
+        \\{"name":"curl","full_name":"curl","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"8.20"},"dependencies":["zzngtcp2"],"oldnames":[],"bottle":{"stable":{"root_url":"","files":{"all":{"cellar":":any","url":"u","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}}
     ;
     try cf.writeStreamingAll(std.Options.debug_io, body);
     cf.close(std.Options.debug_io);
@@ -598,13 +598,119 @@ test "upgrade with a missing transitive dep does not error with lock contention"
     output.beginStderrCapture(testing.allocator, &captured);
     defer output.endStderrCapture();
 
-    // The bottle slot is empty so resolveBottle aborts after the dep
-    // install path runs — both branches surface error.Aborted today, but
-    // the load-bearing observation is the *reason*: the error must not be
-    // the lock-contention message that masks the real cause.
+    // The `all` bottle gets curl past the bottle check, so the 404ing dep
+    // is what aborts. The load-bearing observation is the *reason*: the
+    // error must not be the lock-contention message that masks the real cause.
     upgrade.execute(&ctx, testing.allocator, &.{"curl"}) catch {};
 
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not install new dep(s) for curl") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "Another mt process is running") == null);
+}
+
+/// Seed an installed curl 8.19 whose cached 8.20 adds a dep and publishes
+/// only `files_json` bottles; the dep 404s so nothing reaches the network.
+fn seedCurlUpgrade(path: [:0]const u8, comptime files_json: []const u8) !void {
+    {
+        var db = try openSeededDb(path);
+        defer db.close();
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+            \\VALUES ('curl', 'curl', '8.19', 'sha-old', '/cellar/curl/8.19');
+        );
+    }
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{path});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const cache_json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_curl.json", .{cache_api});
+    defer testing.allocator.free(cache_json);
+    const cf = try test_io.createFileAbsolute(std.Options.debug_io, cache_json, .{ .truncate = true });
+    defer cf.close(std.Options.debug_io);
+    try cf.writeStreamingAll(std.Options.debug_io, "{\"name\":\"curl\",\"full_name\":\"curl\",\"tap\":\"homebrew/core\",\"versions\":{\"stable\":\"8.20\"},\"dependencies\":[\"zzngtcp2\"],\"bottle\":{\"stable\":{\"files\":" ++ files_json ++ "}}}");
+    inline for (.{ "formula_zzngtcp2.404", "cask_zzngtcp2.404" }) |name| {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        defer testing.allocator.free(p);
+        const m = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
+        m.close(std.Options.debug_io);
+    }
+}
+
+/// A golden_gate-only bottle map is newer than every host the suite runs on.
+const newer_only_bottles = "{\"" ++ (if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "") ++
+    "golden_gate\":{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"" ++ "a" ** 64 ++ "\"}}";
+
+/// These tests need a host the fixture's bottles are too new for.
+fn skipOnGoldenGate() !void {
+    var formula = try formula_mod.parseFormula(testing.allocator, "{\"name\":\"probe\",\"versions\":{\"stable\":\"1\"},\"bottle\":{\"stable\":{\"files\":" ++ newer_only_bottles ++ "}}}");
+    defer formula.deinit();
+    _ = formula_mod.resolveBottle(&formula) catch return;
+    return error.SkipZigTest;
+}
+
+// Installing the new dep before learning curl has no usable bottle left a
+// stray direct-reason keg behind and failed again on every run.
+test "upgrade refuses a formula with no bottle for this macOS before installing its new deps" {
+    try skipOnGoldenGate();
+    const path = try setupPrefix("upgrade_no_bottle_named");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedCurlUpgrade(path, newer_only_bottles);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try testing.expectError(error.Aborted, upgrade.execute(&ctx, testing.allocator, &.{"curl"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No bottle available for curl") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Installing new dep") == null);
+}
+
+test "upgrade --dry-run does not promise an upgrade this macOS has no bottle for" {
+    try skipOnGoldenGate();
+    const path = try setupPrefix("upgrade_no_bottle_dry");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedCurlUpgrade(path, newer_only_bottles);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    upgrade.execute(&ctx, testing.allocator, &.{ "--dry-run", "curl" }) catch {};
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would upgrade") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No bottle available for curl") != null);
+}
+
+// A bulk run skips it like an unsupported cask, so one stranded formula does
+// not turn every `mt upgrade` red.
+test "bulk upgrade skips a formula with no bottle for this macOS" {
+    try skipOnGoldenGate();
+    const path = try setupPrefix("upgrade_no_bottle_bulk");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedCurlUpgrade(path, newer_only_bottles);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try upgrade.execute(&ctx, testing.allocator, &.{});
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No bottle available for curl") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Installing new dep") == null);
 }
 
 // Pre-fix, every keg row went through `formulae.brew.sh/api/formula/<name>.json`,

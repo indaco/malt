@@ -795,6 +795,10 @@ fn upgradeFormula(
         return .up_to_date;
     }
 
+    // Before the dry-run promise and the dep installs: neither should
+    // happen for a release this macOS cannot pour.
+    _ = formula_mod.resolveBottle(&formula) catch return skipNoBottle(name, bulk);
+
     warnIfBackward(name, old_pkg_version, formula.pkg_version);
 
     if (dry_run) {
@@ -1106,6 +1110,29 @@ fn skipUnpinned(name: []const u8, bulk: bool) error{Aborted}!Outcome {
     output.warn("{s} declares sha256 :no_check, skipped; pass --allow-unpinned to upgrade it unverified", .{name});
     output.emitNdjsonEvent(.unsupported, name, null);
     return .unsupported;
+}
+
+/// The newer release ships no bottle for this macOS. A bulk run skips it
+/// like an unsupported cask; a named one fails, as install would.
+fn skipNoBottle(name: []const u8, bulk: bool) error{Aborted}!Outcome {
+    if (!bulk) {
+        output.err("No bottle available for {s} on this platform", .{name});
+        return error.Aborted;
+    }
+    output.warn("No bottle available for {s} on this platform, skipped", .{name});
+    output.emitNdjsonEvent(.unsupported, name, null);
+    return .unsupported;
+}
+
+test "skipNoBottle skips in a bulk run and fails a named one" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    try std.testing.expectError(error.Aborted, skipNoBottle("wget", false));
+    try std.testing.expectEqual(Outcome.unsupported, try skipNoBottle("wget", true));
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "No bottle available for wget") != null);
 }
 
 test "tapRecipe carries the qualified version and the checksum opt-out" {
@@ -2805,8 +2832,9 @@ fn writeTestFormulaCache(cache_dir: []const u8, name: []const u8, stable: []cons
     const p = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
     const f = try std.Io.Dir.cwd().createFile(io, p, .{});
     defer f.close(io);
-    var body_buf: [256]u8 = undefined;
-    const body = try std.fmt.bufPrint(&body_buf, "{{\"name\":\"{s}\",\"versions\":{{\"stable\":\"{s}\"}}}}", .{ name, stable });
+    var body_buf: [512]u8 = undefined;
+    // An `all` bottle keeps the would-upgrade path open on any host.
+    const body = try std.fmt.bufPrint(&body_buf, "{{\"name\":\"{s}\",\"versions\":{{\"stable\":\"{s}\"}},\"bottle\":{{\"stable\":{{\"files\":{{\"all\":{{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"{s}\"}}}}}}}}}}", .{ name, stable, "a" ** 64 });
     try f.writeStreamingAll(io, body);
 }
 
