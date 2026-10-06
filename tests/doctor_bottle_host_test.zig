@@ -118,6 +118,8 @@ test "collect skips kegs the core document cannot speak for" {
     var report = bottle_host.collect(allocator, io, s.path, s.cache, host_major);
     defer report.deinit(allocator);
     try testing.expectEqual(@as(u32, 0), report.count());
+    // Only the uncached core keg is one the check failed to look at.
+    try testing.expectEqual(@as(u32, 1), report.unchecked);
 }
 
 test "collect reads neither outside the API cache nor a corrupt document" {
@@ -145,6 +147,8 @@ test "collect reads neither outside the API cache nor a corrupt document" {
     var report = bottle_host.collect(allocator, io, s.path, s.cache, host_major);
     defer report.deinit(allocator);
     try testing.expectEqual(@as(u32, 0), report.count());
+    // The corrupt document is a keg left unchecked; the forged name is no keg.
+    try testing.expectEqual(@as(u32, 1), report.unchecked);
 }
 
 test "collect never flags on an unreadable host version" {

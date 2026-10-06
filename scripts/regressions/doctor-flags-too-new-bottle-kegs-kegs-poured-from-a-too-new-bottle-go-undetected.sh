@@ -3,7 +3,9 @@
 # host (what bottle selection did before it honoured the host version) went
 # unnoticed. `mt doctor` must name it, pointing at `mt reinstall` when a
 # bottle for this macOS exists and at `mt uninstall` when none does, and must
-# leave a keg poured from the host's own bottle alone.
+# leave a keg poured from the host's own bottle alone. A keg it cannot check
+# (no cached formula document, as after `mt update`) must be admitted, not
+# folded into an all-clear.
 #
 # Hermetic: each keg's recorded digest is matched against a formula document
 # seeded under `$MALT_CACHE/api`; `MALT_OFFLINE=1` keeps doctor off the
@@ -86,6 +88,8 @@ A=$(digest a) B=$(digest b) C=$(digest c) D=$(digest d)
 seed regnone "$A" "$NEWER_TAG=$A"                  # no bottle for this macOS
 seed regreinst "$B" "$NEWER_TAG=$B" "$HOST_TAG=$C" # reinstallable
 seed regok "$D" "$HOST_TAG=$D"                     # control
+seed regnodoc "$D" "$HOST_TAG=$D"
+rm "$MALT_CACHE/api/formula_regnodoc.json" # cache wiped, as by mt update
 
 OUT=$("$BIN" doctor --verbose 2>&1 || true)
 
@@ -101,5 +105,9 @@ if grep -q regok <<<"$OUT"; then
   fail "keg poured from the host's own bottle was flagged"
 fi
 pass "host-tag keg left alone"
+
+grep -q '1 more not checked: no cached formula data' <<<"$OUT" ||
+  fail "keg with no cached formula document not reported as unchecked"
+pass "uncached keg reported as not checked"
 
 printf '\n\xe2\x9c\x94 doctor flags kegs poured from a too-new bottle\n'

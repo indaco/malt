@@ -1367,12 +1367,13 @@ fn checkBottleHost(ctx: CheckCtx, name: []const u8) CheckResult {
     defer report.deinit(ctx.allocator);
 
     if (signals.isInterrupted()) return .ok; // partial walk: nothing to report
+    var msg_buf: [512]u8 = undefined;
+    const msg = bottle_host.detail(&msg_buf, report);
     if (report.count() == 0) {
-        printCheck(name, .ok, null);
+        printCheck(name, .ok, msg);
         return .ok;
     }
-    var msg_buf: [512]u8 = undefined;
-    printCheck(name, .warn_status, bottle_host.summary(&msg_buf, report));
+    printCheck(name, .warn_status, msg);
     armVerboseHint();
     writeVerboseList(report.lines.items);
     return .warn_status;

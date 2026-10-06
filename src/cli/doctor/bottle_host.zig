@@ -49,6 +49,7 @@ pub fn remedyFor(formula: *const formula_mod.Formula, store_sha256: []const u8, 
 pub const Report = struct {
     reinstall: u32 = 0,
     uninstall: u32 = 0,
+    unchecked: u32 = 0,
     /// One `--verbose` line per flagged keg, naming its remedy.
     lines: std.ArrayList([]u8) = .empty,
 
@@ -90,9 +91,15 @@ pub fn collect(
         // The name builds a cache path; a hand-edited row must not escape it.
         api_mod.validateName(name) catch continue;
 
-        const bytes = api_mod.readCacheAt(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(.formula)) orelse continue;
+        const bytes = api_mod.readCacheAt(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(.formula)) orelse {
+            report.unchecked += 1;
+            continue;
+        };
         defer allocator.free(bytes);
-        var formula = formula_mod.parseFormula(allocator, bytes) catch continue;
+        var formula = formula_mod.parseFormula(allocator, bytes) catch {
+            report.unchecked += 1;
+            continue;
+        };
         defer formula.deinit();
 
         const remedy = remedyFor(&formula, sha, host_major) orelse continue;
@@ -112,13 +119,24 @@ pub fn collect(
     return report;
 }
 
-/// The single warn-row detail for a non-empty report.
-pub fn summary(buf: []u8, report: Report) []const u8 {
-    return std.fmt.bufPrint(
+const unchecked_note = "not checked: no cached formula data (mt upgrade --dry-run <name> fetches it)";
+
+/// The row's detail, or null when there is nothing to say. Unchecked kegs are
+/// named so an emptied cache never reads as an all-clear.
+pub fn detail(buf: []u8, report: Report) ?[]const u8 {
+    const fallback = "Some kegs were poured from a bottle built for a newer macOS; reinstall or uninstall them.";
+    if (report.count() == 0) {
+        if (report.unchecked == 0) return null;
+        return std.fmt.bufPrint(buf, "{d} keg(s) " ++ unchecked_note, .{report.unchecked}) catch unchecked_note;
+    }
+    const head = std.fmt.bufPrint(
         buf,
         "{d} keg(s) were poured from a bottle built for a newer macOS and may fail to load: {d} to reinstall (mt reinstall <name>), {d} with no bottle for this macOS (mt uninstall <name>)",
         .{ report.count(), report.reinstall, report.uninstall },
-    ) catch "Some kegs were poured from a bottle built for a newer macOS; reinstall or uninstall them.";
+    ) catch return fallback;
+    if (report.unchecked == 0) return head;
+    const tail = std.fmt.bufPrint(buf[head.len..], "; {d} more " ++ unchecked_note, .{report.unchecked}) catch return head;
+    return buf[0 .. head.len + tail.len];
 }
 
 const testing = std.testing;
@@ -180,10 +198,28 @@ test "remedyFor points at reinstall only when this macOS has a bottle" {
     try testing.expectEqual(@as(?Remedy, .uninstall), remedyFor(&none, sha_a, 26));
 }
 
-test "summary names both remedies with their counts" {
+test "detail names both remedies with their counts" {
     var buf: [512]u8 = undefined;
-    const text = summary(&buf, .{ .reinstall = 2, .uninstall = 1 });
+    const text = detail(&buf, .{ .reinstall = 2, .uninstall = 1 }).?;
     try testing.expect(std.mem.startsWith(u8, text, "3 keg(s)"));
     try testing.expect(std.mem.indexOf(u8, text, "2 to reinstall (mt reinstall <name>)") != null);
     try testing.expect(std.mem.indexOf(u8, text, "1 with no bottle for this macOS (mt uninstall <name>)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "not checked") == null);
+}
+
+test "detail admits kegs it could not check instead of a bare all-clear" {
+    // `mt update` wipes the API cache, so right after it nothing is checkable.
+    var buf: [512]u8 = undefined;
+    try testing.expectEqualStrings(
+        "4 keg(s) not checked: no cached formula data (mt upgrade --dry-run <name> fetches it)",
+        detail(&buf, .{ .unchecked = 4 }).?,
+    );
+    const both = detail(&buf, .{ .uninstall = 1, .unchecked = 4 }).?;
+    try testing.expect(std.mem.startsWith(u8, both, "1 keg(s) were poured"));
+    try testing.expect(std.mem.endsWith(u8, both, "; 4 more not checked: no cached formula data (mt upgrade --dry-run <name> fetches it)"));
+}
+
+test "detail is silent when every keg checked out" {
+    var buf: [512]u8 = undefined;
+    try testing.expectEqual(@as(?[]const u8, null), detail(&buf, .{}));
 }
