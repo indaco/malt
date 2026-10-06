@@ -13,6 +13,8 @@ const testing = std.testing;
 /// Missing or unreadable directories contribute 0 rather than failing —
 /// a partial/absent keg dir must not crash the row writer.
 pub fn dirSizeBytes(io: std.Io, path: []const u8) u64 {
+    // A relative path (damaged record) names no keg dir; the absolute open would abort.
+    if (!std.fs.path.isAbsolute(path)) return 0;
     var dir = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch return 0;
     defer dir.close(io);
     return sumDir(io, &dir);
@@ -175,4 +177,8 @@ test "dirSizeBytes returns 0 for an empty directory" {
     const root = s.base;
     try std.Io.Dir.createDirAbsolute(io, root, .default_dir);
     try testing.expectEqual(@as(u64, 0), dirSizeBytes(io, root));
+}
+
+test "dirSizeBytes counts a damaged relative path as empty instead of aborting" {
+    try testing.expectEqual(@as(u64, 0), dirSizeBytes(std.Options.debug_io, "Cellar/relkeg/1.0"));
 }
