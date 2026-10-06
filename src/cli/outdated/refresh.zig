@@ -16,6 +16,7 @@ const forge = @import("../../core/forge.zig");
 const path_component = @import("../../fs/path_component.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const api_mod = @import("../../net/api.zig");
+const cask_variation = @import("../../net/cask_variation.zig");
 const client_mod = @import("../../net/client.zig");
 const pool_mod = @import("../../net/client_pool.zig");
 const output = @import("../../ui/output.zig");
@@ -1070,6 +1071,12 @@ fn fetchLatest(
 /// Returns a fresh caller-owned copy or null if the field is missing /
 /// the document is malformed.
 pub fn parseFormulaLatest(allocator: std.mem.Allocator, json_bytes: []const u8) ?[]u8 {
+    return parseFormulaLatestFor(allocator, json_bytes, cask_variation.runningMacosMajor());
+}
+
+/// `parseFormulaLatest` with the host injected. Null too when no bottle
+/// fits this macOS: an upgrade the host refuses is not an upgrade.
+pub fn parseFormulaLatestFor(allocator: std.mem.Allocator, json_bytes: []const u8, host_major: ?u32) ?[]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch return null;
     defer parsed.deinit();
     const obj = switch (parsed.value) {
@@ -1088,6 +1095,7 @@ pub fn parseFormulaLatest(allocator: std.mem.Allocator, json_bytes: []const u8) 
     };
     // Printed raw by `outdated`, and `upgrade` refuses the same record.
     if (path_component.hasControlByte(stable)) return null;
+    if (!cask_variation.bottlePourable(obj.get("bottle"), host_major)) return null;
     // Qualify with the top-level revision so the fetch fallback catches a
     // revision-only bump (1.2.3 -> 1.2.3_1), mirroring the map path. Absent or
     // non-integer revision is treated as 0; an overflow degrades to the bare
@@ -2027,6 +2035,15 @@ test "parseFormulaLatest pulls versions.stable from a real-shape document" {
     const v = parseFormulaLatest(std.testing.allocator, json) orelse return error.UnexpectedNull;
     defer std.testing.allocator.free(v);
     try std.testing.expectEqualStrings("2.1.1", v);
+}
+
+test "parseFormulaLatestFor reports no upgrade when every bottle needs a newer macOS" {
+    const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
+    const json = "{\"versions\":{\"stable\":\"1.25\"},\"bottle\":{\"stable\":{\"files\":{\"" ++ arch ++ "tahoe\":{}}}}}";
+    try std.testing.expect(parseFormulaLatestFor(std.testing.allocator, json, 14) == null);
+    const v = parseFormulaLatestFor(std.testing.allocator, json, 26) orelse return error.UnexpectedNull;
+    defer std.testing.allocator.free(v);
+    try std.testing.expectEqualStrings("1.25", v);
 }
 
 test "parseFormulaLatest refuses a stable version holding a control byte" {

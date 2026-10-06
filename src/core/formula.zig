@@ -722,35 +722,18 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
 // Bottle selection
 // ---------------------------------------------------------------------------
 
-/// macOS majors that publish bottle tags, newest first.
-const bottle_macos_majors = [_]u32{ 27, 26, 15, 14, 13, 12, 11 };
-
 /// Select the best matching bottle for the running host.
 pub fn resolveBottle(formula: *const Formula) !BottleFile {
     return resolveBottleFor(formula, cask_variation.runningMacosMajor());
 }
 
-/// Homebrew's order: the host's own tag, then `all`, then the newest tag not
-/// newer than the host. A newer tag's binaries would not load on this host.
+/// `resolveBottle` with the host injected, so tests never depend on the
+/// machine they run on.
 pub fn resolveBottleFor(formula: *const Formula, host_major: ?u32) !BottleFile {
     const files = formula.bottle_files orelse return FormulaError.NoBottleAvailable;
     var buf: [32]u8 = undefined;
-
-    if (host_major) |host| {
-        if (cask_variation.variationKey(&buf, host)) |key| {
-            if (files.map.get(key)) |bf| return bf;
-        }
-    }
-    if (files.map.get("all")) |bf| return bf;
-
-    for (bottle_macos_majors) |major| {
-        // An unreadable host version keeps the newest-first pick: refusing
-        // every install would be worse than the risk it guards.
-        if (host_major) |host| if (major > host) continue;
-        const key = cask_variation.variationKey(&buf, major) orelse continue;
-        if (files.map.get(key)) |bf| return bf;
-    }
-    return FormulaError.NoBottleAvailable;
+    const key = cask_variation.bottleKey(&buf, files.map, host_major) orelse return FormulaError.NoBottleAvailable;
+    return files.map.get(key).?;
 }
 
 // ---------------------------------------------------------------------------
@@ -1357,6 +1340,20 @@ test "resolveBottleFor never picks a bottle built for a newer macOS than the hos
             try testing.expectError(FormulaError.NoBottleAvailable, got);
         }
     }
+}
+
+test "resolveBottle selects for the running macOS, not the newest tag" {
+    // Only a host older than the newest tag can tell the two apart.
+    const host = cask_variation.runningMacosMajor() orelse return error.SkipZigTest;
+    if (host >= 27) return error.SkipZigTest;
+    const files = "{" ++ hostBottle("golden_gate", "c") ++ "," ++ hostBottle("tahoe", "a") ++ "," ++
+        hostBottle("sequoia", "b") ++ "," ++ hostBottle("sonoma", "e") ++ "}";
+    const json = try bottleFormulaJson(files);
+    defer testing.allocator.free(json);
+    var formula = try parseFormula(testing.allocator, json);
+    defer formula.deinit();
+    const want = try resolveBottleFor(&formula, host);
+    try testing.expectEqualStrings(want.sha256, (try resolveBottle(&formula)).sha256);
 }
 
 test "parseFormula flags a formula migrated to post_install_steps" {
