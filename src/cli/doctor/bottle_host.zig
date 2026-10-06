@@ -64,8 +64,9 @@ pub const Report = struct {
 };
 
 /// Walk the core kegs and classify each against its cached formula document.
-/// ponytail: cache-only, so a keg whose document was never cached is skipped;
-/// reading the binaries' LC_BUILD_VERSION would cover it, at a full Mach-O walk.
+/// ponytail: cache-only, so a keg with no cached document is only counted as
+/// unchecked; reading its binaries' LC_BUILD_VERSION would cover it, at a full
+/// Mach-O walk.
 pub fn collect(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -166,6 +167,15 @@ test "a digest from the host's own, an older, or the all bottle is fine" {
     try testing.expect(!pouredTooNew(f.bottle_files.?, sha_a, 26));
     try testing.expect(!pouredTooNew(f.bottle_files.?, sha_b, 26));
     try testing.expect(!pouredTooNew(f.bottle_files.?, "c" ** 64, 26));
+}
+
+test "a digest on a tag this build cannot place is never flagged" {
+    // A codename newer than the map, or another arch's tag: no floor to compare.
+    const other = if (arch.len == 0) "arm64_golden_gate" else "golden_gate";
+    var f = try parseDoc(comptime bottle("arm64_future_os", sha_a) ++ "," ++ bottle(other, sha_b));
+    defer f.deinit();
+    try testing.expect(!pouredTooNew(f.bottle_files.?, sha_a, 26));
+    try testing.expect(!pouredTooNew(f.bottle_files.?, sha_b, 26));
 }
 
 test "a digest shared by a newer and a loadable tag is the same loadable bottle" {
