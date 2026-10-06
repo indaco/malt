@@ -109,7 +109,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.err("database path too long", .{});
         return error.Aborted;
     };
-    var db = sqlite.Database.open(db_path) catch {
+    var db = schema_report.openPreviewable(db_path, dry_run) catch {
         output.err("Failed to open database", .{});
         return error.Aborted;
     };

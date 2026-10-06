@@ -116,6 +116,31 @@ pub const Statement = struct {
     }
 };
 
+// Worst case every path byte is percent-encoded, plus the scheme and query.
+const snapshot_uri_len = std.fs.max_path_bytes * 3 + 64;
+
+/// Existence via SQLite's VFS. A wrong answer is safe for both uses: a
+/// missed -wal yields an older but consistent copy, a missed db/ a refusal.
+fn vfsExists(path: [*:0]const u8) bool {
+    const vfs = c.sqlite3_vfs_find(null) orelse return true;
+    var res: c_int = 0;
+    if (vfs.*.xAccess.?(vfs, path, c.SQLITE_ACCESS_EXISTS, &res) != c.SQLITE_OK) return true;
+    return res != 0;
+}
+
+/// Read-only URI for `path`; `?`, `#` and `%` would otherwise end the path.
+fn snapshotUri(buf: []u8, path: []const u8, immutable: bool) error{WriteFailed}![:0]const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    try w.writeAll("file://");
+    for (path) |ch| switch (ch) {
+        '?', '#', '%' => try w.print("%{X:0>2}", .{ch}),
+        else => try w.writeByte(ch),
+    };
+    try w.writeAll(if (immutable) "?mode=ro&immutable=1" else "?mode=ro");
+    try w.writeByte(0);
+    return buf[0 .. w.end - 1 :0];
+}
+
 pub const Database = struct {
     /// Raw sqlite handle; touch only via the methods below.
     _handle: *c.sqlite3,
@@ -145,6 +170,45 @@ pub const Database = struct {
         self.exec("PRAGMA journal_mode=WAL;") catch return SqliteError.OpenFailed;
         self.exec("PRAGMA foreign_keys=ON;") catch return SqliteError.OpenFailed;
 
+        return self;
+    }
+
+    /// Preview handle: a private copy, so a dry run can migrate and read
+    /// without touching the prefix.
+    pub fn openSnapshot(path: [:0]const u8) SqliteError!Database {
+        var mem: ?*c.sqlite3 = null;
+        if (c.sqlite3_open_v2(":memory:", &mem, c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE, null) != c.SQLITE_OK) {
+            if (mem) |d| _ = c.sqlite3_close_v2(d);
+            return SqliteError.OpenFailed;
+        }
+        var self = Database{ ._handle = mem.? };
+        errdefer self.close();
+        self.exec("PRAGMA foreign_keys=ON;") catch return SqliteError.OpenFailed;
+
+        // No -wal means no uncheckpointed frames, so `immutable` loses nothing
+        // and keeps SQLite from creating sidecars next to the file.
+        var buf: [snapshot_uri_len]u8 = undefined;
+        const wal = std.fmt.bufPrintSentinel(&buf, "{s}-wal", .{path}, 0) catch return SqliteError.OpenFailed;
+        const immutable = !vfsExists(wal);
+        const uri = snapshotUri(&buf, path, immutable) catch return SqliteError.OpenFailed;
+
+        var src: ?*c.sqlite3 = null;
+        defer if (src) |s| {
+            _ = c.sqlite3_close_v2(s);
+        };
+        if (c.sqlite3_open_v2(uri.ptr, &src, c.SQLITE_OPEN_READONLY | c.SQLITE_OPEN_URI, null) != c.SQLITE_OK) {
+            // Mirror `open`: only a missing file starts empty; a missing
+            // directory or a file it cannot read fails.
+            const absent = src != null and c.sqlite3_system_errno(src) == @intFromEnum(std.posix.E.NOENT);
+            const dir = std.fs.path.dirname(path) orelse return if (absent) self else SqliteError.OpenFailed;
+            const dir_z = std.fmt.bufPrintSentinel(&buf, "{s}", .{dir}, 0) catch return SqliteError.OpenFailed;
+            return if (absent and vfsExists(dir_z)) self else SqliteError.OpenFailed;
+        }
+        _ = c.sqlite3_busy_timeout(src.?, 5000);
+
+        const backup = c.sqlite3_backup_init(self._handle, "main", src.?, "main") orelse return SqliteError.OpenFailed;
+        const step_rc = c.sqlite3_backup_step(backup, -1);
+        if (c.sqlite3_backup_finish(backup) != c.SQLITE_OK or step_rc != c.SQLITE_DONE) return SqliteError.OpenFailed;
         return self;
     }
 
@@ -394,4 +458,154 @@ test "Database.open waits out a lock held by another connection instead of faili
 
     var db = try Database.open(path);
     db.close();
+}
+
+fn fileExists(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
+}
+
+fn countRows(db: *Database) !i64 {
+    var stmt = try db.prepare("SELECT count(*) FROM t;");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    return stmt.columnInt(0);
+}
+
+test "openSnapshot on an absent file hands back an empty database and creates nothing" {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-snap-absent-{d}.db", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    deleteWithSidecars(io, path);
+    defer deleteWithSidecars(io, path);
+
+    var db = try Database.openSnapshot(path);
+    try db.exec("CREATE TABLE t(x); INSERT INTO t VALUES (1);");
+    try testing.expectEqual(@as(i64, 1), try countRows(&db));
+    db.close();
+
+    for ([_][]const u8{ "", "-wal", "-shm", "-journal" }) |suffix| {
+        var buf: [80]u8 = undefined;
+        try testing.expect(!fileExists(io, try std.fmt.bufPrint(&buf, "{s}{s}", .{ path, suffix })));
+    }
+}
+
+test "openSnapshot refuses a path whose directory is missing, as open does" {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-snap-nodir-{d}/malt.db", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+
+    try testing.expectError(SqliteError.OpenFailed, Database.open(path));
+    try testing.expectError(SqliteError.OpenFailed, Database.openSnapshot(path));
+    try testing.expect(!fileExists(io, std.fs.path.dirname(path).?));
+}
+
+test "openSnapshot reads a WAL database without changing a byte or leaving a sidecar" {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-snap-wal-{d}.db", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    deleteWithSidecars(io, path);
+    defer deleteWithSidecars(io, path);
+    {
+        var seed = try Database.open(path);
+        defer seed.close();
+        try seed.exec("CREATE TABLE t(x); INSERT INTO t VALUES (1), (2);");
+    }
+    const before = try std.Io.Dir.cwd().readFileAlloc(io, path, testing.allocator, .unlimited);
+    defer testing.allocator.free(before);
+
+    var db = try Database.openSnapshot(path);
+    try testing.expectEqual(@as(i64, 2), try countRows(&db));
+    // A write lands in the copy only.
+    try db.exec("INSERT INTO t VALUES (3);");
+    try testing.expectEqual(@as(i64, 3), try countRows(&db));
+    db.close();
+
+    const after = try std.Io.Dir.cwd().readFileAlloc(io, path, testing.allocator, .unlimited);
+    defer testing.allocator.free(after);
+    try testing.expectEqualSlices(u8, before, after);
+    for ([_][]const u8{ "-wal", "-shm" }) |suffix| {
+        var buf: [80]u8 = undefined;
+        try testing.expect(!fileExists(io, try std.fmt.bufPrint(&buf, "{s}{s}", .{ path, suffix })));
+    }
+}
+
+test "openSnapshot sees rows a live writer has committed but not yet checkpointed" {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-snap-live-{d}.db", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    deleteWithSidecars(io, path);
+    defer deleteWithSidecars(io, path);
+
+    var writer = try Database.open(path);
+    defer writer.close();
+    try writer.exec("PRAGMA wal_autocheckpoint=0; CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3);");
+    var wal_buf: [80]u8 = undefined;
+    try testing.expect(fileExists(io, try std.fmt.bufPrint(&wal_buf, "{s}-wal", .{path})));
+
+    var db = try Database.openSnapshot(path);
+    defer db.close();
+    try testing.expectEqual(@as(i64, 3), try countRows(&db));
+}
+
+test "openSnapshot reports an unreadable database as a failure, never as empty" {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-snap-walled-{d}.db", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    deleteWithSidecars(io, path);
+    defer deleteWithSidecars(io, path);
+    {
+        var seed = try Database.open(path);
+        defer seed.close();
+        try seed.exec("CREATE TABLE t(x);");
+    }
+    const f = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer f.close(io);
+    try f.setPermissions(io, std.Io.File.Permissions.fromMode(0));
+    defer f.setPermissions(io, std.Io.File.Permissions.fromMode(0o644)) catch {};
+    // root reads through mode 0, which would make the check vacuous.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    try testing.expectError(SqliteError.OpenFailed, Database.openSnapshot(path));
+}
+
+test "openSnapshot copies a database whose path carries URI metacharacters" {
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt-snap-%?#-{d}", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    var path_buf: [80]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/malt.db", .{dir});
+    {
+        var seed = try Database.open(path);
+        defer seed.close();
+        try seed.exec("CREATE TABLE t(x); INSERT INTO t VALUES (1);");
+    }
+
+    var db = try Database.openSnapshot(path);
+    defer db.close();
+    try testing.expectEqual(@as(i64, 1), try countRows(&db));
+}
+
+test "openSnapshot reports a directory it cannot look into as a failure, never as empty" {
+    // The file may well be there; only a definite ENOENT starts empty.
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root bypasses the perm wall
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt-snap-walled-dir-{d}", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    var path_buf: [80]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/malt.db", .{dir});
+    {
+        var seed = try Database.open(path);
+        seed.close();
+    }
+    var d = try std.Io.Dir.cwd().openDir(io, dir, .{});
+    defer d.close(io);
+    try d.setPermissions(io, std.Io.File.Permissions.fromMode(0));
+    defer d.setPermissions(io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+
+    try testing.expectError(SqliteError.OpenFailed, Database.openSnapshot(path));
 }

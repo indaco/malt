@@ -1083,7 +1083,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var db_path_buf: [prefix_path.path_buf_len]u8 = undefined;
     // A validated prefix plus a fixed suffix always fits path_buf_len.
     const db_path = prefix_path.joinZ(&db_path_buf, prefix, "/db/malt.db") catch unreachable;
-    var db = openPrefixDb(ctx.io, db_path) catch |e| switch (e) {
+    var db = openPrefixDb(ctx.io, db_path, false) catch |e| switch (e) {
         // Fresh prefix: nothing installed = nothing to be outdated.
         error.Absent => return,
         error.Unreadable => {
@@ -1265,9 +1265,9 @@ fn warnAuditIncomplete() void {
 /// Only a missing `db/` directory may read as "nothing installed":
 /// anything that exists there but cannot be opened is an error, never
 /// an all-clear. SQLite's CREATE flag alone would hide that difference.
-pub fn openPrefixDb(io: std.Io, db_path: [:0]const u8) error{ Absent, Unreadable }!sqlite.Database {
+pub fn openPrefixDb(io: std.Io, db_path: [:0]const u8, dry_run: bool) error{ Absent, Unreadable }!sqlite.Database {
     const db_dir = std.fs.path.dirname(db_path) orelse unreachable;
-    return sqlite.Database.open(db_path) catch
+    return schema_report.openPreviewable(db_path, dry_run) catch
         if (prefix_path.dirMissing(io, db_dir)) error.Absent else error.Unreadable;
 }
 
@@ -1310,7 +1310,7 @@ test "openPrefixDb reports a prefix with no db/ directory as absent" {
     var s = try Scratch.init("openPrefixDb_absent");
     defer s.deinit();
     const db_path = try scratchDbPath(&s);
-    try std.testing.expectError(error.Absent, openPrefixDb(fs_test_io, db_path));
+    try std.testing.expectError(error.Absent, openPrefixDb(fs_test_io, db_path, false));
 }
 
 test "openPrefixDb creates the database when db/ exists but the file does not" {
@@ -1319,8 +1319,21 @@ test "openPrefixDb creates the database when db/ exists but the file does not" {
     defer s.deinit();
     const db_path = try scratchDbPath(&s);
     try s.dir.createDirPath(fs_test_io, "db");
-    var db = try openPrefixDb(fs_test_io, db_path);
+    var db = try openPrefixDb(fs_test_io, db_path, false);
     db.close();
+}
+
+test "openPrefixDb under a preview opens a blank copy and leaves db/ empty" {
+    var s = try Scratch.init("openPrefixDb_preview");
+    defer s.deinit();
+    const db_path = try scratchDbPath(&s);
+    try s.dir.createDirPath(fs_test_io, "db");
+    var db = try openPrefixDb(fs_test_io, db_path, true);
+    db.close();
+    try std.testing.expectError(error.FileNotFound, s.dir.access(fs_test_io, "db/malt.db", .{}));
+    // No db/ at all stays a fresh prefix under a preview too.
+    try s.dir.deleteTree(fs_test_io, "db");
+    try std.testing.expectError(error.Absent, openPrefixDb(fs_test_io, db_path, true));
 }
 
 test "openPrefixDb refuses a file that exists but is not a database" {
@@ -1331,7 +1344,7 @@ test "openPrefixDb refuses a file that exists but is not a database" {
     const file = try std.Io.Dir.createFileAbsolute(fs_test_io, db_path, .{ .truncate = true });
     defer file.close(fs_test_io);
     try file.writeStreamingAll(fs_test_io, "not a sqlite header");
-    try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path));
+    try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path, false));
 }
 
 test "openPrefixDb refuses a db that is a file where the directory should be" {
@@ -1342,7 +1355,7 @@ test "openPrefixDb refuses a db that is a file where the directory should be" {
     const db_path = try scratchDbPath(&s);
     const blocker = try s.dir.createFile(fs_test_io, "db", .{});
     blocker.close(fs_test_io);
-    try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path));
+    try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path, false));
 }
 
 test "openPrefixDb refuses a db/ symlink whose target is gone" {
@@ -1351,7 +1364,7 @@ test "openPrefixDb refuses a db/ symlink whose target is gone" {
     defer s.deinit();
     const db_path = try scratchDbPath(&s);
     try s.dir.symLink(fs_test_io, "/nonexistent/malt-db", "db", .{});
-    try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path));
+    try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path, false));
 }
 
 test "openPrefixDb refuses a db/ directory it cannot look into" {
@@ -1366,7 +1379,7 @@ test "openPrefixDb refuses a db/ directory it cannot look into" {
     defer db_dir.close(fs_test_io);
     try db_dir.setPermissions(fs_test_io, std.Io.File.Permissions.fromMode(0));
     defer db_dir.setPermissions(fs_test_io, std.Io.File.Permissions.fromMode(0o755)) catch {};
-    try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path));
+    try std.testing.expectError(error.Unreadable, openPrefixDb(fs_test_io, db_path, false));
 }
 
 test "abortUnreadableRows leaves every other error to main, unprinted" {

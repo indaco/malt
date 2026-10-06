@@ -56,7 +56,7 @@ test "openDb returns null when the prefix has no db/ directory" {
     var fx = try Fixture.init("missing_db");
     defer fx.deinit();
 
-    try testing.expect(info.openDb(fx.base) == null);
+    try testing.expect(info.openDb(std.Options.debug_io, fx.base, false) == null);
 }
 
 test "openDb succeeds and returns a usable handle when db/ exists" {
@@ -64,7 +64,7 @@ test "openDb succeeds and returns a usable handle when db/ exists" {
     defer fx.deinit();
     try test_io.makeDirAbsolute(std.Options.debug_io, fx.p("db"));
 
-    var db = info.openDb(fx.base) orelse return error.ExpectedDatabase;
+    var db = info.openDb(std.Options.debug_io, fx.base, false) orelse return error.ExpectedDatabase;
     defer db.close();
 }
 
@@ -74,7 +74,7 @@ test "openDb returns null when the prefix itself does not exist" {
     // populated by any malt command yet.
     const prefix = try test_io.uniqueTempPath(testing.allocator, "info", "no_prefix_at_all");
     defer testing.allocator.free(prefix);
-    try testing.expect(info.openDb(prefix) == null);
+    try testing.expect(info.openDb(std.Options.debug_io, prefix, false) == null);
 }
 
 // --- openInstallDb: only a missing db/ is a fresh prefix ----------------

@@ -7,6 +7,8 @@
 const std = @import("std");
 const lock_mod = @import("../../db/lock.zig");
 const sqlite = @import("../../db/sqlite.zig");
+const output = @import("../../ui/output.zig");
+const schema_report = @import("../schema_report.zig");
 const linker_mod = @import("../../core/linker.zig");
 
 /// Auto-fix classes that are reversible and never touch user data.
@@ -195,7 +197,7 @@ fn walkOrphans(io: std.Io, prefix: []const u8, do_remove: bool) OrphanSweep {
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return result;
-    var db = sqlite.Database.open(db_path) catch return result;
+    var db = schema_report.openPreviewable(io, db_path, output.isDryRun()) catch return result;
     defer db.close();
 
     // Prepare the orphan-classification statement once, drive it per entry.

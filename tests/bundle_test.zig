@@ -427,14 +427,10 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try malt.cli_bundle.execute(&ctx, testing.allocator, &.{ "install", bf_path });
 
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{dir_z}, 0);
+    // Unwired, the real open would create the DB to hold that insert.
+    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{dir_z});
     defer testing.allocator.free(db_path);
-    var db = try sqlite.Database.open(db_path);
-    defer db.close();
-    var stmt = try db.prepare("SELECT COUNT(*) FROM bundles;");
-    defer stmt.finalize();
-    _ = try stmt.step();
-    try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
+    try testing.expectError(error.FileNotFound, test_io.cwd().access(std.Options.debug_io, db_path, .{}));
 }
 
 const c = test_io.c;

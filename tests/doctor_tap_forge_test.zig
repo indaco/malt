@@ -78,7 +78,7 @@ test "emitTapForgeReport: human mode lists each tap with its host on stderr" {
     output.beginStderrCapture(allocator, &stderr_buf);
     defer output.endStderrCapture();
 
-    doctor.emitTapForgeReport(allocator, s.path);
+    doctor.emitTapForgeReport(allocator, std.Options.debug_io, s.path);
 
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "  > Registered taps:") != null);
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        user/repo [github.com]") != null);
@@ -98,7 +98,7 @@ test "emitTapForgeReport: human mode stays silent when no taps are registered" {
     output.beginStderrCapture(allocator, &stderr_buf);
     defer output.endStderrCapture();
 
-    doctor.emitTapForgeReport(allocator, s.path);
+    doctor.emitTapForgeReport(allocator, std.Options.debug_io, s.path);
 
     try testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
 }

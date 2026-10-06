@@ -554,10 +554,10 @@ pub fn dbUnreadable(name: []const u8) error{Aborted} {
 
 /// Open the malt database, or `null` for any failure. Only for callers
 /// that report the failure themselves (doctor's integrity row).
-pub fn openDb(prefix: []const u8) ?sqlite.Database {
+pub fn openDb(io: std.Io, prefix: []const u8, dry_run: bool) ?sqlite.Database {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
-    return sqlite.Database.open(db_path) catch null;
+    return schema_report.openPreviewable(io, db_path, dry_run) catch null;
 }
 
 /// Minimal JSON shape for the "no installed record" case. Mirrors the

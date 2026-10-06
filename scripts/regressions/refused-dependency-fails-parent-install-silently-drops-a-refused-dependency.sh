@@ -116,7 +116,9 @@ pass "offline install plans a stale cached dependency"
 # so a refused upstream record must not block the parent.
 write_formula bar '1.2\r' '[]' "$(bottle_json bar "$SHA_BAR")"
 DB="$PREFIX/db/malt.db"
-[[ -f "$DB" ]] || fail "no database after the earlier runs, so the keg cannot be seeded"
+# Previews never create the database; a read-only command does.
+"$BIN" list >/dev/null 2>&1 || true
+[[ -f "$DB" ]] || fail "no database to seed the keg into"
 mkdir -p "$PREFIX/Cellar/bar/1.2" "$PREFIX/opt"
 ln -s "$PREFIX/Cellar/bar/1.2" "$PREFIX/opt/bar"
 sqlite3 "$DB" "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)

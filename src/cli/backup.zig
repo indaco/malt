@@ -28,6 +28,7 @@ const path_write = @import("../fs/path_write.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 const install_args = @import("install/args.zig");
+const schema_report = @import("schema_report.zig");
 const tap_cmd = @import("tap.zig");
 
 pub const Kind = enum { formula, cask, service };
@@ -86,7 +87,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return Error.DatabaseError;
 
-    var db = sqlite.Database.open(db_path) catch {
+    var db = schema_report.openPreviewable(db_path, output.isDryRun()) catch {
         output.err("Failed to open database at {s}", .{db_path});
         return Error.DatabaseError;
     };

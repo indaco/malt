@@ -4,6 +4,8 @@
 //! malt already migrated. Callers used to collapse it into a generic
 //! "failed to initialize" or swallow it, so the user never learned that
 //! upgrading malt — not repairing the DB — is the fix.
+//!
+//! Also owns which handle a command opens, so a preview never writes the DB.
 
 const std = @import("std");
 const output = @import("../ui/output.zig");
@@ -39,6 +41,13 @@ pub fn abortInitFailure(db: *sqlite.Database, e: schema.MigrateError, prefix: []
     return if (e == error.SchemaTooNew) error.SchemaTooNew else error.Aborted;
 }
 
+/// Open the prefix DB for a command whose effective dry-run is `dry_run`.
+/// A preview gets a private copy: `initSchema` may create or migrate it,
+/// and neither may reach the user's file.
+pub fn openPreviewable(db_path: [:0]const u8, dry_run: bool) sqlite.SqliteError!sqlite.Database {
+    return if (dry_run) sqlite.Database.openSnapshot(db_path) else sqlite.Database.open(db_path);
+}
+
 test "initFailureMessage names the DB version, the supported ceiling and the path on SchemaTooNew" {
     var buf: [512]u8 = undefined;
     const msg = initFailureMessage(&buf, error.SchemaTooNew, schema.known_schema_version + 1, "/opt/malt");
@@ -71,4 +80,26 @@ test "initFailureMessage degrades to a generic line when buf is too small" {
     try std.testing.expect(std.mem.indexOf(u8, too_new, "upgrade malt") != null);
     const broken = initFailureMessage(&tiny, error.StepFailed, 1, "/opt/malt");
     try std.testing.expect(std.mem.indexOf(u8, broken, "schema") != null);
+}
+
+test "openPreviewable creates the file for a real run and nothing for a preview" {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/malt-open-prefix-{d}.db", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    const cwd = std.Io.Dir.cwd();
+    defer for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
+        var buf: [80]u8 = undefined;
+        cwd.deleteFile(io, std.fmt.bufPrint(&buf, "{s}{s}", .{ path, suffix }) catch unreachable) catch {};
+    };
+    cwd.deleteFile(io, path) catch {};
+
+    var preview = try openPreviewable(path, true);
+    try schema.initSchema(&preview);
+    preview.close();
+    try std.testing.expectError(error.FileNotFound, cwd.access(io, path, .{}));
+
+    var real = try openPreviewable(path, false);
+    try schema.initSchema(&real);
+    real.close();
+    try cwd.access(io, path, .{});
 }

@@ -692,7 +692,7 @@ fn runInstall(
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return InstallError.DatabaseError;
-    var db = sqlite.Database.open(db_path) catch {
+    var db = schema_report.openPreviewable(db_path, flags.dry_run) catch {
         sink.err("Failed to open database at {s}", .{db_path});
         return InstallError.DatabaseError;
     };

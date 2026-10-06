@@ -498,6 +498,8 @@ test "execute --dry-run skips the fast path so the plan still reaches the user" 
 
     const db_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
     defer testing.allocator.free(db_file);
+    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    defer testing.allocator.free(lock_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -506,7 +508,9 @@ test "execute --dry-run skips the fast path so the plan still reaches the user" 
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "seedpkg" }) catch {};
 
-    try testing.expect(pathExists(db_file));
+    // The lock is the slow path's footprint; the preview must still not create the DB.
+    try testing.expect(pathExists(lock_file));
+    try testing.expect(!pathExists(db_file));
 }
 
 test "execute --cask refuses an unreadable casks table before fetching the cask" {

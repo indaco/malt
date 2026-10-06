@@ -348,10 +348,10 @@ pub fn writeTapForgeJson(w: *std.Io.Writer, taps: []const tap_mod.TapInfo) !void
 /// Read the registered taps from the prefix DB. Returns `null` on any
 /// DB/list failure so a caller drops the taps report rather than failing
 /// the whole doctor run. Free with `freeTaps`.
-fn collectTaps(allocator: std.mem.Allocator, prefix: []const u8) ?[]tap_mod.TapInfo {
+fn collectTaps(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) ?[]tap_mod.TapInfo {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
-    var db = sqlite.Database.open(db_path) catch return null;
+    var db = schema_report.openPreviewable(io, db_path, output.isDryRun()) catch return null;
     defer db.close();
     schema.initSchema(&db) catch |e| if (e == error.SchemaTooNew) return null;
     return tap_mod.list(allocator, &db) catch null;
@@ -370,8 +370,8 @@ fn freeTaps(allocator: std.mem.Allocator, taps: []tap_mod.TapInfo) void {
 /// Emit the registered-tap forge/host block as human lines (silent when
 /// no taps). The `--json` view is a member of the merged document built
 /// in `emitDoctorJson`. Pure read; safe from `execute`'s post-check phase.
-pub fn emitTapForgeReport(allocator: std.mem.Allocator, prefix: []const u8) void {
-    const taps = collectTaps(allocator, prefix) orelse return;
+pub fn emitTapForgeReport(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) void {
+    const taps = collectTaps(allocator, io, prefix) orelse return;
     defer freeTaps(allocator, taps);
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -412,7 +412,7 @@ pub fn emitDoctorJson(allocator: std.mem.Allocator, io: std.Io, prefix: []const 
     const tap_cache = collectTapCacheUsage(allocator, io, cache_dir);
     // Free the collected slice even when empty-but-allocated; only the
     // collection-failed (`null`) case substitutes a static empty slice.
-    const taps_opt = collectTaps(allocator, prefix);
+    const taps_opt = collectTaps(allocator, io, prefix);
     defer if (taps_opt) |t| freeTaps(allocator, t);
     const taps: []const tap_mod.TapInfo = taps_opt orelse &.{};
 
@@ -482,7 +482,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     } else {
         emitCaskHistoryReport(allocator, ctx.io, prefix, cache_dir);
         emitTapCacheReport(allocator, ctx.io, cache_dir);
-        emitTapForgeReport(allocator, prefix);
+        emitTapForgeReport(allocator, ctx.io, prefix);
     }
 
     if (fix_requested) {
@@ -701,7 +701,7 @@ fn checkMaltPrefix(ctx: CheckCtx, name: []const u8) CheckResult {
 /// unopenable or unwritable DB is the integrity row's verdict, and a
 /// missing db/ is the directory row's.
 fn checkDatabaseSchema(ctx: CheckCtx, name: []const u8) CheckResult {
-    var db = cli_info.openDb(ctx.prefix) orelse {
+    var db = cli_info.openDb(ctx.io, ctx.prefix, output.isDryRun()) orelse {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -722,7 +722,7 @@ fn checkSqliteIntegrity(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .err_status, "Prefix path too long");
         return .err_status;
     };
-    var db = sqlite.Database.open(db_path) catch {
+    var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
         // Nothing installed yet; the directory row flags the missing db/.
         if (prefix_path.dirMissing(ctx.io, std.fs.path.dirname(db_path).?)) {
             printCheck(name, .ok, null);
@@ -980,7 +980,7 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     };
-    var db = sqlite.Database.open(db_path) catch {
+    var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -1038,7 +1038,7 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     };
-    var db = sqlite.Database.open(db_path) catch {
+    var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -1500,7 +1500,7 @@ fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     };
-    var db = sqlite.Database.open(db_path) catch {
+    var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -1564,7 +1564,7 @@ fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     };
-    var db = sqlite.Database.open(db_path) catch {
+    var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
