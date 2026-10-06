@@ -719,6 +719,13 @@ test "a cold names+versions cycle downloads the bulk dump exactly once" {
     defer testing.allocator.free(want_names);
     try testing.expectEqualStrings(want_names, names);
 
+    // The same download leaves doctor its bottle-digest side-car.
+    const bottles = api_mod.readBottlesIndex(io, testing.allocator, dir.path) orelse return error.NoBottlesSideCar;
+    defer testing.allocator.free(bottles);
+    const want_bottles = try api_mod.extractBottles(testing.allocator, fixture);
+    defer testing.allocator.free(want_bottles);
+    try testing.expectEqualStrings(want_bottles, bottles);
+
     // invalidateCache wipes api/ wholesale → the versions side-car too.
     var vpath_buf: [512]u8 = undefined;
     const vpath = try std.fmt.bufPrint(&vpath_buf, "{s}/api/versions_formula.txt", .{dir.path});
