@@ -37,6 +37,7 @@ pub const Linker = struct {
     /// policy — otherwise a dep installed under isolation would falsely
     /// trigger a conflict against a keg whose bins were never linked.
     pub fn checkConflicts(self: *Linker, keg_path: []const u8, bin_isolated: bool) ![]Conflict {
+        try requireAbsolute(keg_path);
         // Same slice `link` uses: bin-isolated drops the leading bin/sbin.
         const dirs_to_check: []const []const u8 = if (bin_isolated) linkable_dirs[2..] else &linkable_dirs;
         var conflicts: std.ArrayList(Conflict) = .empty;
@@ -184,6 +185,12 @@ pub const Linker = struct {
         return null;
     }
 
+    /// The keg walk uses absolute-only opens, which abort on a relative path;
+    /// a damaged record must fail the call instead of the process.
+    fn requireAbsolute(keg_path: []const u8) LinkError!void {
+        if (!std.fs.path.isAbsolute(keg_path)) return LinkError.LinkFailed;
+    }
+
     /// True when `target` lies inside `keg_path`. A bare prefix match is not
     /// enough: `Cellar/foo/1.0_1` continues `Cellar/foo/1.0` byte-for-byte.
     fn isUnderKeg(target: []const u8, keg_path: []const u8) bool {
@@ -211,6 +218,7 @@ pub const Linker = struct {
     /// formulae are unaffected; only the global PATH entries disappear.
     pub fn link(self: *Linker, keg_path: []const u8, name: []const u8, keg_id: i64, bin_isolated: bool) !void {
         _ = name;
+        try requireAbsolute(keg_path);
         // bin-isolated drops the leading `bin`/`sbin`; full keeps them.
         const dirs_to_link: []const []const u8 = if (bin_isolated) linkable_dirs[2..] else &linkable_dirs;
 
@@ -547,4 +555,15 @@ test "conflict-check dir set is derived from linkable_dirs for both isolation mo
 
     try testing.expectEqual(expected_isolated.len, isolated.len);
     for (isolated, expected_isolated) |got, want| try testing.expectEqualStrings(want, got);
+}
+
+test "link and checkConflicts refuse a relative keg path instead of aborting" {
+    // Restore paths relink from DB rows after unlinking the old links, so a
+    // damaged row must surface as an error they can report.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var linker = Linker.init(std.Options.debug_io, testing.allocator, &db, "/tmp/malt-linker-rel");
+    try testing.expectError(LinkError.LinkFailed, linker.link("Cellar/relkeg/1.0", "relkeg", 1, false));
+    try testing.expectError(LinkError.LinkFailed, linker.checkConflicts("Cellar/relkeg/1.0", false));
 }

@@ -99,6 +99,11 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
         return error.Aborted;
     };
     const cellar_path = std.mem.sliceTo(cellar_path_raw, 0);
+    // malt only records absolute paths, and the linker walks them as such.
+    if (!std.fs.path.isAbsolute(cellar_path)) {
+        output.err("The install record for {s} is damaged (cellar path '{s}' is not absolute). Run `mt reinstall {s}` to repair it.", .{ target_name, cellar_path, target_name });
+        return error.Aborted;
+    }
 
     var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
 
