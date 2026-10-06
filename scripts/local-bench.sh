@@ -7,11 +7,13 @@
 #   - sanity-checking numbers against a freshly built malt
 #   - reproducing a suspect CI result on a known-good laptop
 #
-# Runs four phases in order (first failure aborts the rest):
-#   1. bench tree   — rebuilds malt + clones/updates nanobrew/zerobrew
-#   2. bench wget   — reuses the tree build (SKIP_BUILD=1)
-#   3. bench ffmpeg — reuses the tree build
-#   4. stress ffmpeg ×20 — malt-only cold-install race detector
+# Runs six phases in order (first failure aborts the rest):
+#   1. bench tree      — rebuilds malt + clones/updates nanobrew/zerobrew
+#   2. bench wget      — reuses the tree build (SKIP_BUILD=1)
+#   3. bench ffmpeg    — reuses the tree build
+#   4. bench openjdk   — reuses the tree build
+#   5. bench tesseract — reuses the tree build
+#   6. stress ffmpeg ×20 — malt-only cold-install race detector
 #
 # If you only want to iterate on part of the bench, call scripts/bench.sh directly.
 #
@@ -61,6 +63,8 @@ export BENCH_FAIL_FAST="${BENCH_FAIL_FAST:-1}"
 ./scripts/bench.sh tree
 SKIP_BUILD=1 ./scripts/bench.sh wget
 SKIP_BUILD=1 ./scripts/bench.sh ffmpeg
+SKIP_BUILD=1 ./scripts/bench.sh openjdk
+SKIP_BUILD=1 ./scripts/bench.sh tesseract
 BENCH_STRESS=20 SKIP_BUILD=1 SKIP_OTHERS=1 SKIP_BREW=1 ./scripts/bench.sh ffmpeg
 
 if [ "$CLEAN" = "1" ]; then

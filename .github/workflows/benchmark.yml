@@ -12,7 +12,7 @@ permissions:
 jobs:
   benchmark:
     name: macOS Benchmarks
-    runs-on: macos-14
+    runs-on: macos-26
     env:
       # Wipe the malt prefix between cold runs so the published numbers
       # reflect a real network download, not a store-cache hit. Fail loud
@@ -61,6 +61,17 @@ jobs:
         id: ffmpeg
         run: SKIP_BUILD=1 ./scripts/bench.sh ffmpeg
 
+      # One very large bottle plus a wide dep graph: download and extraction
+      # throughput rather than per-package overhead.
+      - name: Benchmark openjdk
+        id: openjdk
+        run: SKIP_BUILD=1 ./scripts/bench.sh openjdk
+
+      # The widest graph of prefix-pinned bottles: relocation cost at scale.
+      - name: Benchmark tesseract
+        id: tesseract
+        run: SKIP_BUILD=1 ./scripts/bench.sh tesseract
+
       # --- Race detection -----------------------------------------------------
       #
       # Single-sample benchmarks miss low-rate races in the parallel install
@@ -108,7 +119,7 @@ jobs:
       - name: Summary
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## Benchmark Results — macOS 14 (Apple Silicon)
+          ## Benchmark Results — macOS 26 (Apple Silicon)
 
           - Benchmarked releases: malt `${STEPS_TREE_OUTPUTS_MT_VER}`, nanobrew `${STEPS_TREE_OUTPUTS_NB_VER}`, zerobrew `${STEPS_TREE_OUTPUTS_ZB_VER}`
 
@@ -123,15 +134,19 @@ jobs:
           | Package | malt | nanobrew | zerobrew | Homebrew |
           |---------|------|----------|----------|----------|
           | **tree** (0 deps) | ${STEPS_TREE_OUTPUTS_MT_COLD_DISP} | ${STEPS_TREE_OUTPUTS_NB_COLD_DISP} | ${STEPS_TREE_OUTPUTS_ZB_COLD_DISP} | ${STEPS_TREE_OUTPUTS_BREW_COLD_DISP} |
-          | **wget** (6 deps) | ${STEPS_WGET_OUTPUTS_MT_COLD_DISP} | ${STEPS_WGET_OUTPUTS_NB_COLD_DISP} | ${STEPS_WGET_OUTPUTS_ZB_COLD_DISP} | ${STEPS_WGET_OUTPUTS_BREW_COLD_DISP} |
-          | **ffmpeg** (11 deps) | ${STEPS_FFMPEG_OUTPUTS_MT_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_NB_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_ZB_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_BREW_COLD_DISP} |
+          | **wget** (7 deps) | ${STEPS_WGET_OUTPUTS_MT_COLD_DISP} | ${STEPS_WGET_OUTPUTS_NB_COLD_DISP} | ${STEPS_WGET_OUTPUTS_ZB_COLD_DISP} | ${STEPS_WGET_OUTPUTS_BREW_COLD_DISP} |
+          | **ffmpeg** (14 deps) | ${STEPS_FFMPEG_OUTPUTS_MT_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_NB_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_ZB_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_BREW_COLD_DISP} |
+          | **openjdk** (29 deps) | ${STEPS_OPENJDK_OUTPUTS_MT_COLD_DISP} | ${STEPS_OPENJDK_OUTPUTS_NB_COLD_DISP} | ${STEPS_OPENJDK_OUTPUTS_ZB_COLD_DISP} | ${STEPS_OPENJDK_OUTPUTS_BREW_COLD_DISP} |
+          | **tesseract** (37 deps) | ${STEPS_TESSERACT_OUTPUTS_MT_COLD_DISP} | ${STEPS_TESSERACT_OUTPUTS_NB_COLD_DISP} | ${STEPS_TESSERACT_OUTPUTS_ZB_COLD_DISP} | ${STEPS_TESSERACT_OUTPUTS_BREW_COLD_DISP} |
 
           ### Warm Install
           | Package | malt | nanobrew | zerobrew |
           |---------|------|----------|----------|
           | **tree** (0 deps) | ${STEPS_TREE_OUTPUTS_MT_WARM} | ${STEPS_TREE_OUTPUTS_NB_WARM} | ${STEPS_TREE_OUTPUTS_ZB_WARM} |
-          | **wget** (6 deps) | ${STEPS_WGET_OUTPUTS_MT_WARM} | ${STEPS_WGET_OUTPUTS_NB_WARM} | ${STEPS_WGET_OUTPUTS_ZB_WARM} |
-          | **ffmpeg** (11 deps) | ${STEPS_FFMPEG_OUTPUTS_MT_WARM} | ${STEPS_FFMPEG_OUTPUTS_NB_WARM} | ${STEPS_FFMPEG_OUTPUTS_ZB_WARM} |
+          | **wget** (7 deps) | ${STEPS_WGET_OUTPUTS_MT_WARM} | ${STEPS_WGET_OUTPUTS_NB_WARM} | ${STEPS_WGET_OUTPUTS_ZB_WARM} |
+          | **ffmpeg** (14 deps) | ${STEPS_FFMPEG_OUTPUTS_MT_WARM} | ${STEPS_FFMPEG_OUTPUTS_NB_WARM} | ${STEPS_FFMPEG_OUTPUTS_ZB_WARM} |
+          | **openjdk** (29 deps) | ${STEPS_OPENJDK_OUTPUTS_MT_WARM} | ${STEPS_OPENJDK_OUTPUTS_NB_WARM} | ${STEPS_OPENJDK_OUTPUTS_ZB_WARM} |
+          | **tesseract** (37 deps) | ${STEPS_TESSERACT_OUTPUTS_MT_WARM} | ${STEPS_TESSERACT_OUTPUTS_NB_WARM} | ${STEPS_TESSERACT_OUTPUTS_ZB_WARM} |
           EOF
         env:
           STEPS_TREE_OUTPUTS_MT_SIZE: ${{ steps.tree.outputs.mt_size }}
@@ -149,9 +164,17 @@ jobs:
           STEPS_WGET_OUTPUTS_ZB_COLD_DISP: ${{ steps.wget.outputs.zb_cold_disp }}
           STEPS_WGET_OUTPUTS_BREW_COLD_DISP: ${{ steps.wget.outputs.brew_cold_disp }}
           STEPS_FFMPEG_OUTPUTS_MT_COLD_DISP: ${{ steps.ffmpeg.outputs.mt_cold_disp }}
+          STEPS_OPENJDK_OUTPUTS_MT_COLD_DISP: ${{ steps.openjdk.outputs.mt_cold_disp }}
+          STEPS_TESSERACT_OUTPUTS_MT_COLD_DISP: ${{ steps.tesseract.outputs.mt_cold_disp }}
           STEPS_FFMPEG_OUTPUTS_NB_COLD_DISP: ${{ steps.ffmpeg.outputs.nb_cold_disp }}
+          STEPS_OPENJDK_OUTPUTS_NB_COLD_DISP: ${{ steps.openjdk.outputs.nb_cold_disp }}
+          STEPS_TESSERACT_OUTPUTS_NB_COLD_DISP: ${{ steps.tesseract.outputs.nb_cold_disp }}
           STEPS_FFMPEG_OUTPUTS_ZB_COLD_DISP: ${{ steps.ffmpeg.outputs.zb_cold_disp }}
+          STEPS_OPENJDK_OUTPUTS_ZB_COLD_DISP: ${{ steps.openjdk.outputs.zb_cold_disp }}
+          STEPS_TESSERACT_OUTPUTS_ZB_COLD_DISP: ${{ steps.tesseract.outputs.zb_cold_disp }}
           STEPS_FFMPEG_OUTPUTS_BREW_COLD_DISP: ${{ steps.ffmpeg.outputs.brew_cold_disp }}
+          STEPS_OPENJDK_OUTPUTS_BREW_COLD_DISP: ${{ steps.openjdk.outputs.brew_cold_disp }}
+          STEPS_TESSERACT_OUTPUTS_BREW_COLD_DISP: ${{ steps.tesseract.outputs.brew_cold_disp }}
           STEPS_TREE_OUTPUTS_MT_WARM: ${{ steps.tree.outputs.mt_warm }}
           STEPS_TREE_OUTPUTS_NB_WARM: ${{ steps.tree.outputs.nb_warm }}
           STEPS_TREE_OUTPUTS_ZB_WARM: ${{ steps.tree.outputs.zb_warm }}
@@ -159,8 +182,14 @@ jobs:
           STEPS_WGET_OUTPUTS_NB_WARM: ${{ steps.wget.outputs.nb_warm }}
           STEPS_WGET_OUTPUTS_ZB_WARM: ${{ steps.wget.outputs.zb_warm }}
           STEPS_FFMPEG_OUTPUTS_MT_WARM: ${{ steps.ffmpeg.outputs.mt_warm }}
+          STEPS_OPENJDK_OUTPUTS_MT_WARM: ${{ steps.openjdk.outputs.mt_warm }}
+          STEPS_TESSERACT_OUTPUTS_MT_WARM: ${{ steps.tesseract.outputs.mt_warm }}
           STEPS_FFMPEG_OUTPUTS_NB_WARM: ${{ steps.ffmpeg.outputs.nb_warm }}
+          STEPS_OPENJDK_OUTPUTS_NB_WARM: ${{ steps.openjdk.outputs.nb_warm }}
+          STEPS_TESSERACT_OUTPUTS_NB_WARM: ${{ steps.tesseract.outputs.nb_warm }}
           STEPS_FFMPEG_OUTPUTS_ZB_WARM: ${{ steps.ffmpeg.outputs.zb_warm }}
+          STEPS_OPENJDK_OUTPUTS_ZB_WARM: ${{ steps.openjdk.outputs.zb_warm }}
+          STEPS_TESSERACT_OUTPUTS_ZB_WARM: ${{ steps.tesseract.outputs.zb_warm }}
 
       - name: Update README
         run: |
@@ -170,7 +199,7 @@ jobs:
           # tables so no table header has to carry them.
           cat > /tmp/meta_table.md << TABLE
           <!-- BENCH:META:START -->
-          - Install times on macOS 14 (Apple Silicon).
+          - Install times on macOS 26 (Apple Silicon).
           - Benchmarked releases:
             - malt \`${STEPS_TREE_OUTPUTS_MT_VER}\`
             - nanobrew \`${STEPS_TREE_OUTPUTS_NB_VER}\`
@@ -203,8 +232,10 @@ jobs:
           | Package | malt | nanobrew | zerobrew | Homebrew |
           | ------- | ---- | -------- | -------- | -------- |
           | **tree** (0 deps) | ${STEPS_TREE_OUTPUTS_MT_COLD_DISP} | ${STEPS_TREE_OUTPUTS_NB_COLD_DISP} | ${STEPS_TREE_OUTPUTS_ZB_COLD_DISP} | ${STEPS_TREE_OUTPUTS_BREW_COLD_DISP} |
-          | **wget** (6 deps) | ${STEPS_WGET_OUTPUTS_MT_COLD_DISP} | ${STEPS_WGET_OUTPUTS_NB_COLD_DISP} | ${STEPS_WGET_OUTPUTS_ZB_COLD_DISP} | ${STEPS_WGET_OUTPUTS_BREW_COLD_DISP} |
-          | **ffmpeg** (11 deps) | ${STEPS_FFMPEG_OUTPUTS_MT_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_NB_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_ZB_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_BREW_COLD_DISP} |
+          | **wget** (7 deps) | ${STEPS_WGET_OUTPUTS_MT_COLD_DISP} | ${STEPS_WGET_OUTPUTS_NB_COLD_DISP} | ${STEPS_WGET_OUTPUTS_ZB_COLD_DISP} | ${STEPS_WGET_OUTPUTS_BREW_COLD_DISP} |
+          | **ffmpeg** (14 deps) | ${STEPS_FFMPEG_OUTPUTS_MT_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_NB_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_ZB_COLD_DISP} | ${STEPS_FFMPEG_OUTPUTS_BREW_COLD_DISP} |
+          | **openjdk** (29 deps) | ${STEPS_OPENJDK_OUTPUTS_MT_COLD_DISP} | ${STEPS_OPENJDK_OUTPUTS_NB_COLD_DISP} | ${STEPS_OPENJDK_OUTPUTS_ZB_COLD_DISP} | ${STEPS_OPENJDK_OUTPUTS_BREW_COLD_DISP} |
+          | **tesseract** (37 deps) | ${STEPS_TESSERACT_OUTPUTS_MT_COLD_DISP} | ${STEPS_TESSERACT_OUTPUTS_NB_COLD_DISP} | ${STEPS_TESSERACT_OUTPUTS_ZB_COLD_DISP} | ${STEPS_TESSERACT_OUTPUTS_BREW_COLD_DISP} |
           TABLE
 
           # Explain any ⚠️ cell so a reader isn't left guessing why a number is
@@ -234,8 +265,10 @@ jobs:
           | Package | malt | nanobrew | zerobrew |
           | ------- | ---- | -------- | -------- |
           | **tree** (0 deps) | ${STEPS_TREE_OUTPUTS_MT_WARM} | ${STEPS_TREE_OUTPUTS_NB_WARM} | ${STEPS_TREE_OUTPUTS_ZB_WARM} |
-          | **wget** (6 deps) | ${STEPS_WGET_OUTPUTS_MT_WARM} | ${STEPS_WGET_OUTPUTS_NB_WARM} | ${STEPS_WGET_OUTPUTS_ZB_WARM} |
-          | **ffmpeg** (11 deps) | ${STEPS_FFMPEG_OUTPUTS_MT_WARM} | ${STEPS_FFMPEG_OUTPUTS_NB_WARM} | ${STEPS_FFMPEG_OUTPUTS_ZB_WARM} |
+          | **wget** (7 deps) | ${STEPS_WGET_OUTPUTS_MT_WARM} | ${STEPS_WGET_OUTPUTS_NB_WARM} | ${STEPS_WGET_OUTPUTS_ZB_WARM} |
+          | **ffmpeg** (14 deps) | ${STEPS_FFMPEG_OUTPUTS_MT_WARM} | ${STEPS_FFMPEG_OUTPUTS_NB_WARM} | ${STEPS_FFMPEG_OUTPUTS_ZB_WARM} |
+          | **openjdk** (29 deps) | ${STEPS_OPENJDK_OUTPUTS_MT_WARM} | ${STEPS_OPENJDK_OUTPUTS_NB_WARM} | ${STEPS_OPENJDK_OUTPUTS_ZB_WARM} |
+          | **tesseract** (37 deps) | ${STEPS_TESSERACT_OUTPUTS_MT_WARM} | ${STEPS_TESSERACT_OUTPUTS_NB_WARM} | ${STEPS_TESSERACT_OUTPUTS_ZB_WARM} |
           <!-- BENCH:WARM:END -->
           TABLE
 
@@ -259,7 +292,7 @@ jobs:
 
           # Update date. The anchor pins to the date blockquote line that
           # both files carry.
-          sed -i '' "s|^> Apple Silicon (GitHub Actions macos-14), .*|> Apple Silicon (GitHub Actions macos-14), $DATE. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).|" README.md BENCHMARKS.md
+          sed -i '' "s|^> Apple Silicon (GitHub Actions macos-[0-9]*), .*|> Apple Silicon (GitHub Actions macos-26), $DATE. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).|" README.md BENCHMARKS.md
         env:
           STEPS_TREE_OUTPUTS_MT_SIZE: ${{ steps.tree.outputs.mt_size }}
           STEPS_TREE_OUTPUTS_NB_SIZE: ${{ steps.tree.outputs.nb_size }}
@@ -276,9 +309,17 @@ jobs:
           STEPS_WGET_OUTPUTS_ZB_COLD_DISP: ${{ steps.wget.outputs.zb_cold_disp }}
           STEPS_WGET_OUTPUTS_BREW_COLD_DISP: ${{ steps.wget.outputs.brew_cold_disp }}
           STEPS_FFMPEG_OUTPUTS_MT_COLD_DISP: ${{ steps.ffmpeg.outputs.mt_cold_disp }}
+          STEPS_OPENJDK_OUTPUTS_MT_COLD_DISP: ${{ steps.openjdk.outputs.mt_cold_disp }}
+          STEPS_TESSERACT_OUTPUTS_MT_COLD_DISP: ${{ steps.tesseract.outputs.mt_cold_disp }}
           STEPS_FFMPEG_OUTPUTS_NB_COLD_DISP: ${{ steps.ffmpeg.outputs.nb_cold_disp }}
+          STEPS_OPENJDK_OUTPUTS_NB_COLD_DISP: ${{ steps.openjdk.outputs.nb_cold_disp }}
+          STEPS_TESSERACT_OUTPUTS_NB_COLD_DISP: ${{ steps.tesseract.outputs.nb_cold_disp }}
           STEPS_FFMPEG_OUTPUTS_ZB_COLD_DISP: ${{ steps.ffmpeg.outputs.zb_cold_disp }}
+          STEPS_OPENJDK_OUTPUTS_ZB_COLD_DISP: ${{ steps.openjdk.outputs.zb_cold_disp }}
+          STEPS_TESSERACT_OUTPUTS_ZB_COLD_DISP: ${{ steps.tesseract.outputs.zb_cold_disp }}
           STEPS_FFMPEG_OUTPUTS_BREW_COLD_DISP: ${{ steps.ffmpeg.outputs.brew_cold_disp }}
+          STEPS_OPENJDK_OUTPUTS_BREW_COLD_DISP: ${{ steps.openjdk.outputs.brew_cold_disp }}
+          STEPS_TESSERACT_OUTPUTS_BREW_COLD_DISP: ${{ steps.tesseract.outputs.brew_cold_disp }}
           STEPS_TREE_OUTPUTS_MT_WARM: ${{ steps.tree.outputs.mt_warm }}
           STEPS_TREE_OUTPUTS_NB_WARM: ${{ steps.tree.outputs.nb_warm }}
           STEPS_TREE_OUTPUTS_ZB_WARM: ${{ steps.tree.outputs.zb_warm }}
@@ -286,8 +327,14 @@ jobs:
           STEPS_WGET_OUTPUTS_NB_WARM: ${{ steps.wget.outputs.nb_warm }}
           STEPS_WGET_OUTPUTS_ZB_WARM: ${{ steps.wget.outputs.zb_warm }}
           STEPS_FFMPEG_OUTPUTS_MT_WARM: ${{ steps.ffmpeg.outputs.mt_warm }}
+          STEPS_OPENJDK_OUTPUTS_MT_WARM: ${{ steps.openjdk.outputs.mt_warm }}
+          STEPS_TESSERACT_OUTPUTS_MT_WARM: ${{ steps.tesseract.outputs.mt_warm }}
           STEPS_FFMPEG_OUTPUTS_NB_WARM: ${{ steps.ffmpeg.outputs.nb_warm }}
+          STEPS_OPENJDK_OUTPUTS_NB_WARM: ${{ steps.openjdk.outputs.nb_warm }}
+          STEPS_TESSERACT_OUTPUTS_NB_WARM: ${{ steps.tesseract.outputs.nb_warm }}
           STEPS_FFMPEG_OUTPUTS_ZB_WARM: ${{ steps.ffmpeg.outputs.zb_warm }}
+          STEPS_OPENJDK_OUTPUTS_ZB_WARM: ${{ steps.openjdk.outputs.zb_warm }}
+          STEPS_TESSERACT_OUTPUTS_ZB_WARM: ${{ steps.tesseract.outputs.zb_warm }}
 
       - name: Open PR with benchmark results
         # Only publish the README refresh when the workflow runs against
@@ -323,7 +370,7 @@ jobs:
           ## Description
 
           Weekly benchmark refresh produced by the [benchmark workflow](.github/workflows/benchmark.yml).
-          Updates the binary size, cold install, and warm install tables in BENCHMARKS.md (and the cold and warm tables in the README) with fresh numbers from a true cold install on macos-14 (BENCH_TRUE_COLD=1, BENCH_FAIL_FAST=1).
+          Updates the binary size, cold install, and warm install tables in BENCHMARKS.md (and the cold and warm tables in the README) with fresh numbers from a true cold install on macos-26 (BENCH_TRUE_COLD=1, BENCH_FAIL_FAST=1).
 
           ## Related Issue
 
