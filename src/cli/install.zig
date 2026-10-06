@@ -130,6 +130,16 @@ pub fn unlinkStaleKegLinks(
     }
 }
 
+/// True when `stale` is another version dir in the same `Cellar/<name>/` as
+/// the malt-built `keep` path, so deleting it cannot reach outside the keg.
+fn isSiblingKegDir(stale: []const u8, keep: []const u8) bool {
+    const keep_dir = std.fs.path.dirname(keep) orelse return false;
+    const stale_dir = std.fs.path.dirname(stale) orelse return false;
+    const leaf = std.fs.path.basename(stale);
+    if (!std.fs.path.isAbsolute(keep_dir) or !std.mem.eql(u8, stale_dir, keep_dir)) return false;
+    return leaf.len > 0 and !std.mem.eql(u8, leaf, ".") and !std.mem.eql(u8, leaf, "..");
+}
+
 /// Drop the DB rows + on-disk dirs for every `kegs` row of `name`
 /// whose `cellar_path` differs from `keep_cellar_path`. Pairs with
 /// `unlinkStaleKegLinks` (which clears the symlinks before
@@ -179,7 +189,9 @@ pub fn dropStaleKegRows(
     for (stale.items) |s| {
         deleteDependencyRows(db, s.id);
         deleteKegRowOnly(db, s.id);
-        std.Io.Dir.cwd().deleteTree(ctx.io, s.path) catch {};
+        // A damaged or hand-edited path can point anywhere; the row alone is
+        // safe to drop, the delete only for a sibling version of the kept keg.
+        if (isSiblingKegDir(s.path, keep_cellar_path)) std.Io.Dir.cwd().deleteTree(ctx.io, s.path) catch {};
     }
 }
 
@@ -2355,4 +2367,19 @@ test "the prune helpers refuse a name or version that leaves the Cellar" {
     }
 
     try std.Io.Dir.accessAbsolute(ctx.io, victim, .{});
+}
+
+test "isSiblingKegDir accepts only another version dir beside the kept keg" {
+    const keep = "/opt/malt/Cellar/foo/2.0";
+    try std.testing.expect(isSiblingKegDir("/opt/malt/Cellar/foo/1.0", keep));
+    try std.testing.expect(isSiblingKegDir("/opt/malt/Cellar/foo/1.0/", keep));
+    // Escapes, another package, a nested path, or no absolute anchor: never.
+    try std.testing.expect(!isSiblingKegDir("/opt/malt/Cellar/foo/..", keep));
+    try std.testing.expect(!isSiblingKegDir("/opt/malt/Cellar/foo/.", keep));
+    try std.testing.expect(!isSiblingKegDir("/opt/malt/Cellar/foo/1.0/../../bar/1.0", keep));
+    try std.testing.expect(!isSiblingKegDir("/opt/malt/Cellar/bar/1.0", keep));
+    try std.testing.expect(!isSiblingKegDir("/opt/malt/Cellar/foo/1.0/sub", keep));
+    try std.testing.expect(!isSiblingKegDir("/Users/me/work", keep));
+    try std.testing.expect(!isSiblingKegDir("Cellar/foo/1.0", keep));
+    try std.testing.expect(!isSiblingKegDir("Cellar/foo/1.0", "Cellar/foo/2.0"));
 }
