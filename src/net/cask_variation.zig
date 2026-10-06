@@ -1,7 +1,7 @@
-//! malt — cask variation resolution
-//! Which `variations` key and `depends_on.macos` verdict apply to the host
-//! running malt. Shared by the per-cask parser and the bulk index extractor
-//! so a cask resolves the same way on both paths.
+//! malt — macOS variation resolution
+//! Which cask `variations` key, `depends_on.macos` verdict and formula bottle
+//! tag apply to the host running malt. Shared by the parsers and the bulk
+//! index extractor so a package resolves the same way on every path.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -33,12 +33,49 @@ pub fn macosCodename(major: u32) ?[]const u8 {
     };
 }
 
-/// The `variations` key for this host: `arm64_<codename>` on Apple silicon,
-/// the bare codename on Intel.
+/// The `variations` or bottle key for a macOS major: `arm64_<codename>` on
+/// Apple silicon, the bare codename on Intel.
 pub fn variationKey(buf: []u8, major: u32) ?[]const u8 {
     const codename = macosCodename(major) orelse return null;
     const prefix: []const u8 = if (builtin.cpu.arch == .aarch64) "arm64_" else "";
     return std.fmt.bufPrint(buf, "{s}{s}", .{ prefix, codename }) catch null;
+}
+
+/// macOS majors that publish bottle tags, newest first.
+const bottle_majors = [_]u32{ 27, 26, 15, 14, 13, 12, 11 };
+
+/// The tag to pour from a tag-keyed bottle map, in Homebrew's order: the
+/// host's own, then `all`, then the newest not newer than the host. A newer
+/// tag's binaries would not load here. Null when nothing fits.
+pub fn bottleKey(buf: []u8, files: anytype, host_major: ?u32) ?[]const u8 {
+    if (host_major) |host| {
+        if (variationKey(buf, host)) |key| if (files.contains(key)) return key;
+    }
+    if (files.contains("all")) return "all";
+    for (bottle_majors) |major| {
+        // An unreadable host version keeps the newest-first pick: refusing
+        // every install would be worse than the risk it guards.
+        if (host_major) |host| if (major > host) continue;
+        const key = variationKey(buf, major) orelse continue;
+        if (files.contains(key)) return key;
+    }
+    return null;
+}
+
+/// Whether a formula document's `bottle` object offers this host a bottle.
+pub fn bottlePourable(bottle: ?std.json.Value, host_major: ?u32) bool {
+    const files = objectAt(bottle, &.{ "stable", "files" }) orelse return true;
+    var buf: [32]u8 = undefined;
+    return bottleKey(&buf, files, host_major) != null;
+}
+
+fn objectAt(root: ?std.json.Value, path: []const []const u8) ?std.json.ObjectMap {
+    var v = root orelse return null;
+    for (path) |key| {
+        if (v != .object) return null;
+        v = v.object.get(key) orelse return null;
+    }
+    return if (v == .object) v.object else null;
 }
 
 /// One `depends_on.macos` clause, e.g. `{">=": ["12"]}` or
@@ -179,4 +216,24 @@ test "an empty macos clause, an unknown major, or no clause gates nothing" {
     try std.testing.expect(macosRequirement(p.value) == null);
     try std.testing.expect(osSupported(null, 14));
     try std.testing.expect(osSupported(.{ .op = ">=", .versions = &.{} }, null));
+}
+
+test "bottlePourable refuses only a bottle map with nothing this macOS can load" {
+    const a = std.testing.allocator;
+    const arch = if (builtin.cpu.arch == .aarch64) "arm64_" else "";
+    var newer = try std.json.parseFromSlice(std.json.Value, a, "{\"stable\":{\"files\":{\"" ++ arch ++ "tahoe\":{},\"" ++ arch ++ "sequoia\":{}}}}", .{});
+    defer newer.deinit();
+    try std.testing.expect(!bottlePourable(newer.value, 14));
+    try std.testing.expect(bottlePourable(newer.value, 15));
+    try std.testing.expect(bottlePourable(newer.value, null));
+
+    var all = try std.json.parseFromSlice(std.json.Value, a, "{\"stable\":{\"files\":{\"all\":{}}}}", .{});
+    defer all.deinit();
+    try std.testing.expect(bottlePourable(all.value, 14));
+
+    // No bottle map says nothing about this host, so it is not refused.
+    var bare = try std.json.parseFromSlice(std.json.Value, a, "{}", .{});
+    defer bare.deinit();
+    try std.testing.expect(bottlePourable(bare.value, 14));
+    try std.testing.expect(bottlePourable(null, 14));
 }

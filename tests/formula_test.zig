@@ -65,7 +65,8 @@ test "resolve bottle for current platform" {
     var formula = try formula_mod.parseFormula(alloc, minimal_json);
     defer formula.deinit();
 
-    const bottle = try formula_mod.resolveBottle(&formula);
+    // Pinned to sequoia: the fixture's only tag, whatever macOS runs the suite.
+    const bottle = try formula_mod.resolveBottleFor(&formula, 15);
     try testing.expect(bottle.sha256.len > 0);
     try testing.expect(bottle.url.len > 0);
 }
@@ -116,13 +117,13 @@ test "handle missing bottle for platform" {
     try testing.expectError(formula_mod.FormulaError.NoBottleAvailable, result);
 }
 
-test "resolveBottle prefers tahoe over sequoia on current arch" {
+test "resolveBottleFor takes the host's tag on current arch, never a newer one" {
     var arena = testArena();
     defer arena.deinit();
     const alloc = arena.allocator();
 
     // Bottle map advertises both tahoe and sequoia variants for both arches.
-    // Newer-OS preference: tahoe must win on macOS 26 for the current arch.
+    // A tahoe bottle on a sequoia host would not load, so each host gets its own.
     const json =
         \\{
         \\  "name": "rust",
@@ -153,14 +154,12 @@ test "resolveBottle prefers tahoe over sequoia on current arch" {
     var formula = try formula_mod.parseFormula(alloc, json);
     defer formula.deinit();
 
-    const bottle = try formula_mod.resolveBottle(&formula);
-
-    const expected_sha = switch (builtin.cpu.arch) {
-        .aarch64 => "a" ** 64,
-        .x86_64 => "c" ** 64,
-        else => "a" ** 64,
-    };
-    try testing.expectEqualStrings(expected_sha, bottle.sha256);
+    const arm = builtin.cpu.arch == .aarch64;
+    const tahoe = try formula_mod.resolveBottleFor(&formula, 26);
+    try testing.expectEqualStrings(if (arm) "a" ** 64 else "c" ** 64, tahoe.sha256);
+    const sequoia = try formula_mod.resolveBottleFor(&formula, 15);
+    try testing.expectEqualStrings(if (arm) "b" ** 64 else "d" ** 64, sequoia.sha256);
+    try testing.expectError(formula_mod.FormulaError.NoBottleAvailable, formula_mod.resolveBottleFor(&formula, 14));
 }
 
 test "parse formula with post_install_defined true" {

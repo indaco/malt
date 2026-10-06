@@ -59,7 +59,7 @@ mkdir -p "$PREFIX/db" "$MALT_CACHE/api"
 # a fully offline dry-run can find, and only if it looks under $MALT_CACHE.
 sqlite3 "$DB" "INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
   VALUES ('regfoo', 'regfoo', '1.0', 0, 'seedsha', '/tmp/c/regfoo/1.0');"
-printf '{"name":"regfoo","versions":{"stable":"2.0"},"revision":0}' >"$MALT_CACHE/api/formula_regfoo.json"
+printf '{"name":"regfoo","versions":{"stable":"2.0"},"revision":0,"bottle":{"stable":{"files":{"all":{"cellar":":any","url":"u","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}}' >"$MALT_CACHE/api/formula_regfoo.json"
 
 OUT=$("$BIN" upgrade --dry-run 2>&1 || true)
 echo "$OUT" | grep -q "would upgrade regfoo 1.0 -> 2.0" ||
