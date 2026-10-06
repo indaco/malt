@@ -120,6 +120,33 @@ test "collect skips kegs the core document cannot speak for" {
     try testing.expectEqual(@as(u32, 0), report.count());
 }
 
+test "collect reads neither outside the API cache nor a corrupt document" {
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "untrusted");
+    defer s.deinit(allocator);
+
+    // `x/../../escaped` would resolve to `<cache>/escaped.json`; plant a damning
+    // document there so only the name check keeps it unread.
+    var buf: [512]u8 = undefined;
+    try test_io.cwd().createDirPath(io, try std.fmt.bufPrint(&buf, "{s}/api/formula_x", .{s.cache}));
+    try s.seed("x/../../escaped", null, sha_a, null);
+    try test_io.cwd().writeFile(io, .{
+        .sub_path = try std.fmt.bufPrint(&buf, "{s}/escaped.json", .{s.cache}),
+        .data = "{\"name\":\"escaped\",\"full_name\":\"escaped\",\"versions\":{\"stable\":\"1.0\"},\"revision\":0," ++
+            "\"bottle\":{\"stable\":{\"root_url\":\"https://x\",\"files\":{" ++ comptime bottle(newer_tag, sha_a) ++ "}}}}",
+    });
+
+    try s.seed("corrupt", null, sha_a, null);
+    try test_io.cwd().writeFile(io, .{
+        .sub_path = try std.fmt.bufPrint(&buf, "{s}/api/formula_corrupt.json", .{s.cache}),
+        .data = "{not json",
+    });
+
+    var report = bottle_host.collect(allocator, io, s.path, s.cache, host_major);
+    defer report.deinit(allocator);
+    try testing.expectEqual(@as(u32, 0), report.count());
+}
+
 test "collect never flags on an unreadable host version" {
     const allocator = testing.allocator;
     var s = try Scratch.init(allocator, "null_host");
