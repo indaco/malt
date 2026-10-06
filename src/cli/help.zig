@@ -420,6 +420,7 @@ const tap_help =
     \\  --yes, -y            Confirm the apply step of --refresh --all.
     \\  --json               Emit the --refresh --all diff as
     \\                       `{"taps":[{"tap","old_sha","new_sha","status","error"}]}`.
+    \\  --dry-run            Show what would change without saving it
     \\
     \\Taps are auto-resolved during install, so explicit `tap` is
     \\usually unnecessary — the auto-tap also pins the SHA on first use.
@@ -433,6 +434,9 @@ const untap_help =
     \\pinned to. Packages already installed from that tap stay installed
     \\and keep working (`malt outdated --tap` still recognises them), but
     \\nothing new resolves against the tap until it is re-added.
+    \\
+    \\Flags:
+    \\  --dry-run   Show what would be removed without removing it
     \\
 ;
 

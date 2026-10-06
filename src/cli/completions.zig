@@ -189,7 +189,7 @@ pub const bash_script =
     \\        bundle-import)    cmd_flags="--dry-run -n" ;;
     \\        run)              cmd_flags="--keep" ;;
     \\        doctor)           cmd_flags="--fix --dry-run --post-install-status" ;;
-    \\        tap)              cmd_flags="--refresh --all --pin --repo --host --forge --url --force --yes -y --json" ;;
+    \\        tap)              cmd_flags="--refresh --all --pin --repo --host --forge --url --force --yes -y --json --dry-run" ;;
     \\    esac
     \\
     \\    if [[ "$cur" == -* ]]; then
@@ -569,6 +569,7 @@ pub const zsh_script =
     \\                        '--force[Rebind an existing tap to a new --repo target]' \
     \\                        '(--yes -y)'{--yes,-y}'[Confirm --refresh --all apply]' \
     \\                        '--json[Emit refresh-all diff as JSON]' \
+    \\                        '--dry-run[Show what would change without saving it]' \
     \\                        '*::slug:'
     \\                    ;;
     \\                doctor)
@@ -853,6 +854,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l force   -d 'Rebind an existing tap to a new --repo target'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -s y -l yes -d 'Confirm --refresh --all apply'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l json    -d 'Emit refresh-all diff as JSON'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l dry-run -d 'Show what would change without saving it'
     \\
     \\    # completions — shell name as positional
     \\    complete -c $__malt_bin -n '__malt_using_command completions' -f -a 'bash zsh fish'

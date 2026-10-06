@@ -430,6 +430,7 @@ test "every exception is still needed" {
 /// checked for honouring the --dry-run their help advertises.
 const dry_run_only = [_]Command{
     .{ .name = "cleanup", .sources = &.{ "purge.zig", "purge" } },
+    .{ .name = "untap", .sources = &.{"tap.zig"} },
 };
 
 test "every command whose help advertises --dry-run reads the global flag" {
