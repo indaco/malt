@@ -7,7 +7,7 @@
 # emitted to $GITHUB_OUTPUT when present.
 #
 # Usage:
-#   scripts/bench.sh                       # build everything, bench tree+wget+ffmpeg
+#   scripts/bench.sh                       # build everything, bench tree+wget+ffmpeg+openjdk+tesseract
 #   scripts/bench.sh tree                  # bench a subset
 #   SKIP_BUILD=1 scripts/bench.sh tree     # reuse existing binaries
 #   SKIP_OTHERS=1 scripts/bench.sh         # bench only malt (and brew)
@@ -17,6 +17,11 @@
 #   BENCH_SKIP_UPDATE=1 scripts/bench.sh   # don't git-fetch nanobrew/zerobrew (offline)
 #   BENCH_STRESS=20 scripts/bench.sh ffmpeg  # stress mode — see below
 #   BENCH_PER_ROUND=1 scripts/bench.sh wget  # log every (round,tool,pkg,cold,warm) sample
+#   BENCH_BREW_FULL_COLD=1 scripts/bench.sh  # brew cold uninstalls the dep closure (default on CI)
+#
+# What is measured: the wall time of `<tool> install <pkg>`. A sample only
+# counts if the package's own binary then runs (probe_usable, untimed), so a
+# tool that exits 0 with an unusable install records FAIL, not a fast time.
 #
 # Env overrides:
 #   BENCH_WORK_DIR     Where to clone other tools      (default /tmp/malt-bench)
@@ -167,11 +172,14 @@ fi
 export MALT_PREFIX="$MALT_BENCH_PREFIX"
 export ZEROBREW_ROOT="$ZB_BENCH_PREFIX"
 export ZEROBREW_PREFIX="$ZB_BENCH_PREFIX"
+# Keep brew's periodic self-update and cleanup out of the timed install.
+export HOMEBREW_NO_AUTO_UPDATE=1
+export HOMEBREW_NO_INSTALL_CLEANUP=1
 
 if [ $# -gt 0 ]; then
   PACKAGES=("$@")
 else
-  PACKAGES=(tree wget ffmpeg)
+  PACKAGES=(tree wget ffmpeg openjdk tesseract)
 fi
 
 # --- output helpers ----------------------------------------------------------
@@ -461,6 +469,50 @@ build_zerobrew() {
   "$ZB_BIN" init >/dev/null 2>&1 || true
 }
 
+# --- usability probe ---------------------------------------------------------
+#
+# `install` exiting 0 does not mean the package works: a tool that pours a
+# bottle built for a newer macOS exits 0 and leaves a binary dyld refuses to
+# load. Each sample therefore ends by running the package's own binary from
+# the tool's `opt/` link (which also covers keg-only formulae like openjdk).
+# The probe is not timed - it only decides whether the sample counts.
+
+# probe_cmd <pkg> — "<exe> <arg>" proving <pkg> is usable; empty if unknown.
+probe_cmd() {
+  case "$1" in
+  tree) echo "tree --version" ;;
+  wget) echo "wget --version" ;;
+  ffmpeg) echo "ffmpeg -version" ;;
+  openjdk) echo "java -version" ;;
+  tesseract) echo "tesseract --version" ;;
+  esac
+}
+
+# tool_prefix <mt|nb|zb|brew> — where that tool links installed packages.
+tool_prefix() {
+  case "$1" in
+  mt) echo "$MALT_BENCH_PREFIX" ;;
+  nb) echo "$NB_BENCH_PREFIX/prefix" ;;
+  zb) echo "$ZB_BENCH_PREFIX" ;;
+  brew) brew --prefix ;;
+  esac
+}
+
+# probe_usable <key> <pkg> — exit 0 when <pkg>'s binary runs from <key>'s
+# prefix. A package with no probe entry is let through with a warning: it
+# can still be benched, its numbers just aren't proven end to end.
+probe_usable() {
+  local key="$1" pkg="$2" cmd exe arg
+  cmd=$(probe_cmd "$pkg")
+  if [ -z "$cmd" ]; then
+    warn "no usability probe for $pkg - install time is unverified"
+    return 0
+  fi
+  exe=${cmd%% *}
+  arg=${cmd#* }
+  "$(tool_prefix "$key")/opt/$pkg/bin/$exe" "$arg" >/dev/null 2>&1
+}
+
 # --- timing ------------------------------------------------------------------
 
 # Run `<bin> <uninstall> <pkg>` then time `<bin> <install> <pkg>`. Echo seconds.
@@ -481,6 +533,10 @@ time_install() {
     TIMEFORMAT='%R'
     time "$bin" "$install" "$pkg" >/tmp/malt-bench.out 2>&1
   } 2>&1) || rc=$?
+  if [ "$rc" -eq 0 ] && ! probe_usable "$key" "$pkg"; then
+    warn "$bin install $pkg exited 0 but '$(probe_cmd "$pkg")' does not run"
+    rc=1
+  fi
   if [ "$rc" -ne 0 ]; then
     warn "$bin install $pkg FAILED (exit=$rc); output:"
     sed 's/^/    /' /tmp/malt-bench.out >&2
@@ -502,6 +558,10 @@ time_brew_install() {
     TIMEFORMAT='%R'
     time brew install "$pkg" >/tmp/malt-bench.out 2>&1
   } 2>&1) || rc=$?
+  if [ "$rc" -eq 0 ] && ! probe_usable brew "$pkg"; then
+    warn "brew install $pkg exited 0 but '$(probe_cmd "$pkg")' does not run"
+    rc=1
+  fi
   if [ "$rc" -ne 0 ]; then
     warn "brew install $pkg FAILED (exit=$rc)"
     printf 'FAIL'
@@ -649,9 +709,31 @@ prep_cold_zb() {
 # Targeted wipe (bottle file for the package plus each transitive dep)
 # rather than `brew cleanup --prune=all`, so we don't nuke the user's
 # entire Homebrew cache for everything else they've installed.
+#
+# The bottle wipe alone is not cold: `brew uninstall <pkg>` keeps every
+# dependency installed, so brew re-downloaded one bottle while the other
+# tools fetched the whole graph. Under brew_full_cold the dependency closure
+# is uninstalled and the API metadata cache dropped too, matching what an
+# emptied malt/nanobrew/zerobrew prefix costs.
+
+# brew_full_cold — true on a CI runner or with BENCH_BREW_FULL_COLD=1. Never
+# the default on a dev box: it uninstalls shared deps from the real prefix.
+brew_full_cold() {
+  [ "${CI:-}" = "true" ] || [ "${BENCH_BREW_FULL_COLD:-0}" = "1" ]
+}
+
 prep_cold_brew() {
   local pkg="$1" deps paths
   deps=$(brew deps "$pkg" 2>/dev/null || true)
+  if brew_full_cold; then
+    local installed
+    # Only the installed ones: one missing keg makes `brew uninstall` bail.
+    # shellcheck disable=SC2086  # intentional: $deps is space-separated list
+    installed=$(printf '%s\n' "$pkg" $deps | grep -Fxf - <(brew list --formula -1) || true)
+    # shellcheck disable=SC2086
+    [ -z "$installed" ] || brew uninstall --ignore-dependencies --force $installed >/dev/null 2>&1 || true
+    rm -rf "$(brew --cache)/api"
+  fi
   # `brew --cache <formula>` prints the bottle path even if absent, so
   # `rm -f` is safe against missing files.
   # shellcheck disable=SC2086
@@ -952,6 +1034,7 @@ run_bench_for() {
   fi
   if [ "$SKIP_BREW" != "1" ] && command -v brew >/dev/null 2>&1; then
     tools+=(brew)
+    brew_full_cold || warn "brew cold keeps $pkg's deps installed (set BENCH_BREW_FULL_COLD=1 to uninstall them) - not comparable"
   fi
 
   info "${BOLD}benchmark: $pkg (×$BENCH_ROUNDS rounds + warmup, median ±σ)${RESET}"
