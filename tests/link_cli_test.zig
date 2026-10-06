@@ -123,6 +123,34 @@ test "executeLink on a non-installed package returns Aborted" {
     );
 }
 
+test "executeLink refuses a damaged record whose cellar path is not absolute" {
+    // malt only records absolute paths; a relative one used to reach the
+    // linker's absolute-only directory walk and abort the process.
+    var s = try Scratch.init(testing.allocator, "relcellar_link");
+    defer s.deinit(testing.allocator);
+    try seedKeg(testing.allocator, s.path, "relpkg", "1.0", "relbin");
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try db.exec("UPDATE kegs SET cellar_path = 'Cellar/relpkg/1.0' WHERE name = 'relpkg';");
+    }
+    quiet();
+    defer unquiet();
+    for ([_]bool{ true, false }) |dry_run| {
+        output.setDryRun(dry_run);
+        defer output.setDryRun(false);
+        try testing.expectError(
+            error.Aborted,
+            link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"relpkg"}),
+        );
+    }
+    const link_path = try std.fmt.allocPrint(testing.allocator, "{s}/bin/relbin", .{s.path});
+    defer testing.allocator.free(link_path);
+    try testing.expect(!pathExists(link_path));
+}
+
 test "executeLink refuses an unknown flag before linking anything" {
     // brew's `-n` (dry run) used to fall through to a real link.
     var s = try Scratch.init(testing.allocator, "unknown_flag");

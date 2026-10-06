@@ -242,6 +242,9 @@ pub fn isInstalled(io: std.Io, db: *sqlite.Database, name: []const u8) bool {
     // Trust the DB only when the cellar_path is still on disk.
     const cp_raw = stmt.columnText(0) orelse return false;
     const cellar_path = std.mem.sliceTo(cp_raw, 0);
+    // A relative path is a damaged record that names no keg; the absolute
+    // probe would abort on it.
+    if (!std.fs.path.isAbsolute(cellar_path)) return false;
     std.Io.Dir.accessAbsolute(io, cellar_path, .{}) catch return false;
 
     // …and the opt/<name> symlink resolves. Bottles bake the opt path
@@ -722,4 +725,15 @@ test "resolve drops a self-dependency instead of listing the root as its own dep
     }
 
     try testing.expectEqual(@as(usize, 0), deps.len);
+}
+
+test "isInstalled reads a damaged relative cellar_path as not installed instead of aborting" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try @import("../db/schema.zig").initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES ('relkeg', 'relkeg', '1.0', 'aa', 'Cellar/relkeg/1.0');
+    );
+    try testing.expect(!isInstalled(fs_test_io, &db, "relkeg"));
 }

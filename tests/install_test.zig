@@ -1236,6 +1236,52 @@ test "stale-keg sweep (unlink + drop) clears the prior row, its symlinks, and it
     try testing.expectEqual(keep_id, stmt.columnInt(0));
 }
 
+test "stale-keg sweep drops a damaged relative row without deleting outside the prefix" {
+    // The path would resolve against the caller's cwd, so a reinstall run
+    // from $HOME could remove a directory the user owns.
+    var tdb = try TempDb.init("force_sweep_db_relative");
+    defer tdb.deinit();
+    const prefix = tdb.dir;
+    const keep_keg = try seedKegWithBin(prefix, "relpkg", "1.1", "relpkg-tool");
+    defer testing.allocator.free(keep_keg);
+    _ = try insertKegRow(&tdb.db, "relpkg", "1.1", 0, keep_keg);
+
+    var name_buf: [64]u8 = undefined;
+    const sentinel = try std.fmt.bufPrint(&name_buf, "malt-sentinel-relrow-{d}", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    try std.Io.Dir.cwd().createDirPath(io, sentinel);
+    defer std.Io.Dir.cwd().deleteTree(io, sentinel) catch {};
+    _ = try insertKegRow(&tdb.db, "relpkg", "1.0", 0, sentinel);
+
+    install.dropStaleKegRows(&malt.app_ctx.debug_ctx, testing.allocator, &tdb.db, "relpkg", keep_keg);
+
+    try testing.expectEqual(@as(i64, 1), try kegRowCount(&tdb.db, "relpkg"));
+    try std.Io.Dir.cwd().access(io, sentinel, .{});
+}
+
+test "stale-keg sweep drops a row pointing outside the keg's Cellar dir without deleting it" {
+    // A hand-edited absolute path is no keg of ours; removing it is the one
+    // step a reinstall cannot undo.
+    var tdb = try TempDb.init("force_sweep_db_outside");
+    defer tdb.deinit();
+    const prefix = tdb.dir;
+    const keep_keg = try seedKegWithBin(prefix, "outpkg", "1.1", "outpkg-tool");
+    defer testing.allocator.free(keep_keg);
+    _ = try insertKegRow(&tdb.db, "outpkg", "1.1", 0, keep_keg);
+
+    var path_buf: [64]u8 = undefined;
+    const outside = try std.fmt.bufPrint(&path_buf, "/tmp/malt-sentinel-outside-{d}", .{std.c.getpid()});
+    const io = std.Options.debug_io;
+    try std.Io.Dir.cwd().createDirPath(io, outside);
+    defer std.Io.Dir.cwd().deleteTree(io, outside) catch {};
+    _ = try insertKegRow(&tdb.db, "outpkg", "1.0", 0, outside);
+
+    install.dropStaleKegRows(&malt.app_ctx.debug_ctx, testing.allocator, &tdb.db, "outpkg", keep_keg);
+
+    try testing.expectEqual(@as(i64, 1), try kegRowCount(&tdb.db, "outpkg"));
+    try std.Io.Dir.accessAbsolute(io, outside, .{});
+}
+
 test "stale-keg sweep is a no-op when no sibling rows exist" {
     var tdb = try TempDb.init("force_sweep_db_solo");
     defer tdb.deinit();

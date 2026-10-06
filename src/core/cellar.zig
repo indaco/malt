@@ -507,6 +507,8 @@ fn walkMachOAndVerify(io: std.Io, allocator: std.mem.Allocator, dir_path: []cons
 /// lost. Best-effort over the relocation facade so the ELF backend slots
 /// in unchanged; an unreadable keg dir or file is simply "no link found".
 pub fn cellarLinksPath(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8, needle: []const u8) bool {
+    // A damaged relative record names no keg dir; the absolute open would abort.
+    if (!std.fs.path.isAbsolute(cellar_path)) return false;
     var dir = std.Io.Dir.openDirAbsolute(io, cellar_path, .{ .iterate = true }) catch return false;
     defer dir.close(io);
 
@@ -2250,4 +2252,8 @@ test "resolveKegFiles under allocation failure either resolves fully or hands no
         }
     }
     try testing.expect(saw_oom);
+}
+
+test "cellarLinksPath treats a damaged relative cellar_path as linking nothing" {
+    try std.testing.expect(!cellarLinksPath(std.Options.debug_io, std.testing.allocator, "Cellar/relkeg/1.0", "/opt/dep/"));
 }
