@@ -468,17 +468,17 @@ mt purge --wipe
 mt purge --wipe --backup ~/snapshot.txt --remove-binary --yes
 ```
 
-| Scope             | Removes                                                                | Confirm gate        |
-| ----------------- | ---------------------------------------------------------------------- | ------------------- |
-| `--store-orphans` | Store blobs no installed keg references                                | none                |
-| `--unused-deps`   | Indirect-install kegs no other package needs                           | none                |
-| `--cache[=DAYS]`  | Cache files older than DAYS (default 30)                               | none                |
-| `--downloads`     | Entire `{cache}/downloads` directory                                   | type `downloads`    |
-| `--stale-casks`   | Cask cache + Caskroom entries for uninstalled casks                    | none                |
-| `--old-versions`  | Non-latest version directories in `{prefix}/Cellar`                    | type `old-versions` |
-| `--broken-symlinks` | Prefix symlinks whose target no longer exists                        | none                |
-| `--housekeeping`  | = `--store-orphans --unused-deps --cache --stale-casks --broken-symlinks` | none           |
-| `--wipe`          | Every malt artefact on disk except `{prefix}/var` (mutually exclusive) | type `purge`        |
+| Scope               | Removes                                                                   | Confirm gate        |
+| ------------------- | ------------------------------------------------------------------------- | ------------------- |
+| `--store-orphans`   | Store blobs no installed keg references                                   | none                |
+| `--unused-deps`     | Indirect-install kegs no other package needs                              | none                |
+| `--cache[=DAYS]`    | Cache files older than DAYS (default 30)                                  | none                |
+| `--downloads`       | Entire `{cache}/downloads` directory                                      | type `downloads`    |
+| `--stale-casks`     | Cask cache + Caskroom entries for uninstalled casks                       | none                |
+| `--old-versions`    | Non-latest version directories in `{prefix}/Cellar`                       | type `old-versions` |
+| `--broken-symlinks` | Prefix symlinks whose target no longer exists                             | none                |
+| `--housekeeping`    | = `--store-orphans --unused-deps --cache --stale-casks --broken-symlinks` | none                |
+| `--wipe`            | Every malt artefact on disk except `{prefix}/var` (mutually exclusive)    | type `purge`        |
 
 - **Before deleting.** `--dry-run`/`-n` previews, `--yes`/`-y` skips the typed confirmation, and `--backup <path>` writes a `mt restore`-compatible manifest first. `--wipe` alone takes `--keep-cache` and `--remove-binary`.
 - **Scripting.** `--json` prints one summary object and `--output-format=ndjson` streams events, one per line; stderr stays human. A scope that could not run makes the command exit 1 (4 when the database was written by a newer malt), so a script can tell a refusal from nothing to remove.
@@ -692,36 +692,42 @@ malt verifies every download by SHA256 before extraction, installs atomically, a
 ## Benchmarks
 
 <!-- BENCH:META:START -->
+
 - Install times on macOS 14 (Apple Silicon).
 - Benchmarked releases:
   - malt `0.25.0`
   - nanobrew `v0.1.213`
   - zerobrew `v0.3.5`
+
 <!-- BENCH:META:END -->
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install (median ±σ)
 
-| Package | malt | nanobrew | zerobrew | Homebrew |
-| ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.516±0.027s | 0.589±0.033s | 1.244±0.088s | 1.341±0.195s |
-| **wget** (6 deps) | 3.225±0.328s | ⚠️ n/a (install failed) | ⚠️ n/a (install failed) | 1.496±0.194s |
+| Package              | malt         | nanobrew                | zerobrew                | Homebrew     |
+| -------------------- | ------------ | ----------------------- | ----------------------- | ------------ |
+| **tree** (0 deps)    | 0.516±0.027s | 0.589±0.033s            | 1.244±0.088s            | 1.341±0.195s |
+| **wget** (6 deps)    | 3.225±0.328s | ⚠️ n/a (install failed) | ⚠️ n/a (install failed) | 1.496±0.194s |
 | **ffmpeg** (11 deps) | 3.567±0.229s | ⚠️ n/a (install failed) | ⚠️ n/a (install failed) | 3.262±0.409s |
 
 > ⚠️ = cell omitted. That tool's cold install failed, or exceeded the
 > sanity ceiling (50 s), which reflects a regression in that tool rather
 > than a comparable install time, so the number is withheld instead of
 > published. malt is never omitted - a real malt slowdown stays visible.
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew |
-| ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.012s | 0.107s | 0.341s |
-| **wget** (6 deps) | 0.018s | ⚠️ n/a (install failed) | ⚠️ n/a (install failed) |
+| Package              | malt   | nanobrew                | zerobrew                |
+| -------------------- | ------ | ----------------------- | ----------------------- |
+| **tree** (0 deps)    | 0.012s | 0.107s                  | 0.341s                  |
+| **wget** (6 deps)    | 0.018s | ⚠️ n/a (install failed) | ⚠️ n/a (install failed) |
 | **ffmpeg** (11 deps) | 0.026s | ⚠️ n/a (install failed) | ⚠️ n/a (install failed) |
+
 <!-- BENCH:WARM:END -->
 
 > Apple Silicon (GitHub Actions macos-14), 2026-10-05. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
