@@ -157,6 +157,7 @@ pub fn extractVersionsForHost(
                 name: []const u8 = "",
                 versions: Versions = .{},
                 revision: i64 = 0,
+                bottle: ?std.json.Value = null,
             };
             const parsed = try std.json.parseFromSliceLeaky(
                 []Entry,
@@ -166,6 +167,8 @@ pub fn extractVersionsForHost(
             );
             for (parsed) |e| {
                 const stable = e.versions.stable orelse continue;
+                // Not installable here, so never reported as outdated here.
+                if (!cask_variation.bottlePourable(e.bottle, host.macos_major)) continue;
                 try appendVersionLine(allocator, &out, e.name, stable, e.revision);
             }
         },
@@ -895,6 +898,20 @@ test "extractVersions emits name<TAB>stable<TAB>revision per formula entry" {
     const out = try extractVersions(testing.allocator, .formula, body);
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("wget\t1.21.4\t0\nopenssl@3\t3.2.1\t2\n", out);
+}
+
+test "extractVersions omits a formula whose bottles all need a newer macOS" {
+    // Listing it would offer an upgrade the host refuses on every run.
+    const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
+    const body = "[{\"name\":\"wget\",\"versions\":{\"stable\":\"1.25\"},\"bottle\":{\"stable\":{\"files\":{\"" ++ arch ++ "tahoe\":{}}}}}," ++
+        "{\"name\":\"tree\",\"versions\":{\"stable\":\"2.2\"},\"bottle\":{\"stable\":{\"files\":{\"" ++ arch ++ "sonoma\":{}}}}}," ++
+        "{\"name\":\"unbottled\",\"versions\":{\"stable\":\"1.0\"}}]";
+    const sonoma = try extractVersionsForHost(testing.allocator, .formula, body, .{ .variation_key = null, .macos_major = 14 });
+    defer testing.allocator.free(sonoma);
+    try testing.expectEqualStrings("tree\t2.2\t0\nunbottled\t1.0\t0\n", sonoma);
+    const tahoe = try extractVersionsForHost(testing.allocator, .formula, body, .{ .variation_key = null, .macos_major = 26 });
+    defer testing.allocator.free(tahoe);
+    try testing.expectEqualStrings("wget\t1.25\t0\ntree\t2.2\t0\nunbottled\t1.0\t0\n", tahoe);
 }
 
 test "extractVersions defaults a missing revision to 0" {

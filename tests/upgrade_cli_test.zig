@@ -389,7 +389,7 @@ test "execute --dry-run skips a local keg and warms the snapshot with the core k
         const f = try test_io.createFileAbsolute(std.Options.debug_io, cache_json, .{ .truncate = true });
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io,
-            \\{"name":"wget","versions":{"stable":"1.22"},"revision":0}
+            \\{"name":"wget","versions":{"stable":"1.22"},"revision":0,"bottle":{"stable":{"files":{"all":{"cellar":":any","url":"u","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}}
         );
     }
     {

@@ -9,6 +9,7 @@ const service_types = @import("services/types.zig");
 const cron = @import("services/cron.zig");
 const path_component = @import("../fs/path_component.zig");
 const store_path = @import("../fs/store_path.zig");
+const cask_variation = @import("../net/cask_variation.zig");
 pub const Schedule = service_types.Schedule;
 
 pub const FormulaError = error{
@@ -249,26 +250,15 @@ pub fn dependencyPlaceholder(
 const perl_token = "@@HOMEBREW_PERL@@";
 const perl_dep = "perl";
 
-/// Sentinel for "could not read the macOS version"; `systemPerlPath` maps it
-/// to the newest interpreter, since a stale versioned path is guaranteed
-/// absent while the newest one is right for every macOS malt runs on.
-const unknown_macos_major: u32 = std.math.maxInt(u32);
-
 /// Interpreter each macOS release ships. Upstream pins the same versions, so
-/// a relocated keg lands byte-identical to a brew-poured one.
-fn systemPerlPath(macos_major: u32) []const u8 {
-    if (macos_major >= 14) return "/usr/bin/perl5.34"; // Sonoma and later
-    if (macos_major >= 11) return "/usr/bin/perl5.30"; // Big Sur and later
+/// a relocated keg lands byte-identical to a brew-poured one. An unreadable
+/// version takes the newest: a stale versioned path is guaranteed absent,
+/// while the newest one is right for every macOS malt runs on.
+fn systemPerlPath(macos_major: ?u32) []const u8 {
+    const major = macos_major orelse return "/usr/bin/perl5.34";
+    if (major >= 14) return "/usr/bin/perl5.34"; // Sonoma and later
+    if (major >= 11) return "/usr/bin/perl5.30"; // Big Sur and later
     return "/usr/bin/perl5.18";
-}
-
-fn macosMajorVersion() u32 {
-    var buf: [32]u8 = undefined;
-    var len: usize = buf.len;
-    if (std.c.sysctlbyname("kern.osproductversion", &buf, &len, null, 0) != 0) return unknown_macos_major;
-    const text = std.mem.sliceTo(buf[0..len], 0);
-    const major = text[0 .. std.mem.indexOfScalar(u8, text, '.') orelse text.len];
-    return std.fmt.parseInt(u32, major, 10) catch unknown_macos_major;
 }
 
 /// Resolve `@@HOMEBREW_PERL@@`, which bottles carry in the shebang of every
@@ -297,7 +287,7 @@ pub fn perlPlaceholder(
         const value = std.fmt.bufPrint(buf, "{s}/opt/{s}/bin/perl", .{ prefix, dep }) catch break :brewed_keg;
         return .{ .token = perl_token, .value = value };
     }
-    return .{ .token = perl_token, .value = systemPerlPath(macosMajorVersion()) };
+    return .{ .token = perl_token, .value = systemPerlPath(cask_variation.runningMacosMajor()) };
 }
 
 /// `perl` or a pinned `perl@5.xx`, which installs under its own `opt/` name.
@@ -732,46 +722,18 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
 // Bottle selection
 // ---------------------------------------------------------------------------
 
-/// macOS version codenames in descending order (newest first).
-const macos_arm64_platforms = [_][]const u8{
-    "arm64_tahoe",
-    "arm64_sequoia",
-    "arm64_sonoma",
-    "arm64_ventura",
-    "arm64_monterey",
-};
-
-const macos_x86_platforms = [_][]const u8{
-    "tahoe",
-    "sequoia",
-    "sonoma",
-    "ventura",
-    "monterey",
-};
-
-/// Select the best matching bottle for the current platform.
+/// Select the best matching bottle for the running host.
 pub fn resolveBottle(formula: *const Formula) !BottleFile {
+    return resolveBottleFor(formula, cask_variation.runningMacosMajor());
+}
+
+/// `resolveBottle` with the host injected, so tests never depend on the
+/// machine they run on.
+pub fn resolveBottleFor(formula: *const Formula, host_major: ?u32) !BottleFile {
     const files = formula.bottle_files orelse return FormulaError.NoBottleAvailable;
-
-    const candidates: []const []const u8 = switch (builtin.cpu.arch) {
-        .aarch64 => &macos_arm64_platforms,
-        .x86_64 => &macos_x86_platforms,
-        else => &macos_arm64_platforms,
-    };
-
-    // Try each platform candidate in preference order
-    for (candidates) |platform| {
-        if (files.map.get(platform)) |bf| {
-            return bf;
-        }
-    }
-
-    // Fallback: "all" (used by some header-only / arch-independent bottles)
-    if (files.map.get("all")) |bf| {
-        return bf;
-    }
-
-    return FormulaError.NoBottleAvailable;
+    var buf: [32]u8 = undefined;
+    const key = cask_variation.bottleKey(&buf, files.map, host_major) orelse return FormulaError.NoBottleAvailable;
+    return files.map.get(key).?;
 }
 
 // ---------------------------------------------------------------------------
@@ -1327,6 +1289,73 @@ test "parseFormula drops only the malformed platform entry" {
     try testing.expectEqualStrings("u3", bottle.url);
 }
 
+/// One bottle-map entry for this arch's `<codename>` tag; `sha_char` makes
+/// each entry's digest tell the tests which tag was picked.
+inline fn hostBottle(comptime codename: []const u8, comptime sha_char: []const u8) []const u8 {
+    const prefix = if (builtin.cpu.arch == .aarch64) "arm64_" else "";
+    return otherBottle(prefix ++ codename, sha_char);
+}
+
+inline fn otherBottle(comptime key: []const u8, comptime sha_char: []const u8) []const u8 {
+    return "\"" ++ key ++ "\":{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"" ++ sha_char ** 64 ++ "\"}";
+}
+
+test "resolveBottleFor never picks a bottle built for a newer macOS than the host" {
+    const tahoe_sequoia = "{" ++ hostBottle("tahoe", "a") ++ "," ++ hostBottle("sequoia", "b") ++ "}";
+    const golden_tahoe = "{" ++ hostBottle("golden_gate", "c") ++ "," ++ hostBottle("tahoe", "a") ++ "}";
+    // The other arch's tag for the same release must never stand in.
+    const foreign_sequoia = "{" ++ otherBottle(if (builtin.cpu.arch == .aarch64) "sequoia" else "arm64_sequoia", "b") ++ "}";
+    const Case = struct { files: []const u8, host: ?u32, want: ?u8 };
+    const cases = [_]Case{
+        // Homebrew stopped building sonoma: refuse rather than pour tahoe.
+        .{ .files = tahoe_sequoia, .host = 14, .want = null },
+        .{ .files = tahoe_sequoia, .host = 15, .want = 'b' },
+        .{ .files = tahoe_sequoia, .host = 26, .want = 'a' },
+        .{ .files = golden_tahoe, .host = 27, .want = 'c' },
+        // A host newer than every known tag takes the newest one.
+        .{ .files = golden_tahoe, .host = 28, .want = 'c' },
+        // Gaps in the map fall through to the newest older tag.
+        .{ .files = "{" ++ hostBottle("sequoia", "b") ++ "," ++ hostBottle("ventura", "d") ++ "}", .host = 14, .want = 'd' },
+        // A host older than every published tag gets nothing.
+        .{ .files = "{" ++ hostBottle("sonoma", "e") ++ "}", .host = 13, .want = null },
+        .{ .files = "{" ++ hostBottle("sonoma", "e") ++ "}", .host = 10, .want = null },
+        .{ .files = foreign_sequoia, .host = 15, .want = null },
+        // `all` serves any host, and outranks an older-OS tag as in Homebrew.
+        .{ .files = "{" ++ otherBottle("all", "f") ++ "}", .host = 14, .want = 'f' },
+        .{ .files = "{" ++ otherBottle("all", "f") ++ "," ++ hostBottle("sonoma", "e") ++ "}", .host = 15, .want = 'f' },
+        // The host's own tag outranks `all`.
+        .{ .files = "{" ++ otherBottle("all", "f") ++ "," ++ hostBottle("sequoia", "b") ++ "}", .host = 15, .want = 'b' },
+        // Unreadable host version keeps the newest-first pick.
+        .{ .files = tahoe_sequoia, .host = null, .want = 'a' },
+    };
+    for (cases) |c| {
+        const json = try bottleFormulaJson(c.files);
+        defer testing.allocator.free(json);
+        var formula = try parseFormula(testing.allocator, json);
+        defer formula.deinit();
+        const got = resolveBottleFor(&formula, c.host);
+        if (c.want) |sha_char| {
+            try testing.expectEqualStrings(&([_]u8{sha_char} ** 64), (try got).sha256);
+        } else {
+            try testing.expectError(FormulaError.NoBottleAvailable, got);
+        }
+    }
+}
+
+test "resolveBottle selects for the running macOS, not the newest tag" {
+    // Only a host older than the newest tag can tell the two apart.
+    const host = cask_variation.runningMacosMajor() orelse return error.SkipZigTest;
+    if (host >= 27) return error.SkipZigTest;
+    const files = "{" ++ hostBottle("golden_gate", "c") ++ "," ++ hostBottle("tahoe", "a") ++ "," ++
+        hostBottle("sequoia", "b") ++ "," ++ hostBottle("sonoma", "e") ++ "}";
+    const json = try bottleFormulaJson(files);
+    defer testing.allocator.free(json);
+    var formula = try parseFormula(testing.allocator, json);
+    defer formula.deinit();
+    const want = try resolveBottleFor(&formula, host);
+    try testing.expectEqualStrings(want.sha256, (try resolveBottle(&formula)).sha256);
+}
+
 test "parseFormula flags a formula migrated to post_install_steps" {
     // Migrated formulas report post_install_defined=false and carry the
     // hook in a declarative steps array; the steps are what must keep the
@@ -1546,7 +1575,7 @@ test "systemPerlPath tracks the interpreter each macOS release ships" {
     // An unreadable version reads as "current": a stale path is guaranteed
     // absent on a modern system, the newest one is right for every macOS
     // malt runs on.
-    try testing.expectEqualStrings("/usr/bin/perl5.34", systemPerlPath(unknown_macos_major));
+    try testing.expectEqualStrings("/usr/bin/perl5.34", systemPerlPath(null));
 }
 
 test "perlPlaceholder falls back to the system interpreter when the buffer is too small" {

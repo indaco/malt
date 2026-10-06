@@ -77,7 +77,7 @@ VALUES ('older', '/x/older.rb', '1.0', 1, 'local', 'sha', '$PREFIX/Cellar/older/
 INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason)
 VALUES ('wget', 'wget', '1.20', 0, 'sha2', '$PREFIX/Cellar/wget/1.20', 'direct');
 SQL
-printf '{"name":"wget","versions":{"stable":"1.22"},"revision":0}' >"$MALT_CACHE/api/formula_wget.json"
+printf '{"name":"wget","versions":{"stable":"1.22"},"revision":0,"bottle":{"stable":{"files":{"all":{"cellar":":any","url":"u","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}}' >"$MALT_CACHE/api/formula_wget.json"
 
 # 1. bulk dry-run: clean exit, the local keg neither errors nor fails
 set +e

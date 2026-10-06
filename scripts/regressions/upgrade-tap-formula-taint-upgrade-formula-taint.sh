@@ -103,7 +103,7 @@ sqlite3 "$DB" "UPDATE kegs SET version='${V}' WHERE name='${NAME}';"
 # --- Seed a core keg that is genuinely outdated (offline via API cache) ----
 sqlite3 "$DB" "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) \
   VALUES ('${CORE}', '${CORE}', '1.0', 'seedsha', '${PREFIX}/Cellar/${CORE}/1.0');"
-printf '{"name":"%s","versions":{"stable":"2.0"}}' "$CORE" >"$API/formula_${CORE}.json"
+printf '{"name":"%s","versions":{"stable":"2.0"},"bottle":{"stable":{"files":{"all":{"cellar":":any","url":"u","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}}' "$CORE" >"$API/formula_${CORE}.json"
 
 # --- Force the tap HEAD to look moved -------------------------------------
 # Bogus cached sha so the real HEAD differs; stale etag so the conditional

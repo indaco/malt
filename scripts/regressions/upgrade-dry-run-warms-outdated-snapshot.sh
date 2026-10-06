@@ -72,7 +72,7 @@ seed_keg() {
 # needs name + versions.stable to derive pkg_version.
 seed_formula_cache() {
   local name="$1" stable="$2" revision="${3:-0}"
-  printf '{"name":"%s","versions":{"stable":"%s"},"revision":%s}' "$name" "$stable" "$revision" \
+  printf '{"name":"%s","versions":{"stable":"%s"},"revision":%s,"bottle":{"stable":{"files":{"all":{"cellar":":any","url":"u","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}}' "$name" "$stable" "$revision" \
     >"$API/formula_$name.json"
 }
 
