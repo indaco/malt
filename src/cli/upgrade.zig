@@ -464,7 +464,7 @@ pub fn execute(parent_ctx: *const AppCtx, allocator: std.mem.Allocator, args: []
         output.err("Failed to open database", .{});
         return error.Aborted;
     };
-    var db = outdated_mod.openPrefixDb(ctx.io, db_path) catch |e| switch (e) {
+    var db = outdated_mod.openPrefixDb(ctx.io, db_path, dry_run) catch |e| switch (e) {
         // Fresh prefix: nothing installed, nothing to upgrade.
         error.Absent => return,
         error.Unreadable => {

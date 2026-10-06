@@ -38,8 +38,8 @@ echo stranded >"$prefix/store/$sha/planted/1.0/README"
 
 export MALT_PREFIX="$prefix" NO_COLOR=1 MALT_NO_EMOJI=1 MALT_OFFLINE=1
 
-# A dry run creates the schema without touching the store.
-"$BIN" purge --store-orphans --dry-run >/dev/null 2>&1 || true
+# A read-only command creates the schema without touching the store.
+"$BIN" list >/dev/null 2>&1 || true
 
 # The stranded shape: a claim row with zero owning kegs.
 sqlite3 "$prefix/db/malt.db" \

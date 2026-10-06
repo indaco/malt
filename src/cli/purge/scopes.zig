@@ -37,7 +37,7 @@ pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix:
     rep.fmt = .short_hash;
 
     const io = ctx.io;
-    var db = switch (util.openDbTri(io, prefix)) {
+    var db = switch (util.openDbTri(io, prefix, dry_run)) {
         .absent => {
             rep.empty("no database — nothing to inspect");
             return result;
@@ -104,7 +104,7 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     var result: TierResult = .{};
     var rep = report.Reporter.init("unused-deps", dry_run);
 
-    var db = switch (util.openDbTri(ctx.io, prefix)) {
+    var db = switch (util.openDbTri(ctx.io, prefix, dry_run)) {
         .absent => {
             rep.empty("no database — nothing to inspect");
             return result;
@@ -460,7 +460,7 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
 
     var rep = report.Reporter.init("stale-casks", dry_run);
 
-    var db = switch (util.openDbTri(io, prefix)) {
+    var db = switch (util.openDbTri(io, prefix, dry_run)) {
         .absent => {
             rep.empty("no database — nothing to inspect");
             return result;
@@ -652,8 +652,8 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
         candidates.deinit(allocator);
     }
 
-    try collectCellarOldVersions(io, allocator, prefix, &candidates);
-    collectCaskOldVersions(io, allocator, prefix, cache_dir, &candidates, &result);
+    try collectCellarOldVersions(io, allocator, prefix, &candidates, dry_run);
+    collectCaskOldVersions(io, allocator, prefix, cache_dir, &candidates, &result, dry_run);
 
     if (candidates.items.len == 0) {
         // A refusal already printed its reason; "nothing" would contradict it.
@@ -667,7 +667,7 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
     // cellar-only case stays DB-free, matching the pre-T-038 shape.
     var db_opt: ?sqlite.Database = blk: {
         for (candidates.items) |c| {
-            if (c.kind == .cask) break :blk reopenDbForRowDeletes(io, prefix, &result);
+            if (c.kind == .cask) break :blk reopenDbForRowDeletes(io, prefix, &result, dry_run);
         }
         break :blk null;
     };
@@ -742,8 +742,8 @@ const CellarLiveVersions = struct {
 // when the DB is absent/unreadable so the caller can fall back to the
 // mtime heuristic; a single pass avoids one prepared statement per
 // formula dir.
-fn collectLiveCellarVersions(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, live: *CellarLiveVersions) bool {
-    var db = switch (util.openDbTri(io, prefix)) {
+fn collectLiveCellarVersions(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, live: *CellarLiveVersions, dry_run: bool) bool {
+    var db = switch (util.openDbTri(io, prefix, dry_run)) {
         .absent => return false,
         .unreadable => |e| {
             output.warn("old-versions: cannot read kegs for cellar link check, falling back to mtime ({s})", .{@errorName(e)});
@@ -777,6 +777,7 @@ fn collectCellarOldVersions(
     allocator: std.mem.Allocator,
     prefix: []const u8,
     candidates: *std.ArrayList(OldVersionCandidate),
+    dry_run: bool,
 ) !void {
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{prefix}) catch return;
@@ -786,7 +787,7 @@ fn collectCellarOldVersions(
 
     var live: CellarLiveVersions = .{};
     defer live.deinit(allocator);
-    const have_db = collectLiveCellarVersions(io, allocator, prefix, &live);
+    const have_db = collectLiveCellarVersions(io, allocator, prefix, &live, dry_run);
 
     var iter = cellar_dir.iterate();
     while (iter.next(io) catch null) |formula_entry| {
@@ -868,8 +869,9 @@ fn collectCaskOldVersions(
     cache_dir: []const u8,
     candidates: *std.ArrayList(OldVersionCandidate),
     result: *TierResult,
+    dry_run: bool,
 ) void {
-    var db = switch (util.openDbTri(io, prefix)) {
+    var db = switch (util.openDbTri(io, prefix, dry_run)) {
         .absent => return,
         .unreadable => |e| {
             output.err("old-versions: cannot open database for cask history ({s})", .{@errorName(e)});
@@ -939,8 +941,8 @@ fn reportSchemaTooNew(label: []const u8, db: *sqlite.Database, e: schema.Migrate
     return true;
 }
 
-fn reopenDbForRowDeletes(io: std.Io, prefix: []const u8, result: *TierResult) ?sqlite.Database {
-    return switch (util.openDbTri(io, prefix)) {
+fn reopenDbForRowDeletes(io: std.Io, prefix: []const u8, result: *TierResult, dry_run: bool) ?sqlite.Database {
+    return switch (util.openDbTri(io, prefix, dry_run)) {
         .absent => null,
         .unreadable => |e| blk: {
             output.err("old-versions: cannot reopen database for history rows ({s})", .{@errorName(e)});

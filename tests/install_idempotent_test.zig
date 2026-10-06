@@ -496,17 +496,68 @@ test "execute --dry-run skips the fast path so the plan still reaches the user" 
 
     try seedCellarKeg(prefix, "seedpkg", "1.0");
 
-    const db_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
-    defer testing.allocator.free(db_file);
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
-    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
-    install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "seedpkg" }) catch {};
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "seedpkg" }) catch {};
 
-    try testing.expect(pathExists(db_file));
+    // Offline, the slow path reports the uncached formula; the fast path
+    // would have answered "already installed" without planning anything.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "not cached") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "already installed") == null);
+}
+
+test "execute --dry-run on a prefix that does not exist yet creates nothing" {
+    const parent = try setupPrefix("dryrun_fresh");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, parent) catch {};
+        testing.allocator.free(parent);
+        _ = c.unsetenv("MALT_PREFIX");
+    }
+    const prefix = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/p", .{parent}, 0);
+    defer testing.allocator.free(prefix);
+    _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    const prior_ndjson = malt.output.isNdjson();
+    malt.output.setNdjson(true);
+    defer malt.output.setNdjson(prior_ndjson);
+    var events: std.ArrayList(u8) = .empty;
+    defer events.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &events);
+    defer malt.output.endStdoutCapture();
+
+    install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "freshpkg" }) catch {};
+
+    // The preview still plans against the empty install a real run would start from.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "not cached") != null);
+    try testing.expect(!pathExists(prefix));
+    // No lock was taken, so neither half of the lock bracket may appear alone.
+    const opened = std.mem.indexOf(u8, events.items, "\"event\":\"lock_acquired\"") != null;
+    const closed = std.mem.indexOf(u8, events.items, "\"event\":\"install_complete\"") != null;
+    try testing.expectEqual(opened, closed);
 }
 
 test "execute --cask refuses an unreadable casks table before fetching the cask" {
@@ -574,4 +625,55 @@ test "execute --cask --download-only never consults an unreadable casks table" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
     if (install.execute(&ctx, arena.allocator(), &.{ "--cask", "--download-only", "seedcask" })) |_| return error.TestUnexpectedResult else |_| {}
     try testing.expect(std.mem.indexOf(u8, captured.items, "package database") == null);
+}
+
+test "execute --dry-run reads the database only once it holds the lock" {
+    // A preview that copied first would plan from what a concurrent writer
+    // was about to replace; here the writer moves the schema past this malt.
+    const prefix = try setupPrefix("dryrun_lock");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+        _ = c.unsetenv("MALT_PREFIX");
+    }
+    try seedDb(prefix, "SELECT 1;");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    defer testing.allocator.free(lock_path);
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+
+    const Writer = struct {
+        fn run(wio: std.Io, holder: *malt.lock.LockFile, path: [:0]const u8) void {
+            std.Io.sleep(wio, .fromMilliseconds(300), .awake) catch {};
+            if (malt.sqlite.Database.open(path)) |db| {
+                var w = db;
+                w.exec("INSERT INTO schema_version (version) VALUES (999);") catch {};
+                w.close();
+            } else |_| {}
+            holder.release(wio);
+        }
+    };
+    var holder = try malt.lock.LockFile.acquire(io, lock_path, 1000);
+    const writer = try std.Thread.spawn(.{}, Writer.run, .{ io, &holder, db_path });
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty, .offline = true };
+    install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "foo" }) catch {};
+    writer.join();
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "schema v999") != null);
 }

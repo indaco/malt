@@ -41,10 +41,10 @@ trap 'rm -rf "$PFX"' EXIT
 db() { sqlite3 "$PFX/db/malt.db" "$1"; }
 SHA=$(printf 'a%.0s' {1..64})
 
-# (1) fresh DB: no counter column, schema 16 or later. A dry run creates the
-#     schema without touching the store.
+# (1) fresh DB: no counter column, schema 16 or later. A read-only command
+#     creates the schema without touching the store.
 mkdir -p "$PFX/db"
-"$BIN" purge --store-orphans --dry-run </dev/null >/dev/null 2>&1 || true
+"$BIN" list </dev/null >/dev/null 2>&1 || true
 [[ -f "$PFX/db/malt.db" ]] || fail "no DB was created under $PFX/db"
 ! db "PRAGMA table_info(store_refs);" | grep -q refcount ||
   fail "fresh DB still carries store_refs.refcount"
@@ -58,7 +58,7 @@ db "CREATE TABLE store_refs (store_sha256 TEXT PRIMARY KEY, refcount INTEGER NOT
     CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
     INSERT INTO schema_version VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13),(14),(15);
     INSERT INTO store_refs VALUES ('$SHA', 3);"
-"$BIN" purge --store-orphans --dry-run </dev/null >/dev/null 2>&1 || true
+"$BIN" list </dev/null >/dev/null 2>&1 || true
 ! db "PRAGMA table_info(store_refs);" | grep -q refcount ||
   fail "v15 -> v16 left the counter column behind"
 [[ "$(db 'SELECT count(*) FROM store_refs;')" == 1 ]] ||

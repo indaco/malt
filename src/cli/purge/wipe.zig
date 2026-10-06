@@ -106,7 +106,7 @@ pub fn writeManifest(ctx: *const AppCtx, allocator: std.mem.Allocator, path: []c
     const w = &aw.writer;
     backup_mod.writeHeader(w) catch return Error.WriteFailed;
 
-    switch (util.openDbTri(ctx.io, prefix)) {
+    switch (util.openDbTri(ctx.io, prefix, false)) {
         .absent => {},
         .unreadable => |e| return refuseUnusableDb(prefix, e),
         .opened => |db_val| {

@@ -196,7 +196,7 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
         return unreadable(path, e);
     defer allocator.free(canonical);
 
-    var db = try openDb(ctx);
+    var db = try openDb(ctx, dry_run);
     defer db.close();
 
     const bd = BundleInstallCtx{ .app = ctx, .isolate_deps = isolate_deps };
@@ -293,7 +293,7 @@ fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     // phase, so the per-member uninstalls below run against a freshly
     // opened handle each.
     var plan: cleanup_mod.Plan = blk: {
-        var db = try openDb(ctx);
+        var db = try openDb(ctx, dry_run);
         defer db.close();
         var installed = cleanup_mod.collectInstalled(allocator, &db) catch
             return unreadableDb(&db);
@@ -363,7 +363,7 @@ fn cmdList(ctx: *const AppCtx, rest: []const []const u8) !void {
         if (std.mem.startsWith(u8, a, "-")) return unknownFlag(a);
         return expected("list", "no arguments");
     }
-    var db = try openDb(ctx);
+    var db = try openDb(ctx, false);
     defer db.close();
 
     var stmt = db.prepare("SELECT name, created_at FROM bundles ORDER BY name;") catch
@@ -420,7 +420,7 @@ fn resolveRemoveArgs(rest: []const []const u8, global_dry_run: bool) error{Abort
 fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     var args = try resolveRemoveArgs(rest, output.isDryRun());
     const name = blk: {
-        var db = try openDb(ctx);
+        var db = try openDb(ctx, args.dry_run);
         defer db.close();
         break :blk try resolveBundleName(ctx, allocator, &db, args.name);
     };
@@ -435,7 +435,7 @@ fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
         output.info("would unregister bundle {s}", .{args.name});
         return;
     }
-    var db = try openDb(ctx);
+    var db = try openDb(ctx, args.dry_run);
     defer db.close();
 
     var stmt = db.prepare("DELETE FROM bundles WHERE name = ?;") catch
@@ -454,7 +454,7 @@ fn purgeMembers(ctx: *const AppCtx, allocator: std.mem.Allocator, args: RemoveAr
     defer manifest.deinit();
 
     var plan: cleanup_mod.Plan = blk: {
-        var db = try openDb(ctx);
+        var db = try openDb(ctx, args.dry_run);
         defer db.close();
         try populateFromBundle(&manifest, &db, args.name);
         // Asked to remove packages but nothing says which: a silent
@@ -606,7 +606,7 @@ fn resolveCreateArgs(rest: []const []const u8) error{Aborted}!CreateArgs {
 fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     const args = try resolveCreateArgs(rest);
 
-    var db = try openDb(ctx);
+    var db = try openDb(ctx, args.dry_run or output.isDryRun());
     defer db.close();
 
     var manifest = manifest_mod.Manifest.init(allocator);
@@ -645,7 +645,7 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
         } else return unknownFlag(a);
     }
 
-    var db = try openDb(ctx);
+    var db = try openDb(ctx, false);
     defer db.close();
 
     var manifest = manifest_mod.Manifest.init(allocator);
@@ -695,7 +695,7 @@ fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
         return unreadable(path, e);
     defer allocator.free(canonical);
 
-    var db = try openDb(ctx);
+    var db = try openDb(ctx, dry_run);
     defer db.close();
 
     const name = runner_mod.bundleName(manifest, canonical) catch {
@@ -1028,18 +1028,18 @@ fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, na
     manifest.services = try services.toOwnedSlice(a);
 }
 
-fn openDb(ctx: *const AppCtx) !sqlite.Database {
+fn openDb(ctx: *const AppCtx, dry_run: bool) !sqlite.Database {
     const prefix = atomic.maltPrefixOrAbort();
     var db_dir_buf: [512]u8 = undefined;
     const db_dir = std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix}) catch
         return openFailed();
     // makePath is the idempotent "ensure" variant; a real permission/ENOSPC
     // failure surfaces at sqlite.Database.open below with a narrower error.
-    std.Io.Dir.cwd().createDirPath(ctx.io, db_dir) catch {};
+    if (!dry_run) std.Io.Dir.cwd().createDirPath(ctx.io, db_dir) catch {};
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return openFailed();
-    var db = sqlite.Database.open(path) catch return openFailed();
+    var db = schema_report.openPreviewableCreating(ctx.io, path, dry_run) catch return openFailed();
     errdefer db.close();
     // Schema init is idempotent; a newer-than-us DB is the one failure to
     // stop on, anything else surfaces at the caller's next prepare/step.
