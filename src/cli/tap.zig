@@ -1293,11 +1293,22 @@ fn emitRefreshAll(ctx: *const AppCtx, rows: []const RefreshRow) !void {
     for (rows) |row| try writeRefreshRowText(stdout, row);
 }
 
-fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !void {
-    validateTapName(name) catch {
-        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{name});
+fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, raw_name: []const u8) !void {
+    validateTapName(raw_name) catch {
+        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{raw_name});
         return error.Aborted;
     };
+    var name_buf: [tap_mod.max_slug_len]u8 = undefined;
+    const name = tap_mod.canonicalTapSlug(&name_buf, raw_name) orelse raw_name;
+    // The pin write below would match no row, so fail before the HEAD round trip.
+    const registered = tap_mod.isRegistered(db, name) catch {
+        output.err("Failed to read tap {s}", .{name});
+        return error.Aborted;
+    };
+    if (!registered) {
+        output.err("No available tap {s}", .{name});
+        return error.Aborted;
+    }
     const urls = try tap_mod.resolveTapBaseUrls(allocator, db, name);
     defer urls.deinit(allocator);
     // Force fresh: bypass the cached etag so the operator sees the
@@ -1313,9 +1324,7 @@ fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Data
         output.err("Could not resolve {s}'s HEAD commit: empty response", .{name});
         return error.Aborted;
     };
-    // updateHead pairs the new sha with the new etag atomically; falling
-    // back to updateCommit if the row is absent isn't a concern here —
-    // refresh runs against rows the user already `tap added`.
+    // updateHead pairs the new sha with the new etag atomically.
     tap_mod.updateHead(db, name, sha, res.etag) catch {
         output.err("Failed to update commit pin for {s}", .{name});
         return error.Aborted;

@@ -358,8 +358,16 @@ pub fn remove(db: *sqlite.Database, name: []const u8) sqlite.SqliteError!bool {
     return db.changes() > 0;
 }
 
-/// Replace the stored commit SHA for an existing tap. Called by
-/// `malt tap --refresh`; fails if the tap isn't already registered.
+/// Whether a tap row exists under exactly `name`; callers fold spellings first.
+pub fn isRegistered(db: *sqlite.Database, name: []const u8) sqlite.SqliteError!bool {
+    var stmt = try db.prepare("SELECT 1 FROM taps WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    return stmt.step();
+}
+
+/// Replace the stored commit SHA for an existing tap. A missing row is a
+/// silent no-op, so callers check `isRegistered` first.
 pub fn updateCommit(db: *sqlite.Database, name: []const u8, commit_sha: []const u8) !void {
     try validateCommitSha(commit_sha);
     var stmt = try db.prepare(

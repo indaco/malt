@@ -379,6 +379,42 @@ test "--dry-run untap refuses an unregistered slug instead of previewing a remov
     try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
 }
 
+// --- refresh ---------------------------------------------------------
+
+fn refreshOffline(captured: *std.ArrayList(u8), slug: []const u8) !void {
+    // Offline makes any HEAD lookup fail fast, so the message tells which
+    // side of the registration check the run reached, with no network.
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    output.beginStderrCapture(testing.allocator, captured);
+    defer output.endStderrCapture();
+    try testing.expectError(error.Aborted, tap.execute(&ctx, testing.allocator, &.{ "--refresh", slug }));
+}
+
+test "refresh of an unregistered tap fails before any HEAD lookup" {
+    var s = try Scratch.init(testing.allocator, "tap_refresh_unknown");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try refreshOffline(&captured, "user/rpeo");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/rpeo") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve") == null);
+}
+
+test "refresh finds a registered tap under its homebrew- spelling" {
+    var s = try Scratch.init(testing.allocator, "tap_refresh_homebrew_spelling");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try refreshOffline(&captured, "user/homebrew-repo");
+    // Past the registration check: only the offline HEAD lookup stops it.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve user/repo") != null);
+}
+
 test "--dry-run tap reports the pin it would keep without claiming it tapped" {
     var s = try Scratch.init(testing.allocator, "tap_dry_run_pinned");
     defer s.deinit(testing.allocator);

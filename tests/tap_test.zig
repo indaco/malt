@@ -366,6 +366,19 @@ test "updateCommit rejects malformed SHA" {
     try testing.expectError(error.InvalidSha, tap.updateCommit(&db, "user/repo", "XXXX567890abcdef0123456789abcdef01234567"));
 }
 
+test "isRegistered answers for the exact stored name only" {
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try testing.expect(!try tap.isRegistered(&db, "a/b"));
+    try tap.add(&db, "a/b", "a", "homebrew-b", valid_sha);
+    try testing.expect(try tap.isRegistered(&db, "a/b"));
+    // Spellings are folded by the caller; the lookup itself stays exact.
+    try testing.expect(!try tap.isRegistered(&db, "a/homebrew-b"));
+    try testing.expect(!try tap.isRegistered(&db, "a/c"));
+}
+
 test "updateCommit on an unknown tap is a no-op (no rows affected, no error)" {
     var db = try openDb();
     defer db.close();
