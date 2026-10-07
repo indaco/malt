@@ -540,6 +540,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 /// Primitive entry point for core/bundle's dispatcher: add a single tap by
 /// name. Argv parsing stays in `execute`; this is the non-argv seam.
 pub fn tapAdd(ctx: *const AppCtx, allocator: std.mem.Allocator, name: []const u8) !void {
+    // `name` comes from a Brewfile; as argv a flag-shaped one would run as a flag.
+    validateTapName(name) catch {
+        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{name});
+        return error.Aborted;
+    };
     const argv = [_][]const u8{name};
     return run(ctx, allocator, &argv, .add);
 }
@@ -704,6 +709,36 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             return error.Aborted;
         } else if (positional == null) {
             positional = arg;
+        } else {
+            // brew's `tap <slug> <url>` form; malt takes the URL via --url.
+            if (std.mem.indexOf(u8, arg, "://") != null) {
+                output.err("Unexpected argument '{s}': pass a repo URL with --url", .{arg});
+            } else {
+                output.err("Unexpected argument '{s}' (one tap per command)", .{arg});
+            }
+            return error.Aborted;
+        }
+    }
+    // Alone, --all would batch-refresh every tap; help pairs it with --refresh.
+    if (refresh_all and refresh_target == null) {
+        output.err("--all pairs with --refresh (mt tap --refresh --all)", .{});
+        return error.Aborted;
+    }
+    if (action != .add and refresh_target != null) {
+        output.err("--refresh is only valid with `mt tap`", .{});
+        return error.Aborted;
+    }
+    // The pin would run and the refresh be dropped.
+    if (pin_slug != null and refresh_target != null) {
+        output.err("--pin cannot be combined with --refresh", .{});
+        return error.Aborted;
+    }
+    // --pin and --refresh=<tap> already name their tap; a positional would be dropped.
+    if (positional) |extra| {
+        const named = pin_slug != null or (refresh_target != null and refresh_target.?.len != 0);
+        if (named) {
+            output.err("Unexpected argument '{s}' (one tap per command)", .{extra});
+            return error.Aborted;
         }
     }
     if (refresh_target) |rt| {
@@ -712,6 +747,11 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
         // refreshed nothing.
         if (refresh_target == null and !refresh_all) {
             output.err("--refresh needs a tap (mt tap --refresh <user>/<repo>) or --all", .{});
+            return error.Aborted;
+        }
+        // The batch would win and silently drop the named tap.
+        if (refresh_target != null and refresh_all) {
+            output.err("--refresh takes a tap or --all, not both", .{});
             return error.Aborted;
         }
     }
@@ -822,10 +862,6 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     }
 
     if (refresh_all) {
-        if (action != .add) {
-            output.err("--refresh is only valid with `mt tap`", .{});
-            return error.Aborted;
-        }
         // Every row would fail offline, and failed rows alone exit 0.
         if (ctx.offline) {
             output.err("Cannot refresh taps: {s}", .{tap_mod.offline_resolve_hint});
@@ -836,10 +872,6 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     }
 
     if (refresh_target) |target| {
-        if (action != .add) {
-            output.err("--refresh is only valid with `mt tap`", .{});
-            return error.Aborted;
-        }
         try refreshTap(ctx, allocator, &db, target);
         return;
     }

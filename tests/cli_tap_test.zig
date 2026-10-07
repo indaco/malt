@@ -676,6 +676,155 @@ test "execute rejects a bare --refresh instead of listing taps" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "--all") != null);
 }
 
+test "execute rejects --all without --refresh instead of running the batch refresh" {
+    // Help documents --all as pairing with --refresh; alone it used to
+    // walk every tap, and with --yes apply the new pins.
+    const prefix = try setupPrefix("all_without_refresh");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{"--all"}));
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "--all", "--yes" }));
+    // A slug is not a --refresh either.
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "--all", "user/repo" }));
+    // Same refusal under untap, rather than blaming a --refresh never passed.
+    try testing.expectError(error.Aborted, tap_cli.executeUntap(&ctx, testing.allocator, &.{"--all"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--all pairs with --refresh") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "only valid with") == null);
+}
+
+test "executeUntap rejects --refresh as tap-only, with or without a slug" {
+    // A slug would not make `mt untap --refresh` valid, so the
+    // `mt tap --refresh <user>/<repo>` hint sends the user the wrong way.
+    const prefix = try setupPrefix("untap_refresh");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    // Offline, so a regression reaching refreshTap cannot dial the forge.
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    const cases = [_][]const []const u8{
+        &.{"--refresh"},
+        &.{"--refresh="},
+        &.{"--refresh=user/repo"},
+        &.{ "--refresh", "user/repo" },
+        &.{ "user/repo", "--refresh" },
+    };
+    for (cases) |argv| {
+        captured.clearRetainingCapacity();
+        try testing.expectError(error.Aborted, tap_cli.executeUntap(&ctx, testing.allocator, argv));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "--refresh is only valid with `mt tap`") != null);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "<user>/<repo>") == null);
+    }
+}
+
+test "execute rejects --refresh with both a tap and --all instead of dropping the tap" {
+    // The batch refresh used to win and silently ignore the named tap.
+    const prefix = try setupPrefix("refresh_slug_and_all");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    const cases = [_][]const []const u8{
+        &.{ "--refresh", "user/repo", "--all" },
+        &.{ "--refresh=user/repo", "--all" },
+        &.{ "--refresh", "--all", "user/repo" },
+        &.{ "user/repo", "--refresh", "--all" },
+    };
+    for (cases) |argv| {
+        captured.clearRetainingCapacity();
+        try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, argv));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "not both") != null);
+    }
+}
+
+test "execute rejects --pin combined with --refresh instead of dropping the refresh" {
+    const prefix = try setupPrefix("pin_and_refresh");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const cases = [_][]const []const u8{
+        &.{ "--pin", "a/b", sha, "--refresh", "c/d" },
+        &.{ "--pin", "a/b", sha, "--refresh", "--all" },
+        &.{ "--refresh=c/d", "--pin", "a/b", sha },
+    };
+    for (cases) |argv| {
+        captured.clearRetainingCapacity();
+        try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, argv));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "--pin cannot be combined with --refresh") != null);
+    }
+}
+
+test "execute rejects a second tap argument instead of dropping it" {
+    const prefix = try setupPrefix("second_positional");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    const tap_cases = [_][]const []const u8{
+        &.{ "--refresh", "a/b", "c/d" },
+        &.{ "--refresh=a/b", "c/d" },
+        &.{ "a/b", "c/d" },
+        &.{ "--pin", "a/b", "0123456789abcdef0123456789abcdef01234567", "c/d" },
+        &.{ "c/d", "--pin", "a/b", "0123456789abcdef0123456789abcdef01234567" },
+    };
+    for (tap_cases) |argv| {
+        captured.clearRetainingCapacity();
+        try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, argv));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "Unexpected argument 'c/d'") != null);
+    }
+    // brew's `tap <slug> <url>` form: point at --url, not at "one tap".
+    captured.clearRetainingCapacity();
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "a/b", "https://example.com/a/b" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--url") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "one tap per command") == null);
+    captured.clearRetainingCapacity();
+    try testing.expectError(error.Aborted, tap_cli.executeUntap(&ctx, testing.allocator, &.{ "a/b", "c/d" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unexpected argument 'c/d'") != null);
+}
+
 test "execute --refresh --all refuses offline instead of exiting clean with every row failed" {
     // Offline no row can resolve, so a zero exit would read as a refresh.
     const prefix = try setupPrefix("refresh_all_offline");
@@ -954,4 +1103,48 @@ test "execute --refresh --all with only failed rows does not gate the apply" {
     };
     // The remote 404s → row is `failed` → not gated → exit clean.
     try tap_cli.execute(&ctx, testing.allocator, &.{ "--refresh", "--all" });
+}
+
+// ---------------------------------------------------------------------------
+// tapAdd (Brewfile entry point)
+// ---------------------------------------------------------------------------
+
+test "tapAdd refuses a flag-shaped name instead of running it as a flag" {
+    // A Brewfile `tap "--refresh=user/repo"` reaches tapAdd verbatim; read as
+    // argv it would move that tap's pin with nobody asking for a refresh.
+    const prefix = try setupPrefix("tap_add_flag_name");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const pinned_sha = "0123456789abcdef0123456789abcdef01234567";
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try malt.tap.add(&db, "user/repo", "user", "homebrew-repo", pinned_sha);
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    for ([_][]const u8{ "--refresh=user/repo", "--refresh", "--all" }) |name| {
+        captured.clearRetainingCapacity();
+        try testing.expectError(error.Aborted, tap_cli.tapAdd(&ctx, testing.allocator, name));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "Invalid tap") != null);
+    }
+
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT commit_sha FROM taps WHERE name = 'user/repo';");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqualStrings(pinned_sha, std.mem.sliceTo(stmt.columnText(0).?, 0));
 }
