@@ -82,6 +82,54 @@ pub fn isMachO(data: []const u8) bool {
     };
 }
 
+/// Offset of the host arch's slice in a fat Mach-O; null for a thin file or a
+/// fat one without that slice. Needs only the arch table.
+pub fn hostSliceOffset(data: []const u8) ?u64 {
+    if (data.len < 8) return null;
+    const is64 = switch (std.mem.readInt(u32, data[0..4], .little)) {
+        macho.FAT_MAGIC, macho.FAT_CIGAM => false,
+        macho.FAT_MAGIC_64, macho.FAT_CIGAM_64 => true,
+        else => return null,
+    };
+    const host: macho.cpu_type_t = if (@import("builtin").cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
+    const size = fatArchSize(is64);
+    var offset: usize = 8;
+    for (0..std.mem.readInt(u32, data[4..8], .big)) |_| {
+        if (data.len - offset < size) return null;
+        const entry = data[offset..][0..size];
+        offset += size;
+        if (std.mem.readInt(i32, entry[0..4], .big) == host) return readFatArch(entry, is64).offset;
+    }
+    return null;
+}
+
+/// The macOS major a thin 64-bit Mach-O requires (LC_BUILD_VERSION, else
+/// LC_VERSION_MIN_MACOSX). Needs only the header and load commands; null when
+/// none names macOS or the buffer ends first.
+pub fn minMacosMajor(data: []const u8) ?u32 {
+    const hs = @sizeOf(macho.mach_header_64);
+    if (data.len < hs or std.mem.readInt(u32, data[0..4], .little) != macho.MH_MAGIC_64) return null;
+    const ncmds = std.mem.bytesAsValue(macho.mach_header_64, data[0..hs]).ncmds;
+    var offset: usize = hs;
+    for (0..ncmds) |_| {
+        if (data.len - offset < @sizeOf(macho.load_command)) return null;
+        const cmd = std.mem.readInt(u32, data[offset..][0..4], .little);
+        const cmdsize = std.mem.readInt(u32, data[offset + 4 ..][0..4], .little);
+        if (cmdsize < @sizeOf(macho.load_command) or data.len - offset < cmdsize) return null;
+        const body = data[offset..][0..cmdsize];
+        offset += cmdsize;
+        // The packed version is xxxx.yy.zz; only the major matters here.
+        if (cmd == @intFromEnum(macho.LC.BUILD_VERSION) and cmdsize >= 16) {
+            if (std.mem.readInt(u32, body[8..12], .little) != @intFromEnum(macho.PLATFORM.MACOS)) return null;
+            return std.mem.readInt(u32, body[12..16], .little) >> 16;
+        }
+        if (cmd == @intFromEnum(macho.LC.VERSION_MIN_MACOSX) and cmdsize >= 12) {
+            return std.mem.readInt(u32, body[8..12], .little) >> 16;
+        }
+    }
+    return null;
+}
+
 /// Parse a Mach-O file from a memory-mapped buffer and extract all load command paths.
 pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
     if (data.len < 4) return ParseError.TruncatedFile;
@@ -515,4 +563,70 @@ test "parse surfaces each slice's embedded code signature with its arch" {
         .{ .slice_offset = 48, .slice_len = arm.len, .is_arm64 = true, .dataoff = 4096, .datasize = 512 },
         .{ .slice_offset = 48 + arm.len, .slice_len = x86.len, .is_arm64 = false, .dataoff = 8192, .datasize = 256 },
     }, parsed_fat.signatures);
+}
+
+fn buildVersionMachO(platform: macho.PLATFORM, minos: u32) [@sizeOf(macho.mach_header_64) + @sizeOf(macho.build_version_command)]u8 {
+    const hs = @sizeOf(macho.mach_header_64);
+    const cs = @sizeOf(macho.build_version_command);
+    var buf: [hs + cs]u8 = @splat(0);
+    std.mem.bytesAsValue(macho.mach_header_64, buf[0..hs]).* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 1, .sizeofcmds = cs };
+    std.mem.bytesAsValue(macho.build_version_command, buf[hs..][0..cs]).* = .{
+        .cmdsize = cs,
+        .platform = platform,
+        .minos = minos,
+        .sdk = minos,
+        .ntools = 0,
+    };
+    return buf;
+}
+
+test "minMacosMajor reads the major of LC_BUILD_VERSION's minos" {
+    try testing.expectEqual(@as(?u32, 27), minMacosMajor(&buildVersionMachO(.MACOS, 27 << 16)));
+    try testing.expectEqual(@as(?u32, 26), minMacosMajor(&buildVersionMachO(.MACOS, (26 << 16) | (1 << 8) | 2)));
+}
+
+test "minMacosMajor falls back to LC_VERSION_MIN_MACOSX" {
+    // Pre-Mojave toolchains emit only this one.
+    const hs = @sizeOf(macho.mach_header_64);
+    const cs = @sizeOf(macho.version_min_command);
+    var buf: [hs + cs]u8 = @splat(0);
+    std.mem.bytesAsValue(macho.mach_header_64, buf[0..hs]).* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 1, .sizeofcmds = cs };
+    std.mem.bytesAsValue(macho.version_min_command, buf[hs..][0..cs]).* = .{ .cmd = .VERSION_MIN_MACOSX, .cmdsize = cs, .version = (10 << 16) | (15 << 8), .sdk = 0 };
+    try testing.expectEqual(@as(?u32, 10), minMacosMajor(&buf));
+}
+
+test "minMacosMajor names no floor it cannot read" {
+    // Another platform's floor says nothing about macOS.
+    try testing.expectEqual(@as(?u32, null), minMacosMajor(&buildVersionMachO(.IOS, 27 << 16)));
+    try testing.expectEqual(@as(?u32, null), minMacosMajor(&signatureOnlyMachO(macho.CPU_TYPE_ARM64, 0, 0)));
+    // A short read stops the walk instead of reading past the buffer.
+    const full = buildVersionMachO(.MACOS, 27 << 16);
+    try testing.expectEqual(@as(?u32, null), minMacosMajor(full[0 .. full.len - 4]));
+    try testing.expectEqual(@as(?u32, null), minMacosMajor(full[0..10]));
+    // A fat header is not a slice.
+    var fat: [8]u8 = undefined;
+    std.mem.writeInt(u32, fat[0..4], macho.FAT_MAGIC, .big);
+    try testing.expectEqual(@as(?u32, null), minMacosMajor(&fat));
+}
+
+test "minMacosMajor survives a load command claiming zero size" {
+    // cmdsize 0 would otherwise spin on the same command forever.
+    var buf = buildVersionMachO(.MACOS, 27 << 16);
+    std.mem.writeInt(u32, buf[@sizeOf(macho.mach_header_64) + 4 ..][0..4], 0, .little);
+    try testing.expectEqual(@as(?u32, null), minMacosMajor(&buf));
+}
+
+test "hostSliceOffset finds this arch's slice in a fat file and nothing in a thin one" {
+    var fat: [8 + 2 * 20]u8 = @splat(0);
+    std.mem.writeInt(u32, fat[0..4], macho.FAT_MAGIC, .big);
+    std.mem.writeInt(u32, fat[4..8], 2, .big);
+    std.mem.writeInt(i32, fat[8..12], macho.CPU_TYPE_X86_64, .big);
+    std.mem.writeInt(u32, fat[16..20], 0x4000, .big);
+    std.mem.writeInt(i32, fat[28..32], macho.CPU_TYPE_ARM64, .big);
+    std.mem.writeInt(u32, fat[36..40], 0x8000, .big);
+    const want: u64 = if (@import("builtin").cpu.arch == .aarch64) 0x8000 else 0x4000;
+    try testing.expectEqual(@as(?u64, want), hostSliceOffset(&fat));
+    // An arch table cut short yields nothing rather than a garbage offset.
+    try testing.expectEqual(@as(?u64, null), hostSliceOffset(fat[0..20]));
+    try testing.expectEqual(@as(?u64, null), hostSliceOffset(&buildVersionMachO(.MACOS, 27 << 16)));
 }
