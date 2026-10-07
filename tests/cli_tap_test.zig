@@ -676,6 +676,64 @@ test "execute rejects a bare --refresh instead of listing taps" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "--all") != null);
 }
 
+test "execute rejects --all without --refresh instead of running the batch refresh" {
+    // Help documents --all as pairing with --refresh; alone it used to
+    // walk every tap, and with --yes apply the new pins.
+    const prefix = try setupPrefix("all_without_refresh");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{"--all"}));
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "--all", "--yes" }));
+    // A slug is not a --refresh either.
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "--all", "user/repo" }));
+    // Same refusal under untap, rather than blaming a --refresh never passed.
+    try testing.expectError(error.Aborted, tap_cli.executeUntap(&ctx, testing.allocator, &.{"--all"}));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--all pairs with --refresh") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "only valid with") == null);
+}
+
+test "executeUntap rejects --refresh as tap-only, with or without a slug" {
+    // A slug would not make `mt untap --refresh` valid, so the
+    // `mt tap --refresh <user>/<repo>` hint sends the user the wrong way.
+    const prefix = try setupPrefix("untap_refresh");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    // Offline, so a regression reaching refreshTap cannot dial the forge.
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    const cases = [_][]const []const u8{
+        &.{"--refresh"},
+        &.{"--refresh="},
+        &.{"--refresh=user/repo"},
+        &.{ "--refresh", "user/repo" },
+        &.{ "user/repo", "--refresh" },
+    };
+    for (cases) |argv| {
+        captured.clearRetainingCapacity();
+        try testing.expectError(error.Aborted, tap_cli.executeUntap(&ctx, testing.allocator, argv));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "--refresh is only valid with `mt tap`") != null);
+        try testing.expect(std.mem.indexOf(u8, captured.items, "<user>/<repo>") == null);
+    }
+}
+
 test "execute --refresh --all refuses offline instead of exiting clean with every row failed" {
     // Offline no row can resolve, so a zero exit would read as a refresh.
     const prefix = try setupPrefix("refresh_all_offline");

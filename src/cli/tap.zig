@@ -706,6 +706,15 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             positional = arg;
         }
     }
+    // Alone, --all would batch-refresh every tap; help pairs it with --refresh.
+    if (refresh_all and refresh_target == null) {
+        output.err("--all pairs with --refresh (mt tap --refresh --all)", .{});
+        return error.Aborted;
+    }
+    if (action != .add and refresh_target != null) {
+        output.err("--refresh is only valid with `mt tap`", .{});
+        return error.Aborted;
+    }
     if (refresh_target) |rt| {
         if (rt.len == 0) refresh_target = positional;
         // Otherwise it falls through to the listing and exits 0 having
@@ -822,10 +831,6 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     }
 
     if (refresh_all) {
-        if (action != .add) {
-            output.err("--refresh is only valid with `mt tap`", .{});
-            return error.Aborted;
-        }
         // Every row would fail offline, and failed rows alone exit 0.
         if (ctx.offline) {
             output.err("Cannot refresh taps: {s}", .{tap_mod.offline_resolve_hint});
@@ -836,10 +841,6 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     }
 
     if (refresh_target) |target| {
-        if (action != .add) {
-            output.err("--refresh is only valid with `mt tap`", .{});
-            return error.Aborted;
-        }
         try refreshTap(ctx, allocator, &db, target);
         return;
     }
