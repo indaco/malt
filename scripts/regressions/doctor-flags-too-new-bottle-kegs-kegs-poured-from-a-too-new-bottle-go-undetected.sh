@@ -6,7 +6,8 @@
 # leave a keg poured from the host's own bottle alone. After `mt update` wipes
 # the per-formula documents, the bulk side-car `mt outdated` rebuilds must be
 # enough to check a keg; one in neither must be named, not folded into an
-# all-clear.
+# all-clear. A keg whose bottle was rebuilt upstream (digest gone) is judged by
+# the macOS floor its own binary declares.
 #
 # Hermetic: each keg's recorded digest is matched against a formula document
 # seeded under `$MALT_CACHE/api`; `MALT_OFFLINE=1` keeps doctor off the
@@ -85,7 +86,19 @@ seed() {
     VALUES ('$name', '$name', '1.0', 0, '$sha', '$PREFIX/Cellar/$name/1.0', 'direct');"
 }
 
-A=$(digest a) B=$(digest b) C=$(digest c) D=$(digest d)
+# macho <path> <major>: a thin Mach-O whose only load command is
+# LC_BUILD_VERSION (macOS, minos <major>.0), all the floor check reads.
+macho() {
+  local x
+  x=$(printf '\\x%02x' "$2")
+  mkdir -p "$(dirname "$1")"
+  printf '%b' '\xcf\xfa\xed\xfe\x0c\x00\x00\x01\x00\x00\x00\x00\x02\x00\x00\x00' \
+    '\x01\x00\x00\x00\x18\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' \
+    '\x32\x00\x00\x00\x18\x00\x00\x00\x01\x00\x00\x00' \
+    "\\x00\\x00$x\\x00\\x00\\x00$x\\x00" '\x00\x00\x00\x00' >"$1"
+}
+
+A=$(digest a) B=$(digest b) C=$(digest c) D=$(digest d) E=$(digest e)
 seed regnone "$A" "$NEWER_TAG=$A"                  # no bottle for this macOS
 seed regreinst "$B" "$NEWER_TAG=$B" "$HOST_TAG=$C" # reinstallable
 seed regok "$D" "$HOST_TAG=$D"                     # control
@@ -94,6 +107,10 @@ rm "$MALT_CACHE/api/formula_regnodoc.json" # cache wiped, as by mt update
 seed regside "$A" "$NEWER_TAG=$A"
 rm "$MALT_CACHE/api/formula_regside.json"
 printf 'regside\t%s=%s\n' "$NEWER_TAG" "$A" >"$MALT_CACHE/api/$SIDECAR"
+seed regrebuilt "$E" "$HOST_TAG=$C" # bottle rebuilt since: digest unknown
+macho "$PREFIX/Cellar/regrebuilt/1.0/bin/tool" 27
+seed regfloorok "$E" "$HOST_TAG=$C"
+macho "$PREFIX/Cellar/regfloorok/1.0/bin/tool" "$HOST"
 
 OUT=$("$BIN" doctor --verbose 2>&1 || true)
 
@@ -113,6 +130,13 @@ pass "host-tag keg left alone"
 grep -q 'mt uninstall regside' <<<"$OUT" ||
   fail "keg covered only by the bulk side-car not checked"
 pass "bulk side-car alone is enough to check a keg"
+
+grep -q 'mt reinstall regrebuilt' <<<"$OUT" ||
+  fail "rebuilt keg whose binary needs a newer macOS not flagged"
+if grep -q regfloorok <<<"$OUT"; then
+  fail "rebuilt keg whose binary fits this macOS was flagged"
+fi
+pass "rebuilt keg judged by its binary's macOS floor"
 
 grep -q '1 more not checked: no cached formula data (mt outdated refreshes it)' <<<"$OUT" ||
   fail "keg with no formula data not reported as unchecked"

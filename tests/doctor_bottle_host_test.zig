@@ -64,8 +64,8 @@ const Scratch = struct {
         defer testing.allocator.free(tap_sql);
         const sql = try std.fmt.bufPrintSentinel(&sql_buf,
             \\INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path)
-            \\VALUES ('{s}', '{s}', '1.0', 0, {s}, '{s}', '/tmp/c/{s}/1.0');
-        , .{ name, name, tap_sql, sha, name }, 0);
+            \\VALUES ('{s}', '{s}', '1.0', 0, {s}, '{s}', '{s}/Cellar/{s}/1.0');
+        , .{ name, name, tap_sql, sha, self.path, name }, 0);
         try self.db.exec(sql);
 
         const body = files orelse return;
@@ -86,6 +86,34 @@ fn writeBottlesIndex(s: *const Scratch, body: []const u8) !void {
     var buf: [512]u8 = undefined;
     const path = try std.fmt.bufPrint(&buf, "{s}/api/bottles_" ++ api.bottles_key ++ ".txt", .{s.cache});
     try test_io.cwd().writeFile(io, .{ .sub_path = path, .data = body });
+}
+
+/// A thin Mach-O declaring `minos_major` as its macOS floor, at
+/// `Cellar/<name>/1.0/<rel>`; `fat` wraps it as this arch's slice.
+fn writeKegBinary(s: *const Scratch, name: []const u8, rel: []const u8, minos_major: u32, fat: bool) !void {
+    const macho = std.macho;
+    const hs = @sizeOf(macho.mach_header_64);
+    const cs = @sizeOf(macho.build_version_command);
+    var thin: [hs + cs]u8 = @splat(0);
+    std.mem.bytesAsValue(macho.mach_header_64, thin[0..hs]).* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 1, .sizeofcmds = cs };
+    std.mem.bytesAsValue(macho.build_version_command, thin[hs..][0..cs]).* = .{ .cmdsize = cs, .platform = .MACOS, .minos = minos_major << 16, .sdk = 0, .ntools = 0 };
+
+    var buf: [64 + thin.len]u8 = @splat(0);
+    const bytes: []const u8 = if (fat) blk: {
+        const cpu: macho.cpu_type_t = if (builtin.cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
+        std.mem.writeInt(u32, buf[0..4], macho.FAT_MAGIC, .big);
+        std.mem.writeInt(u32, buf[4..8], 1, .big);
+        std.mem.writeInt(i32, buf[8..12], cpu, .big);
+        std.mem.writeInt(u32, buf[16..20], 64, .big);
+        std.mem.writeInt(u32, buf[20..24], thin.len, .big);
+        @memcpy(buf[64..], &thin);
+        break :blk &buf;
+    } else &thin;
+
+    var path_buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/1.0/{s}", .{ s.path, name, rel });
+    try test_io.cwd().createDirPath(io, std.fs.path.dirname(path).?);
+    try test_io.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
 }
 
 fn bottle(comptime tag: []const u8, comptime sha: []const u8) []const u8 {
@@ -185,6 +213,34 @@ test "collect reads neither outside the API cache nor a corrupt document" {
     try testing.expectEqual(@as(u32, 0), report.count());
     // The corrupt document is a keg left unchecked; the forged name is no keg.
     try testing.expectEqual(@as(u32, 1), report.unchecked);
+}
+
+test "a keg whose digest no bottle carries any more is judged by its binaries" {
+    // A same-version rebuild moves the digest on; the floor dyld enforces
+    // is still in the keg's own Mach-O headers.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "floor");
+    defer s.deinit(allocator);
+    const rebuilt = comptime bottle(host_tag, sha_c);
+    try s.seed("rebuilt_new", null, sha_a, rebuilt);
+    try writeKegBinary(&s, "rebuilt_new", "bin/tool", 27, false);
+    try s.seed("rebuilt_fat", null, sha_a, comptime bottle(newer_tag, sha_b));
+    try writeKegBinary(&s, "rebuilt_fat", "lib/libx.dylib", 27, true);
+    try s.seed("rebuilt_ok", null, sha_a, rebuilt);
+    try writeKegBinary(&s, "rebuilt_ok", "bin/tool", host_major, false);
+    try s.seed("scripts_only", null, sha_a, rebuilt);
+    var dir_buf: [512]u8 = undefined;
+    try test_io.cwd().createDirPath(io, try std.fmt.bufPrint(&dir_buf, "{s}/Cellar/scripts_only/1.0/bin", .{s.path}));
+    // A conclusive digest is never second-guessed by a header read.
+    try s.seed("digest_ok", null, sha_c, rebuilt);
+    try writeKegBinary(&s, "digest_ok", "bin/tool", 27, false);
+
+    var report = bottle_host.collect(allocator, io, s.path, s.cache, host_major);
+    defer report.deinit(allocator);
+    try testing.expectEqual(@as(u32, 1), report.reinstall);
+    try testing.expectEqual(@as(u32, 1), report.uninstall);
+    try testing.expectEqualStrings("rebuilt_fat: no bottle for this macOS — mt uninstall rebuilt_fat", report.lines.items[0]);
+    try testing.expectEqualStrings("rebuilt_new: mt reinstall rebuilt_new", report.lines.items[1]);
 }
 
 test "collect never flags on an unreadable host version" {

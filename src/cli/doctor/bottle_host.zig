@@ -12,6 +12,7 @@ const formula_mod = @import("../../core/formula.zig");
 const api_mod = @import("../../net/api.zig");
 const cask_variation = @import("../../net/cask_variation.zig");
 const install_args = @import("../install/args.zig");
+const parser = @import("../../macho/parser.zig");
 
 pub const Remedy = enum { reinstall, uninstall };
 const Files = std.json.ArrayHashMap(formula_mod.BottleFile);
@@ -37,10 +38,21 @@ pub fn pouredTooNew(
     return newer;
 }
 
-/// The fix for a keg poured too new, or null when it is fine. `reinstall`
-/// only works when a bottle for this macOS exists.
-pub fn remedyFor(files: Files, store_sha256: []const u8, host_major: ?u32) ?Remedy {
-    if (!pouredTooNew(files, store_sha256, host_major)) return null;
+/// Whether any bottle in `files` still carries `store_sha256`.
+fn carriesDigest(files: Files, store_sha256: []const u8) bool {
+    for (files.map.values()) |f| if (std.mem.eql(u8, f.sha256, store_sha256)) return true;
+    return false;
+}
+
+/// The fix for a keg poured too new, or null when it is fine. A digest no
+/// bottle carries any more (a rebuild, a moved-on version) falls back to
+/// `keg_floor`, the macOS its binaries require. `reinstall` only works when a
+/// bottle for this macOS exists.
+pub fn remedyFor(files: Files, store_sha256: []const u8, host_major: ?u32, keg_floor: ?u32) ?Remedy {
+    const host = host_major orelse return null;
+    const too_new = pouredTooNew(files, store_sha256, host) or
+        (!carriesDigest(files, store_sha256) and (keg_floor orelse 0) > host);
+    if (!too_new) return null;
     var buf: [32]u8 = undefined;
     return if (cask_variation.bottleKey(&buf, files.map, host_major) == null) .uninstall else .reinstall;
 }
@@ -88,7 +100,7 @@ pub fn collect(
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return report;
     var db = schema_report.openPreviewable(io, db_path, output.isDryRun()) catch return report;
     defer db.close();
-    var stmt = db.prepare("SELECT name, tap, store_sha256 FROM kegs ORDER BY name;") catch return report;
+    var stmt = db.prepare("SELECT name, tap, store_sha256, cellar_path FROM kegs ORDER BY name;") catch return report;
     defer stmt.finalize();
 
     const index_bytes = api_mod.readBottlesIndex(io, allocator, cache_dir);
@@ -108,6 +120,7 @@ pub fn collect(
         const name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
         const tap = if (stmt.columnText(1)) |t| std.mem.sliceTo(t, 0) else "";
         const sha = std.mem.sliceTo(stmt.columnText(2) orelse continue, 0);
+        const keg_path = if (stmt.columnText(3)) |p| std.mem.sliceTo(p, 0) else "";
         // A tap or `--local` keg's digest is not in the core document.
         if (!install_args.isCoreTap(tap)) continue;
         // The name builds a cache path; a hand-edited row must not escape it.
@@ -120,7 +133,7 @@ pub fn collect(
                     continue;
                 };
                 defer files.deinit(allocator);
-                break :blk remedyFor(files, sha, host_major);
+                break :blk judge(io, files, sha, keg_path, host_major);
             }
             const bytes = api_mod.readCacheAt(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(.formula)) orelse {
                 report.addUnchecked(allocator, name);
@@ -132,7 +145,7 @@ pub fn collect(
                 continue;
             };
             defer formula.deinit();
-            break :blk remedyFor(formula.bottle_files orelse break :blk null, sha, host_major);
+            break :blk judge(io, formula.bottle_files orelse break :blk null, sha, keg_path, host_major);
         };
         const remedy = verdict orelse continue;
         const line = switch (remedy) {
@@ -149,6 +162,42 @@ pub fn collect(
         }
     }
     return report;
+}
+
+/// `remedyFor`, reading the keg's binaries only when the digest cannot decide.
+fn judge(io: std.Io, files: Files, sha: []const u8, keg_path: []const u8, host_major: ?u32) ?Remedy {
+    const floor = if (host_major == null or carriesDigest(files, sha)) null else kegMacosFloor(io, keg_path);
+    return remedyFor(files, sha, host_major, floor);
+}
+
+/// The macOS floor of the first Mach-O under the keg's `bin/` or `lib/`.
+/// ponytail: one binary per keg, since Homebrew builds a keg against one
+/// deployment target; a vendored older binary found first would hide it.
+fn kegMacosFloor(io: std.Io, keg_path: []const u8) ?u32 {
+    if (!std.fs.path.isAbsolute(keg_path)) return null;
+    var keg = std.Io.Dir.openDirAbsolute(io, keg_path, .{}) catch return null;
+    defer keg.close(io);
+    for ([_][]const u8{ "bin", "lib" }) |sub| {
+        var dir = keg.openDir(io, sub, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (it.next(io) catch null) |entry| {
+            if (entry.kind != .file) continue;
+            if (binaryMacosFloor(io, dir, entry.name)) |floor| return floor;
+        }
+    }
+    return null;
+}
+
+/// Reads only the first 16 KiB of the file (of this arch's slice when fat):
+/// the load commands sit there, and kegs hold multi-megabyte dylibs.
+fn binaryMacosFloor(io: std.Io, dir: std.Io.Dir, name: []const u8) ?u32 {
+    const file = dir.openFile(io, name, .{}) catch return null;
+    defer file.close(io);
+    var buf: [16 * 1024]u8 = undefined;
+    var n = file.readPositionalAll(io, &buf, 0) catch return null;
+    if (parser.hostSliceOffset(buf[0..n])) |offset| n = file.readPositionalAll(io, &buf, offset) catch return null;
+    return parser.minMacosMajor(buf[0..n]);
 }
 
 /// A side-car line's `<tag>=<sha256>,...` as a bottle map borrowing from it.
@@ -242,13 +291,25 @@ test "no verdict without a digest match, a recorded digest, or a known host" {
 test "remedyFor points at reinstall only when this macOS has a bottle" {
     var reinst = try parseDoc(comptime bottle(arch ++ "golden_gate", sha_a) ++ "," ++ bottle(arch ++ "tahoe", sha_b));
     defer reinst.deinit();
-    try testing.expectEqual(@as(?Remedy, .reinstall), remedyFor(reinst.bottle_files.?, sha_a, 26));
-    try testing.expectEqual(@as(?Remedy, null), remedyFor(reinst.bottle_files.?, sha_b, 26));
+    try testing.expectEqual(@as(?Remedy, .reinstall), remedyFor(reinst.bottle_files.?, sha_a, 26, null));
+    try testing.expectEqual(@as(?Remedy, null), remedyFor(reinst.bottle_files.?, sha_b, 26, null));
 
     // `mt reinstall` would fail with NoBottleAvailable here.
     var none = try parseDoc(comptime bottle(arch ++ "golden_gate", sha_a));
     defer none.deinit();
-    try testing.expectEqual(@as(?Remedy, .uninstall), remedyFor(none.bottle_files.?, sha_a, 26));
+    try testing.expectEqual(@as(?Remedy, .uninstall), remedyFor(none.bottle_files.?, sha_a, 26, null));
+}
+
+test "remedyFor trusts the binaries' floor only when no bottle carries the digest" {
+    var f = try parseDoc(comptime bottle(arch ++ "tahoe", sha_b));
+    defer f.deinit();
+    // sha_a was rebuilt away: the keg's own floor decides.
+    try testing.expectEqual(@as(?Remedy, .reinstall), remedyFor(f.bottle_files.?, sha_a, 26, 27));
+    try testing.expectEqual(@as(?Remedy, null), remedyFor(f.bottle_files.?, sha_a, 26, 26));
+    try testing.expectEqual(@as(?Remedy, null), remedyFor(f.bottle_files.?, sha_a, 26, null));
+    try testing.expectEqual(@as(?Remedy, null), remedyFor(f.bottle_files.?, sha_a, null, 27));
+    // A digest the map still carries is conclusive, whatever a header says.
+    try testing.expectEqual(@as(?Remedy, null), remedyFor(f.bottle_files.?, sha_b, 26, 27));
 }
 
 test "detail names both remedies with their counts" {
