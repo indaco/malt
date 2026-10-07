@@ -195,7 +195,7 @@ test "executeUntap with no args returns Aborted with a usage hint" {
     );
 }
 
-test "executeUntap removes the matching row and is idempotent on rerun" {
+test "executeUntap removes the matching row, then refuses the slug it no longer knows" {
     var s = try Scratch.init(testing.allocator, "untap_ok");
     defer s.deinit(testing.allocator);
     try seedTap(s.path, "user/repo", "0123456789abcdef0123456789abcdef01234567");
@@ -204,7 +204,51 @@ test "executeUntap removes the matching row and is idempotent on rerun" {
     defer unquiet();
 
     try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"});
-    try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"});
+    try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "user/repo"));
+    // Scripts read the exit code; a rerun removed nothing, so it must fail.
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"}),
+    );
+}
+
+test "executeUntap on a typo'd slug fails and leaves the real tap registered" {
+    var s = try Scratch.init(testing.allocator, "untap_typo");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/rpeo"}),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/rpeo") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Untapped") == null);
+    try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
+}
+
+test "executeUntap matches the homebrew- spelling and names the canonical slug when unknown" {
+    var s = try Scratch.init(testing.allocator, "untap_homebrew_spelling");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/homebrew-nope"}),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/nope") != null);
+
+    try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/homebrew-repo"});
+    try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "user/repo"));
 }
 
 test "executeUntap --refresh is rejected (refresh is tap-only)" {
@@ -313,6 +357,335 @@ test "--dry-run untap previews the removal and keeps the tap registered" {
     defer unquiet();
     try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"});
     try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "user/repo"));
+}
+
+test "--dry-run untap refuses an unregistered slug instead of previewing a removal" {
+    var s = try Scratch.init(testing.allocator, "untap_dry_run_unknown");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    {
+        captureDryRun(&captured);
+        defer endDryRun();
+        try testing.expectError(
+            error.Aborted,
+            tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"nosuch/tap"}),
+        );
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap nosuch/tap") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would untap") == null);
+    try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
+}
+
+// --- untap with installed packages ------------------------------------
+
+fn seedInstalled(prefix: []const u8, sql: [:0]const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try db.exec(sql);
+}
+
+const installed_from_user_repo =
+    \\INSERT INTO kegs (name, full_name, version, tap, store_sha256, cellar_path)
+    \\  VALUES ('foo', 'user/repo/foo', '1.0', 'user/repo', 's', 'c');
+    \\INSERT INTO casks (token, name, version, url, tap)
+    \\  VALUES ('bar', 'Bar', '1.0', 'u', 'user/repo');
+;
+
+test "executeUntap refuses a tap that installed packages still come from, and names them" {
+    var s = try Scratch.init(testing.allocator, "untap_installed");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+    try seedInstalled(s.path, installed_from_user_repo);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    {
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try testing.expectError(
+            error.Aborted,
+            tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/homebrew-repo"}),
+        );
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing to untap user/repo: 2 installed packages come from it (uninstall them first, or pass --force to keep them)") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "  foo\n") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "  bar\n") != null);
+    // Dropping the row would lose the host and pin those packages upgrade from.
+    try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
+
+    // Control: once nothing comes from it, the same untap goes through.
+    try seedInstalled(s.path, "DELETE FROM kegs; DELETE FROM casks;");
+    quiet();
+    defer unquiet();
+    try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"});
+    try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "user/repo"));
+}
+
+test "executeUntap --quiet still says how many packages block the untap" {
+    // Quiet drops the name list, so the error line alone must carry the count and the fix.
+    var s = try Scratch.init(testing.allocator, "untap_installed_quiet");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+    try seedInstalled(s.path,
+        \\INSERT INTO kegs (name, full_name, version, tap, store_sha256, cellar_path)
+        \\  VALUES ('foo', 'user/repo/foo', '1.0', 'user/repo', 's', 'c');
+    );
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    quiet();
+    defer unquiet();
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"}),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing to untap user/repo: 1 installed package comes from it (uninstall it first, or pass --force to keep it)") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "  foo\n") == null);
+}
+
+fn installedRowCount(prefix: []const u8) !i64 {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT (SELECT COUNT(*) FROM kegs) + (SELECT COUNT(*) FROM casks);");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    return stmt.columnInt(0);
+}
+
+test "executeUntap --force drops the tap but keeps its packages, and says so" {
+    // The escape hatch for a tap whose repo is gone: its packages keep
+    // working, they just stop resolving updates through it.
+    var s = try Scratch.init(testing.allocator, "untap_force");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+    try seedInstalled(s.path, installed_from_user_repo);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    {
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--force", "user/repo" });
+    }
+    try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "user/repo"));
+    try testing.expectEqual(@as(i64, 2), try installedRowCount(s.path));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "2 installed packages from it stay installed") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "    foo\n") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Untapped user/repo") != null);
+}
+
+test "executeUntap --force still refuses a tap that was never registered" {
+    var s = try Scratch.init(testing.allocator, "untap_force_unknown");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "user/rpeo", "--force" }),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/rpeo") != null);
+    try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
+}
+
+test "--dry-run untap refuses a tap that installed packages still come from" {
+    var s = try Scratch.init(testing.allocator, "untap_installed_dry_run");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+    try seedInstalled(s.path, installed_from_user_repo);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    {
+        captureDryRun(&captured);
+        defer endDryRun();
+        try testing.expectError(
+            error.Aborted,
+            tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"}),
+        );
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing to untap user/repo") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would untap") == null);
+}
+
+test "executeUntap of a registered core tap ignores the packages installed from the API" {
+    var s = try Scratch.init(testing.allocator, "untap_core_tap");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "homebrew/core", null);
+    try seedInstalled(s.path,
+        \\INSERT INTO kegs (name, full_name, version, tap, store_sha256, cellar_path)
+        \\  VALUES ('jq', 'jq', '1.7', 'homebrew/core', 's', 'c');
+    );
+
+    quiet();
+    defer unquiet();
+    try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"homebrew/core"});
+    try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "homebrew/core"));
+
+    try seedTap(s.path, "homebrew/cask", null);
+    try seedInstalled(s.path,
+        \\INSERT INTO casks (token, name, version, url, tap)
+        \\  VALUES ('firefox', 'Firefox', '1.0', 'u', 'homebrew/cask');
+    );
+    try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"homebrew/cask"});
+    try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "homebrew/cask"));
+}
+
+test "executeUntap waits on the install lock instead of racing a running install" {
+    // An install mid-download holds the lock and has not recorded its keg
+    // yet; untapping then would strand the keg the guard exists to protect.
+    var s = try Scratch.init(testing.allocator, "untap_locked");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{s.path});
+    defer testing.allocator.free(lock_path);
+    var held = try malt.lock.LockFile.acquire(std.Options.debug_io, lock_path, 1000);
+    defer held.release(std.Options.debug_io);
+
+    quiet();
+    defer unquiet();
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"}),
+    );
+    try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
+}
+
+test "executeUntap scrubs control bytes from the package names it lists" {
+    // Rows written before the name guards can carry escapes; listing one
+    // must not hand the terminal a live sequence.
+    var s = try Scratch.init(testing.allocator, "untap_scrub");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+    try seedInstalled(s.path,
+        \\INSERT INTO kegs (name, full_name, version, tap, store_sha256, cellar_path)
+        \\  VALUES ('ev' || char(27) || ']0;pwn' || char(7) || 'il', 'x', '1.0', 'user/repo', 's', 'c');
+    );
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"}),
+    );
+    try testing.expect(std.mem.indexOfScalar(u8, captured.items, 0x1b) == null);
+    try testing.expect(std.mem.indexOfScalar(u8, captured.items, 0x07) == null);
+}
+
+test "executeUntap on an unregistered tap with leftover installs says it is unknown" {
+    // Installs kept from an earlier untap must not make the slug look tapped.
+    var s = try Scratch.init(testing.allocator, "untap_leftover_installs");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "other/tap", null);
+    try seedInstalled(s.path, installed_from_user_repo);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"}),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/repo") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing") == null);
+}
+
+// --- pin -------------------------------------------------------------
+
+test "pin under a homebrew- spelling targets the registered tap, not a second row" {
+    var s = try Scratch.init(testing.allocator, "tap_pin_homebrew_spelling");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    // Offline stops it at the reachability check, which names the tap it resolved.
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    {
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try testing.expectError(error.Aborted, tap.execute(&ctx, testing.allocator, &.{
+            "--pin", "User/homebrew-repo", "0123456789abcdef0123456789abcdef01234567",
+        }));
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not verify user/repo @ 0123456") != null);
+}
+
+// --- refresh ---------------------------------------------------------
+
+fn refreshOffline(captured: *std.ArrayList(u8), slug: []const u8) !void {
+    // Offline makes any HEAD lookup fail fast, so the message tells which
+    // side of the registration check the run reached, with no network.
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    output.beginStderrCapture(testing.allocator, captured);
+    defer output.endStderrCapture();
+    try testing.expectError(error.Aborted, tap.execute(&ctx, testing.allocator, &.{ "--refresh", slug }));
+}
+
+test "refresh of an unregistered tap fails before any HEAD lookup" {
+    var s = try Scratch.init(testing.allocator, "tap_refresh_unknown");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try refreshOffline(&captured, "user/rpeo");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/rpeo") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve") == null);
+}
+
+test "refresh finds a registered tap under its homebrew- spelling" {
+    var s = try Scratch.init(testing.allocator, "tap_refresh_homebrew_spelling");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try refreshOffline(&captured, "user/homebrew-repo");
+    // Past the registration check: only the offline HEAD lookup stops it.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve user/repo") != null);
+}
+
+test "refresh and pin prefer an exact stored name over its folded spelling" {
+    // A pre-canonicalisation DB can keep `u/homebrew-x` and `u/x` as two
+    // taps on different hosts; folding first would act on the wrong one.
+    var s = try Scratch.init(testing.allocator, "tap_exact_before_fold");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "u/homebrew-x", null);
+    try seedTap(s.path, "u/x", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try refreshOffline(&captured, "u/homebrew-x");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve u/homebrew-x") != null);
+
+    captured.clearRetainingCapacity();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    {
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try testing.expectError(error.Aborted, tap.execute(&ctx, testing.allocator, &.{
+            "--pin", "u/homebrew-x", "0123456789abcdef0123456789abcdef01234567",
+        }));
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not verify u/homebrew-x @ 0123456") != null);
 }
 
 test "--dry-run tap reports the pin it would keep without claiming it tapped" {

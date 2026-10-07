@@ -62,6 +62,8 @@ rc=0
 out=$(run "$P" upgrade) || rc=$?
 [[ $rc -eq 0 ]] || fail "493-byte prefix: rc=$rc out=$out"
 grep -q 'No formulas installed' <<<"$out" || fail "493-byte prefix: out=$out"
+# untap refuses an unknown tap, so register one for it to remove.
+sqlite3 "$P/db/malt.db" "INSERT INTO taps(name,url) VALUES('user/repo','https://example/repo');"
 rc=0
 out=$(run "$P" untap user/repo) || rc=$?
 [[ $rc -eq 0 ]] || fail "493-byte prefix, untap: rc=$rc out=$out"

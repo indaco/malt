@@ -47,11 +47,11 @@ json=$("$MALT_BIN" --json tap 2>&1) || fail "--json listing failed: $json"
 [[ "$json" == "[]" ]] || fail "--json listing emitted [$json], expected []"
 
 # A mutating intent must actually run. untap needs no network, so it carries
-# this half on its own.
-out=$("$MALT_BIN" untap nosuch/tap 2>&1) || fail "untap on a fresh prefix failed: $out"
-grep -q 'Untapped nosuch/tap' <<<"$out" ||
-  fail "untap on a fresh prefix reported nothing: [$out]"
+# this half on its own: only a database it opened can say the tap is unknown.
+out=$("$MALT_BIN" untap nosuch/tap 2>&1) && fail "untap of an unknown tap exited 0: $out"
+grep -q 'No available tap nosuch/tap' <<<"$out" ||
+  fail "untap on a fresh prefix never looked the tap up: [$out]"
 [[ -f "$PFX/db/malt.db" ]] ||
-  fail 'untap reported success without ever creating the database'
+  fail 'untap answered without ever creating the database'
 
 printf 'PASS: tap intents act on a fresh prefix, listing leaves it alone\n'

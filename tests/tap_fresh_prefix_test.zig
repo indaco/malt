@@ -56,10 +56,12 @@ test "untap on a fresh prefix does the work instead of reporting a silent succes
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    try tap.executeUntap(&ctx, arena.allocator(), &.{"nosuch/tap"});
+    // Reaching the empty database is what lets untap say the tap is unknown.
+    try testing.expectError(error.Aborted, tap.executeUntap(&ctx, arena.allocator(), &.{"nosuch/tap"}));
 
     try testing.expect(pathExists(db_file));
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Untapped nosuch/tap") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap nosuch/tap") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Untapped") == null);
 }
 
 test "listing on a fresh prefix reports empty without creating a database" {

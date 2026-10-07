@@ -366,6 +366,47 @@ test "updateCommit rejects malformed SHA" {
     try testing.expectError(error.InvalidSha, tap.updateCommit(&db, "user/repo", "XXXX567890abcdef0123456789abcdef01234567"));
 }
 
+test "isRegistered answers for the exact stored name only" {
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try testing.expect(!try tap.isRegistered(&db, "a/b"));
+    try tap.add(&db, "a/b", "a", "homebrew-b", valid_sha);
+    try testing.expect(try tap.isRegistered(&db, "a/b"));
+    // Spellings are folded by the caller; the lookup itself stays exact.
+    try testing.expect(!try tap.isRegistered(&db, "a/homebrew-b"));
+    try testing.expect(!try tap.isRegistered(&db, "a/c"));
+}
+
+test "installedFrom lists each formula then cask installed from that tap only" {
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, tap, store_sha256, cellar_path) VALUES
+        \\  ('foo', 'a/b/foo', '1.0', 'a/b', 's', 'c'),
+        \\  ('foo', 'a/b/foo', '2.0', 'a/b', 's', 'c'),
+        \\  ('bar', 'c/d/bar', '1.0', 'c/d', 's', 'c'),
+        \\  ('baz', 'baz', '1.0', NULL, 's', 'c');
+        \\INSERT INTO casks (token, name, version, url, tap) VALUES
+        \\  ('qux', 'Qux', '1.0', 'u', 'A/B'),
+        \\  ('zed', 'Zed', '1.0', 'u', 'c/d');
+    );
+
+    // Two versions of one formula are one package; the cask row predates
+    // canonical casing, so the match ignores case.
+    const names = try tap.installedFrom(testing.allocator, &db, "a/b");
+    defer tap.freeNames(testing.allocator, names);
+    try testing.expectEqual(@as(usize, 2), names.len);
+    try testing.expectEqualStrings("foo", names[0]);
+    try testing.expectEqualStrings("qux", names[1]);
+
+    const none = try tap.installedFrom(testing.allocator, &db, "e/f");
+    defer tap.freeNames(testing.allocator, none);
+    try testing.expectEqual(@as(usize, 0), none.len);
+}
+
 test "updateCommit on an unknown tap is a no-op (no rows affected, no error)" {
     var db = try openDb();
     defer db.close();
@@ -438,8 +479,27 @@ test "remove deletes a tap" {
 
     try tap.add(&db, "a/b", "a", "homebrew-b", valid_sha);
     try tap.add(&db, "c/d", "c", "homebrew-d", valid_sha);
-    try tap.remove(&db, "a/b");
+    try testing.expect(try tap.remove(&db, "a/b"));
 
+    const taps = try tap.list(testing.allocator, &db);
+    defer freeTaps(taps);
+    try testing.expectEqual(@as(usize, 1), taps.len);
+    try testing.expectEqualStrings("c/d", taps[0].name);
+}
+
+test "remove reports false for an unregistered tap and leaves the others" {
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try tap.add(&db, "a/b", "a", "homebrew-b", valid_sha);
+    // The caller turns false into an error; a typo must not read as a removal.
+    try testing.expect(!try tap.remove(&db, "a/c"));
+    try testing.expect(try tap.remove(&db, "a/b"));
+    try testing.expect(!try tap.remove(&db, "a/b"));
+
+    try tap.add(&db, "c/d", "c", "homebrew-d", valid_sha);
+    try testing.expect(!try tap.remove(&db, "a/b"));
     const taps = try tap.list(testing.allocator, &db);
     defer freeTaps(taps);
     try testing.expectEqual(@as(usize, 1), taps.len);

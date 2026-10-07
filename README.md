@@ -553,7 +553,8 @@ mt tap user/repo                                  # register a tap
 mt tap                                            # list registered taps
 mt tap user/repo --repo owner/exact-repo          # prefixless GitHub repo
 mt tap user/repo --repo owner/exact-repo --force  # rebind to a new repo
-mt untap user/repo                                # remove a tap
+mt untap user/repo                                # remove a tap (refuses while its packages are installed)
+mt untap --force user/repo                        # remove it anyway, keeping its packages
 ```
 
 Taps are auto-resolved during install (`mt install user/repo/formula`), so this is optional unless you want the explicit Homebrew-style workflow.

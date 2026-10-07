@@ -129,7 +129,7 @@ pub fn setPinned(db: *sqlite.Database, kind: Kind, name: []const u8, value: bool
     try stmt.bindInt(1, @intFromBool(value));
     try stmt.bindText(2, name);
     _ = try stmt.step();
-    return changes(db) > 0;
+    return db.changes() > 0;
 }
 
 /// Returns true iff `kind`'s row for `name` has `pinned=1`. Never consults
@@ -150,14 +150,6 @@ fn lookupPinned(db: *sqlite.Database, kind: Kind, name: []const u8) ?bool {
     const has = stmt.step() catch return null;
     if (!has) return null;
     return stmt.columnBool(0);
-}
-
-fn changes(db: *sqlite.Database) i64 {
-    var stmt = db.prepare("SELECT changes();") catch return 0;
-    defer stmt.finalize();
-    const has = stmt.step() catch return 0;
-    if (!has) return 0;
-    return stmt.columnInt(0);
 }
 
 const testing = std.testing;

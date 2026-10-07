@@ -12,6 +12,9 @@ const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const prefix_path = @import("../fs/prefix_path.zig");
 const output = @import("../ui/output.zig");
+const term_sanitize = @import("../ui/term_sanitize.zig");
+const lock_mod = @import("../db/lock.zig");
+const lock_report = @import("lock_report.zig");
 const help = @import("help.zig");
 
 pub const TapNameError = error{InvalidTapName};
@@ -595,7 +598,8 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     // --repo <owner>/<exact-repo>: pin the GitHub repo identifier for
     //   third-party taps whose repo does not carry the `homebrew-` prefix.
     // --force: rebind an existing row to a new --repo target, clearing
-    //   the stale commit pin in the process.
+    //   the stale commit pin in the process. On untap: drop a tap whose
+    //   packages are still installed.
     var refresh_target: ?[]const u8 = null;
     var refresh_all = false;
     var pin_slug: ?[]const u8 = null;
@@ -768,7 +772,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             return error.Aborted;
         }
     }
-    if (force and repo_override == null) {
+    if (force and repo_override == null and action == .add) {
         output.err("--force is only valid alongside --repo", .{});
         return error.Aborted;
     }
@@ -990,7 +994,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             // rebind a later task brings, so refuse it rather than half-apply.
             if (!std.mem.eql(u8, target_pair.host, "github.com")) {
                 if (rebinding) {
-                    output.err("Rebinding {s} onto {s} isn't supported yet — run `mt untap {s}` then re-register.", .{ name, target_pair.host, name });
+                    output.err("Rebinding {s} onto {s} isn't supported yet - run `mt untap --force {s}`, then re-register.", .{ name, target_pair.host, name });
                     return error.Aborted;
                 }
                 tap_mod.addWithForge(&db, name, target_pair.owner, target_pair.repo, target_pair.host, forge_hint, null) catch {
@@ -1075,10 +1079,31 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             reportDone("Tapped", "tap", " {s} @ {s}", .{ name, sha[0..@min(sha.len, 7)] });
         },
         .remove => {
-            tap_mod.remove(&db, name) catch {
+            // Held through the delete: an install mid-download has not
+            // recorded its keg yet, so the guard below would miss it.
+            var lock_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+            const lock_path = prefix_path.join(&lock_path_buf, prefix, "/db/malt.lock") catch {
+                output.err("lock path too long", .{});
+                return error.Aborted;
+            };
+            var lock: ?lock_mod.LockFile = lock_mod.LockFile.acquire(ctx.io, lock_path, 5000) catch |e| switch (e) {
+                // Only a preview of a fresh prefix lacks db/; nothing to serialise against.
+                error.DirMissing => null,
+                else => {
+                    lock_report.reportAcquireFailure(e, prefix);
+                    return error.Aborted;
+                },
+            };
+            defer if (lock) |*l| l.release(ctx.io);
+            try guardInstalledFrom(allocator, &db, name, force);
+            const removed = tap_mod.remove(&db, name) catch {
                 output.err("Failed to untap {s}", .{name});
                 return error.Aborted;
             };
+            if (!removed) {
+                output.err("No available tap {s}", .{name});
+                return error.Aborted;
+            }
             reportDone("Untapped", "untap", " {s}", .{name});
         },
     }
@@ -1088,13 +1113,17 @@ fn pinTap(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
-    slug: []const u8,
+    raw_slug: []const u8,
     sha: []const u8,
 ) !void {
-    validateTapName(slug) catch {
-        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{slug});
+    validateTapName(raw_slug) catch {
+        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{raw_slug});
         return error.Aborted;
     };
+    // A homebrew- spelling pins the registered tap against its stored host
+    // instead of upserting a second row.
+    var slug_buf: [tap_mod.max_slug_len]u8 = undefined;
+    const slug = storedSlug(db, &slug_buf, raw_slug);
     tap_mod.validateCommitSha(sha) catch {
         output.err("Invalid SHA '{s}'. Expected a 40-char lowercase hex commit SHA.", .{sha});
         return error.Aborted;
@@ -1289,11 +1318,90 @@ fn emitRefreshAll(ctx: *const AppCtx, rows: []const RefreshRow) !void {
     for (rows) |row| try writeRefreshRowText(stdout, row);
 }
 
-fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !void {
-    validateTapName(name) catch {
-        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{name});
+/// Mirrors brew: the row holds the host and pin that upgrades of these
+/// packages resolve against, so dropping it would strand them.
+fn guardInstalledFrom(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8, force: bool) !void {
+    // Core packages resolve through the API, never through this row.
+    if (std.mem.eql(u8, name, "homebrew/core") or std.mem.eql(u8, name, "homebrew/cask")) return;
+    const installed = tap_mod.installedFrom(allocator, db, name) catch {
+        output.err("Failed to untap {s}", .{name});
         return error.Aborted;
     };
+    defer tap_mod.freeNames(allocator, installed);
+    if (installed.len == 0) return;
+    // Installs left from an earlier untap don't make the slug tapped again.
+    const registered = tap_mod.isRegistered(db, name) catch {
+        output.err("Failed to untap {s}", .{name});
+        return error.Aborted;
+    };
+    if (!registered) return;
+    const one = installed.len == 1;
+    const plural: []const u8 = if (one) "" else "s";
+    if (force) {
+        output.warn("Untapping {s}: {d} installed package{s} from it stay{s} installed", .{
+            name, installed.len, plural, if (one) "s" else "",
+        });
+    } else {
+        const them: []const u8 = if (one) "it" else "them";
+        // Self-contained: --quiet drops the name list below but not this line.
+        output.err("Refusing to untap {s}: {d} installed package{s} {s} from it (uninstall {s} first, or pass --force to keep {s})", .{
+            name, installed.len, plural, if (one) "comes" else "come", them, them,
+        });
+    }
+    // Legacy rows predate the name guards and may carry escapes.
+    for (installed) |pkg| output.plain("    {s}", .{term_sanitize.scrubInPlace(pkg)});
+    if (!force) return error.Aborted;
+}
+
+/// The exact stored name wins over its folded spelling: a DB from before
+/// canonicalisation can hold `u/homebrew-x` and `u/x` as two taps.
+fn storedSlug(db: *sqlite.Database, buf: *[tap_mod.max_slug_len]u8, raw: []const u8) []const u8 {
+    if (tap_mod.isRegistered(db, raw) catch false) return raw;
+    return tap_mod.canonicalTapSlug(buf, raw) orelse raw;
+}
+
+/// The registration check runs before the HEAD round trip, so an untap in
+/// between leaves nothing to update; say so instead of "Refreshed".
+fn writeRefreshedPin(db: *sqlite.Database, name: []const u8, sha: []const u8, etag: ?[]const u8) !void {
+    tap_mod.updateHead(db, name, sha, etag) catch {
+        output.err("Failed to update commit pin for {s}", .{name});
+        return error.Aborted;
+    };
+    if (db.changes() == 0) {
+        output.err("No available tap {s}", .{name});
+        return error.Aborted;
+    }
+}
+
+test "writeRefreshedPin fails when the tap vanished during the HEAD lookup" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+    try std.testing.expectError(error.Aborted, writeRefreshedPin(&db, "user/repo", sha, null));
+    try tap_mod.add(&db, "user/repo", "user", "homebrew-repo", sha);
+    try writeRefreshedPin(&db, "user/repo", sha, "W/\"e\"");
+}
+
+fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, raw_name: []const u8) !void {
+    validateTapName(raw_name) catch {
+        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{raw_name});
+        return error.Aborted;
+    };
+    var name_buf: [tap_mod.max_slug_len]u8 = undefined;
+    const name = storedSlug(db, &name_buf, raw_name);
+    // The pin write below would match no row, so fail before the HEAD round trip.
+    const registered = tap_mod.isRegistered(db, name) catch {
+        output.err("Failed to read tap {s}", .{name});
+        return error.Aborted;
+    };
+    if (!registered) {
+        output.err("No available tap {s}", .{name});
+        return error.Aborted;
+    }
     const urls = try tap_mod.resolveTapBaseUrls(allocator, db, name);
     defer urls.deinit(allocator);
     // Force fresh: bypass the cached etag so the operator sees the
@@ -1309,12 +1417,6 @@ fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Data
         output.err("Could not resolve {s}'s HEAD commit: empty response", .{name});
         return error.Aborted;
     };
-    // updateHead pairs the new sha with the new etag atomically; falling
-    // back to updateCommit if the row is absent isn't a concern here —
-    // refresh runs against rows the user already `tap added`.
-    tap_mod.updateHead(db, name, sha, res.etag) catch {
-        output.err("Failed to update commit pin for {s}", .{name});
-        return error.Aborted;
-    };
+    try writeRefreshedPin(db, name, sha, res.etag);
     reportDone("Refreshed", "refresh", " {s} to {s}", .{ name, sha[0..@min(sha.len, 7)] });
 }
