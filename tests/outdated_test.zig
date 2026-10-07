@@ -836,10 +836,10 @@ test "tapExists is true for a registered tap and false otherwise" {
 }
 
 test "tapExists accepts a label still referenced by an installed keg after untap" {
-    // Real-world: `mt untap user/repo` drops the taps row but leaves
-    // installed kegs/casks tagged with that label. The audit must
-    // still scope to those rows; rejecting would surface as a typo
-    // error for a tap the user clearly still has packages from.
+    // An untap from before untap refused, or a hand-edited DB, leaves
+    // kegs/casks tagged with a label that has no taps row. The audit
+    // must still scope to those rows; rejecting would surface as a
+    // typo error for a tap the user clearly still has packages from.
     const path = try setupPinnedPrefix("tap_exists_after_untap_keg");
     defer testing.allocator.free(path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
@@ -847,7 +847,7 @@ test "tapExists accepts a label still referenced by an installed keg after untap
 
     var db = try openSeededDb(path);
     defer db.close();
-    // No taps row — the user untapped but kept the install.
+    // No taps row, only the leftover install.
     try insertKegWithTap(&db, "leftover", "user/repo");
 
     try testing.expect(try outdated_mod.tapExists(&db, "user/repo"));
@@ -972,8 +972,8 @@ test "tapExists rejects a label with no row in taps, kegs, or casks" {
 }
 
 test "outdated execute --tap accepts a label kept alive only by installed rows" {
-    // End-to-end: post-untap, the user runs `mt outdated --tap user/repo`
-    // expecting the audit to still scope to their lingering installs.
+    // End-to-end: with only leftover installs carrying the label,
+    // `mt outdated --tap user/repo` must still scope to them.
     const path = try setupPinnedPrefix("exec_tap_after_untap");
     defer testing.allocator.free(path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};

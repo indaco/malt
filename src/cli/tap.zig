@@ -12,6 +12,9 @@ const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const prefix_path = @import("../fs/prefix_path.zig");
 const output = @import("../ui/output.zig");
+const term_sanitize = @import("../ui/term_sanitize.zig");
+const lock_mod = @import("../db/lock.zig");
+const lock_report = @import("lock_report.zig");
 const help = @import("help.zig");
 
 pub const TapNameError = error{InvalidTapName};
@@ -990,7 +993,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             // rebind a later task brings, so refuse it rather than half-apply.
             if (!std.mem.eql(u8, target_pair.host, "github.com")) {
                 if (rebinding) {
-                    output.err("Rebinding {s} onto {s} isn't supported yet — run `mt untap {s}` then re-register.", .{ name, target_pair.host, name });
+                    output.err("Rebinding {s} onto {s} isn't supported yet - uninstall its packages, run `mt untap {s}`, then re-register.", .{ name, target_pair.host, name });
                     return error.Aborted;
                 }
                 tap_mod.addWithForge(&db, name, target_pair.owner, target_pair.repo, target_pair.host, forge_hint, null) catch {
@@ -1075,6 +1078,23 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             reportDone("Tapped", "tap", " {s} @ {s}", .{ name, sha[0..@min(sha.len, 7)] });
         },
         .remove => {
+            // Held through the delete: an install mid-download has not
+            // recorded its keg yet, so the guard below would miss it.
+            var lock_path_buf: [prefix_path.path_buf_len]u8 = undefined;
+            const lock_path = prefix_path.join(&lock_path_buf, prefix, "/db/malt.lock") catch {
+                output.err("lock path too long", .{});
+                return error.Aborted;
+            };
+            var lock: ?lock_mod.LockFile = lock_mod.LockFile.acquire(ctx.io, lock_path, 5000) catch |e| switch (e) {
+                // Only a preview of a fresh prefix lacks db/; nothing to serialise against.
+                error.DirMissing => null,
+                else => {
+                    lock_report.reportAcquireFailure(e, prefix);
+                    return error.Aborted;
+                },
+            };
+            defer if (lock) |*l| l.release(ctx.io);
+            try refuseIfInstalledFrom(allocator, &db, name);
             const removed = tap_mod.remove(&db, name) catch {
                 output.err("Failed to untap {s}", .{name});
                 return error.Aborted;
@@ -1291,6 +1311,32 @@ fn emitRefreshAll(ctx: *const AppCtx, rows: []const RefreshRow) !void {
     }
     if (rows.len == 0) return;
     for (rows) |row| try writeRefreshRowText(stdout, row);
+}
+
+/// Mirrors brew: the row holds the host and pin that upgrades of these
+/// packages resolve against, so dropping it would strand them.
+fn refuseIfInstalledFrom(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !void {
+    // Core packages resolve through the API, never through this row.
+    if (std.mem.eql(u8, name, "homebrew/core") or std.mem.eql(u8, name, "homebrew/cask")) return;
+    const installed = tap_mod.installedFrom(allocator, db, name) catch {
+        output.err("Failed to untap {s}", .{name});
+        return error.Aborted;
+    };
+    defer tap_mod.freeNames(allocator, installed);
+    if (installed.len == 0) return;
+    // Installs left from an earlier untap don't make the slug tapped again.
+    const registered = tap_mod.isRegistered(db, name) catch {
+        output.err("Failed to untap {s}", .{name});
+        return error.Aborted;
+    };
+    if (!registered) return;
+    // Self-contained: --quiet drops the name list below but not this line.
+    output.err("Refusing to untap {s}: {d} installed package{s} from it must be uninstalled first", .{
+        name, installed.len, if (installed.len == 1) "" else "s",
+    });
+    // Legacy rows predate the name guards and may carry escapes.
+    for (installed) |pkg| output.plain("    {s}", .{term_sanitize.scrubInPlace(pkg)});
+    return error.Aborted;
 }
 
 fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, raw_name: []const u8) !void {

@@ -431,9 +431,9 @@ const untap_help =
     \\Usage: malt untap <user>/<repo>
     \\
     \\Drop a tap from the registry, along with the commit SHA it was
-    \\pinned to. Packages already installed from that tap stay installed
-    \\and keep working (`malt outdated --tap` still recognises them), but
-    \\nothing new resolves against the tap until it is re-added.
+    \\pinned to. Fails if the tap is not registered, or while formulae or
+    \\casks installed from it remain: their upgrades resolve against the
+    \\tap's stored host and pin, so uninstall them first.
     \\
     \\Flags:
     \\  --dry-run   Show what would be removed without removing it

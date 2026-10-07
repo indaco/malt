@@ -366,6 +366,37 @@ pub fn isRegistered(db: *sqlite.Database, name: []const u8) sqlite.SqliteError!b
     return stmt.step();
 }
 
+/// Formulae, then casks, installed from `name`; one entry per package.
+/// Free with `freeNames`.
+pub fn installedFrom(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) ![][]u8 {
+    // NOCASE: rows written before canonical tap labels may differ in case.
+    var stmt = try db.prepare(
+        \\SELECT name FROM (SELECT DISTINCT name, 0 AS k FROM kegs WHERE tap = ?1 COLLATE NOCASE
+        \\  UNION ALL SELECT token, 1 FROM casks WHERE tap = ?1 COLLATE NOCASE)
+        \\ORDER BY k, name;
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+
+    var names: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+    while (try stmt.step()) {
+        const raw = stmt.columnText(0) orelse continue;
+        const owned = try allocator.dupe(u8, std.mem.sliceTo(raw, 0));
+        errdefer allocator.free(owned);
+        try names.append(allocator, owned);
+    }
+    return names.toOwnedSlice(allocator);
+}
+
+pub fn freeNames(allocator: std.mem.Allocator, names: []const []const u8) void {
+    for (names) |n| allocator.free(n);
+    allocator.free(names);
+}
+
 /// Replace the stored commit SHA for an existing tap. A missing row is a
 /// silent no-op, so callers check `isRegistered` first.
 pub fn updateCommit(db: *sqlite.Database, name: []const u8, commit_sha: []const u8) !void {

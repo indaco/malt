@@ -94,8 +94,9 @@ pub fn loadCaskRows(
 /// True iff the given `<user/repo>` label is known anywhere the
 /// `--tap` audit can act on: the local `taps` registry, or any
 /// installed row's `tap` column. Used by `outdated`'s `--tap` flag
-/// to fail clearly on typos without rejecting taps the user has
-/// `untap`ped while keeping their installs.
+/// to fail clearly on typos without rejecting a tap whose installs
+/// outlived its row (an untap from before untap refused, or a
+/// hand-edited DB).
 pub fn tapExists(db: *sqlite.Database, label: []const u8) !bool {
     // Three sources, single round-trip: `?1` is reused across the
     // UNION ALL legs; `LIMIT 1` short-circuits after the first match.

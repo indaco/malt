@@ -379,6 +379,34 @@ test "isRegistered answers for the exact stored name only" {
     try testing.expect(!try tap.isRegistered(&db, "a/c"));
 }
 
+test "installedFrom lists each formula then cask installed from that tap only" {
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, tap, store_sha256, cellar_path) VALUES
+        \\  ('foo', 'a/b/foo', '1.0', 'a/b', 's', 'c'),
+        \\  ('foo', 'a/b/foo', '2.0', 'a/b', 's', 'c'),
+        \\  ('bar', 'c/d/bar', '1.0', 'c/d', 's', 'c'),
+        \\  ('baz', 'baz', '1.0', NULL, 's', 'c');
+        \\INSERT INTO casks (token, name, version, url, tap) VALUES
+        \\  ('qux', 'Qux', '1.0', 'u', 'A/B'),
+        \\  ('zed', 'Zed', '1.0', 'u', 'c/d');
+    );
+
+    // Two versions of one formula are one package; the cask row predates
+    // canonical casing, so the match ignores case.
+    const names = try tap.installedFrom(testing.allocator, &db, "a/b");
+    defer tap.freeNames(testing.allocator, names);
+    try testing.expectEqual(@as(usize, 2), names.len);
+    try testing.expectEqualStrings("foo", names[0]);
+    try testing.expectEqualStrings("qux", names[1]);
+
+    const none = try tap.installedFrom(testing.allocator, &db, "e/f");
+    defer tap.freeNames(testing.allocator, none);
+    try testing.expectEqual(@as(usize, 0), none.len);
+}
+
 test "updateCommit on an unknown tap is a no-op (no rows affected, no error)" {
     var db = try openDb();
     defer db.close();
