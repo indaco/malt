@@ -719,6 +719,13 @@ test "a cold names+versions cycle downloads the bulk dump exactly once" {
     defer testing.allocator.free(want_names);
     try testing.expectEqualStrings(want_names, names);
 
+    // The same download leaves doctor its bottle-digest side-car.
+    const bottles = api_mod.readBottlesIndex(io, testing.allocator, dir.path) orelse return error.NoBottlesSideCar;
+    defer testing.allocator.free(bottles);
+    const want_bottles = try api_mod.extractBottles(testing.allocator, fixture);
+    defer testing.allocator.free(want_bottles);
+    try testing.expectEqualStrings(want_bottles, bottles);
+
     // invalidateCache wipes api/ wholesale → the versions side-car too.
     var vpath_buf: [512]u8 = undefined;
     const vpath = try std.fmt.bufPrint(&vpath_buf, "{s}/api/versions_formula.txt", .{dir.path});
@@ -728,6 +735,57 @@ test "a cold names+versions cycle downloads the bulk dump exactly once" {
 }
 
 // --- conditional GET: ETag/304 refresh of the bulk dump ---
+
+// Formula refreshes also need doctor's side-car before a 304 can stand in.
+const bottles_side_car = "bottles_" ++ api_mod.bottles_key ++ ".txt";
+
+test "a warm ETag without the bottles side-car refetches instead of trusting a 304" {
+    // A cache from before the side-car existed would otherwise 304 forever and
+    // never give doctor its data.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const etag = "W/\"unchanged\"";
+    const fixture =
+        \\[{"name":"wget","versions":{"stable":"1.21.4"},"revision":0}]
+    ;
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = EtagServer{
+        .io = io,
+        .listener = &listener,
+        .body = fixture,
+        .etag = etag,
+        .count = std.atomic.Value(u32).init(0),
+        .conditional_count = std.atomic.Value(u32).init(0),
+    };
+    const thread = try std.Thread.spawn(.{}, EtagServer.serve, .{&srv});
+
+    var dir = try TempCacheDir.init("etag_no_bottles");
+    defer dir.deinit();
+    try dir.writeCacheFile("versions_formula.txt", "wget\t1.0\t0\n");
+    try dir.writeCacheFile("names_formula.txt", "wget\n");
+    try dir.writeCacheFile("formula.etag", etag);
+    try backdateIndex(dir.path, "versions_formula.txt");
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
+    var base_buf: [64]u8 = undefined;
+    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const versions = try api.fetchVersionsIndex(.formula);
+    defer testing.allocator.free(versions);
+    stopServer(io, &listener, &srv.stop, thread);
+
+    try testing.expectEqual(@as(u32, 0), srv.conditional_count.load(.monotonic));
+    const bottles = api_mod.readBottlesIndex(io, testing.allocator, dir.path) orelse return error.NoBottlesSideCar;
+    defer testing.allocator.free(bottles);
+    try testing.expectEqualStrings("wget\t\n", bottles);
+}
 
 test "a stale side-car with an unchanged dump refreshes via 304, no re-download" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -762,6 +820,7 @@ test "a stale side-car with an unchanged dump refreshes via 304, no re-download"
     try dir.writeCacheFile("versions_formula.txt", seeded_versions);
     try dir.writeCacheFile("names_formula.txt", seeded_names);
     try dir.writeCacheFile("formula.etag", etag);
+    try dir.writeCacheFile(bottles_side_car, "");
     // Both side-cars are stale so the versions fetch takes the refresh path.
     try backdateIndex(dir.path, "versions_formula.txt");
     try backdateIndex(dir.path, "names_formula.txt");
@@ -828,6 +887,7 @@ test "a changed dump (new ETag) re-extracts both side-cars and stores the new ET
     try dir.writeCacheFile("versions_formula.txt", "stale\t0.0.0\t0\n");
     try dir.writeCacheFile("names_formula.txt", "stale\n");
     try dir.writeCacheFile("formula.etag", old_etag);
+    try dir.writeCacheFile(bottles_side_car, "");
     try backdateIndex(dir.path, "versions_formula.txt");
     try backdateIndex(dir.path, "names_formula.txt");
 
@@ -933,6 +993,7 @@ test "a 200 without an ETag header clears a previously stored ETag" {
     try dir.writeCacheFile("versions_formula.txt", "stale\t0.0.0\t0\n");
     try dir.writeCacheFile("names_formula.txt", "stale\n");
     try dir.writeCacheFile("formula.etag", "W/\"gone\"");
+    try dir.writeCacheFile(bottles_side_car, "");
     try backdateIndex(dir.path, "versions_formula.txt");
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
@@ -981,6 +1042,7 @@ test "an implausibly large stored ETag is ignored and the GET goes out unconditi
     const huge = "x" ** 4096;
     try dir.writeCacheFile("versions_formula.txt", "stale\t0.0.0\t0\n");
     try dir.writeCacheFile("formula.etag", huge);
+    try dir.writeCacheFile(bottles_side_car, "");
     try backdateIndex(dir.path, "versions_formula.txt");
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
@@ -1034,6 +1096,7 @@ test "a 304 with a missing side-car drops the ETag and surfaces ApiUnreachable" 
     // side-car never reaches the 304: the GET goes out unconditional.)
     try dir.writeCacheFile("versions_formula.txt", "wget\t1.0\t0\n");
     try dir.writeCacheFile("formula.etag", etag);
+    try dir.writeCacheFile(bottles_side_car, "");
     try backdateIndex(dir.path, "versions_formula.txt");
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };

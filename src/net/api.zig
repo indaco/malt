@@ -5,6 +5,7 @@ const std = @import("std");
 const cask_variation = @import("cask_variation.zig");
 const atomic = @import("../fs/atomic.zig");
 const path_component = @import("../fs/path_component.zig");
+const store_path = @import("../fs/store_path.zig");
 const client_mod = @import("client.zig");
 const mirror_mod = @import("mirror.zig");
 
@@ -102,6 +103,61 @@ pub fn extractNames(
     return out.toOwnedSlice(allocator);
 }
 
+/// Key of the bottle-digest side-car. The tags kept are this arch's, so two
+/// Macs of different arch sharing a cache each get their own file.
+pub const bottles_key = if (@import("builtin").cpu.arch == .aarch64) "formula.arm64" else "formula.x86_64";
+
+/// From the formula bulk dump: `<name>\t<tag>=<sha256>,...` per formula,
+/// keeping only the tags this arch can place (plus `all`), so doctor can map
+/// any keg's recorded digest back to the macOS its bottle targets.
+pub fn extractBottles(allocator: std.mem.Allocator, json_body: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var key_buf: [32]u8 = undefined;
+    allocator.free(try extractIndexes(allocator, .formula, json_body, CaskHost.running(&key_buf), &out));
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendBottlesLine(allocator: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8, bottle: ?std.json.Value) !void {
+    // Doctor builds a cache path from it, and tab/comma/`=` are separators.
+    validateName(name) catch return;
+    try out.appendSlice(allocator, name);
+    try out.append(allocator, '\t');
+    if (fieldObject(fieldObject(bottle, "stable"), "files")) |files| {
+        var sep = false;
+        var it = files.object.iterator();
+        while (it.next()) |f| {
+            const tag = f.key_ptr.*;
+            if (!std.mem.eql(u8, tag, "all") and cask_variation.tagMajor(tag) == null) continue;
+            const entry = f.value_ptr.*;
+            if (entry != .object) continue;
+            // Same filter as the formula parser, so a listed bottle is one
+            // `mt reinstall` can pour.
+            const url = entry.object.get("url") orelse continue;
+            const sha = entry.object.get("sha256") orelse continue;
+            if (url != .string or sha != .string or !store_path.isValidSha256(sha.string)) continue;
+            if (sep) try out.append(allocator, ',');
+            sep = true;
+            try out.print(allocator, "{s}={s}", .{ tag, sha.string });
+        }
+    }
+    try out.append(allocator, '\n');
+}
+
+fn fieldObject(v: ?std.json.Value, key: []const u8) ?std.json.Value {
+    const obj = v orelse return null;
+    if (obj != .object) return null;
+    const field = obj.object.get(key) orelse return null;
+    return if (field == .object) field else null;
+}
+
+/// The bottle-digest side-car at any age, without a client. Caller owns it.
+pub fn readBottlesIndex(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8) ?[]const u8 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const p = std.fmt.bufPrint(&path_buf, "{s}/api/bottles_{s}.txt", .{ cache_dir, bottles_key }) catch return null;
+    return readCacheFile(io, allocator, p);
+}
+
 /// What the running machine resolves a cask document against. Null on
 /// either field leaves the top-level fields in force.
 pub const CaskHost = struct {
@@ -141,6 +197,18 @@ pub fn extractVersionsForHost(
     json_body: []const u8,
     host: CaskHost,
 ) ![]const u8 {
+    return extractIndexes(allocator, kind, json_body, host, null);
+}
+
+/// The versions side-car and, for formulae when `bottles` is set, the
+/// bottle-digest one, from a single parse of the ~28 MiB dump.
+fn extractIndexes(
+    allocator: std.mem.Allocator,
+    kind: BrewApi.Kind,
+    json_body: []const u8,
+    host: CaskHost,
+    bottles: ?*std.ArrayList(u8),
+) ![]const u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -166,6 +234,7 @@ pub fn extractVersionsForHost(
                 .{ .ignore_unknown_fields = true },
             );
             for (parsed) |e| {
+                if (bottles) |b| try appendBottlesLine(allocator, b, e.name, e.bottle);
                 const stable = e.versions.stable orelse continue;
                 // Not installable here, so never reported as outdated here.
                 if (!cask_variation.bottlePourable(e.bottle, host.macos_major)) continue;
@@ -299,6 +368,14 @@ fn readCacheFile(io: std.Io, allocator: std.mem.Allocator, cache_path: []const u
         return null;
     }
     return content;
+}
+
+/// A cached API document of any age, without a client: for read-only
+/// callers that must never dial out. Caller owns the bytes.
+pub fn readCacheAt(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, key: []const u8, prefix: []const u8) ?[]const u8 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ cache_dir, prefix, key }) catch return null;
+    return readCacheFile(io, allocator, cache_path);
 }
 
 pub const BrewApi = struct {
@@ -504,9 +581,9 @@ pub const BrewApi = struct {
         var url_buf: [512]u8 = undefined;
         const url = try buildNamesIndexUrl(&url_buf, self.base_url, kind);
 
-        // A versions side-car this host never wrote cannot come back from a
-        // 304, so the GET goes out unconditional until one exists.
-        const stored_etag = if (self.indexFileExists("versions_", vkey)) self.readIndexEtag(key) else null;
+        // A side-car this host never wrote cannot come back from a 304, so the
+        // GET goes out unconditional until all of them exist.
+        const stored_etag = if (self.sideCarsPresent(kind, vkey)) self.readIndexEtag(key) else null;
         defer if (stored_etag) |e| self.allocator.free(e);
 
         var resp = self.http.getConditional(url, stored_etag, &.{}) catch return ApiError.ApiUnreachable;
@@ -517,12 +594,12 @@ pub const BrewApi = struct {
             // rewrite and serve the bytes already on disk.
             self.touchIndex("names_", key);
             self.touchIndex("versions_", vkey);
-            if (self.readIndexFile("names_", key, null)) |names| {
+            if (self.sideCarsPresent(kind, vkey)) if (self.readIndexFile("names_", key, null)) |names| {
                 if (self.readIndexFile("versions_", vkey, null)) |versions| {
                     return .{ .names = names, .versions = versions };
                 }
                 self.allocator.free(names);
-            }
+            };
             // ETag present but a side-car is gone (evicted / wiped): drop the
             // ETag so the next refresh re-downloads unconditionally rather
             // than looping on a 304 it can no longer satisfy.
@@ -537,7 +614,10 @@ pub const BrewApi = struct {
             else => return ApiError.InvalidResponse,
         };
         errdefer self.allocator.free(names);
-        const versions = extractVersions(self.allocator, kind, resp.body) catch |e| switch (e) {
+        var bottles: std.ArrayList(u8) = .empty;
+        defer bottles.deinit(self.allocator);
+        var host_buf: [32]u8 = undefined;
+        const versions = extractIndexes(self.allocator, kind, resp.body, CaskHost.running(&host_buf), if (kind == .formula) &bottles else null) catch |e| switch (e) {
             error.OutOfMemory => return ApiError.OutOfMemory,
             else => return ApiError.InvalidResponse,
         };
@@ -545,8 +625,32 @@ pub const BrewApi = struct {
 
         self.writeIndexFile("names_", key, names);
         self.writeIndexFile("versions_", vkey, versions);
+        // A cache warmed before this side-car existed gets it on the next
+        // changed dump; until then doctor reports those kegs as unchecked.
+        // Atomic: doctor may read it mid-refresh, and a cut line could turn a
+        // reinstall remedy into an uninstall one.
+        if (kind == .formula) self.writeBottlesIndex(bottles.items);
         self.writeIndexEtag(key, resp.etag);
         return .{ .names = names, .versions = versions };
+    }
+
+    /// The side-cars a 304 must be able to serve for `kind`: versions, plus
+    /// doctor's bottle digests for formulae.
+    fn sideCarsPresent(self: *const BrewApi, kind: Kind, vkey: []const u8) bool {
+        if (!self.indexFileExists("versions_", vkey)) return false;
+        return kind != .formula or self.indexFileExists("bottles_", bottles_key);
+    }
+
+    fn writeBottlesIndex(self: *const BrewApi, data: []const u8) void {
+        var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const dir = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
+        std.Io.Dir.createDirAbsolute(self.io, dir, .default_dir) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return,
+        };
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const p = std.fmt.bufPrint(&path_buf, "{s}/api/bottles_{s}.txt", .{ self.cache_dir, bottles_key }) catch return;
+        atomic.atomicWriteFile(self.io, p, data) catch {};
     }
 
     fn indexFileExists(self: *const BrewApi, infix: []const u8, key: []const u8) bool {
@@ -724,9 +828,7 @@ pub const BrewApi = struct {
     /// path so a stale snapshot still serves bytes; the regular
     /// `readCache` adds the freshness gate on top.
     pub fn readCacheBytes(self: *BrewApi, key: []const u8, prefix: []const u8) ?[]const u8 {
-        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return null;
-        return readCacheFile(self.io, self.allocator, cache_path);
+        return readCacheAt(self.io, self.allocator, self.cache_dir, key, prefix);
     }
 
     pub fn writeCache(self: *const BrewApi, key: []const u8, prefix: []const u8, data: []const u8) void {
@@ -886,6 +988,55 @@ test "buildNamesIndexUrl emits formula vs cask paths against the override" {
 test "buildFormulaUrl returns OutOfMemory when the buffer can't hold the URL" {
     var tiny: [4]u8 = undefined;
     try testing.expectError(ApiError.OutOfMemory, BrewApi.buildFormulaUrl(&tiny, "https://example.com", "wget"));
+}
+
+// ── extractBottles: the doctor digest side-car ────────────────────────
+
+test "extractBottles keeps each formula's placeable tags with their digests" {
+    const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
+    const other = if (arch.len == 0) "arm64_" else "";
+    const a = "a" ** 64;
+    const b = "b" ** 64;
+    const body = "[{\"name\":\"wget\",\"bottle\":{\"stable\":{\"files\":{" ++
+        "\"" ++ arch ++ "golden_gate\":{\"url\":\"u\",\"sha256\":\"" ++ a ++ "\"}," ++
+        "\"" ++ arch ++ "tahoe\":{\"url\":\"u\",\"sha256\":\"" ++ b ++ "\"}," ++
+        "\"" ++ other ++ "tahoe\":{\"url\":\"u\",\"sha256\":\"" ++ a ++ "\"}," ++
+        "\"x86_64_linux\":{\"url\":\"u\",\"sha256\":\"" ++ a ++ "\"}}}}}," ++
+        "{\"name\":\"ca-certificates\",\"bottle\":{\"stable\":{\"files\":{\"all\":{\"url\":\"u\",\"sha256\":\"" ++ b ++ "\"}}}}}," ++
+        // Listed with no tags: known to the dump, so a keg of it is checked.
+        "{\"name\":\"unbottled\"}]";
+    const out = try extractBottles(testing.allocator, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(
+        "wget\t" ++ arch ++ "golden_gate=" ++ a ++ "," ++ arch ++ "tahoe=" ++ b ++ "\n" ++
+            "ca-certificates\tall=" ++ b ++ "\n" ++
+            "unbottled\t\n",
+        out,
+    );
+}
+
+test "extractBottles drops entries the install path would refuse to pour" {
+    // Doctor would otherwise promise `mt reinstall` for a bottle install rejects.
+    const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
+    const body = "[{\"name\":\"jq\",\"bottle\":{\"stable\":{\"files\":{" ++
+        "\"" ++ arch ++ "tahoe\":{\"url\":\"u\",\"sha256\":\"" ++ "A" ** 64 ++ "\"}," ++
+        "\"" ++ arch ++ "sonoma\":{\"sha256\":\"" ++ "a" ** 64 ++ "\"}}}}}]";
+    const out = try extractBottles(testing.allocator, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("jq\t\n", out);
+}
+
+test "extractBottles drops what could break the line format or a cache path" {
+    // Third-party JSON: a malformed digest or name must not reach the file.
+    const arch = if (@import("builtin").cpu.arch == .aarch64) "arm64_" else "";
+    const body = "[{\"name\":\"jq\",\"bottle\":{\"stable\":{\"files\":{" ++
+        "\"" ++ arch ++ "tahoe\":{\"sha256\":\"," ++ "a" ** 63 ++ "\"}," ++
+        "\"" ++ arch ++ "sonoma\":{}}}}}," ++
+        "{\"name\":\"../evil\",\"bottle\":{\"stable\":{\"files\":{}}}}," ++
+        "{\"name\":\"tab\\tname\"}]";
+    const out = try extractBottles(testing.allocator, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("jq\t\n", out);
 }
 
 // ── extractVersions: the outdated-check producer ──────────────────────
