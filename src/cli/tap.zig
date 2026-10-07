@@ -723,6 +723,11 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             output.err("--refresh needs a tap (mt tap --refresh <user>/<repo>) or --all", .{});
             return error.Aborted;
         }
+        // The batch would win and silently drop the named tap.
+        if (refresh_target != null and refresh_all) {
+            output.err("--refresh takes a tap or --all, not both", .{});
+            return error.Aborted;
+        }
     }
 
     // --repo / --force only make sense on the add path with a positional
