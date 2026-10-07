@@ -762,6 +762,69 @@ test "execute rejects --refresh with both a tap and --all instead of dropping th
     }
 }
 
+test "execute rejects --pin combined with --refresh instead of dropping the refresh" {
+    const prefix = try setupPrefix("pin_and_refresh");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const cases = [_][]const []const u8{
+        &.{ "--pin", "a/b", sha, "--refresh", "c/d" },
+        &.{ "--pin", "a/b", sha, "--refresh", "--all" },
+        &.{ "--refresh=c/d", "--pin", "a/b", sha },
+    };
+    for (cases) |argv| {
+        captured.clearRetainingCapacity();
+        try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, argv));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "--pin cannot be combined with --refresh") != null);
+    }
+}
+
+test "execute rejects a second tap argument instead of dropping it" {
+    const prefix = try setupPrefix("second_positional");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    const tap_cases = [_][]const []const u8{
+        &.{ "--refresh", "a/b", "c/d" },
+        &.{ "--refresh=a/b", "c/d" },
+        &.{ "a/b", "c/d" },
+        &.{ "--pin", "a/b", "0123456789abcdef0123456789abcdef01234567", "c/d" },
+        &.{ "c/d", "--pin", "a/b", "0123456789abcdef0123456789abcdef01234567" },
+    };
+    for (tap_cases) |argv| {
+        captured.clearRetainingCapacity();
+        try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, argv));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "Unexpected argument 'c/d'") != null);
+    }
+    // brew's `tap <slug> <url>` form: point at --url, not at "one tap".
+    captured.clearRetainingCapacity();
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "a/b", "https://example.com/a/b" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--url") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "one tap per command") == null);
+    captured.clearRetainingCapacity();
+    try testing.expectError(error.Aborted, tap_cli.executeUntap(&ctx, testing.allocator, &.{ "a/b", "c/d" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Unexpected argument 'c/d'") != null);
+}
+
 test "execute --refresh --all refuses offline instead of exiting clean with every row failed" {
     // Offline no row can resolve, so a zero exit would read as a refresh.
     const prefix = try setupPrefix("refresh_all_offline");

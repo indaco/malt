@@ -709,6 +709,14 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             return error.Aborted;
         } else if (positional == null) {
             positional = arg;
+        } else {
+            // brew's `tap <slug> <url>` form; malt takes the URL via --url.
+            if (std.mem.indexOf(u8, arg, "://") != null) {
+                output.err("Unexpected argument '{s}': pass a repo URL with --url", .{arg});
+            } else {
+                output.err("Unexpected argument '{s}' (one tap per command)", .{arg});
+            }
+            return error.Aborted;
         }
     }
     // Alone, --all would batch-refresh every tap; help pairs it with --refresh.
@@ -719,6 +727,19 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     if (action != .add and refresh_target != null) {
         output.err("--refresh is only valid with `mt tap`", .{});
         return error.Aborted;
+    }
+    // The pin would run and the refresh be dropped.
+    if (pin_slug != null and refresh_target != null) {
+        output.err("--pin cannot be combined with --refresh", .{});
+        return error.Aborted;
+    }
+    // --pin and --refresh=<tap> already name their tap; a positional would be dropped.
+    if (positional) |extra| {
+        const named = pin_slug != null or (refresh_target != null and refresh_target.?.len != 0);
+        if (named) {
+            output.err("Unexpected argument '{s}' (one tap per command)", .{extra});
+            return error.Aborted;
+        }
     }
     if (refresh_target) |rt| {
         if (rt.len == 0) refresh_target = positional;
