@@ -1112,13 +1112,17 @@ fn pinTap(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
-    slug: []const u8,
+    raw_slug: []const u8,
     sha: []const u8,
 ) !void {
-    validateTapName(slug) catch {
-        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{slug});
+    validateTapName(raw_slug) catch {
+        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{raw_slug});
         return error.Aborted;
     };
+    // Same row key as tap/untap, so a homebrew- spelling pins the registered
+    // tap against its stored host instead of upserting a second row.
+    var slug_buf: [tap_mod.max_slug_len]u8 = undefined;
+    const slug = tap_mod.canonicalTapSlug(&slug_buf, raw_slug) orelse raw_slug;
     tap_mod.validateCommitSha(sha) catch {
         output.err("Invalid SHA '{s}'. Expected a 40-char lowercase hex commit SHA.", .{sha});
         return error.Aborted;

@@ -556,6 +556,27 @@ test "executeUntap on an unregistered tap with leftover installs says it is unkn
     try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing") == null);
 }
 
+// --- pin -------------------------------------------------------------
+
+test "pin under a homebrew- spelling targets the registered tap, not a second row" {
+    var s = try Scratch.init(testing.allocator, "tap_pin_homebrew_spelling");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    // Offline stops it at the reachability check, which names the tap it resolved.
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    {
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try testing.expectError(error.Aborted, tap.execute(&ctx, testing.allocator, &.{
+            "--pin", "User/homebrew-repo", "0123456789abcdef0123456789abcdef01234567",
+        }));
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not verify user/repo @ 0123456") != null);
+}
+
 // --- refresh ---------------------------------------------------------
 
 fn refreshOffline(captured: *std.ArrayList(u8), slug: []const u8) !void {
