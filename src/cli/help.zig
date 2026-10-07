@@ -375,7 +375,7 @@ const tap_help =
     \\       malt tap --refresh <user>/<repo>
     \\       malt tap --refresh --all [--yes] [--json]
     \\       malt tap --pin <user>/<repo> <sha>
-    \\       malt untap <user>/<repo>
+    \\       malt untap [--force] <user>/<repo>
     \\
     \\Manage taps. Without arguments, lists registered taps + their
     \\pinned commit. `tap <slug>` resolves the repo's HEAD commit at
@@ -428,7 +428,7 @@ const tap_help =
 ;
 
 const untap_help =
-    \\Usage: malt untap <user>/<repo>
+    \\Usage: malt untap [--force] <user>/<repo>
     \\
     \\Drop a tap from the registry, along with the commit SHA it was
     \\pinned to. Fails if the tap is not registered, or while formulae or
@@ -436,6 +436,8 @@ const untap_help =
     \\tap's stored host and pin, so uninstall them first.
     \\
     \\Flags:
+    \\  --force     Untap anyway; its packages stay installed but lose the
+    \\              tap's host and pin
     \\  --dry-run   Show what would be removed without removing it
     \\
 ;

@@ -412,7 +412,7 @@ test "executeUntap refuses a tap that installed packages still come from, and na
             tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/homebrew-repo"}),
         );
     }
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing to untap user/repo: 2 installed packages from it must be uninstalled first") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing to untap user/repo: 2 installed packages come from it (uninstall them first, or pass --force to keep them)") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "  foo\n") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "  bar\n") != null);
     // Dropping the row would lose the host and pin those packages upgrade from.
@@ -446,8 +446,58 @@ test "executeUntap --quiet still says how many packages block the untap" {
         error.Aborted,
         tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"}),
     );
-    try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing to untap user/repo: 1 installed package from it must be uninstalled first") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Refusing to untap user/repo: 1 installed package comes from it (uninstall it first, or pass --force to keep it)") != null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "  foo\n") == null);
+}
+
+fn installedRowCount(prefix: []const u8) !i64 {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT (SELECT COUNT(*) FROM kegs) + (SELECT COUNT(*) FROM casks);");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    return stmt.columnInt(0);
+}
+
+test "executeUntap --force drops the tap but keeps its packages, and says so" {
+    // The escape hatch for a tap whose repo is gone: its packages keep
+    // working, they just stop resolving updates through it.
+    var s = try Scratch.init(testing.allocator, "untap_force");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+    try seedInstalled(s.path, installed_from_user_repo);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    {
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--force", "user/repo" });
+    }
+    try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "user/repo"));
+    try testing.expectEqual(@as(i64, 2), try installedRowCount(s.path));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "2 installed packages from it stay installed") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "    foo\n") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Untapped user/repo") != null);
+}
+
+test "executeUntap --force still refuses a tap that was never registered" {
+    var s = try Scratch.init(testing.allocator, "untap_force_unknown");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "user/rpeo", "--force" }),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/rpeo") != null);
+    try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
 }
 
 test "--dry-run untap refuses a tap that installed packages still come from" {

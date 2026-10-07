@@ -598,7 +598,8 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     // --repo <owner>/<exact-repo>: pin the GitHub repo identifier for
     //   third-party taps whose repo does not carry the `homebrew-` prefix.
     // --force: rebind an existing row to a new --repo target, clearing
-    //   the stale commit pin in the process.
+    //   the stale commit pin in the process. On untap: drop a tap whose
+    //   packages are still installed.
     var refresh_target: ?[]const u8 = null;
     var refresh_all = false;
     var pin_slug: ?[]const u8 = null;
@@ -771,7 +772,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             return error.Aborted;
         }
     }
-    if (force and repo_override == null) {
+    if (force and repo_override == null and action == .add) {
         output.err("--force is only valid alongside --repo", .{});
         return error.Aborted;
     }
@@ -993,7 +994,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             // rebind a later task brings, so refuse it rather than half-apply.
             if (!std.mem.eql(u8, target_pair.host, "github.com")) {
                 if (rebinding) {
-                    output.err("Rebinding {s} onto {s} isn't supported yet - uninstall its packages, run `mt untap {s}`, then re-register.", .{ name, target_pair.host, name });
+                    output.err("Rebinding {s} onto {s} isn't supported yet - run `mt untap --force {s}`, then re-register.", .{ name, target_pair.host, name });
                     return error.Aborted;
                 }
                 tap_mod.addWithForge(&db, name, target_pair.owner, target_pair.repo, target_pair.host, forge_hint, null) catch {
@@ -1094,7 +1095,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
                 },
             };
             defer if (lock) |*l| l.release(ctx.io);
-            try refuseIfInstalledFrom(allocator, &db, name);
+            try guardInstalledFrom(allocator, &db, name, force);
             const removed = tap_mod.remove(&db, name) catch {
                 output.err("Failed to untap {s}", .{name});
                 return error.Aborted;
@@ -1319,7 +1320,7 @@ fn emitRefreshAll(ctx: *const AppCtx, rows: []const RefreshRow) !void {
 
 /// Mirrors brew: the row holds the host and pin that upgrades of these
 /// packages resolve against, so dropping it would strand them.
-fn refuseIfInstalledFrom(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !void {
+fn guardInstalledFrom(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8, force: bool) !void {
     // Core packages resolve through the API, never through this row.
     if (std.mem.eql(u8, name, "homebrew/core") or std.mem.eql(u8, name, "homebrew/cask")) return;
     const installed = tap_mod.installedFrom(allocator, db, name) catch {
@@ -1334,13 +1335,22 @@ fn refuseIfInstalledFrom(allocator: std.mem.Allocator, db: *sqlite.Database, nam
         return error.Aborted;
     };
     if (!registered) return;
-    // Self-contained: --quiet drops the name list below but not this line.
-    output.err("Refusing to untap {s}: {d} installed package{s} from it must be uninstalled first", .{
-        name, installed.len, if (installed.len == 1) "" else "s",
-    });
+    const one = installed.len == 1;
+    const plural: []const u8 = if (one) "" else "s";
+    if (force) {
+        output.warn("Untapping {s}: {d} installed package{s} from it stay{s} installed", .{
+            name, installed.len, plural, if (one) "s" else "",
+        });
+    } else {
+        const them: []const u8 = if (one) "it" else "them";
+        // Self-contained: --quiet drops the name list below but not this line.
+        output.err("Refusing to untap {s}: {d} installed package{s} {s} from it (uninstall {s} first, or pass --force to keep {s})", .{
+            name, installed.len, plural, if (one) "comes" else "come", them, them,
+        });
+    }
     // Legacy rows predate the name guards and may carry escapes.
     for (installed) |pkg| output.plain("    {s}", .{term_sanitize.scrubInPlace(pkg)});
-    return error.Aborted;
+    if (!force) return error.Aborted;
 }
 
 /// The exact stored name wins over its folded spelling: a DB from before
