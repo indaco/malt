@@ -98,7 +98,10 @@ pub fn hostSliceOffset(data: []const u8) ?u64 {
         if (data.len - offset < size) return null;
         const entry = data[offset..][0..size];
         offset += size;
-        if (std.mem.readInt(i32, entry[0..4], .big) == host) return readFatArch(entry, is64).offset;
+        if (std.mem.readInt(i32, entry[0..4], .big) != host) continue;
+        // pread takes a signed offset: a larger one is no position, not a seek.
+        const slice = readFatArch(entry, is64).offset;
+        return if (slice <= std.math.maxInt(i64)) slice else null;
     }
     return null;
 }
@@ -629,4 +632,17 @@ test "hostSliceOffset finds this arch's slice in a fat file and nothing in a thi
     // An arch table cut short yields nothing rather than a garbage offset.
     try testing.expectEqual(@as(?u64, null), hostSliceOffset(fat[0..20]));
     try testing.expectEqual(@as(?u64, null), hostSliceOffset(&buildVersionMachO(.MACOS, 27 << 16)));
+}
+
+test "hostSliceOffset refuses a fat64 offset no file position can hold" {
+    // pread takes a signed offset; 2^63 would reach it as negative.
+    var fat: [8 + 32]u8 = @splat(0);
+    std.mem.writeInt(u32, fat[0..4], macho.FAT_MAGIC_64, .big);
+    std.mem.writeInt(u32, fat[4..8], 1, .big);
+    const host: macho.cpu_type_t = if (@import("builtin").cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
+    std.mem.writeInt(i32, fat[8..12], host, .big);
+    std.mem.writeInt(u64, fat[16..24], 1 << 63, .big);
+    try testing.expectEqual(@as(?u64, null), hostSliceOffset(&fat));
+    std.mem.writeInt(u64, fat[16..24], 0x1_0000_4000, .big);
+    try testing.expectEqual(@as(?u64, 0x1_0000_4000), hostSliceOffset(&fat));
 }
