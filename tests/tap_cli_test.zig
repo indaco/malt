@@ -765,3 +765,91 @@ test "--dry-run refresh --all ends in a preview summary" {
     }
     try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would refresh 0 taps") != null);
 }
+
+// --- unusable database ------------------------------------------------
+
+const too_new_db =
+    \\CREATE TABLE schema_version(version INTEGER PRIMARY KEY);
+    \\INSERT INTO schema_version VALUES(99);
+;
+// `kegs` is a VIEW, so initSchema's base index DDL fails.
+const uninitialisable_db = "CREATE VIEW kegs AS SELECT 1 AS id;";
+
+const zero_sha = "0000000000000000000000000000000000000000";
+
+// Every intent that reaches initSchema, listing included: a DB that opens but
+// can't be initialised must not read as "No taps registered".
+const unusable_db_intents = [_][]const []const u8{
+    &.{"user/repo"},
+    &.{ "--refresh", "user/repo" },
+    &.{ "--refresh", "--all" },
+    &.{ "--pin", "user/repo", zero_sha },
+    &.{},
+};
+
+fn seedRaw(prefix: []const u8, sql: [:0]const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    test_io.deleteFileAbsolute(std.Options.debug_io, db_path) catch {};
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try db.exec(sql);
+}
+
+fn queryInt(prefix: []const u8, sql: [:0]const u8) !i64 {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare(sql);
+    defer stmt.finalize();
+    _ = try stmt.step();
+    return stmt.columnInt(0);
+}
+
+fn expectRefusal(
+    seed: [:0]const u8,
+    want: anyerror,
+    needle: []const u8,
+    argv: []const []const u8,
+    prefix: []const u8,
+) !void {
+    try seedRaw(prefix, seed);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.setQuiet(false);
+    output.beginStderrCapture(testing.allocator, &captured);
+    const result = tap.execute(&malt.app_ctx.debug_ctx, testing.allocator, argv);
+    output.endStderrCapture();
+    testing.expectError(want, result) catch |e| {
+        std.debug.print("argv={any} stderr={s}\n", .{ argv, captured.items });
+        return e;
+    };
+    try testing.expect(std.mem.indexOf(u8, captured.items, needle) != null);
+}
+
+test "tap intents on a newer-schema database exit SchemaTooNew and name the version" {
+    var s = try Scratch.init(testing.allocator, "schema_too_new");
+    defer s.deinit(testing.allocator);
+    for (unusable_db_intents) |argv| {
+        try expectRefusal(too_new_db, error.SchemaTooNew, "schema v99", argv, s.path);
+    }
+}
+
+test "tap intents on a database whose schema can't be initialised abort with the cause" {
+    var s = try Scratch.init(testing.allocator, "schema_uninitialisable");
+    defer s.deinit(testing.allocator);
+    for (unusable_db_intents) |argv| {
+        try expectRefusal(uninitialisable_db, error.Aborted, "Failed to initialize database schema", argv, s.path);
+    }
+}
+
+test "--dry-run tap on a newer-schema database refuses instead of previewing" {
+    var s = try Scratch.init(testing.allocator, "schema_too_new_dry_run");
+    defer s.deinit(testing.allocator);
+    output.setDryRun(true);
+    defer output.setDryRun(false);
+    try expectRefusal(too_new_db, error.SchemaTooNew, "schema v99", &.{"user/repo"}, s.path);
+    // The preview runs on a private copy; the real file must stay as seeded.
+    try testing.expectEqual(@as(i64, 1), try queryInt(s.path, "SELECT COUNT(*) FROM sqlite_master;"));
+}
