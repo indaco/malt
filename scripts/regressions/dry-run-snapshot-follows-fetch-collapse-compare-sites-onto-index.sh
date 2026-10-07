@@ -60,10 +60,11 @@ seed_keg() {
     VALUES ('$name', '$name', '$version', 0, 'seedsha', '/tmp/c/$name/$version');"
 }
 
-# Fake upstream, per-package fetch (phase 2 reads this).
+# Fake upstream, per-package fetch (phase 2 reads this). The `all` bottle keeps
+# the row upgradable on any host; a bottle-less release is skipped instead.
 seed_formula_cache() {
   local name="$1" stable="$2"
-  printf '{"name":"%s","versions":{"stable":"%s"},"revision":0}' "$name" "$stable" \
+  printf '{"name":"%s","versions":{"stable":"%s"},"revision":0,"bottle":{"stable":{"files":{"all":{"cellar":":any","url":"u","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}}' "$name" "$stable" \
     >"$API/formula_$name.json"
 }
 
