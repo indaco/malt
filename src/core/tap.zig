@@ -349,11 +349,13 @@ pub fn rebind(
     _ = try stmt.step();
 }
 
-pub fn remove(db: *sqlite.Database, name: []const u8) sqlite.SqliteError!void {
+/// Returns false when no tap of that name is registered.
+pub fn remove(db: *sqlite.Database, name: []const u8) sqlite.SqliteError!bool {
     var stmt = try db.prepare("DELETE FROM taps WHERE name = ?1;");
     defer stmt.finalize();
     try stmt.bindText(1, name);
     _ = try stmt.step();
+    return db.changes() > 0;
 }
 
 /// Replace the stored commit SHA for an existing tap. Called by

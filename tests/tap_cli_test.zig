@@ -195,7 +195,7 @@ test "executeUntap with no args returns Aborted with a usage hint" {
     );
 }
 
-test "executeUntap removes the matching row and is idempotent on rerun" {
+test "executeUntap removes the matching row, then refuses the slug it no longer knows" {
     var s = try Scratch.init(testing.allocator, "untap_ok");
     defer s.deinit(testing.allocator);
     try seedTap(s.path, "user/repo", "0123456789abcdef0123456789abcdef01234567");
@@ -204,7 +204,51 @@ test "executeUntap removes the matching row and is idempotent on rerun" {
     defer unquiet();
 
     try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"});
-    try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"});
+    try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "user/repo"));
+    // Scripts read the exit code; a rerun removed nothing, so it must fail.
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"}),
+    );
+}
+
+test "executeUntap on a typo'd slug fails and leaves the real tap registered" {
+    var s = try Scratch.init(testing.allocator, "untap_typo");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/rpeo"}),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/rpeo") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Untapped") == null);
+    try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
+}
+
+test "executeUntap matches the homebrew- spelling and names the canonical slug when unknown" {
+    var s = try Scratch.init(testing.allocator, "untap_homebrew_spelling");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try testing.expectError(
+        error.Aborted,
+        tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/homebrew-nope"}),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap user/nope") != null);
+
+    try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/homebrew-repo"});
+    try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "user/repo"));
 }
 
 test "executeUntap --refresh is rejected (refresh is tap-only)" {
@@ -313,6 +357,26 @@ test "--dry-run untap previews the removal and keeps the tap registered" {
     defer unquiet();
     try tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"user/repo"});
     try testing.expectEqual(@as(i64, 0), try tapRowCount(s.path, "user/repo"));
+}
+
+test "--dry-run untap refuses an unregistered slug instead of previewing a removal" {
+    var s = try Scratch.init(testing.allocator, "untap_dry_run_unknown");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "user/repo", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    {
+        captureDryRun(&captured);
+        defer endDryRun();
+        try testing.expectError(
+            error.Aborted,
+            tap.executeUntap(&malt.app_ctx.debug_ctx, testing.allocator, &.{"nosuch/tap"}),
+        );
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No available tap nosuch/tap") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would untap") == null);
+    try testing.expectEqual(@as(i64, 1), try tapRowCount(s.path, "user/repo"));
 }
 
 test "--dry-run tap reports the pin it would keep without claiming it tapped" {

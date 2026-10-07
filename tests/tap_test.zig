@@ -438,8 +438,27 @@ test "remove deletes a tap" {
 
     try tap.add(&db, "a/b", "a", "homebrew-b", valid_sha);
     try tap.add(&db, "c/d", "c", "homebrew-d", valid_sha);
-    try tap.remove(&db, "a/b");
+    try testing.expect(try tap.remove(&db, "a/b"));
 
+    const taps = try tap.list(testing.allocator, &db);
+    defer freeTaps(taps);
+    try testing.expectEqual(@as(usize, 1), taps.len);
+    try testing.expectEqualStrings("c/d", taps[0].name);
+}
+
+test "remove reports false for an unregistered tap and leaves the others" {
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try tap.add(&db, "a/b", "a", "homebrew-b", valid_sha);
+    // The caller turns false into an error; a typo must not read as a removal.
+    try testing.expect(!try tap.remove(&db, "a/c"));
+    try testing.expect(try tap.remove(&db, "a/b"));
+    try testing.expect(!try tap.remove(&db, "a/b"));
+
+    try tap.add(&db, "c/d", "c", "homebrew-d", valid_sha);
+    try testing.expect(!try tap.remove(&db, "a/b"));
     const taps = try tap.list(testing.allocator, &db);
     defer freeTaps(taps);
     try testing.expectEqual(@as(usize, 1), taps.len);

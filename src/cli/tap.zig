@@ -1075,10 +1075,14 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             reportDone("Tapped", "tap", " {s} @ {s}", .{ name, sha[0..@min(sha.len, 7)] });
         },
         .remove => {
-            tap_mod.remove(&db, name) catch {
+            const removed = tap_mod.remove(&db, name) catch {
                 output.err("Failed to untap {s}", .{name});
                 return error.Aborted;
             };
+            if (!removed) {
+                output.err("No available tap {s}", .{name});
+                return error.Aborted;
+            }
             reportDone("Untapped", "untap", " {s}", .{name});
         },
     }

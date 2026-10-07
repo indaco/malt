@@ -296,6 +296,12 @@ pub const Database = struct {
         return c.sqlite3_get_autocommit(self._handle) == 0;
     }
 
+    /// Rows touched by the last INSERT/UPDATE/DELETE. A write that matches
+    /// nothing still steps to DONE, so this is how a caller spots a no-op.
+    pub fn changes(self: *Database) i64 {
+        return c.sqlite3_changes64(self._handle);
+    }
+
     /// Begin an immediate transaction.
     pub fn beginTransaction(self: *Database) SqliteError!void {
         return self.exec("BEGIN IMMEDIATE;");
@@ -337,6 +343,17 @@ test "inTransaction reports an explicit BEGIN, not autocommit" {
     try db.beginTransaction();
     db.rollback();
     try testing.expect(!db.inTransaction());
+}
+
+test "changes counts the rows the last write touched, zero for a no-op" {
+    var db = try Database.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE t (k TEXT); INSERT INTO t VALUES ('a'), ('b');");
+
+    try db.exec("DELETE FROM t WHERE k = 'a';");
+    try testing.expectEqual(@as(i64, 1), db.changes());
+    try db.exec("DELETE FROM t WHERE k = 'a';");
+    try testing.expectEqual(@as(i64, 0), db.changes());
 }
 
 test "threadsafeMode returns one of the three documented values" {

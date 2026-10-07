@@ -14,8 +14,8 @@
 #      code: both the broken and fixed runs exit non-zero on a formula
 #      that does not exist; only the broken one blames the repo.
 #   2. Identity — registering one spelling and removing another leaves
-#      no row behind. `untap` is silent about a miss, so the registry
-#      listing is the assertion.
+#      no row behind. The registry listing is the assertion: it shows any
+#      row the removal missed.
 #
 # Uses a deliberately absent formula, so nothing is installed and a
 # single API round trip covers the whole run. Throwaway MALT_PREFIX,
