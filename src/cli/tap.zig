@@ -540,6 +540,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 /// Primitive entry point for core/bundle's dispatcher: add a single tap by
 /// name. Argv parsing stays in `execute`; this is the non-argv seam.
 pub fn tapAdd(ctx: *const AppCtx, allocator: std.mem.Allocator, name: []const u8) !void {
+    // `name` comes from a Brewfile; as argv a flag-shaped one would run as a flag.
+    validateTapName(name) catch {
+        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{name});
+        return error.Aborted;
+    };
     const argv = [_][]const u8{name};
     return run(ctx, allocator, &argv, .add);
 }

@@ -1041,3 +1041,47 @@ test "execute --refresh --all with only failed rows does not gate the apply" {
     // The remote 404s → row is `failed` → not gated → exit clean.
     try tap_cli.execute(&ctx, testing.allocator, &.{ "--refresh", "--all" });
 }
+
+// ---------------------------------------------------------------------------
+// tapAdd (Brewfile entry point)
+// ---------------------------------------------------------------------------
+
+test "tapAdd refuses a flag-shaped name instead of running it as a flag" {
+    // A Brewfile `tap "--refresh=user/repo"` reaches tapAdd verbatim; read as
+    // argv it would move that tap's pin with nobody asking for a refresh.
+    const prefix = try setupPrefix("tap_add_flag_name");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const pinned_sha = "0123456789abcdef0123456789abcdef01234567";
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try malt.tap.add(&db, "user/repo", "user", "homebrew-repo", pinned_sha);
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
+    for ([_][]const u8{ "--refresh=user/repo", "--refresh", "--all" }) |name| {
+        captured.clearRetainingCapacity();
+        try testing.expectError(error.Aborted, tap_cli.tapAdd(&ctx, testing.allocator, name));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "Invalid tap") != null);
+    }
+
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT commit_sha FROM taps WHERE name = 'user/repo';");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqualStrings(pinned_sha, std.mem.sliceTo(stmt.columnText(0).?, 0));
+}
