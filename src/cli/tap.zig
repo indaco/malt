@@ -1119,10 +1119,10 @@ fn pinTap(
         output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{raw_slug});
         return error.Aborted;
     };
-    // Same row key as tap/untap, so a homebrew- spelling pins the registered
-    // tap against its stored host instead of upserting a second row.
+    // A homebrew- spelling pins the registered tap against its stored host
+    // instead of upserting a second row.
     var slug_buf: [tap_mod.max_slug_len]u8 = undefined;
-    const slug = tap_mod.canonicalTapSlug(&slug_buf, raw_slug) orelse raw_slug;
+    const slug = storedSlug(db, &slug_buf, raw_slug);
     tap_mod.validateCommitSha(sha) catch {
         output.err("Invalid SHA '{s}'. Expected a 40-char lowercase hex commit SHA.", .{sha});
         return error.Aborted;
@@ -1343,13 +1343,46 @@ fn refuseIfInstalledFrom(allocator: std.mem.Allocator, db: *sqlite.Database, nam
     return error.Aborted;
 }
 
+/// The exact stored name wins over its folded spelling: a DB from before
+/// canonicalisation can hold `u/homebrew-x` and `u/x` as two taps.
+fn storedSlug(db: *sqlite.Database, buf: *[tap_mod.max_slug_len]u8, raw: []const u8) []const u8 {
+    if (tap_mod.isRegistered(db, raw) catch false) return raw;
+    return tap_mod.canonicalTapSlug(buf, raw) orelse raw;
+}
+
+/// The registration check runs before the HEAD round trip, so an untap in
+/// between leaves nothing to update; say so instead of "Refreshed".
+fn writeRefreshedPin(db: *sqlite.Database, name: []const u8, sha: []const u8, etag: ?[]const u8) !void {
+    tap_mod.updateHead(db, name, sha, etag) catch {
+        output.err("Failed to update commit pin for {s}", .{name});
+        return error.Aborted;
+    };
+    if (db.changes() == 0) {
+        output.err("No available tap {s}", .{name});
+        return error.Aborted;
+    }
+}
+
+test "writeRefreshedPin fails when the tap vanished during the HEAD lookup" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+    try std.testing.expectError(error.Aborted, writeRefreshedPin(&db, "user/repo", sha, null));
+    try tap_mod.add(&db, "user/repo", "user", "homebrew-repo", sha);
+    try writeRefreshedPin(&db, "user/repo", sha, "W/\"e\"");
+}
+
 fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, raw_name: []const u8) !void {
     validateTapName(raw_name) catch {
         output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{raw_name});
         return error.Aborted;
     };
     var name_buf: [tap_mod.max_slug_len]u8 = undefined;
-    const name = tap_mod.canonicalTapSlug(&name_buf, raw_name) orelse raw_name;
+    const name = storedSlug(db, &name_buf, raw_name);
     // The pin write below would match no row, so fail before the HEAD round trip.
     const registered = tap_mod.isRegistered(db, name) catch {
         output.err("Failed to read tap {s}", .{name});
@@ -1374,10 +1407,6 @@ fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Data
         output.err("Could not resolve {s}'s HEAD commit: empty response", .{name});
         return error.Aborted;
     };
-    // updateHead pairs the new sha with the new etag atomically.
-    tap_mod.updateHead(db, name, sha, res.etag) catch {
-        output.err("Failed to update commit pin for {s}", .{name});
-        return error.Aborted;
-    };
+    try writeRefreshedPin(db, name, sha, res.etag);
     reportDone("Refreshed", "refresh", " {s} to {s}", .{ name, sha[0..@min(sha.len, 7)] });
 }

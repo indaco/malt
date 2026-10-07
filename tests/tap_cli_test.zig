@@ -613,6 +613,31 @@ test "refresh finds a registered tap under its homebrew- spelling" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve user/repo") != null);
 }
 
+test "refresh and pin prefer an exact stored name over its folded spelling" {
+    // A pre-canonicalisation DB can keep `u/homebrew-x` and `u/x` as two
+    // taps on different hosts; folding first would act on the wrong one.
+    var s = try Scratch.init(testing.allocator, "tap_exact_before_fold");
+    defer s.deinit(testing.allocator);
+    try seedTap(s.path, "u/homebrew-x", null);
+    try seedTap(s.path, "u/x", null);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    try refreshOffline(&captured, "u/homebrew-x");
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not resolve u/homebrew-x") != null);
+
+    captured.clearRetainingCapacity();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    {
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try testing.expectError(error.Aborted, tap.execute(&ctx, testing.allocator, &.{
+            "--pin", "u/homebrew-x", "0123456789abcdef0123456789abcdef01234567",
+        }));
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not verify u/homebrew-x @ 0123456") != null);
+}
+
 test "--dry-run tap reports the pin it would keep without claiming it tapped" {
     var s = try Scratch.init(testing.allocator, "tap_dry_run_pinned");
     defer s.deinit(testing.allocator);
