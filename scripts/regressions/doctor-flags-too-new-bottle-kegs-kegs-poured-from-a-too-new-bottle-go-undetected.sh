@@ -5,9 +5,9 @@
 # bottle for this macOS exists and at `mt uninstall` when none does, and must
 # leave a keg poured from the host's own bottle alone. After `mt update` wipes
 # the per-formula documents, the bulk side-car `mt outdated` rebuilds must be
-# enough to check a keg; one in neither must be named, not folded into an
-# all-clear. A keg whose bottle was rebuilt upstream (digest gone) is judged by
-# the macOS floor its own binary declares.
+# enough to check a keg; one the side-car no longer lists (it left
+# homebrew/core) is judged by its binary alone. A keg whose bottle was rebuilt
+# upstream (digest gone) is judged by the macOS floor its own binary declares.
 #
 # Hermetic: each keg's recorded digest is matched against a formula document
 # seeded under `$MALT_CACHE/api`; `MALT_OFFLINE=1` keeps doctor off the
@@ -102,8 +102,9 @@ A=$(digest a) B=$(digest b) C=$(digest c) D=$(digest d) E=$(digest e)
 seed regnone "$A" "$NEWER_TAG=$A"                  # no bottle for this macOS
 seed regreinst "$B" "$NEWER_TAG=$B" "$HOST_TAG=$C" # reinstallable
 seed regok "$D" "$HOST_TAG=$D"                     # control
-seed regnodoc "$D" "$HOST_TAG=$D"
-rm "$MALT_CACHE/api/formula_regnodoc.json" # cache wiped, as by mt update
+seed reggone "$D" "$HOST_TAG=$D"
+rm "$MALT_CACHE/api/formula_reggone.json" # and absent from the side-car
+macho "$PREFIX/Cellar/reggone/1.0/bin/tool" 27
 seed regside "$A" "$NEWER_TAG=$A"
 rm "$MALT_CACHE/api/formula_regside.json"
 printf 'regside\t%s=%s\n' "$NEWER_TAG" "$A" >"$MALT_CACHE/api/$SIDECAR"
@@ -114,7 +115,7 @@ macho "$PREFIX/Cellar/regfloorok/1.0/bin/tool" "$HOST"
 
 OUT=$("$BIN" doctor --verbose 2>&1 || true)
 
-grep -q 'mt uninstall regnone' <<<"$OUT" ||
+grep -q 'mt uninstall regnone, dependents first' <<<"$OUT" ||
   fail "keg with no bottle for this macOS not pointed at mt uninstall"
 pass "no-bottle keg flagged with the uninstall remedy"
 
@@ -138,10 +139,19 @@ if grep -q regfloorok <<<"$OUT"; then
 fi
 pass "rebuilt keg judged by its binary's macOS floor"
 
-grep -q '1 more not checked: no cached formula data (mt outdated refreshes it)' <<<"$OUT" ||
-  fail "keg with no formula data not reported as unchecked"
-grep -q 'regnodoc: not checked' <<<"$OUT" ||
-  fail "unchecked keg not named under --verbose"
-pass "keg with no formula data named as not checked"
+grep -q 'mt uninstall reggone, dependents first' <<<"$OUT" ||
+  fail "keg that left homebrew/core with a too-new binary not flagged for uninstall"
+pass "keg that left homebrew/core judged by its binary"
+
+# The row must be a warning, not an ok carrying text: --json and the TUI key
+# on severity, and the exit code is the scripting contract.
+set +e
+JSON=$("$BIN" doctor --json 2>/dev/null)
+RC=$?
+set -e
+grep -q '"id":"bottles_built_for_a_newer_macos","severity":"warn"' <<<"$JSON" ||
+  fail "row not reported as a warning in --json"
+[[ $RC -eq 1 ]] || fail "doctor exited $RC with warnings, expected 1"
+pass "row is a warning in --json and doctor exits 1"
 
 printf '\n\xe2\x9c\x94 doctor flags kegs poured from a too-new bottle\n'

@@ -3,6 +3,8 @@
 //! Bottle selection once ignored the host version, so a keg on disk can hold
 //! binaries dyld refuses. The keg's recorded digest names the bottle it came
 //! from; the bulk side-car or the cached formula document maps it to a tag.
+//! When no bottle carries the digest any more, the keg's own binaries say
+//! which macOS they need.
 
 const std = @import("std");
 const output = @import("../../ui/output.zig");
@@ -70,6 +72,19 @@ pub const Report = struct {
         return self.reinstall + self.uninstall;
     }
 
+    fn addFlagged(self: *Report, allocator: std.mem.Allocator, name: []const u8, remedy: Remedy) void {
+        const line = switch (remedy) {
+            .reinstall => std.fmt.allocPrint(allocator, "{s}: mt reinstall {s}", .{ name, name }),
+            // A library's dependents block a plain uninstall.
+            .uninstall => std.fmt.allocPrint(allocator, "{s}: no bottle for this macOS — mt uninstall {s}, dependents first", .{ name, name }),
+        } catch return;
+        self.lines.append(allocator, line) catch return allocator.free(line);
+        switch (remedy) {
+            .reinstall => self.reinstall += 1,
+            .uninstall => self.uninstall += 1,
+        }
+    }
+
     fn addUnchecked(self: *Report, allocator: std.mem.Allocator, name: []const u8) void {
         self.unchecked += 1;
         const line = std.fmt.allocPrint(allocator, "{s}: not checked", .{name}) catch return;
@@ -84,10 +99,8 @@ pub const Report = struct {
     }
 };
 
-/// Walk the core kegs and classify each against the bulk side-car, falling
-/// back to its own cached formula document.
-/// ponytail: cache-only, so a keg in neither is only counted as unchecked;
-/// reading its binaries' LC_BUILD_VERSION would cover it, at a full Mach-O walk.
+/// Walk the core kegs and judge each against the bulk side-car or its own
+/// cached formula document, falling back to the macOS its binaries require.
 pub fn collect(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -126,42 +139,58 @@ pub fn collect(
         // The name builds a cache path; a hand-edited row must not escape it.
         api_mod.validateName(name) catch continue;
 
-        const verdict: ?Remedy = blk: {
-            if (index.get(name)) |tags| {
-                var files = parseTags(allocator, tags) catch {
-                    report.addUnchecked(allocator, name);
-                    continue;
-                };
+        const verdict: Verdict = blk: {
+            if (index.get(name)) |tags| if (parseTags(allocator, tags)) |parsed| {
+                var files = parsed;
                 defer files.deinit(allocator);
-                break :blk judge(io, files, sha, keg_path, host_major);
+                break :blk .of(judge(io, files, sha, keg_path, host_major));
+            } else |_| {};
+            if (api_mod.readCacheAt(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(.formula))) |bytes| {
+                defer allocator.free(bytes);
+                if (formula_mod.parseFormula(allocator, bytes)) |parsed| {
+                    var formula = parsed;
+                    defer formula.deinit();
+                    // No bottle at all is an empty map: the binaries still decide.
+                    break :blk .of(judge(io, formula.bottle_files orelse .{}, sha, keg_path, host_major));
+                } else |_| {}
             }
-            const bytes = api_mod.readCacheAt(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(.formula)) orelse {
-                report.addUnchecked(allocator, name);
-                continue;
-            };
-            defer allocator.free(bytes);
-            var formula = formula_mod.parseFormula(allocator, bytes) catch {
-                report.addUnchecked(allocator, name);
-                continue;
-            };
-            defer formula.deinit();
-            break :blk judge(io, formula.bottle_files orelse break :blk null, sha, keg_path, host_major);
+            break :blk judgeWithoutData(io, keg_path, host_major, index_bytes != null);
         };
-        const remedy = verdict orelse continue;
-        const line = switch (remedy) {
-            .reinstall => std.fmt.allocPrint(allocator, "{s}: mt reinstall {s}", .{ name, name }),
-            .uninstall => std.fmt.allocPrint(allocator, "{s}: no bottle for this macOS — mt uninstall {s}", .{ name, name }),
-        } catch continue;
-        report.lines.append(allocator, line) catch {
-            allocator.free(line);
-            continue;
-        };
-        switch (remedy) {
-            .reinstall => report.reinstall += 1,
-            .uninstall => report.uninstall += 1,
+        switch (verdict) {
+            .fine => {},
+            .unchecked => report.addUnchecked(allocator, name),
+            .reinstall => report.addFlagged(allocator, name, .reinstall),
+            .uninstall => report.addFlagged(allocator, name, .uninstall),
         }
     }
     return report;
+}
+
+const Verdict = enum {
+    fine,
+    reinstall,
+    uninstall,
+    unchecked,
+
+    fn of(remedy: ?Remedy) Verdict {
+        return switch (remedy orelse return .fine) {
+            .reinstall => .reinstall,
+            .uninstall => .uninstall,
+        };
+    }
+};
+
+/// No side-car line and no document: only the keg's binaries can speak. A
+/// loaded side-car without the name means the formula left homebrew/core, so
+/// there is nothing to refresh and no bottle to reinstall from.
+fn judgeWithoutData(io: std.Io, keg_path: []const u8, host_major: ?u32, left_core: bool) Verdict {
+    const gap: Verdict = if (left_core) .fine else .unchecked;
+    const host = host_major orelse return gap;
+    // No Mach-O under bin/ or lib/: nothing there for dyld to refuse.
+    const floor = kegMacosFloor(io, keg_path) orelse return gap;
+    if (floor <= host) return .fine;
+    // Without data the remedy is a guess; reinstall says so itself if wrong.
+    return if (left_core) .uninstall else .reinstall;
 }
 
 /// `remedyFor`, reading the keg's binaries only when the digest cannot decide.
@@ -215,7 +244,8 @@ fn parseTags(allocator: std.mem.Allocator, tags: []const u8) !Files {
 const unchecked_note = "not checked: no cached formula data (mt outdated refreshes it)";
 
 /// The row's detail, or null when there is nothing to say. Unchecked kegs are
-/// named so an emptied cache never reads as an all-clear.
+/// a data gap, not a fault: they ride an ok row as a count, so the row still
+/// says what it could not see.
 pub fn detail(buf: []u8, report: Report) ?[]const u8 {
     const fallback = "Some kegs were poured from a bottle built for a newer macOS; reinstall or uninstall them.";
     if (report.count() == 0) {
@@ -224,7 +254,7 @@ pub fn detail(buf: []u8, report: Report) ?[]const u8 {
     }
     const head = std.fmt.bufPrint(
         buf,
-        "{d} keg(s) were poured from a bottle built for a newer macOS and may fail to load: {d} to reinstall (mt reinstall <name>), {d} with no bottle for this macOS (mt uninstall <name>)",
+        "{d} keg(s) were poured from a bottle built for a newer macOS and may fail to load: {d} to reinstall (mt reinstall <name>), {d} with no bottle for this macOS (mt uninstall <name>, dependents first)",
         .{ report.count(), report.reinstall, report.uninstall },
     ) catch return fallback;
     if (report.unchecked == 0) return head;
@@ -317,7 +347,7 @@ test "detail names both remedies with their counts" {
     const text = detail(&buf, .{ .reinstall = 2, .uninstall = 1 }).?;
     try testing.expect(std.mem.startsWith(u8, text, "3 keg(s)"));
     try testing.expect(std.mem.indexOf(u8, text, "2 to reinstall (mt reinstall <name>)") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "1 with no bottle for this macOS (mt uninstall <name>)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "1 with no bottle for this macOS (mt uninstall <name>, dependents first)") != null);
     try testing.expect(std.mem.indexOf(u8, text, "not checked") == null);
 }
 

@@ -134,7 +134,7 @@ test "collect names each too-new core keg with the remedy that will work" {
     try testing.expectEqual(@as(u32, 1), report.reinstall);
     try testing.expectEqual(@as(u32, 1), report.uninstall);
     try testing.expectEqual(@as(usize, 2), report.lines.items.len);
-    try testing.expectEqualStrings("regnone: no bottle for this macOS — mt uninstall regnone", report.lines.items[0]);
+    try testing.expectEqualStrings("regnone: no bottle for this macOS — mt uninstall regnone, dependents first", report.lines.items[0]);
     try testing.expectEqualStrings("regreinst: mt reinstall regreinst", report.lines.items[1]);
 }
 
@@ -174,19 +174,64 @@ test "collect checks a keg from the bulk side-car when its own document is gone"
     try s.seed("regreinst", null, sha_b, null);
     try s.seed("regok", null, sha_c, null);
     try s.seed("unbottled", null, sha_a, null);
-    try s.seed("gone", null, sha_a, null); // in neither source
+    // Absent from a loaded side-car: the formula left homebrew/core, so only
+    // its binaries can speak, and no bottle exists to reinstall from.
+    try s.seed("gone", null, sha_a, null);
+    try s.seed("gone_new", null, sha_a, null);
+    try writeKegBinary(&s, "gone_new", "bin/tool", 27, false);
 
     var report = bottle_host.collect(allocator, io, s.path, s.cache, host_major);
     defer report.deinit(allocator);
     try testing.expectEqual(@as(u32, 1), report.reinstall);
-    try testing.expectEqual(@as(u32, 1), report.uninstall);
-    try testing.expectEqual(@as(u32, 1), report.unchecked);
-    try testing.expectEqualStrings("regreinst: mt reinstall regreinst", report.lines.items[0]);
-    try testing.expectEqualStrings("regside: no bottle for this macOS — mt uninstall regside", report.lines.items[1]);
-    try testing.expectEqualStrings("gone: not checked", report.unchecked_lines.items[0]);
+    try testing.expectEqual(@as(u32, 2), report.uninstall);
+    try testing.expectEqual(@as(u32, 0), report.unchecked);
+    try testing.expectEqualStrings("gone_new: no bottle for this macOS — mt uninstall gone_new, dependents first", report.lines.items[0]);
+    try testing.expectEqualStrings("regreinst: mt reinstall regreinst", report.lines.items[1]);
+    try testing.expectEqualStrings("regside: no bottle for this macOS — mt uninstall regside, dependents first", report.lines.items[2]);
 }
 
-test "collect reads neither outside the API cache nor a corrupt document" {
+test "with no formula data at all, a keg's binaries still decide" {
+    // Right after `mt update`: no side-car, no documents. A binary that fits
+    // this macOS cannot fail to load; one that does not is flagged at once.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "no_data");
+    defer s.deinit(allocator);
+    try s.seed("fits", null, sha_a, null);
+    try writeKegBinary(&s, "fits", "bin/tool", host_major, false);
+    try s.seed("too_new", null, sha_a, null);
+    try writeKegBinary(&s, "too_new", "lib/libx.dylib", 27, false);
+    try s.seed("no_binary", null, sha_a, null);
+
+    var report = bottle_host.collect(allocator, io, s.path, s.cache, host_major);
+    defer report.deinit(allocator);
+    // Without data the remedy cannot be proven; reinstall reports it if not.
+    try testing.expectEqual(@as(u32, 1), report.reinstall);
+    try testing.expectEqualStrings("too_new: mt reinstall too_new", report.lines.items[0]);
+    try testing.expectEqual(@as(u32, 1), report.unchecked);
+    try testing.expectEqualStrings("no_binary: not checked", report.unchecked_lines.items[0]);
+}
+
+test "a formula document with no bottle at all still lets the binaries decide" {
+    // The side-car lists such a formula with no tags; its own document must
+    // not quietly pass the same keg.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "unbottled_doc");
+    defer s.deinit(allocator);
+    try s.seed("unbottled", null, sha_a, null);
+    var buf: [512]u8 = undefined;
+    try test_io.cwd().writeFile(io, .{
+        .sub_path = try std.fmt.bufPrint(&buf, "{s}/api/formula_unbottled.json", .{s.cache}),
+        .data = "{\"name\":\"unbottled\",\"full_name\":\"unbottled\",\"versions\":{\"stable\":\"1.0\"},\"revision\":0}",
+    });
+    try writeKegBinary(&s, "unbottled", "bin/tool", 27, false);
+
+    var report = bottle_host.collect(allocator, io, s.path, s.cache, host_major);
+    defer report.deinit(allocator);
+    try testing.expectEqual(@as(u32, 1), report.uninstall);
+    try testing.expectEqual(@as(u32, 0), report.unchecked);
+}
+
+test "collect keeps cache reads inside the API cache and survives a corrupt document" {
     const allocator = testing.allocator;
     var s = try Scratch.init(allocator, "untrusted");
     defer s.deinit(allocator);
@@ -239,8 +284,36 @@ test "a keg whose digest no bottle carries any more is judged by its binaries" {
     defer report.deinit(allocator);
     try testing.expectEqual(@as(u32, 1), report.reinstall);
     try testing.expectEqual(@as(u32, 1), report.uninstall);
-    try testing.expectEqualStrings("rebuilt_fat: no bottle for this macOS — mt uninstall rebuilt_fat", report.lines.items[0]);
+    try testing.expectEqualStrings("rebuilt_fat: no bottle for this macOS — mt uninstall rebuilt_fat, dependents first", report.lines.items[0]);
     try testing.expectEqualStrings("rebuilt_new: mt reinstall rebuilt_new", report.lines.items[1]);
+}
+
+test "a fat64 binary pointing its slice past the file is skipped, not a crash" {
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "fat64");
+    defer s.deinit(allocator);
+    const rebuilt = comptime bottle(host_tag, sha_c);
+    const cpu: std.macho.cpu_type_t = if (builtin.cpu.arch == .aarch64) std.macho.CPU_TYPE_ARM64 else std.macho.CPU_TYPE_X86_64;
+    for ([_]struct { name: []const u8, offset: u64 }{
+        .{ .name = "past_eof", .offset = 0x10_0000 },
+        // Reached pread as a negative offset and aborted Debug builds.
+        .{ .name = "huge", .offset = 1 << 63 },
+    }) |c| {
+        var fat: [8 + 32]u8 = @splat(0);
+        std.mem.writeInt(u32, fat[0..4], std.macho.FAT_MAGIC_64, .big);
+        std.mem.writeInt(u32, fat[4..8], 1, .big);
+        std.mem.writeInt(i32, fat[8..12], cpu, .big);
+        std.mem.writeInt(u64, fat[16..24], c.offset, .big);
+        try s.seed(c.name, null, sha_a, rebuilt);
+        var path_buf: [512]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/1.0/bin/tool", .{ s.path, c.name });
+        try test_io.cwd().createDirPath(io, std.fs.path.dirname(path).?);
+        try test_io.cwd().writeFile(io, .{ .sub_path = path, .data = &fat });
+    }
+
+    var report = bottle_host.collect(allocator, io, s.path, s.cache, host_major);
+    defer report.deinit(allocator);
+    try testing.expectEqual(@as(u32, 0), report.count());
 }
 
 test "collect never flags on an unreadable host version" {
