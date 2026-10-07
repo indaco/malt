@@ -62,6 +62,17 @@ pub fn bottleKey(buf: []u8, files: anytype, host_major: ?u32) ?[]const u8 {
     return null;
 }
 
+/// The macOS major a bottle tag was built for; null for `all`, another
+/// arch's tag, or a codename the map does not know.
+pub fn tagMajor(tag: []const u8) ?u32 {
+    var buf: [32]u8 = undefined;
+    for (bottle_majors) |major| {
+        const key = variationKey(&buf, major) orelse continue;
+        if (std.mem.eql(u8, key, tag)) return major;
+    }
+    return null;
+}
+
 /// Whether a formula document's `bottle` object offers this host a bottle.
 pub fn bottlePourable(bottle: ?std.json.Value, host_major: ?u32) bool {
     const files = objectAt(bottle, &.{ "stable", "files" }) orelse return true;
@@ -236,4 +247,20 @@ test "bottlePourable refuses only a bottle map with nothing this macOS can load"
     defer bare.deinit();
     try std.testing.expect(bottlePourable(bare.value, 14));
     try std.testing.expect(bottlePourable(null, 14));
+}
+
+test "tagMajor maps this arch's tags back to their macOS major" {
+    const arch = if (builtin.cpu.arch == .aarch64) "arm64_" else "";
+    try std.testing.expectEqual(@as(?u32, 27), tagMajor(arch ++ "golden_gate"));
+    try std.testing.expectEqual(@as(?u32, 26), tagMajor(arch ++ "tahoe"));
+    try std.testing.expectEqual(@as(?u32, 11), tagMajor(arch ++ "big_sur"));
+}
+
+test "tagMajor gives no major for tags this host could never have poured" {
+    const other = if (builtin.cpu.arch == .aarch64) "golden_gate" else "arm64_golden_gate";
+    try std.testing.expectEqual(@as(?u32, null), tagMajor(other));
+    // `all` runs everywhere, so it carries no OS floor.
+    try std.testing.expectEqual(@as(?u32, null), tagMajor("all"));
+    try std.testing.expectEqual(@as(?u32, null), tagMajor("x86_64_linux"));
+    try std.testing.expectEqual(@as(?u32, null), tagMajor(""));
 }
