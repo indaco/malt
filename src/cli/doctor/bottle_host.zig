@@ -233,8 +233,8 @@ test "no verdict without a digest match, a recorded digest, or a known host" {
     var f = try parseDoc(comptime bottle(arch ++ "golden_gate", sha_a));
     defer f.deinit();
     // A version bump or rebuild moved the digest on: a miss, never a false
-    // alarm. A migrated keg's empty digest can never match: the parser drops
-    // malformed ones.
+    // alarm. A keg adopted from brew's Cellar records an empty digest, which
+    // never matches: the parser drops malformed ones.
     try testing.expect(!pouredTooNew(f.bottle_files.?, sha_b, 26));
     try testing.expect(!pouredTooNew(f.bottle_files.?, "", 26));
     try testing.expect(!pouredTooNew(f.bottle_files.?, sha_a, null));

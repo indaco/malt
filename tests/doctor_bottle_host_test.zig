@@ -116,8 +116,8 @@ test "collect skips kegs the core document cannot speak for" {
     defer s.deinit(allocator);
     const too_new = comptime bottle(newer_tag, sha_a);
     // A tap or `--local` keg's digest is a coincidence against the core
-    // document, a migrated keg records no digest, and an uncached keg has
-    // nothing to compare against.
+    // document, a keg adopted from brew's Cellar records no digest, and an
+    // uncached keg has nothing to compare against.
     try s.seed("tapkeg", "user/tools", sha_a, too_new);
     try s.seed("localkeg", "local", sha_a, too_new);
     try s.seed("migrated", null, "", too_new);
