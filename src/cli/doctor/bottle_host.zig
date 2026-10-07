@@ -5,7 +5,6 @@
 //! from; the bulk side-car or the cached formula document maps it to a tag.
 
 const std = @import("std");
-const sqlite = @import("../../db/sqlite.zig");
 const output = @import("../../ui/output.zig");
 const signals = @import("../../core/signals.zig");
 const schema_report = @import("../schema_report.zig");
