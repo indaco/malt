@@ -152,7 +152,7 @@ fn fieldObject(v: ?std.json.Value, key: []const u8) ?std.json.Value {
 }
 
 /// The bottle-digest side-car at any age, without a client. Caller owns it.
-pub fn readBottlesIndex(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8) ?[]const u8 {
+pub fn readBottlesIndex(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8) error{OutOfMemory}!?[]const u8 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const p = std.fmt.bufPrint(&path_buf, "{s}/api/bottles_{s}.txt", .{ cache_dir, bottles_key }) catch return null;
     return readCacheFile(io, allocator, p);
@@ -341,7 +341,7 @@ pub fn findNameMatches(
 
 /// TTL-gated read of `{cache_dir}/api/<prefix><key>.json` without a client:
 /// verbs that only consult the cache never need HTTP. Caller owns the bytes.
-pub fn readFreshCache(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, key: []const u8, prefix: []const u8) ?[]const u8 {
+pub fn readFreshCache(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, key: []const u8, prefix: []const u8) error{OutOfMemory}!?[]const u8 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ cache_dir, prefix, key }) catch return null;
 
@@ -354,11 +354,15 @@ pub fn readFreshCache(io: std.Io, allocator: std.mem.Allocator, cache_dir: []con
 }
 
 /// Whole-file read; a short read is a miss rather than a truncated document.
-fn readCacheFile(io: std.Io, allocator: std.mem.Allocator, cache_path: []const u8) ?[]const u8 {
+/// OOM is not a miss: online it would re-fetch, offline claim no snapshot.
+fn readCacheFile(io: std.Io, allocator: std.mem.Allocator, cache_path: []const u8) error{OutOfMemory}!?[]const u8 {
     const file = std.Io.Dir.cwd().openFile(io, cache_path, .{}) catch return null;
     defer file.close(io);
     const file_stat = file.stat(io) catch return null;
-    const content = allocator.alloc(u8, file_stat.size) catch return null;
+    // No fetch writes past the metadata cap, so a larger file is corruption:
+    // a miss lets the next fetch replace it instead of failing every run.
+    if (file_stat.size > client_mod.HttpClient.max_metadata_bytes) return null;
+    const content = try allocator.alloc(u8, file_stat.size);
     const bytes_read = file.readPositionalAll(io, content, 0) catch {
         allocator.free(content);
         return null;
@@ -372,7 +376,7 @@ fn readCacheFile(io: std.Io, allocator: std.mem.Allocator, cache_path: []const u
 
 /// A cached API document of any age, without a client: for read-only
 /// callers that must never dial out. Caller owns the bytes.
-pub fn readCacheAt(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, key: []const u8, prefix: []const u8) ?[]const u8 {
+pub fn readCacheAt(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, key: []const u8, prefix: []const u8) error{OutOfMemory}!?[]const u8 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ cache_dir, prefix, key }) catch return null;
     return readCacheFile(io, allocator, cache_path);
@@ -795,12 +799,12 @@ pub const BrewApi = struct {
         // air-gapped use case: a stale entry is still bytes the user
         // can install from.
         if (self.offline) {
-            if (self.readCacheBytes(key, prefix)) |cached| return cached;
+            if (try self.readCacheBytes(key, prefix)) |cached| return cached;
             return ApiError.OfflineRequired;
         }
 
         // Try the normal success cache.
-        if (self.readCache(key, prefix)) |cached| return cached;
+        if (try self.readCache(key, prefix)) |cached| return cached;
 
         // Cache miss or expired — fetch from API
         var resp = self.http.get(url) catch return ApiError.ApiUnreachable;
@@ -819,7 +823,7 @@ pub const BrewApi = struct {
         return self.allocator.dupe(u8, resp.body) catch return ApiError.OutOfMemory;
     }
 
-    pub fn readCache(self: *BrewApi, key: []const u8, prefix: []const u8) ?[]const u8 {
+    pub fn readCache(self: *BrewApi, key: []const u8, prefix: []const u8) error{OutOfMemory}!?[]const u8 {
         return readFreshCache(self.io, self.allocator, self.cache_dir, key, prefix);
     }
 
@@ -827,7 +831,7 @@ pub const BrewApi = struct {
     /// exists and is readable, regardless of mtime. Used by the offline
     /// path so a stale snapshot still serves bytes; the regular
     /// `readCache` adds the freshness gate on top.
-    pub fn readCacheBytes(self: *BrewApi, key: []const u8, prefix: []const u8) ?[]const u8 {
+    pub fn readCacheBytes(self: *BrewApi, key: []const u8, prefix: []const u8) error{OutOfMemory}!?[]const u8 {
         return readCacheAt(self.io, self.allocator, self.cache_dir, key, prefix);
     }
 

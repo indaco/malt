@@ -894,7 +894,7 @@ pub const HttpClient = struct {
     }
 
     /// Metadata cap (formula.json is ~25 MB; 50 MB gives headroom).
-    const max_metadata_bytes: usize = 50 * 1024 * 1024;
+    pub const max_metadata_bytes: usize = 50 * 1024 * 1024;
 
     /// Bottle responses can be 500+ MB. We cap at 2 GB to prevent true OOM.
     const max_blob_bytes: usize = 2 * 1024 * 1024 * 1024;

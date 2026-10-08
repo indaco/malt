@@ -141,8 +141,11 @@ fn ephemeralRun(
     api.base_url = ctx.mirrors.api_base;
     api.offline = ctx.offline;
 
-    const formula_json = api.fetchFormula(pkg_name) catch {
-        output.err("Formula '{s}' not found", .{pkg_name});
+    const formula_json = api.fetchFormula(pkg_name) catch |e| {
+        switch (e) {
+            error.OutOfMemory => output.err("Failed to fetch formula '{s}': {s}", .{ pkg_name, @errorName(e) }),
+            else => output.err("Formula '{s}' not found", .{pkg_name}),
+        }
         return error.Aborted;
     };
     defer allocator.free(formula_json);

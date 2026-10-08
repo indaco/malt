@@ -487,6 +487,8 @@ const CollectOpts = struct {
     only_deps: bool = false,
     /// Allocator for the collect itself (and `jobs`); setup stays on `alloc`.
     collect_alloc: ?std.mem.Allocator = null,
+    /// Backs the dependency-prefetch workers; defaults to `alloc`.
+    worker_backing: ?std.mem.Allocator = null,
 };
 
 fn collectFirst(
@@ -532,7 +534,7 @@ fn collectFirst(
         .db = &tdb.db,
         .store = &store_inst,
         .cache = &formula_cache,
-        .worker_backing = alloc,
+        .worker_backing = opts.worker_backing orelse alloc,
         .only_deps = opts.only_deps,
     }, seeds[0].name, seeds[0].json, false, jobs);
 }
@@ -607,6 +609,27 @@ test "collectFormulaJobs refuses the parent of a dependency whose record is refu
         .{ .name = "q_ok", .json = bottleJsonUniqueSha("q_ok", "c1") },
         .{ .name = "q_bad", .json = refusedRecord("q_bad", "c2") },
     }, "q_bad", error.DependencyFailed);
+}
+
+test "collectFormulaJobs names an out-of-memory prefetch instead of calling the dependency unfetchable" {
+    const alloc = testing.allocator;
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(alloc);
+    malt.output.beginStderrCapture(alloc, &captured);
+    defer malt.output.endStderrCapture();
+
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
+    defer freeJobs(alloc, &jobs);
+
+    // Offline keeps a wrongful network fallback off the wire.
+    try testing.expectError(error.DependencyFailed, collectFirst(alloc, "prefetch_oom", &.{
+        .{ .name = "p", .json = withDeps(bottleJsonUniqueSha("p", "e0"), "\"q_ok\"") },
+        .{ .name = "q_ok", .json = bottleJsonUniqueSha("q_ok", "e1") },
+    }, .{ .offline = true, .worker_backing = std.testing.failing_allocator }, &jobs));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "dependency q_ok could not be fetched: OutOfMemory") != null);
 }
 
 test "collectFormulaJobs refuses the parent of a dependency with no bottle" {

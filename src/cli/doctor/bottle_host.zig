@@ -116,7 +116,7 @@ pub fn collect(
     var stmt = db.prepare("SELECT name, tap, store_sha256, cellar_path FROM kegs ORDER BY name;") catch return report;
     defer stmt.finalize();
 
-    const index_bytes = api_mod.readBottlesIndex(io, allocator, cache_dir);
+    const index_bytes = api_mod.readBottlesIndex(io, allocator, cache_dir) catch null;
     defer if (index_bytes) |b| allocator.free(b);
     var index: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer index.deinit(allocator);
@@ -145,7 +145,7 @@ pub fn collect(
                 defer files.deinit(allocator);
                 break :blk .of(judge(io, files, sha, keg_path, host_major));
             } else |_| {};
-            if (api_mod.readCacheAt(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(.formula))) |bytes| {
+            if (api_mod.readCacheAt(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(.formula)) catch null) |bytes| {
                 defer allocator.free(bytes);
                 if (formula_mod.parseFormula(allocator, bytes)) |parsed| {
                     var formula = parsed;

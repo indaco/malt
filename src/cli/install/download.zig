@@ -158,6 +158,8 @@ const FetchFormulaCtx = struct {
     offline: bool,
     dep_name: []const u8,
     result: ?[]const u8 = null,
+    /// Why `result` is null, so the refusal names the cause.
+    err: ?anyerror = null,
 
     fn run(self: *FetchFormulaCtx) void {
         const http = self.pool.acquire();
@@ -165,7 +167,10 @@ const FetchFormulaCtx = struct {
         var local_api = api_mod.BrewApi.init(self.io, self.arena.allocator(), http, self.cache_dir);
         local_api.base_url = self.api_base;
         local_api.offline = self.offline;
-        self.result = local_api.fetchFormula(self.dep_name) catch null;
+        self.result = local_api.fetchFormula(self.dep_name) catch |e| blk: {
+            self.err = e;
+            break :blk null;
+        };
     }
 };
 
@@ -321,6 +326,10 @@ pub fn collectFormulaJobs(
         for (dep_jsons) |j| if (j) |bytes| allocator.free(bytes);
         allocator.free(dep_jsons);
     }
+    // Set wherever `dep_jsons` stays null for a dep that still needs one.
+    const dep_errs = allocator.alloc(?anyerror, deps.len) catch return InstallError.DownloadFailed;
+    defer allocator.free(dep_errs);
+    @memset(dep_errs, null);
 
     if (deps.len > 0) {
         const ctxs = allocator.alloc(FetchFormulaCtx, deps.len) catch return InstallError.DownloadFailed;
@@ -378,8 +387,12 @@ pub fn collectFormulaJobs(
         // memory outlives per-worker `arena.deinit()` — downstream
         // parses and eventually `allocator.free`s these bytes.
         for (ctxs, 0..) |*c, i| {
+            dep_errs[i] = c.err;
             if (c.result) |bytes| {
-                dep_jsons[i] = allocator.dupe(u8, bytes) catch null;
+                dep_jsons[i] = allocator.dupe(u8, bytes) catch |e| blk: {
+                    dep_errs[i] = e;
+                    break :blk null;
+                };
             }
         }
     }
@@ -391,7 +404,7 @@ pub fn collectFormulaJobs(
         // One format string keeps this to a single formatter instantiation.
         const reason: []const u8, const detail: []const u8, const e: InstallError = blk: {
             const dep_json = dep_jsons[i] orelse
-                break :blk .{ "could not be fetched", "", InstallError.DependencyFailed };
+                break :blk .{ "could not be fetched: ", @errorName(dep_errs[i].?), InstallError.DependencyFailed };
             const dep_formula = cache.getOrParse(dep.name, dep_json) catch |pe|
                 break :blk .{ "was refused: ", @errorName(pe), InstallError.DependencyFailed };
             _ = formula_mod.resolveBottle(dep_formula) catch
