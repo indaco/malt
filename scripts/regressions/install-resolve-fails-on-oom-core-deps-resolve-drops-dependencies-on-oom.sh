@@ -27,7 +27,7 @@ FILTERS=(
   "resolve reports a parse-time allocation failure instead of falling back"
 )
 
-# Only the resolve path: findOrphans keeps its under-reporting swallow.
+# Only the resolve path; findOrphans has its own allocation-failure tests.
 BODY=$(awk '/^pub fn resolve\(/ || /^fn (dupeDepNames|getDepsFromValue)\(/ { on = 1 } on { print } on && /^}/ { on = 0 }' "$SRC")
 if printf '%s\n' "$BODY" | grep -nE '(pushBack|append|put|dupe|toOwnedSlice)\(.*\)[[:space:]]*catch[[:space:]]*(\{|blk:|continue)'; then
   echo "FAIL: resolve swallows an allocation failure instead of failing" >&2
