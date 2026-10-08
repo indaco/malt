@@ -142,7 +142,7 @@ Follow the idiomatic Zig patterns that are already in the file that you edit: ex
 
 **Tests.** Put pure unit tests in inline `test` blocks next to the code that they test (in `src/*.zig`). Put cross-module integration tests in `tests/`. Each new behaviour (new flag, subcommand, or error path) needs a pinning test. "Obvious" is not an exception.
 
-**Binary size and startup time.** malt is ~3 MB and starts in ~3 ms. Both numbers are part of the value of malt. If new code changes either number by a large amount, justify the cost in the PR description.
+**Binary size and startup time.** malt is ~5 MB and starts in ~3 ms. Both numbers are part of the value of malt. If new code changes either number by a large amount, justify the cost in the PR description.
 
 ## License
 

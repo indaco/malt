@@ -12,7 +12,7 @@ understand it, and accept it as your own work.
 ## Project shape
 
 malt is a Homebrew-compatible package manager written in **Zig 0.16**, for **macOS
-only**. It is ~4 MB and starts in ~3 ms. The install benchmarks in `README.md` are the
+only**. It is ~5 MB and starts in ~3 ms. The install benchmarks in `README.md` are the
 published baseline. These numbers are the product, not trivia. If a change makes the
 binary larger or moves the benchmarks, give the reason in the PR, with the numbers
 before and after. Compare each new dependency against these numbers.

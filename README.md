@@ -1,6 +1,6 @@
 # malt
 
-**Homebrew's whole ecosystem, none of its weight.** malt is a ~4 MB Zig binary. It uses every Homebrew bottle and formula. It runs post-install work natively: the Homebrew install steps and the Ruby `post_install` blocks that taps still ship. Thus, packages work correctly. malt has a CLI and a TUI, and both use themes.
+**Homebrew's whole ecosystem, none of its weight.** malt is a ~5 MB Zig binary. It uses every Homebrew bottle and formula. It runs post-install work natively: the Homebrew install steps and the Ruby `post_install` blocks that taps still ship. Thus, packages work correctly. malt has a CLI and a TUI, and both use themes.
 
 malt installs to its own prefix, `/opt/malt`. A cold start takes ~3 ms. A human designed malt. AI wrote the code.
 
@@ -44,7 +44,7 @@ malt is a **client** for the Homebrew registry, not a fork. It uses every formul
 
 - **It completes the install.** Most alternative clients stop before post-install, and some packages then do not work. malt runs the two kinds of post-install work natively. The first kind is the Homebrew declarative steps: `post_install_steps` for formulae (v6) and flight steps for casks (v7). homebrew-core now uses these steps everywhere. The second kind is the Ruby `post_install` blocks that third-party taps still ship. A built-in Zig interpreter runs them. → [Post-install](ARCHITECTURE.md#post-install-and-flight-steps)
 - **Repeat installs are free.** malt stores bottles by SHA256, and kegs are APFS `clonefile()` copies. Thus, malt never downloads or extracts the same bottle two times. Reinstalls and rollbacks use no network and no additional disk space. An `ffmpeg` install from an existing store completes in **tens of milliseconds**. → [Benchmarks](#benchmarks)
-- **Safety with a fast start.** malt checks the SHA256 of each download while it streams. Each install has 9 atomic steps, and the old version stays unchanged until the new version passes verification. A 30 s lock stops concurrent changes. Subprocesses run in a sandbox. The binary is ~4 MB and starts in ~3 ms. → [Safety and security](ARCHITECTURE.md#safety-and-security)
+- **Safety with a fast start.** malt checks the SHA256 of each download while it streams. Each install has 9 atomic steps, and the old version stays unchanged until the new version passes verification. A 30 s lock stops concurrent changes. Subprocesses run in a sandbox. The binary is ~5 MB and starts in ~3 ms. → [Safety and security](ARCHITECTURE.md#safety-and-security)
 - **One theme for all output.** One `MALT_THEME` palette sets the colours of the CLI and of the `mt tui` dashboard. → [Theming](#theming)
 - **A dashboard that runs the real CLI.** From one screen, `mt tui` can search, install, upgrade, control services, and run doctor. It sends each action to `mt <subcommand>`. It needs no daemon and no second binary. → [Interactive dashboard](#interactive-dashboard)
 - **Taps on all major forges.** malt supports GitHub, GitLab (also self-hosted), Codeberg/Forgejo/Gitea, and Gogs. It uses the forge API and does not clone the full repository. For private taps, each forge has its own token. → [Supported forges](#supported-forges)
