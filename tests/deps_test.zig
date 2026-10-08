@@ -182,6 +182,31 @@ test "findOrphans walks the transitive closure of direct kegs" {
     try testing.expectEqualStrings("stranded-lib", orphans[0]);
 }
 
+fn findTwoOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) !void {
+    const orphans = try deps_mod.findOrphans(allocator, db);
+    defer {
+        for (orphans) |o| allocator.free(o);
+        allocator.free(orphans);
+    }
+    try testing.expectEqual(@as(usize, 2), orphans.len);
+}
+
+test "findOrphans reports allocation failure instead of under-listing orphans" {
+    var tdb = try TempDb.init("orphans_oom");
+    defer tdb.deinit();
+    _ = try insertKeg(&tdb.db, "lone-a", "dependency");
+    _ = try insertKeg(&tdb.db, "lone-b", "dependency");
+
+    try std.testing.checkAllAllocationFailures(testing.allocator, findTwoOrphans, .{&tdb.db});
+}
+
+test "findOrphans fails on an unusable database instead of reporting no orphans" {
+    // No schema: the query cannot run, which is not the same as "nothing to purge".
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try testing.expect(std.meta.isError(deps_mod.findOrphans(testing.allocator, &db)));
+}
+
 test "findOrphans tolerates dependency cycles without looping forever" {
     // Defensive: a malformed graph where two dep kegs reference each
     // other (a → b, b → a) under no direct retainer should still

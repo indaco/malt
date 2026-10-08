@@ -204,9 +204,7 @@ fn resolveErr(e: anyerror) DepError {
 /// `ca-certificates`) is still classed as retained. A flat one-level
 /// query would mis-purge those grandchild deps.
 pub fn findOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) ![]const []const u8 {
-    var orphans: std.ArrayList([]const u8) = .empty;
-
-    var stmt = db.prepare(
+    var stmt = try db.prepare(
         \\WITH RECURSIVE retained(name) AS (
         \\    SELECT DISTINCT d.dep_name
         \\    FROM dependencies d
@@ -221,18 +219,18 @@ pub fn findOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) ![]const 
         \\SELECT k.name FROM kegs k
         \\WHERE k.install_reason = 'dependency'
         \\AND k.name NOT IN (SELECT name FROM retained);
-    ) catch return orphans.toOwnedSlice(allocator) catch &.{};
+    );
     defer stmt.finalize();
 
-    while (true) {
-        const has_row = stmt.step() catch break;
-        if (!has_row) break;
+    // A short list would read as "nothing else to purge"; fail instead.
+    var orphans: std.ArrayList([]const u8) = .empty;
+    errdefer freeNames(allocator, &orphans);
+    while (try stmt.step()) {
         const name = stmt.columnText(0) orelse continue;
-        const owned = allocator.dupe(u8, std.mem.sliceTo(name, 0)) catch continue;
-        orphans.append(allocator, owned) catch continue;
+        try orphans.ensureUnusedCapacity(allocator, 1);
+        orphans.appendAssumeCapacity(try allocator.dupe(u8, std.mem.sliceTo(name, 0)));
     }
-
-    return orphans.toOwnedSlice(allocator) catch &.{};
+    return orphans.toOwnedSlice(allocator);
 }
 
 // --- helpers ---
@@ -938,6 +936,27 @@ test "getDepsFromValue still reads an unparseable or dep-less record as zero dep
         const deps = try getDepsFromValue(testing.allocator, json);
         try testing.expectEqual(@as(usize, 0), deps.len);
     }
+}
+
+fn findTwoOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) !void {
+    const orphans = try findOrphans(allocator, db);
+    defer {
+        for (orphans) |o| allocator.free(o);
+        allocator.free(orphans);
+    }
+    try testing.expectEqual(@as(usize, 2), orphans.len);
+}
+
+test "findOrphans never under-lists orphans when one allocation fails" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try @import("../db/schema.zig").initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason)
+        \\VALUES ('lone-a', 'lone-a', '1.0', 'aa', '/tmp', 'dependency'),
+        \\       ('lone-b', 'lone-b', '1.0', 'bb', '/tmp', 'dependency');
+    );
+    try sweepOneShot(findTwoOrphans, .{&db});
 }
 
 test "isInstalled reads a damaged relative cellar_path as not installed instead of aborting" {
