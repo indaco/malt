@@ -772,10 +772,10 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         // can't reach `cli/help`. Reads parse `mt … --json`; writes re-exec `mt`.
         .tui => {
             if (cli_help.showIfRequested(ctx, cmd_args, "tui")) return;
-            // The leaf reads MALT_PREFIX/MALT_CACHE itself and cannot reach the
-            // fs validator, so fail closed here, before the alt-screen would
-            // swallow the refusal. Only the checks matter; the values are dropped.
-            _ = atomic.maltPrefixOrAbort();
+            // The leaf cannot reach the fs validator. Fail closed here, before the
+            // alt-screen hides the refusal. The leaf reads MALT_CACHE itself, so
+            // only check it here.
+            const prefix = atomic.maltPrefixOrAbort();
             allocator.free(try atomic.maltCacheDir(allocator));
             // Resolve this binary's path so the TUI re-execs the *same* `mt` for
             // delegated mutations. Falling back to a bare `mt` would resolve
@@ -786,7 +786,7 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
                 return error.Aborted;
             };
             const mt_path = self_buf[0..n];
-            try @import("tui/app.zig").run(ctx.io, allocator, ctx.stderr, ctx.environ, mt_path, version);
+            try @import("tui/app.zig").run(ctx.io, allocator, ctx.stderr, ctx.environ, mt_path, prefix, version);
         },
         .bundle => try bundle.execute(ctx, allocator, cmd_args),
         .uses => try uses.execute(ctx, allocator, cmd_args),

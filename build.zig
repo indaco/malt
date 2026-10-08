@@ -394,14 +394,10 @@ pub fn build(b: *std.Build) void {
         .name = "lib_tests",
         .root_module = lib_test_module,
     });
-    // `atomic.maltPrefixOrAbort()` reads the ambient environment and falls back
-    // to the literal `/opt/malt`, so a test that forgets to set a fixture
-    // prefix operates on the developer's real install — silently, and with
-    // `createTempDir`/`cleanupTempDir` doing real deletes. Default every test
-    // run to a throwaway prefix so isolation is a property of the harness
-    // rather than of each test author remembering. Tests that set their own
-    // `MALT_PREFIX` are unaffected; those that assert the unset default still
-    // call `unsetenv` explicitly.
+    // Give every test run a throwaway prefix. Then the harness, not each test
+    // author, keeps tests off the live install. Keep this value equal to
+    // `atomic.fallback_prefix`: test builds use it when the env is lost. Tests
+    // that set their own `MALT_PREFIX` do not change.
     const test_prefix = "/tmp/malt-test-prefix";
     const run_lib_tests = b.addRunArtifact(lib_tests);
     run_lib_tests.setEnvironmentVariable("MALT_PREFIX", test_prefix);
@@ -449,8 +445,7 @@ pub fn build(b: *std.Build) void {
     all_tests_module.addImport("test_io", test_io_mod);
     const all_tests = b.addTest(.{ .name = "all_tests", .root_module = all_tests_module });
     const run_all_tests = b.addRunArtifact(all_tests);
-    // Throwaway prefix: `atomic.maltPrefixOrAbort()` otherwise falls back to
-    // the literal /opt/malt, i.e. the developer's real install.
+    // Same throwaway prefix as `atomic.fallback_prefix`.
     run_all_tests.setEnvironmentVariable("MALT_PREFIX", "/tmp/malt-test-prefix");
     // Inline `test` blocks live in the `malt` module, and the comment on
     // `lib_test_module` explains why crossing `addImport("malt", ...)` drops

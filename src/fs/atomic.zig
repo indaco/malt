@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const clonefile = @import("clonefile.zig");
 const prefix_path = @import("prefix_path.zig");
 
@@ -24,8 +25,7 @@ const libc_env = struct {
 
 /// Test support: point `MALT_PREFIX` at `prefix` and hand back what it
 /// replaced for `restorePrefixEnv`. Tests must restore rather than unset:
-/// later tests rely on the harness value, and without it the real
-/// `/opt/malt` is the fallback.
+/// later tests need the harness value, not the shared test fallback.
 pub fn overridePrefixEnv(prefix: [:0]const u8) !?[:0]u8 {
     const prev: ?[:0]u8 = if (getenvLocal("MALT_PREFIX")) |v| try std.heap.c_allocator.dupeZ(u8, v) else null;
     _ = libc_env.setenv("MALT_PREFIX", prefix.ptr, 1);
@@ -46,10 +46,16 @@ pub fn restorePrefixEnv(prev: ?[:0]u8) void {
     _ = libc_env.unsetenv("MALT_PREFIX");
 }
 
+/// Production default. Test builds never fall back to it.
+pub const default_prefix = "/opt/malt";
+/// The prefix to use when `MALT_PREFIX` is not set. Tests can lose the harness
+/// env. They then use the throwaway root that `build.zig` sets, not the live install.
+pub const fallback_prefix = if (builtin.is_test) "/tmp/malt-test-prefix" else default_prefix;
+
 /// Validated form of `maltPrefixOrAbort`, returns an error on bad env so tests
 /// can inspect the failure without the process exiting.
 pub fn maltPrefixChecked() prefix_path.PrefixError![:0]const u8 {
-    const raw = getenvLocal("MALT_PREFIX") orelse return "/opt/malt";
+    const raw = getenvLocal("MALT_PREFIX") orelse return fallback_prefix;
     try prefix_path.validatePrefix(raw);
     return raw;
 }
@@ -339,6 +345,11 @@ const TestSyncOps = struct {
         test_sync_counters.dir += 1;
     }
 };
+
+test "fallback_prefix passes the checks an env-provided prefix must pass" {
+    // The fallback does not go through `validatePrefix` at runtime. This test applies it.
+    try prefix_path.validatePrefix(fallback_prefix);
+}
 
 test "an exact-mode atomic write survives a restrictive umask" {
     var s = try Scratch.init("atomic_mode");

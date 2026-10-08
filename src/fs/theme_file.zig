@@ -23,7 +23,7 @@ fn resolvePath(environ: std.process.Environ, buf: []u8) ?[]const u8 {
         prefix_path.validateCharsetRoot(f) catch return null;
         return f;
     }
-    const prefix = environ.getPosix("MALT_PREFIX") orelse "/opt/malt";
+    const prefix = environ.getPosix("MALT_PREFIX") orelse atomic.fallback_prefix;
     prefix_path.validatePrefix(prefix) catch return null;
     return std.fmt.bufPrint(buf, "{s}" ++ default_suffix, .{prefix}) catch return null;
 }
