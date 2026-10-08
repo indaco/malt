@@ -867,13 +867,21 @@ fn runInstall(
         // Try formula
         if (!flags.force_cask) {
             const formula_json = api.fetchFormula(pkg_name) catch |fetch_err| {
-                // Offline misses route straight to a typed "snapshot
-                // didn't have it" line instead of falling through to a
-                // cask probe that would also miss with the same noise.
-                if (fetch_err == api_mod.ApiError.OfflineRequired) {
-                    sink.err("offline mode: formula '{s}' not cached", .{pkg_name});
-                    failed_count += 1;
-                    continue;
+                switch (classifyFormulaFetchMiss(fetch_err)) {
+                    .out_of_memory => {
+                        sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(fetch_err) });
+                        failed_count += 1;
+                        continue;
+                    },
+                    // Offline misses route straight to a typed "snapshot
+                    // didn't have it" line instead of falling through to a
+                    // cask probe that would also miss with the same noise.
+                    .offline => {
+                        sink.err("offline mode: formula '{s}' not cached", .{pkg_name});
+                        failed_count += 1;
+                        continue;
+                    },
+                    .try_cask => {},
                 }
                 if (flags.force_formula) {
                     if (mapApiFetchError(fetch_err) != null) {
@@ -1472,6 +1480,23 @@ fn linkAndRecord(
     sink.success("{s} {s} installed{s}", .{ job.name, job.version_str, keg_only_suffix });
 }
 
+/// Only a miss may fall through to the cask probe; OOM or an offline gap ends
+/// the package, or it would be reported as some other kind of failure.
+const FormulaFetchMiss = enum { out_of_memory, offline, try_cask };
+
+fn classifyFormulaFetchMiss(e: api_mod.ApiError) FormulaFetchMiss {
+    return switch (e) {
+        error.OutOfMemory => .out_of_memory,
+        error.OfflineRequired => .offline,
+        error.ApiUnreachable,
+        error.NotFound,
+        error.InvalidResponse,
+        error.InvalidName,
+        error.CacheError,
+        => .try_cask,
+    };
+}
+
 /// Classify a Homebrew-API fetch failure. Network-layer failures map
 /// to `NetworkError` so the user-facing summary names the real cause
 /// instead of the path-specific "not found" fallback. `null` means
@@ -2040,6 +2065,16 @@ test "mapHeadResolveError does not diagnose the cask when malt or the user stopp
     // download URL", blaming the tap for the user's own interruption.
     try std.testing.expect(mapHeadResolveError(error.Canceled) == null);
     try std.testing.expect(mapHeadResolveError(error.OutOfMemory) == null);
+}
+
+test "a formula fetch that ran out of memory ends the package instead of probing casks" {
+    // Falling through would report "not found" or a cask error for a formula
+    // that exists.
+    try std.testing.expectEqual(FormulaFetchMiss.out_of_memory, classifyFormulaFetchMiss(error.OutOfMemory));
+    try std.testing.expectEqual(FormulaFetchMiss.offline, classifyFormulaFetchMiss(error.OfflineRequired));
+    for ([_]api_mod.ApiError{ error.NotFound, error.ApiUnreachable, error.InvalidResponse, error.InvalidName, error.CacheError }) |e| {
+        try std.testing.expectEqual(FormulaFetchMiss.try_cask, classifyFormulaFetchMiss(e));
+    }
 }
 
 test "mapApiFetchError leaves other ApiError variants for the path's own fallback" {

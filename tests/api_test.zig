@@ -254,7 +254,7 @@ test "writeCache then readCache round-trips a value" {
     // writeCache creates api/ and the file; best-effort, no return.
     api.writeCache("kotlin", "formula_", "{\"name\":\"kotlin\"}");
 
-    const got = api.readCache("kotlin", "formula_") orelse return error.ExpectedCacheHit;
+    const got = (try api.readCache("kotlin", "formula_")) orelse return error.ExpectedCacheHit;
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("{\"name\":\"kotlin\"}", got);
 }
@@ -278,7 +278,26 @@ test "readCache returns null when no cache entry exists" {
     defer dir.deinit();
 
     var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
-    try testing.expect(api.readCache("nope", "formula_") == null);
+    try testing.expect(try api.readCache("nope", "formula_") == null);
+}
+
+test "readCache treats an oversized cache file as a miss so a fetch can replace it" {
+    // A size no fetch could have written is corruption; reporting OOM for it
+    // would fail every run until the user wipes the cache by hand.
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("readcache_oversized");
+    defer dir.deinit();
+    try dir.writeCacheFile("formula_huge.json", "{}");
+
+    var path_buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_huge.json", .{dir.path});
+    const f = try test_io.cwd().openFile(std.Options.debug_io, path, .{ .mode = .read_write });
+    defer f.close(std.Options.debug_io);
+    try f.setLength(std.Options.debug_io, client_mod.HttpClient.max_metadata_bytes + 1);
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    try testing.expect(try api.readCache("huge", "formula_") == null);
 }
 
 test "exists returns true when a fresh success cache entry is present" {
@@ -417,6 +436,36 @@ test "fetchFormula under offline serves a fresh cache hit" {
     const out = try api.fetchFormula("wget");
     defer testing.allocator.free(out);
     try testing.expectEqualStrings(json, out);
+}
+
+test "fetchFormula reports allocation failure on a cache hit instead of a miss" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("cache_hit_oom");
+    defer dir.deinit();
+
+    const json =
+        \\{"name":"wget","versions":{"stable":"1.0"}}
+    ;
+    try dir.writeCacheFile("formula_wget.json", json);
+
+    for ([_]bool{ true, false }) |offline| {
+        var at: usize = 0;
+        while (true) : (at += 1) {
+            var fa: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = at });
+            var api = api_mod.BrewApi.init(std.Options.debug_io, fa.allocator(), &http, dir.path);
+            api.offline = offline;
+            // Refused loopback: a wrongful re-fetch fails without egress.
+            api.base_url = "http://127.0.0.1:9";
+            const out = api.fetchFormula("wget") catch |e| {
+                try testing.expectEqual(api_mod.ApiError.OutOfMemory, e);
+                continue;
+            };
+            defer fa.allocator().free(out);
+            try testing.expectEqualStrings(json, out);
+            if (!fa.has_induced_failure) break;
+        }
+    }
 }
 
 test "fetchFormula under offline serves a stale cache hit (no TTL gate)" {
@@ -720,7 +769,7 @@ test "a cold names+versions cycle downloads the bulk dump exactly once" {
     try testing.expectEqualStrings(want_names, names);
 
     // The same download leaves doctor its bottle-digest side-car.
-    const bottles = api_mod.readBottlesIndex(io, testing.allocator, dir.path) orelse return error.NoBottlesSideCar;
+    const bottles = (try api_mod.readBottlesIndex(io, testing.allocator, dir.path)) orelse return error.NoBottlesSideCar;
     defer testing.allocator.free(bottles);
     const want_bottles = try api_mod.extractBottles(testing.allocator, fixture);
     defer testing.allocator.free(want_bottles);
@@ -782,7 +831,7 @@ test "a warm ETag without the bottles side-car refetches instead of trusting a 3
     stopServer(io, &listener, &srv.stop, thread);
 
     try testing.expectEqual(@as(u32, 0), srv.conditional_count.load(.monotonic));
-    const bottles = api_mod.readBottlesIndex(io, testing.allocator, dir.path) orelse return error.NoBottlesSideCar;
+    const bottles = (try api_mod.readBottlesIndex(io, testing.allocator, dir.path)) orelse return error.NoBottlesSideCar;
     defer testing.allocator.free(bottles);
     try testing.expectEqualStrings("wget\t\n", bottles);
 }
@@ -1317,7 +1366,7 @@ test "BrewApi cache round-trips under a cache dir past 512 bytes" {
     api.writeCache("fake", "formula_", json);
 
     try testing.expect(api.cachedExists("fake", .formula));
-    const hit = api.readCache("fake", "formula_") orelse return error.TestExpectedCacheHit;
+    const hit = (try api.readCache("fake", "formula_")) orelse return error.TestExpectedCacheHit;
     defer testing.allocator.free(hit);
     try testing.expectEqualStrings(json, hit);
     try testing.expect(api.cacheSize() > 0);

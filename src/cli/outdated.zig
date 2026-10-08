@@ -173,7 +173,7 @@ pub fn pruneSnapshot(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Datab
 /// snapshot edit must never cost a fetch, and a stale document would vouch
 /// for longer than the audit's own lease. Caller frees.
 pub fn cachedLatest(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8, kind: api_mod.BrewApi.Kind, name: []const u8) ?[]u8 {
-    const json = api_mod.readFreshCache(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(kind)) orelse return null;
+    const json = (api_mod.readFreshCache(io, allocator, cache_dir, name, api_mod.BrewApi.prefixForKind(kind)) catch null) orelse return null;
     defer allocator.free(json);
     return switch (kind) {
         .formula => refresh_mod.parseFormulaLatest(allocator, json),

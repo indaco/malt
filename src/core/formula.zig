@@ -519,7 +519,10 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         allocator,
         json_data,
         .{},
-    ) catch return FormulaError.InvalidJson;
+    ) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return FormulaError.InvalidJson,
+    };
     errdefer parsed.deinit();
     // Funnel auxiliary slices through the parse arena so one
     // `_parsed.deinit()` reclaims them; otherwise the outer arrays leak.
@@ -674,7 +677,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
                                     .url = getString(file_obj, "url") orelse continue,
                                     .sha256 = sha,
                                 };
-                                map.map.put(arena, platform_name, bf) catch continue;
+                                try map.map.put(arena, platform_name, bf);
                             }
                             bottle_files = map;
                         }
@@ -1952,4 +1955,40 @@ test "parseFormula tags why a service block yielded no definition" {
     var j = try parseFormula(testing.allocator, absent);
     defer j.deinit();
     try testing.expectEqual(@as(?ServiceRefusal, null), j.service_refusal);
+}
+
+fn parseFormulaWithDeps(allocator: std.mem.Allocator) !void {
+    var f = try parseFormula(allocator,
+        \\{"name":"oomf","versions":{"stable":"1.0"},"dependencies":["a","b"],"oldnames":["old"]}
+    );
+    defer f.deinit();
+    try testing.expectEqual(@as(usize, 2), f.dependencies.len);
+}
+
+test "parseFormula reports allocation failure as OutOfMemory, not InvalidJson" {
+    // Callers fall back or refuse on InvalidJson; OOM must not look like bad input.
+    try testing.checkAllAllocationFailures(testing.allocator, parseFormulaWithDeps, .{});
+}
+
+fn parseManyBottles(allocator: std.mem.Allocator, json: []const u8, want: usize) !void {
+    var f = try parseFormula(allocator, json);
+    defer f.deinit();
+    try testing.expectEqual(want, f.bottle_files.?.map.count());
+}
+
+test "parseFormula reports allocation failure instead of dropping bottle platforms" {
+    // A dropped host tag would silently install an older-OS bottle; enough
+    // tags to make the arena grow while the map fills.
+    const tags = 2000;
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+    try w.writeAll("{\"name\":\"many\",\"versions\":{\"stable\":\"1.0\"},\"bottle\":{\"stable\":{\"files\":{");
+    for (0..tags) |i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print("\"tag{d}\":{{\"cellar\":\":any\",\"url\":\"https://x/{d}\",\"sha256\":\"{s}\"}}", .{ i, i, "a" ** 64 });
+    }
+    try w.writeAll("}}}}");
+    // One-shot: a sticky sweep fails the later vulns parse and hides the drop.
+    try @import("../testing/one_shot_fail.zig").sweep(parseManyBottles, .{ aw.written(), tags });
 }

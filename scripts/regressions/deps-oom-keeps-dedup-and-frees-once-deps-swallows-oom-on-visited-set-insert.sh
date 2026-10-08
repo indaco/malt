@@ -56,7 +56,10 @@ for f in "${FILTERS[@]}"; do
   fi
   # The runner checks for leaks after printing OK, so scan this test's own
   # output up to the next test line; another test's leak is not ours.
-  if printf '%s\n' "$OUT" | awk -v f="$f" 'index($0, f) { on = 1; next } on && /^[0-9]+\/[0-9]+ / { exit } on' | grep -q 'leaked'; then
+  # Capture before matching: in a pipe, awk's early exit SIGPIPEs printf and
+  # pipefail turns a real match into a false negative.
+  SEG=$(awk -v f="$f" 'index($0, f) { on = 1; next } on && /^[0-9]+\/[0-9]+ / { exit } on' <<<"$OUT")
+  if [[ "$SEG" == *leaked* ]]; then
     echo "FAIL: deps leaks on an allocation failure: $f" >&2
     exit 1
   fi

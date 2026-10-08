@@ -182,6 +182,31 @@ test "findOrphans walks the transitive closure of direct kegs" {
     try testing.expectEqualStrings("stranded-lib", orphans[0]);
 }
 
+fn findTwoOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) !void {
+    const orphans = try deps_mod.findOrphans(allocator, db);
+    defer {
+        for (orphans) |o| allocator.free(o);
+        allocator.free(orphans);
+    }
+    try testing.expectEqual(@as(usize, 2), orphans.len);
+}
+
+test "findOrphans reports allocation failure instead of under-listing orphans" {
+    var tdb = try TempDb.init("orphans_oom");
+    defer tdb.deinit();
+    _ = try insertKeg(&tdb.db, "lone-a", "dependency");
+    _ = try insertKeg(&tdb.db, "lone-b", "dependency");
+
+    try std.testing.checkAllAllocationFailures(testing.allocator, findTwoOrphans, .{&tdb.db});
+}
+
+test "findOrphans fails on an unusable database instead of reporting no orphans" {
+    // No schema: the query cannot run, which is not the same as "nothing to purge".
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try testing.expect(std.meta.isError(deps_mod.findOrphans(testing.allocator, &db)));
+}
+
 test "findOrphans tolerates dependency cycles without looping forever" {
     // Defensive: a malformed graph where two dep kegs reference each
     // other (a → b, b → a) under no direct retainer should still
@@ -401,15 +426,55 @@ test "resolve fails the resolve when a dep's sub-fetch fails" {
     );
 }
 
-test "resolve's only failure across the module boundary is ResolutionFailed" {
+test "resolve's failures across the module boundary are ResolutionFailed and OutOfMemory" {
     // Boundary check on the public re-export: `DepError` is what a consumer of
     // `malt.deps` may have to handle, so the exhaustive switch below stops
     // compiling the moment the set grows a variant nobody can produce.
-    try comptime testing.expect(deps_mod.DepError == error{ResolutionFailed});
-    const e: deps_mod.DepError = error.ResolutionFailed;
-    switch (e) {
-        error.ResolutionFailed => {},
+    try comptime testing.expect(deps_mod.DepError == error{ ResolutionFailed, OutOfMemory });
+    for ([_]deps_mod.DepError{ error.ResolutionFailed, error.OutOfMemory }) |e| {
+        switch (e) {
+            error.ResolutionFailed, error.OutOfMemory => {},
+        }
     }
+}
+
+/// The cache shares the failing allocator so its parse-time allocations fail
+/// too; a fresh cache per call keeps every sweep index independent.
+fn resolveServedGraph(
+    allocator: std.mem.Allocator,
+    api: *api_mod.BrewApi,
+    db: *sqlite.Database,
+) !void {
+    var cache = deps_mod.FormulaCache.init(allocator);
+    defer cache.deinit();
+    const deps = try deps_mod.resolve(std.Options.debug_io, allocator, "oom_root", api, db, &cache);
+    defer freeResolved(allocator, deps);
+    try testing.expectEqual(@as(usize, 2), deps.len);
+    try testing.expectEqualStrings("oom_mid", deps[0].name);
+    try testing.expectEqualStrings("oom_leaf", deps[1].name);
+}
+
+test "resolve fails instead of returning a partial graph when allocation fails on fetched formulas" {
+    const alloc = testing.allocator;
+
+    var dir = try TempCacheDir.init("resolve_oom");
+    defer dir.deinit();
+
+    // `oom_mid` has no `name`, so its deps come from the permissive fallback.
+    try dir.writeFormula("oom_root", "{\"name\":\"oom_root\",\"versions\":{\"stable\":\"1.0\"},\"dependencies\":[\"oom_mid\"],\"oldnames\":[]}");
+    try dir.writeFormula("oom_mid", "{\"dependencies\":[\"oom_leaf\"]}");
+    try dir.writeFormula("oom_leaf", "{\"name\":\"oom_leaf\",\"versions\":{\"stable\":\"1.0\"},\"dependencies\":[],\"oldnames\":[]}");
+
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
+
+    var tdb = try TempDb.init("resolve_oom");
+    defer tdb.deinit();
+
+    // The API keeps its own allocator, so the byte balance also proves the
+    // fetched JSON goes back to the allocator that made it.
+    try std.testing.checkAllAllocationFailures(alloc, resolveServedGraph, .{ &api, &tdb.db });
 }
 
 test "resolve walks a dependency cycle to completion through the public module" {

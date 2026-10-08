@@ -320,8 +320,8 @@ pub fn apiMiss(e: api_mod.ApiError, name: []const u8) !bool {
 /// A record the API served but the parser refused is an unreadable answer,
 /// not a missing package, and must not fall through to the other kind.
 pub fn refusedRecord(e: anyerror, name: []const u8) !bool {
-    // Only an OOM after the JSON parse gets here; the parsers fold one
-    // inside it into a parse error.
+    // parseCask still folds an OOM inside its JSON parse into a parse error,
+    // so only an OOM after that parse reaches here for a cask.
     if (e == error.OutOfMemory) return error.OutOfMemory;
     return apiMiss(error.InvalidResponse, name);
 }

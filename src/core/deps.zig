@@ -8,6 +8,7 @@ const formula_mod = @import("formula.zig");
 
 pub const DepError = error{
     ResolutionFailed,
+    OutOfMemory,
 };
 
 pub const ResolvedDep = struct {
@@ -88,6 +89,7 @@ pub const FormulaCache = struct {
 /// Caller frees each `ResolvedDep.name` and the outer slice. Every string
 /// from `getDeps` is either moved into `result`/`queue` or freed on the spot.
 /// `cache` is shared with the download pipeline so each formula parses once.
+/// Allocation failure returns `error.OutOfMemory`, never a partial graph.
 pub fn resolve(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -97,6 +99,10 @@ pub fn resolve(
     cache: *FormulaCache,
 ) DepError![]ResolvedDep {
     var result: std.ArrayList(ResolvedDep) = .empty;
+    errdefer {
+        for (result.items) |r| allocator.free(r.name);
+        result.deinit(allocator);
+    }
 
     // Records "seen at all", not "seen on this path": a back-edge and a
     // diamond collapse to the same event, so a repeat name is dropped and
@@ -115,21 +121,17 @@ pub fn resolve(
 
     // A fetch failure on the root's own formula aborts the resolve loudly;
     // never fold it into an empty graph the caller would treat as success.
-    const root_deps = getDeps(allocator, root_name, api, cache) catch {
-        result.deinit(allocator);
-        return error.ResolutionFailed;
-    };
+    const root_deps = getDeps(allocator, root_name, api, cache) catch |e|
+        return resolveErr(e);
     defer allocator.free(root_deps);
 
-    for (root_deps) |dep| {
-        queue.pushBack(allocator, dep) catch {
-            allocator.free(dep);
-            continue;
-        };
-    }
+    queue.ensureUnusedCapacity(allocator, root_deps.len) catch |e| {
+        for (root_deps) |dep| allocator.free(dep);
+        return e;
+    };
+    for (root_deps) |dep| queue.pushBackAssumeCapacity(dep);
 
-    // OOM on visited.put is non-fatal: duplicates are caught by the dedup check below.
-    visited.put(root_name, {}) catch {};
+    try visited.put(root_name, {});
 
     while (queue.popFront()) |dep_name| {
         // Dedup: already processed → free the duplicate.
@@ -138,20 +140,22 @@ pub fn resolve(
             continue;
         }
 
-        // Append to `result` before marking `visited` — `visited` borrows from
-        // `result`'s stable storage, and reversing risks leak or dangle on OOM.
+        // Reserve both slots first so `dep_name` lands in `result` and
+        // `visited` together or not at all; `visited` borrows the string.
+        result.ensureUnusedCapacity(allocator, 1) catch |e| {
+            allocator.free(dep_name);
+            return e;
+        };
+        visited.ensureUnusedCapacity(1) catch |e| {
+            allocator.free(dep_name);
+            return e;
+        };
         const installed = isInstalled(io, db, dep_name);
-        result.append(allocator, .{
+        result.appendAssumeCapacity(.{
             .name = dep_name,
             .already_installed = installed,
-        }) catch {
-            allocator.free(dep_name);
-            continue;
-        };
-
-        // visited.put failure is non-fatal: worst case we re-process the
-        // name later, which the dedup check above will handle.
-        visited.put(dep_name, {}) catch {};
+        });
+        visited.putAssumeCapacityNoClobber(dep_name, {});
 
         // Fan out into this dep's own dependencies.
         if (!installed) {
@@ -159,13 +163,14 @@ pub fn resolve(
             // transitive closure silently missing — abort instead of folding
             // a truncated graph into success. `dep_name` is already owned by
             // `result`, so freeing `result`'s names covers it.
-            const sub_deps = getDeps(allocator, dep_name, api, cache) catch {
-                for (result.items) |r| allocator.free(r.name);
-                result.deinit(allocator);
-                return error.ResolutionFailed;
-            };
+            const sub_deps = getDeps(allocator, dep_name, api, cache) catch |e|
+                return resolveErr(e);
             defer allocator.free(sub_deps);
 
+            queue.ensureUnusedCapacity(allocator, sub_deps.len) catch |e| {
+                for (sub_deps) |sub_dep| allocator.free(sub_dep);
+                return e;
+            };
             for (sub_deps) |sub_dep| {
                 // Free duplicates immediately instead of dropping them on
                 // the floor — the previous code's silent leak was here.
@@ -173,21 +178,20 @@ pub fn resolve(
                     allocator.free(sub_dep);
                     continue;
                 }
-                queue.pushBack(allocator, sub_dep) catch {
-                    allocator.free(sub_dep);
-                    continue;
-                };
+                queue.pushBackAssumeCapacity(sub_dep);
             }
         }
     }
 
-    return result.toOwnedSlice(allocator) catch blk: {
-        // toOwnedSlice can only fail if the shrink-realloc fails; in that
-        // case `result` still owns everything, so free every name before
-        // giving up.
-        for (result.items) |r| allocator.free(r.name);
-        result.deinit(allocator);
-        break :blk &.{};
+    return result.toOwnedSlice(allocator);
+}
+
+/// OOM stays OOM so the caller reports the real cause; every other
+/// `getDeps` failure is a fetch or lookup the resolve cannot complete without.
+fn resolveErr(e: anyerror) DepError {
+    return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.ResolutionFailed,
     };
 }
 
@@ -200,9 +204,7 @@ pub fn resolve(
 /// `ca-certificates`) is still classed as retained. A flat one-level
 /// query would mis-purge those grandchild deps.
 pub fn findOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) ![]const []const u8 {
-    var orphans: std.ArrayList([]const u8) = .empty;
-
-    var stmt = db.prepare(
+    var stmt = try db.prepare(
         \\WITH RECURSIVE retained(name) AS (
         \\    SELECT DISTINCT d.dep_name
         \\    FROM dependencies d
@@ -217,18 +219,18 @@ pub fn findOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) ![]const 
         \\SELECT k.name FROM kegs k
         \\WHERE k.install_reason = 'dependency'
         \\AND k.name NOT IN (SELECT name FROM retained);
-    ) catch return orphans.toOwnedSlice(allocator) catch &.{};
+    );
     defer stmt.finalize();
 
-    while (true) {
-        const has_row = stmt.step() catch break;
-        if (!has_row) break;
+    // A short list would read as "nothing else to purge"; fail instead.
+    var orphans: std.ArrayList([]const u8) = .empty;
+    errdefer freeNames(allocator, &orphans);
+    while (try stmt.step()) {
         const name = stmt.columnText(0) orelse continue;
-        const owned = allocator.dupe(u8, std.mem.sliceTo(name, 0)) catch continue;
-        orphans.append(allocator, owned) catch continue;
+        try orphans.ensureUnusedCapacity(allocator, 1);
+        orphans.appendAssumeCapacity(try allocator.dupe(u8, std.mem.sliceTo(name, 0)));
     }
-
-    return orphans.toOwnedSlice(allocator) catch &.{};
+    return orphans.toOwnedSlice(allocator);
 }
 
 // --- helpers ---
@@ -308,19 +310,23 @@ fn getDeps(
     // not masquerade as "zero deps". The Value-walk fallback below stays
     // reachable only for bytes that fetched but failed `parseFormula`.
     const json_bytes = try api.fetchFormula(name);
-    defer allocator.free(json_bytes);
+    defer api.allocator.free(json_bytes);
 
     if (cache.getOrParse(name, json_bytes)) |formula| {
         return dupeDepNames(allocator, formula.dependencies);
-    } else |_| {
-        return getDepsFromValue(allocator, json_bytes);
+    } else |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return getDepsFromValue(allocator, json_bytes),
     }
 }
 
 /// Permissive dep-list extraction for JSON `parseFormula` rejects.
 /// Reads `dependencies[]` directly off the dynamic Value tree.
 fn getDepsFromValue(allocator: std.mem.Allocator, json_bytes: []const u8) ![][]const u8 {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch return &.{};
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return &.{},
+    };
     defer parsed.deinit();
 
     const obj = switch (parsed.value) {
@@ -333,39 +339,30 @@ fn getDepsFromValue(allocator: std.mem.Allocator, json_bytes: []const u8) ![][]c
     };
 
     var out: std.ArrayList([]const u8) = .empty;
+    errdefer freeNames(allocator, &out);
     for (arr.items) |item| {
         const s = switch (item) {
             .string => |str| str,
             else => continue,
         };
-        const owned = allocator.dupe(u8, s) catch continue;
-        out.append(allocator, owned) catch {
-            allocator.free(owned);
-            continue;
-        };
+        try out.ensureUnusedCapacity(allocator, 1);
+        out.appendAssumeCapacity(try allocator.dupe(u8, s));
     }
-    return out.toOwnedSlice(allocator) catch blk: {
-        for (out.items) |d| allocator.free(d);
-        out.deinit(allocator);
-        break :blk &.{};
-    };
+    return out.toOwnedSlice(allocator);
 }
 
 /// Dupe every dep name onto the BFS allocator — `resolve` owns the strings.
 fn dupeDepNames(allocator: std.mem.Allocator, deps: []const []const u8) ![][]const u8 {
     var out: std.ArrayList([]const u8) = .empty;
-    for (deps) |d| {
-        const owned = allocator.dupe(u8, d) catch continue;
-        out.append(allocator, owned) catch {
-            allocator.free(owned);
-            continue;
-        };
-    }
-    return out.toOwnedSlice(allocator) catch blk: {
-        for (out.items) |d| allocator.free(d);
-        out.deinit(allocator);
-        break :blk &.{};
-    };
+    errdefer freeNames(allocator, &out);
+    try out.ensureUnusedCapacity(allocator, deps.len);
+    for (deps) |d| out.appendAssumeCapacity(try allocator.dupe(u8, d));
+    return out.toOwnedSlice(allocator);
+}
+
+fn freeNames(allocator: std.mem.Allocator, names: *std.ArrayList([]const u8)) void {
+    for (names.items) |n| allocator.free(n);
+    names.deinit(allocator);
 }
 
 // --- FormulaCache unit tests (no DB / no network) -------------------------
@@ -725,6 +722,241 @@ test "resolve drops a self-dependency instead of listing the root as its own dep
     }
 
     try testing.expectEqual(@as(usize, 0), deps.len);
+}
+
+// --- allocation failure ----------------------------------------------------
+
+const sweepOneShot = @import("../testing/one_shot_fail.zig").sweep;
+
+/// Seeds `a -> {b, c}`, `b -> {c}`, `c -> {a, d}`, `d -> {}`: a diamond, a
+/// back-edge to the root and a leaf, so every allocation site on the walk runs.
+fn seedDiamondCycle(cache: *FormulaCache) !void {
+    _ = try cache.getOrParse("a", "{\"name\":\"a\",\"versions\":{\"stable\":\"1.0\"},\"dependencies\":[\"b\",\"c\"],\"oldnames\":[]}");
+    _ = try cache.getOrParse("b", "{\"name\":\"b\",\"versions\":{\"stable\":\"1.0\"},\"dependencies\":[\"c\"],\"oldnames\":[]}");
+    _ = try cache.getOrParse("c", "{\"name\":\"c\",\"versions\":{\"stable\":\"1.0\"},\"dependencies\":[\"a\",\"d\"],\"oldnames\":[]}");
+    _ = try cache.getOrParse("d", testFormulaJson("d"));
+}
+
+/// Succeeds only with the full closure; any partial graph fails the caller.
+fn resolveDiamondCycle(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    api: *api_mod.BrewApi,
+    db: *sqlite.Database,
+    cache: *FormulaCache,
+) !void {
+    const deps = try resolve(io, allocator, "a", api, db, cache);
+    defer {
+        for (deps) |d| allocator.free(d.name);
+        allocator.free(deps);
+    }
+    try testing.expectEqual(@as(usize, 3), deps.len);
+    try testing.expectEqualStrings("b", deps[0].name);
+    try testing.expectEqualStrings("c", deps[1].name);
+    try testing.expectEqualStrings("d", deps[2].name);
+}
+
+test "resolve fails instead of returning a truncated graph when any allocation fails" {
+    const client_mod = @import("../net/client.zig");
+    const schema_mod = @import("../db/schema.zig");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, "/tmp/malt_resolve_oom_cache");
+    api.base_url = "http://127.0.0.1:9";
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema_mod.initSchema(&db);
+
+    var cache = FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+    try seedDiamondCycle(&cache);
+
+    try sweepOneShot(resolveDiamondCycle, .{ io, &api, &db, &cache });
+}
+
+test "resolve survives every allocation failure without leaking" {
+    const client_mod = @import("../net/client.zig");
+    const schema_mod = @import("../db/schema.zig");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, "/tmp/malt_resolve_oom_leak_cache");
+    api.base_url = "http://127.0.0.1:9";
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema_mod.initSchema(&db);
+
+    var cache = FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+    try seedDiamondCycle(&cache);
+
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        resolveDiamondCycle,
+        .{ io, &api, &db, &cache },
+    );
+}
+
+/// `w -> {x}`, `x -> {y0..y9}`: the leaf fan-out is wider than the queue the
+/// root left behind, so only this shape makes the sub-dep reserve allocate.
+fn resolveWideFanOut(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    api: *api_mod.BrewApi,
+    db: *sqlite.Database,
+    cache: *FormulaCache,
+) !void {
+    const deps = try resolve(io, allocator, "w", api, db, cache);
+    defer {
+        for (deps) |d| allocator.free(d.name);
+        allocator.free(deps);
+    }
+    try testing.expectEqual(@as(usize, 11), deps.len);
+    try testing.expectEqualStrings("x", deps[0].name);
+    for (deps[1..], 0..) |d, i| {
+        var buf: [4]u8 = undefined;
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&buf, "y{d}", .{i}), d.name);
+    }
+}
+
+test "resolve fails instead of dropping a wide fan-out when the queue cannot grow" {
+    const client_mod = @import("../net/client.zig");
+    const schema_mod = @import("../db/schema.zig");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, "/tmp/malt_resolve_fanout_oom_cache");
+    api.base_url = "http://127.0.0.1:9";
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema_mod.initSchema(&db);
+
+    var cache = FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+    _ = try cache.getOrParse("w", "{\"name\":\"w\",\"versions\":{\"stable\":\"1.0\"},\"dependencies\":[\"x\"],\"oldnames\":[]}");
+    _ = try cache.getOrParse("x", "{\"name\":\"x\",\"versions\":{\"stable\":\"1.0\"},\"dependencies\":" ++
+        "[\"y0\",\"y1\",\"y2\",\"y3\",\"y4\",\"y5\",\"y6\",\"y7\",\"y8\",\"y9\"],\"oldnames\":[]}");
+    inline for (0..10) |i| {
+        const name = std.fmt.comptimePrint("y{d}", .{i});
+        _ = try cache.getOrParse(name, testFormulaJson(name));
+    }
+
+    try sweepOneShot(resolveWideFanOut, .{ io, &api, &db, &cache });
+}
+
+/// The cache lives on the failing allocator so a parse-time OOM is injectable.
+fn resolveFetchedPair(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    api: *api_mod.BrewApi,
+    db: *sqlite.Database,
+) !void {
+    var cache = FormulaCache.init(allocator);
+    defer cache.deinit();
+    const deps = try resolve(io, allocator, "fa", api, db, &cache);
+    defer {
+        for (deps) |d| allocator.free(d.name);
+        allocator.free(deps);
+    }
+    try testing.expectEqual(@as(usize, 1), deps.len);
+    try testing.expectEqualStrings("fb", deps[0].name);
+    // The fallback walk never caches, so a missing entry means an OOM was
+    // taken for unparseable JSON.
+    try testing.expect(cache.get("fa") != null and cache.get("fb") != null);
+}
+
+test "resolve reports a parse-time allocation failure instead of falling back" {
+    const client_mod = @import("../net/client.zig");
+    const schema_mod = @import("../db/schema.zig");
+
+    var s = try Scratch.init("deps_parse_oom");
+    defer s.deinit();
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/api"));
+    const docs = [_][2][]const u8{
+        .{ "/api/formula_fa.json", "{\"name\":\"fa\",\"versions\":{\"stable\":\"1.0\"},\"dependencies\":[\"fb\"],\"oldnames\":[]}" },
+        .{ "/api/formula_fb.json", testFormulaJson("fb") },
+    };
+    for (docs) |d| {
+        const f = try std.Io.Dir.cwd().createFile(fs_test_io, s.p(d[0]), .{});
+        defer f.close(fs_test_io);
+        try f.writeStreamingAll(fs_test_io, d[1]);
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, s.base);
+    api.base_url = "http://127.0.0.1:9";
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema_mod.initSchema(&db);
+
+    try sweepOneShot(resolveFetchedPair, .{ io, &api, &db });
+}
+
+fn depsFromValueTwo(allocator: std.mem.Allocator) !void {
+    const deps = try getDepsFromValue(allocator, "{\"dependencies\":[\"x\",7,\"y\"]}");
+    defer {
+        for (deps) |d| allocator.free(d);
+        allocator.free(deps);
+    }
+    try testing.expectEqual(@as(usize, 2), deps.len);
+    try testing.expectEqualStrings("x", deps[0]);
+    try testing.expectEqualStrings("y", deps[1]);
+}
+
+test "getDepsFromValue reports allocation failure instead of fewer or zero deps" {
+    try sweepOneShot(depsFromValueTwo, .{});
+    try testing.checkAllAllocationFailures(testing.allocator, depsFromValueTwo, .{});
+}
+
+test "getDepsFromValue still reads an unparseable or dep-less record as zero deps" {
+    // Only OOM changed; a malformed record keeps its zero-deps reading.
+    for ([_][]const u8{ "not json", "[1,2]", "{}", "{\"dependencies\":\"x\"}", "{\"dependencies\":[]}" }) |json| {
+        const deps = try getDepsFromValue(testing.allocator, json);
+        try testing.expectEqual(@as(usize, 0), deps.len);
+    }
+}
+
+fn findTwoOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) !void {
+    const orphans = try findOrphans(allocator, db);
+    defer {
+        for (orphans) |o| allocator.free(o);
+        allocator.free(orphans);
+    }
+    try testing.expectEqual(@as(usize, 2), orphans.len);
+}
+
+test "findOrphans never under-lists orphans when one allocation fails" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try @import("../db/schema.zig").initSchema(&db);
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason)
+        \\VALUES ('lone-a', 'lone-a', '1.0', 'aa', '/tmp', 'dependency'),
+        \\       ('lone-b', 'lone-b', '1.0', 'bb', '/tmp', 'dependency');
+    );
+    try sweepOneShot(findTwoOrphans, .{&db});
 }
 
 test "isInstalled reads a damaged relative cellar_path as not installed instead of aborting" {
