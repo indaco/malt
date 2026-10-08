@@ -10,6 +10,11 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
     try db.beginTransaction();
     errdefer db.rollback();
 
+    // Refuse inside the write lock, before any DDL: a check before BEGIN
+    // races a newer malt on a shared DB, and the base DDL would write to the
+    // newer shape or mask the refusal as ExecFailed.
+    if (try existingVersion(db) > known_schema_version) return error.SchemaTooNew;
+
     // 1. schema_version
     try db.exec(
         \\CREATE TABLE IF NOT EXISTS schema_version (
@@ -1026,6 +1031,14 @@ fn canonicalizeCasks(db: *sqlite.Database) sqlite.SqliteError!void {
 /// columns, not one.
 fn caskColumnsPresent(db: *sqlite.Database, wanted: []const []const u8) sqlite.SqliteError!bool {
     return columnsPresent(db, "PRAGMA table_info(casks);", wanted);
+}
+
+/// `currentVersion`, but 0 on a DB that has no `schema_version` table yet.
+fn existingVersion(db: *sqlite.Database) sqlite.SqliteError!i64 {
+    var stmt = try db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version';");
+    defer stmt.finalize();
+    if (!try stmt.step()) return 0;
+    return currentVersion(db);
 }
 
 /// Query the current schema version.
@@ -2372,6 +2385,84 @@ test "migrate refuses a DB whose schema_version exceeds the known max" {
     try testing.expectError(error.SchemaTooNew, migrate(&db));
     // Untouched: refusal must not silently bump the version.
     try testing.expectEqual(@as(i64, 999), try currentVersion(&db));
+}
+
+test "initSchema refuses a too-new DB without writing to it" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    try db.exec("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);");
+    try db.exec("INSERT INTO schema_version (version) VALUES (99);");
+
+    try testing.expectError(error.SchemaTooNew, initSchema(&db));
+
+    var objects = try db.prepare("SELECT count(*) FROM sqlite_master;");
+    defer objects.finalize();
+    _ = try objects.step();
+    try testing.expectEqual(@as(i64, 1), objects.columnInt(0));
+    try testing.expectEqual(@as(i64, 99), try currentVersion(&db));
+
+    var versions = try db.prepare("SELECT count(*) FROM schema_version;");
+    defer versions.finalize();
+    _ = try versions.step();
+    try testing.expectEqual(@as(i64, 1), versions.columnInt(0));
+}
+
+test "initSchema reports SchemaTooNew, not ExecFailed, when a newer malt reshaped an indexed column" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    try initSchema(&db);
+    try db.exec("DROP INDEX idx_kegs_store;");
+    try db.exec("ALTER TABLE kegs RENAME COLUMN store_sha256 TO store_digest;");
+    try db.exec("INSERT INTO schema_version (version) VALUES (99);");
+
+    try testing.expectError(error.SchemaTooNew, initSchema(&db));
+}
+
+test "existingVersion is 0 for a missing or empty schema_version table" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    try testing.expectEqual(@as(i64, 0), try existingVersion(&db));
+    try db.exec("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);");
+    try testing.expectEqual(@as(i64, 0), try existingVersion(&db));
+}
+
+test "initSchema accepts an empty schema_version table" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    try db.exec("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);");
+    try initSchema(&db);
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
+}
+
+test "initSchema refuses exactly one version past the known max without writing" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    try db.exec("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);");
+    var buf: [64]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(&buf, "INSERT INTO schema_version (version) VALUES ({d});", .{known_schema_version + 1});
+    try db.exec(sql);
+
+    try testing.expectError(error.SchemaTooNew, initSchema(&db));
+
+    var objects = try db.prepare("SELECT count(*) FROM sqlite_master;");
+    defer objects.finalize();
+    _ = try objects.step();
+    try testing.expectEqual(@as(i64, 1), objects.columnInt(0));
+    try testing.expectEqual(known_schema_version + 1, try currentVersion(&db));
+}
+
+test "initSchema accepts a DB already at the known max" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    try initSchema(&db);
+    try initSchema(&db);
+    try testing.expectEqual(known_schema_version, try currentVersion(&db));
 }
 
 fn refcountColumns(db: *sqlite.Database) !i64 {
