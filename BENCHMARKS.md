@@ -1,6 +1,6 @@
 # Benchmarks
 
-Install times for malt against nanobrew, zerobrew and Homebrew, refreshed weekly by the [benchmark workflow](.github/workflows/benchmark.yml). The README shows the cold and warm tables at a glance.
+This file gives the install times of malt, nanobrew, zerobrew, and Homebrew. The [benchmark workflow](.github/workflows/benchmark.yml) updates them each week. The README shows a summary of the cold and warm tables.
 
 <!-- BENCH:META:START -->
 - Install times on macOS 26 (Apple Silicon).
@@ -50,39 +50,39 @@ Install times for malt against nanobrew, zerobrew and Homebrew, refreshed weekly
 
 ### What a number means
 
-Each cell is the wall-clock time of one command, `<tool> install <pkg>`, measured from launch to exit. That covers resolving dependencies, downloading, extracting, relocating, linking, and recording the install.
+Each cell is the wall-clock time of one command, `<tool> install <pkg>`, from launch to exit. This time includes dependency resolution, download, extraction, relocation, links, and the install record.
 
-A sample only counts if the package works afterwards. Once the install exits, the bench runs the package's own binary from the tool's prefix (`tree --version`, `java -version`, ...). That check is not timed. If the install exits non-zero or the binary doesn't run, the sample is a failure, not a time. So a tool can't post a fast number for a partial install, or for a bottle built for a newer macOS that won't load.
+A sample counts only if the package works after the install. When the install exits, the bench runs the binary of the package from the prefix of the tool (`tree --version`, `java -version`, ...). This check is not timed. If the install exits with a non-zero code or the binary does not run, the sample is a failure, not a time. Thus, a tool cannot show a fast time for a partial install. It also cannot show a fast time for a bottle that is built for a newer macOS and does not load.
 
 ### Cold and warm
 
-- **Cold**: the package and every dependency are absent, and the tool has no cached bottles or package metadata. Every byte comes from the network, like a fresh machine.
-  - malt, nanobrew, zerobrew: the bench wipes the tool's whole prefix, which holds its caches.
-  - Homebrew: the bench uninstalls the package and its whole dependency tree, then deletes those bottles from `~/Library/Caches/Homebrew` and drops the API metadata cache. Auto-update and post-install cleanup are switched off so they don't land in the timing.
-- **Warm**: the package was just uninstalled, and the tool's download cache is still populated. This measures install work without the network. Homebrew has no warm column.
+- **Cold**: the package and all its dependencies are not installed, and the tool has no cached bottles or package metadata. All data comes from the network, as on a new machine.
+  - malt, nanobrew, zerobrew: the bench deletes the full prefix of the tool, which contains its caches.
+  - Homebrew: the bench uninstalls the package and its full dependency tree. Then it deletes these bottles from `~/Library/Caches/Homebrew` and deletes the API metadata cache. Auto-update and post-install cleanup are off, so they do not add to the time.
+- **Warm**: the package was uninstalled immediately before, and the download cache of the tool is still full. This measures the install work without the network. Homebrew has no warm column.
 
-Uninstalling Homebrew's dependency tree would remove packages from a real install, so it only happens on CI or with `BENCH_BREW_FULL_COLD=1`. A local run without it keeps brew's dependencies installed and prints a warning: those brew numbers are not comparable.
+An uninstall of the Homebrew dependency tree removes packages from a real install. Thus, the bench does this only on CI or with `BENCH_BREW_FULL_COLD=1`. Without it, a local run keeps the brew dependencies installed and prints a warning. These brew times are not comparable.
 
 ### Noise control
 
-- Each cell is the **median of 5 rounds** (`BENCH_ROUNDS`), shown with its standard deviation.
-- A discarded warmup round runs first, so DNS, TLS and disk caches are populated before timing starts.
-- Tool order rotates every round, so no tool always gets the slowest or fastest network slot.
+- Each cell is the **median of 5 rounds** (`BENCH_ROUNDS`), with its standard deviation.
+- A warmup round runs first, and the bench discards it. Thus, the DNS, TLS, and disk caches are full before the timing starts.
+- The tool order changes each round. Thus, no tool always gets the slowest or fastest network slot.
 
 ### Versions and builds
 
-- Peers are built from their latest release tag. CI also builds malt from its latest release branch (`BENCH_MALT_RELEASE=1`), so the table is release against release. A local run benches your working tree.
-- Each tool uses the release flags its upstream ships: malt `ReleaseSafe` (as in [`.goreleaser.yaml`](.goreleaser.yaml)), nanobrew `ReleaseFast`, zerobrew `cargo build --release`.
-- CI runs on `macos-26`, so every package has a bottle built for the host OS.
+- The bench builds peers from their latest release tag. CI also builds malt from its latest release branch (`BENCH_MALT_RELEASE=1`), so the table compares release with release. A local run measures your working tree.
+- Each tool uses the release flags that its upstream ships: malt `ReleaseSafe` (as in [`.goreleaser.yaml`](.goreleaser.yaml)), nanobrew `ReleaseFast`, zerobrew `cargo build --release`.
+- CI runs on `macos-26`. Thus, each package has a bottle built for the host OS.
 
 ### Withheld cells
 
-A peer's cell shows ⚠️ when its install fails or its cold median exceeds 50 s (`BENCH_MAX_COLD`). That points to a regression in that tool, not a comparable time. malt is never withheld: a failed malt install aborts the run, so it can't publish anything.
+A peer cell shows ⚠️ if its install fails or its cold median is more than 50 s (`BENCH_MAX_COLD`). This shows a regression in that tool, not a comparable time. malt is never withheld. A failed malt install stops the run, so the run publishes nothing.
 
 ### Reproducing
 
-`./scripts/local-bench.sh` runs the same steps as CI: every package, then the ffmpeg ×20 stress test. Add `--clean` to wipe the `/tmp` bench state afterwards. To iterate, run `scripts/bench.sh <pkg>` directly:
+`./scripts/local-bench.sh` runs the same steps as CI: all packages, then the ffmpeg ×20 stress test. To delete the `/tmp` bench state after the run, add `--clean`. For quick iterations, run `scripts/bench.sh <pkg>` directly:
 
-- `SKIP_BUILD=1` reuses the existing binaries.
-- `SKIP_OTHERS=1` and `SKIP_BREW=1` drop the peer tools.
-- `BENCH_SKIP_UPDATE=1` keeps whatever peer versions are already checked out.
+- `SKIP_BUILD=1` uses the existing binaries again.
+- `SKIP_OTHERS=1` and `SKIP_BREW=1` remove the peer tools from the run.
+- `BENCH_SKIP_UPDATE=1` keeps the peer versions that are already checked out.
