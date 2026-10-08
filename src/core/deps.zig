@@ -312,7 +312,7 @@ fn getDeps(
     // not masquerade as "zero deps". The Value-walk fallback below stays
     // reachable only for bytes that fetched but failed `parseFormula`.
     const json_bytes = try api.fetchFormula(name);
-    defer allocator.free(json_bytes);
+    defer api.allocator.free(json_bytes);
 
     if (cache.getOrParse(name, json_bytes)) |formula| {
         return dupeDepNames(allocator, formula.dependencies);

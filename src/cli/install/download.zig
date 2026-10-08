@@ -286,11 +286,6 @@ pub fn collectFormulaJobs(
     const bottle: ?formula_mod.BottleFile = formula_mod.resolveBottle(formula) catch null;
     if (bottle == null and !ctx.only_deps) return refuseNoBottle(ctx.sink, formula.name);
 
-    // Resolve dependencies. `deps_mod.resolve` forwards the allocator
-    // into `api.fetchFormula`, whose bytes come from `api.allocator`
-    // (the same caller allocator) — so the allocator here must match
-    // `allocator`, otherwise free on the API-allocated bytes is a no-op
-    // on the wrong allocator.
     // Let a resolve failure propagate: the caller routes it into
     // "Failed to resolve <pkg>" + failed_count, rather than installing a
     // truncated dep graph as success.

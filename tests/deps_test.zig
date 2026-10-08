@@ -447,18 +447,9 @@ test "resolve fails instead of returning a partial graph when allocation fails o
     var tdb = try TempDb.init("resolve_oom");
     defer tdb.deinit();
 
-    // Not checkAllAllocationFailures: the fetched JSON comes from the API's
-    // allocator, so its byte balance never matches. testing.allocator still
-    // catches a real leak.
-    var at: usize = 0;
-    while (true) : (at += 1) {
-        var fa: std.testing.FailingAllocator = .init(alloc, .{ .fail_index = at });
-        resolveServedGraph(fa.allocator(), &api, &tdb.db) catch |e| {
-            try testing.expectEqual(error.OutOfMemory, e);
-            continue;
-        };
-        if (!fa.has_induced_failure) break;
-    }
+    // The API keeps its own allocator, so the byte balance also proves the
+    // fetched JSON goes back to the allocator that made it.
+    try std.testing.checkAllAllocationFailures(alloc, resolveServedGraph, .{ &api, &tdb.db });
 }
 
 test "resolve walks a dependency cycle to completion through the public module" {
