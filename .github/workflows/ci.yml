@@ -253,6 +253,9 @@ jobs:
       - name: Regression guard - --dry-run never creates or migrates the install database
         run: ./scripts/regressions/dry-run-leaves-db-untouched-dry-run-creates-and-initialises-the-db.sh
 
+      - name: Regression guard - refusing a newer-schema database leaves it untouched
+        run: ./scripts/regressions/schema-too-new-refusal-leaves-db-untouched-initschema-writes-to-a-newer-schema-db-before-refusing.sh
+
       - name: Regression guard - --dry-run update keeps the API cache
         run: ./scripts/regressions/update-dry-run-keeps-cache-dry-run-update-wipes-the-api-cache.sh
 
