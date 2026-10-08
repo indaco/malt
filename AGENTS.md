@@ -1,25 +1,25 @@
 # AGENTS.md
 
-Instructions for AI coding agents working in this repository. Humans should read
-[CONTRIBUTING.md](CONTRIBUTING.md) first - it explains the _why_ behind everything below.
-This file is the executable subset: exact commands, hard invariants, and the rules
-agents most often get wrong. The [pre-PR checklist](#before-you-open-the-pr) at the end
-is the short form.
+Instructions for AI coding agents that work in this repository. Human readers: start
+with [CONTRIBUTING.md](CONTRIBUTING.md). It explains the _why_ of all the rules below.
+This file is the executable subset: exact commands, hard invariants, and the rules that
+agents most frequently get wrong. The [pre-PR checklist](#before-you-open-the-pr) at the
+end is the short form.
 
-AI-assisted PRs are welcome. The contributor is accountable for the diff: read it,
-understand it, and stand behind it as your own work.
+AI-assisted PRs are welcome. The contributor is responsible for the diff: read it,
+understand it, and accept it as your own work.
 
 ## Project shape
 
-malt is a Homebrew-compatible package manager written in **Zig 0.16**, targeting
-**macOS only**. It is ~4 MB, starts in ~3 ms, and the install benchmarks in `README.md`
-are the published baseline. Those numbers are the product, not trivia: a change that
-grows the binary or moves the benchmarks needs a reason stated in the PR, with the
-before-and-after numbers. Weigh every new dependency against them.
+malt is a Homebrew-compatible package manager written in **Zig 0.16**, for **macOS
+only**. It is ~4 MB and starts in ~3 ms. The install benchmarks in `README.md` are the
+published baseline. These numbers are the product, not trivia. If a change makes the
+binary larger or moves the benchmarks, give the reason in the PR, with the numbers
+before and after. Compare each new dependency against these numbers.
 
 Do not port to Linux or Windows. Mach-O patching, APFS clonefile, launchd,
-`sandbox-exec`, and the bottle ecosystem are all platform-specific, and the
-macOS-only constraint is deliberate.
+`sandbox-exec`, and the bottle ecosystem are all platform-specific. The macOS-only
+constraint is deliberate.
 
 ## Verify before proposing a diff
 
@@ -29,20 +29,21 @@ just test                             # unit tests + cheap static regression gua
 ./scripts/lint-spawn-invariants.sh    # argv-only spawn lint
 ```
 
-`just test` wraps `zig build test` and adds the static guards; prefer it over calling
-`zig build test` directly. Run `just --list` for every available target.
+`just test` runs `zig build test` and adds the static guards. Use it instead of
+`zig build test`. To see all available targets, run `just --list`.
 
-Every existing test must pass. If a test fails - even one that looks flaky or unrelated
-to your change - fix it or report it. Do not describe a red suite as green.
+All existing tests must pass. If a test fails, fix it or report it. This also applies to
+a test that looks flaky or not related to your change. Do not describe a red suite as
+green.
 
-If tests fail with a GitHub API rate-limit error, they are starved of auth, not broken.
-Export a token and re-run before concluding anything:
+If tests fail with a GitHub API rate-limit error, they have no authentication. They are
+not broken. Export a token and run them again before you make a conclusion:
 
 ```bash
 export MALT_GITHUB_TOKEN="$(gh auth token)"
 ```
 
-Additionally, depending on what the diff touches:
+Also, run or update these items for the parts that the diff touches:
 
 | Diff touches                                                                        | Also run or update                                                                              |
 | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -54,100 +55,103 @@ Additionally, depending on what the diff touches:
 | anything in `scripts/**`                                                            | `shellcheck` and `shfmt -i 2` on the changed scripts                                            |
 | install / extract / download paths                                                  | `just regressions` (needs network and a token)                                                  |
 | behaviour an existing script already covers                                         | that script under `scripts/e2e/`, `scripts/smokes/`, `scripts/test/`, or `scripts/regressions/` |
-| install, parse, network, or concurrency paths                                       | `./scripts/bench.sh` - compare against the baselines in `README.md`                             |
+| install, parse, network, or concurrency paths                                       | `./scripts/bench.sh`: compare against the baselines in `README.md`                              |
 
-Do not claim a check passed without running it. If a check cannot run in your
-environment, say so explicitly in the PR rather than staying silent.
+Do not claim that a check passed if you did not run it. If a check cannot run in your
+environment, say so in the PR. Do not stay silent.
 
 ## Hard invariants
 
-A diff that breaks one of these is wrong, not a design discussion. If you believe the
-constraint itself is wrong, open an issue before writing code.
+A diff that breaks one of these invariants is wrong. It is not a design discussion. If
+you think that the constraint itself is wrong, open an issue before you write code.
 
-**Argv-only spawn.** Every subprocess goes through argv-style APIs
+**Argv-only spawn.** Each subprocess goes through argv-style APIs
 (`fs_compat.Child.init(argv, allocator)`). No `sh -c <string>`, no `/bin/sh`, no shell
-interpolation - not even inside comments, which the lint also scans. The only exception
-is the rejection list in `src/core/services/plist.zig`, which exists to refuse them.
-Guarded by `tests/spawn_invariant_test.zig` and `scripts/lint-spawn-invariants.sh`.
+interpolation. This also applies to comments, because the lint scans them too. The only
+exception is the rejection list in `src/core/services/plist.zig`, which exists to refuse
+them. `tests/spawn_invariant_test.zig` and `scripts/lint-spawn-invariants.sh` enforce
+this rule.
 
-**A new CLI flag reaches four places.** The parser, `src/cli/help.zig`, all three shells
+**A new CLI flag goes to four places.** The parser, `src/cli/help.zig`, all three shells
 in `src/cli/completions.zig` (bash, zsh, fish), and the regenerated `man/malt.1`.
-`tests/flag_drift_test.zig` derives the truth from the parsers and fails
-`zig build test` on drift, so a half-wired flag will not merge.
+`tests/flag_drift_test.zig` gets the truth from the parsers and fails `zig build test`
+on drift. Thus, a flag that is only partly connected cannot merge.
 
-**Do the work in-process.** Reach for `std.fs`, `std.posix`, `std.crypto`, and
-`std.tar` before reaching for a subprocess. malt copies, hashes, extracts, links, and
-patches Mach-O binaries in Zig on purpose: no dependency on which `cp`, `shasum`, or
-`tar` happens to be on `PATH`, no output parsing, real error values instead of exit
-codes, and one less call site for the spawn audit to clear. When the platform tool
-genuinely is the interface - `sandbox-exec`, `launchctl`, the `brew` fallback, system
-Ruby - spawn it argv-only and keep the call site narrow.
+**Do the work in-process.** Use `std.fs`, `std.posix`, `std.crypto`, and `std.tar`
+before you use a subprocess. malt copies, hashes, extracts, links, and patches Mach-O
+binaries in Zig on purpose. Thus, malt does not depend on the `cp`, `shasum`, or `tar`
+on `PATH`, and it does not parse their output. It gets real error values instead of exit
+codes, and the spawn audit has one less call site to clear. Sometimes the platform tool
+is the real interface: `sandbox-exec`, `launchctl`, the `brew` fallback, and system
+Ruby. Then spawn it argv-only and keep the call site narrow.
 
-**Formula Ruby is pinned.** Source fetched over the wire is executed only if its SHA256
-matches `src/core/pins_manifest.txt` against the pinned commit in `src/core/pins.zig`.
-No manifest entry, no execution. The pin is frozen - upstream has migrated every Ruby
-`post_install` to declarative `post_install_steps` - so the manifest is no longer regenerated.
+**Formula Ruby is pinned.** malt executes downloaded source only if its SHA256 matches
+`src/core/pins_manifest.txt` for the pinned commit in `src/core/pins.zig`. No manifest
+entry, no execution. The pin is frozen, because upstream has migrated all Ruby
+`post_install` blocks to declarative `post_install_steps`. Thus, nobody regenerates the
+manifest now.
 
-**Service declarations are validated.** Formula `service:` blocks pass through
+**Service declarations are validated.** Formula `service:` blocks go through
 `plist_mod.validate` before launchd sees them. Do not add bypasses.
 
 **The diff contains only the change.** Plans, task notes, scratch files, analysis
-write-ups, and build artefacts stay out of the repository - `git status` should show
-nothing but the files the change needs. Keep planning docs local; `docs/` is gitignored
-on purpose.
+documents, and build artefacts stay out of the repository. `git status` must show only
+the files that the change needs. Keep planning documents local. `docs/` is gitignored on
+purpose.
 
 **No traceability numbers in the artefacts.** Issue numbers, bug IDs, task IDs, and
-internal document references belong in the PR conversation, not in commit messages, PR
-bodies, or code comments. Regression scripts are named after the behaviour they pin, not
-after a ticket.
+internal document references go in the PR conversation. Do not put them in commit
+messages, PR bodies, or code comments. Name regression scripts after the behaviour that
+they pin, not after a ticket.
 
 ## Tests
 
-**Work test-first.** Write the test, run it, watch it fail for the reason you expect,
-then write the implementation that turns it green. A test written after the code passes
-because it was shaped around what the code already does - it pins the implementation
-instead of the intent, and it will not catch the regression you wrote it for.
+**Work test-first.** Write the test and run it. Make sure that it fails for the reason
+that you expect. Then write the implementation that makes it pass. A test that you write
+after the code passes because it has the shape of the current code. It pins the
+implementation, not the intent. It does not find the regression that you wrote it for.
 
-New behaviour requires new tests. Changed behaviour requires updated tests. "Obvious" is
-not an exception - every new flag, subcommand, and error path lands with a pinning test.
+New behaviour needs new tests. Changed behaviour needs updated tests. "Obvious" is not an
+exception: each new flag, subcommand, and error path needs a pinning test.
 
-- **Unit tests** are inline `test` blocks next to the code they exercise, in `src/`.
-- **Integration tests** are separate files in `tests/`, one per subsystem.
-- **Edge cases get their own cases**, and they are the point of the exercise: empty
-  input, boundary values, off-by-one limits, malformed and hostile data, permission and
-  I/O failure, interrupted or concurrent access, the error branch of every `try`. The
-  happy path is the case least likely to break; a suite that only covers it tells you
-  nothing.
-- **Fixed a bug? Ask whether it can come back.** If it can, add a script under
-  `scripts/regressions/` named after the behaviour it pins.
+- **Unit tests** are inline `test` blocks next to the code that they test, in `src/`.
+- **Integration tests** are separate files in `tests/`, one for each subsystem.
+- **Each edge case gets its own test case.** Edge cases are the most important tests:
+  empty input, boundary values, off-by-one limits, malformed and hostile data,
+  permission and I/O failure, interrupted or concurrent access, and the error branch of
+  each `try`. The happy path is the least likely to break. A suite that covers only the
+  happy path tells you nothing.
+- **When you fix a bug, ask if it can occur again.** If it can, add a script under
+  `scripts/regressions/`. Name it after the behaviour that it pins.
 - A test that cannot fail when the logic changes is not a test. Encode _why_ the
-  behaviour matters, not just that the current output is the current output.
+  behaviour is important, not only that the current output is the current output.
 
 ## Where code goes
 
-- `src/cli/` - command implementations, flag parsing, user-facing output
-- `src/core/` - package-manager logic. Stays a leaf: no `cli/*` or `ui/*` imports, no
-  user-facing strings. `src/core/forge.zig` is the model - adding a forge is a new enum
-  arm so the compiler flags every unhandled `switch`.
-- `src/ui/`, `src/tui/` - rendering and the interactive TUI
-- `src/net/`, `src/db/`, `src/fs/`, `src/macho/`, `src/update/` - transport, SQLite
+- `src/cli/`: command implementations, flag parsing, user-facing output
+- `src/core/`: package-manager logic. It stays a leaf: no `cli/*` or `ui/*` imports, and
+  no user-facing strings. `src/core/forge.zig` is the model. A new forge is a new enum
+  arm, so the compiler flags each unhandled `switch`.
+- `src/ui/`, `src/tui/`: rendering and the interactive TUI
+- `src/net/`, `src/db/`, `src/fs/`, `src/macho/`, `src/update/`: transport, SQLite
   state, filesystem primitives, Mach-O patching, self-update
-- `tests/` - cross-module integration tests
-- `scripts/regressions/` - one script per fixed bug
+- `tests/`: cross-module integration tests
+- `scripts/regressions/`: one script for each fixed bug
 
-Write idiomatic Zig 0.16 and follow the patterns already in the file you are editing:
-explicit error sets, `defer` / `errdefer`, `anytype` writers, allocator threading over
-global state, `std.posix` / `std.Io` / `std.crypto` over libc wrappers. Prefer
-`StaticStringMap` plus an exhaustive `switch` over chains of string comparisons.
+Write idiomatic Zig 0.16 and follow the patterns that are already in the file that you
+edit: explicit error sets, `defer` / `errdefer`, `anytype` writers, allocator threading
+instead of global state, and `std.posix` / `std.Io` / `std.crypto` instead of libc
+wrappers. Use `StaticStringMap` and an exhaustive `switch` instead of chains of string
+comparisons.
 
-Comments are short and explain _why_ a non-obvious choice was made. Not everything needs
-one. A comment that restates the code, or narrates implementation detail the reader can
-see, is noise - delete it.
+Keep comments short. A comment explains _why_ you made a non-obvious choice. Not all code
+needs a comment. A comment that repeats the code, or describes implementation detail
+that the reader can see, is noise. Delete it.
 
 ## Out of scope
 
-Do not write this code. Open an issue instead - these are settled boundaries and PRs
-against them are closed without a long discussion.
+Do not write this code. Open an issue instead. These boundaries are settled, and
+maintainers close PRs against them without a long discussion.
 
 - Linux or Windows support
 - Brewfile `do … end` blocks and Ruby conditionals such as `if OS.mac?` (the escape
@@ -158,23 +162,23 @@ against them are closed without a long discussion.
 
 ## Branches, commits, PRs
 
-- Branch prefix matching the change: `feat/`, `fix/`, `refactor/`, `perf/`, `chore/`,
-  `docs/`, `test/`. No `wip/` or `ui/`.
-- [Conventional Commits](https://www.conventionalcommits.org/) header
+- Use a branch prefix that matches the change: `feat/`, `fix/`, `refactor/`, `perf/`,
+  `chore/`, `docs/`, `test/`. Do not use `wip/` or `ui/`.
+- Use a [Conventional Commits](https://www.conventionalcommits.org/) header
   (`type(scope): subject`). The subject states the value delivered, not the
-  implementation; the body explains _why_, not _what_.
+  implementation. The body explains _why_, not _what_.
 - Do not add `Co-Authored-By` or any AI attribution trailer to commits.
-- PRs target `main`, including fixes for the current release. Never target `release/*`.
-- PRs are squash-merged, so the PR title becomes the `git log` entry: Conventional
-  Commits header, under 70 chars.
-- The PR body uses the repo template and describes the user-visible change or the safety
-  property added - not a file-by-file walkthrough. Fill every section; write `- None`
-  under _Related Issue_ and _Notes for Reviewers_ when nothing applies.
-- Anything beyond a typo or one-liner: open an issue first.
+- PRs target `main`, also fixes for the current release. Never target `release/*`.
+- malt squash-merges PRs, so the PR title becomes the `git log` entry. Use a
+  Conventional Commits header of fewer than 70 characters.
+- The PR body uses the repository template. It describes the user-visible change or the
+  safety property that you added, not each file. Fill all sections. Write `- None` under
+  _Related Issue_ and _Notes for Reviewers_ when nothing applies.
+- For all changes larger than a typo or a one-line fix, open an issue first.
 
 ## Before you open the PR
 
-- [ ] Every acceptance criterion in the request is met - not most of them
+- [ ] All acceptance criteria in the request are met, not only most of them
 - [ ] `just fmt`, `just test`, and `./scripts/lint-spawn-invariants.sh` pass
 - [ ] Extra checks for the surfaces this diff touches (see the table above) were run
 - [ ] Tests were written first and observed failing before the implementation landed

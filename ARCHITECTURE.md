@@ -1,12 +1,12 @@
 # Architecture
 
-How malt is built and what it guarantees. For installing and using malt, see the [README](README.md).
+This document describes how malt is built and what it guarantees. For install and use, refer to the [README](README.md).
 
-malt's behaviour follows from a small number of design choices - each one a direct consequence of wanting safe concurrency and interruption survival.
+A small number of design choices control the behaviour of malt. Each choice comes from two requirements: safe concurrency, and recovery after an interruption.
 
 ## Its own prefix
 
-malt installs to `/opt/malt` and never touches Homebrew. The path is short on purpose: Mach-O load command patching needs room to replace the original Homebrew path in-place, and `/opt/malt` always fits.
+malt installs to `/opt/malt` and does not change Homebrew. The path is short on purpose. Mach-O load command patching replaces the original Homebrew path in place, and the new path must fit in the same space. `/opt/malt` always fits.
 
 ```text
 /opt/malt/
@@ -25,9 +25,9 @@ malt installs to `/opt/malt` and never touches Homebrew. The path is short on pu
 
 ## Content-addressable store
 
-Bottles are stored by their SHA256. The same bottle is never downloaded or extracted twice; multiple installed kegs reference the same store entry. Store entries are immutable - only `mt purge --store-orphans` removes them. Kegs in `Cellar/` are materialized via APFS `clonefile()`, which creates a copy-on-write clone at zero disk cost; non-APFS volumes fall back to a recursive copy.
+malt stores bottles by their SHA256. Thus, malt never downloads or extracts the same bottle two times. Many installed kegs can refer to the same store entry. Store entries are immutable, and only `mt purge --store-orphans` removes them. malt makes the kegs in `Cellar/` with APFS `clonefile()`. This makes a copy-on-write clone that uses no additional disk space. On a volume that is not APFS, malt makes a recursive copy instead.
 
-This is what makes `mt rollback` an instant operation: every previously installed bottle is still in the store, so reverting is unlink → re-clone → DB update, with no re-download.
+Thus, `mt rollback` completes immediately. All previously installed bottles are still in the store. A rollback is unlink → clone again → DB update, with no new download.
 
 ## Streaming download pipeline
 
@@ -41,47 +41,55 @@ Network (HTTPS from GHCR CDN)
                     └──► filesystem write to tmp/
 ```
 
-No intermediate archive file is written to disk. The SHA256 is verified against the Homebrew API manifest immediately after the stream completes; on mismatch, the extracted directory is deleted before any commit happens.
+malt does not write an intermediate archive file to disk. When the stream completes, malt verifies the SHA256 against the Homebrew API manifest. If the SHA256 does not match, malt deletes the extracted directory before a commit occurs.
 
 ## Mach-O patching
 
 Homebrew bottles contain hardcoded `/opt/homebrew/Cellar/...` paths in Mach-O load commands. malt corrects them in four steps:
 
-1. Parse headers with struct-aware parsing (not raw byte scanning).
-2. Identify every relevant load command (`LC_ID_DYLIB`, `LC_LOAD_DYLIB`, `LC_RPATH`, etc.).
-3. Rewrite paths in-place and pad the remaining space with null bytes.
-4. On arm64, ad-hoc codesign the patched binary via `codesign --force --sign -`.
+1. Parse the headers with struct-aware parsing, not with raw byte scans.
+2. Find all relevant load commands (`LC_ID_DYLIB`, `LC_LOAD_DYLIB`, `LC_RPATH`, and others).
+3. Write the new paths in place and fill the remaining space with null bytes.
+4. On arm64, apply an ad-hoc codesign to the patched binary with `codesign --force --sign -`.
 
-Text files (`.pc` configs, shell scripts) containing `@@HOMEBREW_PREFIX@@` or `@@HOMEBREW_CELLAR@@` placeholders are patched the same way. Patching always happens on the Cellar copy, never the store original - if it fails, the Cellar copy is deleted and the store entry stays pristine for retry.
+Text files (`.pc` configs, shell scripts) can contain `@@HOMEBREW_PREFIX@@` or `@@HOMEBREW_CELLAR@@` placeholders. malt patches them in the same way. malt always patches the Cellar copy, never the original in the store. If the patch fails, malt deletes the Cellar copy. The store entry stays unchanged for a new attempt.
 
 ## Post-install and flight steps
 
-Most alternative clients stop once the files are in place. malt also runs the configuration a package declares, in both forms Homebrew supports.
+Most alternative clients stop when the files are in place. malt also runs the configuration that a package declares. It supports the two forms that Homebrew supports.
 
 ### Declarative steps
 
-Homebrew v6 introduced a declarative `post_install_steps` array for formulae, and homebrew-core now uses it throughout. malt runs those steps natively - across install, upgrade, and migrate. A formula that declares steps is configured by its steps alone; its Ruby `post_install`, if any, is not run.
+Homebrew v6 added a declarative `post_install_steps` array for formulae, and homebrew-core now uses it everywhere. malt runs these steps natively during install, upgrade, and migrate. If a formula declares steps, malt configures it with only these steps. malt does not run its Ruby `post_install`, if there is one.
 
-Casks declare the same step schema as `preflight_steps` / `postflight_steps` / `uninstall_preflight_steps` / `uninstall_postflight_steps` (Homebrew v7). `mt install --cask` runs the preflight over the staged artefact before anything is placed and the postflight once the cask is recorded; `mt uninstall`, `mt upgrade` and `mt rollback` run the steps stored at install time, so they match the version on disk, and drop the symlinks a cask declared for removal. Cask steps are confined to the Caskroom, the malt prefix, `$HOME/Library` and the applications directory, and may never remove or relocate those roots, their top-level directories, or anything under `Keychains`, `Mail`, `Messages`, `Safari`, `Accounts`, `Mobile Documents` and `CloudStorage`; steps that need `sudo` are reported and skipped, never escalated. `terminate_process` and `delete_keychain_certificate` act on the user session as upstream defines them and are not confined. A failed uninstall preflight keeps the cask on disk; `mt uninstall --force` continues past it. `mt install --dry-run` lists the steps a cask would run and which ones malt refuses; `mt upgrade --dry-run` does not, and `mt uninstall --dry-run` stops before them.
+Casks declare the same step schema as `preflight_steps`, `postflight_steps`, `uninstall_preflight_steps`, and `uninstall_postflight_steps` (Homebrew v7).
+
+- **Install.** `mt install --cask` runs the preflight steps on the staged artefact before it puts files in place. It runs the postflight steps after it records the cask.
+- **Uninstall, upgrade, rollback.** `mt uninstall`, `mt upgrade`, and `mt rollback` run the steps that malt stored at install time. Thus, the steps match the version on disk. These commands also remove the symlinks that a cask declared for removal.
+- **Confinement.** Cask steps can change only the Caskroom, the malt prefix, `$HOME/Library`, and the applications directory. They cannot remove or move these roots or their top-level directories. They also cannot remove or move anything under `Keychains`, `Mail`, `Messages`, `Safari`, `Accounts`, `Mobile Documents`, and `CloudStorage`.
+- **No privilege escalation.** malt reports and skips steps that need `sudo`. It never escalates.
+- **Unconfined steps.** `terminate_process` and `delete_keychain_certificate` act on the user session as upstream defines them. malt does not confine them.
+- **Failures.** If an uninstall preflight fails, the cask stays on disk. `mt uninstall --force` continues after the failure.
+- **Dry runs.** `mt install --dry-run` lists the steps that a cask would run and the steps that malt refuses. `mt upgrade --dry-run` does not list them. `mt uninstall --dry-run` stops before the steps.
 
 ### Ruby `post_install`
 
-Homebrew 7 deprecates the Ruby `post_install` hook in favour of `post_install_steps`, but still runs it. homebrew-core has migrated; many third-party taps have not. For those formulae malt tries its native interpreter first. It parses and evaluates the Ruby subset those blocks actually use:
+Homebrew 7 deprecates the Ruby `post_install` hook and recommends `post_install_steps`, but it still runs the hook. homebrew-core has migrated, but many third-party taps have not. For these formulae, malt tries its native interpreter first. The interpreter parses and evaluates the Ruby subset that these blocks use:
 
 - `Pathname` operations, `FileUtils`, `inreplace`, `Dir.glob`
 - string interpolation, `%w[]` arrays, the boolean operators
 - control flow: `if`/`unless`, `.each`/`.select`/`.map`
 - `Formula["name"]` cross-lookup, `ENV` access
 
-Source for `homebrew-core` formulas is fetched on demand from GitHub if the tap isn't cloned locally.
+If the `homebrew-core` tap is not cloned locally, malt gets the formula source from GitHub when it needs it.
 
-Every mutating filesystem operation - write, rm, chmod, symlink - is validated against the formula's Cellar prefix and the malt prefix; paths containing `..` or resolving outside the sandbox via symlinks are rejected immediately.
+malt validates each filesystem operation that makes a change (write, rm, chmod, symlink). The path must be in the Cellar prefix of the formula or in the malt prefix. malt immediately rejects paths that contain `..` and paths that resolve outside the sandbox through symlinks.
 
-When the interpreter hits an unsupported construct, the user is directed to `--use-system-ruby`, which delegates to a sandboxed Ruby subprocess scoped to the formula's cellar, with:
+If the interpreter finds an unsupported construct, malt tells the user to use `--use-system-ruby`. This flag sends the block to a sandboxed Ruby subprocess. The sandbox is limited to the cellar of the formula and has:
 
-- a scrubbed environment
-- `RLIMIT_CPU`/`AS`/`FSIZE` caps
-- terminal escape sequences filtered from child output
+- a clean environment
+- `RLIMIT_CPU`/`AS`/`FSIZE` limits
+- a filter that removes terminal escape sequences from child output
 
 ```text
 Formula declares post_install_steps?
@@ -104,54 +112,56 @@ Formula declares post_install_steps?
 
 ## Atomic install protocol
 
-Every install follows nine steps. Failure at any step triggers cleanup of that step only - no prior state is modified.
+Each install has nine steps. If a step fails, malt cleans up only that step. No prior state changes.
 
-1. **Acquire lock** - exclusive advisory lock on `db/malt.lock`
-2. **Pre-flight** - resolve dependencies, check disk space, detect link conflicts
-3. **Download** - fetch bottles from GHCR CDN with streaming SHA256 verification
-4. **Extract** - decompress and untar to `tmp/`
-5. **Commit to store** - atomic rename from `tmp/` to `store/`
-6. **Materialize** - APFS clonefile from `store/` to `Cellar/`, patch Mach-O, codesign
-7. **Link** - create symlinks in `bin/`, `lib/`, etc., record in DB
-8. **DB commit** - insert into kegs, dependencies, links tables in a single transaction
-9. **Release lock** - clean up tmp files
+1. **Acquire lock**: get an exclusive advisory lock on `db/malt.lock`.
+2. **Pre-flight**: resolve dependencies, check disk space, and find link conflicts.
+3. **Download**: get bottles from the GHCR CDN with streaming SHA256 verification.
+4. **Extract**: decompress and untar to `tmp/`.
+5. **Commit to store**: rename atomically from `tmp/` to `store/`.
+6. **Materialize**: clone from `store/` to `Cellar/` with APFS clonefile, patch Mach-O, and codesign.
+7. **Link**: make symlinks in `bin/`, `lib/`, and other directories, and record them in the DB.
+8. **DB commit**: write to the kegs, dependencies, and links tables in one transaction.
+9. **Release lock**: clean up the tmp files.
 
-Upgrades follow the same protocol on the new version before anything is removed from the old; on failure, the old symlinks are restored. Read-only commands (`list`, `info`, `search`) do not acquire the lock.
+An upgrade runs the same protocol on the new version before it removes anything from the old version. If the upgrade fails, malt restores the old symlinks. Read-only commands (`list`, `info`, `search`) do not get the lock.
 
 ## Safety and security
 
-malt's correctness rests on a few load-bearing properties:
+The correctness of malt depends on these properties:
 
-- **SHA256 verification.** Streaming hash computed during download, verified before extraction. No unverified data touches the store.
-- **Tar entry pre-scan.** Every entry's name and symlink target are validated before any byte is written. The 512-byte tar header is checksum-verified per entry. Hardlinks are applied via `linkat(..., 0)`, which refuses to follow a symlink - so a hostile tarball cannot land a hardlink inside the keg via a symlink to `/etc/passwd`.
-- **Pre-flight checks.** Dependencies resolved, disk space verified, link conflicts detected before any download begins.
-- **Atomic installs.** The 9-step protocol uses `errdefer` at every stage. Interrupted installs leave no partial state.
-- **Concurrent access.** A 30-second-timeout advisory file lock prevents concurrent mutations. Read-only commands don't acquire it.
-- **Upgrade rollback.** New version is fully installed and verified before the old version is touched.
-- **Store immutability.** Store entries are never modified after commit. Patching happens on the Cellar clone.
-- **Mach-O parser hardening.** Section offsets and string-table indices are validated against the slice using overflow-checked arithmetic, so a bottle with crafted load commands can't wrap an integer into a bounds-bypass.
-- **DSL path sandboxing.** Every mutating operation in the post_install interpreter is validated against the Cellar/malt prefix; `..` and symlink-escape paths are rejected.
-- **DSL `system` is argv-only.** The interpreter's `system` builtin spawns with an argv slice and pins the executable - never `/bin/sh -c`, never PATH-resolved. A formula that writes `system "rm", arg` cannot reach the parent shell.
+- **SHA256 verification.** malt calculates the hash during the download and verifies it before extraction. No unverified data gets into the store.
+- **Tar entry pre-scan.** malt validates the name and symlink target of each entry before it writes a byte. It verifies the checksum of each 512-byte tar header. malt applies hardlinks with `linkat(..., 0)`, which does not follow a symlink. Thus, a hostile tarball cannot use a symlink to `/etc/passwd` to put a hardlink inside the keg.
+- **Pre-flight checks.** Before a download starts, malt resolves dependencies, verifies disk space, and finds link conflicts.
+- **Atomic installs.** The 9-step protocol uses `errdefer` at each stage. An interrupted install leaves no partial state.
+- **Concurrent access.** An advisory file lock with a 30-second timeout prevents concurrent changes. Read-only commands do not get the lock.
+- **Upgrade rollback.** malt fully installs and verifies the new version before it changes the old version.
+- **Store immutability.** malt never changes a store entry after the commit. Patches apply to the Cellar clone.
+- **Mach-O parser hardening.** malt validates section offsets and string-table indices against the slice with overflow-checked arithmetic. Thus, a bottle with crafted load commands cannot cause an integer wrap that bypasses a bounds check.
+- **DSL path sandboxing.** malt validates each change operation in the post_install interpreter against the Cellar and malt prefixes. It rejects `..` paths and paths that escape through symlinks.
+- **DSL `system` is argv-only.** The `system` builtin of the interpreter starts the process with an argv slice and a fixed executable. It never uses `/bin/sh -c` and never resolves the executable through PATH. Thus, a formula that writes `system "rm", arg` cannot get to the parent shell.
 
-The supply-chain story:
+These properties protect the supply chain:
 
-- **Signed releases.** Every release is cosign-signed keyless via GitHub OIDC; `install.sh` verifies the signature before trusting the SHA256 checksum. A leaked GitHub token is not enough to ship a malicious malt binary.
-- **Pinned third-party source.** `homebrew-core` and third-party taps are pinned to a specific commit SHA. Formula Ruby source is SHA256-verified against an embedded manifest at that commit. A rewritten upstream branch cannot substitute a formula's bottle URL mid-install. Advance a tap pin explicitly with `mt tap --refresh user/repo`.
-- **Sandboxed `post_install`.** The opt-in `--use-system-ruby` path runs inside a `sandbox-exec` profile scoped to the formula's cellar. Hostile formulas can affect their own install prefix and nothing else.
-- **Boundary validation.** `MALT_PREFIX`, `MALT_CACHE`, launchd service declarations, install-script checksums, and HTTP redirects fail-closed on malformed or suspicious input - no silent HTTPS→HTTP downgrades, no `/bin/sh` in service argv, no `..` in prefix paths. A cask that declares no `sha256` is refused rather than treated as opted out; only an API cask's explicit `sha256 :no_check` skips verification. Tap and local `.rb` packages must pin a 64 lowercase-hex `sha256`; one that declares `sha256 :no_check` installs only with `--allow-unpinned`, with a warning, and never as a `.pkg`. A manifest URL must be `https://` unless a digest already pins the bytes it returns - so the handful of upstream packages still served over plaintext keep installing, while one that hash-verifies nothing is refused outright.
-- **Trusted verifier.** `mt version update` refuses a `cosign` that resolves inside `/opt/malt`, which packages can write to. A shim dropped there cannot rubber-stamp a malicious update.
-- **Posture visibility.** `mt doctor` flags world- or group-writable paths and unexpected ownership under `/opt/malt`, so multi-user machines see their attack surface at a glance.
+- **Signed releases.** Each release has a keyless cosign signature through GitHub OIDC. `install.sh` verifies the signature before it trusts the SHA256 checksum. Thus, a leaked GitHub token is not sufficient to ship a malicious malt binary.
+- **Pinned third-party source.** malt pins `homebrew-core` and third-party taps to a specific commit SHA. It verifies the SHA256 of the formula Ruby source against an embedded manifest at that commit. Thus, a rewritten upstream branch cannot change the bottle URL of a formula during an install. To move a tap pin forward, run `mt tap --refresh user/repo`.
+- **Sandboxed `post_install`.** The opt-in `--use-system-ruby` path runs in a `sandbox-exec` profile that is limited to the cellar of the formula. A hostile formula can change only its own install prefix.
+- **Boundary validation.** `MALT_PREFIX`, `MALT_CACHE`, launchd service declarations, install-script checksums, and HTTP redirects fail closed on malformed or suspicious input. malt does not downgrade from HTTPS to HTTP. It does not accept `/bin/sh` in service argv or `..` in prefix paths.
+- **Checksum rules.** malt refuses a cask that declares no `sha256`, and does not treat it as opted out. Only the explicit `sha256 :no_check` of an API cask skips verification. Tap and local `.rb` packages must pin a `sha256` of 64 lowercase hex characters. A package that declares `sha256 :no_check` installs only with `--allow-unpinned`, with a warning, and never as a `.pkg`.
+- **HTTPS manifest URLs.** A manifest URL must use `https://`, unless a digest already pins the bytes that it returns. Thus, the few upstream packages that still use plaintext continue to install. But malt refuses a package if no hash verifies it.
+- **Trusted verifier.** `mt version update` refuses a `cosign` that resolves inside `/opt/malt`, because packages can write to that directory. Thus, a shim in that directory cannot approve a malicious update.
+- **Posture visibility.** `mt doctor` shows world-writable or group-writable paths and unexpected ownership under `/opt/malt`. Thus, on a multi-user machine, you can quickly see the attack surface.
 
 ## Inside the binary
 
-malt's binary is small because it ships only five subsystems and the glue between them:
+The malt binary is small because it contains only five subsystems and the code that connects them:
 
-- **SQLite.** ACID writes, reverse-dependency queries, linker-conflict detection, atomic rollback after a failed upgrade. Survives `kill -9` mid-write.
-- **Native post-install.** A steps executor for Homebrew's declarative steps, plus a Ruby-subset interpreter in Zig for the taps that still ship `post_install` blocks.
-- **Mach-O patching with arm64 ad-hoc codesign.** Rewrites `/opt/homebrew` → `MALT_PREFIX` and re-signs so `dyld` loads the result on modern macOS.
-- **Install lock.** `flock` on `db/malt.lock` plus a symlink-tree walk, acquired by every mutating command, so two invocations - or a Ctrl-C'd install - can't corrupt state.
-- **`sandbox-exec` profile.** The opt-in `--use-system-ruby` path runs formula scripts in a deny-default sandbox (caps and escape-filtering as above).
+- **SQLite.** ACID writes, reverse-dependency queries, linker-conflict detection, and atomic rollback after a failed upgrade. The database stays correct after `kill -9` during a write.
+- **Native post-install.** A step executor for the Homebrew declarative steps, and a Ruby-subset interpreter in Zig for the taps that still ship `post_install` blocks.
+- **Mach-O patching with arm64 ad-hoc codesign.** malt changes `/opt/homebrew` to `MALT_PREFIX` and signs the result again. Thus, `dyld` loads the result on modern macOS.
+- **Install lock.** `flock` on `db/malt.lock` and a symlink-tree walk. Each command that makes changes gets the lock. Thus, two concurrent commands, or an install that you stop with Ctrl-C, cannot corrupt the state.
+- **`sandbox-exec` profile.** The opt-in `--use-system-ruby` path runs formula scripts in a deny-default sandbox, with the limits and escape filter described above.
 
-All five run per-install. The warm install times in the [benchmarks](README.md#benchmarks) are their combined wall-clock cost.
+All five subsystems run on each install. The warm install times in the [benchmarks](README.md#benchmarks) are their combined wall-clock cost.
 
-The interactive dashboard (`mt tui`) is the one piece that doesn't run per-install - it's compiled into the same binary instead of shipping as a companion tool, and costs only about 300 KB to keep there.
+The interactive dashboard (`mt tui`) is the only part that does not run on each install. It is compiled into the same binary and is not a separate tool. It adds only about 300 KB.
