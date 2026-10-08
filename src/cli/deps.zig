@@ -113,15 +113,18 @@ fn appendEntry(
     if (visited.contains(name)) return;
 
     const deps = (try fetchEither(allocator, db, api, name)) orelse return;
-    const formula_owned = allocator.dupe(u8, name) catch {
-        freeOwnedDeps(allocator, deps);
-        return DepError.OutOfMemory;
-    };
+    errdefer freeOwnedDeps(allocator, deps);
+    const formula_owned = try allocator.dupe(u8, name);
     errdefer allocator.free(formula_owned);
 
-    try entries.append(allocator, .{ .formula = formula_owned, .depends_on = deps });
-    visited.put(formula_owned, {}) catch {};
-    try frontier.append(allocator, formula_owned);
+    // Reserve all three first: once `entries` owns the strings nothing may
+    // fail, or the errdefers above would free them a second time.
+    try entries.ensureUnusedCapacity(allocator, 1);
+    try visited.ensureUnusedCapacity(1);
+    try frontier.ensureUnusedCapacity(allocator, 1);
+    entries.appendAssumeCapacity(.{ .formula = formula_owned, .depends_on = deps });
+    visited.putAssumeCapacityNoClobber(formula_owned, {});
+    frontier.appendAssumeCapacity(formula_owned);
 }
 
 fn fetchEither(
@@ -995,6 +998,116 @@ test "collectDeps surfaces allocator failure cleanly" {
     const fa = testing.failing_allocator;
     const got = collectDeps(fa, db_stub.lookup(), null, "wget", .{});
     try testing.expectError(error.OutOfMemory, got);
+}
+
+/// Diamond (`c` reached twice) plus a back-edge (`c -> a`): every revisit
+/// is caught only by the visited set, so a lost insert shows up as a row.
+fn addDiamondCycle(db_stub: *StubLookup) !void {
+    try db_stub.add("a", &.{ "b", "c" });
+    try db_stub.add("b", &.{"c"});
+    try db_stub.add("c", &.{"a"});
+}
+
+fn collectDiamondCycle(allocator: std.mem.Allocator, db: DepLookup) !void {
+    const entries = try collectDeps(allocator, db, null, "a", .{ .recursive = true });
+    defer freeEntries(allocator, entries);
+    try expectOneRowPerFormula(entries);
+}
+
+fn expectOneRowPerFormula(entries: []const Entry) !void {
+    if (entries.len != 3) return error.UnexpectedEntries;
+    for ([_][]const u8{ "a", "b", "c" }) |name| {
+        if (findEntryByName(entries, name) == null) return error.MissingEntry;
+    }
+}
+
+test "collectDeps --recursive survives every allocation failure without duplicates or double frees" {
+    var db_stub = StubLookup.init(testing.allocator);
+    defer db_stub.deinit();
+    try addDiamondCycle(&db_stub);
+
+    try std.testing.checkAllAllocationFailures(testing.allocator, collectDiamondCycle, .{db_stub.lookup()});
+}
+
+fn collectBlendedWithMiss(allocator: std.mem.Allocator, db: DepLookup, api: DepLookup) !void {
+    const entries = try collectDeps(allocator, db, api, "ffmpeg", .{ .recursive = true });
+    defer freeEntries(allocator, entries);
+    if (entries.len != 2) return error.UnexpectedEntries;
+}
+
+test "collectDeps --recursive survives allocation failure across the API fallback and a dropped miss" {
+    // `x264` only resolves through the API and `ghost` resolves nowhere:
+    // the fallback and the drop paths must stay leak-free under OOM too.
+    var db_stub = StubLookup.init(testing.allocator);
+    defer db_stub.deinit();
+    try db_stub.add("ffmpeg", &.{ "x264", "ghost" });
+
+    var api_stub = StubLookup.init(testing.allocator);
+    defer api_stub.deinit();
+    try api_stub.add("x264", &.{});
+
+    try std.testing.checkAllAllocationFailures(
+        testing.allocator,
+        collectBlendedWithMiss,
+        .{ db_stub.lookup(), api_stub.lookup() },
+    );
+}
+
+test "collectDeps --recursive keeps one row per formula when any single allocation fails" {
+    // checkAllAllocationFailures fails every allocation after the first, so it
+    // never sees a walk continue past one isolated failure: the duplicate case.
+    const OneShotFail = struct {
+        child: std.mem.Allocator,
+        at: usize,
+        n: usize = 0,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+
+        fn alloc(ctx: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            defer self.n += 1;
+            if (self.n == self.at) return null;
+            return self.child.rawAlloc(len, a, ra);
+        }
+
+        fn resize(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.child.rawResize(m, a, new_len, ra);
+        }
+
+        fn remap(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.child.rawRemap(m, a, new_len, ra);
+        }
+
+        fn free(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.child.rawFree(m, a, ra);
+        }
+    };
+
+    var db_stub = StubLookup.init(testing.allocator);
+    defer db_stub.deinit();
+    try addDiamondCycle(&db_stub);
+
+    // Stop at the first run that never reaches its failure index: every
+    // allocation of the walk has then been failed once.
+    var at: usize = 0;
+    while (true) : (at += 1) {
+        var fa: OneShotFail = .{ .child = testing.allocator, .at = at };
+        collectDiamondCycle(fa.allocator(), db_stub.lookup()) catch |e| {
+            try testing.expectEqual(error.OutOfMemory, e);
+            continue;
+        };
+        if (fa.n <= at) break;
+    }
 }
 
 test "encodeHuman recursive stops re-expanding on a cycle" {
