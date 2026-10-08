@@ -688,7 +688,7 @@ fn caskCellarKegKey(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
 // it as trusted.
 
 fn checkMaltPrefix(ctx: CheckCtx, name: []const u8) CheckResult {
-    const is_default = std.mem.eql(u8, ctx.prefix, "/opt/malt");
+    const is_default = std.mem.eql(u8, ctx.prefix, atomic.default_prefix);
     var pbuf: [600]u8 = undefined;
     const detail = std.fmt.bufPrint(
         &pbuf,

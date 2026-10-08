@@ -54,10 +54,16 @@ const Fixture = struct {
     }
 };
 
-test "maltPrefixOrAbort returns default when env unset" {
+test "default_prefix is the production install root" {
+    try testing.expectEqualStrings("/opt/malt", atomic.default_prefix);
+}
+
+test "maltPrefixOrAbort: a test build with env unset stays off the live install" {
     unsetPrefix();
     const got = atomic.maltPrefixOrAbort();
-    try testing.expectEqualStrings("/opt/malt", got);
+    // The `/tmp/malt-` start lets the `malt-*` glob in `scripts/clean.sh` remove it.
+    try testing.expect(std.mem.startsWith(u8, got, "/tmp/malt-"));
+    try testing.expect(!std.mem.eql(u8, got, atomic.default_prefix));
 }
 
 test "maltPrefixOrAbort honours MALT_PREFIX env var" {
@@ -85,10 +91,12 @@ test "maltPrefixChecked: relative MALT_PREFIX returns NotAbsolute" {
     try testing.expectError(error.NotAbsolute, atomic.maltPrefixChecked());
 }
 
-test "maltPrefixChecked: unset returns default" {
+test "maltPrefixChecked: a test build with env unset stays off the live install" {
     unsetPrefix();
     const got = try atomic.maltPrefixChecked();
-    try testing.expectEqualStrings("/opt/malt", got);
+    // The `/tmp/malt-` start lets the `malt-*` glob in `scripts/clean.sh` remove it.
+    try testing.expect(std.mem.startsWith(u8, got, "/tmp/malt-"));
+    try testing.expect(!std.mem.eql(u8, got, atomic.default_prefix));
 }
 
 test "maltTmpDir composes {prefix}/tmp" {

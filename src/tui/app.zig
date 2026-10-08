@@ -821,7 +821,8 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) void {
 
 /// Launch the dashboard. Refuses (exit 2) on a non-interactive terminal rather
 /// than degrading. Every fault path restores the terminal via `errdefer`.
-pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, environ: std.process.Environ, mt_path: []const u8, version: []const u8) RunError!void {
+/// `prefix` is the install root for the dashboard. The caller validates it.
+pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, environ: std.process.Environ, mt_path: []const u8, prefix: []const u8, version: []const u8) RunError!void {
     const in_fd = std.posix.STDIN_FILENO;
     const out_fd = std.posix.STDOUT_FILENO;
     if (refusalReason(
@@ -854,8 +855,6 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     errdefer t.restore();
     term.installWinch(fd);
 
-    // The prefix the dashboard acts on, resolved the way the rest of malt does.
-    const prefix = std.process.Environ.getPosix(environ, "MALT_PREFIX") orelse "/opt/malt";
     var app: App = .{ .mt_path = mt_path, .version = version, .prefix = prefix }; // re-exec this mt for delegated mutations
     initLaunchDirty(&app); // every data tab loads lazily on first entry
     defer app.storages.deinit(allocator); // app owns the per-tab parse storage

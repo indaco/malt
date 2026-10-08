@@ -23,7 +23,7 @@ fn resolvePath(environ: std.process.Environ, buf: []u8) ?[]const u8 {
         prefix_path.validateCharsetRoot(f) catch return null;
         return f;
     }
-    const prefix = environ.getPosix("MALT_PREFIX") orelse "/opt/malt";
+    const prefix = environ.getPosix("MALT_PREFIX") orelse atomic.fallback_prefix;
     prefix_path.validatePrefix(prefix) catch return null;
     return std.fmt.bufPrint(buf, "{s}" ++ default_suffix, .{prefix}) catch return null;
 }
@@ -112,10 +112,12 @@ test "resolvePath builds the default path under a valid prefix" {
     try testing.expectEqualStrings("/opt/malt/etc/malt/themes.json", resolvePath(env, &buf).?);
 }
 
-test "resolvePath falls back to /opt/malt when MALT_PREFIX is unset" {
+test "resolvePath with MALT_PREFIX unset stays off the live install in a test build" {
     var buf: [600]u8 = undefined;
     const env = envSlice(&[_:null]?[*:0]const u8{});
-    try testing.expectEqualStrings("/opt/malt/etc/malt/themes.json", resolvePath(env, &buf).?);
+    const got = resolvePath(env, &buf).?;
+    try testing.expect(std.mem.startsWith(u8, got, "/tmp/malt-"));
+    try testing.expect(std.mem.endsWith(u8, got, default_suffix));
 }
 
 test "resolvePath rejects a malformed MALT_PREFIX" {
