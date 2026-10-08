@@ -24,7 +24,7 @@ test "probe: unset MALT_PREFIX resolves under /tmp/malt-" {
 }
 EOF
 
-out=$(cd "$S/fs" && env -u MALT_PREFIX -u MALT_CACHE zig test probe_test.zig 2>&1) && rc=0 || rc=$?
+out=$(cd "$S/fs" && env -u MALT_PREFIX -u MALT_CACHE zig test --cache-dir "$S/zig-cache" probe_test.zig 2>&1) && rc=0 || rc=$?
 if [[ $rc -ne 0 ]]; then
   echo "FAIL: test build falls back to the live prefix:" >&2
   echo "$out" >&2
@@ -35,8 +35,13 @@ if ! grep -q 'probe: unset MALT_PREFIX.*OK\|All [0-9]* tests passed' <<<"$out"; 
   exit 1
 fi
 
-if grep -rnE 'MALT_PREFIX"\) orelse "/opt/malt"' "$ROOT/src"; then
-  echo "FAIL: a site keeps its own /opt/malt fallback" >&2
+# A MALT_PREFIX read must not fall back to the live prefix in any form. The
+# match can span lines but stops at the end of the statement.
+fallback_re='"MALT_PREFIX"\)[^;]*?\b(?:orelse|else)\s+(?:return\s+)?(?:"/opt/malt"|(?:atomic\.)?default_prefix\b)'
+hits=$(find "$ROOT/src" -name '*.zig' -exec perl -0777 -ne "print \"\$ARGV\n\" if m{$fallback_re}" {} +)
+if [[ -n $hits ]]; then
+  echo "FAIL: a site keeps its own /opt/malt fallback:" >&2
+  echo "$hits" >&2
   exit 1
 fi
 
