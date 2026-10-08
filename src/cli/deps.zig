@@ -988,9 +988,9 @@ test "collectDeps --recursive aborts when an inner lookup fails" {
 }
 
 test "collectDeps surfaces allocator failure cleanly" {
-    // Touches the OOM branch in `appendEntry` so an exhausted allocator
-    // propagates as `error.OutOfMemory` rather than silently emitting a
-    // partial result. The failing_allocator allows zero allocations.
+    // The failing_allocator allows zero allocations, so the root lookup's own
+    // allocation fails: OOM from a lookup must surface as `error.OutOfMemory`
+    // rather than read as "not found". The sweeps below cover `appendEntry`.
     var db_stub = StubLookup.init(testing.allocator);
     defer db_stub.deinit();
     try db_stub.add("wget", &.{"openssl@3"});
