@@ -46,7 +46,8 @@ pub fn freeFindings(allocator: std.mem.Allocator, findings: []WalkFinding) void 
 
 /// Walk `prefix` recursively and collect every entry whose permissions
 /// violate `classifyPermissions`. Caps at `max_findings` to bound
-/// memory on pathologically large prefixes.
+/// memory on pathologically large prefixes. Returns an error instead of
+/// a partial list when part of the tree cannot be audited.
 pub fn walkPrefix(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -60,7 +61,8 @@ pub fn walkPrefix(
         findings.deinit(allocator);
     }
 
-    try checkPath(allocator, prefix, current_uid, &findings, max_findings);
+    const prefix_z = try std.posix.toPosixPath(prefix);
+    try checkPath(allocator, std.c.AT.FDCWD, &prefix_z, prefix, "", current_uid, &findings, max_findings);
     if (findings.items.len >= max_findings) return findings.toOwnedSlice(allocator);
 
     var dir = std.Io.Dir.openDirAbsolute(io, prefix, .{ .iterate = true }) catch |e| switch (e) {
@@ -69,49 +71,77 @@ pub fn walkPrefix(
     };
     defer dir.close(io);
 
-    var walker = try dir.walk(allocator);
-    defer walker.deinit();
+    // Selective, so a directory is checked before the walk opens it.
+    var walker = try dir.walkSelectively(allocator);
+    defer {
+        // deinit frees memory only; an early return leaves entered dirs open.
+        // Item 0 is `dir`, closed by its own defer.
+        if (walker.stack.items.len > 1) {
+            for (walker.stack.items[1..]) |item| item.iter.reader.dir.close(io);
+        }
+        walker.deinit();
+    }
 
-    while (walker.next(io) catch null) |entry| {
+    // A directory the walk cannot open ends the audit: a partial list would read as clean.
+    while (try walker.next(io)) |entry| {
         if (findings.items.len >= max_findings) break;
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const full = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, entry.path }) catch continue;
-        try checkPath(allocator, full, current_uid, &findings, max_findings);
+        // Relative to the parent handle, so deep trees never hit max_path_bytes.
+        try checkPath(allocator, entry.dir.handle, entry.basename, prefix, entry.path, current_uid, &findings, max_findings);
+        walker.enter(io, entry) catch |e| switch (e) {
+            // Benign only if the entry is gone: a swapped-in dangling link would hide a subtree.
+            error.FileNotFound => if (!isGone(entry.dir.handle, entry.basename)) return e,
+            else => return e,
+        };
     }
 
     return findings.toOwnedSlice(allocator);
 }
 
+/// Stat `name` relative to `dir_fd`; on a finding, record `prefix/rel`
+/// (just `prefix` when `rel` is empty).
 fn checkPath(
     allocator: std.mem.Allocator,
-    path: []const u8,
+    dir_fd: std.posix.fd_t,
+    name: [*:0]const u8,
+    prefix: []const u8,
+    rel: []const u8,
     current_uid: std.posix.uid_t,
     findings: *std.ArrayList(WalkFinding),
     max_findings: usize,
 ) !void {
     if (findings.items.len >= max_findings) return;
-    if (path.len >= std.fs.max_path_bytes) return;
-
-    var cstr_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    @memcpy(cstr_buf[0..path.len], path);
-    cstr_buf[path.len] = 0;
-    const cstr: [*:0]const u8 = @ptrCast(&cstr_buf);
 
     // NOFOLLOW: a planted symlink must not redirect the walker to its target.
+    // The prefix itself follows, because the walk runs in its target.
     // Still libc — no std peer on 0.16 surfaces st_uid.
+    const flags: u32 = if (rel.len == 0) 0 else std.c.AT.SYMLINK_NOFOLLOW;
     var st: std.c.Stat = undefined;
-    if (std.c.fstatat(std.c.AT.FDCWD, cstr, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0)
-        return; // skip unstatable entries silently
+    const rc = std.c.fstatat(dir_fd, name, &st, flags);
+    if (rc != 0) switch (std.posix.errno(rc)) {
+        // Removed between readdir and stat, e.g. by a concurrent purge.
+        .NOENT => return,
+        .ACCES, .PERM => return error.AccessDenied,
+        else => return error.Unexpected,
+    };
 
     const mode: u16 = @intCast(st.mode & 0o777);
     const report = classifyPermissions(mode, st.uid, current_uid);
     if (report.isOk()) return;
 
-    const owned = try allocator.dupe(u8, path);
+    const owned = if (rel.len == 0)
+        try allocator.dupe(u8, prefix)
+    else
+        try std.fs.path.join(allocator, &.{ prefix, rel });
     findings.append(allocator, .{ .path = owned, .report = report }) catch |e| {
         allocator.free(owned);
         return e;
     };
+}
+
+fn isGone(dir_fd: std.posix.fd_t, name: [*:0]const u8) bool {
+    var st: std.c.Stat = undefined;
+    const rc = std.c.fstatat(dir_fd, name, &st, std.c.AT.SYMLINK_NOFOLLOW);
+    return rc != 0 and std.posix.errno(rc) == .NOENT;
 }
 
 pub fn currentUid() std.posix.uid_t {
@@ -123,6 +153,23 @@ pub fn currentUid() std.posix.uid_t {
 /// prefix owner. Pure so the refusal can be unit-tested.
 pub fn privilegeIdsMatch(uid: std.posix.uid_t, euid: std.posix.uid_t, gid: std.posix.gid_t, egid: std.posix.gid_t) bool {
     return uid == euid and gid == egid;
+}
+
+test "isGone: true only when the entry no longer exists" {
+    const io = std.Options.debug_io;
+    var buf: [64]u8 = undefined;
+    const base = try std.fmt.bufPrint(&buf, "/tmp/malt_isgone_{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, base);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var dir = try std.Io.Dir.cwd().openDir(io, base, .{});
+    defer dir.close(io);
+
+    try std.testing.expect(isGone(dir.handle, "never_created"));
+    // A dangling link fails the open with ENOENT but still exists, so it must
+    // not pass as a removal.
+    try dir.symLink(io, "nowhere", "dangling", .{});
+    try std.testing.expect(!isGone(dir.handle, "dangling"));
 }
 
 // Re-exports for non-macOS callers that want the type-level surface

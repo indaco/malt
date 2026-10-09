@@ -171,6 +171,20 @@ test "walkPrefix: missing prefix returns empty findings, no error" {
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
 
+test "walkPrefix: a stat errno that is neither gone nor denied maps to Unexpected" {
+    var fx = try Fixture.init("notdir");
+    defer fx.deinit();
+    const file = fx.p("file");
+    (try test_io.createFileAbsolute(std.Options.debug_io, file, .{})).close(std.Options.debug_io);
+
+    // Only the prefix stat can hit ENOTDIR deterministically: a walked entry is
+    // a bare name under an open directory handle.
+    try testing.expectError(
+        error.Unexpected,
+        perms.walkPrefix(std.Options.debug_io, testing.allocator, fx.p("file/sub"), perms.currentUid(), 64),
+    );
+}
+
 test "walkPrefix: respects max_findings cap" {
     var fx = try Fixture.init("cap");
     defer fx.deinit();
@@ -186,4 +200,167 @@ test "walkPrefix: respects max_findings cap" {
     const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, fx.base, perms.currentUid(), 2);
     defer perms.freeFindings(testing.allocator, findings);
     try testing.expect(findings.len <= 2);
+}
+
+test "walkPrefix: an unreadable subdirectory fails the audit instead of truncating it" {
+    // Root reads through mode 000, so the walk would not fail.
+    if (std.c.getuid() == 0) return error.SkipZigTest;
+    var fx = try Fixture.init("locked");
+    defer fx.deinit();
+
+    const locked = fx.p("a_locked");
+    try test_io.cwd().createDirPath(std.Options.debug_io, locked);
+    try test_io.cwd().createDirPath(std.Options.debug_io, fx.p("b_open"));
+    const evil = fx.p("b_open/evil");
+    (try test_io.createFileAbsolute(std.Options.debug_io, evil, .{})).close(std.Options.debug_io);
+    if (c.chmod(evil, 0o666) != 0) return error.TestUnexpectedResult;
+
+    if (c.chmod(locked, 0o000) != 0) return error.TestUnexpectedResult;
+    // Restore before fx.deinit so the tree can be deleted.
+    defer _ = c.chmod(locked, 0o755);
+
+    // A partial list would let doctor report a clean prefix.
+    try testing.expectError(
+        error.AccessDenied,
+        perms.walkPrefix(std.Options.debug_io, testing.allocator, fx.base, perms.currentUid(), 64),
+    );
+}
+
+fn openFdCount() usize {
+    var n: usize = 0;
+    for (0..1024) |fd| {
+        if (std.c.fcntl(@intCast(fd), std.c.F.GETFD) != -1) n += 1;
+    }
+    return n;
+}
+
+test "walkPrefix: a failed walk closes every directory it opened" {
+    if (std.c.getuid() == 0) return error.SkipZigTest;
+    var fx = try Fixture.init("fd_leak");
+    defer fx.deinit();
+
+    const locked = fx.p("a/b/locked");
+    try test_io.cwd().createDirPath(std.Options.debug_io, locked);
+    if (c.chmod(locked, 0o000) != 0) return error.TestUnexpectedResult;
+    defer _ = c.chmod(locked, 0o755);
+
+    // doctor runs the audit once per process, but other callers may not.
+    const before = openFdCount();
+    try testing.expectError(
+        error.AccessDenied,
+        perms.walkPrefix(std.Options.debug_io, testing.allocator, fx.base, perms.currentUid(), 64),
+    );
+    try testing.expectEqual(before, openFdCount());
+}
+
+test "walkPrefix: an entry that cannot be stat'd fails the audit instead of being skipped" {
+    if (std.c.getuid() == 0) return error.SkipZigTest;
+    var fx = try Fixture.init("nosearch");
+    defer fx.deinit();
+
+    const dir = fx.p("no_search");
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+    const evil = fx.p("no_search/evil");
+    (try test_io.createFileAbsolute(std.Options.debug_io, evil, .{})).close(std.Options.debug_io);
+    if (c.chmod(evil, 0o666) != 0) return error.TestUnexpectedResult;
+
+    // Read without search: the walker lists `evil`, but stat on it is denied.
+    if (c.chmod(dir, 0o444) != 0) return error.TestUnexpectedResult;
+    defer _ = c.chmod(dir, 0o755);
+
+    try testing.expectError(
+        error.AccessDenied,
+        perms.walkPrefix(std.Options.debug_io, testing.allocator, fx.base, perms.currentUid(), 64),
+    );
+}
+
+test "walkPrefix: a symlinked prefix is judged on the directory it walks" {
+    var fx = try Fixture.init("linked_root");
+    defer fx.deinit();
+    var outside = try Fixture.init("linked_root_target");
+    defer outside.deinit();
+
+    const target = outside.p("real");
+    try test_io.cwd().createDirPath(std.Options.debug_io, target);
+    if (c.chmod(target, 0o757) != 0) return error.TestUnexpectedResult;
+    const link = fx.p("prefix");
+    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, target, link, .{});
+
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, link, perms.currentUid(), 64);
+    defer perms.freeFindings(testing.allocator, findings);
+
+    // The walk writes through the link, so the target's o+w must surface.
+    for (findings) |f| {
+        if (std.mem.eql(u8, f.path, link)) {
+            try testing.expect(f.report.other_writable);
+            return;
+        }
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "walkPrefix: an unreadable prefix still fails the audit" {
+    // Pins existing behaviour: a missing prefix is empty, an unreadable one is not.
+    if (std.c.getuid() == 0) return error.SkipZigTest;
+    var fx = try Fixture.init("locked_root");
+    defer fx.deinit();
+
+    if (c.chmod(fx.base, 0o000) != 0) return error.TestUnexpectedResult;
+    defer _ = c.chmod(fx.base, 0o755);
+
+    try testing.expectError(
+        error.AccessDenied,
+        perms.walkPrefix(std.Options.debug_io, testing.allocator, fx.base, perms.currentUid(), 64),
+    );
+}
+
+test "walkPrefix: a symlink to an unreadable directory is not followed" {
+    // Failing here would turn any dangling or foreign link into a false warning.
+    if (std.c.getuid() == 0) return error.SkipZigTest;
+    var fx = try Fixture.init("link_locked");
+    defer fx.deinit();
+    var outside = try Fixture.init("link_locked_target");
+    defer outside.deinit();
+
+    const target = outside.p("locked");
+    try test_io.cwd().createDirPath(std.Options.debug_io, target);
+    if (c.chmod(target, 0o000) != 0) return error.TestUnexpectedResult;
+    defer _ = c.chmod(target, 0o755);
+    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, target, fx.p("link"), .{});
+
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, fx.base, perms.currentUid(), 64);
+    defer perms.freeFindings(testing.allocator, findings);
+}
+
+test "walkPrefix: entries beyond max_path_bytes are still audited" {
+    const io = std.Options.debug_io;
+    var fx = try Fixture.init("deep");
+    defer fx.deinit();
+
+    // Nest relative to each parent: absolute-path helpers stop at the limit.
+    const seg = "d" ** 100;
+    var dir = try std.Io.Dir.openDirAbsolute(io, fx.base, .{});
+    defer dir.close(io);
+    var depth: usize = 0;
+    while (fx.base.len + depth * (seg.len + 1) <= std.fs.max_path_bytes) : (depth += 1) {
+        try dir.createDir(io, seg, .default_dir);
+        const child = try dir.openDir(io, seg, .{});
+        dir.close(io);
+        dir = child;
+    }
+    (try dir.createFile(io, "evil", .{})).close(io);
+    if (std.c.fchmodat(dir.handle, "evil", 0o666, 0) != 0) return error.TestUnexpectedResult;
+
+    const findings = try perms.walkPrefix(io, testing.allocator, fx.base, perms.currentUid(), 64);
+    defer perms.freeFindings(testing.allocator, findings);
+
+    var saw_deep = false;
+    for (findings) |f| {
+        if (std.mem.endsWith(u8, f.path, "/evil")) {
+            try testing.expect(f.path.len > std.fs.max_path_bytes);
+            try testing.expect(f.report.other_writable);
+            saw_deep = true;
+        }
+    }
+    try testing.expect(saw_deep);
 }
