@@ -270,6 +270,60 @@ test "execute refuses a formula and a cask in one run before installing anything
     try testing.expect(!pathExists(lock_file));
 }
 
+test "execute refuses a later name that is not installed before installing anything" {
+    // `--force` makes install a fresh install, so a missing later name would
+    // be installed instead of refused.
+    const prefix = try setupPrefix("later_missing");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+        _ = c.unsetenv("MALT_PREFIX");
+    }
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    try test_io.cwd().createDirPath(std.Options.debug_io, std.fs.path.dirname(db_path).?);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+            \\  VALUES ('wget', 'wget', '1.24', 'a', '/c/wget');
+            \\INSERT INTO casks (token, name, version, url)
+            \\  VALUES ('firefox', 'firefox', '120.0', 'https://x.invalid/f.dmg');
+        );
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    const cases = [_]struct { argv: []const []const u8, want: []const u8 }{
+        .{ .argv = &.{ "wget", "htop" }, .want = "htop is not installed" },
+        // `--formula` hides the casks table, so the cask is missing here.
+        .{ .argv = &.{ "--formula", "wget", "firefox" }, .want = "firefox is not installed" },
+        // The first missing name in argv order wins over a later kind split.
+        .{ .argv = &.{ "wget", "ghost", "firefox" }, .want = "ghost is not installed" },
+        // Plural kind flags scope the lookup like the singular ones.
+        .{ .argv = &.{ "--casks", "wget", "ghost" }, .want = "wget is not installed" },
+        .{ .argv = &.{ "--formulae", "firefox", "wget" }, .want = "firefox is not installed" },
+    };
+    for (cases) |case| {
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        malt.output.beginStderrCapture(testing.allocator, &captured);
+        defer malt.output.endStderrCapture();
+        try testing.expectError(error.Aborted, reinstall.execute(&ctx, arena.allocator(), case.argv));
+        try testing.expect(std.mem.indexOf(u8, captured.items, case.want) != null);
+    }
+
+    const lock_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    defer testing.allocator.free(lock_file);
+    try testing.expect(!pathExists(lock_file));
+}
+
 test "execute points a core cask at uninstall then install instead of forcing it" {
     // A forced install would delete the live app before placing the new
     // copy, with no way back if that fails; exiting 0 unchanged hid that.
