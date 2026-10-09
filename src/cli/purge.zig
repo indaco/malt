@@ -119,6 +119,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             purge_json.emitSummary(
                 dry_run,
                 &wipe_rows,
+                wipe_result.status,
                 wipe_result.removed,
                 wipe_result.bytes,
                 elapsed,
@@ -191,6 +192,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         purge_json.emitSummary(
             dry_run,
             summary.rows.items,
+            grand_total.status,
             grand_total.removed,
             grand_total.bytes,
             elapsed,

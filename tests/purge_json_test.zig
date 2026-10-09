@@ -583,6 +583,80 @@ test "ndjson purge_complete reports status:error when an interrupt stops the run
     try testing.expectEqual(@as(?bool, true), try lastEventIsError(allocator, out, "purge_complete"));
 }
 
+test "--json summary reports status:error when an interrupt stops the run between scopes" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "summary_interrupt");
+    defer prefix.deinit(allocator);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.json);
+    output.setDryRun(true);
+    output.setNdjson(false);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    output.beginStdoutCapture(allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    defer malt.signals.setInterruptedForTest(false);
+    defer malt.signals.armInterruptAfterForTest(0);
+    malt.signals.setInterruptedForTest(false);
+    // `cache` runs. The check before `broken-symlinks` sets the flag.
+    malt.signals.armInterruptAfterForTest(2);
+
+    const ctx = makeCtx();
+    try testing.expectError(error.UserInterrupted, purge.execute(&ctx, allocator, &[_][]const u8{ "--cache", "--broken-symlinks" }));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, stdout_buf.items, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    // No row failed, so only the run status can tell consumers that the run stopped.
+    const rows = obj.get("scopes").?.array.items;
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("ok", rows[0].object.get("status").?.string);
+    try testing.expectEqualStrings("error", obj.get("status").?.string);
+}
+
+test "--json summary reports status:error when an allocation fails mid-run" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "summary_oom");
+    defer prefix.deinit(allocator);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.json);
+    output.setDryRun(true);
+    output.setNdjson(false);
+
+    const ctx = makeCtx();
+    var errored_summaries: usize = 0;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var stdout_buf: std.ArrayList(u8) = .empty;
+        defer stdout_buf.deinit(allocator);
+        output.beginStdoutCapture(allocator, &stdout_buf);
+        defer output.endStdoutCapture();
+
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        if (purge.execute(&ctx, failing.allocator(), &[_][]const u8{ "--cache", "--broken-symlinks" })) |_| {
+            if (!failing.has_induced_failure) break;
+            continue;
+        } else |e| {
+            // A failure that the allocator did not cause would repeat on every pass.
+            if (!failing.has_induced_failure) return e;
+        }
+
+        // A failure before the summary defer gives no output. That is correct.
+        if (stdout_buf.items.len == 0) continue;
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, stdout_buf.items, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings("error", parsed.value.object.get("status").?.string);
+        errored_summaries += 1;
+    }
+    try testing.expect(errored_summaries > 0);
+}
+
 // A pin, not proof of the fix: the failed store-orphans scope sets the run
 // status before the interrupt. It makes sure the interrupt keeps error_kind.
 test "ndjson purge_complete keeps the first failed scope's error_kind when an interrupt follows" {
