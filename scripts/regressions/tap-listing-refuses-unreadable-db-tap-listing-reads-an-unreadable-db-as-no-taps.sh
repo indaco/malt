@@ -42,16 +42,19 @@ reset() {
   chmod 600 "$DB" 2>/dev/null
   rm -f "$DB" "$DB-wal" "$DB-shm"
 }
+# shellcheck disable=SC2329 # seeds are invoked indirectly via "$seed"
 seed_unreadable() {
   reset
   sqlite3 "$DB" "CREATE TABLE t(x);"
   chmod 000 "$DB"
 }
+# shellcheck disable=SC2329
 seed_unreadable_dir() {
   reset
   sqlite3 "$DB" "CREATE TABLE t(x);"
   chmod 000 "$PREFIX/db"
 }
+# shellcheck disable=SC2329
 seed_not_a_db() {
   reset
   head -c 4096 /dev/urandom >"$DB"
