@@ -850,7 +850,9 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     }
 
     var db = schema_report.openPreviewableCreating(ctx.io, db_path, dry_run) catch {
-        if (is_listing) {
+        // Only an absent db/ is a fresh prefix; a file that exists but will
+        // not open is a broken database, not an empty tap list.
+        if (is_listing and prefix_path.dirMissing(ctx.io, std.fs.path.dirname(db_path).?)) {
             if (output.isJson()) output.writeStdoutAll("[]\n") else output.info("No taps registered", .{});
             return;
         }
