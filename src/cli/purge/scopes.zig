@@ -2113,7 +2113,7 @@ test "runUnusedDeps reaps a batch mixing orphans with and without a service" {
     try testing.expectEqual(@as(u32, 2), result.removed);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
-    // Keg-scoped on both sides: `hasService` also matches the label, which
+    // Keg-scoped on both sides: a label match would also hit, which
     // here is the reaped keg's own name.
     try testing.expect(!kegHasService(&db, "withsvc"));
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, svc_dir, .{}));

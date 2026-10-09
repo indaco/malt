@@ -51,6 +51,13 @@ const TempDb = struct {
     }
 };
 
+/// Test oracle: a name (label or keg) that `resolveLabel` accepts.
+fn serviceRegistered(db: *sqlite.Database, name: []const u8) bool {
+    const label = supervisor.resolveLabel(testing.allocator, db, name) catch return false;
+    testing.allocator.free(label);
+    return true;
+}
+
 test "list returns empty initially" {
     var t = try TempDb.init("empty");
     defer t.deinit();
@@ -60,7 +67,7 @@ test "list returns empty initially" {
     try testing.expectEqual(@as(usize, 0), items.len);
 }
 
-test "raw services row insert is reflected by list and hasService" {
+test "raw services row insert is reflected by list and name resolution" {
     var t = try TempDb.init("insert");
     defer t.deinit();
 
@@ -69,8 +76,8 @@ test "raw services row insert is reflected by list and hasService" {
         \\VALUES ('redis', 'redis', '/tmp/redis.plist', 1, 'registered');
     );
 
-    try testing.expect(supervisor.hasService(&t.db, "redis"));
-    try testing.expect(!supervisor.hasService(&t.db, "missing"));
+    try testing.expect(serviceRegistered(&t.db, "redis"));
+    try testing.expect(!serviceRegistered(&t.db, "missing"));
 
     const items = try supervisor.list(.{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &t.db });
     defer supervisor.freeServiceInfos(testing.allocator, items);
@@ -144,8 +151,8 @@ test "resolveLabel accepts the keg name a user would actually type" {
     try testing.expectEqualStrings("com.malt.mosquitto", by_label);
 
     // `status` and `start` must agree on what exists.
-    try testing.expect(supervisor.hasService(&t.db, "mosquitto"));
-    try testing.expect(supervisor.hasService(&t.db, "com.malt.mosquitto"));
+    try testing.expect(serviceRegistered(&t.db, "mosquitto"));
+    try testing.expect(serviceRegistered(&t.db, "com.malt.mosquitto"));
 
     try testing.expectError(
         error.ServiceNotFound,
@@ -209,6 +216,6 @@ test "stopAndUnregister removes the row when given the keg name" {
     };
     supervisor.stopAndUnregister(ctx, "mosquitto");
 
-    try testing.expect(!supervisor.hasService(&t.db, "mosquitto"));
-    try testing.expect(!supervisor.hasService(&t.db, "com.malt.mosquitto"));
+    try testing.expect(!serviceRegistered(&t.db, "mosquitto"));
+    try testing.expect(!serviceRegistered(&t.db, "com.malt.mosquitto"));
 }
