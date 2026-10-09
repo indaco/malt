@@ -617,16 +617,6 @@ fn runtimeFromList(term: std.process.Child.Term, stdout: []const u8, label: []co
     return parseRuntime(stdout, label);
 }
 
-pub fn hasService(db: *sqlite.Database, name: []const u8) bool {
-    // Accepts a label or a keg name, matching `resolveLabel`, so `status` and
-    // `start` agree on what exists.
-    var stmt = db.prepare("SELECT 1 FROM services WHERE name = ? OR keg_name = ?;") catch return false;
-    defer stmt.finalize();
-    stmt.bindText(1, name) catch return false;
-    stmt.bindText(2, name) catch return false;
-    return stmt.step() catch false;
-}
-
 pub fn tailLog(io: std.Io, allocator: std.mem.Allocator, path: []const u8, n: usize, writer: *std.Io.Writer) SupervisorError!void {
     const f = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return SupervisorError.IoFailed;
     defer f.close(io);
@@ -1062,7 +1052,8 @@ test "stopAndUnregister removes the service directory its registration owned" {
 
     stopAndUnregister(.{ .allocator = testing.allocator, .io = dbg_io, .db = &db }, "unregister-probe");
 
-    try testing.expect(!hasService(&db, label));
+    const found = resolveLabel(testing.allocator, &db, label);
+    try testing.expectError(error.ServiceNotFound, found);
     try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(dbg_io, dir, .{}));
 }
 

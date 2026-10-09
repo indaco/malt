@@ -8,6 +8,7 @@ const testing = std.testing;
 const malt = @import("malt");
 const test_io = @import("test_io");
 const services_cli = malt.cli_services;
+const output = malt.output;
 
 const c = test_io.c;
 
@@ -39,6 +40,147 @@ test "execute with -h / --help prints help" {
     _ = c.setenv("MALT_PREFIX", "/tmp/malt_cli_services_help_flag", 1);
     try services_cli.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"-h"});
     try services_cli.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--help"});
+}
+
+test "execute <subcommand> --help prints help without opening the database" {
+    const prefix = try setupPrefix("sub_help");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    // Help must win before openDb; a pre-existing db/ would hide a regression.
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    defer testing.allocator.free(db_dir);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, db_dir);
+
+    const cases = [_][]const []const u8{
+        &.{ "list", "--help" },
+        &.{ "status", "--help" },
+        &.{ "start", "--help" },
+        &.{ "stop", "--help" },
+        &.{ "logs", "--help" },
+        &.{ "restart", "foo", "-h" },
+        &.{ "logs", "foo", "--follow", "--help" },
+    };
+    for (cases) |args| {
+        const io = std.Options.debug_io;
+        const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/stdout", .{prefix});
+        defer testing.allocator.free(out_path);
+        const out = try test_io.createFileAbsolute(io, out_path, .{ .truncate = true, .read = true });
+        defer out.close(io);
+        const ctx: malt.app_ctx.AppCtx = .{
+            .io = io,
+            .environ = .empty,
+            .stdout = out,
+            .stderr = test_io.testSink(),
+        };
+        try services_cli.execute(&ctx, testing.allocator, args);
+        const body = try testing.allocator.alloc(u8, (try out.stat(io)).size);
+        defer testing.allocator.free(body);
+        _ = try out.readPositionalAll(io, body, 0);
+        if (std.mem.indexOf(u8, body, "Usage: malt services") == null) {
+            std.debug.print("no help for {s}:\n{s}\n", .{ args[0], body });
+            return error.TestExpectedEqual;
+        }
+    }
+    try testing.expectError(error.FileNotFound, test_io.cwd().access(std.Options.debug_io, db_dir, .{}));
+}
+
+test "execute start/stop/restart/logs on an unregistered service aborts with a message, not a raw error" {
+    const prefix = try setupPrefix("unregistered");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    inline for (.{ "start", "stop", "restart", "logs" }) |sub| {
+        var captured: std.ArrayList(u8) = .empty;
+        defer captured.deinit(testing.allocator);
+        output.beginStderrCapture(testing.allocator, &captured);
+        defer output.endStderrCapture();
+        try testing.expectError(error.Aborted, services_cli.execute(&ctx, testing.allocator, &.{ sub, "nope" }));
+        try testing.expect(std.mem.indexOf(u8, captured.items, "no such service: nope") != null);
+    }
+}
+
+test "execute treats a help flag after `--` as an operand, not a help request" {
+    const prefix = try setupPrefix("dashdash");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    // Help would return success; reaching the subcommand aborts on the unknown name.
+    try testing.expectError(error.Aborted, services_cli.execute(&ctx, testing.allocator, &.{ "logs", "nope", "--", "-h" }));
+}
+
+test "servicesStart takes the name literally, so a service named --help is not a help request" {
+    const prefix = try setupPrefix("start_literal");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    // restore prints its own warning, so a pre-printed error would duplicate it
+    // (and ignore --quiet).
+    try testing.expectError(error.ServiceNotFound, services_cli.servicesStart(&ctx, testing.allocator, "--help"));
+}
+
+test "execute start and status on an unreadable services table surfaces the database error, not a missing service" {
+    const prefix = try setupPrefix("broken_table");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    {
+        const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+        defer testing.allocator.free(db_path);
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        // initSchema keeps an existing table, so keg_name stays missing.
+        try db.exec("ALTER TABLE services RENAME TO s_old; CREATE TABLE services(name TEXT);");
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    inline for (.{ "start", "status" }) |sub| {
+        try testing.expectError(error.DatabaseError, services_cli.execute(&ctx, testing.allocator, &.{ sub, "nope" }));
+    }
+    try testing.expect(std.mem.indexOf(u8, captured.items, "no such service") == null);
+}
+
+test "execute start checks the name before taking the lock to refresh overrides" {
+    const prefix = try setupPrefix("check_before_lock");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.lock", .{prefix});
+    defer testing.allocator.free(lock_path);
+    var held = try malt.lock.LockFile.acquire(io, lock_path, 1000);
+    defer held.release(io);
+
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty };
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+    // A lifecycle step that ran first would stall on the held lock and warn.
+    try testing.expectError(error.Aborted, services_cli.execute(&ctx, testing.allocator, &.{ "start", "nope" }));
+    try testing.expect(std.mem.indexOf(u8, captured.items, "another malt command") == null);
 }
 
 test "execute list on an empty prefix reports no services" {
@@ -404,8 +546,8 @@ test "writeServicesJson: an errored row serialises as state \"errored\" without 
 
 test "execute status by keg name emits the row registered under its launchd label" {
     // Every other verb takes the formula name, so `services status mosquitto`
-    // must find `com.malt.mosquitto`. `hasService` already accepted the keg
-    // name, so this used to pass that gate and then filter the row back out.
+    // must find `com.malt.mosquitto`. The existence check already accepted the
+    // keg name, so this used to pass it and then filter the row back out.
     const prefix = try setupPrefix("status_by_keg");
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -471,8 +613,7 @@ test "execute logs by keg name reads the log under the launchd label" {
 }
 
 test "execute status refuses to guess when one formula registers two services" {
-    // Resolution happens after `hasService`, so the ambiguity has to surface
-    // rather than the first row winning silently.
+    // The ambiguity has to surface rather than the first row winning silently.
     const prefix = try setupPrefix("status_ambiguous");
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};

@@ -1,7 +1,7 @@
 //! malt — supervisor pure-helper tests
 //! Covers the helpers that don't touch launchctl: directory paths, log
 //! paths, error descriptions, runtime state names, and `register`, `list`,
-//! `hasService`, `setStatus` against a real in-memory SQLite database.
+//! name resolution, `setStatus` against a real in-memory SQLite database.
 
 const std = @import("std");
 const testing = std.testing;
@@ -45,6 +45,13 @@ const Fixture = struct {
         self.arena.deinit();
     }
 };
+
+/// Test oracle: a name (label or keg) that `resolveLabel` accepts.
+fn serviceRegistered(db: *sqlite.Database, name: []const u8) bool {
+    const label = supervisor.resolveLabel(testing.allocator, db, name) catch return false;
+    testing.allocator.free(label);
+    return true;
+}
 
 test "SupervisorCtx bundles allocator and db into one param" {
     var db = try sqlite.Database.open(":memory:");
@@ -105,7 +112,7 @@ test "runtimeStateName distinguishes every variant" {
     try testing.expectEqualStrings("running", supervisor.runtimeStateName(.running));
 }
 
-test "list is empty on a fresh database and hasService returns false" {
+test "list is empty on a fresh database and no name resolves" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
@@ -113,7 +120,7 @@ test "list is empty on a fresh database and hasService returns false" {
     const list = try supervisor.list(.{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db });
     defer supervisor.freeServiceInfos(testing.allocator, list);
     try testing.expectEqual(@as(usize, 0), list.len);
-    try testing.expect(!supervisor.hasService(&db, "anything"));
+    try testing.expect(!serviceRegistered(&db, "anything"));
 }
 
 test "register writes a plist and a DB row that list reports back" {
@@ -142,7 +149,7 @@ test "register writes a plist and a DB row that list reports back" {
     const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
     try supervisor.register(ctx, spec, "testkeg", true, cellar, prefix);
 
-    try testing.expect(supervisor.hasService(&db, "com.malt.test.svc"));
+    try testing.expect(serviceRegistered(&db, "com.malt.test.svc"));
 
     const list = try supervisor.list(ctx);
     defer supervisor.freeServiceInfos(testing.allocator, list);
@@ -299,7 +306,7 @@ test "register rejects an out-of-range interval via the validate gate" {
     const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
     // validate is the single gate; a zero interval must never reach disk or the DB.
     try testing.expectError(error.InvalidService, supervisor.register(ctx, spec, "testkeg", true, cellar, prefix));
-    try testing.expect(!supervisor.hasService(&db, "com.malt.test.badsched"));
+    try testing.expect(!serviceRegistered(&db, "com.malt.test.badsched"));
 }
 
 test "tailLog writes the last N lines into the provided writer" {
@@ -348,9 +355,9 @@ test "stopAndUnregister is a no-op on an absent service and still wipes the row"
     _ = try stmt.step();
     stmt.finalize();
 
-    try testing.expect(supervisor.hasService(&db, "ghost"));
+    try testing.expect(serviceRegistered(&db, "ghost"));
     supervisor.stopAndUnregister(.{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db }, "ghost");
-    try testing.expect(!supervisor.hasService(&db, "ghost"));
+    try testing.expect(!serviceRegistered(&db, "ghost"));
 }
 
 test "queryRuntime returns not_loaded for a label launchctl has never heard of" {

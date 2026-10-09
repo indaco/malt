@@ -107,8 +107,8 @@ fn retireDropped(
     applyDropped(io, allocator, db, name, pkg_version, label, supervisor_mod.probeRuntime(io, allocator, label), sink);
 }
 
-/// Keyed on the keg only: `supervisor.hasService` also matches the label,
-/// which a formula name can spell.
+/// Keyed on the keg only: a label match would also accept a name a formula
+/// can spell.
 fn hasKegService(db: *sqlite.Database, name: []const u8) bool {
     var stmt = db.prepare("SELECT 1 FROM services WHERE keg_name = ?;") catch return false;
     defer stmt.finalize();
@@ -863,7 +863,7 @@ test "applyDropped retires the previous version's row when no job is loaded" {
 
     applyDropped(std.Options.debug_io, testing.allocator, &db, "tree", "2.2.1", label, .not_loaded, sink_mod.terminal);
 
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
     try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.Options.debug_io, dir, .{}));
     try testing.expect(std.mem.indexOf(u8, buf.items, "declares no service") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "retired") != null);
@@ -886,7 +886,7 @@ test "applyDropped keeps the row when launchd could not be asked" {
 
     applyDropped(std.Options.debug_io, testing.allocator, &db, "tree", "2.2.1", "com.malt.tree", null, sink_mod.terminal);
 
-    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not ask launchd") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "mt reinstall tree") != null);
 }
@@ -908,7 +908,7 @@ test "applyDropped keeps the row while the previous version's job is loaded" {
 
     applyDropped(std.Options.debug_io, testing.allocator, &db, "tree", "2.2.1", "com.malt.tree", .running, sink_mod.terminal);
 
-    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "declares no service") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "mt services stop tree") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "mt reinstall tree") != null);
@@ -929,7 +929,7 @@ test "register stays silent for a formula that never had a service" {
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
 
     try testing.expectEqual(@as(usize, 0), buf.items.len);
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
 }
 
 test "register keeps the row and says why when the new version's service block is unsupported" {
@@ -953,7 +953,7 @@ test "register keeps the row and says why when the new version's service block i
 
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
 
-    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: unsupported service block") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
@@ -988,7 +988,7 @@ test "register retires the previous version's row when the new version's service
     defer threaded.deinit();
     register(threaded.io(), .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "declares no service; retired the registration from the previous version") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
 }
@@ -1012,7 +1012,7 @@ test "register says a declared shipped plist is missing from the keg and registe
 
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
 
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: declares a shipped plist that is not in the keg") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "kept the service registration") == null);
 }
@@ -1037,7 +1037,7 @@ test "register keeps the row and says why when the new version ships its own pli
 
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
 
-    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: declares a shipped plist that is not in the keg") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
@@ -1060,7 +1060,7 @@ test "registerRuby retires the previous version's row when the block is gone" {
     defer threaded.deinit();
     registerRuby(threaded.io(), .empty, testing.allocator, &db, null, false, null, "tree", "2.2.1", "/p", sink_mod.terminal);
 
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "declares no service") != null);
 }
 
@@ -1081,7 +1081,7 @@ test "retireDropped ignores a registration that only shares the formula's name a
 
     retireDropped(std.Options.debug_io, testing.allocator, &db, "com.malt.redis", "1.0", sink_mod.terminal);
 
-    try testing.expect(supervisor_mod.hasService(&db, "redis"));
+    try testing.expect(hasKegService(&db, "redis"));
     try testing.expectEqual(@as(usize, 0), buf.items.len);
 }
 
@@ -1102,7 +1102,7 @@ test "registerRuby keeps the row when the block is declared but could not be rea
 
     registerRuby(std.Options.debug_io, .empty, testing.allocator, &db, null, true, null, "tree", "2.2.1", "/p", sink_mod.terminal);
 
-    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
 
@@ -1120,7 +1120,7 @@ test "registerRuby keeps the row when the block has a token it cannot render" {
 
     registerRuby(std.Options.debug_io, .empty, testing.allocator, &db, .{ .run = &.{"\"a\\\\t\""} }, true, null, "tree", "2.2.1", "/p", sink_mod.terminal);
 
-    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: unsupported service block") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
@@ -1139,7 +1139,7 @@ test "registerRuby says nothing about a refused block on a fresh install" {
 
     registerRuby(std.Options.debug_io, .empty, testing.allocator, &db, null, true, null, "tree", "2.2.1", "/p", sink_mod.terminal);
 
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
     try testing.expectEqual(@as(usize, 0), buf.items.len);
 }
 
@@ -1226,7 +1226,7 @@ test "register lifts the plist a core formula ships into a malt-rendered service
     defer threaded.deinit();
     register(threaded.io(), .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
-    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
     const rendered = try renderedPlist(prefix);
     defer testing.allocator.free(rendered);
@@ -1277,7 +1277,7 @@ test "register lifts a shipped plist that the keg carries as a symlink to its re
     defer threaded.deinit();
     register(threaded.io(), .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
-    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
 }
 
@@ -1342,7 +1342,7 @@ test "register refuses a shipped label from the API that is not a plain file nam
 
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, "/p", sink_mod.terminal);
 
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist label is not a plain file name") != null);
 }
 
@@ -1379,7 +1379,7 @@ test "register refuses a shipped plist whose symlink leaves the keg" {
     // Leaf link straight out of the keg.
     try keg.symLink(std.Options.debug_io, "../../../etc/evil.plist", "org.example.shipd.plist", .{});
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist links outside the keg") != null);
 
     // Leaf stays lexically in the keg; an intermediate directory link
@@ -1389,7 +1389,7 @@ test "register refuses a shipped plist whose symlink leaves the keg" {
     try keg.symLink(std.Options.debug_io, "dir/etc/evil.plist", "org.example.shipd.plist", .{});
     buf.clearRetainingCapacity();
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist links outside the keg") != null);
 }
 
@@ -1420,7 +1420,7 @@ test "register refuses a shipped plist over the size cap even when its head pars
 
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist is not a launchd plist malt can read") != null);
 }
 
@@ -1450,7 +1450,7 @@ test "register refuses a shipped plist that uses a key malt does not adopt and n
 
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist uses MachServices, which malt does not adopt") != null);
     // The seeded row is the previous version's; a refusal keeps it.
-    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
 
@@ -1478,7 +1478,7 @@ test "register refuses a shipped plist whose Label is not the declared one" {
 
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist label does not match the declared service name") != null);
 }
 
@@ -1507,7 +1507,7 @@ test "register refuses a shipped plist whose executable escapes the keg and opt 
 
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: InvalidService") != null);
 }
 
@@ -1537,7 +1537,7 @@ test "register says it kept the previous row when the new keg's shipped plist fa
 
     register(std.Options.debug_io, .empty, testing.allocator, &db, &formula, prefix, sink_mod.terminal);
 
-    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: InvalidService") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "tree 2.2.1: kept the service registration from the previous version") != null);
 }
@@ -1568,7 +1568,7 @@ test "registerRuby lifts the plist a tap formula ships" {
     defer threaded.deinit();
     registerRuby(threaded.io(), .empty, testing.allocator, &db, null, true, "org.example.shipd", "tree", "2.2.1", prefix, sink_mod.terminal);
 
-    try testing.expect(supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service") == null);
 }
 
@@ -1586,7 +1586,7 @@ test "registerRuby refuses a shipped label that is not a plain file name" {
 
     registerRuby(std.Options.debug_io, .empty, testing.allocator, &db, null, true, "../../etc/evil", "tree", "2.2.1", "/p", sink_mod.terminal);
 
-    try testing.expect(!supervisor_mod.hasService(&db, "tree"));
+    try testing.expect(!hasKegService(&db, "tree"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "could not register service for tree: shipped plist label is not a plain file name") != null);
 }
 
