@@ -1,5 +1,5 @@
 //! malt — reinstall command.
-//! Thin shim over the install pipeline. Refuses when the named package
+//! Thin shim over the install pipeline. Refuses when any named package
 //! isn't installed; otherwise prepends `--force` and forwards argv into
 //! `install.execute`. Mirrors the `cleanup → purge` shape so global
 //! flags (`--json`, `--quiet`, `--dry-run`) reach the downstream parser
@@ -20,8 +20,7 @@ const install = @import("install.zig");
 const install_args = @import("install/args.zig");
 const tap_mod = @import("../core/tap.zig");
 
-/// First positional that doesn't look like a flag is the package name
-/// that drives the "is this installed?" lookup.
+/// First positional that doesn't look like a flag.
 fn firstPositional(args: []const []const u8) ?[]const u8 {
     for (args) |a| {
         if (isPositional(a)) return a;
@@ -145,11 +144,13 @@ fn columnSlice(stmt: *sqlite.Statement, col: u32) []const u8 {
     return std.mem.sliceTo(stmt.columnText(col) orelse return "", 0);
 }
 
-/// Why a multi-name run can't share one install run.
-const Mix = enum { none, rewritten, kinds };
+/// Why a multi-name run can't share one install run. `missing` borrows the
+/// name from `args`.
+const Mix = union(enum) { none, rewritten, kinds, missing: []const u8 };
 
 /// One install run pins a single tap and side, so a package that needs
 /// rewriting, or formulas beside casks, would mis-route some of the names.
+/// A name that isn't installed would be freshly installed by `--force`.
 fn mixOf(allocator: std.mem.Allocator, db: *sqlite.Database, args: []const []const u8, only: Only) error{ OutOfMemory, Unreadable }!Mix {
     var positionals: usize = 0;
     for (args) |a| {
@@ -167,7 +168,8 @@ fn mixOf(allocator: std.mem.Allocator, db: *sqlite.Database, args: []const []con
                 first_kind = first_kind orelse t.presence;
                 if (first_kind.? != t.presence) return .kinds;
             },
-            .local, .missing => {},
+            .missing => return .{ .missing = a },
+            .local => {},
         }
     }
     return .none;
@@ -191,10 +193,22 @@ fn warnShadowed(allocator: std.mem.Allocator, db: *sqlite.Database, args: []cons
     }
 }
 
+// Same spellings as install, so a scoped run isn't read as unscoped.
+const kind_flags = std.StaticStringMap(Only).initComptime(.{
+    .{ "--cask", .cask },
+    .{ "--casks", .cask },
+    .{ "--formula", .keg },
+    .{ "--formulae", .keg },
+});
+
 fn onlyFromArgs(args: []const []const u8) Only {
-    for (args) |a| if (std.mem.eql(u8, a, "--cask")) return .cask;
-    for (args) |a| if (std.mem.eql(u8, a, "--formula")) return .keg;
-    return .any;
+    var only: Only = .any;
+    for (args) |a| {
+        const k = kind_flags.get(a) orelse continue;
+        if (k == .cask) return .cask;
+        only = k;
+    }
+    return only;
 }
 
 /// `--force`, the side to install from, then `args` with the first
@@ -297,6 +311,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
     switch (mixed) {
         .none => {},
+        .missing => |n| {
+            output.err("{s} is not installed", .{n});
+            return error.Aborted;
+        },
         .rewritten => {
             output.err("Reinstall tap packages one at a time so each resolves from its own tap", .{});
             return error.Aborted;
@@ -478,10 +496,15 @@ test "onlyFromArgs maps the user's kind flag onto the table it restricts" {
     try testing.expectEqual(Only.cask, onlyFromArgs(&.{ "--cask", "x" }));
     try testing.expectEqual(Only.keg, onlyFromArgs(&.{ "x", "--formula" }));
     try testing.expectEqual(Only.any, onlyFromArgs(&.{"x"}));
+    try testing.expectEqual(Only.cask, onlyFromArgs(&.{ "--casks", "x" }));
+    try testing.expectEqual(Only.keg, onlyFromArgs(&.{ "--formulae", "x" }));
+    // --cask wins whatever the order, as before.
+    try testing.expectEqual(Only.cask, onlyFromArgs(&.{ "--formula", "--cask", "x" }));
+    try testing.expectEqual(Only.cask, onlyFromArgs(&.{ "--cask", "--formula", "x" }));
 }
 
 fn expectMix(db: *sqlite.Database, args: []const []const u8, only: Only, want: Mix) !void {
-    try testing.expectEqual(want, try mixOf(testing.allocator, db, args, only));
+    try testing.expectEqualDeep(want, try mixOf(testing.allocator, db, args, only));
 }
 
 test "mixOf refuses a tap package alongside other names" {
@@ -509,10 +532,20 @@ test "mixOf keeps single-kind and single-name runs as before" {
     try expectMix(&db, &.{ "wget", "jq" }, .any, .none);
     try expectMix(&db, &.{ "firefox", "iterm2" }, .any, .none);
     try expectMix(&db, &.{ "--quiet", "foo" }, .any, .none);
-    try expectMix(&db, &.{ "wget", "not-installed" }, .any, .none);
-    try expectMix(&db, &.{ "firefox", "not-installed" }, .any, .none);
-    // `--cask` hides the formula row, so no side is split.
-    try expectMix(&db, &.{ "--cask", "firefox", "wget" }, .cask, .none);
+}
+
+test "mixOf names the first package that is not installed" {
+    var db = try seedDb();
+    defer db.close();
+    try expectMix(&db, &.{ "wget", "not-installed" }, .any, .{ .missing = "not-installed" });
+    try expectMix(&db, &.{ "firefox", "not-installed" }, .any, .{ .missing = "not-installed" });
+    // `--cask` hides the formula row, so `wget` is missing, not a split side.
+    try expectMix(&db, &.{ "--cask", "firefox", "wget" }, .cask, .{ .missing = "wget" });
+    // Argv order decides which refusal wins.
+    try expectMix(&db, &.{ "wget", "ghost", "firefox" }, .any, .{ .missing = "ghost" });
+    try expectMix(&db, &.{ "wget", "firefox", "ghost" }, .any, .kinds);
+    // The refusal echoes the name as typed, tap prefix included.
+    try expectMix(&db, &.{ "wget", "acme/tools/ghost" }, .any, .{ .missing = "acme/tools/ghost" });
 }
 
 fn expectArgv(expected: []const []const u8, target: Target, args: []const []const u8) !void {
