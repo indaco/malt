@@ -815,6 +815,10 @@ fn expectRefusal(
     prefix: []const u8,
 ) !void {
     try seedRaw(prefix, seed);
+    try expectRefusalOn(want, needle, argv);
+}
+
+fn expectRefusalOn(want: anyerror, needle: []const u8, argv: []const []const u8) !void {
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
     output.setQuiet(false);
@@ -826,6 +830,36 @@ fn expectRefusal(
         return e;
     };
     try testing.expect(std.mem.indexOf(u8, captured.items, needle) != null);
+    // `output.info` writes to stderr, so only this capture can catch a regression.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "No taps registered") == null);
+}
+
+// The caller restores 0o600 so Scratch.deinit can delete the file.
+fn seedUnreadable(prefix: []const u8) !void {
+    try seedRaw(prefix, "CREATE TABLE t(x);");
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(db_path, 0o000));
+}
+
+fn seedNotADatabase(prefix: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrint(&buf, "{s}/db/malt.db", .{prefix});
+    // Sidecars from a healthy open would change how SQLite reads the file.
+    for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
+        var p_buf: [520]u8 = undefined;
+        const p = try std.fmt.bufPrint(&p_buf, "{s}{s}", .{ db_path, suffix });
+        test_io.deleteFileAbsolute(std.Options.debug_io, p) catch {};
+    }
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, "this is not a sqlite database " ** 20);
+}
+
+fn restoreDbMode(prefix: []const u8) void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    _ = std.c.chmod(db_path, 0o600);
 }
 
 test "tap intents on a newer-schema database exit SchemaTooNew and name the version" {
@@ -852,4 +886,68 @@ test "--dry-run tap on a newer-schema database refuses instead of previewing" {
     try expectRefusal(too_new_db, error.SchemaTooNew, "schema v99", &.{"user/repo"}, s.path);
     // The preview runs on a private copy; the real file must stay as seeded.
     try testing.expectEqual(@as(i64, 1), try queryInt(s.path, "SELECT COUNT(*) FROM sqlite_master;"));
+}
+
+test "tap intents on a database that can't be opened abort instead of listing no taps" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root ignores mode bits
+    var s = try Scratch.init(testing.allocator, "open_unreadable");
+    defer s.deinit(testing.allocator);
+    defer restoreDbMode(s.path);
+    for (unusable_db_intents) |argv| {
+        restoreDbMode(s.path);
+        try seedUnreadable(s.path);
+        try expectRefusalOn(error.Aborted, "Cannot open the tap database", argv);
+    }
+}
+
+test "tap intents on a file that isn't a database abort instead of listing no taps" {
+    var s = try Scratch.init(testing.allocator, "open_not_a_db");
+    defer s.deinit(testing.allocator);
+    for (unusable_db_intents) |argv| {
+        try seedNotADatabase(s.path);
+        try expectRefusalOn(error.Aborted, "Cannot open the tap database", argv);
+    }
+}
+
+test "--json tap listing on an unopenable database aborts without printing []" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root ignores mode bits
+    var s = try Scratch.init(testing.allocator, "open_unreadable_json");
+    defer s.deinit(testing.allocator);
+    defer restoreDbMode(s.path);
+    output.setMode(.json);
+    defer output.setMode(.human);
+    try seedUnreadable(s.path);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &out);
+    defer output.endStdoutCapture();
+    try expectRefusalOn(error.Aborted, "Cannot open the tap database", &.{});
+    try testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "--dry-run tap listing on an unopenable database refuses instead of previewing" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root ignores mode bits
+    var s = try Scratch.init(testing.allocator, "open_unreadable_dry_run");
+    defer s.deinit(testing.allocator);
+    defer restoreDbMode(s.path);
+    output.setDryRun(true);
+    defer output.setDryRun(false);
+    try seedUnreadable(s.path);
+    try expectRefusalOn(error.Aborted, "Cannot open the tap database", &.{});
+}
+
+test "tap intents on an unreadable db directory abort instead of listing no taps" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root ignores mode bits
+    var s = try Scratch.init(testing.allocator, "open_unreadable_dir");
+    defer s.deinit(testing.allocator);
+    var dir_buf: [512]u8 = undefined;
+    const db_dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}/db", .{s.path}, 0);
+    defer _ = std.c.chmod(db_dir, 0o755);
+    for (unusable_db_intents) |argv| {
+        _ = std.c.chmod(db_dir, 0o755);
+        try seedRaw(s.path, "CREATE TABLE t(x);");
+        try testing.expectEqual(@as(c_int, 0), std.c.chmod(db_dir, 0o000));
+        try expectRefusalOn(error.Aborted, "Cannot open the tap database", argv);
+    }
 }
