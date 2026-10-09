@@ -112,9 +112,11 @@ fn checkPath(
     if (findings.items.len >= max_findings) return;
 
     // NOFOLLOW: a planted symlink must not redirect the walker to its target.
+    // The prefix itself follows, because the walk runs in its target.
     // Still libc — no std peer on 0.16 surfaces st_uid.
+    const flags: u32 = if (rel.len == 0) 0 else std.c.AT.SYMLINK_NOFOLLOW;
     var st: std.c.Stat = undefined;
-    const rc = std.c.fstatat(dir_fd, name, &st, std.c.AT.SYMLINK_NOFOLLOW);
+    const rc = std.c.fstatat(dir_fd, name, &st, flags);
     if (rc != 0) switch (std.posix.errno(rc)) {
         // Removed between readdir and stat, e.g. by a concurrent purge.
         .NOENT => return,

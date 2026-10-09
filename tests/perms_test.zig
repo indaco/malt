@@ -274,7 +274,33 @@ test "walkPrefix: an entry that cannot be stat'd fails the audit instead of bein
     );
 }
 
-test "walkPrefix: an unreadable prefix fails the audit" {
+test "walkPrefix: a symlinked prefix is judged on the directory it walks" {
+    var fx = try Fixture.init("linked_root");
+    defer fx.deinit();
+    var outside = try Fixture.init("linked_root_target");
+    defer outside.deinit();
+
+    const target = outside.p("real");
+    try test_io.cwd().createDirPath(std.Options.debug_io, target);
+    if (c.chmod(target, 0o757) != 0) return error.TestUnexpectedResult;
+    const link = fx.p("prefix");
+    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, target, link, .{});
+
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, link, perms.currentUid(), 64);
+    defer perms.freeFindings(testing.allocator, findings);
+
+    // The walk writes through the link, so the target's o+w must surface.
+    for (findings) |f| {
+        if (std.mem.eql(u8, f.path, link)) {
+            try testing.expect(f.report.other_writable);
+            return;
+        }
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "walkPrefix: an unreadable prefix still fails the audit" {
+    // Pins existing behaviour: a missing prefix is empty, an unreadable one is not.
     if (std.c.getuid() == 0) return error.SkipZigTest;
     var fx = try Fixture.init("locked_root");
     defer fx.deinit();
