@@ -105,6 +105,16 @@ fn captureExecute(
     args: []const []const u8,
     tag: []const u8,
 ) ![]u8 {
+    return captureExecuteWith(allocator, args, tag, .empty, false);
+}
+
+fn captureExecuteWith(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    tag: []const u8,
+    environ: std.process.Environ,
+    offline: bool,
+) ![]u8 {
     const cap_base = try test_io.uniqueTempPath(allocator, "search_cap", tag);
     defer allocator.free(cap_base);
     const cap_path = try allocator.dupeZ(u8, cap_base);
@@ -116,7 +126,8 @@ fn captureExecute(
 
     const ctx: malt.app_ctx.AppCtx = .{
         .io = std.Options.debug_io,
-        .environ = .empty,
+        .environ = environ,
+        .offline = offline,
         .stdout = file,
         .stderr = test_io.testSink(),
     };
@@ -362,40 +373,73 @@ test "execute --installed tolerates a missing local DB without crashing" {
     try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--installed", "wget" });
 }
 
-test "execute --offline collapses --api into local-only" {
-    // T-029 slice: even with `--api` requested, `--offline` wins and the
-    // command must not attempt the network path.
+// Overwrite the formula index with one that adds an API-only name, so an
+// API-scope answer differs from the installed-scope one.
+fn seedApiOnlyName(allocator: std.mem.Allocator, prefix: []const u8) !void {
+    const idx = try std.fmt.allocPrint(allocator, "{s}/cache/api/names_formula.txt", .{prefix});
+    defer allocator.free(idx);
+    try writeFile(idx, "wget\nwgetpaste\nwget-api-only\n");
+}
+
+const installed_wget_json =
+    \\{"schema_version":1,"query":"wget","results":[{"name":"wget","type":"formula","installed":true},{"name":"wgetpaste","type":"formula","installed":true}]}
+++ "\n";
+
+test "execute with ctx.offline collapses --api into the installed set" {
+    // `main` strips `--offline` into `ctx.offline`; args never carry it.
     var s = try Scratch.init(testing.allocator, "offline");
     defer s.deinit(testing.allocator);
     try seedDb(testing.allocator, s.path);
+    try seedCache(testing.allocator, s.path);
+    try seedApiOnlyName(testing.allocator, s.path);
 
     const prior = OutputState.save();
     defer prior.restore();
+    output.setMode(.json);
     output.setQuiet(true);
 
-    try search.execute(
-        &malt.app_ctx.debug_ctx,
-        testing.allocator,
-        &.{ "--offline", "--api", "wget" },
-    );
+    const out = try captureExecuteWith(testing.allocator, &.{ "--api", "wget" }, "offline", .empty, true);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(installed_wget_json, out);
 }
 
-test "execute MALT_OFFLINE=1 mirrors the --offline flag" {
+test "execute with ctx.offline from MALT_OFFLINE selects the installed set" {
     var s = try Scratch.init(testing.allocator, "offline_env");
     defer s.deinit(testing.allocator);
     try seedDb(testing.allocator, s.path);
+    try seedCache(testing.allocator, s.path);
+    try seedApiOnlyName(testing.allocator, s.path);
 
     const prior = OutputState.save();
     defer prior.restore();
+    output.setMode(.json);
     output.setQuiet(true);
 
-    // Build an AppCtx with a one-entry environ instead of mutating the
-    // process env — keeps the test hermetic and parallel-safe.
-    const entries = [_:null]?[*:0]const u8{"MALT_OFFLINE=1".ptr};
+    // Whitespace around the value is accepted by the shared env parser.
+    const entries = [_:null]?[*:0]const u8{"MALT_OFFLINE= 1".ptr};
     const env: std.process.Environ = .{ .block = .{ .slice = entries[0..1 :null] } };
-    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = env };
 
-    try search.execute(&ctx, testing.allocator, &.{"wget"});
+    const out = try captureExecuteWith(testing.allocator, &.{"wget"}, "offline_env", env, malt.offline.resolveFromEnv(env));
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(installed_wget_json, out);
+}
+
+test "execute online default still returns API-only names" {
+    // Guards the other direction: scope must not degrade without offline.
+    var s = try Scratch.init(testing.allocator, "online_default");
+    defer s.deinit(testing.allocator);
+    try seedDb(testing.allocator, s.path);
+    try seedCache(testing.allocator, s.path);
+    try seedApiOnlyName(testing.allocator, s.path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.json);
+    output.setQuiet(true);
+
+    const out = try captureExecuteWith(testing.allocator, &.{ "--api", "wget" }, "online_default", .empty, false);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "wget-api-only") != null);
 }
 
 // --- unreadable install database ---------------------------------------

@@ -318,7 +318,7 @@ const search_help =
     \\  --installed    Query kegs.name + casks.token only. No network.
     \\  --api          Explicit form of the default (Homebrew API).
     \\  --all          Run both passes and merge results, deduped + sorted.
-    \\  --offline      Alias of --installed (mirrors MALT_OFFLINE=1).
+    \\  --offline      Force --installed, overriding --api and --all (mirrors MALT_OFFLINE=1).
     \\
     \\Kind filter:
     \\  --formula      Search formulas only

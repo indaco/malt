@@ -321,28 +321,22 @@ test "mergeResults with empty local degenerates to sorted API" {
     try testing.expectEqualStrings("wget2", merged.matches[1]);
 }
 
-test "isOfflineRequested honours --offline" {
+test "resolveScope picks installed when ctx.offline is set" {
+    const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty, .offline = true };
+    try testing.expectEqual(Scope.installed, resolveScope(&ctx, &.{"wget"}));
+    try testing.expectEqual(Scope.installed, resolveScope(&ctx, &.{ "--api", "wget" }));
+    try testing.expectEqual(Scope.installed, resolveScope(&ctx, &.{ "--all", "wget" }));
+}
+
+test "resolveScope keeps the requested scope online" {
     const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
-    try testing.expect(isOfflineRequested(&ctx, &.{ "--offline", "wget" }));
-    try testing.expect(!isOfflineRequested(&ctx, &.{ "--api", "wget" }));
+    try testing.expectEqual(Scope.default, resolveScope(&ctx, &.{"wget"}));
+    try testing.expectEqual(Scope.api, resolveScope(&ctx, &.{ "--api", "wget" }));
 }
 
-test "isOfflineRequested reads MALT_OFFLINE truthy values" {
-    inline for (.{ "MALT_OFFLINE=1", "MALT_OFFLINE=true", "MALT_OFFLINE=TRUE", "MALT_OFFLINE=True" }) |kv| {
-        const entries = [_:null]?[*:0]const u8{kv.ptr};
-        const env: std.process.Environ = .{ .block = .{ .slice = entries[0..1 :null] } };
-        const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = env };
-        try testing.expect(isOfflineRequested(&ctx, &.{"wget"}));
-    }
-}
-
-test "isOfflineRequested rejects MALT_OFFLINE falsy values" {
-    inline for (.{ "MALT_OFFLINE=0", "MALT_OFFLINE=", "MALT_OFFLINE=no", "MALT_OFFLINE=false" }) |kv| {
-        const entries = [_:null]?[*:0]const u8{kv.ptr};
-        const env: std.process.Environ = .{ .block = .{ .slice = entries[0..1 :null] } };
-        const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = env };
-        try testing.expect(!isOfflineRequested(&ctx, &.{"wget"}));
-    }
+test "resolveScope treats a literal --offline query as a query" {
+    const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
+    try testing.expectEqual(Scope.default, resolveScope(&ctx, &.{ "--", "--offline" }));
 }
 
 /// Results for a single kind (formula or cask) of a search query.
@@ -356,7 +350,7 @@ const KindResults = struct {
     matches: []const []const u8 = &.{},
 };
 
-const SearchFlag = enum { formula, cask, scope, offline };
+const SearchFlag = enum { formula, cask, scope };
 const search_flag_map = std.StaticStringMap(SearchFlag).initComptime(.{
     .{ "--formula", .formula },
     .{ "--formulae", .formula },
@@ -365,7 +359,6 @@ const search_flag_map = std.StaticStringMap(SearchFlag).initComptime(.{
     .{ "--installed", .scope },
     .{ "--api", .scope },
     .{ "--all", .scope },
-    .{ "--offline", .offline },
 });
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -385,8 +378,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         } else if (search_flag_map.get(arg)) |flag| switch (flag) {
             .formula => search_formula = true,
             .cask => search_cask = true,
-            // Read by `parseScope` and `isOfflineRequested`.
-            .scope, .offline => {},
+            // Read by `parseScope`.
+            .scope => {},
         } else {
             // Dropping it would answer a different question than the one asked.
             output.err("Unknown flag: {s}", .{arg});
@@ -404,10 +397,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         search_cask = true;
     }
 
-    // T-029 slice for `search`: offline mode degrades to local-only so
-    // a plane-mode user gets an answer instead of a connect timeout.
-    var scope = parseScope(args);
-    if (isOfflineRequested(ctx, args)) scope = .installed;
+    const scope = resolveScope(ctx, args);
 
     const json_mode = output.isJson();
 
@@ -497,15 +487,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 }
 
-/// `--offline` flag or `MALT_OFFLINE` env (`1` / `true`). When either
-/// is active, `mt search` cannot make sense of `--api` and degrades to
-/// `--installed` semantics.
-pub fn isOfflineRequested(ctx: *const AppCtx, args: []const []const u8) bool {
-    for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--offline")) return true;
-    }
-    const val = std.process.Environ.getPosix(ctx.environ, "MALT_OFFLINE") orelse return false;
-    return std.mem.eql(u8, val, "1") or std.ascii.eqlIgnoreCase(val, "true");
+/// Offline degrades to local-only so a plane-mode user gets an answer
+/// instead of a connect timeout. `ctx.offline` is the single source: `main`
+/// strips the flag and folds `MALT_OFFLINE` into it.
+fn resolveScope(ctx: *const AppCtx, args: []const []const u8) Scope {
+    return if (ctx.offline) .installed else parseScope(args);
 }
 
 /// Open `{prefix}/db/malt.db` for search. `null` only for a fresh prefix,
