@@ -47,11 +47,14 @@
 //!   the stream. Consumers can rely on strict open/close brackets.
 //! - `status` is `"ok"` or `"error"` on every `scope_completed` and
 //!   `purge_complete` event (and on every summary scope row + the
-//!   summary itself). Distinguishes a clean no-op from a scope that
-//!   could not run; the latter also makes the command exit 1.
+//!   summary itself). On `purge_complete` and the summary, `"error"`
+//!   means that the run did not complete cleanly: a scope failed or the
+//!   run was interrupted. The command then exits non-zero (1, or 130 on
+//!   SIGINT).
 //! - `error_kind` is a stable lowercase token included only when
 //!   `status == "error"` so scripts can branch without parsing
-//!   free-form errno strings.
+//!   free-form errno strings. It can be absent, for example after an
+//!   interrupt.
 //!
 //! ## Emit atomicity
 //!
@@ -88,11 +91,13 @@ pub const PurgeEvent = enum {
 
 /// Build the `--json` summary document. Pure: writes only to `w`, takes
 /// no allocator, no IO. The orchestrator pre-aggregates `rows` and
-/// `totals` so this stays a serialiser.
+/// `totals` so this stays a serialiser. `run_status` covers failures that
+/// leave no failed row, such as an interrupt between scopes.
 pub fn buildSummary(
     w: *std.Io.Writer,
     dry_run: bool,
     rows: []const report.SummaryRow,
+    run_status: ScopeStatus,
     total_removed: u64,
     total_bytes: u64,
     time_ms: i64,
@@ -122,7 +127,7 @@ pub fn buildSummary(
     }
     try w.print(
         "],\"totals\":{{\"removed\":{d},\"bytes\":{d}}},\"status\":\"{s}\",\"time_ms\":{d}}}\n",
-        .{ total_removed, total_bytes, statusTag(if (any_error) .err else .ok), time_ms },
+        .{ total_removed, total_bytes, statusTag(if (any_error or run_status == .err) .err else .ok), time_ms },
     );
 }
 
@@ -222,13 +227,14 @@ const summary_buffer_size: usize = 2048;
 pub fn emitSummary(
     dry_run: bool,
     rows: []const report.SummaryRow,
+    run_status: ScopeStatus,
     total_removed: u64,
     total_bytes: u64,
     time_ms: i64,
 ) void {
     var buf: [summary_buffer_size]u8 = undefined;
     var w = std.Io.Writer.fixed(buf[0..]);
-    buildSummary(&w, dry_run, rows, total_removed, total_bytes, time_ms) catch return;
+    buildSummary(&w, dry_run, rows, run_status, total_removed, total_bytes, time_ms) catch return;
     output.writeStdoutAll(w.buffered());
 }
 
@@ -244,7 +250,7 @@ test "buildSummary emits a parseable object with required top-level keys" {
         .{ .name = "store-orphans", .removed = 5, .bytes = 4096 },
         .{ .name = "unused-deps", .removed = 1, .bytes = 0 },
     };
-    try buildSummary(&aw.writer, false, &rows, 6, 4096, 12);
+    try buildSummary(&aw.writer, false, &rows, .ok, 6, 4096, 12);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
     defer parsed.deinit();
@@ -258,10 +264,22 @@ test "buildSummary emits a parseable object with required top-level keys" {
     try testing.expectEqual(@as(i64, 12), obj.get("time_ms").?.integer);
 }
 
+test "buildSummary reports status:error for a failed run with no failed row" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const rows = [_]report.SummaryRow{.{ .name = "cache", .removed = 0, .bytes = 0 }};
+    try buildSummary(&aw.writer, false, &rows, .err, 0, 0, 0);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("ok", parsed.value.object.get("scopes").?.array.items[0].object.get("status").?.string);
+    try testing.expectEqualStrings("error", parsed.value.object.get("status").?.string);
+}
+
 test "buildSummary marks dry-run runs with dry_run:true" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try buildSummary(&aw.writer, true, &.{}, 0, 0, 0);
+    try buildSummary(&aw.writer, true, &.{}, .ok, 0, 0, 0);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
     defer parsed.deinit();
@@ -275,7 +293,7 @@ test "buildSummary scope rows pin name/removed/bytes shape" {
     const rows = [_]report.SummaryRow{
         .{ .name = "cache", .removed = 3, .bytes = 1024 },
     };
-    try buildSummary(&aw.writer, false, &rows, 3, 1024, 0);
+    try buildSummary(&aw.writer, false, &rows, .ok, 3, 1024, 0);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
     defer parsed.deinit();
@@ -291,7 +309,7 @@ test "buildSummary escapes special characters in scope names" {
     const rows = [_]report.SummaryRow{
         .{ .name = "weird\"name", .removed = 0, .bytes = 0 },
     };
-    try buildSummary(&aw.writer, false, &rows, 0, 0, 0);
+    try buildSummary(&aw.writer, false, &rows, .ok, 0, 0, 0);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
     defer parsed.deinit();
@@ -466,7 +484,7 @@ test "emitSummary writes the full closed-schema worst case in one go" {
     output.beginStdoutCapture(testing.allocator, &buf);
     defer output.endStdoutCapture();
 
-    emitSummary(false, &rows, std.math.maxInt(u64), std.math.maxInt(u64), std.math.maxInt(i64));
+    emitSummary(false, &rows, .err, std.math.maxInt(u64), std.math.maxInt(u64), std.math.maxInt(i64));
 
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
     defer parsed.deinit();
@@ -488,7 +506,7 @@ test "emitSummary drops cleanly when the document overflows the stack buffer" {
     output.beginStdoutCapture(testing.allocator, &buf);
     defer output.endStdoutCapture();
 
-    emitSummary(false, &rows, 0, 0, 0);
+    emitSummary(false, &rows, .ok, 0, 0, 0);
 
     try testing.expectEqual(@as(usize, 0), buf.items.len);
 }

@@ -119,6 +119,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             purge_json.emitSummary(
                 dry_run,
                 &wipe_rows,
+                wipe_result.status,
                 wipe_result.removed,
                 wipe_result.bytes,
                 elapsed,
@@ -191,6 +192,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         purge_json.emitSummary(
             dry_run,
             summary.rows.items,
+            grand_total.status,
             grand_total.removed,
             grand_total.bytes,
             elapsed,
@@ -203,6 +205,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         grand_total.status,
         grand_total.error_kind,
     );
+    // On an error exit this runs first, so purge_complete reports error.
+    // error_kind keeps the first cause.
+    errdefer grand_total.status = .err;
 
     inline for (scope_run_order) |k| {
         if (@field(opts.scope, @tagName(k))) {
@@ -224,6 +229,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 r.status,
                 r.error_kind,
             );
+            errdefer r.status = .err;
             r = try switch (k) {
                 .unused_deps => scopes_mod.runUnusedDeps(ctx, allocator, prefix, cache_dir, dry_run),
                 .store_orphans => scopes_mod.runStoreOrphans(ctx, allocator, prefix, dry_run),
