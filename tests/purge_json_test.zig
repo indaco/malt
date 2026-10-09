@@ -535,6 +535,156 @@ test "ndjson purge_complete carries status:error when any scope errored" {
     try testing.expect(saw_purge_complete_error);
 }
 
+/// Returns true if the last `event` line has status "error", or null if there is no such line.
+fn lastEventIsError(allocator: std.mem.Allocator, ndjson: []const u8, event: []const u8) !?bool {
+    var needle_buf: [64]u8 = undefined;
+    const needle = try std.fmt.bufPrint(&needle_buf, "\"event\":\"{s}\"", .{event});
+    var is_error: ?bool = null;
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, ndjson, "\n"), '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, needle) == null) continue;
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+        defer parsed.deinit();
+        const status = parsed.value.object.get("status") orelse return error.TestMissingStatus;
+        is_error = std.mem.eql(u8, status.string, "error");
+    }
+    return is_error;
+}
+
+test "ndjson purge_complete reports status:error when an interrupt stops the run between scopes" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "purge_interrupt");
+    defer prefix.deinit(allocator);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(true);
+    output.setNdjson(true);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    output.beginStdoutCapture(allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    defer malt.signals.setInterruptedForTest(false);
+    defer malt.signals.armInterruptAfterForTest(0);
+    malt.signals.setInterruptedForTest(false);
+    // Only the scope boundaries read the flag. Thus `cache` runs and `broken-symlinks` does not start.
+    malt.signals.armInterruptAfterForTest(2);
+
+    const ctx = makeCtx();
+    try testing.expectError(error.UserInterrupted, purge.execute(&ctx, allocator, &[_][]const u8{ "--cache", "--broken-symlinks" }));
+
+    const out = stdout_buf.items;
+    try testing.expect(std.mem.indexOf(u8, out, "\"scope\":\"broken-symlinks\"") == null);
+    // The scope that completed keeps its status. Only the run status changes.
+    try testing.expectEqual(@as(?bool, false), try lastEventIsError(allocator, out, "scope_completed"));
+    try testing.expectEqual(@as(?bool, true), try lastEventIsError(allocator, out, "purge_complete"));
+}
+
+// A pin, not proof of the fix: the failed store-orphans scope sets the run
+// status before the interrupt. It makes sure the interrupt keeps error_kind.
+test "ndjson purge_complete keeps the first failed scope's error_kind when an interrupt follows" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "purge_interrupt_kind");
+    defer prefix.deinit(allocator);
+
+    const db_path = try std.fmt.allocPrint(allocator, "{s}/db/malt.db", .{prefix.path});
+    defer allocator.free(db_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "garbage header");
+    }
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(true);
+    output.setNdjson(true);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    output.beginStdoutCapture(allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    defer malt.signals.setInterruptedForTest(false);
+    defer malt.signals.armInterruptAfterForTest(0);
+    malt.signals.setInterruptedForTest(false);
+    // `store-orphans` runs. The check before `cache` sets the flag.
+    malt.signals.armInterruptAfterForTest(2);
+
+    const ctx = makeCtx();
+    try testing.expectError(error.UserInterrupted, purge.execute(&ctx, allocator, &[_][]const u8{ "--store-orphans", "--cache" }));
+
+    var scope_kind: ?[]u8 = null;
+    defer if (scope_kind) |k| allocator.free(k);
+    var saw_purge_complete = false;
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, stdout_buf.items, "\n"), '\n');
+    while (lines.next()) |line| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const event = obj.get("event").?.string;
+        if (std.mem.eql(u8, event, "scope_completed")) {
+            try testing.expectEqualStrings("error", obj.get("status").?.string);
+            scope_kind = try allocator.dupe(u8, obj.get("error_kind").?.string);
+        } else if (std.mem.eql(u8, event, "purge_complete")) {
+            try testing.expectEqualStrings("error", obj.get("status").?.string);
+            // Consumers use error_kind to find the cause. The interrupt must not remove it.
+            const kind = obj.get("error_kind") orelse return error.TestExpectedErrorKind;
+            try testing.expectEqualStrings(scope_kind.?, kind.string);
+            saw_purge_complete = true;
+        }
+    }
+    try testing.expect(saw_purge_complete);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"scope\":\"cache\"") == null);
+}
+
+test "ndjson brackets report status:error when a scope cannot record its result" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "purge_oom");
+    defer prefix.deinit(allocator);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(true);
+    output.setNdjson(true);
+
+    const ctx = makeCtx();
+    var saw_scope_error = false;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var stdout_buf: std.ArrayList(u8) = .empty;
+        defer stdout_buf.deinit(allocator);
+        output.beginStdoutCapture(allocator, &stdout_buf);
+        defer output.endStdoutCapture();
+
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        if (purge.execute(&ctx, failing.allocator(), &[_][]const u8{ "--cache", "--broken-symlinks" })) |_| {
+            if (!failing.has_induced_failure) break;
+            continue;
+        } else |e| {
+            // A failure that the allocator did not cause would repeat on every pass.
+            if (!failing.has_induced_failure) return e;
+        }
+
+        // A failure before the first event gives an empty stream. That is correct.
+        const run_is_error = try lastEventIsError(allocator, stdout_buf.items, "purge_complete") orelse continue;
+        try testing.expect(run_is_error);
+        const started = std.mem.count(u8, stdout_buf.items, "\"event\":\"scope_started\"");
+        const completed = std.mem.count(u8, stdout_buf.items, "\"event\":\"scope_completed\"");
+        try testing.expectEqual(started, completed);
+        if (try lastEventIsError(allocator, stdout_buf.items, "scope_completed") orelse false)
+            saw_scope_error = true;
+    }
+    // At least one failed allocation must occur in a scope. Today only
+    // `summary.add` allocates there: the cache and broken-symlinks runners do not.
+    try testing.expect(saw_scope_error);
+}
+
 test "--json summary marks errored scopes with status:error and bumps schema version" {
     const allocator = testing.allocator;
     var prefix = try ScratchPrefix.init(allocator, "summary_err");
