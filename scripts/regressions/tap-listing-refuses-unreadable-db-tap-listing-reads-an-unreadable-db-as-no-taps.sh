@@ -38,6 +38,7 @@ SHA=$(printf '0%.0s' {1..40})
 NEEDLE="Cannot open the tap database"
 
 reset() {
+  chmod 755 "$PREFIX/db" 2>/dev/null
   chmod 600 "$DB" 2>/dev/null
   rm -f "$DB" "$DB-wal" "$DB-shm"
 }
@@ -45,6 +46,11 @@ seed_unreadable() {
   reset
   sqlite3 "$DB" "CREATE TABLE t(x);"
   chmod 000 "$DB"
+}
+seed_unreadable_dir() {
+  reset
+  sqlite3 "$DB" "CREATE TABLE t(x);"
+  chmod 000 "$PREFIX/db"
 }
 seed_not_a_db() {
   reset
@@ -69,7 +75,13 @@ check() {
   done
 }
 
-check unreadable seed_unreadable
+# Root ignores mode bits, so the chmod seeds would pass vacuously.
+if [[ $(id -u) == 0 ]]; then
+  echo "  - skipping mode-000 cases as root"
+else
+  check unreadable seed_unreadable
+  check unreadable-dir seed_unreadable_dir
+fi
 check not-a-database seed_not_a_db
 
 # Control: an absent db/ is a fresh prefix and stays unbuilt.

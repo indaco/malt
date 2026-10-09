@@ -889,6 +889,7 @@ test "--dry-run tap on a newer-schema database refuses instead of previewing" {
 }
 
 test "tap intents on a database that can't be opened abort instead of listing no taps" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root ignores mode bits
     var s = try Scratch.init(testing.allocator, "open_unreadable");
     defer s.deinit(testing.allocator);
     defer restoreDbMode(s.path);
@@ -909,6 +910,7 @@ test "tap intents on a file that isn't a database abort instead of listing no ta
 }
 
 test "--json tap listing on an unopenable database aborts without printing []" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root ignores mode bits
     var s = try Scratch.init(testing.allocator, "open_unreadable_json");
     defer s.deinit(testing.allocator);
     defer restoreDbMode(s.path);
@@ -925,6 +927,7 @@ test "--json tap listing on an unopenable database aborts without printing []" {
 }
 
 test "--dry-run tap listing on an unopenable database refuses instead of previewing" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root ignores mode bits
     var s = try Scratch.init(testing.allocator, "open_unreadable_dry_run");
     defer s.deinit(testing.allocator);
     defer restoreDbMode(s.path);
@@ -932,4 +935,19 @@ test "--dry-run tap listing on an unopenable database refuses instead of preview
     defer output.setDryRun(false);
     try seedUnreadable(s.path);
     try expectRefusalOn(error.Aborted, "Cannot open the tap database", &.{});
+}
+
+test "tap intents on an unreadable db directory abort instead of listing no taps" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root ignores mode bits
+    var s = try Scratch.init(testing.allocator, "open_unreadable_dir");
+    defer s.deinit(testing.allocator);
+    var dir_buf: [512]u8 = undefined;
+    const db_dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}/db", .{s.path}, 0);
+    defer _ = std.c.chmod(db_dir, 0o755);
+    for (unusable_db_intents) |argv| {
+        _ = std.c.chmod(db_dir, 0o755);
+        try seedRaw(s.path, "CREATE TABLE t(x);");
+        try testing.expectEqual(@as(c_int, 0), std.c.chmod(db_dir, 0o000));
+        try expectRefusalOn(error.Aborted, "Cannot open the tap database", argv);
+    }
 }
