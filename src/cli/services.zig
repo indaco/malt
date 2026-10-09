@@ -60,10 +60,13 @@ pub fn describeError(err: ServicesError) []const u8 {
 }
 
 /// Primitive entry point for core/bundle's dispatcher: start a single
-/// service. Argv parsing stays in `execute`; this is the non-argv seam.
+/// service. Skips `execute` so the name is never read as a help flag, and
+/// skips the missing-service message: restore prints its own warning, so a
+/// pre-printed error would duplicate it and ignore --quiet.
 pub fn servicesStart(ctx: *const AppCtx, allocator: std.mem.Allocator, name: []const u8) !void {
-    const argv = [_][]const u8{ "start", name };
-    return execute(ctx, allocator, &argv);
+    var db = try openDb(ctx);
+    defer db.close();
+    return cmdOne(ctx.io, ctx.environ, allocator, &db, &.{name}, .start, false);
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -86,11 +89,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (std.mem.eql(u8, sub, "list") or std.mem.eql(u8, sub, "ls")) {
         return cmdList(ctx.io, allocator, &db);
     } else if (std.mem.eql(u8, sub, "start")) {
-        return cmdOne(ctx.io, ctx.environ, allocator, &db, rest, .start);
+        return cmdOne(ctx.io, ctx.environ, allocator, &db, rest, .start, true);
     } else if (std.mem.eql(u8, sub, "stop")) {
-        return cmdOne(ctx.io, ctx.environ, allocator, &db, rest, .stop);
+        return cmdOne(ctx.io, ctx.environ, allocator, &db, rest, .stop, true);
     } else if (std.mem.eql(u8, sub, "restart")) {
-        return cmdOne(ctx.io, ctx.environ, allocator, &db, rest, .restart);
+        return cmdOne(ctx.io, ctx.environ, allocator, &db, rest, .restart, true);
     } else if (std.mem.eql(u8, sub, "status")) {
         return cmdStatus(ctx.io, allocator, &db, rest);
     } else if (std.mem.eql(u8, sub, "logs")) {
@@ -103,12 +106,24 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
 const Lifecycle = enum { start, stop, restart };
 
-fn cmdOne(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const []const u8, op: Lifecycle) !void {
+/// Runs before any lifecycle step so a missing name cannot half-run one, and
+/// gives one message for every verb instead of a raw `ServiceNotFound`. Only
+/// that error is mapped; a failing database must still surface as itself.
+fn requireService(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) ![]const u8 {
+    return supervisor.resolveLabel(allocator, db, name) catch |e| {
+        if (e != error.ServiceNotFound) return e;
+        output.err("no such service: {s}", .{name});
+        return error.Aborted;
+    };
+}
+
+fn cmdOne(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const []const u8, op: Lifecycle, report_missing: bool) !void {
     if (rest.len != 1) {
         output.err("services {s}: expected a single service name", .{@tagName(op)});
         return error.Aborted;
     }
     const name = rest[0];
+    if (report_missing) allocator.free(try requireService(allocator, db, name));
     const ctx: supervisor.SupervisorCtx = .{ .allocator = allocator, .io = io, .db = db };
     if (op != .start) announceStop(io, allocator, db, name);
     // Bootstrap reads the plist, so an edited override file lands here.
@@ -170,13 +185,9 @@ fn cmdList(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database) !void
 fn cmdStatus(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const []const u8) !void {
     if (rest.len == 0) return cmdList(io, allocator, db);
     const name = rest[0];
-    if (!supervisor.hasService(db, name)) {
-        output.err("no such service: {s}", .{name});
-        return error.Aborted;
-    }
     // Rows and launchd are both keyed by the label; the user may have typed the
     // keg name, which every other verb accepts.
-    const label = try supervisor.resolveLabel(allocator, db, name);
+    const label = try requireService(allocator, db, name);
     defer allocator.free(label);
     if (output.isJson()) {
         // Reuse `supervisor.list` filtered down to `name`, so the JSON shape
@@ -239,7 +250,7 @@ fn cmdLogs(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []con
     // Log dirs are named by the label, so resolve what the user typed first.
     var db = try openDb(ctx);
     defer db.close();
-    const label = try supervisor.resolveLabel(allocator, &db, name);
+    const label = try requireService(allocator, &db, name);
     defer allocator.free(label);
     const path = try supervisor.logPath(allocator, label, if (stream == .stdout) .stdout else .stderr);
     defer allocator.free(path);

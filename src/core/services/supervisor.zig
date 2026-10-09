@@ -618,8 +618,8 @@ fn runtimeFromList(term: std.process.Child.Term, stdout: []const u8, label: []co
 }
 
 pub fn hasService(db: *sqlite.Database, name: []const u8) bool {
-    // Accepts a label or a keg name, matching `resolveLabel`, so `status` and
-    // `start` agree on what exists.
+    // Accepts a label or a keg name, matching `resolveLabel`. Tests use it as
+    // an oracle; the CLI resolves through `resolveLabel` so errors stay distinct.
     var stmt = db.prepare("SELECT 1 FROM services WHERE name = ? OR keg_name = ?;") catch return false;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return false;
