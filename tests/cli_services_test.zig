@@ -41,6 +41,49 @@ test "execute with -h / --help prints help" {
     try services_cli.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--help"});
 }
 
+test "execute <subcommand> --help prints help without opening the database" {
+    const prefix = try setupPrefix("sub_help");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    // Help must win before openDb; a pre-existing db/ would hide a regression.
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+    defer testing.allocator.free(db_dir);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, db_dir);
+
+    const cases = [_][]const []const u8{
+        &.{ "list", "--help" },
+        &.{ "status", "--help" },
+        &.{ "start", "--help" },
+        &.{ "stop", "--help" },
+        &.{ "logs", "--help" },
+        &.{ "restart", "foo", "-h" },
+        &.{ "logs", "foo", "--follow", "--help" },
+    };
+    for (cases) |args| {
+        const io = std.Options.debug_io;
+        const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/stdout", .{prefix});
+        defer testing.allocator.free(out_path);
+        const out = try test_io.createFileAbsolute(io, out_path, .{ .truncate = true, .read = true });
+        defer out.close(io);
+        const ctx: malt.app_ctx.AppCtx = .{
+            .io = io,
+            .environ = .empty,
+            .stdout = out,
+            .stderr = test_io.testSink(),
+        };
+        try services_cli.execute(&ctx, testing.allocator, args);
+        const body = try testing.allocator.alloc(u8, (try out.stat(io)).size);
+        defer testing.allocator.free(body);
+        _ = try out.readPositionalAll(io, body, 0);
+        if (std.mem.indexOf(u8, body, "Usage: malt services") == null) {
+            std.debug.print("no help for {s}:\n{s}\n", .{ args[0], body });
+            return error.TestExpectedEqual;
+        }
+    }
+    try testing.expectError(error.FileNotFound, test_io.cwd().access(std.Options.debug_io, db_dir, .{}));
+}
+
 test "execute list on an empty prefix reports no services" {
     const prefix = try setupPrefix("list_empty");
     defer testing.allocator.free(prefix);
