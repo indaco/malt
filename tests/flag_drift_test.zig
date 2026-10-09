@@ -207,10 +207,10 @@ fn readSourceFlags(allocator: std.mem.Allocator, cmd: Command) !FlagSet {
     return set;
 }
 
-/// True when shipped code, not a comment or an inline test, asks `output`
-/// for the global dry-run flag. Relies on zig fmt: a top-level `test` block
-/// opens at column 0 and closes on a lone `}`.
-fn readsDryRun(src: []const u8) bool {
+/// True when shipped code, not a comment or an inline test, contains
+/// `needle`. Relies on zig fmt: a top-level `test` block opens at column 0
+/// and closes on a lone `}`.
+fn readsShipped(src: []const u8, needle: []const u8) bool {
     var in_test = false;
     var it = std.mem.splitScalar(u8, src, '\n');
     while (it.next()) |line| {
@@ -222,9 +222,23 @@ fn readsDryRun(src: []const u8) bool {
             in_test = true;
             continue;
         }
-        if (std.mem.indexOf(u8, stripLineComment(line), "isDryRun()") != null) return true;
+        if (std.mem.indexOf(u8, stripLineComment(line), needle) != null) return true;
     }
     return false;
+}
+
+fn readsDryRun(src: []const u8) bool {
+    return readsShipped(src, "isDryRun()");
+}
+
+fn readsOffline(src: []const u8) bool {
+    return readsShipped(src, "ctx.offline");
+}
+
+/// Reading the global is not enough: main strips the flag, so a literal
+/// `"--offline"` in shipped code is an argv scan that can never fire.
+fn honoursOffline(src: []const u8) bool {
+    return readsOffline(src) and !readsShipped(src, "\"--offline\"");
 }
 
 /// The bash per-command flag list. Scoped to the `cmd_flags` table so the
@@ -461,6 +475,53 @@ test "every command whose help advertises --dry-run reads the global flag" {
         std.debug.print("Commands ignoring the global --dry-run:\n{s}", .{report.items});
         return error.DryRunIgnored;
     }
+}
+
+test "every command whose help advertises --offline reads ctx.offline" {
+    // `main` strips the flag into `ctx.offline`; a command that scans argv
+    // for it never sees it. Same blind spot as --dry-run above.
+    const alloc = testing.allocator;
+    var report: std.ArrayList(u8) = .empty;
+    defer report.deinit(alloc);
+
+    var checked: usize = 0;
+    for (commands) |cmd| {
+        if (cmd.delegates) continue;
+        if (std.mem.indexOf(u8, malt.cli_help.helpFor(cmd.name), "--offline") == null) continue;
+        checked += 1;
+        const src = try readSources(alloc, cmd);
+        defer alloc.free(src);
+        if (honoursOffline(src)) continue;
+        try report.appendSlice(alloc, "  ");
+        try report.appendSlice(alloc, cmd.name);
+        try report.appendSlice(alloc, " advertises --offline but never reads ctx.offline, or scans argv for it\n");
+    }
+    // Zero matches would pass vacuously.
+    try testing.expect(checked > 0);
+
+    if (report.items.len > 0) {
+        std.debug.print("Commands ignoring the global --offline:\n{s}", .{report.items});
+        return error.OfflineIgnored;
+    }
+}
+
+test "readsShipped sees an argv scan for the stripped flag" {
+    try testing.expect(readsShipped("    if (std.mem.eql(u8, arg, \"--offline\")) return true;\n", "\"--offline\""));
+    try testing.expect(!readsShipped("    // \"--offline\" is stripped by main\n", "\"--offline\""));
+    try testing.expect(!readsShipped("test \"x\" {\n    _ = \"--offline\";\n}\n", "\"--offline\""));
+}
+
+test "honoursOffline rejects an argv scan even when ctx.offline is also read" {
+    try testing.expect(honoursOffline("    http.offline = ctx.offline;\n"));
+    try testing.expect(!honoursOffline("    .{ \"--offline\", .offline },\n    http.offline = ctx.offline;\n"));
+    try testing.expect(!honoursOffline(""));
+}
+
+test "readsOffline ignores a mention inside a comment or an inline test" {
+    try testing.expect(readsOffline("    http.offline = ctx.offline;\n"));
+    try testing.expect(!readsOffline("    // ctx.offline is set by main\n"));
+    try testing.expect(!readsOffline(""));
+    try testing.expect(!readsOffline("test \"x\" {\n    _ = ctx.offline;\n}\n"));
 }
 
 test "readsDryRun ignores a mention inside a comment or an inline test" {
