@@ -428,7 +428,7 @@ pub const zsh_script =
     \\                        '--installed[Local DB only, no network]' \
     \\                        '--api[Force Homebrew API path]' \
     \\                        '--all[Run local + API and merge results]' \
-    \\                        '--offline[Alias of --installed (mirrors MALT_OFFLINE)]' \
+    \\                        '--offline[Force --installed, overriding --api and --all]' \
     \\                        '--json[Output as JSON]' \
     \\                        '*::query:'
     \\                    ;;
@@ -783,7 +783,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l installed -d 'Local DB only, no network'
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l api       -d 'Force Homebrew API path'
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l all       -d 'Run local + API and merge'
-    \\    complete -c $__malt_bin -n '__malt_using_command search' -l offline   -d 'Alias of --installed'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l offline   -d 'Force --installed, overriding --api and --all'
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l json      -d 'JSON output'
     \\
     \\    # uses
