@@ -35,6 +35,6 @@ awk '/pub fn resolveAppDir\(/,/^}/' "$SRC" | grep -q 'validateShape' ||
 # 2. Behaviour: run the integration binary that carries the pins.
 (cd "$ROOT" && zig build test-bin >/dev/null 2>&1) ||
   fail "could not build the test binaries (zig build test-bin)"
-"$ROOT/zig-out/test-bin/cask_test" >/dev/null 2>&1 || fail "cask_test reports a failure"
+env -u MALT_CACHE MALT_PREFIX=/tmp/malt-test-prefix "$ROOT/zig-out/test-bin/cask_test" >/dev/null 2>&1 || fail "cask_test reports a failure"
 
 echo "PASS: MALT_APPDIR is shape-validated before cask placement"

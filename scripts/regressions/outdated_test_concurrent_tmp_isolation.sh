@@ -35,7 +35,7 @@ CONC=8
 ROUNDS=6
 for _ in $(seq 1 "$ROUNDS"); do
   for j in $(seq 1 "$CONC"); do
-    "$BIN" >"$WORK/o.$$.$j.$RANDOM" 2>&1 &
+    env -u MALT_CACHE MALT_PREFIX=/tmp/malt-test-prefix "$BIN" >"$WORK/o.$$.$j.$RANDOM" 2>&1 &
   done
   # A process may exit non-zero on the orthogonal WAL flake; ignore exit codes
   # here — the temp-path verdict comes solely from the signature grep below.

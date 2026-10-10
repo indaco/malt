@@ -78,7 +78,7 @@ if [[ ! -x "$BIN" ]]; then
     exit 1
   fi
 fi
-if ! "$BIN"; then
+if ! env -u MALT_CACHE MALT_PREFIX=/tmp/malt-test-prefix "$BIN"; then
   echo "FAIL: vulns integration tests (OSV fixture) failed" >&2
   exit 1
 fi

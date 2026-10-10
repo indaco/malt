@@ -12,6 +12,9 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || exit 2
 
+# Some guards purge the cache root; never let that be the developer's.
+unset MALT_CACHE
+
 : "${MALT_REGRESSION_TIMEOUT:=600}"
 
 # Only mint a token when the caller hasn't supplied one and gh can.

@@ -15,6 +15,8 @@
 
 set -euo pipefail
 
+unset MALT_CACHE
+
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 

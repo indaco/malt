@@ -24,6 +24,8 @@
 
 set -euo pipefail
 
+unset MALT_CACHE
+
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
 [[ -x "$BIN" ]] || {

@@ -8,6 +8,10 @@
 
 set -euo pipefail
 
+# Keep test binaries off the developer's real cache and prefix.
+unset MALT_CACHE
+export MALT_PREFIX=/tmp/malt-test-prefix
+
 cd "$(dirname "$0")/.."
 
 if ! command -v kcov >/dev/null 2>&1; then
