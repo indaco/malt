@@ -52,6 +52,12 @@ pub const default_prefix = "/opt/malt";
 /// env. They then use the throwaway root that `build.zig` sets, not the live install.
 pub const fallback_prefix = if (builtin.is_test) "/tmp/malt-test-prefix" else default_prefix;
 
+/// Test builds honour MALT_CACHE only under /tmp, where every fixture lives.
+/// An inherited developer cache then falls back to `{prefix}/cache`.
+fn testHonoursCache(cache: []const u8) bool {
+    return !builtin.is_test or std.mem.startsWith(u8, cache, "/tmp/");
+}
+
 /// Validated form of `maltPrefixOrAbort`, returns an error on bad env so tests
 /// can inspect the failure without the process exiting.
 pub fn maltPrefixChecked() prefix_path.PrefixError![:0]const u8 {
@@ -261,7 +267,7 @@ pub fn maltDbDir(allocator: std.mem.Allocator) ![]const u8 {
 pub fn maltCacheDirChecked(allocator: std.mem.Allocator) (prefix_path.PrefixError || std.mem.Allocator.Error)![]const u8 {
     if (getenvLocal("MALT_CACHE")) |cache| {
         try prefix_path.validateShape(cache);
-        return allocator.dupe(u8, cache);
+        if (testHonoursCache(cache)) return allocator.dupe(u8, cache);
     }
     return std.fmt.allocPrint(allocator, "{s}/cache", .{try maltPrefixChecked()});
 }
@@ -272,7 +278,7 @@ pub fn maltCacheDirChecked(allocator: std.mem.Allocator) (prefix_path.PrefixErro
 pub fn maltCacheDir(allocator: std.mem.Allocator) ![]const u8 {
     if (getenvLocal("MALT_CACHE")) |cache| {
         prefix_path.validateShape(cache) catch |e| refuseEnv("MALT_CACHE", e);
-        return allocator.dupe(u8, cache);
+        if (testHonoursCache(cache)) return allocator.dupe(u8, cache);
     }
     return std.fmt.allocPrint(allocator, "{s}/cache", .{maltPrefixOrAbort()});
 }

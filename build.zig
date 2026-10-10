@@ -402,6 +402,7 @@ pub fn build(b: *std.Build) void {
     const run_lib_tests = b.addRunArtifact(lib_tests);
     run_lib_tests.setEnvironmentVariable("MALT_PREFIX", test_prefix);
     // An inherited cache root would send fixtures to the developer's real cache.
+    // `atomic.maltCacheDir` also ignores one outside /tmp in test builds.
     run_lib_tests.removeEnvironmentVariable("MALT_CACHE");
     test_step.dependOn(&run_lib_tests.step);
 

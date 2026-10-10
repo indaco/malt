@@ -178,6 +178,36 @@ test "maltCacheDir honours MALT_CACHE env var" {
     try testing.expectEqualStrings("/tmp/malt_atomic_cache_override", path);
 }
 
+// A shell-inherited MALT_CACHE is the developer's real cache; a direct
+// test-binary run must not write to it or purge it.
+test "test builds ignore a MALT_CACHE outside /tmp and fall back to {prefix}/cache" {
+    setPrefix("/tmp/malt_atomic_cache_inherited");
+    defer unsetPrefix();
+    defer unsetCache();
+
+    const fallback = "/tmp/malt_atomic_cache_inherited/cache";
+    // "/tmp" and "/tmpx/c" pin the trailing slash; the match is lexical,
+    // so the /private/tmp spelling also falls back.
+    const rows = [_]struct { cache: [:0]const u8, want: []const u8 }{
+        .{ .cache = "/var/empty/malt-inherited-cache", .want = fallback },
+        .{ .cache = "/tmp", .want = fallback },
+        .{ .cache = "/tmpx/c", .want = fallback },
+        .{ .cache = "/private/tmp/c", .want = fallback },
+        .{ .cache = "/tmp/c", .want = "/tmp/c" },
+    };
+    for (rows) |row| {
+        setCache(row.cache);
+
+        const path = try atomic.maltCacheDir(testing.allocator);
+        defer testing.allocator.free(path);
+        try testing.expectEqualStrings(row.want, path);
+
+        const checked = try atomic.maltCacheDirChecked(testing.allocator);
+        defer testing.allocator.free(checked);
+        try testing.expectEqualStrings(row.want, checked);
+    }
+}
+
 test "createTempDir creates a unique directory under the prefix and cleanup removes it" {
     var fx = try Fixture.init("ctmp");
     defer fx.deinit();
