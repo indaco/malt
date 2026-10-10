@@ -52,7 +52,7 @@ if ! zig build test-bin >/dev/null 2>&1; then
 fi
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/malt-reg-migrate-reason.XXXXXX")
 trap 'rm -rf "$SCRATCH"' EXIT
-if ! MALT_PREFIX="$SCRATCH" "$BIN" >"$SCRATCH/log" 2>&1; then
+if ! env -u MALT_CACHE MALT_PREFIX="$SCRATCH" "$BIN" >"$SCRATCH/log" 2>&1; then
   echo "FAIL: a brew dependency was migrated as installed on request" >&2
   tail -n 30 "$SCRATCH/log" >&2
   exit 1

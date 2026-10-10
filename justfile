@@ -51,6 +51,7 @@ regressions-static:
     @./scripts/regressions/version-update-swap-failure-exits-nonzero-version-update-exits-zero-on-swap-failure.sh
     @MALT_STATIC_ONLY=1 ./scripts/regressions/post-install-steps-live-artefacts.sh
     @./scripts/test/bench_release_resolution_test.sh
+    @./scripts/regressions/test-runs-ignore-inherited-malt-cache.sh
 
 # Run unit tests + cheap static regression guards.
 [group('test')]

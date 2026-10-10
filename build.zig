@@ -401,6 +401,8 @@ pub fn build(b: *std.Build) void {
     const test_prefix = "/tmp/malt-test-prefix";
     const run_lib_tests = b.addRunArtifact(lib_tests);
     run_lib_tests.setEnvironmentVariable("MALT_PREFIX", test_prefix);
+    // An inherited cache root would send fixtures to the developer's real cache.
+    run_lib_tests.removeEnvironmentVariable("MALT_CACHE");
     test_step.dependOn(&run_lib_tests.step);
 
     const install_lib_tests = b.addInstallArtifact(lib_tests, .{
@@ -447,6 +449,7 @@ pub fn build(b: *std.Build) void {
     const run_all_tests = b.addRunArtifact(all_tests);
     // Same throwaway prefix as `atomic.fallback_prefix`.
     run_all_tests.setEnvironmentVariable("MALT_PREFIX", "/tmp/malt-test-prefix");
+    run_all_tests.removeEnvironmentVariable("MALT_CACHE");
     // Inline `test` blocks live in the `malt` module, and the comment on
     // `lib_test_module` explains why crossing `addImport("malt", ...)` drops
     // them: the aggregate root cannot collect them, however it is generated.
@@ -480,6 +483,7 @@ pub fn build(b: *std.Build) void {
 
         const run_t = b.addRunArtifact(t);
         run_t.setEnvironmentVariable("MALT_PREFIX", test_prefix);
+        run_t.removeEnvironmentVariable("MALT_CACHE");
         test_step.dependOn(&run_t.step);
 
         // Only installed when the user asks for `zig build test-bin`

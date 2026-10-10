@@ -36,7 +36,7 @@ done
   }
 
 set +e
-OUT=$(timeout 120 "$ROOT/zig-out/test-bin/migrate_smoke_test" 2>&1)
+OUT=$(timeout 120 env -u MALT_CACHE MALT_PREFIX=/tmp/malt-test-prefix "$ROOT/zig-out/test-bin/migrate_smoke_test" 2>&1)
 RC=$?
 set -e
 [[ $RC -eq 124 ]] && {

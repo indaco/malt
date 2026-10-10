@@ -11,6 +11,10 @@
 # Usage: scripts/test-concurrent.sh [copies] [rounds]
 
 set -euo pipefail
+
+# Keep test binaries off the developer's real cache and prefix.
+unset MALT_CACHE
+export MALT_PREFIX=/tmp/malt-test-prefix
 cd "$(dirname "$0")/.."
 
 copies=${1:-6}
