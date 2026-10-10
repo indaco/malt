@@ -7,7 +7,12 @@
 
 set -euo pipefail
 
-MT=${MT:-./zig-out/bin/mt}
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+MT=${MT:-$ROOT/zig-out/bin/mt}
+[[ -x $MT ]] || {
+  echo "FAIL: malt binary not found at $MT - run zig build first" >&2
+  exit 1
+}
 P=$(mktemp -d)
 trap 'rm -rf "$P"' EXIT
 export MALT_PREFIX=$P MALT_CACHE=$P/c

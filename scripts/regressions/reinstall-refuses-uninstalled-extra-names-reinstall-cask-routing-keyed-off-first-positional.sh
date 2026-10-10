@@ -9,19 +9,21 @@
 
 set -euo pipefail
 
-B=${MALT_BIN:-./zig-out/bin/mt}
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+B=${MALT_BIN:-$ROOT/zig-out/bin/mt}
 P=$(mktemp -d /tmp/mt_reinstall_extra.XXXXXX)
 trap 'rm -rf "$P"' EXIT
 export MALT_PREFIX=$P MALT_CACHE=$P/cache
-mkdir -p "$P/db" "$P/cache" "$P/tmp"
-"$B" --offline uses x >/dev/null 2>&1 || true
-sqlite3 "$P/db/malt.db" "INSERT INTO kegs(name,full_name,version,store_sha256,cellar_path) VALUES('wget','wget','1.24','a','$P/Cellar/wget/1.24');
-  INSERT INTO casks(token,name,version,url) VALUES('firefox','firefox','120.0','https://x.invalid/f.dmg');"
 
 fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
+[[ -x $B ]] || fail "malt binary not found at $B - run zig build first"
+mkdir -p "$P/db" "$P/cache" "$P/tmp"
+"$B" --offline uses x >/dev/null 2>&1 || true
+sqlite3 "$P/db/malt.db" "INSERT INTO kegs(name,full_name,version,store_sha256,cellar_path) VALUES('wget','wget','1.24','a','$P/Cellar/wget/1.24');
+  INSERT INTO casks(token,name,version,url) VALUES('firefox','firefox','120.0','https://x.invalid/f.dmg');"
 
 check() { # $1 = expected stderr text, rest = argv
   local want=$1 rc=0 err

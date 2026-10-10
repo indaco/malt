@@ -13,7 +13,7 @@
 # the download path.
 set -euo pipefail
 
-malt="$(pwd)/zig-out/bin/malt" # plain `zig build` first — shell regs don't rebuild
+malt="$(cd "$(dirname "$0")/../.." && pwd)/zig-out/bin/malt" # plain `zig build` first — shell regs don't rebuild
 [ -x "$malt" ] || {
   echo "SKIP: build malt first (zig build)"
   exit 1

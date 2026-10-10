@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-root=$(git rev-parse --show-toplevel)
+root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
