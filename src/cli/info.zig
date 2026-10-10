@@ -125,7 +125,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // missed or the DB was absent entirely.
     if (try emitApiMetadata(ctx, allocator, name, stdout, json_mode, colorize, sel)) return;
 
-    try emitNotFound(name, stdout, json_mode);
+    try emitNotFound(name, stdout, json_mode, sel);
 }
 
 /// If `name` is an installed formula, write its info row and return
@@ -260,9 +260,10 @@ fn emitNotFound(
     name: []const u8,
     stdout: *std.Io.Writer,
     json_mode: bool,
+    sel: KindSelect,
 ) !void {
     if (json_mode) {
-        try writeJsonNotInstalled(name, stdout);
+        try writeJsonNotInstalled(name, stdout, sel);
         return;
     }
     var buf: [4096]u8 = undefined;
@@ -561,17 +562,18 @@ pub fn openDb(io: std.Io, prefix: []const u8, dry_run: bool) ?sqlite.Database {
 }
 
 /// Minimal JSON shape for the "no installed record" case. Mirrors the
-/// `installed=false` branch of `writeJsonInfo` without needing a live
-/// sqlite statement — used when the DB is missing or the package has
-/// simply never been installed.
+/// `installed=false` roots of the formula and cask writers without a live
+/// sqlite statement.
 fn writeJsonNotInstalled(
     name: []const u8,
     stdout: *std.Io.Writer,
+    sel: KindSelect,
 ) !void {
+    const kind = if (sel.cask and !sel.formula) "cask" else "formula";
     try output.writeSchemaVersionPrefix(stdout);
     try stdout.writeAll("\"name\":");
     try output.jsonStr(stdout, name);
-    try stdout.writeAll(",\"type\":\"formula\",\"installed\":false}\n");
+    try stdout.print(",\"type\":\"{s}\",\"installed\":false}}\n", .{kind});
 }
 
 fn writeHumanInfo(
@@ -985,11 +987,27 @@ test "writeJsonNotInstalled carries schema_version on the minimal not-found root
     // still version itself so a consumer parses one shape for every case.
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try writeJsonNotInstalled("ghost", &aw.writer);
+    try writeJsonNotInstalled("ghost", &aw.writer, selectKinds(false, false));
     try testing.expectEqualStrings(
         "{\"schema_version\":1,\"name\":\"ghost\",\"type\":\"formula\",\"installed\":false}\n",
         aw.written(),
     );
+}
+
+test "writeJsonNotInstalled reports the selected kind, formula unless cask alone" {
+    // A `--cask` caller must not get back the one kind it excluded; the
+    // both-kinds case keeps "formula" so the default shape stays stable.
+    const cases = [_]struct { cask: bool, formula: bool, want: []const u8 }{
+        .{ .cask = true, .formula = false, .want = "{\"schema_version\":1,\"name\":\"ghost\",\"type\":\"cask\",\"installed\":false}\n" },
+        .{ .cask = false, .formula = true, .want = "{\"schema_version\":1,\"name\":\"ghost\",\"type\":\"formula\",\"installed\":false}\n" },
+        .{ .cask = true, .formula = true, .want = "{\"schema_version\":1,\"name\":\"ghost\",\"type\":\"formula\",\"installed\":false}\n" },
+    };
+    for (cases) |c| {
+        var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer aw.deinit();
+        try writeJsonNotInstalled("ghost", &aw.writer, selectKinds(c.cask, c.formula));
+        try testing.expectEqualStrings(c.want, aw.written());
+    }
 }
 
 test "encodeInstalledCaskHuman renders every populated field" {
