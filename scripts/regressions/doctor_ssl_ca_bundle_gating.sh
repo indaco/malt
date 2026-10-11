@@ -12,6 +12,7 @@
 #   2. installed but cert.pem unlinked → a warn row naming the fault, and a
 #      json finding with severity "warn".
 #   3. installed and cert.pem linked → a clean ok row, json severity "ok".
+#   4. the same for an openssl@4-only prefix, the major Homebrew moves to.
 #
 # Usage: scripts/regressions/doctor_ssl_ca_bundle_gating.sh
 
@@ -35,17 +36,17 @@ fail() {
 
 # Seed a scratch prefix with the expected layout. `$2` truthy links
 # opt/ca-certificates (the "installed" signal); `$3` truthy lands the
-# openssl@3 cert.pem.
+# cert.pem of keg `$4` (default openssl@3).
 seed() {
-  local pfx="$1" with_ca="$2" with_cert="$3"
+  local pfx="$1" with_ca="$2" with_cert="$3" keg="${4:-openssl@3}"
   mkdir -p "$pfx/store" "$pfx/Cellar" "$pfx/Caskroom" "$pfx/opt" \
     "$pfx/bin" "$pfx/lib" "$pfx/tmp" "$pfx/cache" "$pfx/db"
   if [[ -n "$with_ca" ]]; then
     mkdir -p "$pfx/opt/ca-certificates"
   fi
   if [[ -n "$with_cert" ]]; then
-    mkdir -p "$pfx/etc/openssl@3"
-    : >"$pfx/etc/openssl@3/cert.pem"
+    mkdir -p "$pfx/opt/$keg" "$pfx/etc/$keg"
+    : >"$pfx/etc/$keg/cert.pem"
   fi
 }
 
@@ -92,6 +93,18 @@ if printf '%s' "$HUMAN" | grep -q "isn't linked"; then
 fi
 printf '%s' "$JSON" | grep -q '"id":"ssl_ca_bundle","severity":"ok"' ||
   fail 'a healthy bundle did not serialize an ok json finding'
+rm -rf "$PFX"
+
+# ── 4. an openssl@4-only prefix, linked → a clean ok row ─────────────
+PFX=$(mktemp -d -t mt_doctor_ssl_v4.XXXXXX)
+trap 'rm -rf "$PFX"' EXIT
+seed "$PFX" 1 1 openssl@4
+run_doctor "$PFX"
+if printf '%s' "$HUMAN" | grep -q "isn't linked"; then
+  fail 'a linked openssl@4 bundle still rendered the unlinked-cert warning'
+fi
+printf '%s' "$JSON" | grep -q '"id":"ssl_ca_bundle","severity":"ok"' ||
+  fail 'a linked openssl@4 bundle did not serialize an ok json finding'
 rm -rf "$PFX"
 
 trap - EXIT

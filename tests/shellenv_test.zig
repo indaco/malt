@@ -2,7 +2,12 @@
 
 const std = @import("std");
 const testing = std.testing;
-const shellenv = @import("malt").shellenv;
+const malt = @import("malt");
+const shellenv = malt.shellenv;
+const ca_bundle = malt.ca_bundle;
+const test_io = @import("test_io");
+
+const v3_cert = "/opt/malt/etc/openssl@3/cert.pem";
 
 test "parseShell recognises the three supported shells" {
     try testing.expectEqual(shellenv.Shell.bash, shellenv.parseShell("bash").?);
@@ -39,7 +44,7 @@ fn expectContains(haystack: []const u8, needle: []const u8) !void {
 }
 
 test "render bash exports brew-compatible env so third-party scripts keep working" {
-    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt", false);
+    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt", null);
     defer testing.allocator.free(out);
 
     try expectContains(out, "export HOMEBREW_PREFIX=\"/opt/malt\"");
@@ -55,15 +60,15 @@ test "render bash exports brew-compatible env so third-party scripts keep workin
 }
 
 test "render bash and zsh emit byte-identical output (single shared arm)" {
-    const bash = try shellenv.render(testing.allocator, .bash, "/opt/malt", false);
+    const bash = try shellenv.render(testing.allocator, .bash, "/opt/malt", null);
     defer testing.allocator.free(bash);
-    const zsh = try shellenv.render(testing.allocator, .zsh, "/opt/malt", false);
+    const zsh = try shellenv.render(testing.allocator, .zsh, "/opt/malt", null);
     defer testing.allocator.free(zsh);
     try testing.expectEqualStrings(bash, zsh);
 }
 
 test "render bash prepends malt's bin before \\$PATH so its binaries win" {
-    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt", false);
+    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt", null);
     defer testing.allocator.free(out);
     // Binary order matters: an `append` would let the existing PATH shadow
     // malt-installed tools.
@@ -73,7 +78,7 @@ test "render bash prepends malt's bin before \\$PATH so its binaries win" {
 }
 
 test "render bash terminates every line with `;\\n` so eval sees full statements" {
-    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt", false);
+    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt", null);
     defer testing.allocator.free(out);
     try testing.expect(out.len > 0);
     try testing.expect(std.mem.endsWith(u8, out, ";\n"));
@@ -85,7 +90,7 @@ test "render bash terminates every line with `;\\n` so eval sees full statements
 }
 
 test "render fish uses set -gx and avoids POSIX export syntax" {
-    const out = try shellenv.render(testing.allocator, .fish, "/opt/malt", false);
+    const out = try shellenv.render(testing.allocator, .fish, "/opt/malt", null);
     defer testing.allocator.free(out);
 
     try expectContains(out, "set -gx HOMEBREW_PREFIX \"/opt/malt\"");
@@ -101,18 +106,23 @@ test "render fish uses set -gx and avoids POSIX export syntax" {
 
 test "render emits SSL_CERT_FILE only when the CA bundle is present" {
     // Present: a single export line pointing at the canonical bundle.
-    const with = try shellenv.render(testing.allocator, .bash, "/opt/malt", true);
+    const with = try shellenv.render(testing.allocator, .bash, "/opt/malt", v3_cert);
     defer testing.allocator.free(with);
     try expectContains(with, "export SSL_CERT_FILE=\"/opt/malt/etc/openssl@3/cert.pem\";");
 
+    // An openssl@4 prefix exports its own bundle path, not the openssl@3 one.
+    const v4 = try shellenv.render(testing.allocator, .bash, "/opt/malt", "/opt/malt/etc/openssl@4/cert.pem");
+    defer testing.allocator.free(v4);
+    try expectContains(v4, "export SSL_CERT_FILE=\"/opt/malt/etc/openssl@4/cert.pem\";");
+
     // Absent: nothing — the var must never name a missing file.
-    const without = try shellenv.render(testing.allocator, .bash, "/opt/malt", false);
+    const without = try shellenv.render(testing.allocator, .bash, "/opt/malt", null);
     defer testing.allocator.free(without);
     try testing.expect(std.mem.indexOf(u8, without, "SSL_CERT_FILE") == null);
 }
 
 test "render bash SSL_CERT_FILE line is terminated and follows INFOPATH" {
-    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt", true);
+    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt", v3_cert);
     defer testing.allocator.free(out);
     // Must keep the `;\n` line-termination contract eval relies on.
     try testing.expect(std.mem.endsWith(u8, out, ";\n"));
@@ -123,7 +133,7 @@ test "render bash SSL_CERT_FILE line is terminated and follows INFOPATH" {
 }
 
 test "render fish uses set -gx for SSL_CERT_FILE when present" {
-    const out = try shellenv.render(testing.allocator, .fish, "/opt/malt", true);
+    const out = try shellenv.render(testing.allocator, .fish, "/opt/malt", v3_cert);
     defer testing.allocator.free(out);
     try expectContains(out, "set -gx SSL_CERT_FILE \"/opt/malt/etc/openssl@3/cert.pem\";");
     // No POSIX export / brace-expansion sneaks in via the new line.
@@ -131,9 +141,9 @@ test "render fish uses set -gx for SSL_CERT_FILE when present" {
 }
 
 test "render bash and zsh stay byte-identical with SSL_CERT_FILE present" {
-    const bash = try shellenv.render(testing.allocator, .bash, "/opt/malt", true);
+    const bash = try shellenv.render(testing.allocator, .bash, "/opt/malt", v3_cert);
     defer testing.allocator.free(bash);
-    const zsh = try shellenv.render(testing.allocator, .zsh, "/opt/malt", true);
+    const zsh = try shellenv.render(testing.allocator, .zsh, "/opt/malt", v3_cert);
     defer testing.allocator.free(zsh);
     try testing.expectEqualStrings(bash, zsh);
 }
@@ -144,7 +154,7 @@ test "render with SSL_CERT_FILE present survives a tiny budget without corruptio
         testing.allocator,
         struct {
             fn run(a: std.mem.Allocator) !void {
-                const out = try shellenv.render(a, .bash, "/opt/malt", true);
+                const out = try shellenv.render(a, .bash, "/opt/malt", v3_cert);
                 a.free(out);
             }
         }.run,
@@ -153,7 +163,7 @@ test "render with SSL_CERT_FILE present survives a tiny budget without corruptio
 }
 
 test "render honors a non-default prefix" {
-    const out = try shellenv.render(testing.allocator, .bash, "/usr/local", false);
+    const out = try shellenv.render(testing.allocator, .bash, "/usr/local", null);
     defer testing.allocator.free(out);
 
     try expectContains(out, "export HOMEBREW_PREFIX=\"/usr/local\"");
@@ -164,7 +174,7 @@ test "render honors a non-default prefix" {
 test "render surfaces allocator failure rather than swallowing it" {
     try testing.expectError(
         error.OutOfMemory,
-        shellenv.render(testing.failing_allocator, .bash, "/opt/malt", false),
+        shellenv.render(testing.failing_allocator, .bash, "/opt/malt", null),
     );
 }
 
@@ -174,10 +184,124 @@ test "render with a tiny budget eventually returns OutOfMemory, not corruption" 
         testing.allocator,
         struct {
             fn run(a: std.mem.Allocator) !void {
-                const out = try shellenv.render(a, .fish, "/opt/malt", false);
+                const out = try shellenv.render(a, .fish, "/opt/malt", null);
                 a.free(out);
             }
         }.run,
         .{},
     );
+}
+
+// --- CA bundle lookup -------------------------------------------------
+//
+// Homebrew moves dependents from openssl@3 to openssl@4 over time, so a
+// prefix can hold either major, or both. Each one reads its own
+// `etc/<keg>/cert.pem`.
+
+/// Scratch prefix with `etc/<keg>/cert.pem` for each keg in `kegs`.
+fn certPrefix(tag: []const u8, kegs: []const []const u8) ![]const u8 {
+    const prefix = try test_io.uniqueTempPath(testing.allocator, "shellenv_cert", tag);
+    errdefer testing.allocator.free(prefix);
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+    for (kegs) |keg| {
+        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc/{s}", .{ prefix, keg });
+        defer testing.allocator.free(dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+        const cert = try std.fmt.allocPrint(testing.allocator, "{s}/cert.pem", .{dir});
+        defer testing.allocator.free(cert);
+        (try test_io.createFileAbsolute(std.Options.debug_io, cert, .{})).close(std.Options.debug_io);
+    }
+    return prefix;
+}
+
+fn expectFound(prefix: []const u8, keg: []const u8) !void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const got = ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) orelse
+        return error.CertNotFound;
+    const want = try std.fmt.allocPrint(testing.allocator, "{s}/etc/{s}/cert.pem", .{ prefix, keg });
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, got);
+}
+
+test "findCertFile finds the bundle of an openssl@4-only prefix" {
+    const prefix = try certPrefix("v4", &.{"openssl@4"});
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try expectFound(prefix, "openssl@4");
+}
+
+test "findCertFile finds the bundle of an openssl@3-only prefix" {
+    const prefix = try certPrefix("v3", &.{"openssl@3"});
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try expectFound(prefix, "openssl@3");
+}
+
+test "findCertFile prefers openssl@4 when both majors are present" {
+    const prefix = try certPrefix("both", &.{ "openssl@3", "openssl@4" });
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try expectFound(prefix, "openssl@4");
+}
+
+test "findCertFile returns null when no openssl keg has a bundle" {
+    const prefix = try certPrefix("none", &.{});
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) == null);
+}
+
+test "findCertFile skips a dangling openssl@4 link and falls back to openssl@3" {
+    // SSL_CERT_FILE must never name a missing file, so a link that does
+    // not resolve does not count as a bundle.
+    const prefix = try certPrefix("dangling", &.{"openssl@3"});
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc/openssl@4", .{prefix});
+    defer testing.allocator.free(dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/cert.pem", .{dir});
+    defer testing.allocator.free(link);
+    const gone = try std.fmt.allocPrint(testing.allocator, "{s}/gone.pem", .{prefix});
+    defer testing.allocator.free(gone);
+    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, gone, link, .{});
+    try expectFound(prefix, "openssl@3");
+}
+
+/// `mkdir -p <prefix><sub>`.
+fn mkdirIn(prefix: []const u8, sub: []const u8) !void {
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ prefix, sub });
+    defer testing.allocator.free(dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+}
+
+test "findCertFile ignores a stray bundle of a major that is not installed" {
+    // doctor judges the installed majors only, so shellenv must not export
+    // a file that doctor never checked.
+    const prefix = try certPrefix("stray_v4", &.{ "openssl@3", "openssl@4" });
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@3");
+    try expectFound(prefix, "openssl@3");
+}
+
+test "findCertFile exports nothing when the installed major has no bundle" {
+    const prefix = try certPrefix("stray_only", &.{"openssl@4"});
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@3");
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expect(ca_bundle.findCertFile(std.Options.debug_io, &buf, prefix) == null);
+}
+
+test "findCertFile prefers openssl@4 among installed majors" {
+    // The "both majors are present" test has no opt/ dirs, so it never
+    // reaches the installed-major loop that a real prefix goes through.
+    const prefix = try certPrefix("both_installed", &.{ "openssl@3", "openssl@4" });
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@3");
+    try mkdirIn(prefix, "/opt/openssl@4");
+    try expectFound(prefix, "openssl@4");
 }

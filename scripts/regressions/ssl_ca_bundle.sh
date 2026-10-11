@@ -13,8 +13,10 @@
 #   * mt install ca-certificates → <prefix>/etc/ca-certificates/cert.pem is the
 #     bundle the keg's own helper builds: a real file holding the shipped store
 #     *plus* the roots the system keychain trusts, not a copy of the store.
-#   * mt install openssl@3 → <prefix>/etc/openssl@3/cert.pem resolves (no
-#     dangle) through to that bundle byte for byte.
+#   * mt install openssl@3, then openssl@4 → each <prefix>/etc/<keg>/cert.pem
+#     resolves (no dangle) through to that bundle byte for byte, and
+#     mt shellenv exports it as SSL_CERT_FILE; mt doctor then finds both
+#     bundles linked.
 #
 # The shipped `cacert.pem` is only an input to the helper. Asserting the
 # installed bundle equals it would pin the state where the helper never ran.
@@ -70,18 +72,38 @@ CA_N=$(certs "$CA_CERT")
   fail "etc/ca-certificates/cert.pem is a copy of the shipped store — the keg's helper never ran"
 pass "etc/ca-certificates/cert.pem is the helper's bundle ($CA_N certs vs $SHIPPED_N shipped)"
 
-# ── 2. openssl@3 links etc/openssl@3/cert.pem through the chain. ─────
-printf '▸ malt install openssl@3\n'
-"$BIN" install openssl@3 >"$PREFIX/ossl.log" 2>&1 || fail "install openssl@3 failed — see $PREFIX/ossl.log"
-pass "installed openssl@3"
+# ── 2. each openssl major links etc/<keg>/cert.pem through the chain. ─
+# Homebrew moves dependents from openssl@3 to openssl@4, so both must work.
+# openssl@4 goes second: shellenv prefers it once both are present.
+for KEG in openssl@3 openssl@4; do
+  printf '▸ malt install %s\n' "$KEG"
+  "$BIN" install "$KEG" >"$PREFIX/$KEG.log" 2>&1 || fail "install $KEG failed — see $PREFIX/$KEG.log"
+  pass "installed $KEG"
 
-OSSL_CERT="$PREFIX/etc/openssl@3/cert.pem"
-[[ -L "$OSSL_CERT" ]] || fail "$OSSL_CERT is not a symlink"
-[[ -e "$OSSL_CERT" ]] || fail "$OSSL_CERT dangles — the cross-formula pkgetc chain is broken"
-pass "etc/openssl@3/cert.pem is a symlink that resolves (no dangle)"
+  OSSL_CERT="$PREFIX/etc/$KEG/cert.pem"
+  [[ -L "$OSSL_CERT" ]] || fail "$OSSL_CERT is not a symlink"
+  [[ -e "$OSSL_CERT" ]] || fail "$OSSL_CERT dangles — the cross-formula pkgetc chain is broken"
+  pass "etc/$KEG/cert.pem is a symlink that resolves (no dangle)"
 
-[[ "$(sha "$OSSL_CERT")" == "$(sha "$CA_CERT")" ]] ||
-  fail "etc/openssl@3/cert.pem does not resolve to the ca-certificates bundle"
-pass "etc/openssl@3/cert.pem reaches the ca-certificates bundle (sha256 match)"
+  [[ "$(sha "$OSSL_CERT")" == "$(sha "$CA_CERT")" ]] ||
+    fail "etc/$KEG/cert.pem does not resolve to the ca-certificates bundle"
+  pass "etc/$KEG/cert.pem reaches the ca-certificates bundle (sha256 match)"
+
+  # The user-facing contract: shellenv hands this keg's bundle to the shell.
+  "$BIN" shellenv bash | grep -qF "export SSL_CERT_FILE=\"$OSSL_CERT\";" ||
+    fail "mt shellenv did not export SSL_CERT_FILE=$OSSL_CERT"
+  pass "mt shellenv exports SSL_CERT_FILE → etc/$KEG/cert.pem"
+done
+
+# ── 3. with both majors installed, doctor finds every bundle linked. ──
+# doctor exits 1 on a warn row; under pipefail a piped grep would then
+# never fire, so capture the output first.
+DOCTOR=$("$BIN" doctor 2>&1 || true)
+# A crash or a missing row would also show no warning, so require the row.
+grep -q 'SSL CA bundle' <<<"$DOCTOR" || fail "mt doctor drew no SSL CA bundle row"
+if grep -q "isn't linked" <<<"$DOCTOR"; then
+  fail "mt doctor reports an unlinked CA bundle with openssl@3 and openssl@4 installed"
+fi
+pass "mt doctor finds the bundle of both openssl majors"
 
 printf '\n✔ ssl ca-bundle provisioning regression passed\n'

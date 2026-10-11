@@ -26,6 +26,7 @@ const der = Certificate.der;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const child = @import("child.zig");
+const prefix_path = @import("../fs/prefix_path.zig");
 const sandbox = @import("dsl/sandbox.zig");
 
 pub const BuildError = error{
@@ -238,6 +239,51 @@ pub fn build(
 /// means any upstream edit falls back to running it — correct, just slower —
 /// until the equivalence test is re-run and this digest updated.
 pub const known_script_sha256 = "0d382c7231f5f0378947729c5815f7fb8f6c12c16396172513109b13bd59b900";
+
+/// OpenSSL kegs that read `<prefix>/etc/<keg>/cert.pem`, newest first.
+/// Homebrew moves dependents to a new major over time, so a prefix can
+/// hold either one, or both.
+pub const openssl_kegs = [_][]const u8{ "openssl@4", "openssl@3" };
+
+// Callers size their buffers for a validated prefix plus `max_path_suffix`;
+// a longer suffix would overflow and read as a missing bundle.
+comptime {
+    for (openssl_kegs) |keg| {
+        std.debug.assert(("/etc/" ++ keg ++ "/cert.pem").len <= prefix_path.max_path_suffix);
+    }
+}
+
+/// Whether `<prefix>/opt/<keg>` resolves, i.e. the keg is installed.
+pub fn isInstalled(io: std.Io, buf: []u8, prefix: []const u8, keg: []const u8) bool {
+    const opt = std.fmt.bufPrint(buf, "{s}/opt/{s}", .{ prefix, keg }) catch return false;
+    std.Io.Dir.cwd().access(io, opt, .{}) catch return false;
+    return true;
+}
+
+/// `<prefix>/etc/<keg>/cert.pem` formatted into `buf`, when it resolves.
+/// A dangling link does not count: callers export the path as-is.
+pub fn certFile(io: std.Io, buf: []u8, prefix: []const u8, keg: []const u8) ?[]const u8 {
+    const path = std.fmt.bufPrint(buf, "{s}/etc/{s}/cert.pem", .{ prefix, keg }) catch return null;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return null;
+    return path;
+}
+
+/// The bundle of the newest installed OpenSSL major that has one. A file
+/// under a major that is not installed counts only when no major is, so
+/// shellenv never exports a bundle that doctor does not check.
+pub fn findCertFile(io: std.Io, buf: []u8, prefix: []const u8) ?[]const u8 {
+    var any_installed = false;
+    for (openssl_kegs) |keg| {
+        if (!isInstalled(io, buf, prefix, keg)) continue;
+        any_installed = true;
+        if (certFile(io, buf, prefix, keg)) |path| return path;
+    }
+    if (any_installed) return null;
+    for (openssl_kegs) |keg| {
+        if (certFile(io, buf, prefix, keg)) |path| return path;
+    }
+    return null;
+}
 
 /// Whether `path` is that script.
 pub fn isKnownScript(io: std.Io, path: []const u8) bool {

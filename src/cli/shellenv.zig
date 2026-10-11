@@ -5,6 +5,7 @@
 const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const atomic = @import("../fs/atomic.zig");
+const ca_bundle = @import("../core/ca_bundle.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
@@ -25,23 +26,23 @@ pub fn detectFromShellPath(value: ?[]const u8) ?Shell {
     return parseShell(base);
 }
 
-/// Caller owns the returned slice. `cert_present` gates the
-/// `SSL_CERT_FILE` line: emit it only when the CA bundle exists so the
+/// Caller owns the returned slice. `cert_file` gates the
+/// `SSL_CERT_FILE` line: pass it only when the CA bundle exists so the
 /// var never points at a missing file.
 pub fn render(
     allocator: std.mem.Allocator,
     shell: Shell,
     prefix: []const u8,
-    cert_present: bool,
+    cert_file: ?[]const u8,
 ) std.mem.Allocator.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     // The writer is allocator-backed, so its `WriteFailed` is always OOM.
-    writeShellEnv(&aw.writer, shell, prefix, cert_present) catch return error.OutOfMemory;
+    writeShellEnv(&aw.writer, shell, prefix, cert_file) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
-fn writeShellEnv(w: *std.Io.Writer, shell: Shell, prefix: []const u8, cert_present: bool) std.Io.Writer.Error!void {
+fn writeShellEnv(w: *std.Io.Writer, shell: Shell, prefix: []const u8, cert_file: ?[]const u8) std.Io.Writer.Error!void {
     // Fish uses `set -gx` because `export` is a syntax error in fish;
     // bash/zsh share the POSIX form.
     switch (shell) {
@@ -52,7 +53,7 @@ fn writeShellEnv(w: *std.Io.Writer, shell: Shell, prefix: []const u8, cert_prese
             try w.print("export PATH=\"{s}/bin:{s}/sbin${{PATH+:$PATH}}\";\n", .{ prefix, prefix });
             try w.print("export MANPATH=\"{s}/share/man${{MANPATH+:$MANPATH}}:\";\n", .{prefix});
             try w.print("export INFOPATH=\"{s}/share/info:${{INFOPATH:-}}\";\n", .{prefix});
-            if (cert_present) try w.print("export SSL_CERT_FILE=\"{s}/etc/openssl@3/cert.pem\";\n", .{prefix});
+            if (cert_file) |cert| try w.print("export SSL_CERT_FILE=\"{s}\";\n", .{cert});
         },
         .fish => {
             try w.print("set -gx HOMEBREW_PREFIX \"{s}\";\n", .{prefix});
@@ -61,7 +62,7 @@ fn writeShellEnv(w: *std.Io.Writer, shell: Shell, prefix: []const u8, cert_prese
             try w.print("set -gx PATH \"{s}/bin\" \"{s}/sbin\" $PATH;\n", .{ prefix, prefix });
             try w.print("set -gx MANPATH \"{s}/share/man\" $MANPATH;\n", .{prefix});
             try w.print("set -gx INFOPATH \"{s}/share/info\" $INFOPATH;\n", .{prefix});
-            if (cert_present) try w.print("set -gx SSL_CERT_FILE \"{s}/etc/openssl@3/cert.pem\";\n", .{prefix});
+            if (cert_file) |cert| try w.print("set -gx SSL_CERT_FILE \"{s}\";\n", .{cert});
         },
     }
 }
@@ -72,18 +73,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const shell = resolveShell(ctx, args) orelse std.process.exit(2);
 
     const prefix = atomic.maltPrefixOrAbort();
-    const out = try render(allocator, shell, prefix, sslCertPresent(ctx.io, prefix));
+    var cert_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const out = try render(allocator, shell, prefix, ca_bundle.findCertFile(ctx.io, &cert_buf, prefix));
     defer allocator.free(out);
     output.writeStdoutAll(out);
-}
-
-/// True when the OpenSSL CA bundle exists at the canonical path. Drives
-/// the `SSL_CERT_FILE` export so it never names a missing file.
-fn sslCertPresent(io: std.Io, prefix: []const u8) bool {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "{s}/etc/openssl@3/cert.pem", .{prefix}) catch return false;
-    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
-    return true;
 }
 
 fn resolveShell(ctx: *const AppCtx, args: []const []const u8) ?Shell {

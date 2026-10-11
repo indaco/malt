@@ -1,8 +1,9 @@
 //! `mt doctor` SSL CA bundle check tests.
 //!
 //! The check is gated on its precondition: it verifies the OpenSSL trust
-//! bundle (`<prefix>/etc/openssl@3/cert.pem`) only when `ca-certificates`
-//! is installed (`<prefix>/opt/ca-certificates`). A prefix that never
+//! bundle (`<prefix>/etc/openssl@<N>/cert.pem`) only when `ca-certificates`
+//! is installed (`<prefix>/opt/ca-certificates`). Each installed OpenSSL
+//! major must reach the bundle through its own etc dir. A prefix that never
 //! installed `ca-certificates` is a normal state, not a defect — the check
 //! stays silent. An installed-but-unlinked bundle is a real
 //! misconfiguration and warns.
@@ -139,4 +140,107 @@ test "a max-length prefix still verifies the bundle instead of reporting ok" {
     defer buf.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(p.path), &buf));
     try testing.expect(std.mem.indexOf(u8, buf.items, "isn't linked") != null);
+}
+
+// Homebrew moves dependents from openssl@3 to openssl@4, so the check
+// accepts the bundle of either major and names the keg that is installed.
+
+fn mkdirIn(prefix: []const u8, sub: []const u8) !void {
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ prefix, sub });
+    defer testing.allocator.free(dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+}
+
+fn touchIn(prefix: []const u8, sub: []const u8) !void {
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ prefix, sub });
+    defer testing.allocator.free(path);
+    (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
+}
+
+test "an openssl@4-only prefix with its bundle linked is a clean ok row" {
+    const prefix = try makePrefix("v4_linked", true, false);
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@4");
+    try mkdirIn(prefix, "/etc/openssl@4");
+    try touchIn(prefix, "/etc/openssl@4/cert.pem");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckResult.ok, sslRun(ctxFor(prefix), &buf));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "isn't linked") == null);
+}
+
+test "openssl@4 installed with no bundle: the warning names openssl@4" {
+    // Naming openssl@3 here would send the user to fix a keg that is not
+    // installed.
+    const prefix = try makePrefix("v4_unlinked", true, false);
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@4");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
+}
+
+test "openssl@3 installed with no bundle: the warning names openssl@3" {
+    const prefix = try makePrefix("v3_unlinked", true, false);
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@3");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@3's cert.pem isn't linked") != null);
+}
+
+test "both majors installed, only openssl@3 linked: warns about openssl@4" {
+    // An upgraded prefix keeps its openssl@3 link while a new closure pulls
+    // in openssl@4. Its binaries read their own etc dir, so the openssl@3
+    // bundle does not cover them.
+    const prefix = try makePrefix("both_v4_unlinked", true, true);
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@3");
+    try mkdirIn(prefix, "/opt/openssl@4");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
+}
+
+test "both majors installed and linked: a clean ok row" {
+    const prefix = try makePrefix("both_linked", true, true);
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@3");
+    try mkdirIn(prefix, "/opt/openssl@4");
+    try mkdirIn(prefix, "/etc/openssl@4");
+    try touchIn(prefix, "/etc/openssl@4/cert.pem");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckResult.ok, sslRun(ctxFor(prefix), &buf));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "isn't linked") == null);
+}
+
+test "both majors installed, only openssl@4 linked: warns about openssl@3" {
+    // The per-major rule in the other direction: the openssl@4 bundle does
+    // not cover openssl@3 binaries either.
+    const prefix = try makePrefix("both_v3_unlinked", true, false);
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@3");
+    try mkdirIn(prefix, "/opt/openssl@4");
+    try mkdirIn(prefix, "/etc/openssl@4");
+    try touchIn(prefix, "/etc/openssl@4/cert.pem");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@3's cert.pem isn't linked") != null);
 }

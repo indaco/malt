@@ -5,9 +5,10 @@
 # CA-bundle provisioning makes real HTTPS verification succeed — not just
 # that the cert.pem files exist on disk (the ssl_ca_bundle regression
 # covers that), but that a fresh interpreter linked against the malt
-# openssl@3 can actually verify a live certificate chain.
+# openssl (python@3.14 now depends on openssl@4) can actually verify a live
+# certificate chain.
 #
-# Slower than the regression (downloads python@3.14 + openssl@3 +
+# Slower than the regression (downloads python@3.14 + openssl@4 +
 # ca-certificates), so it lives under smokes/ rather than regressions/.
 #
 # Assertions:
