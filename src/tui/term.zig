@@ -323,3 +323,10 @@ test "enterAltScreen survives a resize signal interrupting a blocked write" {
     try t.enterAltScreen();
     try std.testing.expect(t.in_alt);
 }
+
+test "enterAltScreen still fails on a dead fd and leaves in_alt unset" {
+    // Only EINTR is retried; a real tty fault must stay fatal.
+    var t = termOnPipe(-1);
+    try std.testing.expectError(TermError.WriteFailed, t.enterAltScreen());
+    try std.testing.expect(!t.in_alt);
+}
