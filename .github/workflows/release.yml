@@ -75,7 +75,7 @@ jobs:
 
   goreleaser:
     name: goreleaser
-    runs-on: macos-14
+    runs-on: macos-26
     needs: tag-validate
     # id-token: write is the minimum for cosign keyless - it lets the
     # job mint a GitHub OIDC token that Sigstore exchanges for a
@@ -156,7 +156,7 @@ jobs:
   # we can validate before flipping draft=false.
   verify-artifacts:
     name: Verify draft artifacts
-    runs-on: macos-14
+    runs-on: macos-26
     needs: goreleaser
     permissions:
       contents: read
@@ -238,7 +238,7 @@ jobs:
         # tarball root. Closes the gap that let a prior release ship a
         # tarball that ran fine via install.sh but broke `brew install --cask`.
         run: |
-          # macos-14's /bin/bash is 3.2; avoid bash 4+ builtins (mapfile).
+          # macOS /bin/bash is 3.2; avoid bash 4+ builtins (mapfile).
           found=()
           while IFS= read -r line; do
             [ -n "$line" ] && found+=("$line")
@@ -395,7 +395,7 @@ jobs:
   # trigger would race the other workflows on the same event.
   install-smoke:
     name: Install smoke (live release)
-    runs-on: macos-14
+    runs-on: macos-26
     needs: create-release-notes
     timeout-minutes: 10
     permissions:
@@ -414,7 +414,7 @@ jobs:
       - name: Run release-install smoke
         env:
           # Authenticated API calls raise the ceiling from 60/hr per
-          # runner IP (shared across the macos-14 pool) to 5000/hr,
+          # runner IP (shared across the macOS runner pool) to 5000/hr,
           # which both the propagation wait and install.sh probe rely
           # on. Contents-read is the only scope consulted.
           MALT_SMOKE_API_TOKEN: ${{ secrets.RELEASE_TOKEN }}

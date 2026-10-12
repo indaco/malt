@@ -25,7 +25,7 @@ on:
 jobs:
   build-macos:
     name: Build & Test (macOS)
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       # Canary: make /opt/malt writable and empty. If root owns it, a leaked
       # write fails and the check below cannot see it.
@@ -382,7 +382,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v7
         with:
@@ -422,7 +422,7 @@ jobs:
   # never being run again after the branch that added it merges.
   regressions-hermetic:
     name: Regression guards (hermetic)
-    runs-on: macos-14
+    runs-on: macos-26
     # Deliberate waiting dominates these: ~22 min of run time, 31 min observed
     # worst case. Bound generously so a genuine hang fails in an hour rather
     # than sitting for GitHub's six.
@@ -474,7 +474,7 @@ jobs:
   # their own job they cost nothing on the critical path.
   regressions-harness:
     name: Regression guards (harness)
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       # Canary: make /opt/malt writable and empty. If root owns it, a leaked

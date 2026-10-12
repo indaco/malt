@@ -34,7 +34,7 @@ on:
 jobs:
   corpus:
     name: DSL corpus coverage (macOS)
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7

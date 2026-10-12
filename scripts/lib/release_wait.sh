@@ -28,7 +28,7 @@ WAIT_POLL_INTERVAL="${WAIT_POLL_INTERVAL:-5}" # 5s between probes
 MALT_SMOKE_API_BASE="${MALT_SMOKE_API_BASE:-https://api.github.com/repos/indaco/malt}"
 
 # Optional token. Unauthenticated GitHub API is 60 req/hr per IP, and
-# macos-14 runners share IPs — a busy window plus aggressive polling
+# macOS runners share IPs — a busy window plus aggressive polling
 # drops us to 403s that look identical to "tag not ready yet". The
 # smoke workflow passes the job's GITHUB_TOKEN here to lift the ceiling
 # to 5000/hr and keep polls honest.
