@@ -78,6 +78,7 @@ pub const Term = struct {
         var off: usize = 0;
         while (off < bytes.len) {
             const n = std.c.write(self.fd, bytes[off..].ptr, bytes.len - off);
+            if (n < 0 and std.posix.errno(n) == .INTR) continue; // a signal (e.g. resize) interrupted the write
             if (n <= 0) return TermError.WriteFailed;
             off += @intCast(n);
         }
@@ -268,4 +269,57 @@ test "restore emits mouse_disable before alt_leave" {
         got += @intCast(n);
     }
     try std.testing.expectEqualStrings(want, &buf);
+}
+
+fn noopWinch(_: std.posix.SIG) callconv(.c) void {}
+
+const Interrupter = struct {
+    target: std.c.pthread_t,
+    drain_fd: std.posix.fd_t,
+
+    fn run(self: *const Interrupter) void {
+        const gap = std.c.timespec{ .sec = 0, .nsec = 150 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&gap, null);
+        _ = std.c.pthread_kill(self.target, .WINCH);
+        _ = std.c.nanosleep(&gap, null);
+        var buf: [4096]u8 = undefined;
+        while (std.c.read(self.drain_fd, &buf, buf.len) > 0) {}
+    }
+};
+
+test "enterAltScreen survives a resize signal interrupting a blocked write" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    // Fill the pipe so write(2) blocks with zero bytes moved; a partial
+    // transfer would hide the EINTR.
+    const nonblock: c_int = @bitCast(std.posix.O{ .NONBLOCK = true });
+    try std.testing.expect(std.c.fcntl(fds[1], std.posix.F.SETFL, nonblock) != -1);
+    const chunk = [_]u8{0} ** 4096;
+    while (std.c.write(fds[1], &chunk, chunk.len) > 0) {}
+    try std.testing.expect(std.c.fcntl(fds[1], std.posix.F.SETFL, @as(c_int, 0)) != -1);
+
+    // Same flags as termsize.installWinch (no SA_RESTART). Restore the
+    // process-global disposition so other termsize tests are unaffected.
+    var old: std.posix.Sigaction = undefined;
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = &noopWinch },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.WINCH, &act, &old);
+    defer std.posix.sigaction(.WINCH, &old, null);
+
+    // Non-blocking drain end: the thread stops at empty instead of hanging
+    // the join when the write under test already failed.
+    try setNonblock(fds[0]);
+    const intr = Interrupter{ .target = std.c.pthread_self(), .drain_fd = fds[0] };
+    const th = try std.Thread.spawn(.{}, Interrupter.run, .{&intr});
+    defer th.join();
+
+    var t = termOnPipe(fds[1]);
+    try t.enterAltScreen();
+    try std.testing.expect(t.in_alt);
 }

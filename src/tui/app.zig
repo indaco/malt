@@ -828,6 +828,7 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) void {
     var off: usize = 0;
     while (off < bytes.len) {
         const n = std.c.write(fd, bytes[off..].ptr, bytes.len - off);
+        if (n < 0 and std.posix.errno(n) == .INTR) continue; // a signal (e.g. resize) interrupted the write
         if (n <= 0) return; // best-effort: a vanished tty has nothing to draw
         off += @intCast(n);
     }

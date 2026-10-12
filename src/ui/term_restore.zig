@@ -43,6 +43,7 @@ pub fn crashRestore() void {
     var off: usize = 0;
     while (off < restore_seq.len) {
         const n = std.c.write(reg_fd, restore_seq[off..].ptr, restore_seq.len - off);
+        if (n < 0 and std.posix.errno(n) == .INTR) continue; // a signal (e.g. resize) interrupted the write
         if (n <= 0) break; // best-effort: a vanished tty has nothing to restore
         off += @intCast(n);
     }
