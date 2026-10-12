@@ -110,8 +110,9 @@ REQUEST_LOG_FILE="$LOG_FILE" python3 "$WORK/fixture.py" "$WORK/cert.pem" "$WORK/
   >"$WORK/port" 2>"$WORK/server.err" &
 SERVER_PID=$!
 
-# Bound the wait: a fixture that never binds must fail, not hang.
-for _ in $(seq 1 50); do
+# Bound the wait: a fixture that never binds must fail, not hang. 30s covers
+# a cold first Python start on a fresh CI runner.
+for _ in $(seq 1 300); do
   [[ -s "$WORK/port" ]] && break
   sleep 0.1
 done
