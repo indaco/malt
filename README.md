@@ -706,9 +706,9 @@ malt verifies the SHA256 of each download before extraction. It installs atomica
 <!-- BENCH:META:START -->
 - Install times on macOS 26 (Apple Silicon).
 - Benchmarked releases:
-  - malt `0.25.0`
+  - malt `0.25.2`
   - nanobrew `v0.1.213`
-  - zerobrew `v0.3.5`
+  - zerobrew `v0.4.0`
 <!-- BENCH:META:END -->
 
 <!-- BENCH:COLD:START -->
@@ -716,11 +716,11 @@ malt verifies the SHA256 of each download before extraction. It installs atomica
 
 | Package | malt | nanobrew | zerobrew | Homebrew |
 | ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.347±0.018s | 0.438±0.283s | 1.000±0.083s | 1.483±0.503s |
-| **wget** (7 deps) | 3.527±0.762s | 9.107±1.270s | 7.824±2.962s | 22.378±3.747s |
-| **ffmpeg** (14 deps) | 4.515±0.815s | 8.441±1.052s | 11.221±1.075s | 19.218±1.048s |
-| **openjdk** (29 deps) | 18.240±1.807s | 29.129±3.795s | 34.277±7.731s | 23.124±3.621s |
-| **tesseract** (37 deps) | 12.078±1.300s | 22.073±4.210s | 32.432±1.069s | 23.078±2.029s |
+| **tree** (0 deps) | 0.554±0.007s | 0.594±0.033s | 1.106±0.185s | 1.894±0.187s |
+| **wget** (7 deps) | 3.591±0.582s | 7.903±0.754s | 4.009±0.808s | 20.904±4.086s |
+| **ffmpeg** (14 deps) | 4.001±0.536s | 7.992±0.935s | 3.523±0.189s | 20.654±1.923s |
+| **openjdk** (29 deps) | 15.060±1.395s | 25.897±4.279s | 7.214±0.438s | 17.368±1.414s |
+| **tesseract** (37 deps) | 10.698±0.570s | 29.125±6.394s | 5.792±0.435s | 19.247±1.722s |
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
@@ -728,14 +728,14 @@ malt verifies the SHA256 of each download before extraction. It installs atomica
 
 | Package | malt | nanobrew | zerobrew |
 | ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.016s | 0.074s | 0.400s |
-| **wget** (7 deps) | 0.026s | 0.693s | 2.565s |
-| **ffmpeg** (14 deps) | 0.031s | 3.898s | 5.290s |
-| **openjdk** (29 deps) | 0.026s | 6.974s | 5.998s |
-| **tesseract** (37 deps) | 0.021s | 1.303s | 4.591s |
+| **tree** (0 deps) | 0.015s | 0.112s | 0.307s |
+| **wget** (7 deps) | 0.023s | 0.113s | 0.264s |
+| **ffmpeg** (14 deps) | 0.031s | 4.110s | 0.252s |
+| **openjdk** (29 deps) | 0.018s | 6.482s | 0.220s |
+| **tesseract** (37 deps) | 0.021s | 1.381s | 0.282s |
 <!-- BENCH:WARM:END -->
 
-> Apple Silicon (GitHub Actions macos-26), 2026-10-06. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
+> Apple Silicon (GitHub Actions macos-26), 2026-10-12. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
 
 Binary sizes and the methodology are in [BENCHMARKS.md](BENCHMARKS.md).
 
