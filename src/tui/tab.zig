@@ -216,13 +216,13 @@ pub fn renderHint(f: *Frame, rect: Rect, msg: []const u8) void {
 }
 
 /// Comptime contract check: a conforming tab module exposes `State` (with a
-/// `chrome: Chrome` field), `title`, `step`, and `render`. Called on each tab so
+/// `chrome: Chrome` field) and the decls checked below. Called on each tab so
 /// a missing or mis-typed piece fails the build, not the dashboard at runtime.
 pub fn verify(comptime M: type) void {
     if (!@hasDecl(M, "State")) @compileError(@typeName(M) ++ ": tab must expose `pub const State`");
     if (!@hasField(M.State, "chrome")) @compileError(@typeName(M) ++ ".State must embed a `chrome` field");
     if (@FieldType(M.State, "chrome") != Chrome) @compileError(@typeName(M) ++ ".State.chrome must be tab.Chrome");
-    for ([_][]const u8{ "title", "footerHint", "step", "render", "update" }) |decl| {
+    for ([_][]const u8{ "title", "footerHint", "listLen", "step", "render", "update" }) |decl| {
         if (!@hasDecl(M, decl)) @compileError(@typeName(M) ++ ": tab must expose `pub fn " ++ decl ++ "`");
     }
     // A tab declares its background-fetch capability as data, read generically by
@@ -254,6 +254,10 @@ const GoodTab = struct {
     }
     pub fn footerHint() []const u8 {
         return "g: go";
+    }
+    pub fn listLen(s: *const State) usize {
+        _ = s;
+        return 0;
     }
     pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, s: *State, storage: *Storage, key: Key) cmd.Cmd {
         _ = allocator;

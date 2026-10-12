@@ -90,12 +90,11 @@ comptime {
 }
 
 /// A pure step jump for paging — the viewport height is unknown to a pure
-/// `step`, so a fixed page is the data-agnostic approximation; the render's
-/// `scroll_list.clamp` still bounds it to the real list.
+/// `step`, so a fixed page is the data-agnostic approximation.
 const page_step = 10;
 
 /// Rows the wheel scrolls per notch — the conventional 3-row step. A one-line UX
-/// tunable; like paging, it just nudges `selected` and lets `clamp` bound it.
+/// tunable.
 const wheel_step = 3;
 
 pub const App = struct {
@@ -151,6 +150,21 @@ fn activeChrome(a: *App) *tab.Chrome {
     switch (a.active) {
         inline else => |t| return &@field(a.states, @tagName(t)).chrome,
     }
+}
+
+fn activeListLen(a: *const App) usize {
+    switch (a.active) {
+        inline else => |t| return moduleFor(t).listLen(&@field(a.states, @tagName(t))),
+    }
+}
+
+/// Bounded here because render only clamps a copy: stored excess would swallow
+/// later Up presses. Clamp first so a stale value recovers on the first Up.
+fn moveSelection(a: *App, down: bool, n: usize) void {
+    const last = activeListLen(a) -| 1;
+    const v = &activeChrome(a).view;
+    const cur = @min(v.selected, last);
+    v.selected = if (down) @min(cur +| n, last) else cur -| n;
 }
 
 fn activeFilterText(a: *const App) []const u8 {
@@ -302,10 +316,10 @@ fn stepNormal(allocator: std.mem.Allocator, mt_path: []const u8, a: *App, key: K
         .ctrl_c => a.quit = true,
         .tab, .right => a.active = tab_bar.next(a.active),
         .left => a.active = tab_bar.prev(a.active),
-        .up => activeChrome(a).view.selected -|= 1,
-        .down => activeChrome(a).view.selected += 1,
-        .page_up => activeChrome(a).view.selected -|= page_step,
-        .page_down => activeChrome(a).view.selected += page_step,
+        .up => moveSelection(a, false, 1),
+        .down => moveSelection(a, true, 1),
+        .page_up => moveSelection(a, false, page_step),
+        .page_down => moveSelection(a, true, page_step),
         .home => activeChrome(a).view.selected = 0,
         .char => |c| {
             if (c.len == 1) switch (c.bytes[0]) {
@@ -334,9 +348,9 @@ fn stepNormal(allocator: std.mem.Allocator, mt_path: []const u8, a: *App, key: K
             } else return routeToTab(allocator, mt_path, a, key);
         },
         .space, .end, .esc => return routeToTab(allocator, mt_path, a, key),
-        // `end` needs the row count to land on the last row — deferred to the
-        // data tab; Esc routes so a tab can close a pane / cancel its guard;
-        // `backspace`/`unknown` are inert outside edit mode.
+        // `end` lands on the last row, which the data tab owns; Esc routes so
+        // a tab can close a pane / cancel its guard; `backspace`/`unknown` are
+        // inert outside edit mode.
         .backspace, .unknown => {},
     }
     return .none;
@@ -979,7 +993,7 @@ fn serviceKey(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: 
 /// synthesizes `.enter`, which opens the row's detail pane or toggles it closed when
 /// it is already open for that row — reusing the whole Enter → `mt info` → pump path
 /// verbatim. A left-press on the filter/query input row focuses it for typing (mouse
-/// parity with `/`). The wheel nudges `selected`, which render's `clamp` bounds. Only a
+/// parity with `/`). The wheel moves `selected` within the list. Only a
 /// press acts; releases are inert for every button.
 fn serviceMouse(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, m: keys.Mouse) RunError!void {
     // The uninstall guard is modal for every button: freeze here rather than routing
@@ -1007,8 +1021,8 @@ fn serviceMouse(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter
         };
     }
     switch (m.button) {
-        64 => activeChrome(app).view.selected -|= wheel_step, // wheel up
-        65 => activeChrome(app).view.selected += wheel_step, // wheel down
+        64 => moveSelection(app, false, wheel_step), // wheel up
+        65 => moveSelection(app, true, wheel_step), // wheel down
         0 => if (clickSelect(app, m)) |_| {
             // Left picks: `.space` toggles the basket on the multi-select tabs and is
             // inert elsewhere. Editing swallows space, so a click mid-type just moves
@@ -1301,8 +1315,17 @@ test "q and ctrl_c request quit" {
     try std.testing.expect(b.quit);
 }
 
+// A list far taller than any 80x24 content band.
+const many_pkgs = blk: {
+    var arr: [40]installed.Pkg = undefined;
+    for (&arr, 0..) |*p, i|
+        p.* = .{ .name = std.fmt.comptimePrint("pkg{d:0>3}", .{i}), .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null };
+    break :blk arr;
+};
+
 test "down increments the selection, up saturates at zero" {
-    var a: App = .{};
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
     stepA(&a, .down);
     stepA(&a, .down);
     try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
@@ -1313,7 +1336,8 @@ test "down increments the selection, up saturates at zero" {
 }
 
 test "page keys jump by a page and saturate; home returns to the top" {
-    var a: App = .{};
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
     stepA(&a, .page_down);
     try std.testing.expectEqual(@as(usize, page_step), activeChrome(&a).view.selected);
     stepA(&a, .page_up);
@@ -1326,7 +1350,8 @@ test "page keys jump by a page and saturate; home returns to the top" {
 }
 
 test "a wheel notch moves the selection by a step; up saturates at zero" {
-    var a: App = .{};
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
     try serviceMouseA(&a, wheel_down);
     try std.testing.expectEqual(@as(usize, 3), activeChrome(&a).view.selected); // conventional 3-row notch
     try serviceMouseA(&a, wheel_down);
@@ -1337,17 +1362,103 @@ test "a wheel notch moves the selection by a step; up saturates at zero" {
     try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
 }
 
+test "Down past the last row then Up moves the cursor on the first press" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &click_pkgs;
+    for (0..20) |_| stepA(&a, .down);
+    try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
+    stepA(&a, .up);
+    try std.testing.expectEqual(@as(usize, 1), activeChrome(&a).view.selected);
+}
+
+test "the wheel and End stay inside the list, so the next Up moves at once" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &click_pkgs;
+    for (0..10) |_| try serviceMouseA(&a, wheel_down);
+    try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
+    try serviceMouseA(&a, wheel_up);
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected); // 2 -| 3
+    stepA(&a, .end);
+    try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
+    stepA(&a, .down);
+    stepA(&a, .down);
+    try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
+    stepA(&a, .up);
+    try std.testing.expectEqual(@as(usize, 1), activeChrome(&a).view.selected);
+}
+
+test "a selection left stale by a filter shrink recovers on the first Up" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    activeChrome(&a).view.selected = 30;
+    activeChrome(&a).filter.push("pkg00"); // leaves 10 of the 40 rows
+    stepA(&a, .up);
+    try std.testing.expectEqual(@as(usize, 8), activeChrome(&a).view.selected);
+}
+
+test "an empty list keeps the selection at zero for Down and PageDown" {
+    var a: App = .{ .active = .installed };
+    stepA(&a, .down);
+    stepA(&a, .page_down);
+    try serviceMouseA(&a, wheel_down);
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+}
+
+test "every list tab bounds Down by its own row count" {
+    const findings = [_]doctor.Row{
+        .{ .id = "stale_lock", .severity = .warn, .title = "Stale lock" },
+        .{ .id = "malt_prefix", .severity = .ok, .title = "MALT_PREFIX" },
+    };
+    var o: App = .{ .active = .outdated };
+    o.states.outdated.items = &click_rows;
+    var s: App = .{ .active = .services };
+    s.states.services.items = &click_services;
+    var d: App = .{ .active = .doctor };
+    d.states.doctor.items = &findings;
+    var q: App = .{ .active = .search };
+    q.states.search.items = &search_matches;
+    q.states.search.phase = .loaded;
+    // `filter` narrows each list to one row; Search's input is a query, not a filter.
+    const cases = [_]struct { app: *App, last: usize, filter: []const u8 }{
+        .{ .app = &o, .last = 2, .filter = "pkga" },
+        .{ .app = &s, .last = 2, .filter = "redis" },
+        .{ .app = &d, .last = 1, .filter = "stale" },
+        .{ .app = &q, .last = 1, .filter = "" },
+    };
+    for (cases) |c| {
+        for (0..15) |_| stepA(c.app, .down);
+        try std.testing.expectEqual(c.last, activeChrome(c.app).view.selected);
+        stepA(c.app, .up);
+        try std.testing.expectEqual(c.last - 1, activeChrome(c.app).view.selected);
+        if (c.filter.len == 0) continue;
+        activeChrome(c.app).filter.push(c.filter);
+        try std.testing.expectEqual(@as(usize, 1), activeListLen(c.app));
+        for (0..15) |_| stepA(c.app, .down);
+        try std.testing.expectEqual(@as(usize, 0), activeChrome(c.app).view.selected);
+    }
+}
+
+test "Search basket view bounds Down by the basket, not the results" {
+    // More results than basket entries, so a view-blind bound would overshoot.
+    const results = [_]search.Match{
+        .{ .name = "wget", .kind = .formula, .installed = false },
+        .{ .name = "curl", .kind = .formula, .installed = false },
+        .{ .name = "jq", .kind = .formula, .installed = false },
+    };
+    var a: App = .{ .active = .search };
+    a.states.search.items = &results;
+    a.states.search.basket = &search_basket;
+    a.states.search.view = .basket;
+    a.states.search.phase = .loaded;
+    for (0..5) |_| stepA(&a, .down);
+    try std.testing.expectEqual(@as(usize, 1), activeChrome(&a).view.selected);
+}
+
 test "a wheel notch scrolls the rendered viewport, not just the cursor" {
     // A list far taller than any 80x24 content band, so a deep selection forces a
     // non-zero offset — proving render's `clamp` follows the wheel nudge.
-    const pkgs = comptime blk: {
-        var arr: [40]installed.Pkg = undefined;
-        for (&arr, 0..) |*p, i|
-            p.* = .{ .name = std.fmt.comptimePrint("pkg{d:0>3}", .{i}), .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null };
-        break :blk arr;
-    };
     var a: App = .{ .active = .installed };
-    a.states.installed.items = &pkgs;
+    a.states.installed.items = &many_pkgs;
     for (0..10) |_| try serviceMouseA(&a, wheel_down); // 10 notches → selected 30
     try std.testing.expectEqual(@as(usize, 30), activeChrome(&a).view.selected);
     var buf: [8192]u8 = undefined;
@@ -1358,6 +1469,7 @@ test "a wheel notch scrolls the rendered viewport, not just the cursor" {
 
 test "the wheel scrolls the filtered list while the filter is being edited" {
     var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
     stepA(&a, ch('/')); // enter filter editing
     try std.testing.expect(a.editing);
     try serviceMouseA(&a, wheel_down);

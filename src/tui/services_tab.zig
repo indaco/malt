@@ -72,8 +72,13 @@ fn filteredCount(items: []const Row, filter: []const u8) usize {
     return n;
 }
 
+/// Row count the shell bounds the cursor by.
+pub fn listLen(s: *const State) usize {
+    return filteredCount(s.items, s.chrome.filter.slice());
+}
+
 /// The service the selection points at, after applying the filter and clamping
-/// the (shell-driven, unbounded) selection into the filtered list. The shell
+/// the selection into the filtered list. The shell
 /// reads its `name` to build `mt services <action> <name>`.
 pub fn selectedService(s: *const State) ?Row {
     const filter = s.chrome.filter.slice();

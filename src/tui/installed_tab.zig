@@ -114,8 +114,13 @@ fn filteredCount(items: []const Pkg, filter: []const u8) usize {
     return n;
 }
 
+/// Row count the shell bounds the cursor by.
+pub fn listLen(s: *const State) usize {
+    return filteredCount(s.items, s.chrome.filter.slice());
+}
+
 /// The package the selection currently points at, after applying the filter and
-/// clamping the (shell-driven, unbounded) selection into the filtered list.
+/// clamping the selection into the filtered list.
 pub fn selectedPkg(s: *const State) ?Pkg {
     const filter = s.chrome.filter.slice();
     const nf = filteredCount(s.items, filter);

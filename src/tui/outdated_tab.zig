@@ -82,8 +82,13 @@ fn filteredCount(items: []const Row, filter: []const u8) usize {
     return n;
 }
 
+/// Row count the shell bounds the cursor by.
+pub fn listLen(s: *const State) usize {
+    return filteredCount(s.items, s.chrome.filter.slice());
+}
+
 /// The item index the cursor points at after applying the filter and clamping
-/// the (shell-driven, unbounded) selection into the filtered list, or null when
+/// the selection into the filtered list, or null when
 /// the filtered list is empty.
 pub fn selectedIndex(s: *const State) ?usize {
     const filter = s.chrome.filter.slice();

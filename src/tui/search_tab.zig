@@ -234,7 +234,12 @@ pub fn footerHintFor(view: View) []const u8 {
     };
 }
 
-/// The hit the selection points at, clamping the (shell-driven, unbounded)
+/// Row count the shell bounds the cursor by.
+pub fn listLen(s: *const State) usize {
+    return if (s.view == .basket) s.basket.len else s.items.len;
+}
+
+/// The hit the selection points at, clamping the
 /// selection into the result list. No filter: the query already ran server-side,
 /// so the selection indexes straight into `items`. The key handlers read its
 /// `name` and `kind` for the info read, the basket toggle, and the install fallback.
@@ -243,7 +248,7 @@ pub fn selectedMatch(s: *const State) ?Match {
     return s.items[i];
 }
 
-/// The index of the active row in `items`, clamping the unbounded cursor. No
+/// The index of the active row in `items`, clamping the cursor. No
 /// filter, so the cursor indexes straight into `items`. Null on an empty list, in
 /// the basket view, and while the results are not loaded (a re-query searching, or
 /// no query yet): the results list is not on screen then, so no key may act on a
@@ -266,7 +271,7 @@ fn doToggle(allocator: std.mem.Allocator, s: *State, storage: *Storage) void {
     syncSelected(s, storage);
 }
 
-/// The basket pick the cursor points at, clamping the (shell-driven, unbounded)
+/// The basket pick the cursor points at, clamping the
 /// selection into the basket. The shell reads its `name`/`kind` to resolve a
 /// removal. Null on an empty basket.
 pub fn selectedBasketEntry(s: *const State) ?SelEntry {

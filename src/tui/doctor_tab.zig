@@ -79,6 +79,11 @@ fn filteredCount(items: []const Row, filter: []const u8) usize {
     return n;
 }
 
+/// Row count the shell bounds the cursor by.
+pub fn listLen(s: *const State) usize {
+    return filteredCount(s.items, s.chrome.filter.slice());
+}
+
 /// The `n`-th finding in filtered, severity-ordered display order, or null when
 /// `n` is past the end. The single source of the display order, shared by the
 /// selection and the renderer.
@@ -96,7 +101,7 @@ fn orderedNth(items: []const Row, filter: []const u8, n: usize) ?Row {
 }
 
 /// The finding the selection points at, after applying the filter and clamping
-/// the (shell-driven, unbounded) selection into the filtered, severity-ordered
+/// the selection into the filtered, severity-ordered
 /// list. The shell reads its `fix_class` to build `mt doctor --fix <class>`.
 pub fn selectedFinding(s: *const State) ?Row {
     const filter = s.chrome.filter.slice();
