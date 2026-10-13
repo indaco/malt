@@ -147,9 +147,9 @@ fn writePlainLine(label: []const u8, status: []const u8) void {
 /// re-enable autowrap, show the cursor, return to
 /// column 0. Safe to call from a panic / signal handler — the bytes are
 /// idempotent, and writes silently drop when stderr is unconfigured.
-/// When the TUI registered a raw terminal, its crash restore (alt-screen
-/// leave + `tcsetattr`) runs first, so a panic message lands on a readable
-/// cooked screen instead of trapping inside the alt buffer.
+/// When the TUI or the colour probe registered a raw terminal, its crash
+/// restore runs first (the TUI's includes the alt-screen leave), so a panic
+/// message lands on a readable cooked screen.
 pub fn restoreTerminal() void {
     term_restore.crashRestore();
     writeStderrAll("\x1b[?7h\x1b[?25h\r");

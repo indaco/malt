@@ -25,7 +25,7 @@ var reg_termios: std.posix.termios = undefined;
 var reg_emit_seq: bool = true;
 
 /// Record the terminal to restore on a crash. One registration at a time —
-/// the TUI owns at most one raw terminal.
+/// the TUI or the colour probe owns at most one raw terminal.
 pub fn register(fd: std.posix.fd_t, saved: std.posix.termios) void {
     reg_fd = fd;
     reg_termios = saved;
@@ -48,7 +48,7 @@ pub fn isActive() bool {
     return active.load(.acquire);
 }
 
-/// Forget the registration; a clean exit restores through `Term` instead.
+/// Forget the registration once the owner has restored the terminal itself.
 pub fn clear() void {
     active.store(false, .release);
 }
@@ -69,8 +69,9 @@ pub fn crashRestore() void {
 }
 
 /// Termination signals that must restore the terminal before the process
-/// dies. `SIGINT` is absent by design: TUI raw mode turns `ISIG` off, so
-/// Ctrl-C arrives as a byte and exits through the clean restore path.
+/// dies. `SIGINT` is absent: TUI raw mode turns `ISIG` off, so Ctrl-C arrives
+/// as a byte. The colour probe keeps `ISIG` on (see `queryOsc11Background`),
+/// so a second SIGINT inside its window is not covered.
 const crash_signals = [_]std.posix.SIG{ .TERM, .HUP, .QUIT };
 
 fn crashSignalHandler(sig: std.posix.SIG) callconv(.c) void {
@@ -83,15 +84,21 @@ fn crashSignalHandler(sig: std.posix.SIG) callconv(.c) void {
 
 /// Wire `SIGTERM`/`SIGHUP`/`SIGQUIT` to restore-then-die. Installed by the
 /// TUI and lazily by the background-colour probe; with nothing registered the
-/// handler just re-raises. Handled signals reset to default on `execve`, so
-/// delegated children are unaffected.
+/// handler just re-raises. A signal the parent chose to ignore stays ignored,
+/// so `nohup`-style runs survive. Handled signals reset to default on
+/// `execve`, so delegated children are unaffected.
 pub fn installCrashSignals() void {
     const act = std.posix.Sigaction{
         .handler = .{ .handler = &crashSignalHandler },
         .mask = std.posix.sigemptyset(),
         .flags = std.posix.SA.RESETHAND,
     };
-    for (crash_signals) |sig| std.posix.sigaction(sig, &act, null);
+    for (crash_signals) |sig| {
+        var old: std.posix.Sigaction = undefined;
+        std.posix.sigaction(sig, null, &old);
+        if (old.handler.handler == std.posix.SIG.IGN) continue;
+        std.posix.sigaction(sig, &act, null);
+    }
 }
 
 // The regression script exercises SIGTERM end-to-end on a real pty; this
@@ -268,4 +275,26 @@ test "register after registerTermios emits the restore sequence again" {
     var buf: [restore_seq.len]u8 = undefined;
     try std.testing.expectEqual(@as(isize, restore_seq.len), std.c.read(fds[0], &buf, buf.len));
     try std.testing.expectEqualStrings(restore_seq, &buf);
+}
+
+test "installCrashSignals keeps a signal the parent chose to ignore ignored" {
+    var prev: [crash_signals.len]std.posix.Sigaction = undefined;
+    for (crash_signals, 0..) |sig, i| std.posix.sigaction(sig, null, &prev[i]);
+    defer for (crash_signals, 0..) |sig, i| std.posix.sigaction(sig, &prev[i], null);
+
+    const ignore = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.TERM, &ignore, null);
+    installCrashSignals();
+
+    var term: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.TERM, null, &term);
+    try std.testing.expectEqual(std.posix.SIG.IGN, term.handler.handler);
+    // Only the ignored signal is spared; the rest still get the handler.
+    var hup: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.HUP, null, &hup);
+    try std.testing.expectEqual(&crashSignalHandler, hup.handler.handler);
 }
