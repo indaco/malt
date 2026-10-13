@@ -34,12 +34,17 @@ trap 'rm -rf "$PREFIX"' EXIT
 
 DRIVER=$(
   cat <<'PY'
-import fcntl, os, pty, select, signal, sys, termios, time
+import fcntl, os, pty, select, signal, struct, sys, termios, time
 
 binary, name, prefix = sys.argv[1:4]
+# "ign-SIG": parent ignores SIG before exec; "tui-SIG": run the dashboard.
+mode = name.split("-")[0] if name.split("-")[0] in ("ign", "tui") else "plain"
+sig_name = name.split("-")[1] if mode != "plain" else name
 signal.alarm(20)  # bounds a hang; the assertions then fail on missing output
 
 m, s = pty.openpty()
+if mode == "tui":  # the dashboard refuses a zero-sized terminal
+    fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
 r, w = os.pipe()
 
 holder = os.fork()
@@ -54,7 +59,10 @@ if holder == 0:
     if mt == 0:
         for fd in (0, 1, 2):
             os.dup2(s, fd)
-        os.execve(binary, [binary, "--offline", "info", "zzz-not-a-pkg"], env)
+        if mode == "ign":
+            signal.signal(getattr(signal, "SIG" + sig_name), signal.SIG_IGN)
+        argv = [binary, "tui"] if mode == "tui" else [binary, "--offline", "info", "zzz-not-a-pkg"]
+        os.execve(binary, argv, env)
     os.write(w, f"{mt}\n".encode())
     _, st = os.waitpid(mt, 0)
     how = f"signal {os.WTERMSIG(st)}" if os.WIFSIGNALED(st) else f"exit {os.WEXITSTATUS(st)}"
@@ -98,13 +106,26 @@ if name.startswith("reply-"):
     os.kill(holder, signal.SIGKILL)
     sys.exit(0)
 
-if name != "none":
-    os.kill(mt, getattr(signal, "SIG" + name))
+post = seen.split(b"\x1b]11;?\x1b\\", 1)[-1]
+if sig_name != "none":
+    os.kill(mt, getattr(signal, "SIG" + sig_name))
+# Keep draining: the dashboard repaints, and a full pty buffer would block its
+# crash restore (tcsetattr waits for output to drain).
+drain = True
+while drain:
+    drain = not select.select([r], [], [], 0)[0]
+    while select.select([m], [], [], 0.05)[0]:
+        try:
+            post += os.read(m, 4096)
+        except OSError:
+            drain = False
+            break
 status = rf.readline().strip()
 
 lflag = termios.tcgetattr(s)[3]
 print(f"QUERY={query} STATUS={status} "
-      f"ECHO={int(bool(lflag & termios.ECHO))} ICANON={int(bool(lflag & termios.ICANON))}",
+      f"ECHO={int(bool(lflag & termios.ECHO))} ICANON={int(bool(lflag & termios.ICANON))} "
+      f"ALTLEAVE={int(b'\x1b[?1049l' in post)}",
       flush=True)
 # No waitpid: the dying session leader blocks on tty teardown while we hold
 # the master, so reaping would hang. It is reparented and goes away on its own.
@@ -123,6 +144,20 @@ for sig in none TERM HUP QUIT; do
   [[ $sig == none || $out == *"signal $(kill -l "$sig")"* ]] ||
     fail "$sig: command did not die by SIG$sig ($out)"
 done
+
+# A parent that ignores a signal must keep ignoring it: the command finishes
+# on its own (exit 1) and still leaves the pty cooked.
+out=$(python3 -I -c "$DRIVER" "$BIN" ign-TERM "$PREFIX") || fail "ign-TERM: pty driver failed"
+[[ $out == *QUERY=1* ]] || fail "ign-TERM: probe never sent OSC 11 ($out)"
+[[ $out == *"STATUS=exit 1"* ]] || fail "ign-TERM: an ignored SIGTERM killed the command ($out)"
+[[ $out == *ECHO=1*ICANON=1* ]] || fail "ign-TERM: pty left raw ($out)"
+
+# When the dashboard owns the raw terminal, the probe must not take over its
+# restore: a kill during the probe still leaves the alt screen and cooks the pty.
+out=$(python3 -I -c "$DRIVER" "$BIN" tui-TERM "$PREFIX") || fail "tui-TERM: pty driver failed"
+[[ $out == *QUERY=1* ]] || fail "tui-TERM: dashboard never probed ($out)"
+[[ $out == *ECHO=1*ICANON=1* ]] || fail "tui-TERM: pty left raw ($out)"
+[[ $out == *ALTLEAVE=1* ]] || fail "tui-TERM: alt screen never left ($out)"
 
 # A reply split across reads must resolve to the same colour as a whole one.
 reply() { python3 -I -c "$DRIVER" "$BIN" "reply-$1" "$PREFIX" || fail "reply-$1: pty driver failed"; }
