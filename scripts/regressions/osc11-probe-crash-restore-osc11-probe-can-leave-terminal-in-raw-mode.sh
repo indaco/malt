@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Regression: a termination signal that lands inside the background-colour
+# probe's window must not leave the user's tty in raw mode. The probe turns
+# echo and canonical mode off to read the terminal's OSC 11 reply, but it only
+# restored them on scope exit; a plain CLI command had no crash handler, so
+# SIGTERM/SIGHUP/SIGQUIT killed it with the pty still `-echo -icanon`.
+#
+# script(1) with a sleep cannot target a 100 ms window, so an embedded python
+# pty driver keys on the query bytes: it signals the command the moment
+# `ESC ] 11 ; ?` appears, then reads the pty's termios back. A session-leader
+# holder keeps the pty open after the command dies; without it macOS revokes
+# the slave and tcgetattr fails.
+#
+# Exits 0 when the bug is absent, non-zero with a message when present.
+# No network (--offline plus a throwaway MALT_PREFIX); cleans up its temp
+# state; finishes in a few seconds once built.
+
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
+[[ -x "$BIN" ]] || {
+  echo "build malt first: zig build" >&2
+  exit 2
+}
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+PREFIX=$(mktemp -d -t mt_osc11_raw.XXXXXX)
+trap 'rm -rf "$PREFIX"' EXIT
+
+DRIVER=$(
+  cat <<'PY'
+import fcntl, os, pty, select, signal, sys, termios, time
+
+binary, name, prefix = sys.argv[1:4]
+signal.alarm(20)  # bounds a hang; the assertions then fail on missing output
+
+m, s = pty.openpty()
+r, w = os.pipe()
+
+holder = os.fork()
+if holder == 0:
+    os.setsid()
+    fcntl.ioctl(s, termios.TIOCSCTTY, 0)
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("MALT_")
+           and k not in ("NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "CI", "COLORFGBG")}
+    env.update(MALT_PREFIX=prefix, TERM="xterm-256color")
+    mt = os.fork()
+    if mt == 0:
+        for fd in (0, 1, 2):
+            os.dup2(s, fd)
+        os.execve(binary, [binary, "--offline", "info", "zzz-not-a-pkg"], env)
+    os.write(w, f"{mt}\n".encode())
+    _, st = os.waitpid(mt, 0)
+    how = f"signal {os.WTERMSIG(st)}" if os.WIFSIGNALED(st) else f"exit {os.WEXITSTATUS(st)}"
+    os.write(w, f"{how}\n".encode())
+    time.sleep(60)  # keep the pty alive until the driver reads it
+    os._exit(0)
+
+rf = os.fdopen(r, "r")
+mt = int(rf.readline())
+
+seen = b""
+deadline = time.time() + 5
+while b"\x1b]11;?" not in seen and time.time() < deadline:
+    if select.select([m], [], [], 0.05)[0]:
+        try:
+            seen += os.read(m, 4096)
+        except OSError:
+            break
+query = int(b"\x1b]11;?" in seen)
+
+if name != "none":
+    os.kill(mt, getattr(signal, "SIG" + name))
+status = rf.readline().strip()
+
+lflag = termios.tcgetattr(s)[3]
+print(f"QUERY={query} STATUS={status} "
+      f"ECHO={int(bool(lflag & termios.ECHO))} ICANON={int(bool(lflag & termios.ICANON))}",
+      flush=True)
+# No waitpid: the dying session leader blocks on tty teardown while we hold
+# the master, so reaping would hang. It is reparented and goes away on its own.
+os.kill(holder, signal.SIGKILL)
+PY
+)
+
+for sig in none TERM HUP QUIT; do
+  out=$(python3 -I -c "$DRIVER" "$BIN" "$sig" "$PREFIX") ||
+    fail "$sig: pty driver failed"
+  [[ $out == *QUERY=1* ]] ||
+    fail "$sig: probe never sent OSC 11 (colour env leaked?) ($out)"
+  [[ $out == *ECHO=1*ICANON=1* ]] ||
+    fail "$sig: pty left raw after the signal ($out)"
+  # Death must still be BY the signal so the parent sees it (and SIGQUIT dumps).
+  [[ $sig == none || $out == *"signal $(kill -l "$sig")"* ]] ||
+    fail "$sig: command did not die by SIG$sig ($out)"
+done
+
+printf 'PASS: OSC 11 probe window restores the tty on TERM/HUP/QUIT\n'
