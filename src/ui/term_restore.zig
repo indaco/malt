@@ -1,8 +1,8 @@
 //! malt — signal-safe crash-restore registry for terminal state.
 //!
-//! `std`-only leaf in the `ui/` sink layer, below both the CLI progress
-//! engine and `tui/term.zig`. The TUI's saved termios lives on the run
-//! loop's stack, unreachable from the process-global panic hook and from
+//! `std`-only leaf (tests use `testing/resize_interrupt.zig`) in the `ui/`
+//! sink layer, below both the CLI progress engine and `tui/term.zig`. The
+//! TUI's saved termios lives on the run loop's stack, unreachable from the process-global panic hook and from
 //! signal handlers; this registry mirrors the two fields the crash path
 //! needs — the terminal fd and the pre-raw termios — so either path can
 //! put the terminal back before the process dies.

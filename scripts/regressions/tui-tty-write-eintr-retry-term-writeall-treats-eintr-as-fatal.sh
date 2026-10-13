@@ -4,7 +4,7 @@
 #
 # The raw write loops used to treat EINTR as a hard failure. The runtime
 # checks are inline tests (lib_tests, over the 30 s budget), so this guard
-# pins the source shape instead: every loop retries EINTR, and installWinch
+# pins the source shape instead: every raw write loop retries EINTR, and installWinch
 # keeps flags = 0 so the blocking tty read still wakes on resize.
 # No build, no network, no temp state.
 

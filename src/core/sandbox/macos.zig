@@ -1086,12 +1086,12 @@ test "filterInto keeps pumping when a resize interrupts a blocked read" {
     var in: [2]std.posix.fd_t = undefined;
     var out: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&in));
-    errdefer {
-        _ = std.c.close(in[0]);
-        _ = std.c.close(in[1]);
-    }
-    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&out));
     defer _ = std.c.close(in[0]);
+    // The Late thread owns in[1] once spawned (-1 below); close it only before.
+    errdefer if (in[1] != -1) {
+        _ = std.c.close(in[1]);
+    };
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&out));
     defer _ = std.c.close(out[0]);
     defer _ = std.c.close(out[1]);
 
@@ -1106,6 +1106,7 @@ test "filterInto keeps pumping when a resize interrupts a blocked read" {
         }
     };
     const th = try std.Thread.spawn(.{}, Late.run, .{in[1]});
+    in[1] = -1;
     defer th.join();
     try fx.start();
 
