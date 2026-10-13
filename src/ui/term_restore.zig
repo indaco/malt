@@ -191,3 +191,14 @@ test "crashRestore after register/clear round-trip writes nothing" {
     try std.testing.expectEqual(@as(isize, 1), n);
     try std.testing.expectEqual(@as(u8, 'S'), buf[0]);
 }
+
+test "crashRestore delivers the whole sequence when a signal interrupts a blocked write" {
+    var fx = try @import("../testing/resize_interrupt.zig").Fixture.init();
+    defer fx.deinit();
+    try fx.start();
+
+    register(fx.writeFd(), std.mem.zeroes(std.posix.termios));
+    defer clear();
+    crashRestore();
+    try std.testing.expectEqual(fx.filled + restore_seq.len, fx.finish());
+}

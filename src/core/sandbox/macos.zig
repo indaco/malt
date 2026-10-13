@@ -631,7 +631,7 @@ fn maybeSpawnFilter(
 fn reapChild(pid: std.c.pid_t, hooks: SpawnHooks) void {
     std.posix.kill(pid, std.posix.SIG.KILL) catch {}; // ESRCH means already dead
     var status: c_int = 0;
-    _ = std.c.waitpid(pid, &status, 0);
+    _ = waitChild(pid, &status);
     if (hooks.on_child_reaped) |cb| cb(pid, hooks.ctx);
 }
 
@@ -712,8 +712,8 @@ pub fn spawnFilteredWithHooks(
     return @intCast(wexitstatus(status));
 }
 
-/// A resize (SIGWINCH without SA_RESTART) can interrupt the wait; the child
-/// is still running, so retry instead of reporting a wait failure.
+/// A signal (resize, first Ctrl-C) can interrupt the wait while the child is
+/// still running; retry instead of reporting a wait failure.
 fn waitChild(pid: std.c.pid_t, status: *c_int) std.c.pid_t {
     while (true) {
         const w = std.c.waitpid(pid, status, 0);
@@ -1086,6 +1086,10 @@ test "filterInto keeps pumping when a resize interrupts a blocked read" {
     var in: [2]std.posix.fd_t = undefined;
     var out: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&in));
+    errdefer {
+        _ = std.c.close(in[0]);
+        _ = std.c.close(in[1]);
+    }
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&out));
     defer _ = std.c.close(in[0]);
     defer _ = std.c.close(out[0]);
@@ -1106,6 +1110,9 @@ test "filterInto keeps pumping when a resize interrupts a blocked read" {
     try fx.start();
 
     filterInto(in[0], out[1]);
+    // EOF for the read below, so a red run fails instead of blocking.
+    _ = std.c.close(out[1]);
+    out[1] = -1;
 
     var buf: [8]u8 = undefined;
     try std.testing.expectEqual(@as(isize, 2), std.c.read(out[0], &buf, buf.len));

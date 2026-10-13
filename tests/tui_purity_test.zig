@@ -1,7 +1,9 @@
 //! Pin test: `src/tui/` is a leaf. Every `@import` in it must resolve only to
 //! `std`, `ui/color.zig`, or `ui/term_sanitize.zig` — never `cli/*`, `core/*`,
 //! `db/*`, `net/*`, `main.zig`, or `app_ctx.zig`. The TUI pressure-tests the
-//! `--json` contract instead of reaching across module boundaries.
+//! `--json` contract instead of reaching across module boundaries. One
+//! exception: the std-only test fixture `testing/resize_interrupt.zig`, which
+//! only test blocks import.
 
 const std = @import("std");
 const testing = std.testing;
@@ -101,7 +103,7 @@ fn importAllowed(importer_dir: []const u8, path: []const u8) bool {
         std.mem.eql(u8, resolved, "src/ui/term_restore.zig") or
         std.mem.eql(u8, resolved, "src/ui/spinner_frames.zig") or
         std.mem.eql(u8, resolved, "src/ui/bytes.zig") or
-        // Std-only test fixture, never linked into the binary.
+        // Test-only fixture; not enforced to test blocks, so keep it out of prod code.
         std.mem.eql(u8, resolved, "src/testing/resize_interrupt.zig");
 }
 
@@ -168,7 +170,7 @@ test "importAllowed permits the shared bytes humanizer leaf" {
     try testing.expect(importAllowed("src/tui/json", "../../ui/bytes.zig"));
 }
 
-test "importAllowed permits the std-only resize-interrupt test fixture" {
+test "importAllowed permits the test-only resize-interrupt fixture exception" {
     try testing.expect(importAllowed("src/tui", "../testing/resize_interrupt.zig"));
     try testing.expect(!importAllowed("src/tui", "../testing/one_shot_fail.zig"));
 }

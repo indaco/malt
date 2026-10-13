@@ -17,6 +17,10 @@ pub const Fixture = struct {
     pub fn init() !Fixture {
         var fds: [2]std.posix.fd_t = undefined;
         try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+        errdefer {
+            _ = std.c.close(fds[0]);
+            _ = std.c.close(fds[1]);
+        }
         const nonblock: c_int = @bitCast(std.posix.O{ .NONBLOCK = true });
         try std.testing.expect(std.c.fcntl(fds[1], std.posix.F.SETFL, nonblock) != -1);
         const chunk = [_]u8{0} ** 4096;

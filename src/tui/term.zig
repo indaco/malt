@@ -289,14 +289,3 @@ test "enterAltScreen still fails on a dead fd and leaves in_alt unset" {
     try std.testing.expectError(TermError.WriteFailed, t.enterAltScreen());
     try std.testing.expect(!t.in_alt);
 }
-
-test "crashRestore delivers the whole sequence when a signal interrupts a blocked write" {
-    var fx = try @import("../testing/resize_interrupt.zig").Fixture.init();
-    defer fx.deinit();
-    try fx.start();
-
-    term_restore.register(fx.writeFd(), std.mem.zeroes(std.posix.termios));
-    defer term_restore.clear();
-    term_restore.crashRestore();
-    try std.testing.expectEqual(fx.filled + term_restore.restore_seq.len, fx.finish());
-}
