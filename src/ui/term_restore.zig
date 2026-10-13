@@ -82,12 +82,20 @@ fn crashSignalHandler(sig: std.posix.SIG) callconv(.c) void {
     std.posix.raise(sig) catch {};
 }
 
-/// Wire `SIGTERM`/`SIGHUP`/`SIGQUIT` to restore-then-die. Installed by the
-/// TUI and lazily by the background-colour probe; with nothing registered the
-/// handler just re-raises. A signal the parent chose to ignore stays ignored,
-/// so `nohup`-style runs survive. Handled signals reset to default on
-/// `execve`, so delegated children are unaffected.
+/// Wire `SIGTERM`/`SIGHUP`/`SIGQUIT` to restore-then-die, for the TUI. With
+/// nothing registered the handler just re-raises. Handled signals reset to
+/// default on `execve`, so delegated children are unaffected.
 pub fn installCrashSignals() void {
+    install(false);
+}
+
+/// Same wiring for the colour probe, which runs in any command: a signal the
+/// parent chose to ignore (`trap '' TERM`) stays ignored, children included.
+pub fn installCrashSignalsKeepIgnored() void {
+    install(true);
+}
+
+fn install(keep_ignored: bool) void {
     const act = std.posix.Sigaction{
         .handler = .{ .handler = &crashSignalHandler },
         .mask = std.posix.sigemptyset(),
@@ -96,7 +104,7 @@ pub fn installCrashSignals() void {
     for (crash_signals) |sig| {
         var old: std.posix.Sigaction = undefined;
         std.posix.sigaction(sig, null, &old);
-        if (old.handler.handler == std.posix.SIG.IGN) continue;
+        if (keep_ignored and old.handler.handler == std.posix.SIG.IGN) continue;
         std.posix.sigaction(sig, &act, null);
     }
 }
@@ -112,10 +120,22 @@ test "restore_seq disables mouse tracking so a dead shell stops receiving report
     );
 }
 
+// A runner started with `&` or `trap ''` inherits ignored signals, which would
+// mask what these tests install; start each from the default disposition.
+fn resetCrashSignals() void {
+    const dfl = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    for (crash_signals) |sig| std.posix.sigaction(sig, &dfl, null);
+}
+
 test "installCrashSignals wires TERM/HUP/QUIT to the restore handler" {
     var prev: [crash_signals.len]std.posix.Sigaction = undefined;
     for (crash_signals, 0..) |sig, i| std.posix.sigaction(sig, null, &prev[i]);
     defer for (crash_signals, 0..) |sig, i| std.posix.sigaction(sig, &prev[i], null);
+    resetCrashSignals();
 
     installCrashSignals();
     for (crash_signals) |sig| {
@@ -132,6 +152,7 @@ test "installCrashSignals wires TERM/HUP/QUIT to the restore handler" {
 // the parent treats as failure.
 fn raiseAndDie(sig: std.posix.SIG) noreturn {
     clear(); // inherited registration would make crashRestore scribble on a test pipe
+    resetCrashSignals();
     installCrashSignals();
     std.posix.raise(sig) catch {};
     std.process.exit(0);
@@ -277,10 +298,34 @@ test "register after registerTermios emits the restore sequence again" {
     try std.testing.expectEqualStrings(restore_seq, &buf);
 }
 
-test "installCrashSignals keeps a signal the parent chose to ignore ignored" {
+test "installCrashSignalsKeepIgnored keeps a signal the parent chose to ignore ignored" {
     var prev: [crash_signals.len]std.posix.Sigaction = undefined;
     for (crash_signals, 0..) |sig, i| std.posix.sigaction(sig, null, &prev[i]);
     defer for (crash_signals, 0..) |sig, i| std.posix.sigaction(sig, &prev[i], null);
+    resetCrashSignals();
+
+    const ignore = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.TERM, &ignore, null);
+    installCrashSignalsKeepIgnored();
+
+    var term: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.TERM, null, &term);
+    try std.testing.expectEqual(std.posix.SIG.IGN, term.handler.handler);
+    // Only the ignored signal is spared; the rest still get the handler.
+    var hup: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.HUP, null, &hup);
+    try std.testing.expectEqual(&crashSignalHandler, hup.handler.handler);
+}
+
+test "installCrashSignals still takes over an ignored signal for the TUI" {
+    var prev: [crash_signals.len]std.posix.Sigaction = undefined;
+    for (crash_signals, 0..) |sig, i| std.posix.sigaction(sig, null, &prev[i]);
+    defer for (crash_signals, 0..) |sig, i| std.posix.sigaction(sig, &prev[i], null);
+    resetCrashSignals();
 
     const ignore = std.posix.Sigaction{
         .handler = .{ .handler = std.posix.SIG.IGN },
@@ -290,11 +335,9 @@ test "installCrashSignals keeps a signal the parent chose to ignore ignored" {
     std.posix.sigaction(.TERM, &ignore, null);
     installCrashSignals();
 
+    // The TUI restores its screen on a kill, and its children must not
+    // inherit an ignored SIGTERM or the quit path could not stop them.
     var term: std.posix.Sigaction = undefined;
     std.posix.sigaction(.TERM, null, &term);
-    try std.testing.expectEqual(std.posix.SIG.IGN, term.handler.handler);
-    // Only the ignored signal is spared; the rest still get the handler.
-    var hup: std.posix.Sigaction = undefined;
-    std.posix.sigaction(.HUP, null, &hup);
-    try std.testing.expectEqual(&crashSignalHandler, hup.handler.handler);
+    try std.testing.expectEqual(&crashSignalHandler, term.handler.handler);
 }

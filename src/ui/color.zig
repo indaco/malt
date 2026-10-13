@@ -973,7 +973,7 @@ fn queryOsc11Background() ?Background {
     // a core-to-ui import, which the layering forbids.
     const own = !term_restore.isActive();
     if (own) {
-        term_restore.installCrashSignals();
+        term_restore.installCrashSignalsKeepIgnored();
         term_restore.registerTermios(stdin_fd, saved);
     }
     defer if (own) term_restore.clear();
