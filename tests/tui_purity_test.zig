@@ -100,7 +100,9 @@ fn importAllowed(importer_dir: []const u8, path: []const u8) bool {
         std.mem.eql(u8, resolved, "src/ui/termsize.zig") or
         std.mem.eql(u8, resolved, "src/ui/term_restore.zig") or
         std.mem.eql(u8, resolved, "src/ui/spinner_frames.zig") or
-        std.mem.eql(u8, resolved, "src/ui/bytes.zig");
+        std.mem.eql(u8, resolved, "src/ui/bytes.zig") or
+        // Std-only test fixture, never linked into the binary.
+        std.mem.eql(u8, resolved, "src/testing/resize_interrupt.zig");
 }
 
 /// Normalise `rel` against `base` into a repo-relative POSIX path, collapsing
@@ -164,6 +166,11 @@ test "importAllowed permits the shared spinner_frames leaf" {
 test "importAllowed permits the shared bytes humanizer leaf" {
     try testing.expect(importAllowed("src/tui", "../ui/bytes.zig"));
     try testing.expect(importAllowed("src/tui/json", "../../ui/bytes.zig"));
+}
+
+test "importAllowed permits the std-only resize-interrupt test fixture" {
+    try testing.expect(importAllowed("src/tui", "../testing/resize_interrupt.zig"));
+    try testing.expect(!importAllowed("src/tui", "../testing/one_shot_fail.zig"));
 }
 
 test "importAllowed rejects an outward reach from any depth" {

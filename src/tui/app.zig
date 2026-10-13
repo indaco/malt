@@ -2782,7 +2782,7 @@ test "refusalReason refuses non-tty, NO_COLOR, and CI; allows a clean tty" {
 }
 
 test "writeAll delivers the whole frame when a resize interrupts a blocked write" {
-    var fx = try @import("resize_interrupt.zig").Fixture.init();
+    var fx = try @import("../testing/resize_interrupt.zig").Fixture.init();
     defer fx.deinit();
     try fx.start();
 

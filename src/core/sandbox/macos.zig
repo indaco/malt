@@ -572,7 +572,7 @@ fn spawnInherit(
         std.c._exit(127);
     }
     var status: c_int = 0;
-    const w = std.c.waitpid(pid, &status, 0);
+    const w = waitChild(pid, &status);
     if (w < 0) return SandboxError.WaitFailed;
     if (wifsignaled(status)) return SandboxError.ChildSignaled;
     if (!wifexited(status)) return SandboxError.ChildCrashed;
@@ -697,7 +697,7 @@ pub fn spawnFilteredWithHooks(
     err_r.value = -1;
 
     var status: c_int = 0;
-    const w = std.c.waitpid(pid, &status, 0);
+    const w = waitChild(pid, &status);
 
     // Happy path: threads exit on EOF once the child is gone; join and
     // clear the optionals so a late error cannot re-join.
@@ -712,6 +712,16 @@ pub fn spawnFilteredWithHooks(
     return @intCast(wexitstatus(status));
 }
 
+/// A resize (SIGWINCH without SA_RESTART) can interrupt the wait; the child
+/// is still running, so retry instead of reporting a wait failure.
+fn waitChild(pid: std.c.pid_t, status: *c_int) std.c.pid_t {
+    while (true) {
+        const w = std.c.waitpid(pid, status, 0);
+        if (w < 0 and std.posix.errno(w) == .INTR) continue;
+        return w;
+    }
+}
+
 const FdSinkCtx = struct { fd: c_int };
 
 fn fdSinkWrite(ctx: *anyopaque, bytes: []const u8) term_sanitize.SinkError!void {
@@ -719,6 +729,7 @@ fn fdSinkWrite(ctx: *anyopaque, bytes: []const u8) term_sanitize.SinkError!void 
     var off: usize = 0;
     while (off < bytes.len) {
         const n = std.c.write(self.fd, bytes.ptr + off, bytes.len - off);
+        if (n < 0 and std.posix.errno(n) == .INTR) continue;
         if (n < 0) return error.WriteFailed;
         off += @intCast(n);
     }
@@ -743,6 +754,7 @@ pub fn filterInto(pipe_fd: c_int, out_fd: c_int) void {
     var buf: [4096]u8 = undefined;
     while (true) {
         const n = std.c.read(pipe_fd, &buf, buf.len);
+        if (n < 0 and std.posix.errno(n) == .INTR) continue;
         if (n <= 0) break;
         sanitizer.feed(buf[0..@intCast(n)], sink) catch break;
     }
@@ -1052,4 +1064,69 @@ test "renderRubyProfile rejects unsafe cellar path" {
         SandboxError.UnsafePath,
         renderRubyProfile(std.testing.allocator, "/opt/malt\"/evil", "/opt/malt", .{}),
     );
+}
+
+const resize = @import("../../testing/resize_interrupt.zig");
+
+test "fdSinkWrite delivers every byte when a resize interrupts a blocked write" {
+    var fx = try resize.Fixture.init();
+    defer fx.deinit();
+    try fx.start();
+
+    var ctx = FdSinkCtx{ .fd = fx.writeFd() };
+    const frame = "0123456789";
+    try fdSinkWrite(&ctx, frame);
+    try std.testing.expectEqual(fx.filled + frame.len, fx.finish());
+}
+
+test "filterInto keeps pumping when a resize interrupts a blocked read" {
+    var fx = try resize.Fixture.init();
+    defer fx.deinit();
+
+    var in: [2]std.posix.fd_t = undefined;
+    var out: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&in));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&out));
+    defer _ = std.c.close(in[0]);
+    defer _ = std.c.close(out[0]);
+    defer _ = std.c.close(out[1]);
+
+    // Data arrives only after the fixture's signals, so the read is blocked
+    // (and interrupted) first.
+    const Late = struct {
+        fn run(fd: std.posix.fd_t) void {
+            const gap = std.c.timespec{ .sec = 0, .nsec = 400 * std.time.ns_per_ms };
+            _ = std.c.nanosleep(&gap, null);
+            _ = std.c.write(fd, "ok", 2);
+            _ = std.c.close(fd);
+        }
+    };
+    const th = try std.Thread.spawn(.{}, Late.run, .{in[1]});
+    defer th.join();
+    try fx.start();
+
+    filterInto(in[0], out[1]);
+
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 2), std.c.read(out[0], &buf, buf.len));
+    try std.testing.expectEqualStrings("ok", buf[0..2]);
+}
+
+test "waitChild waits out a resize instead of reporting a wait failure" {
+    var fx = try resize.Fixture.init();
+    defer fx.deinit();
+
+    const pid = std.c.fork();
+    try std.testing.expect(pid >= 0);
+    if (pid == 0) {
+        const nap = std.c.timespec{ .sec = 0, .nsec = 500 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&nap, null);
+        std.c._exit(7);
+    }
+    try fx.start();
+
+    var status: c_int = 0;
+    try std.testing.expectEqual(pid, waitChild(pid, &status));
+    try std.testing.expect(wifexited(status));
+    try std.testing.expectEqual(@as(u8, 7), wexitstatus(status));
 }

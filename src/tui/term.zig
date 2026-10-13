@@ -272,7 +272,7 @@ test "restore emits mouse_disable before alt_leave" {
 }
 
 test "enterAltScreen survives a resize signal interrupting a blocked write" {
-    var fx = try @import("resize_interrupt.zig").Fixture.init();
+    var fx = try @import("../testing/resize_interrupt.zig").Fixture.init();
     defer fx.deinit();
     try fx.start();
 
@@ -291,7 +291,7 @@ test "enterAltScreen still fails on a dead fd and leaves in_alt unset" {
 }
 
 test "crashRestore delivers the whole sequence when a signal interrupts a blocked write" {
-    var fx = try @import("resize_interrupt.zig").Fixture.init();
+    var fx = try @import("../testing/resize_interrupt.zig").Fixture.init();
     defer fx.deinit();
     try fx.start();
 
