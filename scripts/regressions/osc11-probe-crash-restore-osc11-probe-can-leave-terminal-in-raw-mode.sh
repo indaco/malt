@@ -49,6 +49,7 @@ r, w = os.pipe()
 
 holder = os.fork()
 if holder == 0:
+    os.close(m)  # a hung case then hangs up the pty when the driver dies
     os.setsid()
     fcntl.ioctl(s, termios.TIOCSCTTY, 0)
     env = {k: v for k, v in os.environ.items()
@@ -59,6 +60,8 @@ if holder == 0:
     if mt == 0:
         for fd in (0, 1, 2):
             os.dup2(s, fd)
+        for name_ in ("SIGTERM", "SIGHUP", "SIGQUIT"):  # undo a nohup/& parent
+            signal.signal(getattr(signal, name_), signal.SIG_DFL)
         if mode == "ign":
             signal.signal(getattr(signal, "SIG" + sig_name), signal.SIG_IGN)
         argv = [binary, "tui"] if mode == "tui" else [binary, "--offline", "info", "zzz-not-a-pkg"]
