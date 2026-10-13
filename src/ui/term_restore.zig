@@ -5,7 +5,8 @@
 //! TUI's saved termios lives on the run loop's stack, unreachable from the process-global panic hook and from
 //! signal handlers; this registry mirrors the two fields the crash path
 //! needs — the terminal fd and the pre-raw termios — so either path can
-//! put the terminal back before the process dies.
+//! put the terminal back before the process dies. The TUI and the OSC 11
+//! background probe are the two raw-mode users.
 
 const std = @import("std");
 
@@ -21,13 +22,30 @@ pub const restore_seq = "\x1b[?1049l\x1b[?25h\x1b[?7h\r\x1b[?1000l\x1b[?1006l";
 var active: std.atomic.Value(bool) = .init(false);
 var reg_fd: std.posix.fd_t = -1;
 var reg_termios: std.posix.termios = undefined;
+var reg_emit_seq: bool = true;
 
 /// Record the terminal to restore on a crash. One registration at a time —
 /// the TUI owns at most one raw terminal.
 pub fn register(fd: std.posix.fd_t, saved: std.posix.termios) void {
     reg_fd = fd;
     reg_termios = saved;
+    reg_emit_seq = true;
     active.store(true, .release);
+}
+
+/// Like `register`, for a raw window that never touched the screen: the crash
+/// path restores the termios only and writes no escape sequences.
+pub fn registerTermios(fd: std.posix.fd_t, saved: std.posix.termios) void {
+    reg_fd = fd;
+    reg_termios = saved;
+    reg_emit_seq = false;
+    active.store(true, .release);
+}
+
+/// True while a registration is held, so a second raw window can tell it
+/// does not own the restore.
+pub fn isActive() bool {
+    return active.load(.acquire);
 }
 
 /// Forget the registration; a clean exit restores through `Term` instead.
@@ -40,7 +58,7 @@ pub fn clear() void {
 /// both best-effort. Idempotent and a no-op when nothing is registered.
 pub fn crashRestore() void {
     if (!active.load(.acquire)) return;
-    var off: usize = 0;
+    var off: usize = if (reg_emit_seq) 0 else restore_seq.len;
     while (off < restore_seq.len) {
         const n = std.c.write(reg_fd, restore_seq[off..].ptr, restore_seq.len - off);
         if (n < 0 and std.posix.errno(n) == .INTR) continue; // a signal (e.g. resize) interrupted the write
@@ -63,9 +81,10 @@ fn crashSignalHandler(sig: std.posix.SIG) callconv(.c) void {
     std.posix.raise(sig) catch {};
 }
 
-/// Wire `SIGTERM`/`SIGHUP`/`SIGQUIT` to restore-then-die. TUI-only by
-/// contract — plain CLI commands never enter raw mode. Handled signals
-/// reset to default on `execve`, so delegated children are unaffected.
+/// Wire `SIGTERM`/`SIGHUP`/`SIGQUIT` to restore-then-die. Installed by the
+/// TUI and lazily by the background-colour probe; with nothing registered the
+/// handler just re-raises. Handled signals reset to default on `execve`, so
+/// delegated children are unaffected.
 pub fn installCrashSignals() void {
     const act = std.posix.Sigaction{
         .handler = .{ .handler = &crashSignalHandler },
@@ -201,4 +220,52 @@ test "crashRestore delivers the whole sequence when a signal interrupts a blocke
     defer clear();
     crashRestore();
     try std.testing.expectEqual(fx.filled + restore_seq.len, fx.finish());
+}
+
+test "isActive follows register, registerTermios and clear" {
+    clear();
+    try std.testing.expect(!isActive());
+    register(-1, std.mem.zeroes(std.posix.termios));
+    try std.testing.expect(isActive());
+    clear();
+    try std.testing.expect(!isActive());
+    registerTermios(-1, std.mem.zeroes(std.posix.termios));
+    try std.testing.expect(isActive());
+    clear();
+    try std.testing.expect(!isActive());
+}
+
+test "crashRestore after registerTermios leaves plain CLI output untouched" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    registerTermios(fds[1], std.mem.zeroes(std.posix.termios));
+    defer clear();
+    crashRestore();
+
+    // The probe never entered the alt screen; a stray restore_seq would print
+    // escape garbage into the command's output. The sentinel must come first.
+    try std.testing.expectEqual(@as(isize, 1), std.c.write(fds[1], "S", 1));
+    var buf: [restore_seq.len]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 1), std.c.read(fds[0], &buf, buf.len));
+    try std.testing.expectEqual(@as(u8, 'S'), buf[0]);
+}
+
+test "register after registerTermios emits the restore sequence again" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    registerTermios(fds[1], std.mem.zeroes(std.posix.termios));
+    register(fds[1], std.mem.zeroes(std.posix.termios));
+    defer clear();
+    crashRestore();
+
+    // A stale termios-only flag would silently drop the TUI's screen restore.
+    var buf: [restore_seq.len]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, restore_seq.len), std.c.read(fds[0], &buf, buf.len));
+    try std.testing.expectEqualStrings(restore_seq, &buf);
 }

@@ -5,6 +5,7 @@
 const std = @import("std");
 const themes = @import("themes.zig");
 const theme_registry = @import("theme_registry.zig");
+const term_restore = @import("term_restore.zig");
 /// Process-wide io + environ seeded once from `main` via `setRuntime`.
 /// Defaults stay benign so tests that don't seed see deterministic
 /// "no env vars, no terminal probe" output.
@@ -934,6 +935,15 @@ fn queryOsc11Background() ?Background {
 
     // Raw mode: response bytes must reach our read, not the shell prompt.
     const saved = std.posix.tcgetattr(stdin_fd) catch return null;
+    // A fatal signal in the raw window must still restore the tty. The clear
+    // is deferred first so it runs after the restore, never before. The TUI's
+    // own registration, when present, is left alone.
+    const own = !term_restore.isActive();
+    if (own) {
+        term_restore.installCrashSignals();
+        term_restore.registerTermios(stdin_fd, saved);
+    }
+    defer if (own) term_restore.clear();
     var raw = saved;
     raw.lflag.ECHO = false;
     raw.lflag.ICANON = false;
