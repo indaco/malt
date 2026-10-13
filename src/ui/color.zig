@@ -936,6 +936,23 @@ fn oscResponseComplete(bytes: []const u8) bool {
     return std.mem.endsWith(u8, bytes, "\x1b\\");
 }
 
+/// Wait until `fd` is readable or `deadline` (ms, `nowMs` clock) passes. An
+/// interrupted poll recomputes the time left instead of restarting the whole
+/// timeout, so a signal storm cannot stretch the raw window.
+fn waitReadable(fd: std.posix.fd_t, deadline: i64) bool {
+    while (true) {
+        const remaining = deadline - nowMs();
+        if (remaining <= 0) return false;
+        var pfd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        const rc = std.posix.system.poll(&pfd, 1, @intCast(remaining));
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return rc > 0,
+            .INTR => continue,
+            else => return false,
+        }
+    }
+}
+
 /// Ask the terminal for its background colour via OSC 11 and classify
 /// the response. TTY-only; bounded by a 100 ms deadline so a silent
 /// terminal never stalls malt.
@@ -948,9 +965,12 @@ fn queryOsc11Background() ?Background {
 
     // Raw mode: response bytes must reach our read, not the shell prompt.
     const saved = std.posix.tcgetattr(stdin_fd) catch return null;
-    // A fatal signal in the raw window must still restore the tty. The clear
+    // A TERM/HUP/QUIT in the raw window must still restore the tty. The clear
     // is deferred first so it runs after the restore, never before. The TUI's
-    // own registration, when present, is left alone.
+    // own registration is left alone.
+    // ISIG stays on: clearing it makes the restore drop a Ctrl-C pressed in
+    // the window. A second SIGINT is not covered; restoring on that kill needs
+    // a core-to-ui import, which the layering forbids.
     const own = !term_restore.isActive();
     if (own) {
         term_restore.installCrashSignals();
@@ -980,11 +1000,7 @@ fn queryOsc11Background() ?Background {
     const stdin_file: std.Io.File = .{ .handle = stdin_fd, .flags = .{ .nonblocking = false } };
     const deadline = nowMs() + osc11_timeout_ms;
     while (len < buf.len and !oscResponseComplete(buf[0..len])) {
-        const remaining = deadline - nowMs();
-        if (remaining <= 0) break;
-        var pfd = [_]std.posix.pollfd{.{ .fd = stdin_fd, .events = std.posix.POLL.IN, .revents = 0 }};
-        const ready = std.posix.poll(&pfd, @intCast(remaining)) catch return null;
-        if (ready == 0) break;
+        if (!waitReadable(stdin_fd, deadline)) break;
         const n = stdin_file.readStreaming(pkg_io, &.{buf[len..]}) catch return null;
         if (n == 0) break;
         len += n;
@@ -1639,4 +1655,50 @@ test "oscResponseComplete stops only on a BEL or ST terminator" {
     try std.testing.expect(oscResponseComplete("\x1b]11;rgb:0000/0000/0000\x07"));
     try std.testing.expect(oscResponseComplete("\x1b]11;rgb:0000/0000/0000\x1b\\"));
     try std.testing.expect(!oscResponseComplete("\\")); // bare backslash is not ST
+}
+
+fn noopSignal(_: std.posix.SIG) callconv(.c) void {}
+
+fn interruptRepeatedly(target: std.c.pthread_t) void {
+    for (0..40) |_| {
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+        _ = std.c.pthread_kill(target, .WINCH);
+    }
+}
+
+test "waitReadable keeps its deadline while signals keep interrupting the poll" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    // No SA_RESTART, like the resize handler: poll returns EINTR each time.
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = &noopSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    var prev: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.WINCH, &act, &prev);
+    defer std.posix.sigaction(.WINCH, &prev, null);
+
+    const storm = try std.Thread.spawn(.{}, interruptRepeatedly, .{std.c.pthread_self()});
+    defer storm.join();
+
+    const start = nowMs();
+    try std.testing.expect(!waitReadable(fds[0], start + 100));
+    // The storm lasts ~400 ms; a restarted timeout would outlive it.
+    try std.testing.expect(nowMs() - start < 250);
+}
+
+test "waitReadable returns true once data is ready and false for a past deadline" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    try std.testing.expect(!waitReadable(fds[0], nowMs() - 1));
+    try std.testing.expectEqual(@as(isize, 1), std.c.write(fds[1], "x", 1));
+    try std.testing.expect(waitReadable(fds[0], nowMs() + 100));
 }
