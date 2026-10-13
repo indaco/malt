@@ -923,8 +923,21 @@ pub fn themeFromEnv(value: ?[]const u8) ?Background {
 
 // ─── OSC 11 I/O ──────────────────────────────────────────────────────
 
+const osc11_timeout_ms = 100;
+
+fn nowMs() i64 {
+    return std.Io.Clock.awake.now(pkg_io).toMilliseconds();
+}
+
+/// True once a reply ends in BEL or ST (`ESC \`), so the read loop can stop.
+fn oscResponseComplete(bytes: []const u8) bool {
+    if (bytes.len == 0) return false;
+    if (bytes[bytes.len - 1] == 0x07) return true;
+    return std.mem.endsWith(u8, bytes, "\x1b\\");
+}
+
 /// Ask the terminal for its background colour via OSC 11 and classify
-/// the response. TTY-only; bounded by a 100 ms poll so a silent
+/// the response. TTY-only; bounded by a 100 ms deadline so a silent
 /// terminal never stalls malt.
 fn queryOsc11Background() ?Background {
     if (!isTty(std.posix.STDIN_FILENO)) return null;
@@ -960,15 +973,23 @@ fn queryOsc11Background() ?Background {
     const stderr_file: std.Io.File = .{ .handle = stderr_fd, .flags = .{ .nonblocking = false } };
     stderr_file.writeStreamingAll(pkg_io, query) catch return null;
 
-    var pfd = [_]std.posix.pollfd{.{ .fd = stdin_fd, .events = std.posix.POLL.IN, .revents = 0 }};
-    const ready = std.posix.poll(&pfd, 100) catch return null;
-    if (ready == 0) return null;
-
+    // A reply can arrive split across reads, so accumulate until a terminator
+    // or the one shared deadline instead of trusting a single read.
     var buf: [64]u8 = undefined;
+    var len: usize = 0;
     const stdin_file: std.Io.File = .{ .handle = stdin_fd, .flags = .{ .nonblocking = false } };
-    const n = stdin_file.readStreaming(pkg_io, &.{buf[0..]}) catch return null;
-    if (n == 0) return null;
-    const rgb = parseOsc11Response(buf[0..n]) orelse return null;
+    const deadline = nowMs() + osc11_timeout_ms;
+    while (len < buf.len and !oscResponseComplete(buf[0..len])) {
+        const remaining = deadline - nowMs();
+        if (remaining <= 0) break;
+        var pfd = [_]std.posix.pollfd{.{ .fd = stdin_fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        const ready = std.posix.poll(&pfd, @intCast(remaining)) catch return null;
+        if (ready == 0) break;
+        const n = stdin_file.readStreaming(pkg_io, &.{buf[len..]}) catch return null;
+        if (n == 0) break;
+        len += n;
+    }
+    const rgb = parseOsc11Response(buf[0..len]) orelse return null;
     return classifyLuminance(rgb);
 }
 
@@ -1609,4 +1630,13 @@ test "selectionAccent carries an active custom theme's accent" {
     try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", .truecolor, .unknown, custom_ocean_src));
     defer resetCustom();
     try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", selectionAccent());
+}
+
+test "oscResponseComplete stops only on a BEL or ST terminator" {
+    try std.testing.expect(!oscResponseComplete(""));
+    try std.testing.expect(!oscResponseComplete("\x1b]11;rgb:0000/0000/0000"));
+    try std.testing.expect(!oscResponseComplete("\x1b]11;rgb:0000/0000/0000\x1b")); // ST split across reads
+    try std.testing.expect(oscResponseComplete("\x1b]11;rgb:0000/0000/0000\x07"));
+    try std.testing.expect(oscResponseComplete("\x1b]11;rgb:0000/0000/0000\x1b\\"));
+    try std.testing.expect(!oscResponseComplete("\\")); // bare backslash is not ST
 }

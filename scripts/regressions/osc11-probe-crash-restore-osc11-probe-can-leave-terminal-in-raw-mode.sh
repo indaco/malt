@@ -49,7 +49,7 @@ if holder == 0:
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("MALT_")
            and k not in ("NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "CI", "COLORFGBG")}
-    env.update(MALT_PREFIX=prefix, TERM="xterm-256color")
+    env.update(MALT_PREFIX=prefix, TERM="xterm-256color", COLORTERM="truecolor")
     mt = os.fork()
     if mt == 0:
         for fd in (0, 1, 2):
@@ -74,6 +74,29 @@ while b"\x1b]11;?" not in seen and time.time() < deadline:
         except OSError:
             break
 query = int(b"\x1b]11;?" in seen)
+
+if name.startswith("reply-"):
+    # Feed the terminal's answer in pieces; the colour it picks shows in the
+    # command's own output, which the driver returns for comparison.
+    reply = {"white": b"\x1b]11;rgb:ffff/ffff/ffff\x07",
+             "black": b"\x1b]11;rgb:0000/0000/0000\x07"}[name.split("-")[2]]
+    pieces = [reply[:12], reply[12:]] if name.split("-")[1] == "split" else [reply]
+    for piece in pieces:
+        os.write(m, piece)
+        time.sleep(0.03)
+    out = seen.split(b"\x1b]11;?\x1b\\", 1)[-1]
+    done = False
+    while not done:
+        done = bool(select.select([r], [], [], 0)[0])  # exited: drain once more
+        while select.select([m], [], [], 0.05)[0]:
+            try:
+                out += os.read(m, 4096)
+            except OSError:
+                done = True
+                break
+    print(f"QUERY={query} OUT={out.hex()}", flush=True)
+    os.kill(holder, signal.SIGKILL)
+    sys.exit(0)
 
 if name != "none":
     os.kill(mt, getattr(signal, "SIG" + name))
@@ -101,4 +124,13 @@ for sig in none TERM HUP QUIT; do
     fail "$sig: command did not die by SIG$sig ($out)"
 done
 
-printf 'PASS: OSC 11 probe window restores the tty on TERM/HUP/QUIT\n'
+# A reply split across reads must resolve to the same colour as a whole one.
+reply() { python3 -I -c "$DRIVER" "$BIN" "reply-$1" "$PREFIX" || fail "reply-$1: pty driver failed"; }
+whole=$(reply whole-white)
+split=$(reply split-white)
+black=$(reply whole-black)
+[[ $whole == *QUERY=1* ]] || fail "reply: probe never sent OSC 11 ($whole)"
+[[ $split == "$whole" ]] || fail "a colour reply split across reads was not understood"
+[[ $black != "$whole" ]] || fail "reply colour has no effect on output; the split check proves nothing"
+
+printf 'PASS: OSC 11 probe restores the tty on TERM/HUP/QUIT and reads split replies\n'
