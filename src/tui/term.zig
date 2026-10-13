@@ -271,62 +271,32 @@ test "restore emits mouse_disable before alt_leave" {
     try std.testing.expectEqualStrings(want, &buf);
 }
 
-fn noopWinch(_: std.posix.SIG) callconv(.c) void {}
-
-const Interrupter = struct {
-    target: std.c.pthread_t,
-    drain_fd: std.posix.fd_t,
-
-    fn run(self: *const Interrupter) void {
-        const gap = std.c.timespec{ .sec = 0, .nsec = 150 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&gap, null);
-        _ = std.c.pthread_kill(self.target, .WINCH);
-        _ = std.c.nanosleep(&gap, null);
-        var buf: [4096]u8 = undefined;
-        while (std.c.read(self.drain_fd, &buf, buf.len) > 0) {}
-    }
-};
-
 test "enterAltScreen survives a resize signal interrupting a blocked write" {
-    var fds: [2]std.posix.fd_t = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
-    defer _ = std.c.close(fds[0]);
-    defer _ = std.c.close(fds[1]);
+    var fx = try @import("resize_interrupt.zig").Fixture.init();
+    defer fx.deinit();
+    try fx.start();
 
-    // Fill the pipe so write(2) blocks with zero bytes moved; a partial
-    // transfer would hide the EINTR.
-    const nonblock: c_int = @bitCast(std.posix.O{ .NONBLOCK = true });
-    try std.testing.expect(std.c.fcntl(fds[1], std.posix.F.SETFL, nonblock) != -1);
-    const chunk = [_]u8{0} ** 4096;
-    while (std.c.write(fds[1], &chunk, chunk.len) > 0) {}
-    try std.testing.expect(std.c.fcntl(fds[1], std.posix.F.SETFL, @as(c_int, 0)) != -1);
-
-    // Same flags as termsize.installWinch (no SA_RESTART). Restore the
-    // process-global disposition so other termsize tests are unaffected.
-    var old: std.posix.Sigaction = undefined;
-    const act = std.posix.Sigaction{
-        .handler = .{ .handler = &noopWinch },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    std.posix.sigaction(.WINCH, &act, &old);
-    defer std.posix.sigaction(.WINCH, &old, null);
-
-    // Non-blocking drain end: the thread stops at empty instead of hanging
-    // the join when the write under test already failed.
-    try setNonblock(fds[0]);
-    const intr = Interrupter{ .target = std.c.pthread_self(), .drain_fd = fds[0] };
-    const th = try std.Thread.spawn(.{}, Interrupter.run, .{&intr});
-    defer th.join();
-
-    var t = termOnPipe(fds[1]);
+    var t = termOnPipe(fx.writeFd());
     try t.enterAltScreen();
     try std.testing.expect(t.in_alt);
+    try std.testing.expectEqual(fx.filled + seq.alt_enter.len, fx.finish());
 }
 
 test "enterAltScreen still fails on a dead fd and leaves in_alt unset" {
-    // Only EINTR is retried; a real tty fault must stay fatal.
+    // Only EINTR is retried; a real tty fault must stay fatal (a retry on any
+    // n < 0 would spin here instead of failing).
     var t = termOnPipe(-1);
     try std.testing.expectError(TermError.WriteFailed, t.enterAltScreen());
     try std.testing.expect(!t.in_alt);
+}
+
+test "crashRestore delivers the whole sequence when a signal interrupts a blocked write" {
+    var fx = try @import("resize_interrupt.zig").Fixture.init();
+    defer fx.deinit();
+    try fx.start();
+
+    term_restore.register(fx.writeFd(), std.mem.zeroes(std.posix.termios));
+    defer term_restore.clear();
+    term_restore.crashRestore();
+    try std.testing.expectEqual(fx.filled + term_restore.restore_seq.len, fx.finish());
 }

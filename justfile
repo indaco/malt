@@ -47,6 +47,7 @@ regressions-static:
     @./scripts/regressions/post-install-copy-deletes-destination-before-clone.sh
     @./scripts/regressions/tar-prescan-followups-925-926-follow-up.sh
     @./scripts/regressions/tui-background-fetch-no-double-reap-start-background-waits-after-kill.sh
+    @./scripts/regressions/tui-tty-write-eintr-retry-term-writeall-treats-eintr-as-fatal.sh
     @./scripts/regressions/install-smoke-red-run-reverts-casks-and-skips-upstream-outages-local-smoke-install.sh
     @./scripts/regressions/version-update-swap-failure-exits-nonzero-version-update-exits-zero-on-swap-failure.sh
     @MALT_STATIC_ONLY=1 ./scripts/regressions/post-install-steps-live-artefacts.sh

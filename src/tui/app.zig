@@ -2781,61 +2781,13 @@ test "refusalReason refuses non-tty, NO_COLOR, and CI; allows a clean tty" {
     try std.testing.expect(refusalReason(true, true, false, false) == null);
 }
 
-fn noopWinch(_: std.posix.SIG) callconv(.c) void {}
-
-const WinchThenDrain = struct {
-    target: std.c.pthread_t,
-    drain_fd: std.posix.fd_t,
-    got: usize = 0,
-
-    fn run(self: *WinchThenDrain) void {
-        const gap = std.c.timespec{ .sec = 0, .nsec = 150 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&gap, null);
-        _ = std.c.pthread_kill(self.target, .WINCH);
-        _ = std.c.nanosleep(&gap, null);
-        var buf: [4096]u8 = undefined;
-        while (true) {
-            const n = std.c.read(self.drain_fd, &buf, buf.len);
-            if (n <= 0) break;
-            self.got += @intCast(n);
-        }
-    }
-};
-
 test "writeAll delivers the whole frame when a resize interrupts a blocked write" {
-    var fds: [2]std.posix.fd_t = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
-    defer _ = std.c.close(fds[0]);
-    defer _ = std.c.close(fds[1]);
-
-    // Full pipe: write(2) blocks with zero bytes moved, so the signal yields EINTR.
-    const nonblock: c_int = @bitCast(std.posix.O{ .NONBLOCK = true });
-    try std.testing.expect(std.c.fcntl(fds[1], std.posix.F.SETFL, nonblock) != -1);
-    const chunk = [_]u8{0} ** 4096;
-    var filled: usize = 0;
-    while (true) {
-        const n = std.c.write(fds[1], &chunk, chunk.len);
-        if (n <= 0) break;
-        filled += @intCast(n);
-    }
-    try std.testing.expect(std.c.fcntl(fds[1], std.posix.F.SETFL, @as(c_int, 0)) != -1);
-    try std.testing.expect(std.c.fcntl(fds[0], std.posix.F.SETFL, nonblock) != -1);
-
-    var old: std.posix.Sigaction = undefined;
-    const act = std.posix.Sigaction{
-        .handler = .{ .handler = &noopWinch },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    std.posix.sigaction(.WINCH, &act, &old);
-    defer std.posix.sigaction(.WINCH, &old, null);
-
-    var drain = WinchThenDrain{ .target = std.c.pthread_self(), .drain_fd = fds[0] };
-    const th = try std.Thread.spawn(.{}, WinchThenDrain.run, .{&drain});
+    var fx = try @import("resize_interrupt.zig").Fixture.init();
+    defer fx.deinit();
+    try fx.start();
 
     const frame = "0123456789";
-    writeAll(fds[1], frame);
-    th.join();
-    // Drain saw the pre-fill plus the whole frame: nothing was dropped.
-    try std.testing.expectEqual(filled + frame.len, drain.got);
+    writeAll(fx.writeFd(), frame);
+    // Pre-fill plus the whole frame came out: nothing was dropped.
+    try std.testing.expectEqual(fx.filled + frame.len, fx.finish());
 }
