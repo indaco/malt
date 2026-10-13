@@ -153,6 +153,10 @@ test "installCrashSignals wires TERM/HUP/QUIT to the restore handler" {
 fn raiseAndDie(sig: std.posix.SIG) noreturn {
     clear(); // inherited registration would make crashRestore scribble on a test pipe
     resetCrashSignals();
+    // A runner may block these in its mask; a blocked raise stays pending.
+    var unblock = std.posix.sigemptyset();
+    for (crash_signals) |s| std.posix.sigaddset(&unblock, s);
+    std.posix.sigprocmask(std.posix.SIG.UNBLOCK, &unblock, null);
     installCrashSignals();
     std.posix.raise(sig) catch {};
     std.process.exit(0);

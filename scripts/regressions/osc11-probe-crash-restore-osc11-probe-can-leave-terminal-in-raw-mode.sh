@@ -37,18 +37,20 @@ DRIVER=$(
 import fcntl, os, pty, select, signal, struct, sys, termios, time
 
 binary, name, prefix = sys.argv[1:4]
-# "ign-SIG": parent ignores SIG before exec; "tui-SIG": run the dashboard.
-mode = name.split("-")[0] if name.split("-")[0] in ("ign", "tui") else "plain"
+# "ign-SIG": parent ignores SIG before exec; "tui-SIG": run the dashboard;
+# "tuiign-SIG": both.
+mode = name.split("-")[0] if name.split("-")[0] in ("ign", "tui", "tuiign") else "plain"
 sig_name = name.split("-")[1] if mode != "plain" else name
 signal.alarm(20)  # bounds a hang; the assertions then fail on missing output
 
 m, s = pty.openpty()
-if mode == "tui":  # the dashboard refuses a zero-sized terminal
+if mode.startswith("tui"):  # the dashboard refuses a zero-sized terminal
     fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
 r, w = os.pipe()
 
 holder = os.fork()
 if holder == 0:
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)  # nohup parent: still hang up on a dead driver
     os.close(m)  # a hung case then hangs up the pty when the driver dies
     os.setsid()
     fcntl.ioctl(s, termios.TIOCSCTTY, 0)
@@ -62,9 +64,9 @@ if holder == 0:
             os.dup2(s, fd)
         for name_ in ("SIGTERM", "SIGHUP", "SIGQUIT"):  # undo a nohup/& parent
             signal.signal(getattr(signal, name_), signal.SIG_DFL)
-        if mode == "ign":
+        if mode in ("ign", "tuiign"):
             signal.signal(getattr(signal, "SIG" + sig_name), signal.SIG_IGN)
-        argv = [binary, "tui"] if mode == "tui" else [binary, "--offline", "info", "zzz-not-a-pkg"]
+        argv = [binary, "tui"] if mode.startswith("tui") else [binary, "--offline", "info", "zzz-not-a-pkg"]
         os.execve(binary, argv, env)
     os.write(w, f"{mt}\n".encode())
     _, st = os.waitpid(mt, 0)
@@ -154,6 +156,12 @@ out=$(python3 -I -c "$DRIVER" "$BIN" ign-TERM "$PREFIX") || fail "ign-TERM: pty 
 [[ $out == *QUERY=1* ]] || fail "ign-TERM: probe never sent OSC 11 ($out)"
 [[ $out == *"STATUS=exit 1"* ]] || fail "ign-TERM: an ignored SIGTERM killed the command ($out)"
 [[ $out == *ECHO=1*ICANON=1* ]] || fail "ign-TERM: pty left raw ($out)"
+
+# The dashboard takes over a signal its parent ignored, so its children do not
+# inherit the ignore and its quit path can still stop them.
+out=$(python3 -I -c "$DRIVER" "$BIN" tuiign-TERM "$PREFIX") || fail "tuiign-TERM: pty driver failed"
+[[ $out == *"STATUS=signal 15"* ]] || fail "tuiign-TERM: dashboard kept an ignored SIGTERM ignored ($out)"
+[[ $out == *ECHO=1*ICANON=1*ALTLEAVE=1* ]] || fail "tuiign-TERM: terminal not restored ($out)"
 
 # When the dashboard owns the raw terminal, the probe must not take over its
 # restore: a kill during the probe still leaves the alt screen and cooks the pty.
