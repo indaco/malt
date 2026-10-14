@@ -233,6 +233,18 @@ fn tabBarRow(size: term.Size) ?u16 {
     };
 }
 
+/// The active tab's modal prompt, or null when the tab has none. Optional like
+/// `hitTest`, so the shell never names a tab or its guard state.
+fn activeModalPrompt(app: *const App, buf: []u8) ?[]const u8 {
+    switch (app.active) {
+        inline else => |t| {
+            const M = moduleFor(t);
+            if (!@hasDecl(M, "modalPrompt")) return null;
+            return M.modalPrompt(&@field(app.states, @tagName(t)), buf);
+        },
+    }
+}
+
 /// Hit-test a click against the active tab's list, or null when the tab exposes no
 /// `hitTest` (only Doctor has no clickable list). The `@hasDecl` gate keeps that
 /// tab free of a dead arm, matching the optional tab contract.
@@ -366,7 +378,12 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
     var f: tab.Frame = .{ .buf = buf };
     f.put(term.seq.sync_begin); // open the atomic frame; every region positions its own cursor
     switch (layout.compute(cols, rows)) {
-        .too_small => renderTooSmall(&f, cols, rows),
+        .too_small => {
+            renderTooSmall(&f, cols, rows);
+            // A modal prompt must stay visible: a resize can shrink the screen under an armed guard.
+            var pb: [tab.modal_prompt_buf_len]u8 = undefined;
+            if (rows > 0) if (activeModalPrompt(app, &pb)) |text| renderFooterText(&f, text, color.roleCode(.warning), rows, 1, cols);
+        },
         .ok => |r| {
             f.moveTo(r.header.row, 1);
             var hdb: [256]u8 = undefined;
@@ -403,19 +420,20 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
             renderActive(app, &f, bodyRect(app.active, r.content));
 
             // Footer: a rule line separating content, then — by priority — the
-            // pre-read loading status, the transient error banner, or the help line.
-            // Each wraps across the footer's text rows (below the separator) so a
-            // long line keeps its tail on a narrow terminal instead of truncating.
+            // tab's modal prompt when the body has no rows to show it, the
+            // pre-read loading status, the transient error banner, or the help
+            // line. Each wraps across the footer's text rows (below the separator)
+            // so a long line keeps its tail on a narrow terminal instead of truncating.
             tab.renderSeparator(&f, r.footer, r.footer.row, false);
             const text_rows = r.footer.height -| 1;
-            // The active tab's background fetch reads as Loading in the footer too,
-            // so a tab the user navigated *into* mid-audit shows it is still
-            // computing — not an empty list that looks done.
-            // The armed uninstall prompt wins: with no body rows the tab cannot show it.
-            if (hiddenGuard(app, bodyRect(app.active, r.content))) |target| {
-                var gb: [288]u8 = undefined;
-                renderFooterText(&f, installed.guardText(&gb, target.name()), color.roleCode(.warning), r.footer.row + 1, text_rows, cols);
+            var pb: [tab.modal_prompt_buf_len]u8 = undefined;
+            const prompt = if (bodyRect(app.active, r.content).height == 0) activeModalPrompt(app, &pb) else null;
+            if (prompt) |text| {
+                renderFooterText(&f, text, color.roleCode(.warning), r.footer.row + 1, text_rows, cols);
             } else if (app.loading or app.shared.tab_loading.contains(app.active)) {
+                // The active tab's background fetch reads as Loading in the footer too,
+                // so a tab the user navigated *into* mid-audit shows it is still
+                // computing — not an empty list that looks done.
                 var lb: [64]u8 = undefined;
                 renderFooterText(&f, loadingLine(&lb, app), color.roleCode(.accent), r.footer.row + 1, text_rows, cols);
             } else if (app.shared.banner.isSet()) {
@@ -431,12 +449,6 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
     }
     f.put(term.seq.sync_end); // close the atomic frame
     return f.slice();
-}
-
-/// The Installed uninstall target when its guard is armed but the body has no rows to draw it in.
-fn hiddenGuard(app: *const App, body: tab.Rect) ?*const installed.ConfirmTarget {
-    if (app.active != .installed or body.height != 0) return null;
-    return if (app.states.installed.confirm_uninstall) |*t| t else null;
 }
 
 /// The "terminal too small" fallback: the notice icon + message in the info
@@ -1230,6 +1242,28 @@ test "at the minimum height the armed uninstall prompt shows in the footer" {
     // The body has no rows here, so the in-tab banner has nowhere to draw.
     const out = renderFrame(&buf, &a, 80, layout.min_rows);
     try std.testing.expect(std.mem.indexOf(u8, out, "Uninstall curl? [y/N]") != null);
+}
+
+test "below the minimum size the armed uninstall prompt still shows" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
+    var buf: [8192]u8 = undefined;
+    const narrow = renderFrame(&buf, &a, layout.min_cols - 1, 24);
+    try std.testing.expect(std.mem.indexOf(u8, narrow, "[y/N]") != null);
+    const short = renderFrame(&buf, &a, 80, layout.min_rows - 1);
+    try std.testing.expect(std.mem.indexOf(u8, short, "[y/N]") != null);
+}
+
+test "at the minimum height the armed prompt wins over a footer banner" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
+    a.shared.banner.set("refresh failed", "Boom");
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, layout.min_rows);
+    try std.testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") == null);
 }
 
 test "the armed uninstall prompt is drawn once when the body has rows" {

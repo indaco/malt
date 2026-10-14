@@ -286,13 +286,19 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     }
 }
 
-/// The banner names the latched target, never the live selection — what it
-/// shows is exactly what `y` will uninstall.
-/// The prompt line. Public so the shell can show it in the footer when the body has no rows.
-pub fn guardText(buf: []u8, name: []const u8) []const u8 {
+fn guardText(buf: []u8, name: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "Uninstall {s}? [y/N]", .{name}) catch "Uninstall? [y/N]";
 }
 
+/// The uninstall prompt while the guard is armed. The shell shows it outside the
+/// tab when the body has no rows to draw the banner in.
+pub fn modalPrompt(s: *const State, buf: []u8) ?[]const u8 {
+    const target = if (s.confirm_uninstall) |*t| t else return null;
+    return guardText(buf, target.name());
+}
+
+/// The banner names the latched target, never the live selection — what it
+/// shows is exactly what `y` will uninstall.
 fn renderGuard(name: []const u8, f: *tab.Frame, rect: tab.Rect) void {
     f.moveTo(rect.row, rect.col);
     f.put(color.Style.reverse.code());

@@ -136,6 +136,9 @@ pub fn blankRemainder(f: *Frame, rect: Rect, painted: u16) void {
 /// dead arm, and `verify` never requires it.
 pub const Hit = struct { index: usize, open: bool };
 
+/// Buffer room for an optional tab `modalPrompt`: a latched name plus its text.
+pub const modal_prompt_buf_len = 288;
+
 /// A multi-select row checkbox: unselected, selected, or blocked (a row that
 /// can't be selected — pinned in Outdated, already-installed in Search).
 pub const Check = enum { off, on, blocked };
