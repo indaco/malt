@@ -379,10 +379,13 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
     f.put(term.seq.sync_begin); // open the atomic frame; every region positions its own cursor
     switch (layout.compute(cols, rows)) {
         .too_small => {
-            renderTooSmall(&f, cols, rows);
-            // A modal prompt must stay visible: a resize can shrink the screen under an armed guard.
+            // A modal prompt takes the whole screen so a long name or a narrow
+            // terminal still shows the name and `[y/N]`; otherwise the notice.
             var pb: [tab.modal_prompt_buf_len]u8 = undefined;
-            if (rows > 0) if (activeModalPrompt(app, &pb)) |text| renderFooterText(&f, text, color.roleCode(.warning), rows, 1, cols);
+            if (activeModalPrompt(app, &pb)) |text|
+                renderFooterText(&f, text, color.roleCode(.warning), 1, rows, cols)
+            else
+                renderTooSmall(&f, cols, rows);
         },
         .ok => |r| {
             f.moveTo(r.header.row, 1);
@@ -474,13 +477,15 @@ fn renderTooSmall(f: *tab.Frame, cols: u16, rows: u16) void {
                 }
             }
         }
-        f.moveTo(row, 1);
+        f.moveClear(row, 1);
         f.put(color.roleCode(.accent));
         f.putContent(rest[0..take]);
         f.put(color.Style.reset.code());
         rest = rest[take..];
         while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
     }
+    // Erase what a previous frame left below the notice (a cancelled prompt, or the dashboard).
+    tab.blankRemainder(f, .{ .row = 1, .col = 1, .width = cols, .height = rows }, row - 1);
 }
 
 /// Paint `text` wrapped across at most `max_rows` rows from `start_row`, styled
@@ -1241,7 +1246,12 @@ test "at the minimum height the armed uninstall prompt shows in the footer" {
     var buf: [8192]u8 = undefined;
     // The body has no rows here, so the in-tab banner has nowhere to draw.
     const out = renderFrame(&buf, &a, 80, layout.min_rows);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Uninstall curl? [y/N]") != null);
+    const prompt = std.mem.indexOf(u8, out, "Uninstall curl? [y/N]").?;
+    // Footer text starts one row below the footer rule (row 6 at 7 rows), and no
+    // other cursor move sits between that row and the prompt.
+    const move = "\x1b[6;1H";
+    const footer_text = std.mem.lastIndexOf(u8, out[0..prompt], move).?;
+    try std.testing.expect(std.mem.indexOf(u8, out[footer_text + move.len .. prompt], ";1H") == null);
 }
 
 test "below the minimum size the armed uninstall prompt still shows" {
@@ -1253,6 +1263,32 @@ test "below the minimum size the armed uninstall prompt still shows" {
     try std.testing.expect(std.mem.indexOf(u8, narrow, "[y/N]") != null);
     const short = renderFrame(&buf, &a, 80, layout.min_rows - 1);
     try std.testing.expect(std.mem.indexOf(u8, short, "[y/N]") != null);
+}
+
+test "below the minimum size a long name and a tiny terminal still show the whole prompt" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    var buf: [8192]u8 = undefined;
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("font-jetbrains-mono-nerd-font", .cask);
+    const wide = renderFrame(&buf, &a, layout.min_cols - 10, 24);
+    try std.testing.expect(std.mem.indexOf(u8, wide, "font-jetbrains-mono-nerd-font?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wide, "[y/N]") != null);
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
+    const tiny = renderFrame(&buf, &a, 10, 24);
+    try std.testing.expect(std.mem.indexOf(u8, tiny, "curl?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tiny, "[y/N]") != null);
+}
+
+test "a prompt cancelled while the terminal is too small leaves no stale row" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
+    var buf: [8192]u8 = undefined;
+    stepA(&a, .esc); // cancel
+    try std.testing.expect(a.states.installed.confirm_uninstall == null);
+    const out = renderFrame(&buf, &a, 80, 5);
+    // Row 5 held the prompt a frame ago; the notice no longer covers it, so it must be erased.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[5;1H" ++ term.seq.erase_line) != null);
 }
 
 test "at the minimum height the armed prompt wins over a footer banner" {

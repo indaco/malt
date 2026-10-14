@@ -286,6 +286,10 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     }
 }
 
+comptime {
+    std.debug.assert(row_buf_len + "Uninstall ? [y/N]".len <= tab.modal_prompt_buf_len);
+}
+
 fn guardText(buf: []u8, name: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "Uninstall {s}? [y/N]", .{name}) catch "Uninstall? [y/N]";
 }
