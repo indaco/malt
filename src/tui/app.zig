@@ -437,14 +437,15 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
             // Footer: a rule line separating content, then — by priority — the
             // tab's modal prompt when the body has no rows to show it, the
             // pre-read loading status, the transient error banner, or the help
-            // line. Each wraps across the footer's text rows (below the separator)
+            // line. Each wraps across the footer's text rows (below the rule)
             // so a long line keeps its tail on a narrow terminal instead of truncating.
-            tab.renderSeparator(&f, r.footer, r.footer.row, false);
-            const text_rows = r.footer.height -| 1;
             var pb: [tab.modal_prompt_buf_len]u8 = undefined;
             const prompt = if (bodyRect(app.active, r.content).height == 0) activeModalPrompt(app, &pb) else null;
+            // The prompt also takes the rule row: a long name needs a third line to keep `[y/N]`.
+            if (prompt == null) tab.renderSeparator(&f, r.footer, r.footer.row, false);
+            const text_rows = r.footer.height -| 1;
             if (prompt) |text| {
-                renderFooterText(&f, text, color.roleCode(.warning), r.footer.row + 1, text_rows, cols);
+                renderFooterText(&f, text, color.roleCode(.warning), r.footer.row, r.footer.height, cols);
             } else if (app.loading or app.shared.tab_loading.contains(app.active)) {
                 // The active tab's background fetch reads as Loading in the footer too,
                 // so a tab the user navigated *into* mid-audit shows it is still
@@ -1259,9 +1260,9 @@ test "at the minimum height the armed uninstall prompt shows in the footer" {
     // The body has no rows here, so the in-tab banner has nowhere to draw.
     const out = renderFrame(&buf, &a, 80, layout.min_rows);
     const prompt = std.mem.indexOf(u8, out, "Uninstall curl? [y/N]").?;
-    // Footer text starts one row below the footer rule (row 6 at 7 rows), and no
-    // other cursor move sits between that row and the prompt.
-    const move = "\x1b[6;1H";
+    // The prompt starts on the footer rule row (row 5 at 7 rows), and no other
+    // cursor move sits between that row and the prompt.
+    const move = "\x1b[5;1H";
     const footer_text = std.mem.lastIndexOf(u8, out[0..prompt], move).?;
     try std.testing.expect(std.mem.indexOf(u8, out[footer_text + move.len .. prompt], ";1H") == null);
 }
@@ -1360,6 +1361,16 @@ test "a tab without a modal guard never holds the banner" {
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, layout.min_rows);
     try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") == null);
+}
+
+test "at the minimum size a long name still leaves [y/N] on screen" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("a" ** 45, .formula);
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, layout.min_cols, layout.min_rows);
+    try std.testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[5;1H─") == null); // the prompt owns the rule row
 }
 
 test "the armed uninstall prompt is drawn once when the body has rows" {
@@ -2059,7 +2070,7 @@ test "renderFrame draws a footer rule above a dimmed help line" {
     var a: App = .{};
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
-    try std.testing.expect(std.mem.indexOf(u8, out, "─") != null); // horizontal rule
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[22;1H─") != null); // the footer rule, not the content rule
     try std.testing.expect(std.mem.indexOf(u8, out, color.Style.dim.code()) != null); // dimmed help: muted role == dim on the basic tier
     try std.testing.expect(std.mem.indexOf(u8, out, "quit") != null);
 }

@@ -241,7 +241,7 @@ Use the mouse or the keyboard. Click a tab to open it. Click a row to select it.
 
 - **Batch installs across searches.** `space` adds a result to a basket. The basket stays when you start a new query. `i` installs all packages in the basket, and `l` opens the basket for review. In the basket, `space` or `d` removes a package, and `n` removes all packages.
 - **Reads with `--json`, runs the real commands.** Each action runs the real `mt <subcommand>` inline. Thus, output and prompts stay in your scrollback. The dashboard has no install, upgrade, or fix code of its own.
-- **Live resize.** The columns adapt when you change the window size. If the window is too small, the dashboard shows a "terminal too small" notice instead of a damaged frame.
+- **Live resize.** The columns adapt when you change the window size. If the window is too small, the dashboard shows a "terminal too small" notice instead of a damaged frame. If an uninstall prompt is open, the dashboard shows the prompt instead of the notice.
 
 ## Command reference
 
