@@ -294,6 +294,11 @@ fn guardText(buf: []u8, name: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "Uninstall {s}? [y/N]", .{name}) catch "Uninstall? [y/N]";
 }
 
+/// True while the uninstall guard is armed; the shell then freezes other input.
+pub fn modal(s: *const State) bool {
+    return s.confirm_uninstall != null;
+}
+
 /// The uninstall prompt while the guard is armed. The shell shows it outside the
 /// tab when the body has no rows to draw the banner in.
 pub fn modalPrompt(s: *const State, buf: []u8) ?[]const u8 {

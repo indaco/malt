@@ -233,6 +233,18 @@ fn tabBarRow(size: term.Size) ?u16 {
     };
 }
 
+/// True while the active tab holds a modal guard. Optional like `hitTest`, so the
+/// shell never names a tab or its guard state.
+fn activeModal(app: *const App) bool {
+    switch (app.active) {
+        inline else => |t| {
+            const M = moduleFor(t);
+            if (!@hasDecl(M, "modal")) return false;
+            return M.modal(&@field(app.states, @tagName(t)));
+        },
+    }
+}
+
 /// The active tab's modal prompt, or null when the tab has none. Optional like
 /// `hitTest`, so the shell never names a tab or its guard state.
 fn activeModalPrompt(app: *const App, buf: []u8) ?[]const u8 {
@@ -311,11 +323,9 @@ fn stepFilter(allocator: std.mem.Allocator, mt_path: []const u8, a: *App, key: K
 }
 
 fn stepNormal(allocator: std.mem.Allocator, mt_path: []const u8, a: *App, key: Key) cmd.Cmd {
-    // The Installed uninstall guard is modal: while it is up, route every key
-    // to the tab so its one-key resolve sees keys this switch would otherwise
-    // consume — navigation, tab switches, digits, and `/` then cancel the
-    // guard instead of bypassing it.
-    if (a.active == .installed and a.states.installed.confirm_uninstall != null) {
+    // A modal guard gets every key, so navigation, tab switches, digits and `/`
+    // cancel it instead of bypassing it.
+    if (activeModal(a)) {
         switch (key) {
             .ctrl_c => {
                 a.quit = true;
@@ -1026,7 +1036,7 @@ fn serviceKey(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: 
 fn serviceMouse(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, m: keys.Mouse) RunError!void {
     // The uninstall guard is modal for every button: freeze here rather than routing
     // through the key-trap, which would read a click or a notch as a cancel.
-    if (app.active == .installed and app.states.installed.confirm_uninstall != null) return;
+    if (activeModal(app)) return;
     if (!m.press) return; // only a press acts; a release moves and opens nothing
     // A left-click on the query/filter input row focuses it for typing — mouse parity
     // with `/`. It sits above the list, so it never collides with a row hit-test.
@@ -1299,6 +1309,16 @@ test "at the minimum height the armed prompt wins over a footer banner" {
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, layout.min_rows);
     try std.testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") == null);
+}
+
+test "a tab without a modal guard never holds the banner" {
+    var a: App = .{ .active = .doctor };
+    a.shared.banner.set("refresh failed", "Boom");
+    try std.testing.expect(!activeModal(&a));
+    stepA(&a, .down);
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, layout.min_rows);
     try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") == null);
 }
 

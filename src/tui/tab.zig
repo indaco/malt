@@ -235,6 +235,8 @@ pub fn verify(comptime M: type) void {
     // `step`/`update` are the Elm effect seam: they return a `cmd.Cmd` and own the
     // tab's parse storage, so a conforming tab must expose one — reported here.
     if (!@hasDecl(M, "Storage")) @compileError(@typeName(M) ++ ": tab must expose `pub const Storage`");
+    // `modal(s) bool` is OPTIONAL too: true while the tab holds a modal guard, so the
+    // shell routes every key to the tab and freezes the mouse without naming its state.
     // `modalPrompt(s, buf) ?[]const u8` is OPTIONAL too: a tab with a modal key gate
     // returns its prompt text so the shell shows it when the body has no rows or the
     // terminal is too small. It carries the render only; the tab owns the key routing.
