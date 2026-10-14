@@ -841,6 +841,24 @@ test "render on a zero-height rect paints nothing, even with the guard armed" {
     try testing.expectEqual(@as(usize, 0), f.slice().len);
 }
 
+test "render on a zero-height rect paints nothing without the guard too" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample };
+    render(&s, &f, .{ .row = 7, .col = 1, .width = 80, .height = 0 });
+    try testing.expectEqual(@as(usize, 0), f.slice().len);
+}
+
+test "render on a one-row rect still paints the armed guard banner" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.chrome.view.selected = 1; // curl
+    _ = stepKey(&s, ch('x'));
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "[y/N]") != null);
+}
+
 test "render reflows: the same state at two widths differs" {
     var a: [8192]u8 = undefined;
     var b: [8192]u8 = undefined;
