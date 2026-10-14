@@ -296,7 +296,9 @@ fn tabTitles() [tab_bar.count][]const u8 {
 /// the `serviceKey` pump performs. Not a value-returning `App -> App` anymore because
 /// a `Cmd` carries a heap argv the pump owns.
 pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, app: *App, key: Key) cmd.Cmd {
-    app.shared.banner.clear(); // a keypress dismisses the prior transient error banner
+    // An answer to a prompt is not an acknowledgement: the user may not have seen the banner.
+    // The newest error still wins: a failed action sets its own banner over it.
+    if (!activeModal(app)) app.shared.banner.clear();
     return if (app.editing) stepFilter(allocator, mt_path, app, key) else stepNormal(allocator, mt_path, app, key);
 }
 
@@ -1016,7 +1018,7 @@ fn ttyReadable(fd: std.posix.fd_t, timeout_ms: i32) bool {
 /// interpreter from the `Cmd`'s `fail_op`); only a fatal fault propagates to the
 /// errdefer restore + exit.
 fn serviceKey(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, key: Key) RunError!void {
-    const c = step(allocator, app.mt_path, app, key); // mutates nav/editing in place; clears the banner
+    const c = step(allocator, app.mt_path, app, key); // mutates nav/editing in place; clears the banner unless a modal guard is armed
     if (app.quit) {
         freeCmdArgv(allocator, c); // a quit key can still return a stray Cmd (it won't)
         return;
@@ -1034,7 +1036,7 @@ fn serviceKey(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: 
 /// parity with `/`). The wheel moves `selected` within the list. Only a
 /// press acts; releases are inert for every button.
 fn serviceMouse(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Storages, m: keys.Mouse) RunError!void {
-    // The uninstall guard is modal for every button: freeze here rather than routing
+    // A modal guard is modal for every button: freeze here rather than routing
     // through the key-trap, which would read a click or a notch as a cancel.
     if (activeModal(app)) return;
     if (!m.press) return; // only a press acts; a release moves and opens nothing
@@ -1309,6 +1311,44 @@ test "at the minimum height the armed prompt wins over a footer banner" {
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, layout.min_rows);
     try std.testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") == null);
+}
+
+test "a banner set while the prompt is armed shows once the answer clears the prompt" {
+    var buf: [8192]u8 = undefined;
+    for ([_]Key{ ch('n'), .esc }) |answer| {
+        var a: App = .{ .active = .installed };
+        a.states.installed.items = &many_pkgs;
+        a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
+        a.shared.banner.set("refresh failed", "Boom");
+        stepA(&a, answer);
+        try std.testing.expect(a.states.installed.confirm_uninstall == null);
+        const out = renderFrame(&buf, &a, 80, layout.min_rows);
+        try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") != null);
+    }
+}
+
+test "confirming the prompt keeps a banner set while it was armed" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
+    a.shared.banner.set("refresh failed", "Boom");
+    stepA(&a, ch('y'));
+    try std.testing.expect(a.states.installed.confirm_uninstall == null);
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, layout.min_rows);
+    try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") != null);
+}
+
+test "the next key after the prompt is answered dismisses the banner" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
+    a.shared.banner.set("refresh failed", "Boom");
+    stepA(&a, ch('n'));
+    stepA(&a, .down);
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, layout.min_rows);
     try std.testing.expect(std.mem.indexOf(u8, out, "refresh failed") == null);
 }
 
@@ -2683,7 +2723,7 @@ test "a banner truncates width-aware to the terminal columns" {
     try std.testing.expect(std.mem.indexOf(u8, out, "info for some-very-long-package-name failed: ChildFailed") == null);
 }
 
-test "any keypress clears a transient banner" {
+test "any keypress clears a transient banner when no modal guard is armed" {
     var a: App = .{};
     a.shared.banner.set("uninstall failed", "ChildFailed");
     try std.testing.expect(a.shared.banner.isSet());

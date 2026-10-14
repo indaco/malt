@@ -82,6 +82,7 @@ regressions-hermetic:
 # slowest one.
 [group('test')]
 regressions-harness:
+    @./scripts/regressions/banner-survives-modal-answer-prompt-answer-drops-banner.sh
     @./scripts/regressions/cached-outdated-drops-revision-bumped-packages.sh
     @./scripts/regressions/child-run-sequential-pipe-drain-deadlock.sh
     @./scripts/regressions/close-reaps-straggling-statement-database-close-uses-sqlite3-close-and-drops-return.sh

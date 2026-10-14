@@ -22,7 +22,7 @@ pub const banner_max = 160;
 
 /// A transient banner for a recoverable backend failure, shown in the footer.
 /// Fixed buffer, no allocation, like the filter. Set when a delegated op fails
-/// recoverably, cleared on the next keypress (`step`). The message is run
+/// recoverably, cleared on the next keypress that does not answer a modal prompt (`step`). The message is run
 /// through `term_sanitize` at set-time because the op label may carry a
 /// child-derived package name — the leaf's untrusted-input rule.
 pub const Banner = struct {
