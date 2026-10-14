@@ -411,7 +411,11 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
             // The active tab's background fetch reads as Loading in the footer too,
             // so a tab the user navigated *into* mid-audit shows it is still
             // computing — not an empty list that looks done.
-            if (app.loading or app.shared.tab_loading.contains(app.active)) {
+            // The armed uninstall prompt wins: with no body rows the tab cannot show it.
+            if (hiddenGuard(app, bodyRect(app.active, r.content))) |target| {
+                var gb: [288]u8 = undefined;
+                renderFooterText(&f, installed.guardText(&gb, target.name()), color.roleCode(.warning), r.footer.row + 1, text_rows, cols);
+            } else if (app.loading or app.shared.tab_loading.contains(app.active)) {
                 var lb: [64]u8 = undefined;
                 renderFooterText(&f, loadingLine(&lb, app), color.roleCode(.accent), r.footer.row + 1, text_rows, cols);
             } else if (app.shared.banner.isSet()) {
@@ -427,6 +431,12 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
     }
     f.put(term.seq.sync_end); // close the atomic frame
     return f.slice();
+}
+
+/// The Installed uninstall target when its guard is armed but the body has no rows to draw it in.
+fn hiddenGuard(app: *const App, body: tab.Rect) ?*const installed.ConfirmTarget {
+    if (app.active != .installed or body.height != 0) return null;
+    return if (app.states.installed.confirm_uninstall) |*t| t else null;
 }
 
 /// The "terminal too small" fallback: the notice icon + message in the info
@@ -1210,6 +1220,26 @@ test "esc in normal mode routes to the active tab so it can cancel its guard" {
     a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
     stepA(&a, .esc); // not editing → must reach the tab, which lowers the guard
     try std.testing.expect(a.states.installed.confirm_uninstall == null);
+}
+
+test "at the minimum height the armed uninstall prompt shows in the footer" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
+    var buf: [8192]u8 = undefined;
+    // The body has no rows here, so the in-tab banner has nowhere to draw.
+    const out = renderFrame(&buf, &a, 80, layout.min_rows);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Uninstall curl? [y/N]") != null);
+}
+
+test "the armed uninstall prompt is drawn once when the body has rows" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    a.states.installed.confirm_uninstall = installed.ConfirmTarget.init("curl", .formula);
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, layout.min_rows + 1);
+    const first = std.mem.indexOf(u8, out, "[y/N]").?;
+    try std.testing.expect(std.mem.indexOfPos(u8, out, first + 1, "[y/N]") == null);
 }
 
 test "ttyReadable sees a buffered byte and times out on silence" {

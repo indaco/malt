@@ -288,12 +288,16 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
 
 /// The banner names the latched target, never the live selection — what it
 /// shows is exactly what `y` will uninstall.
+/// The prompt line. Public so the shell can show it in the footer when the body has no rows.
+pub fn guardText(buf: []u8, name: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "Uninstall {s}? [y/N]", .{name}) catch "Uninstall? [y/N]";
+}
+
 fn renderGuard(name: []const u8, f: *tab.Frame, rect: tab.Rect) void {
     f.moveTo(rect.row, rect.col);
     f.put(color.Style.reverse.code());
     var b: [row_buf_len]u8 = undefined;
-    const line = std.fmt.bufPrint(&b, "Uninstall {s}? [y/N]", .{name}) catch "Uninstall? [y/N]";
-    f.putContent(scroll_list.truncate(line, rect.width));
+    f.putContent(scroll_list.truncate(guardText(&b, name), rect.width));
     f.put(color.Style.reset.code());
 }
 
