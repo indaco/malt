@@ -61,7 +61,8 @@ pub const TermError = error{ NotATty, WriteFailed, TermiosFailed };
 /// A live terminal session. Tracks exactly what was entered so `restore`
 /// undoes precisely those things, idempotently and in a crash-safe order.
 /// `fd` is the controlling terminal (read+write); `io` only services the
-/// `isTty` probe so the raw-mode path degrades cleanly off a TTY.
+/// `isTty` probe so the raw-mode path degrades cleanly off a TTY, and as the
+/// clock that bounds `drainInput`.
 pub const Term = struct {
     io: std.Io,
     fd: std.posix.fd_t,
@@ -163,6 +164,27 @@ pub const Term = struct {
         term_restore.register(self.fd, saved);
     }
 
+    /// Drop unread input. Best-effort: a gone tty has nothing to drop.
+    pub fn discardInput(self: *Term) void {
+        const attrs = std.posix.tcgetattr(self.fd) catch return;
+        std.posix.tcsetattr(self.fd, .FLUSH, attrs) catch {};
+    }
+
+    /// Drop input until the tty stays quiet for `quiet_ms`. One flush is not
+    /// enough: a paste larger than the tty queue keeps arriving after it.
+    /// Returns false when the input outlasts `budget_ms` or the wait fails,
+    /// so the caller can fail closed.
+    pub fn drainInput(self: *Term, quiet_ms: i32, budget_ms: i64) bool {
+        const start = std.Io.Clock.awake.now(self.io).toMilliseconds();
+        while (true) {
+            self.discardInput();
+            var pfd = [_]std.posix.pollfd{.{ .fd = self.fd, .events = std.posix.POLL.IN, .revents = 0 }};
+            const ready = std.posix.poll(&pfd, quiet_ms) catch return false;
+            if (ready == 0) return true;
+            if (std.Io.Clock.awake.now(self.io).toMilliseconds() - start >= budget_ms) return false;
+        }
+    }
+
     pub fn exitRaw(self: *Term) void {
         const saved = self.saved orelse return;
         term_restore.clear();
@@ -192,9 +214,9 @@ test "cursorMove writes a 1-based CUP sequence" {
 }
 
 // A pipe stands in for the tty so tests can read back exactly what `Term`
-// writes; `io` is untouched by the write helpers, so `undefined` is safe.
+// writes.
 fn termOnPipe(write_fd: std.posix.fd_t) Term {
-    return .{ .io = undefined, .fd = write_fd };
+    return .{ .io = std.testing.io, .fd = write_fd };
 }
 
 // Non-blocking read end so an under-writing helper fails the read assertion
@@ -288,4 +310,112 @@ test "enterAltScreen still fails on a dead fd and leaves in_alt unset" {
     var t = termOnPipe(-1);
     try std.testing.expectError(TermError.WriteFailed, t.enterAltScreen());
     try std.testing.expect(!t.in_alt);
+}
+
+extern "c" fn openpty(amaster: *c_int, aslave: *c_int, name: ?[*]u8, termp: ?*const anyopaque, winp: ?*const anyopaque) c_int;
+
+test "discardInput drops bytes queued on the tty and keeps it usable" {
+    var master: c_int = undefined;
+    var slave: c_int = undefined;
+    if (openpty(&master, &slave, null, null, null) != 0) return error.SkipZigTest;
+    defer _ = std.c.close(master);
+    defer _ = std.c.close(slave);
+    var raw = try std.posix.tcgetattr(slave);
+    raw.lflag.ICANON = false; // byte-at-a-time, so "xy" is readable without a newline
+    raw.lflag.ECHO = false; // an unread echo would block the close
+    try std.posix.tcsetattr(slave, .NOW, raw);
+    try std.testing.expectEqual(@as(isize, 2), std.c.write(master, "xy", 2));
+    var pfd = [_]std.posix.pollfd{.{ .fd = slave, .events = std.posix.POLL.IN, .revents = 0 }};
+    try std.testing.expect(try std.posix.poll(&pfd, 500) > 0); // queued before the flush
+
+    var t = termOnPipe(slave);
+    t.discardInput();
+    pfd[0].revents = 0;
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&pfd, 50));
+}
+
+test "discardInput on a non-tty is a no-op" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    var t = termOnPipe(fds[0]);
+    t.discardInput();
+}
+
+test "drainInput drops a paste larger than the tty queue" {
+    var master: c_int = undefined;
+    var slave: c_int = undefined;
+    if (openpty(&master, &slave, null, null, null) != 0) return error.SkipZigTest;
+    defer _ = std.c.close(master);
+    defer _ = std.c.close(slave);
+    var raw = try std.posix.tcgetattr(slave);
+    raw.lflag.ICANON = false;
+    raw.lflag.ECHO = false;
+    try std.posix.tcsetattr(slave, .NOW, raw);
+
+    // The blocking write outlives one flush, like a terminal pasting 8 KiB.
+    const paste = struct {
+        fn run(fd: c_int) void {
+            var chunk = [_]u8{'y'} ** 512;
+            for (0..16) |_| if (std.c.write(fd, &chunk, chunk.len) < 0) return;
+        }
+    };
+    const writer = try std.Thread.spawn(.{}, paste.run, .{master});
+    errdefer writer.detach();
+    var pfd = [_]std.posix.pollfd{.{ .fd = slave, .events = std.posix.POLL.IN, .revents = 0 }};
+    try std.testing.expect(try std.posix.poll(&pfd, 1000) > 0); // the paste has started
+    var t: Term = .{ .io = std.testing.io, .fd = slave };
+    // Checked before the join: a short drain leaves the writer blocked forever.
+    try std.testing.expect(t.drainInput(40, 5000));
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&pfd, 50));
+    writer.join();
+}
+
+test "drainInput waits through a pause shorter than its quiet window" {
+    var master: c_int = undefined;
+    var slave: c_int = undefined;
+    if (openpty(&master, &slave, null, null, null) != 0) return error.SkipZigTest;
+    defer _ = std.c.close(master);
+    defer _ = std.c.close(slave);
+    var raw = try std.posix.tcgetattr(slave);
+    raw.lflag.ICANON = false;
+    raw.lflag.ECHO = false;
+    try std.posix.tcsetattr(slave, .NOW, raw);
+
+    // A slow link: the second half of the paste lands 60 ms after the first.
+    const paste = struct {
+        fn run(fd: c_int) void {
+            _ = std.c.write(fd, "yyyy", 4);
+            std.Io.sleep(std.testing.io, .fromMilliseconds(60), .awake) catch {};
+            _ = std.c.write(fd, "yyyy", 4);
+        }
+    };
+    const writer = try std.Thread.spawn(.{}, paste.run, .{master});
+    defer writer.join();
+    var pfd = [_]std.posix.pollfd{.{ .fd = slave, .events = std.posix.POLL.IN, .revents = 0 }};
+    try std.testing.expect(try std.posix.poll(&pfd, 1000) > 0);
+    var t: Term = .{ .io = std.testing.io, .fd = slave };
+    try std.testing.expect(t.drainInput(300, 5000));
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&pfd, 50));
+}
+
+test "drainInput fails closed when input never stops" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    try std.testing.expectEqual(@as(isize, 1), std.c.write(fds[1], "y", 1));
+    // A pipe cannot be flushed, so the byte stays and the budget runs out.
+    var t: Term = .{ .io = std.testing.io, .fd = fds[0] };
+    try std.testing.expect(!t.drainInput(1, 20));
+}
+
+test "drainInput on a quiet fd returns at once" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    var t: Term = .{ .io = std.testing.io, .fd = fds[0] };
+    try std.testing.expect(t.drainInput(1, 20));
 }

@@ -53,7 +53,7 @@ rc=${PIPESTATUS[0]}
 grep -q "refusing to launch" "$err" || fail "no refusal message on stderr (piped)"
 
 # Cases 3-4: refusals that only fire on a real terminal need the pty driver.
-if perl -MIO::Pty -e 1 >/dev/null 2>&1 && perl -c "$TUI_PTY_DRIVER" >/dev/null 2>&1; then
+if "$TUI_PERL" -MIO::Pty -e 1 >/dev/null 2>&1 && "$TUI_PERL" -c "$TUI_PTY_DRIVER" >/dev/null 2>&1; then
   # NO_COLOR set, but a genuine tty: still refused (the dashboard needs ANSI).
   cap="$TUI_PREFIX/cap_nocolor.bin"
   out=$(

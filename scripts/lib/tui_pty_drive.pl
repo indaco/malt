@@ -13,6 +13,9 @@
 # The action program is read from stdin, one action per line:
 #   mark LABEL        write "\n@@LABEL@@\n" into the capture (phase separator)
 #   send BYTES        write BYTES to the pty (\t \n \r \e \xHH escapes honoured)
+#   put BYTES         like send, but returns at once (no trailing settle)
+#   trickle SECS DELAY BYTES  send BYTES every DELAY seconds for SECS
+#   pause SECS        keep capturing for exactly SECS
 #   settle [secs]     read+capture until output goes idle (default 0.6s window)
 #   resize COLS ROWS  TIOCSWINSZ the pty; the kernel delivers SIGWINCH
 #   quitwait [secs]   wait for the child to exit, capturing its final bytes
@@ -83,6 +86,27 @@ sub unescape {
   return $s;
 }
 
+# Write `data` while still reading the child's output: a large paste would
+# otherwise deadlock once the child blocks writing a frame nobody reads.
+sub send_bytes {
+  my ($data) = @_;
+  $pty->blocking(0);
+  while (length $data) {
+    my $n = syswrite($pty, $data, 512);
+    last if !defined $n && !$!{EAGAIN};    # the child is gone (EIO)
+    substr($data, 0, $n) = '' if $n;
+    if ($sel->can_read(0)) {
+      my $buf;
+      my $r = sysread($pty, $buf, 65536);
+      last if defined $r && $r == 0;    # EOF
+      print $cap $buf if $r;
+    } else {
+      sleep 0.01;
+    }
+  }
+  $pty->blocking(1);
+}
+
 sub child_alive { return waitpid($pid, 1) == 0 }
 
 drain();    # the first paint, before any action
@@ -95,8 +119,19 @@ while (my $line = <STDIN>) {
   if ($op eq 'mark') {
     print $cap "\n\@\@$rest\@\@\n";
   } elsif ($op eq 'send') {
-    syswrite($pty, unescape($rest));
+    send_bytes(unescape($rest));
     drain();
+  } elsif ($op eq 'put') {
+    send_bytes(unescape($rest));
+  } elsif ($op eq 'trickle') {
+    my ($secs, $delay, $bytes) = split /\s+/, $rest, 3;
+    my $end = time + $secs;
+    while (time < $end) {
+      send_bytes(unescape($bytes));
+      drain($delay, 99);
+    }
+  } elsif ($op eq 'pause') {
+    drain($rest, 99);
   } elsif ($op eq 'settle') {
     drain($rest // 0.6);
   } elsif ($op eq 'resize') {

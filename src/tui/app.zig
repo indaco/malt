@@ -101,6 +101,9 @@ pub const App = struct {
     active: Tab = .search,
     editing: bool = false,
     quit: bool = false,
+    /// Set after a flood cancelled a prompt: the flood's own keys must not clear
+    /// the banner that explains the cancel. The run loop drops it once input is quiet.
+    keep_banner: bool = false,
     states: TabStates = .{},
     /// Per-tab parse storage, one `Storage` per tab, owned here. Each tab's rows
     /// borrow from its own slot; the arena lifetimes live with the tab, not a
@@ -245,6 +248,21 @@ fn activeModal(app: *const App) bool {
     }
 }
 
+/// Cancel the armed prompt when the input never stopped, and say so: a silent
+/// cancel would look like a lost keypress.
+fn cancelOnFlood(allocator: std.mem.Allocator, app: *App, drained: bool) void {
+    if (drained) return;
+    freeCmdArgv(allocator, step(allocator, app.mt_path, app, .esc));
+    app.shared.banner.set("prompt cancelled", "InputFlood");
+    app.keep_banner = true;
+}
+
+/// True when the key just serviced armed a modal guard. The user has not seen
+/// the prompt yet, so the rest of the read must not answer it.
+fn armedModal(was_modal: bool, app: *const App) bool {
+    return !was_modal and activeModal(app);
+}
+
 /// The active tab's modal prompt, or null when the tab has none. Optional like
 /// `hitTest`, so the shell never names a tab or its guard state.
 fn activeModalPrompt(app: *const App, buf: []u8) ?[]const u8 {
@@ -298,8 +316,15 @@ fn tabTitles() [tab_bar.count][]const u8 {
 pub fn step(allocator: std.mem.Allocator, mt_path: []const u8, app: *App, key: Key) cmd.Cmd {
     // An answer to a prompt is not an acknowledgement: the user may not have seen the banner.
     // The newest error still wins: a failed action sets its own banner over it.
-    if (!activeModal(app)) app.shared.banner.clear();
-    return if (app.editing) stepFilter(allocator, mt_path, app, key) else stepNormal(allocator, mt_path, app, key);
+    const was_modal = activeModal(app);
+    if (!was_modal and !app.keep_banner) app.shared.banner.clear();
+    const c = if (app.editing) stepFilter(allocator, mt_path, app, key) else stepNormal(allocator, mt_path, app, key);
+    // A new prompt owns the screen: a stale cancel banner next to it would mislead.
+    if (armedModal(was_modal, app)) {
+        app.keep_banner = false;
+        app.shared.banner.clear();
+    }
+    return c;
 }
 
 fn stepFilter(allocator: std.mem.Allocator, mt_path: []const u8, a: *App, key: Key) cmd.Cmd {
@@ -978,8 +1003,16 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
                 },
                 .key => |k| {
                     consumed += k.consumed;
+                    const was_modal = activeModal(&app);
                     try serviceKey(io, allocator, &t, painter, &fetches, &app, &app.storages, k.key);
                     if (app.quit) break;
+                    if (armedModal(was_modal, &app)) {
+                        // A paste must not answer a prompt the user has not seen. Show the
+                        // prompt first, then drop input; if it never stops, cancel instead.
+                        try repaint(fd, &frame, allocator, &app);
+                        cancelOnFlood(allocator, &app, t.drainInput(drain_quiet_ms, drain_budget_ms));
+                        break;
+                    }
                 },
                 .mouse => |m| {
                     consumed += m.consumed;
@@ -994,9 +1027,16 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
             if (decoder.flush()) |k| try serviceKey(io, allocator, &t, painter, &fetches, &app, &app.storages, k);
         }
         try repaint(fd, &frame, allocator, &app);
+        // Slow input is still input: only a full quiet window ends the hold.
+        if (app.keep_banner and !ttyReadable(fd, drain_quiet_ms)) app.keep_banner = false;
     }
     t.restore();
 }
+
+/// Quiet time that ends a drain after an armed prompt. It must outlast the pauses
+/// of a paste over a slow link; the budget bounds a flood.
+const drain_quiet_ms: i32 = 300;
+const drain_budget_ms: i64 = 5000;
 
 /// How long a buffered partial escape sequence may wait for its next byte
 /// before the tail resolves as a lone Esc. A genuine CSI arrives in one
@@ -1381,6 +1421,58 @@ test "the armed uninstall prompt is drawn once when the body has rows" {
     const out = renderFrame(&buf, &a, 80, layout.min_rows + 1);
     const first = std.mem.indexOf(u8, out, "[y/N]").?;
     try std.testing.expect(std.mem.indexOfPos(u8, out, first + 1, "[y/N]") == null);
+}
+
+test "a key that arms a modal guard drops the rest of the read" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    var was = activeModal(&a);
+    stepA(&a, ch('x'));
+    try std.testing.expect(armedModal(was, &a)); // "xy" in one read: the "y" must not run
+    was = activeModal(&a);
+    stepA(&a, ch('y'));
+    try std.testing.expect(!armedModal(was, &a)); // the answering key is serviced, not dropped
+    was = activeModal(&a);
+    stepA(&a, .down);
+    try std.testing.expect(!armedModal(was, &a)); // a plain key keeps the read going
+}
+
+test "a flood that outlasts the drain cancels the prompt and says so" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    stepA(&a, ch('x'));
+    cancelOnFlood(std.testing.allocator, &a, true);
+    try std.testing.expect(activeModal(&a)); // a quiet tty keeps the prompt up
+    cancelOnFlood(std.testing.allocator, &a, false);
+    try std.testing.expect(!activeModal(&a));
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, layout.min_rows + 1);
+    try std.testing.expect(std.mem.indexOf(u8, out, "prompt cancelled") != null);
+    stepA(&a, ch('z')); // the flood's next key must not wipe the explanation
+    try std.testing.expect(std.mem.indexOf(u8, renderFrame(&buf, &a, 80, layout.min_rows + 1), "prompt cancelled") != null);
+    a.keep_banner = false;
+    stepA(&a, ch('z'));
+    try std.testing.expect(std.mem.indexOf(u8, renderFrame(&buf, &a, 80, layout.min_rows + 1), "prompt cancelled") == null);
+}
+
+test "a new prompt after a flood cancel hides the stale cancel banner" {
+    var a: App = .{ .active = .installed };
+    a.states.installed.items = &many_pkgs;
+    stepA(&a, ch('x'));
+    cancelOnFlood(std.testing.allocator, &a, false);
+    stepA(&a, ch('x'));
+    try std.testing.expect(activeModal(&a));
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, layout.min_rows + 1);
+    try std.testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "prompt cancelled") == null);
+}
+
+test "x on an empty list arms nothing, so the read is kept" {
+    var a: App = .{ .active = .installed };
+    const was = activeModal(&a);
+    stepA(&a, ch('x'));
+    try std.testing.expect(!armedModal(was, &a));
 }
 
 test "ttyReadable sees a buffered byte and times out on silence" {

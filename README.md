@@ -237,7 +237,7 @@ The dashboard has five tabs. Each tab shows live data from `mt … --json`:
 | Services  | launchd services + runtime state                  | `mt services start/stop/restart` |
 | Doctor    | structured `mt doctor` findings, errors first     | `mt doctor --fix <class>`        |
 
-Use the mouse or the keyboard. Click a tab to open it. Click a row to select it. Use the wheel to scroll the active list. The footer of each tab shows its action keys.
+Use the mouse or the keyboard. Click a tab to open it. Click a row to select it. Use the wheel to scroll the active list. The footer of each tab shows its action keys. The uninstall prompt drops input until the terminal is quiet for 300 ms, so a paste cannot answer it. Input that does not stop for 5 s cancels the prompt.
 
 - **Batch installs across searches.** `space` adds a result to a basket. The basket stays when you start a new query. `i` installs all packages in the basket, and `l` opens the basket for review. In the basket, `space` or `d` removes a package, and `n` removes all packages.
 - **Reads with `--json`, runs the real commands.** Each action runs the real `mt <subcommand>` inline. Thus, output and prompts stay in your scrollback. The dashboard has no install, upgrade, or fix code of its own.

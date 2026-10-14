@@ -144,7 +144,9 @@ fi
 # perl driver against the offline fake cask so it stays fast and deterministic;
 # skip (don't fail) when IO::Pty is unavailable, exactly like the tui e2e.
 PTY_DRIVER="$ROOT/scripts/lib/tui_pty_drive.pl"
-if perl -MIO::Pty -e 1 >/dev/null 2>&1 && perl -c "$PTY_DRIVER" >/dev/null 2>&1; then
+# IO::Pty ships with the system Perl only; a Homebrew perl earlier on PATH lacks it.
+if [[ -x /usr/bin/perl ]]; then PERL=/usr/bin/perl; else PERL=perl; fi
+if "$PERL" -MIO::Pty -e 1 >/dev/null 2>&1 && "$PERL" -c "$PTY_DRIVER" >/dev/null 2>&1; then
   p=$(fresh_prefix cf)
   db="$p/db/malt.db"
   sqlite3 "$db" \
@@ -154,7 +156,7 @@ if perl -MIO::Pty -e 1 >/dev/null 2>&1 && perl -c "$PTY_DRIVER" >/dev/null 2>&1;
 
   # Decline: "n" must abort at the gate — no reinstall attempt, no sudo.
   cap="$tmp/cf_no.cap"
-  PATH="$tmp:$PATH" MALT_PREFIX="$p" MALT_OFFLINE=1 perl "$PTY_DRIVER" "$cap" 80 24 \
+  PATH="$tmp:$PATH" MALT_PREFIX="$p" MALT_OFFLINE=1 "$PERL" "$PTY_DRIVER" "$cap" 80 24 \
     "$MT_BIN" rollback faketpkg --to 1.0 <<<'settle 1
 send n\n
 quitwait 5' >/dev/null
@@ -172,7 +174,7 @@ quitwait 5' >/dev/null
   # Accept: "y" must proceed past the gate. Offline, the fake URL then fails the
   # download — that failure is the observable "we got past confirmation".
   cap="$tmp/cf_yes.cap"
-  PATH="$tmp:$PATH" MALT_PREFIX="$p" MALT_OFFLINE=1 perl "$PTY_DRIVER" "$cap" 80 24 \
+  PATH="$tmp:$PATH" MALT_PREFIX="$p" MALT_OFFLINE=1 "$PERL" "$PTY_DRIVER" "$cap" 80 24 \
     "$MT_BIN" rollback faketpkg --to 1.0 <<<'settle 1
 send y\n
 quitwait 10' >/dev/null

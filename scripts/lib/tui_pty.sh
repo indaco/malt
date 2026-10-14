@@ -17,6 +17,9 @@ TUI_PTY_DRIVER="$TUI_PTY_LIB_DIR/tui_pty_drive.pl"
 
 MT_BIN="${MT_BIN:-./zig-out/bin/malt}"
 
+# IO::Pty ships with the system Perl only; a Homebrew perl earlier on PATH lacks it.
+if [[ -x /usr/bin/perl ]]; then TUI_PERL=/usr/bin/perl; else TUI_PERL=perl; fi
+
 # Guard: refuse with exit 2 (the e2e "can't run here" signal) when the binary
 # or any required host tool is absent, instead of failing obscurely later.
 tui_pty_guard() {
@@ -25,15 +28,15 @@ tui_pty_guard() {
     echo "tui-e2e: run 'zig build' first (or set MT_BIN)" >&2
     exit 2
   fi
-  if ! command -v perl >/dev/null 2>&1; then
+  if ! command -v "$TUI_PERL" >/dev/null 2>&1; then
     echo "tui-e2e: perl is required to drive the pty" >&2
     exit 2
   fi
-  if ! perl -MIO::Pty -e 1 >/dev/null 2>&1; then
+  if ! "$TUI_PERL" -MIO::Pty -e 1 >/dev/null 2>&1; then
     echo "tui-e2e: perl module IO::Pty is required to drive the pty" >&2
     exit 2
   fi
-  if ! perl -c "$TUI_PTY_DRIVER" >/dev/null 2>&1; then
+  if ! "$TUI_PERL" -c "$TUI_PTY_DRIVER" >/dev/null 2>&1; then
     echo "tui-e2e: pty driver failed to compile: $TUI_PTY_DRIVER" >&2
     exit 2
   fi
@@ -104,7 +107,7 @@ tui_pty_seed_orphan_store() {
 # "EXIT_STATUS=<n>" line so the caller can assert on the child's exit code.
 tui_pty_drive() {
   local capfile="$1" cols="$2" rows="$3"
-  perl "$TUI_PTY_DRIVER" "$capfile" "$cols" "$rows" "$MT_BIN" tui
+  "$TUI_PERL" "$TUI_PTY_DRIVER" "$capfile" "$cols" "$rows" "$MT_BIN" tui
 }
 
 # Count installed kegs in the fixture store (post-run assertions).

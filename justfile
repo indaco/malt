@@ -95,6 +95,7 @@ regressions-harness:
     @./scripts/regressions/frame-putcontent-passes-lone-c1-bytes.sh
     @./scripts/regressions/ghcr-bearer-header-fixed-stack-buffer.sh
     @./scripts/regressions/installed-render-zero-height-guard-installed-render-missing-zero-height-guard.sh
+    @./scripts/regressions/modal-arm-drops-buffered-keys-xy-in-one-read-uninstalls-without-prompt.sh
     @./scripts/regressions/post-install-run-step-gh804.sh
     @./scripts/regressions/progress-shared-counters-atomic-progressbar-update-lock-free-data-race.sh
     @./scripts/regressions/ruby-fallback-fenced-interpreter-homebrew-ruby-is-not-usable.sh
