@@ -849,6 +849,15 @@ test "render on a zero-height rect paints nothing without the guard too" {
     try testing.expectEqual(@as(usize, 0), f.slice().len);
 }
 
+test "hitTest on a zero-height rect hits nothing, even with the guard armed" {
+    var s: State = .{ .items = &sample };
+    s.chrome.view.selected = 1; // curl
+    _ = stepKey(&s, ch('x'));
+    const rect: tab.Rect = .{ .row = 7, .col = 1, .width = 80, .height = 0 };
+    try testing.expect(hitTest(&s, rect, 7, 1) == null);
+    try testing.expect(hitTest(&s, rect, 8, 1) == null);
+}
+
 test "render on a one-row rect still paints the armed guard banner" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
