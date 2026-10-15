@@ -153,8 +153,8 @@ pub const SharedModel = struct {
 
     /// Consume `t`'s dirty flag: true exactly once after it was marked, so a caller
     /// refetches its `--json` at most once per staleness. A synchronous tab reads
-    /// it on entry (inside its own `service`); the loop reads it for the background
-    /// tabs before kicking their audit.
+    /// it on entry (inside its own `service`); the loop consumes it for a background
+    /// tab only once its audit runs, so a failed start retries.
     pub fn takeDirty(self: *SharedModel, t: Tab) bool {
         if (!self.dirty.contains(t)) return false;
         self.dirty.remove(t);

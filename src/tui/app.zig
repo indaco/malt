@@ -144,7 +144,8 @@ fn initLaunchDirty(a: *App) void {
 }
 
 /// Consume `t`'s dirty flag: true exactly once after it was marked, so the
-/// caller refetches its `--json` at most once per staleness.
+/// caller refetches its `--json` at most once per staleness. A background tab
+/// consumes it only once its fetch runs, so a failed start retries.
 pub fn takeDirty(a: *App, t: Tab) bool {
     return a.shared.takeDirty(t);
 }
@@ -858,8 +859,10 @@ fn onEntryReload(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painte
         inline else => |tag| {
             const M = moduleFor(tag);
             if (M.fetch_spec != null) {
-                if (takeDirty(app, tag)) {
+                // Clear dirty only once a fetch owns the load, so a failed spawn retries on the next key or entry.
+                if (app.shared.dirty.contains(tag)) {
                     if (backgroundReadCmd(allocator, app.mt_path, tag)) |bg| try pump(io, allocator, t, painter, fetches, app, store, bg);
+                    if (app.shared.tab_loading.contains(tag)) _ = takeDirty(app, tag);
                 }
             } else if (@hasDecl(M, "refreshCmd")) {
                 if (takeDirty(app, tag)) try pump(io, allocator, t, painter, fetches, app, store, M.refreshCmd(allocator, app.mt_path));
@@ -2433,6 +2436,83 @@ test "a background read kickoff is a quiet no-op on a spawn fault, never flaggin
     try std.testing.expect(!app.shared.tab_loading.contains(.outdated)); // a failed kickoff stays unflagged
     try std.testing.expect(app.shared.outdated_count == null);
     try std.testing.expect(!app.shared.banner.isSet()); // launch-time, no nag
+}
+
+/// Run `onEntryReload` on a headless rig.
+fn entryReload(fetches: *Fetches, app: *App, store: *Storages) !void {
+    term.setSizeForTest(.{ .cols = 80, .rows = 24 });
+    var thr = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer thr.deinit();
+    var frame: []u8 = try std.testing.allocator.alloc(u8, 256);
+    defer std.testing.allocator.free(frame);
+    var tm = term.Term.init(thr.io(), -1);
+    try onEntryReload(thr.io(), std.testing.allocator, &tm, testPainter(&frame), fetches, app, store);
+    if (fetches.getPtr(app.active).* != null) try driveFetchToEnd(thr.io(), std.testing.allocator, app, store, fetches, app.active);
+}
+
+/// Enter `tag` with it flagged dirty, via `entryReload`.
+fn entryReloadDirty(tag: Tab, mt_path: []const u8, fetches: *Fetches, app: *App, store: *Storages) !void {
+    app.* = .{ .active = tag, .mt_path = mt_path };
+    app.shared.dirty.insert(tag);
+    try entryReload(fetches, app, store);
+}
+
+test "a failed entry fetch keeps the tab dirty so the next entry retries it" {
+    for ([_]Tab{ .outdated, .services, .doctor }) |tag| {
+        var app: App = undefined;
+        var store: Storages = .{};
+        defer store.deinit(std.testing.allocator);
+        var fetches: Fetches = .initFill(null);
+        try entryReloadDirty(tag, "/nonexistent/malt_probe", &fetches, &app, &store);
+        try std.testing.expect(fetches.getPtr(tag).* == null);
+        try std.testing.expect(!app.shared.tab_loading.contains(tag));
+        try std.testing.expect(app.shared.dirty.contains(tag)); // consumed only once a fetch owns the load
+    }
+}
+
+test "a started entry fetch consumes the dirty flag so the next entry does not re-audit" {
+    for ([_]Tab{ .outdated, .services, .doctor }) |tag| {
+        var app: App = undefined;
+        var store: Storages = .{};
+        defer store.deinit(std.testing.allocator);
+        var fetches: Fetches = .initFill(null);
+        try entryReloadDirty(tag, "/usr/bin/true", &fetches, &app, &store);
+        try std.testing.expect(!app.shared.dirty.contains(tag));
+    }
+}
+
+test "a background read command is null, not a crash, when the argv cannot be allocated" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expect(backgroundReadCmd(failing.allocator(), "/usr/bin/true", .outdated) == null);
+}
+
+test "entering a clean tab starts no fetch" {
+    var app: App = .{ .active = .outdated, .mt_path = "/usr/bin/true" };
+    var store: Storages = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    try entryReload(&fetches, &app, &store);
+    try std.testing.expect(fetches.getPtr(.outdated).* == null);
+}
+
+test "entering a dirty tab while its fetch runs clears the flag without a second spawn" {
+    var app: App = .{ .active = .outdated, .mt_path = "/usr/bin/true" };
+    var store: Storages = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    var thr = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer thr.deinit();
+    startBg(thr.io(), &fetches, &app, .outdated);
+    const fd_before = fetches.getPtr(.outdated).*.?.fd;
+    app.shared.dirty.insert(.outdated);
+    // Not `entryReload`: it would drain the fetch before the fd check.
+    var tm = term.Term.init(thr.io(), -1);
+    var frame: []u8 = try std.testing.allocator.alloc(u8, 256);
+    defer std.testing.allocator.free(frame);
+    try onEntryReload(thr.io(), std.testing.allocator, &tm, testPainter(&frame), &fetches, &app, &store);
+    try std.testing.expectEqual(fd_before, fetches.getPtr(.outdated).*.?.fd);
+    try std.testing.expect(!app.shared.dirty.contains(.outdated));
+    try driveFetchToEnd(thr.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
 }
 
 test "a background read kickoff skips a tab whose audit is already in flight" {
