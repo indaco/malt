@@ -21,6 +21,7 @@ const cmd = @import("cmd.zig");
 const ctx = @import("ctx.zig");
 const detail_pane = @import("detail_pane.zig");
 const scroll_list = @import("scroll_list.zig");
+const text_wrap = @import("text_wrap.zig");
 const list_json = @import("json/list.zig");
 const info_json = @import("json/info.zig");
 const color = @import("../ui/color.zig");
@@ -217,8 +218,10 @@ fn detailFields(d: Detail, size_buf: []u8, deps_buf: []u8) [5]detail_pane.Field 
 /// under the pointer even with a pane open.
 fn listContentRect(s: *const State, rect: tab.Rect) tab.Rect {
     var content = rect;
-    if (s.confirm_uninstall != null)
-        content = .{ .row = content.row + 1, .col = content.col, .width = content.width, .height = content.height -| 1 };
+    if (s.confirm_uninstall) |*target| {
+        const gh = guardHeight(target, content.width, content.height);
+        content = .{ .row = content.row + gh, .col = content.col, .width = content.width, .height = content.height - gh };
+    }
     if (s.detail) |d| {
         var size_buf: [16]u8 = undefined;
         var deps_buf: [512]u8 = undefined;
@@ -235,8 +238,9 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (r.height == 0) return;
     var content = r;
     if (s.confirm_uninstall) |*target| {
-        renderGuard(target.name(), f, .{ .row = content.row, .col = content.col, .width = content.width, .height = 1 });
-        content = .{ .row = content.row + 1, .col = content.col, .width = content.width, .height = content.height -| 1 };
+        const gh = guardHeight(target, content.width, content.height);
+        renderGuard(target.name(), f, .{ .row = content.row, .col = content.col, .width = content.width, .height = gh });
+        content = .{ .row = content.row + gh, .col = content.col, .width = content.width, .height = content.height - gh };
     }
     var list_rect = content;
     if (s.detail) |d| {
@@ -306,13 +310,75 @@ pub fn modalPrompt(s: *const State, buf: []u8) ?[]const u8 {
     return guardText(buf, target.name());
 }
 
+/// Rows the prompt takes, at most `max`. `render` and `hitTest` share it, so a
+/// click lands on the row that is drawn. A prompt cut to its tail is counted by
+/// codepoint, the way `renderGuardTail` paints it.
+fn guardHeight(target: *const ConfirmTarget, width: u16, max: u16) u16 {
+    if (width == 0) return 0; // `text_wrap` floors the width at one column
+    var b: [tab.modal_prompt_buf_len]u8 = undefined;
+    const text = guardText(&b, target.name());
+    var rows: usize = 0;
+    var it = text_wrap.iter(text, width);
+    while (it.next() != null) rows += 1;
+    if (rows <= max) return @intCast(rows);
+    var codepoints: usize = 0; // lead bytes, as `renderGuardTail` counts, so a cut name still agrees
+    for (text) |c| codepoints += @intFromBool(!isContinuation(c));
+    return @intCast(@min(@as(usize, max), std.math.divCeil(usize, codepoints, width) catch max));
+}
+
 /// The banner names the latched target, never the live selection — what it
-/// shows is exactly what `y` will uninstall.
+/// shows is exactly what `y` will uninstall. It wraps so `[y/N]` stays visible;
+/// a rect too short for that shows the last bytes of the prompt instead, so the
+/// end of the name and the keys both stay on screen.
 fn renderGuard(name: []const u8, f: *tab.Frame, rect: tab.Rect) void {
-    f.moveTo(rect.row, rect.col);
+    var b: [tab.modal_prompt_buf_len]u8 = undefined;
+    const text = guardText(&b, name);
+    var rows: u16 = 0;
+    var count = text_wrap.iter(text, rect.width);
+    while (count.next() != null) rows += 1;
+    if (rows > rect.height) return renderGuardTail(text, f, rect);
+    var it = text_wrap.iter(text, rect.width);
+    var row: u16 = 0;
+    while (it.next()) |chunk| : (row += 1) paintGuardRow(f, rect, row, chunk);
+}
+
+fn renderGuardTail(text: []const u8, f: *tab.Frame, rect: tab.Rect) void {
+    // Word wrap can spend a whole row on the keys alone, so cut by width here.
+    // Count codepoints, not bytes, so no row is wider than the rect.
+    var start = text.len;
+    var kept: usize = 0;
+    while (start > 0 and kept < @as(usize, rect.width) * rect.height) : (kept += 1) {
+        start -= 1;
+        while (start > 0 and isContinuation(text[start])) start -= 1;
+    }
+    var rest = text[start..];
+    var row: u16 = 0;
+    while (row < rect.height and rest.len > 0) : (row += 1) {
+        const take = codepointsLen(rest, rect.width);
+        paintGuardRow(f, rect, row, rest[0..take]);
+        rest = rest[take..];
+    }
+}
+
+/// Byte length of the first `n` codepoints of `s`.
+fn codepointsLen(s: []const u8, n: usize) usize {
+    var i: usize = 0;
+    var seen: usize = 0;
+    while (i < s.len and seen < n) : (seen += 1) {
+        i += 1;
+        while (i < s.len and isContinuation(s[i])) i += 1;
+    }
+    return i;
+}
+
+fn isContinuation(byte: u8) bool {
+    return (byte & 0xC0) == 0x80;
+}
+
+fn paintGuardRow(f: *tab.Frame, rect: tab.Rect, row: u16, chunk: []const u8) void {
+    f.moveTo(rect.row + row, rect.col);
     f.put(color.Style.reverse.code());
-    var b: [row_buf_len]u8 = undefined;
-    f.putContent(scroll_list.truncate(guardText(&b, name), rect.width));
+    f.putContent(chunk);
     f.put(color.Style.reset.code());
 }
 
@@ -848,6 +914,162 @@ test "render draws the [y/N] guard banner naming the package when confirming" {
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "curl") != null);
     try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+}
+
+test "the in-list guard wraps to keep the whole name and [y/N]" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("a" ** 35, .formula);
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 50, .height = 6 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "a" ** 35) != null);
+    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+}
+
+test "the in-list guard keeps a name longer than the row buffer" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("n" ** 250, .formula);
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 50, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "n" ** 50) != null);
+    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+}
+
+test "the in-list guard stays in the rows it is given when the rect is short" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("a" ** 120, .formula);
+    render(&s, &f, .{ .row = 3, .col = 1, .width = 50, .height = 1 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[4;") == null); // nothing below the one row
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[3;") != null);
+}
+
+test "the in-list guard keeps the name and [y/N] when the body has only one row" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("a" ** 44, .formula); // "<name>? " fills the row
+    render(&s, &f, .{ .row = 3, .col = 1, .width = 50, .height = 1 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "[y/N]") != null);
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "aaaa") != null); // the name stays too
+}
+
+test "the in-list guard takes one row when the prompt fits" {
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("curl", .formula);
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 80, .height = 10 };
+    try testing.expectEqual(@as(?usize, 0), hitTest(&s, rect, 3, 1).?.index); // heading row 2, first row 3
+}
+
+test "the in-list guard takes at most the rows the rect gives" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("a" ** 120, .formula);
+    render(&s, &f, .{ .row = 3, .col = 1, .width = 50, .height = 2 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[5;") == null); // no third row
+    var needle: [32]u8 = undefined;
+    const second_row = try std.fmt.bufPrint(&needle, "\x1b[4;1H{s}", .{color.Style.reverse.code()});
+    try testing.expect(std.mem.indexOf(u8, out, second_row) != null); // second guard row, not the heading
+    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+}
+
+test "the in-list guard paints nothing in a zero-width rect" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("curl", .formula);
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 0, .height = 5 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "Uninstall") == null);
+}
+
+test "the in-list guard tail never splits a multibyte name" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("é" ** 40, .formula);
+    render(&s, &f, .{ .row = 3, .col = 1, .width = 50, .height = 1 });
+    const out = f.slice();
+    try testing.expect(std.unicode.utf8ValidateSlice(out));
+    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+}
+
+test "the in-list guard tail keeps every row within the rect width" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("é" ** 60, .formula);
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 11, .height = 3 });
+    const out = f.slice();
+    try testing.expect(std.unicode.utf8ValidateSlice(out));
+    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    // 3 rows x 11 codepoints: two full rows of "é", then 4 "é" and the keys
+    try testing.expect(std.mem.indexOf(u8, out, "é" ** 11) != null);
+    try testing.expect(std.mem.indexOf(u8, out, "é" ** 12) == null);
+    try testing.expect(std.mem.indexOf(u8, out, "é" ** 4 ++ "? [y/N]") != null);
+}
+
+test "the in-list guard reserves only the rows its tail paints" {
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("é" ** 20, .formula); // 38 codepoints, 58 bytes
+    const content = listContentRect(&s, .{ .row = 1, .col = 1, .width = 20, .height = 3 });
+    try testing.expectEqual(@as(u16, 1), content.height); // 2 guard rows, no blank row
+}
+
+test "the in-list guard reserves only the rows its tail paints for a cut name" {
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("é" ** 20 ++ "\x80", .formula); // ends mid-rune
+    const content = listContentRect(&s, .{ .row = 1, .col = 1, .width = 20, .height = 3 });
+    try testing.expectEqual(@as(u16, 1), content.height);
+}
+
+test "the in-list guard tail survives a stray continuation byte" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("a\x80\x80\x80" ** 20, .formula);
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 8, .height = 2 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "[y/N]") != null);
+}
+
+test "the in-list guard never splits a multibyte name" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("é" ** 40, .formula);
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 50, .height = 6 });
+    const out = f.slice();
+    try testing.expect(std.unicode.utf8ValidateSlice(out));
+    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+}
+
+test "the wrapped in-list guard and the docked detail pane both stay visible" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &tall_sample, .detail = .{ .pkg = tall_sample[0], .info = .{} } };
+    s.confirm_uninstall = ConfirmTarget.init("a" ** 35, .formula);
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 50, .height = 12 };
+    render(&s, &f, rect);
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Tap") != null);
+    try testing.expect(hitTest(&s, rect, 2, 1) == null); // second guard row
+    try testing.expectEqual(@as(?usize, 0), hitTest(&s, rect, 4, 1).?.index); // below the heading
+}
+
+test "hitTest follows the wrapped guard height" {
+    var s: State = .{ .items = &sample };
+    s.confirm_uninstall = ConfirmTarget.init("a" ** 35, .formula); // 2 rows at width 50
+    const rect: tab.Rect = .{ .row = 1, .col = 1, .width = 50, .height = 10 };
+    try testing.expect(hitTest(&s, rect, 2, 1) == null); // second guard row
+    try testing.expect(hitTest(&s, rect, 3, 1) == null); // heading row
+    try testing.expectEqual(@as(?usize, 0), hitTest(&s, rect, 4, 1).?.index);
 }
 
 test "render on a zero-height rect paints nothing, even with the guard armed" {

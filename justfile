@@ -94,6 +94,7 @@ regressions-harness:
     @./scripts/regressions/failing-pragma-closes-handle-failing-pragma-leaks-open-sqlite-handle.sh
     @./scripts/regressions/frame-putcontent-passes-lone-c1-bytes.sh
     @./scripts/regressions/ghcr-bearer-header-fixed-stack-buffer.sh
+    @./scripts/regressions/in-list-uninstall-prompt-wraps-in-list-uninstall-prompt-truncates-confirm-keys.sh
     @./scripts/regressions/installed-render-zero-height-guard-installed-render-missing-zero-height-guard.sh
     @./scripts/regressions/modal-arm-drops-buffered-keys-xy-in-one-read-uninstalls-without-prompt.sh
     @./scripts/regressions/post-install-run-step-gh804.sh
