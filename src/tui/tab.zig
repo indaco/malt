@@ -71,8 +71,8 @@ pub const Frame = struct {
     /// Position the cursor, then erase to end of line — a self-erasing line for
     /// single-write rows that own their line from `col` rightward. The erase is a
     /// raw `put` on purpose: `putContent` strips ESC, so a row can never emit its
-    /// own erase. Rows that paint several segments across one line (the header,
-    /// the detail pane's indented continuations) must keep `moveTo` — a mid-row
+    /// own erase. Rows that paint several segments across one line (the detail
+    /// pane's indented continuations) must keep `moveTo` — a mid-row
     /// erase here would wipe an earlier segment.
     pub fn moveClear(self: *Frame, row: u16, col: u16) void {
         self.moveTo(row, col);

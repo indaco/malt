@@ -14,6 +14,11 @@ const name = "mt";
 const sep = "  •  ";
 const unknown = "—";
 
+/// Bytes a caller's render buffer must hold: widest role SGR (19) + left (192) +
+/// cursor-column move (8) + right (64) + reset (4), rounded up. Independent of
+/// `cols`, so no width can reach `append`'s clamp.
+pub const buf_cap: usize = 320;
+
 /// Header inputs. `version` and `prefix` are always known; each count is null
 /// until its store loads, so an unloaded count renders as `unknown` rather than
 /// a stale or wrong number.
@@ -27,7 +32,8 @@ pub const Fields = struct {
 
 /// Render the muted header into `buf`, truncated to `cols`. The right segment is
 /// shown only when it fits with a column of gap; otherwise it is dropped whole
-/// so name + version survive a narrow terminal.
+/// so name + version survive a narrow terminal. The caller must erase the row
+/// first: the gap between the segments is skipped, not painted.
 pub fn render(buf: []u8, fields: Fields, cols: u16) []const u8 {
     var lbuf: [192]u8 = undefined;
     var rbuf: [64]u8 = undefined;
@@ -40,10 +46,12 @@ pub fn render(buf: []u8, fields: Fields, cols: u16) []const u8 {
     append(buf, &len, color.roleCode(.muted)); // chrome, like the footer
     append(buf, &len, left);
     // Right-justify the counts; keep at least one column of gap. When they can't
-    // fit, drop them whole rather than clip the left.
-    if (lw + rw < cols) {
-        var pad = cols - lw - rw;
-        while (pad > 0) : (pad -= 1) append(buf, &len, " ");
+    // fit, drop them whole rather than clip the left. A cursor move, not pad
+    // spaces, keeps the byte cost the same at any width.
+    // `rw > 0` also keeps the column within five digits.
+    if (rw > 0 and lw + rw < cols) {
+        var cha: [8]u8 = undefined;
+        append(buf, &len, std.fmt.bufPrint(&cha, "\x1b[{d}G", .{cols - rw + 1}) catch unreachable);
         append(buf, &len, right);
     }
     append(buf, &len, color.Style.reset.code());
@@ -116,7 +124,8 @@ test "render right-justifies both counts and fills the line" {
     const reset = color.Style.reset.code();
     if (std.mem.endsWith(u8, visible, reset)) visible = visible[0 .. visible.len - reset.len];
     try std.testing.expect(std.mem.endsWith(u8, visible, "17 outdated"));
-    try std.testing.expectEqual(@as(usize, 80), visibleWidth(out));
+    // The gap is a cursor move to the column where the right segment starts.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[57G192 kegs") != null);
 }
 
 test "render shows an em-dash for a count whose store has not loaded" {
@@ -154,4 +163,30 @@ test "render bounds the visible width to cols without counting SGR" {
     var buf: [256]u8 = undefined;
     const out = render(&buf, .{ .version = "0.1.0", .prefix = "/opt/malt", .kegs = 192, .outdated = 17 }, 8);
     try std.testing.expect(visibleWidth(out) <= 8);
+}
+
+test "render keeps the right segment and reset on a terminal wider than the scratch" {
+    const reset = color.Style.reset.code();
+    const cases = [_]Fields{
+        .{ .version = "0.1.0", .prefix = "/opt/malt", .kegs = 192, .outdated = 17 },
+        .{ .version = "0.1.0", .prefix = "/opt/malt", .outdated_spinner = "⠋" },
+        .{ .version = "0.1.0", .prefix = "/opt/malt" },
+    };
+    for (cases) |fields| {
+        for ([_]u16{ 260, std.math.maxInt(u16) }) |cols| {
+            var buf: [buf_cap]u8 = undefined;
+            const out = render(&buf, fields, cols);
+            try std.testing.expect(std.mem.indexOf(u8, out, " outdated") != null);
+            try std.testing.expect(std.mem.endsWith(u8, out, reset));
+            try std.testing.expect(std.unicode.utf8ValidateSlice(out));
+        }
+    }
+}
+
+test "render keeps one column of gap at the exact fit boundary" {
+    var buf: [buf_cap]u8 = undefined;
+    const fields: Fields = .{ .version = "0.1.0", .prefix = "/opt/malt", .kegs = 192, .outdated = 17 };
+    // left is 22 columns, right is 24: 46 has no gap, 47 has exactly one.
+    try std.testing.expect(std.mem.indexOf(u8, render(&buf, fields, 46), "outdated") == null);
+    try std.testing.expect(std.mem.indexOf(u8, render(&buf, fields, 47), "\x1b[24G192 kegs") != null);
 }

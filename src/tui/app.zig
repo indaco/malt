@@ -426,8 +426,8 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
                 renderTooSmall(&f, cols, rows);
         },
         .ok => |r| {
-            f.moveTo(r.header.row, 1);
-            var hdb: [256]u8 = undefined;
+            f.moveClear(r.header.row, 1); // the header no longer pads its own gap
+            var hdb: [header.buf_cap]u8 = undefined;
             f.put(header.render(&hdb, .{
                 .version = app.version,
                 .prefix = app.prefix,
@@ -1345,6 +1345,15 @@ test "a prompt cancelled while the terminal is too small leaves no stale row" {
     const out = renderFrame(&buf, &a, 80, 5);
     // Row 5 held the prompt a frame ago; the notice no longer covers it, so it must be erased.
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[5;1H" ++ term.seq.erase_line) != null);
+}
+
+test "the header row is erased before it is painted" {
+    // The header skips the gap between its segments, so a shorter count would
+    // leave the old digits there.
+    var a: App = .{ .active = .installed };
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1;1H" ++ term.seq.erase_line) != null);
 }
 
 test "at the minimum height the armed prompt wins over a footer banner" {
