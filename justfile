@@ -107,6 +107,7 @@ regressions-harness:
     @./scripts/regressions/smoke-probe-help-blocks-on-controlling-tty.sh
     @./scripts/regressions/term-sanitize-anti-injection-guarantee.sh
     @./scripts/regressions/test-build-prefix-fallback-test-binaries-fall-back-to-the-live-prefix.sh
+    @./scripts/regressions/tui-header-wide-cols-header-right-segment-truncated-on-wide-terminals.sh
     @./scripts/regressions/tui-startup-outdated-network-freeze.sh
     @./scripts/regressions/tui-wrap-rune-boundary-tui-text-wrap-splits-utf8-sequence.sh
     @./scripts/regressions/tui_tab_chrome_separator_and_headings.sh
