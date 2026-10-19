@@ -90,6 +90,9 @@ jobs:
       - name: Regression guard - commands append to a shared redirected stdout
         run: ./scripts/regressions/cli-stdout-shared-redirect-cli-stdout-writer-overwrites-shared-redirect.sh
 
+      - name: Regression guard - shellenv keeps a resolving leftover CA bundle
+        run: ./scripts/regressions/shellenv-exports-leftover-ca-bundle-shellenv-drops-ssl-cert-file-for-unlinked-major.sh
+
       # Security smoke: flag-scope enforcement, argv-only lint,
       # pins-manifest shape, install.sh fail-closed regression suite.
       # Subsumes the individual install.sh step that used to live in
