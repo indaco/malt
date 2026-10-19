@@ -185,6 +185,20 @@ test "openssl@4 installed with no bundle: the warning names openssl@4" {
     try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
 }
 
+test "openssl@4 installed with only a leftover openssl@3 bundle: still warns about openssl@4" {
+    // A leftover bundle never mutes the warning: processes that skip
+    // shellenv read only etc/openssl@4.
+    const prefix = try makePrefix("v4_leftover_v3", true, true);
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@4");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
+}
+
 test "openssl@3 installed with no bundle: the warning names openssl@3" {
     const prefix = try makePrefix("v3_unlinked", true, false);
     defer testing.allocator.free(prefix);

@@ -268,9 +268,28 @@ pub fn certFile(io: std.Io, buf: []u8, prefix: []const u8, keg: []const u8) ?[]c
     return path;
 }
 
-/// The bundle of the newest installed OpenSSL major that has one. A file
-/// under a major that is not installed counts only when no major is, so
-/// shellenv never exports a bundle that doctor does not check.
+/// Whether the link at `path` points into the ca-certificates files of
+/// `prefix`. A copied file can hold stale roots, so it never counts.
+fn linksToCaCertificates(io: std.Io, raw_prefix: []const u8, path: []const u8) bool {
+    const prefix = std.mem.trimEnd(u8, raw_prefix, "/");
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.Io.Dir.readLinkAbsolute(io, path, &link_buf) catch return false;
+    var scratch: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const dir = std.fs.path.dirname(path) orelse return false;
+    const target = std.fs.path.resolvePosix(fba.allocator(), &.{ dir, link_buf[0..n] }) catch return false;
+    inline for (.{ "etc", "opt" }) |sub| {
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = std.fmt.bufPrint(&root_buf, "{s}/{s}/ca-certificates/", .{ prefix, sub }) catch return false;
+        if (std.mem.startsWith(u8, target, root)) return true;
+    }
+    return false;
+}
+
+/// The bundle of the newest installed OpenSSL major that has one. Else a
+/// leftover bundle: every major reads SSL_CERT_FILE. With a major installed,
+/// doctor can miss a stale copy, so only a link to an installed
+/// ca-certificates counts.
 pub fn findCertFile(io: std.Io, buf: []u8, prefix: []const u8) ?[]const u8 {
     var any_installed = false;
     for (openssl_kegs) |keg| {
@@ -278,9 +297,11 @@ pub fn findCertFile(io: std.Io, buf: []u8, prefix: []const u8) ?[]const u8 {
         any_installed = true;
         if (certFile(io, buf, prefix, keg)) |path| return path;
     }
-    if (any_installed) return null;
+    const ca_installed = any_installed and isInstalled(io, buf, prefix, "ca-certificates");
     for (openssl_kegs) |keg| {
-        if (certFile(io, buf, prefix, keg)) |path| return path;
+        const path = certFile(io, buf, prefix, keg) orelse continue;
+        if (!any_installed) return path;
+        if (ca_installed and linksToCaCertificates(io, prefix, path)) return path;
     }
     return null;
 }
