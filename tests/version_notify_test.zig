@@ -515,6 +515,12 @@ test "test builds drop a notifier cache path outside /tmp" {
     const home_only = [_:null]?[*:0]const u8{"HOME=/var/empty/mt-home"};
     try testing.expect(notifier.cachePath(fixtureEnviron(&home_only), &buf) == null);
 
+    const xdg_only = [_:null]?[*:0]const u8{"XDG_CACHE_HOME=/var/empty/mt-xdg"};
+    try testing.expect(notifier.cachePath(fixtureEnviron(&xdg_only), &buf) == null);
+
+    const empty = [_:null]?[*:0]const u8{};
+    try testing.expect(notifier.cachePath(fixtureEnviron(&empty), &buf) == null);
+
     const dir = try test_io.uniqueTempPath(allocator, "notify", "guard");
     defer allocator.free(dir);
     const cache_var = try std.fmt.allocPrintSentinel(allocator, "MALT_CACHE={s}", .{dir}, 0);
