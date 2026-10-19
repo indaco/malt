@@ -29,19 +29,20 @@ malt stores bottles by their SHA256. Thus, malt never downloads or extracts the 
 
 Thus, `mt rollback` completes immediately. All previously installed bottles are still in the store. A rollback is unlink → clone again → DB update, with no new download.
 
-## Streaming download pipeline
+## Download pipeline
 
-Each bottle download is a single-pass pipeline:
+Each bottle download has two stages:
 
 ```text
 Network (HTTPS from GHCR CDN)
-    ├──► SHA256 hasher (streaming - computed as chunks arrive)
-    └──► gzip/zstd decompressor
-            └──► tar extractor
-                    └──► filesystem write to tmp/
+    ├──► SHA256 hasher (calculated as chunks arrive)
+    └──► temporary archive in tmp/
+            │  SHA256 matches the Homebrew API manifest?
+            ├── no  → delete the temporary directory
+            └── yes → gzip decompressor → tar pre-scan → tar extractor → tmp/
 ```
 
-malt does not write an intermediate archive file to disk. When the stream completes, malt verifies the SHA256 against the Homebrew API manifest. If the SHA256 does not match, malt deletes the extracted directory before a commit occurs.
+malt does not keep the bottle in memory. If the SHA256 does not match, malt deletes the temporary directory. The decompressor and the tar parser never read unverified data.
 
 ## Mach-O patching
 
@@ -131,6 +132,7 @@ An upgrade runs the same protocol on the new version before it removes anything 
 The correctness of malt depends on these properties:
 
 - **SHA256 verification.** malt calculates the hash during the download and verifies it before extraction. No unverified data gets into the store.
+- **Verify before parse.** The decompressor and the tar parser read a bottle only after its SHA256 matches. Thus, a changed or damaged bottle cannot get to the parser. For this reason, malt does not extract a bottle during its download.
 - **Tar entry pre-scan.** malt validates the name and symlink target of each entry before it writes a byte. It verifies the checksum of each 512-byte tar header. malt applies hardlinks with `linkat(..., 0)`, which does not follow a symlink. Thus, a hostile tarball cannot use a symlink to `/etc/passwd` to put a hardlink inside the keg.
 - **Pre-flight checks.** Before a download starts, malt resolves dependencies, verifies disk space, and finds link conflicts.
 - **Atomic installs.** The 9-step protocol uses `errdefer` at each stage. An interrupted install leaves no partial state.
