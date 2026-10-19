@@ -81,6 +81,19 @@ check "bare ref list" "release/0.20" "$(printf 'release/0.18\nrelease/0.20\nrele
 check "empty input yields empty" "" "$(printf '' | pick_latest_release_branch)"
 check "non-release refs ignored" "" "$(printf 'main\nfeature/release/0.20\n' | pick_latest_release_branch)"
 
+echo "built_version_matches:"
+# A restored build cache can hand back a binary built from an older source
+# tree: the table then labels (and times) the wrong release. The built
+# version must equal the source's .version, or the run must stop.
+ver_src=$(mktemp -d /tmp/bench-ver.XXXXXX)
+printf '0.25.2\n' >"$ver_src/.version"
+check_pred "matching version passes" 0 built_version_matches "$ver_src" "0.25.2"
+check_pred "stale cached build fails" 1 built_version_matches "$ver_src" "0.25.0"
+check_pred "unreported version fails" 1 built_version_matches "$ver_src" ""
+command rm -f "$ver_src/.version"
+check_pred "missing .version fails" 1 built_version_matches "$ver_src" "0.25.2"
+rm -rf "$ver_src"
+
 echo "over_threshold:"
 check_pred "130.802 over 30 trips" 0 over_threshold "130.802" "30"
 check_pred "2.9 under 30 does not trip" 1 over_threshold "2.933" "30"

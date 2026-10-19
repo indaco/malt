@@ -356,7 +356,19 @@ build_malt() {
     err "build did not produce $MALT_BIN"
   fi
   "$MALT_BIN" --version >&2
+  if ! built_version_matches "$src" "$(malt_version)"; then
+    err "built malt reports '$(malt_version)' but $src/.version is '$(tr -d '[:space:]' <"$src/.version" 2>/dev/null)' — stale build cache?"
+  fi
   set_result ver_mt "$(malt_version)"
+}
+
+# built_version_matches <src_dir> <built_ver> — true only when the binary's
+# version equals the source's .version. A stale build cache can return a binary
+# from an older tree, which then publishes under the wrong release label.
+built_version_matches() {
+  local want
+  want=$(tr -d '[:space:]' <"$1/.version" 2>/dev/null) || return 1
+  [ -n "$want" ] && [ "$2" = "$want" ]
 }
 
 # malt_version — semver token from `malt --version` (e.g. "0.9.3"), for the
