@@ -905,7 +905,7 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) void {
 /// Launch the dashboard. Refuses (exit 2) on a non-interactive terminal rather
 /// than degrading. Every fault path restores the terminal via `errdefer`.
 /// `prefix` is the install root for the dashboard. The caller validates it.
-pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, environ: std.process.Environ, mt_path: []const u8, prefix: []const u8, version: []const u8) RunError!void {
+pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, environ: std.process.Environ, mt_path: []const u8, prefix: []const u8, cache_dir: []const u8, version: []const u8) RunError!void {
     const in_fd = std.posix.STDIN_FILENO;
     const out_fd = std.posix.STDOUT_FILENO;
     if (refusalReason(
@@ -970,12 +970,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     // any background read — the one interpreter path.
     // Warm-read first: seed the tab from the last snapshot so it opens with data
     // instead of a spinner; the audit below then refreshes it (pinned/tap fill in).
-    // Cache dir resolved locally (MALT_CACHE, else <prefix>/cache) so the TUI
-    // stays clear of the fs leaf.
-    var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_dir: ?[]const u8 = std.process.Environ.getPosix(environ, "MALT_CACHE") orelse
-        (std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch null);
-    if (cache_dir) |cd| outdated.warmRead(io, allocator, cd, &app.states.outdated, &app.storages.outdated, &app.shared);
+    // The caller resolves the cache dir; the TUI stays clear of the fs leaf.
+    outdated.warmRead(io, allocator, cache_dir, &app.states.outdated, &app.storages.outdated, &app.shared);
     if (backgroundReadCmd(allocator, app.mt_path, .outdated)) |bg| try pump(io, allocator, &t, painter, &fetches, &app, &app.storages, bg);
     if (app.shared.tab_loading.contains(.outdated)) _ = takeDirty(&app, .outdated);
     try repaint(fd, &frame, allocator, &app); // first interactive frame: kegs + the outdated spinner

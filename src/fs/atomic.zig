@@ -54,7 +54,7 @@ pub const fallback_prefix = if (builtin.is_test) "/tmp/malt-test-prefix" else de
 
 /// Test builds honour MALT_CACHE only under /tmp, where every fixture lives.
 /// An inherited developer cache then falls back to `{prefix}/cache`.
-fn testHonoursCache(cache: []const u8) bool {
+pub fn testHonoursCache(cache: []const u8) bool {
     return !builtin.is_test or std.mem.startsWith(u8, cache, "/tmp/");
 }
 

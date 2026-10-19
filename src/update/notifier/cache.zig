@@ -70,7 +70,9 @@ pub fn cachePathFrom(env: EnvOverride, buf: []u8) ?[]const u8 {
 }
 
 pub fn cachePath(environ: std.process.Environ, buf: []u8) ?[]const u8 {
-    return cachePathFrom(liveEnv(environ), buf);
+    const path = cachePathFrom(liveEnv(environ), buf) orelse return null;
+    if (!atomic.testHonoursCache(path)) return null; // skip the notice, as for a malformed root
+    return path;
 }
 
 /// Realistic failure: `error.NoSpaceLeft` when `buf` is undersized.

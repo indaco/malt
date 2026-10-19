@@ -773,10 +773,10 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         .tui => {
             if (cli_help.showIfRequested(ctx, cmd_args, "tui")) return;
             // The leaf cannot reach the fs validator. Fail closed here, before the
-            // alt-screen hides the refusal. The leaf reads MALT_CACHE itself, so
-            // only check it here.
+            // alt-screen hides the refusal. The leaf gets the checked cache dir.
             const prefix = atomic.maltPrefixOrAbort();
-            allocator.free(try atomic.maltCacheDir(allocator));
+            const cache_dir = try atomic.maltCacheDir(allocator);
+            defer allocator.free(cache_dir);
             // Resolve this binary's path so the TUI re-execs the *same* `mt` for
             // delegated mutations. Falling back to a bare `mt` would resolve
             // through PATH, where a package's own bin directory can shadow us.
@@ -786,7 +786,7 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
                 return error.Aborted;
             };
             const mt_path = self_buf[0..n];
-            try @import("tui/app.zig").run(ctx.io, allocator, ctx.stderr, ctx.environ, mt_path, prefix, version);
+            try @import("tui/app.zig").run(ctx.io, allocator, ctx.stderr, ctx.environ, mt_path, prefix, cache_dir, version);
         },
         .bundle => try bundle.execute(ctx, allocator, cmd_args),
         .uses => try uses.execute(ctx, allocator, cmd_args),
