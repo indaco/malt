@@ -711,6 +711,9 @@ malt verifies the SHA256 of each download before extraction. It installs atomica
   - zerobrew `v0.4.0`
 <!-- BENCH:META:END -->
 
+> [!NOTE]
+> malt verifies the SHA256 of a bottle before it reads the archive. Thus, extraction starts only after the download is complete. A client that extracts during the download can be faster on large packages, but its parser reads data that is not verified yet. → [Verify before parse](ARCHITECTURE.md#safety-and-security)
+
 <!-- BENCH:COLD:START -->
 ### Cold Install (median ±σ)
 
