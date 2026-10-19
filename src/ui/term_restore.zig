@@ -251,7 +251,7 @@ test "crashRestore delivers the whole sequence when a signal interrupts a blocke
     register(fx.writeFd(), std.mem.zeroes(std.posix.termios));
     defer clear();
     crashRestore();
-    try std.testing.expectEqual(fx.filled + restore_seq.len, fx.finish());
+    try std.testing.expectEqual(fx.filled + restore_seq.len, try fx.finish());
 }
 
 test "isActive follows register, registerTermios and clear" {

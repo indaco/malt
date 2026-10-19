@@ -1076,7 +1076,7 @@ test "fdSinkWrite delivers every byte when a resize interrupts a blocked write" 
     var ctx = FdSinkCtx{ .fd = fx.writeFd() };
     const frame = "0123456789";
     try fdSinkWrite(&ctx, frame);
-    try std.testing.expectEqual(fx.filled + frame.len, fx.finish());
+    try std.testing.expectEqual(fx.filled + frame.len, try fx.finish());
 }
 
 test "filterInto keeps pumping when a resize interrupts a blocked read" {
@@ -1095,22 +1095,22 @@ test "filterInto keeps pumping when a resize interrupts a blocked read" {
     defer _ = std.c.close(out[0]);
     defer _ = std.c.close(out[1]);
 
-    // Data arrives only after the fixture's signals, so the read is blocked
-    // (and interrupted) first.
+    // Data arrives only after the signals, so the read is blocked (and
+    // interrupted) first.
     const Late = struct {
-        fn run(fd: std.posix.fd_t) void {
-            const gap = std.c.timespec{ .sec = 0, .nsec = 400 * std.time.ns_per_ms };
-            _ = std.c.nanosleep(&gap, null);
+        fn run(gate: *resize.Fixture, fd: std.posix.fd_t) void {
+            gate.waitInterrupted();
             _ = std.c.write(fd, "ok", 2);
             _ = std.c.close(fd);
         }
     };
-    const th = try std.Thread.spawn(.{}, Late.run, .{in[1]});
+    try fx.start();
+    const th = try std.Thread.spawn(.{}, Late.run, .{ &fx, in[1] });
     in[1] = -1;
     defer th.join();
-    try fx.start();
 
     filterInto(in[0], out[1]);
+    _ = try fx.finish();
     // EOF for the read below, so a red run fails instead of blocking.
     _ = std.c.close(out[1]);
     out[1] = -1;
@@ -1124,17 +1124,30 @@ test "waitChild waits out a resize instead of reporting a wait failure" {
     var fx = try resize.Fixture.init();
     defer fx.deinit();
 
+    var gate: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&gate));
     const pid = std.c.fork();
     try std.testing.expect(pid >= 0);
     if (pid == 0) {
-        const nap = std.c.timespec{ .sec = 0, .nsec = 500 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&nap, null);
+        // Exits once the parent closes its write end after the signals.
+        _ = std.c.close(gate[1]);
+        var b: u8 = 0;
+        _ = std.c.read(gate[0], @ptrCast(&b), 1);
         std.c._exit(7);
     }
+    _ = std.c.close(gate[0]);
     try fx.start();
+    const release = try std.Thread.spawn(.{}, struct {
+        fn run(f: *resize.Fixture, fd: std.posix.fd_t) void {
+            f.waitInterrupted();
+            _ = std.c.close(fd);
+        }
+    }.run, .{ &fx, gate[1] });
+    defer release.join();
 
     var status: c_int = 0;
     try std.testing.expectEqual(pid, waitChild(pid, &status));
     try std.testing.expect(wifexited(status));
     try std.testing.expectEqual(@as(u8, 7), wexitstatus(status));
+    _ = try fx.finish();
 }

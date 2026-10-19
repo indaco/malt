@@ -301,7 +301,7 @@ test "enterAltScreen survives a resize signal interrupting a blocked write" {
     var t = termOnPipe(fx.writeFd());
     try t.enterAltScreen();
     try std.testing.expect(t.in_alt);
-    try std.testing.expectEqual(fx.filled + seq.alt_enter.len, fx.finish());
+    try std.testing.expectEqual(fx.filled + seq.alt_enter.len, try fx.finish());
 }
 
 test "enterAltScreen still fails on a dead fd and leaves in_alt unset" {

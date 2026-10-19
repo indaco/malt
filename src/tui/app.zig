@@ -3137,5 +3137,5 @@ test "writeAll delivers the whole frame when a resize interrupts a blocked write
     const frame = "0123456789";
     writeAll(fx.writeFd(), frame);
     // Pre-fill plus the whole frame came out: nothing was dropped.
-    try std.testing.expectEqual(fx.filled + frame.len, fx.finish());
+    try std.testing.expectEqual(fx.filled + frame.len, try fx.finish());
 }
