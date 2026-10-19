@@ -502,3 +502,26 @@ test "pendingNotice stays silent on a command that never carries the notice" {
         return error.TestUnexpectedResult;
     }
 }
+
+test "test builds drop a notifier cache path outside /tmp" {
+    const allocator = testing.allocator;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    // An inherited developer cache must never be resolved by a test build.
+    const inherited = [_:null]?[*:0]const u8{"MALT_CACHE=/var/empty/mt-inherited"};
+    try testing.expect(notifier.cachePath(fixtureEnviron(&inherited), &buf) == null);
+
+    // The $HOME/.cache/malt fallback is the same leak with no MALT_CACHE at all.
+    const home_only = [_:null]?[*:0]const u8{"HOME=/var/empty/mt-home"};
+    try testing.expect(notifier.cachePath(fixtureEnviron(&home_only), &buf) == null);
+
+    const dir = try test_io.uniqueTempPath(allocator, "notify", "guard");
+    defer allocator.free(dir);
+    const cache_var = try std.fmt.allocPrintSentinel(allocator, "MALT_CACHE={s}", .{dir}, 0);
+    defer allocator.free(cache_var);
+    const under_tmp = [_:null]?[*:0]const u8{cache_var.ptr};
+    const got = notifier.cachePath(fixtureEnviron(&under_tmp), &buf) orelse return error.TestExpectedNonNull;
+    const want = try std.fmt.allocPrint(allocator, "{s}/version-notify.json", .{dir});
+    defer allocator.free(want);
+    try testing.expectEqualStrings(want, got);
+}
