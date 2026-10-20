@@ -87,6 +87,9 @@ jobs:
       - name: Regression guard - failed tap --force commit keeps the prior keg
         run: ./scripts/regressions/tap-force-failed-commit-keeps-prior-keg-tap-force-reinstall-prunes-other-versions-before-commit.sh
 
+      - name: Regression guard - tap and local installs refuse another keg's links
+        run: ./scripts/regressions/tap-install-refuses-other-kegs-links-tap-formula-installs-skip-the-symlink.sh
+
       - name: Regression guard - commands append to a shared redirected stdout
         run: ./scripts/regressions/cli-stdout-shared-redirect-cli-stdout-writer-overwrites-shared-redirect.sh
 
