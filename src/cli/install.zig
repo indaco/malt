@@ -1561,10 +1561,10 @@ test "matchesLinkOverwrite ignores an empty pattern" {
 test "blockingConflicts lets a listed slot change hands and keeps the rest" {
     const a = std.testing.allocator;
     const pats = [_][]const u8{"lib/libfoo*"};
-    const listed: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0" };
-    const unlisted: linker_mod.Conflict = .{ .link_path = "/p/bin/foo", .existing_keg = "Cellar/old/1.0" };
+    const listed: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0", .in_cellar = true };
+    const unlisted: linker_mod.Conflict = .{ .link_path = "/p/bin/foo", .existing_keg = "Cellar/old/1.0", .in_cellar = true };
     const stray: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.a", .existing_keg = "existing file", .owned_by_keg = false };
-    const own: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.1.dylib", .existing_keg = "Cellar/new/0.9" };
+    const own: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.1.dylib", .existing_keg = "Cellar/new/0.9", .in_cellar = true };
 
     const left = try blockingConflicts(a, &.{ listed, unlisted, stray, own }, "/p", "new", &pats);
     defer a.free(left);
@@ -1583,16 +1583,21 @@ test "blockingConflicts lets a listed slot change hands and keeps the rest" {
 test "mayTakeOver refuses a foreign link and a clash higher up the path" {
     const pats = [_][]const u8{"lib/libfoo*"};
     const foreign: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/x/1", .in_cellar = false };
-    const ancestor: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo", .existing_keg = "Cellar/old/1.0", .structural = true };
-    const plain: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0" };
+    const ancestor: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo", .existing_keg = "Cellar/old/1.0", .in_cellar = true, .structural = true };
+    const plain: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0", .in_cellar = true };
     try std.testing.expect(!mayTakeOver(foreign, "/p", "new", &pats));
     try std.testing.expect(!mayTakeOver(ancestor, "/p", "new", &pats));
     try std.testing.expect(mayTakeOver(plain, "/p", "new", &pats));
 }
 
+test "mayTakeOver refuses a conflict that never said it is inside the Cellar" {
+    const unset: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0" };
+    try std.testing.expect(!mayTakeOver(unset, "/p", "new", &.{"lib/libfoo*"}));
+}
+
 test "blockingConflicts refuses a slot outside the prefix" {
     const a = std.testing.allocator;
-    const c: linker_mod.Conflict = .{ .link_path = "/elsewhere/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0" };
+    const c: linker_mod.Conflict = .{ .link_path = "/elsewhere/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0", .in_cellar = true };
     const left = try blockingConflicts(a, &.{c}, "/p", "new", &.{"lib/libfoo*"});
     defer a.free(left);
     try std.testing.expectEqual(@as(usize, 1), left.len);
@@ -1653,7 +1658,8 @@ pub fn linkAndRecord(
             // Without the snapshot a failed link could not give the slots back.
             taken = snapshotTaken(io, allocator, db, found, prefix, job.name, formula.link_overwrite) catch |err| {
                 sink.err("{s}: cannot record the links it would take over: {s}", .{ job.name, @errorName(err) });
-                cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
+                dropUnrecordedKeg(io, db, prefix, job.name, job.version_str, keg_path);
+                if (flags.force) relinkKegs(db, linker, job.name);
                 return InstallError.LinkFailed;
             };
         }

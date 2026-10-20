@@ -1699,7 +1699,9 @@ pub fn upgradeDbAtomic(
         bin_isolated,
         .{ .in_transaction = true },
     );
-    try linker.link(new_cellar_path, formula.name, new_keg_id, bin_isolated);
+    // A keg-only formula owns no public links; linking could take back slots
+    // that a newer formula now holds.
+    if (!formula.keg_only) try linker.link(new_cellar_path, formula.name, new_keg_id, bin_isolated);
     install_record_mod.deleteKeg(db, old_keg_id);
     return new_keg_id;
 }
@@ -2465,6 +2467,41 @@ test "upgradeDbAtomic re-records dependency edges so cleanup keeps live runtime 
     }
     for (orphans) |o| {
         try std.testing.expect(!std.mem.eql(u8, o, "oniguruma"));
+    }
+}
+
+// A keg-only formula owns no public links. If a newer formula took its old
+// slots over, upgrading it must not link them back.
+test "upgradeDbAtomic links a regular formula but leaves a keg-only one unlinked" {
+    inline for (.{ .{ false, true }, .{ true, false } }) |case| {
+        var s = try Scratch.init("upgrade_keg_only");
+        defer s.deinit();
+        var db = try sqlite.Database.open(":memory:");
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path, install_reason)
+            \\VALUES (1, 'foo', 'foo', '1.0', 'sha-old', '/nonexistent/Cellar/foo/1.0', 'direct');
+        );
+        const keg = s.p("/Cellar/foo/2.0");
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/Cellar/foo/2.0/bin"));
+        (try std.Io.Dir.createFileAbsolute(fs_test_io, s.p("/Cellar/foo/2.0/bin/foo"), .{})).close(fs_test_io);
+
+        const json = if (case[0])
+            \\{"name":"foo","full_name":"foo","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":true,"post_install_defined":false,"versions":{"stable":"2.0"},"dependencies":[]}
+        else
+            \\{"name":"foo","full_name":"foo","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"2.0"},"dependencies":[]}
+        ;
+        var formula = try formula_mod.parseFormula(std.testing.allocator, json);
+        defer formula.deinit();
+        var linker = linker_mod.Linker.init(fs_test_io, std.testing.allocator, &db, s.base);
+
+        try db.beginTransaction();
+        _ = try upgradeDbAtomic(&db, &linker, 1, &formula, "sha-new", keg, false);
+        try db.commit();
+
+        const linked = if (std.Io.Dir.accessAbsolute(fs_test_io, s.p("/bin/foo"), .{})) |_| true else |_| false;
+        try std.testing.expectEqual(case[1], linked);
     }
 }
 

@@ -16,8 +16,9 @@ pub const Conflict = struct {
     /// write inside the other keg, so no override may cover it.
     structural: bool = false,
     /// The link points into this prefix's own Cellar. Only such a link may
-    /// change hands; a user's or a cask's link never does.
-    in_cellar: bool = true,
+    /// change hands; a user's or a cask's link never does. Off by default so
+    /// a conflict that skips the check cannot be taken over.
+    in_cellar: bool = false,
 };
 
 pub const Linker = struct {

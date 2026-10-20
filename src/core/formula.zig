@@ -218,6 +218,22 @@ pub fn readKegSource(
     return readFormulaSource(io, allocator, rb_path);
 }
 
+/// True when the shipped formula source declares the keg keg-only. Only an
+/// unconditional class-level line counts: a modifier (`if OS.mac?`) or a
+/// nested block can switch it off on this host, so those read as linked.
+pub fn declaresKegOnly(src: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, src, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, " \t\r");
+        if (!std.mem.startsWith(u8, line, "  keg_only")) continue;
+        const rest = line["  keg_only".len..];
+        if (rest.len != 0 and rest[0] != ' ') continue;
+        if (std.mem.indexOf(u8, rest, " if ") != null or std.mem.indexOf(u8, rest, " unless ") != null) continue;
+        return true;
+    }
+    return false;
+}
+
 /// Resolve this formula's dependency-scoped placeholder into `buf`.
 /// Null when it declares no matching dependency: guessing would bake a path
 /// to a keg the formula never asked for.
@@ -2019,4 +2035,13 @@ test "parseFormula reports allocation failure instead of dropping bottle platfor
     try w.writeAll("}}}}");
     // One-shot: a sticky sweep fails the later vulns parse and hides the drop.
     try @import("../testing/one_shot_fail.zig").sweep(parseManyBottles, .{ aw.written(), tags });
+}
+
+test "declaresKegOnly reads only an unconditional class-level declaration" {
+    try testing.expect(declaresKegOnly("class A < Formula\n  keg_only :versioned_formula\nend\n"));
+    try testing.expect(declaresKegOnly("class A < Formula\n  keg_only \"macOS ships it\"\nend\n"));
+    try testing.expect(!declaresKegOnly("class A < Formula\n  keg_only :provided_by_macos if OS.mac?\nend\n"));
+    try testing.expect(!declaresKegOnly("class A < Formula\n  on_linux do\n    keg_only :x\n  end\nend\n"));
+    try testing.expect(!declaresKegOnly("class A < Formula\n  keg_only_thing 1\nend\n"));
+    try testing.expect(!declaresKegOnly(""));
 }

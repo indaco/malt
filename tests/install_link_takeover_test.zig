@@ -93,6 +93,10 @@ const Env = struct {
 
     /// Run the link phase for `new` with the given `link_overwrite` JSON list.
     fn linkNew(self: *Env, keg: []const u8, overwrite_json: []const u8) !void {
+        return self.linkNewWith(keg, overwrite_json, .{});
+    }
+
+    fn linkNewWith(self: *Env, keg: []const u8, overwrite_json: []const u8, flags: malt.install_args.InstallFlags) !void {
         const json = try std.fmt.allocPrint(
             testing.allocator,
             "{{\"name\":\"new\",\"versions\":{{\"stable\":\"1.0\"}},\"link_overwrite\":{s}}}",
@@ -118,7 +122,7 @@ const Env = struct {
         };
         var cache = deps_mod.FormulaCache.init(testing.allocator);
         defer cache.deinit();
-        try install.linkAndRecord(io, std.process.Environ.empty, testing.allocator, &job, keg, &self.db, &self.linker, self.prefix, &cache, .{}, malt.install_sink.silent);
+        try install.linkAndRecord(io, std.process.Environ.empty, testing.allocator, &job, keg, &self.db, &self.linker, self.prefix, &cache, flags, malt.install_sink.silent);
     }
 };
 
@@ -310,4 +314,48 @@ test "a link into a Cellar outside the prefix is never taken over" {
 
     var buf: [512]u8 = undefined;
     try testing.expectEqualStrings("/elsewhere/Cellar/x/1/lib/libfoo.dylib", env.target("lib/libfoo.dylib", &buf));
+}
+
+test "a snapshot that cannot be taken stops the install and removes the new keg" {
+    const env = try Env.init("snapshot_fail");
+    defer env.deinit();
+    const old = try env.installLinked("old", &.{"lib/libfoo.dylib"});
+    defer testing.allocator.free(old);
+    const new = try env.makeKeg("new", &.{"lib/libfoo.dylib"});
+    defer testing.allocator.free(new);
+    // The owner lookup reads `links`; losing it makes the snapshot fail.
+    try env.db.exec("ALTER TABLE links RENAME TO links_gone;");
+
+    try testing.expectError(error.LinkFailed, env.linkNew(new, "[\"lib/libfoo*\"]"));
+
+    var buf: [512]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, env.target("lib/libfoo.dylib", &buf), "/Cellar/old/") != null);
+    try testing.expect(!exists(new));
+}
+
+test "a snapshot failure under --force keeps the keg the surviving row points at" {
+    const env = try Env.init("snapshot_fail_force");
+    defer env.deinit();
+    const old = try env.installLinked("old", &.{"lib/libfoo.dylib"});
+    defer testing.allocator.free(old);
+    const new = try env.makeKeg("new", &.{"lib/libfoo.dylib"});
+    defer testing.allocator.free(new);
+    // A same-version reinstall: the prior row already owns this directory.
+    _ = try install_record.recordKegFields(&env.db, .{
+        .name = "new",
+        .full_name = "new",
+        .version = "1.0",
+        .revision = 0,
+        .tap = "",
+        .store_sha256 = "",
+        .cellar_path = new,
+        .install_reason = "direct",
+        .bin_isolated = false,
+        .dependencies = &.{},
+    }, .{});
+    try env.db.exec("ALTER TABLE links RENAME TO links_gone;");
+
+    try testing.expectError(error.LinkFailed, env.linkNewWith(new, "[\"lib/libfoo*\"]", .{ .force = true }));
+
+    try testing.expect(exists(new));
 }
