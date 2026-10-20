@@ -365,6 +365,29 @@ pub const Linker = struct {
         };
     }
 
+    /// Put back a keg-only keg's links after an upgrade or rollback.
+    /// A keg-only keg owns no public links by default, so this links only a
+    /// keg that held some (`held`, a hand `mt link`). If another keg holds
+    /// one of its slots it links nothing: a full relink would take them back
+    /// from a successor that took them over.
+    pub fn linkHeld(self: *Linker, keg_path: []const u8, name: []const u8, keg_id: i64, bin_isolated: bool, held: bool) !void {
+        if (!held) return;
+        const found = try self.checkConflicts(keg_path, bin_isolated);
+        defer {
+            for (found) |c| {
+                self.allocator.free(c.link_path);
+                self.allocator.free(c.existing_keg);
+            }
+            if (found.len > 0) self.allocator.free(found);
+        }
+        if (found.len > 0) {
+            // Drop the stale rows of the slots that were not put back.
+            self.unlink(keg_id) catch {};
+            return;
+        }
+        try self.link(keg_path, name, keg_id, bin_isolated);
+    }
+
     /// Create `opt/{name} -> Cellar/{name}/{version}` symlink.
     ///
     /// Dependents' relocated `LC_LOAD_DYLIB` entries point into

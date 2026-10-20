@@ -1114,3 +1114,73 @@ test "checkConflicts keeps malt's own link in_cellar under a trailing-slash pref
     defer testing.allocator.free(slashed);
     try testing.expect((try conflictFor(slashed, own)).in_cellar);
 }
+
+fn linkExists(prefix: []const u8, rel: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, rel }) catch return false;
+    var tgt: [512]u8 = undefined;
+    _ = test_io.readLinkAbsolute(std.Options.debug_io, p, &tgt) catch return false;
+    return true;
+}
+
+test "linkHeld links nothing for a keg that held no links" {
+    const prefix = try uniquePrefix("link_held_none");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    const keg = try makeKegWithBinary(prefix, "foo", "1.0", "tool");
+    defer testing.allocator.free(keg);
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertKeg(&db, 1, "foo", keg);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+
+    try linker.linkHeld(keg, "foo", 1, false, false);
+
+    try testing.expect(!linkExists(prefix, "bin/tool"));
+}
+
+test "linkHeld relinks a keg that held links when no slot clashes" {
+    const prefix = try uniquePrefix("link_held_clear");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    const keg = try makeKegWithBinary(prefix, "foo", "1.0", "tool");
+    defer testing.allocator.free(keg);
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertKeg(&db, 1, "foo", keg);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+
+    try linker.linkHeld(keg, "foo", 1, false, true);
+
+    try testing.expect(linkExists(prefix, "bin/tool"));
+    try testing.expect(linker_mod.isKegLinked(&db, 1));
+}
+
+test "linkHeld leaves every slot alone when one is held by another keg" {
+    const prefix = try uniquePrefix("link_held_clash");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    const other = try makeKegWithBinary(prefix, "other", "1.0", "tool");
+    defer testing.allocator.free(other);
+    const keg = try makeKegWithBinary(prefix, "foo", "2.0", "tool");
+    defer testing.allocator.free(keg);
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try insertKeg(&db, 1, "foo", keg);
+    try insertKeg(&db, 2, "other", other);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try linker.link(other, "other", 2, false);
+
+    try linker.linkHeld(keg, "foo", 1, false, true);
+
+    var buf: [512]u8 = undefined;
+    const p = try std.fmt.allocPrint(testing.allocator, "{s}/bin/tool", .{prefix});
+    defer testing.allocator.free(p);
+    const t = try test_io.readLinkAbsolute(std.Options.debug_io, p, &buf);
+    try testing.expect(std.mem.indexOf(u8, t, "/Cellar/other/") != null);
+    try testing.expect(linker_mod.isKegLinked(&db, 2));
+    try testing.expect(!linker_mod.isKegLinked(&db, 1));
+}
