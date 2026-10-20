@@ -1135,7 +1135,7 @@ test "linkHeld links nothing for a keg that held no links" {
     try insertKeg(&db, 1, "foo", keg);
     var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
 
-    try linker.linkHeld(keg, "foo", 1, false, false);
+    try testing.expect(!try linker.linkHeld(keg, "foo", 1, false, false));
 
     try testing.expect(!linkExists(prefix, "bin/tool"));
 }
@@ -1152,7 +1152,7 @@ test "linkHeld relinks a keg that held links when no slot clashes" {
     try insertKeg(&db, 1, "foo", keg);
     var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
 
-    try linker.linkHeld(keg, "foo", 1, false, true);
+    try testing.expect(!try linker.linkHeld(keg, "foo", 1, false, true));
 
     try testing.expect(linkExists(prefix, "bin/tool"));
     try testing.expect(linker_mod.isKegLinked(&db, 1));
@@ -1174,7 +1174,7 @@ test "linkHeld leaves every slot alone when one is held by another keg" {
     var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
     try linker.link(other, "other", 2, false);
 
-    try linker.linkHeld(keg, "foo", 1, false, true);
+    try testing.expect(try linker.linkHeld(keg, "foo", 1, false, true));
 
     var buf: [512]u8 = undefined;
     const p = try std.fmt.allocPrint(testing.allocator, "{s}/bin/tool", .{prefix});

@@ -341,10 +341,8 @@ fn swapKeg(
     const held = linker_mod.isKegLinked(db, keg_id);
     try linker.unlink(keg_id);
     try retargetKegRow(db, keg_id, target.pkg_version, target.sha256, keg_path);
-    if (keg_only) {
-        try linker.linkHeld(keg_path, name, keg_id, bin_isolated, held);
-    } else {
-        try linker.link(keg_path, name, keg_id, bin_isolated);
+    if (try linker.relink(keg_path, name, keg_id, bin_isolated, keg_only, held)) {
+        output.warn("{s}: another keg holds some of its links, so none were restored - run: mt link --overwrite {s}", .{ name, name });
     }
 }
 
@@ -370,13 +368,12 @@ const Undo = struct {
         self.linker.unlink(self.keg_id) catch {};
         self.db.rollback();
         if (self.cellar_path.len > 0) {
-            const restored = if (self.keg_only)
-                self.linker.linkHeld(self.cellar_path, self.name, self.keg_id, self.bin_isolated, linker_mod.isKegLinked(self.db, self.keg_id))
-            else
-                self.linker.link(self.cellar_path, self.name, self.keg_id, self.bin_isolated);
-            restored catch {
+            const held = linker_mod.isKegLinked(self.db, self.keg_id);
+            if (self.linker.relink(self.cellar_path, self.name, self.keg_id, self.bin_isolated, self.keg_only, held)) |skipped| {
+                if (skipped) output.warn("{s}: another keg holds some of its links, so none were restored - run: mt link --overwrite {s}", .{ self.name, self.name });
+            } else |_| {
                 output.err("CRITICAL: could not restore symlinks for {s} - run: mt link {s}", .{ self.name, self.name });
-            };
+            }
         }
         cellar.remove(self.io, self.prefix, self.name, self.abandoned_pkg_version) catch {};
     }

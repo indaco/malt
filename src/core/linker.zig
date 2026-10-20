@@ -369,9 +369,10 @@ pub const Linker = struct {
     /// A keg-only keg owns no public links by default, so this links only a
     /// keg that held some (`held`, a hand `mt link`). If another keg holds
     /// one of its slots it links nothing: a full relink would take them back
-    /// from a successor that took them over.
-    pub fn linkHeld(self: *Linker, keg_path: []const u8, name: []const u8, keg_id: i64, bin_isolated: bool, held: bool) !void {
-        if (!held) return;
+    /// from a successor that took them over. True when it skipped for that
+    /// reason, so the caller can tell the user.
+    pub fn linkHeld(self: *Linker, keg_path: []const u8, name: []const u8, keg_id: i64, bin_isolated: bool, held: bool) !bool {
+        if (!held) return false;
         const found = try self.checkConflicts(keg_path, bin_isolated);
         defer {
             for (found) |c| {
@@ -383,9 +384,17 @@ pub const Linker = struct {
         if (found.len > 0) {
             // Drop the stale rows of the slots that were not put back.
             self.unlink(keg_id) catch {};
-            return;
+            return true;
         }
         try self.link(keg_path, name, keg_id, bin_isolated);
+        return false;
+    }
+
+    /// `link` for a regular keg, `linkHeld` for a keg-only one.
+    pub fn relink(self: *Linker, keg_path: []const u8, name: []const u8, keg_id: i64, bin_isolated: bool, keg_only: bool, held: bool) !bool {
+        if (keg_only) return self.linkHeld(keg_path, name, keg_id, bin_isolated, held);
+        try self.link(keg_path, name, keg_id, bin_isolated);
+        return false;
     }
 
     /// Create `opt/{name} -> Cellar/{name}/{version}` symlink.
