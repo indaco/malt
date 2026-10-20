@@ -1313,11 +1313,12 @@ pub fn materializeRubyFormula(
 
     // Before the sweep: a refusal then leaves every prior link untouched.
     // `--force` clears the keg's own links, so only other kegs' slots block.
-    // No `link_overwrite` here: a .rb cannot declare one.
+    // `link_overwrite` is not parsed from a .rb, so no slot may change hands.
+    // A layout change (file <-> directory) of the keg's own links is refused too.
     const all: []linker_mod.Conflict = linker.checkConflicts(cellar_path, false) catch &.{};
     var blocking: usize = 0;
     for (all) |c| {
-        if (force and c.owned_by_keg and !c.structural and install_mod.kegOwnedBy(c.existing_keg, resolved.name)) {
+        if (force and c.owned_by_keg and c.in_cellar and !c.structural and install_mod.kegOwnedBy(c.existing_keg, resolved.name)) {
             allocator.free(c.link_path);
             allocator.free(c.existing_keg);
         } else {

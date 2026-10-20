@@ -909,7 +909,7 @@ fn runInstall(
                             // The sibling is where it was actually found, so its
                             // error is the useful one; the cask miss above is
                             // just how we got here.
-                            if (tap_err != InstallError.BuildFromSourceUnsupported) {
+                            if (tap_err != InstallError.BuildFromSourceUnsupported and tap_err != InstallError.LinkFailed) {
                                 sink.err("Failed to install {s}: {s}", .{ slug, @errorName(tap_err) });
                             }
                             failed_count += 1;

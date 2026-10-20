@@ -1671,6 +1671,27 @@ test "materializeRubyFormula --force still refuses a slot another keg links" {
     try testing.expectEqualStrings(owner, buf[0..n]);
 }
 
+test "materializeRubyFormula --force refuses a same-name link that points outside the prefix" {
+    // A foreign Cellar (another package manager) owns that slot, not malt.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "9c" ** 32;
+    try seedKegArchive(prefix, "second", sha);
+    const foreign = try std.fmt.allocPrint(testing.allocator, "{s}/elsewhere/Cellar/second/1.0/bin/second", .{prefix});
+    defer testing.allocator.free(foreign);
+    try plantSlot(prefix, "second", foreign);
+
+    var errs: std.ArrayList(u8) = .empty;
+    defer errs.deinit(testing.allocator);
+    try refusedInstall(prefix, "second", sha, true, &errs);
+
+    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/second", .{prefix});
+    defer testing.allocator.free(slot);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try test_io.cwd().readLink(std.Options.debug_io, slot, &buf);
+    try testing.expectEqualStrings(foreign, buf[0..n]);
+}
+
 test "materializeRubyFormula refuses a stray file in the slot with the file hint" {
     const prefix = try scratchPrefix();
     defer cleanupPrefix(prefix);
