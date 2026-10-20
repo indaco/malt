@@ -302,6 +302,7 @@ pub fn build(b: *std.Build) void {
         "tests/linker_isolation_test.zig",
         "tests/install_isolation_test.zig",
         "tests/install_record_rollback_test.zig",
+        "tests/install_link_takeover_test.zig",
         "tests/doctor_isolation_test.zig",
         "tests/tui_term_test.zig",
         "tests/tui_keys_test.zig",

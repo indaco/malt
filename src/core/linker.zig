@@ -12,6 +12,9 @@ pub const Conflict = struct {
     /// False when the slot holds a stray file or directory rather than a
     /// keg's symlink: no package owns it, so only the user can clear it.
     owned_by_keg: bool = true,
+    /// An ancestor of the slot clashes, not the slot itself. Linking would
+    /// write inside the other keg, so no override may cover it.
+    structural: bool = false,
 };
 
 pub const Linker = struct {
@@ -77,6 +80,7 @@ pub const Linker = struct {
                         .link_path = self.allocator.dupe(u8, link_path) catch continue,
                         .existing_keg = self.allocator.dupe(u8, owner orelse "existing directory") catch continue,
                         .owned_by_keg = owner != null,
+                        .structural = true,
                     }) catch continue;
                     continue;
                 }
