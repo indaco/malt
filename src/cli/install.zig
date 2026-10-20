@@ -1427,13 +1427,13 @@ fn globMatch(pat: []const u8, s: []const u8) bool {
 /// the path stays the user's to clear.
 fn mayTakeOver(c: linker_mod.Conflict, prefix: []const u8, name: []const u8, patterns: []const []const u8) bool {
     if (!c.owned_by_keg or c.structural) return false;
-    if (!std.mem.startsWith(u8, c.existing_keg, "Cellar/") or kegOwnedBy(c.existing_keg, name)) return false;
+    if (!c.in_cellar or kegOwnedBy(c.existing_keg, name)) return false;
     if (c.link_path.len <= prefix.len + 1 or !std.mem.startsWith(u8, c.link_path, prefix) or c.link_path[prefix.len] != '/') return false;
     return matchesLinkOverwrite(patterns, c.link_path[prefix.len + 1 ..]);
 }
 
 /// A slot taken from another keg, as it stood before the link phase.
-const TakenSlot = struct {
+pub const TakenSlot = struct {
     link_path: []const u8,
     target: []const u8,
     /// Owner row, absent for a link malt never recorded.
@@ -1441,7 +1441,7 @@ const TakenSlot = struct {
 };
 
 /// Record the slots the link phase may replace. Caller frees with `freeTaken`.
-fn snapshotTaken(
+pub fn snapshotTaken(
     io: std.Io,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
@@ -1451,21 +1451,28 @@ fn snapshotTaken(
     patterns: []const []const u8,
 ) ![]TakenSlot {
     var out: std.ArrayList(TakenSlot) = .empty;
-    errdefer freeTaken(allocator, out.items);
+    errdefer {
+        for (out.items) |t| {
+            allocator.free(t.link_path);
+            allocator.free(t.target);
+        }
+        out.deinit(allocator);
+    }
     for (found) |c| {
         if (!mayTakeOver(c, prefix, name, patterns)) continue;
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = std.Io.Dir.readLinkAbsolute(io, c.link_path, &buf) catch continue;
+        const n = try std.Io.Dir.readLinkAbsolute(io, c.link_path, &buf);
+        const keg_id = try slotOwner(db, c.link_path);
         const link_path = try allocator.dupe(u8, c.link_path);
         errdefer allocator.free(link_path);
         const target = try allocator.dupe(u8, buf[0..n]);
         errdefer allocator.free(target);
-        try out.append(allocator, .{ .link_path = link_path, .target = target, .keg_id = slotOwner(db, c.link_path) });
+        try out.append(allocator, .{ .link_path = link_path, .target = target, .keg_id = keg_id });
     }
     return out.toOwnedSlice(allocator);
 }
 
-fn freeTaken(allocator: std.mem.Allocator, taken: []const TakenSlot) void {
+pub fn freeTaken(allocator: std.mem.Allocator, taken: []const TakenSlot) void {
     for (taken) |t| {
         allocator.free(t.link_path);
         allocator.free(t.target);
@@ -1473,11 +1480,12 @@ fn freeTaken(allocator: std.mem.Allocator, taken: []const TakenSlot) void {
     allocator.free(taken);
 }
 
-fn slotOwner(db: *sqlite.Database, link_path: []const u8) ?i64 {
-    var stmt = db.prepare("SELECT keg_id FROM links WHERE link_path = ?1;") catch return null;
+/// Null only when no row exists; a DB failure must not read as "no row".
+fn slotOwner(db: *sqlite.Database, link_path: []const u8) !?i64 {
+    var stmt = try db.prepare("SELECT keg_id FROM links WHERE link_path = ?1;");
     defer stmt.finalize();
-    stmt.bindText(1, link_path) catch return null;
-    if (!(stmt.step() catch false)) return null;
+    try stmt.bindText(1, link_path);
+    if (!try stmt.step()) return null;
     return stmt.columnInt(0);
 }
 
@@ -1488,7 +1496,7 @@ fn restoreTaken(io: std.Io, db: *sqlite.Database, taken: []const TakenSlot, new_
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const restorable = blk: {
             const n = std.Io.Dir.readLinkAbsolute(io, t.link_path, &buf) catch |err| break :blk err == error.FileNotFound;
-            break :blk std.mem.startsWith(u8, buf[0..n], new_keg);
+            break :blk linker_mod.Linker.isUnderKeg(buf[0..n], new_keg);
         };
         if (!restorable) continue;
         std.Io.Dir.deleteFileAbsolute(io, t.link_path) catch {};
@@ -1574,7 +1582,7 @@ test "blockingConflicts lets a listed slot change hands and keeps the rest" {
 
 test "mayTakeOver refuses a foreign link and a clash higher up the path" {
     const pats = [_][]const u8{"lib/libfoo*"};
-    const foreign: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "/usr/local/opt/x/lib/libfoo.dylib" };
+    const foreign: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/x/1", .in_cellar = false };
     const ancestor: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo", .existing_keg = "Cellar/old/1.0", .structural = true };
     const plain: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0" };
     try std.testing.expect(!mayTakeOver(foreign, "/p", "new", &pats));
@@ -1641,7 +1649,14 @@ pub fn linkAndRecord(
         // `linker.link` replaces the slots we let through.
         const conflicts = blockingConflicts(allocator, found, prefix, job.name, formula.link_overwrite) catch found;
         defer if (conflicts.ptr != found.ptr) allocator.free(conflicts);
-        if (conflicts.len == 0) taken = snapshotTaken(io, allocator, db, found, prefix, job.name, formula.link_overwrite) catch &.{};
+        if (conflicts.len == 0) {
+            // Without the snapshot a failed link could not give the slots back.
+            taken = snapshotTaken(io, allocator, db, found, prefix, job.name, formula.link_overwrite) catch |err| {
+                sink.err("{s}: cannot record the links it would take over: {s}", .{ job.name, @errorName(err) });
+                cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
+                return InstallError.LinkFailed;
+            };
+        }
         if (conflicts.len > 0) {
             sink.err("{s}: {d} symlink conflict(s) detected:", .{ job.name, conflicts.len });
             for (conflicts) |conflict| {

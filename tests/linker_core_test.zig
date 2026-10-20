@@ -1052,3 +1052,65 @@ test "unlink surfaces SqliteError when links table is missing" {
     var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, "/tmp/malt_unused");
     try testing.expectError(sqlite.SqliteError.PrepareFailed, linker.unlink(1));
 }
+
+fn conflictFor(prefix: []const u8, link_target: []const u8) !linker_mod.Conflict {
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+    const keg = try makeKegWithBinary(prefix, "foo", "1.0", "tool");
+    defer testing.allocator.free(keg);
+    const bin = try std.fmt.allocPrint(testing.allocator, "{s}/bin/tool", .{prefix});
+    defer testing.allocator.free(bin);
+    const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{prefix});
+    defer testing.allocator.free(bin_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
+    try test_io.symLinkAbsolute(std.Options.debug_io, link_target, bin, .{});
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    const found = try linker.checkConflicts(keg, false);
+    defer testing.allocator.free(found);
+    try testing.expectEqual(@as(usize, 1), found.len);
+    const c = found[0];
+    testing.allocator.free(c.link_path);
+    testing.allocator.free(c.existing_keg);
+    return c;
+}
+
+test "checkConflicts marks only links into the prefix's own Cellar as in_cellar" {
+    const prefix = try uniquePrefix("in_cellar");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    const own = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/bar/1/bin/tool", .{prefix});
+    defer testing.allocator.free(own);
+    try testing.expect((try conflictFor(prefix, own)).in_cellar);
+}
+
+test "checkConflicts keeps a link into another Cellar out of in_cellar" {
+    const prefix = try uniquePrefix("in_cellar_other");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    const c = try conflictFor(prefix, "/x/Cellar/y/1/bin/tool");
+    try testing.expect(!c.in_cellar);
+    try testing.expect(c.owned_by_keg);
+}
+
+test "checkConflicts does not match a sibling prefix that shares the leading bytes" {
+    const prefix = try uniquePrefix("in_cellar_sibling");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    const sibling = try std.fmt.allocPrint(testing.allocator, "{s}2/Cellar/y/1/bin/tool", .{prefix});
+    defer testing.allocator.free(sibling);
+    try testing.expect(!(try conflictFor(prefix, sibling)).in_cellar);
+}
+
+test "checkConflicts keeps malt's own link in_cellar under a trailing-slash prefix" {
+    const base = try uniquePrefix("in_cellar_slash");
+    defer testing.allocator.free(base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    const own = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/bar/1/bin/tool", .{base});
+    defer testing.allocator.free(own);
+    const slashed = try std.fmt.allocPrint(testing.allocator, "{s}/", .{base});
+    defer testing.allocator.free(slashed);
+    try testing.expect((try conflictFor(slashed, own)).in_cellar);
+}

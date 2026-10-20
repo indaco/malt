@@ -15,6 +15,9 @@ pub const Conflict = struct {
     /// An ancestor of the slot clashes, not the slot itself. Linking would
     /// write inside the other keg, so no override may cover it.
     structural: bool = false,
+    /// The link points into this prefix's own Cellar. Only such a link may
+    /// change hands; a user's or a cask's link never does.
+    in_cellar: bool = true,
 };
 
 pub const Linker = struct {
@@ -91,21 +94,21 @@ pub const Linker = struct {
                 // scanning kegs with many files. `rel` is the full nested
                 // path relative to the linkable dir.
                 var link_target_buf: [1024]u8 = undefined;
-                const existing_keg: []const u8, const owned_by_keg = blk: {
+                const existing_keg: []const u8, const owned_by_keg, const in_cellar = blk: {
                     const n = prefix_dir.readLink(self.io, rel, &link_target_buf) catch |err| switch (err) {
                         error.FileNotFound => continue, // slot is free
                         // Anything else (a regular file, an unreadable entry)
                         // is occupied by something we cannot verify; `link`
                         // would replace it, so refuse here.
-                        else => break :blk .{ "existing file", false },
+                        else => break :blk .{ "existing file", false, false },
                     };
                     const target = link_target_buf[0..n];
                     if (isUnderKeg(target, keg_path)) continue; // our own link
                     // Targets look like: /opt/malt/Cellar/<name>/<ver>/bin/<file>.
-                    // A link into some other Cellar is the user's, not ours.
-                    const ours = std.mem.startsWith(u8, target, self.prefix) and
-                        std.mem.startsWith(u8, target[self.prefix.len..], "/Cellar/");
-                    break :blk .{ extractKegFromPath(target) orelse target, ours };
+                    const root = std.mem.trimEnd(u8, self.prefix, "/");
+                    const ours = std.mem.startsWith(u8, target, root) and
+                        std.mem.startsWith(u8, target[root.len..], "/Cellar/");
+                    break :blk .{ extractKegFromPath(target) orelse target, true, ours };
                 };
 
                 var link_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -114,6 +117,7 @@ pub const Linker = struct {
                     .link_path = self.allocator.dupe(u8, link_path) catch continue,
                     .existing_keg = self.allocator.dupe(u8, existing_keg) catch continue,
                     .owned_by_keg = owned_by_keg,
+                    .in_cellar = in_cellar,
                 }) catch continue;
             }
         }
@@ -200,7 +204,7 @@ pub const Linker = struct {
 
     /// True when `target` lies inside `keg_path`. A bare prefix match is not
     /// enough: `Cellar/foo/1.0_1` continues `Cellar/foo/1.0` byte-for-byte.
-    fn isUnderKeg(target: []const u8, keg_path: []const u8) bool {
+    pub fn isUnderKeg(target: []const u8, keg_path: []const u8) bool {
         return target.len > keg_path.len and
             std.mem.startsWith(u8, target, keg_path) and
             target[keg_path.len] == '/';

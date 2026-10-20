@@ -242,10 +242,10 @@ test "a link that fails after a takeover gives the old keg its slots back" {
 test "a rollback leaves a slot a third keg holds with that keg" {
     const env = try Env.init("third");
     defer env.deinit();
-    const old = try env.installLinked("old", &.{ "lib/libfoo.dylib", "lib/libbar.dylib" });
+    const old = try env.installLinked("old", &.{ "lib/libfoo.dylib", "lib/libbar.dylib", "lib/libbaz.dylib" });
     defer testing.allocator.free(old);
-    // `third` took libbar from `old` earlier.
-    const third = try env.installLinked("third", &.{"lib/libbar.dylib"});
+    // `third` took libbaz from `old` earlier, and `new` does not ship it.
+    const third = try env.installLinked("third", &.{"lib/libbaz.dylib"});
     defer testing.allocator.free(third);
     const new = try env.makeKeg("new", &.{ "lib/libfoo.dylib", "lib/libbar.dylib" });
     defer testing.allocator.free(new);
@@ -261,8 +261,37 @@ test "a rollback leaves a slot a third keg holds with that keg" {
     var buf: [512]u8 = undefined;
     var obuf: [64]u8 = undefined;
     try testing.expectEqualStrings("old", env.owner("lib/libfoo.dylib", &obuf));
-    try testing.expect(std.mem.indexOf(u8, env.target("lib/libbar.dylib", &buf), "Cellar/third/") != null);
-    try testing.expectEqualStrings("third", env.owner("lib/libbar.dylib", &obuf));
+    try testing.expectEqualStrings("old", env.owner("lib/libbar.dylib", &obuf));
+    try testing.expect(std.mem.indexOf(u8, env.target("lib/libbaz.dylib", &buf), "Cellar/third/") != null);
+    try testing.expectEqualStrings("third", env.owner("lib/libbaz.dylib", &obuf));
+}
+
+test "snapshotTaken frees what it holds when an allocation fails" {
+    const env = try Env.init("snapshot_oom");
+    defer env.deinit();
+    const old = try env.installLinked("old", &.{ "lib/libfoo.dylib", "lib/libbar.dylib", "lib/libbaz.dylib" });
+    defer testing.allocator.free(old);
+    const new = try env.makeKeg("new", &.{ "lib/libfoo.dylib", "lib/libbar.dylib", "lib/libbaz.dylib" });
+    defer testing.allocator.free(new);
+    const found = try env.linker.checkConflicts(new, false);
+    defer {
+        for (found) |c| {
+            testing.allocator.free(c.link_path);
+            testing.allocator.free(c.existing_keg);
+        }
+        testing.allocator.free(found);
+    }
+
+    var fail_index: usize = 0;
+    while (fail_index < 12) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        const taken = install.snapshotTaken(io, failing.allocator(), &env.db, found, env.prefix, "new", &.{"lib/lib*"}) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        try testing.expectEqual(@as(usize, 3), taken.len);
+        install.freeTaken(failing.allocator(), taken);
+    }
 }
 
 test "a link into a Cellar outside the prefix is never taken over" {
