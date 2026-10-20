@@ -585,3 +585,9 @@ test "recordKegFields inherits an existing pin via COALESCE-MAX on force-reinsta
 
     try testing.expectEqual(@as(i64, 1), try readIntCol(&db, "SELECT pinned FROM kegs WHERE name = ?1;", "pinned-pkg"));
 }
+
+test "localErrorIsAnnounced keeps the conflict report as the only line for LinkFailed" {
+    try testing.expect(localErrorIsAnnounced(InstallError.LinkFailed));
+    // Silent raise sites still need the generic summary.
+    try testing.expect(!localErrorIsAnnounced(InstallError.RecordFailed));
+}
