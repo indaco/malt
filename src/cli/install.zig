@@ -854,8 +854,8 @@ fn runInstall(
                 if (skippableRecommended(exec_opts.recommended, pkg_name, e)) {
                     sink.warn("{s} is recommended, not required — continuing without it.", .{pkg_name});
                 } else {
-                    // Both refusals already printed their own line.
-                    if (e != InstallError.BuildFromSourceUnsupported and e != InstallError.UnpinnedChecksum) {
+                    // These refusals already printed their own line.
+                    if (e != InstallError.BuildFromSourceUnsupported and e != InstallError.UnpinnedChecksum and e != InstallError.LinkFailed) {
                         sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                     }
                     failed_count += 1;
@@ -1375,7 +1375,7 @@ fn conflictHint(conflicts: []const linker_mod.Conflict, name: []const u8) []cons
 }
 
 /// `existing_keg` is `Cellar/<name>/<ver>`; match the name segment only.
-fn kegOwnedBy(existing_keg: []const u8, name: []const u8) bool {
+pub fn kegOwnedBy(existing_keg: []const u8, name: []const u8) bool {
     const marker = "Cellar/";
     if (!std.mem.startsWith(u8, existing_keg, marker)) return false;
     const rest = existing_keg[marker.len..];

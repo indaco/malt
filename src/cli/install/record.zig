@@ -112,6 +112,8 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
         // Raise site names the formula whose deps failed; the inner
         // install already printed which dep and why.
         InstallError.DependencyFailed,
+        // Every raise site prints the conflict or link failure itself.
+        InstallError.LinkFailed,
         => true,
 
         InstallError.NoPackages,
@@ -120,7 +122,6 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
         InstallError.CaskNotFound,
         InstallError.NoBottle,
         InstallError.StoreFailed,
-        InstallError.LinkFailed,
         // Some RecordFailed paths emit a classified err first, others
         // (db.beginTransaction failure) do not — leave the generic
         // dispatch summary on so the silent path still surfaces.
