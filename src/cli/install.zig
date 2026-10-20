@@ -1386,6 +1386,125 @@ test "conflictHint names the one action that actually clears the slot" {
     try std.testing.expect(kegOwnedBy("Cellar/a/1.0", "a"));
 }
 
+/// Homebrew `link_overwrite?`: exact path, directory prefix, or a glob where
+/// `*` spans `/`. `rel` is relative to the prefix.
+fn matchesLinkOverwrite(patterns: []const []const u8, rel: []const u8) bool {
+    for (patterns) |pat| {
+        if (pat.len == 0) continue;
+        if (std.mem.eql(u8, pat, rel)) return true;
+        if (rel.len > pat.len and rel[pat.len] == '/' and std.mem.startsWith(u8, rel, pat)) return true;
+        if (std.mem.indexOfScalar(u8, pat, '*') != null and globMatch(pat, rel)) return true;
+    }
+    return false;
+}
+
+/// `*` matches any run of bytes, `/` included; both ends anchored.
+fn globMatch(pat: []const u8, s: []const u8) bool {
+    var pi: usize = 0;
+    var si: usize = 0;
+    var star: ?usize = null;
+    var mark: usize = 0;
+    while (si < s.len) {
+        if (pi < pat.len and pat[pi] == '*') {
+            star = pi;
+            mark = si;
+            pi += 1;
+        } else if (pi < pat.len and pat[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if (star) |st| {
+            pi = st + 1;
+            mark += 1;
+            si = mark;
+        } else return false;
+    }
+    while (pi < pat.len and pat[pi] == '*') pi += 1;
+    return pi == pat.len;
+}
+
+/// A slot may change hands only when another keg's symlink holds it and the
+/// formula lists it. A stray file stays the user's to clear.
+fn mayTakeOver(c: linker_mod.Conflict, prefix: []const u8, name: []const u8, patterns: []const []const u8) bool {
+    if (!c.owned_by_keg or kegOwnedBy(c.existing_keg, name)) return false;
+    if (c.link_path.len <= prefix.len + 1 or !std.mem.startsWith(u8, c.link_path, prefix) or c.link_path[prefix.len] != '/') return false;
+    return matchesLinkOverwrite(patterns, c.link_path[prefix.len + 1 ..]);
+}
+
+/// Conflicts the formula may not take over. Caller frees the slice.
+fn blockingConflicts(
+    allocator: std.mem.Allocator,
+    conflicts: []const linker_mod.Conflict,
+    prefix: []const u8,
+    name: []const u8,
+    patterns: []const []const u8,
+) ![]linker_mod.Conflict {
+    var out: std.ArrayList(linker_mod.Conflict) = .empty;
+    errdefer out.deinit(allocator);
+    for (conflicts) |c| {
+        if (!mayTakeOver(c, prefix, name, patterns)) try out.append(allocator, c);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "matchesLinkOverwrite follows the Homebrew pattern rules" {
+    const pats = [_][]const u8{ "bin/openssl", "include/openssl/*", "lib/libssl*", "share/man/man*/*ssl.gz", "lib/cmake" };
+    try std.testing.expect(matchesLinkOverwrite(&pats, "bin/openssl"));
+    try std.testing.expect(matchesLinkOverwrite(&pats, "include/openssl/ssl.h"));
+    try std.testing.expect(matchesLinkOverwrite(&pats, "include/openssl/sub/x.h"));
+    try std.testing.expect(matchesLinkOverwrite(&pats, "lib/libssl.3.dylib"));
+    try std.testing.expect(matchesLinkOverwrite(&pats, "share/man/man1/openssl.gz"));
+    try std.testing.expect(matchesLinkOverwrite(&pats, "lib/cmake/OpenSSL/OpenSSLConfig.cmake"));
+    try std.testing.expect(!matchesLinkOverwrite(&pats, "lib/libcrypto.dylib"));
+    try std.testing.expect(!matchesLinkOverwrite(&pats, "bin/openssl2"));
+    try std.testing.expect(!matchesLinkOverwrite(&pats, "lib/cmakefoo"));
+    try std.testing.expect(!matchesLinkOverwrite(&pats, "include/openssl"));
+    try std.testing.expect(!matchesLinkOverwrite(&.{}, "bin/openssl"));
+}
+
+test "globMatch backtracks and anchors both ends" {
+    try std.testing.expect(globMatch("a*b*c", "aXbYbZc"));
+    try std.testing.expect(globMatch("lib/libssl*", "lib/libssl"));
+    try std.testing.expect(globMatch("*ssl.gz", "man/man1/openssl.gz"));
+    try std.testing.expect(!globMatch("a*b", "abX"));
+    try std.testing.expect(!globMatch("Xa*", "a"));
+    try std.testing.expect(!globMatch("a*c", "a"));
+}
+
+test "matchesLinkOverwrite ignores an empty pattern" {
+    try std.testing.expect(!matchesLinkOverwrite(&.{""}, "bin/openssl"));
+    try std.testing.expect(!matchesLinkOverwrite(&.{""}, ""));
+}
+
+test "blockingConflicts lets a listed slot change hands and keeps the rest" {
+    const a = std.testing.allocator;
+    const pats = [_][]const u8{"lib/libfoo*"};
+    const listed: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0" };
+    const unlisted: linker_mod.Conflict = .{ .link_path = "/p/bin/foo", .existing_keg = "Cellar/old/1.0" };
+    const stray: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.a", .existing_keg = "existing file", .owned_by_keg = false };
+    const own: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.1.dylib", .existing_keg = "Cellar/new/0.9" };
+
+    const left = try blockingConflicts(a, &.{ listed, unlisted, stray, own }, "/p", "new", &pats);
+    defer a.free(left);
+    // A same-name leftover stays blocked: `--force` owns that case.
+    try std.testing.expectEqual(@as(usize, 3), left.len);
+    try std.testing.expectEqualStrings("/p/bin/foo", left[0].link_path);
+    try std.testing.expectEqualStrings("/p/lib/libfoo.a", left[1].link_path);
+    try std.testing.expectEqualStrings("/p/lib/libfoo.1.dylib", left[2].link_path);
+
+    // Nothing listed: every conflict stays, as before.
+    const all = try blockingConflicts(a, &.{ listed, unlisted }, "/p", "new", &.{});
+    defer a.free(all);
+    try std.testing.expectEqual(@as(usize, 2), all.len);
+}
+
+test "blockingConflicts refuses a slot outside the prefix" {
+    const a = std.testing.allocator;
+    const c: linker_mod.Conflict = .{ .link_path = "/elsewhere/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0" };
+    const left = try blockingConflicts(a, &.{c}, "/p", "new", &.{"lib/libfoo*"});
+    defer a.free(left);
+    try std.testing.expectEqual(@as(usize, 1), left.len);
+}
+
 /// Link + record a materialised keg. Must run serially: linker conflict
 /// checks read live symlink state and SQLite is single-writer.
 ///
@@ -1423,7 +1542,9 @@ fn linkAndRecord(
     // spurious bin/sbin conflict against a keg whose bins were never
     // linked in the first place.
     if (!job.keg_only) {
-        const conflicts = linker.checkConflicts(keg_path, bin_isolated) catch &.{};
+        const found = linker.checkConflicts(keg_path, bin_isolated) catch &.{};
+        // `linker.link` replaces the slots we let through.
+        const conflicts = blockingConflicts(allocator, found, prefix, job.name, formula.link_overwrite) catch found;
         if (conflicts.len > 0) {
             sink.err("{s}: {d} symlink conflict(s) detected:", .{ job.name, conflicts.len });
             for (conflicts) |conflict| {
