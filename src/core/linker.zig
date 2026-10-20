@@ -101,8 +101,11 @@ pub const Linker = struct {
                     };
                     const target = link_target_buf[0..n];
                     if (isUnderKeg(target, keg_path)) continue; // our own link
-                    // Targets look like: /opt/malt/Cellar/<name>/<ver>/bin/<file>
-                    break :blk .{ extractKegFromPath(target) orelse target, true };
+                    // Targets look like: /opt/malt/Cellar/<name>/<ver>/bin/<file>.
+                    // A link into some other Cellar is the user's, not ours.
+                    const ours = std.mem.startsWith(u8, target, self.prefix) and
+                        std.mem.startsWith(u8, target[self.prefix.len..], "/Cellar/");
+                    break :blk .{ extractKegFromPath(target) orelse target, ours };
                 };
 
                 var link_path_buf: [std.fs.max_path_bytes]u8 = undefined;

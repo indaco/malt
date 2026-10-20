@@ -238,3 +238,47 @@ test "a link that fails after a takeover gives the old keg its slots back" {
     }
     try testing.expect(!exists(new));
 }
+
+test "a rollback leaves a slot a third keg holds with that keg" {
+    const env = try Env.init("third");
+    defer env.deinit();
+    const old = try env.installLinked("old", &.{ "lib/libfoo.dylib", "lib/libbar.dylib" });
+    defer testing.allocator.free(old);
+    // `third` took libbar from `old` earlier.
+    const third = try env.installLinked("third", &.{"lib/libbar.dylib"});
+    defer testing.allocator.free(third);
+    const new = try env.makeKeg("new", &.{ "lib/libfoo.dylib", "lib/libbar.dylib" });
+    defer testing.allocator.free(new);
+    try env.db.exec(
+        \\CREATE TRIGGER fail_second AFTER INSERT ON links
+        \\WHEN NEW.keg_id = (SELECT id FROM kegs WHERE name = 'new')
+        \\  AND (SELECT COUNT(*) FROM links WHERE keg_id = NEW.keg_id) >= 2
+        \\BEGIN SELECT RAISE(ABORT, 'disk full'); END;
+    );
+
+    try testing.expectError(error.LinkFailed, env.linkNew(new, "[\"lib/lib*\"]"));
+
+    var buf: [512]u8 = undefined;
+    var obuf: [64]u8 = undefined;
+    try testing.expectEqualStrings("old", env.owner("lib/libfoo.dylib", &obuf));
+    try testing.expect(std.mem.indexOf(u8, env.target("lib/libbar.dylib", &buf), "Cellar/third/") != null);
+    try testing.expectEqualStrings("third", env.owner("lib/libbar.dylib", &obuf));
+}
+
+test "a link into a Cellar outside the prefix is never taken over" {
+    const env = try Env.init("other_cellar");
+    defer env.deinit();
+    const new = try env.makeKeg("new", &.{"lib/libfoo.dylib"});
+    defer testing.allocator.free(new);
+    const lib = try env.path("lib", .{});
+    defer testing.allocator.free(lib);
+    try test_io.cwd().createDirPath(io, lib);
+    const slot = try env.path("lib/libfoo.dylib", .{});
+    defer testing.allocator.free(slot);
+    try test_io.symLinkAbsolute(io, "/elsewhere/Cellar/x/1/lib/libfoo.dylib", slot, .{});
+
+    try testing.expectError(error.LinkFailed, env.linkNew(new, "[\"lib/libfoo*\"]"));
+
+    var buf: [512]u8 = undefined;
+    try testing.expectEqualStrings("/elsewhere/Cellar/x/1/lib/libfoo.dylib", env.target("lib/libfoo.dylib", &buf));
+}

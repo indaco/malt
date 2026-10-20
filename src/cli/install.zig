@@ -1432,30 +1432,76 @@ fn mayTakeOver(c: linker_mod.Conflict, prefix: []const u8, name: []const u8, pat
     return matchesLinkOverwrite(patterns, c.link_path[prefix.len + 1 ..]);
 }
 
-/// Name segment of `Cellar/<name>/<ver>`.
-fn kegNameOf(existing_keg: []const u8) ?[]const u8 {
-    const rest = existing_keg["Cellar/".len..];
-    const end = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
-    return rest[0..end];
-}
+/// A slot taken from another keg, as it stood before the link phase.
+const TakenSlot = struct {
+    link_path: []const u8,
+    target: []const u8,
+    /// Owner row, absent for a link malt never recorded.
+    keg_id: ?i64,
+};
 
-/// Give back the slots a failed link took from other kegs.
-fn relinkTakenOver(
+/// Record the slots the link phase may replace. Caller frees with `freeTaken`.
+fn snapshotTaken(
+    io: std.Io,
+    allocator: std.mem.Allocator,
     db: *sqlite.Database,
-    linker: *linker_mod.Linker,
     found: []const linker_mod.Conflict,
     prefix: []const u8,
     name: []const u8,
     patterns: []const []const u8,
-) void {
-    for (found, 0..) |c, i| {
+) ![]TakenSlot {
+    var out: std.ArrayList(TakenSlot) = .empty;
+    errdefer freeTaken(allocator, out.items);
+    for (found) |c| {
         if (!mayTakeOver(c, prefix, name, patterns)) continue;
-        const owner = kegNameOf(c.existing_keg) orelse continue;
-        // One relink per previous keg is enough.
-        const seen = for (found[0..i]) |p| {
-            if (mayTakeOver(p, prefix, name, patterns) and std.mem.eql(u8, kegNameOf(p.existing_keg) orelse "", owner)) break true;
-        } else false;
-        if (!seen) relinkKegs(db, linker, owner);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = std.Io.Dir.readLinkAbsolute(io, c.link_path, &buf) catch continue;
+        const link_path = try allocator.dupe(u8, c.link_path);
+        errdefer allocator.free(link_path);
+        const target = try allocator.dupe(u8, buf[0..n]);
+        errdefer allocator.free(target);
+        try out.append(allocator, .{ .link_path = link_path, .target = target, .keg_id = slotOwner(db, c.link_path) });
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn freeTaken(allocator: std.mem.Allocator, taken: []const TakenSlot) void {
+    for (taken) |t| {
+        allocator.free(t.link_path);
+        allocator.free(t.target);
+    }
+    allocator.free(taken);
+}
+
+fn slotOwner(db: *sqlite.Database, link_path: []const u8) ?i64 {
+    var stmt = db.prepare("SELECT keg_id FROM links WHERE link_path = ?1;") catch return null;
+    defer stmt.finalize();
+    stmt.bindText(1, link_path) catch return null;
+    if (!(stmt.step() catch false)) return null;
+    return stmt.columnInt(0);
+}
+
+/// Put back only the slots a failed link took. A slot someone else holds now
+/// stays theirs, and an intact one is not touched.
+fn restoreTaken(io: std.Io, db: *sqlite.Database, taken: []const TakenSlot, new_keg: []const u8) void {
+    for (taken) |t| {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const restorable = blk: {
+            const n = std.Io.Dir.readLinkAbsolute(io, t.link_path, &buf) catch |err| break :blk err == error.FileNotFound;
+            break :blk std.mem.startsWith(u8, buf[0..n], new_keg);
+        };
+        if (!restorable) continue;
+        std.Io.Dir.deleteFileAbsolute(io, t.link_path) catch {};
+        // `unlink` prunes the directories it emptied.
+        if (std.fs.path.dirname(t.link_path)) |dir| std.Io.Dir.cwd().createDirPath(io, dir) catch continue;
+        std.Io.Dir.symLinkAbsolute(io, t.target, t.link_path, .{}) catch continue;
+        const id = t.keg_id orelse continue;
+        var stmt = db.prepare("INSERT OR REPLACE INTO links (keg_id, link_path, target) VALUES (?1, ?2, ?3);") catch continue;
+        defer stmt.finalize();
+        stmt.bindInt(1, id) catch continue;
+        stmt.bindText(2, t.link_path) catch continue;
+        stmt.bindText(3, t.target) catch continue;
+        _ = stmt.step() catch {};
     }
 }
 
@@ -1536,11 +1582,6 @@ test "mayTakeOver refuses a foreign link and a clash higher up the path" {
     try std.testing.expect(mayTakeOver(plain, "/p", "new", &pats));
 }
 
-test "kegNameOf reads the name segment" {
-    try std.testing.expectEqualStrings("openssl@3", kegNameOf("Cellar/openssl@3/3.6.5").?);
-    try std.testing.expect(kegNameOf("Cellar/openssl@3") == null);
-}
-
 test "blockingConflicts refuses a slot outside the prefix" {
     const a = std.testing.allocator;
     const c: linker_mod.Conflict = .{ .link_path = "/elsewhere/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0" };
@@ -1585,6 +1626,8 @@ pub fn linkAndRecord(
     // the link policy — otherwise an isolated dep would trigger a
     // spurious bin/sbin conflict against a keg whose bins were never
     // linked in the first place.
+    var taken: []const TakenSlot = &.{};
+    defer if (taken.len > 0) freeTaken(allocator, taken);
     var found: []const linker_mod.Conflict = &.{};
     defer {
         for (found) |c| {
@@ -1598,6 +1641,7 @@ pub fn linkAndRecord(
         // `linker.link` replaces the slots we let through.
         const conflicts = blockingConflicts(allocator, found, prefix, job.name, formula.link_overwrite) catch found;
         defer if (conflicts.ptr != found.ptr) allocator.free(conflicts);
+        if (conflicts.len == 0) taken = snapshotTaken(io, allocator, db, found, prefix, job.name, formula.link_overwrite) catch &.{};
         if (conflicts.len > 0) {
             sink.err("{s}: {d} symlink conflict(s) detected:", .{ job.name, conflicts.len });
             for (conflicts) |conflict| {
@@ -1625,7 +1669,7 @@ pub fn linkAndRecord(
             linker.unlink(keg_id) catch {};
             deleteKeg(db, keg_id);
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
-            relinkTakenOver(db, linker, found, prefix, job.name, formula.link_overwrite);
+            restoreTaken(io, db, taken, keg_path);
             return InstallError.LinkFailed;
         };
         // `recorded` after both succeed — link rollback undoes the keg
